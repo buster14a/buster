@@ -2087,7 +2087,7 @@ static PPOutputDiagnosticNote check_semantic_forward_note(const Parser* parser, 
 // before `right`. An ambiguous call's best and a call's non-viable candidates other than by their arguments' count by
 // their declarations' order; those by count last, the ones whose parameter count is nearer the arguments' first, at the
 // same distance the ones given too many first.
-static bool check_semantic_overload_before(const TypeTable* types, const CheckOverloadCandidate* candidates, const CheckOverloadExplained* left,
+static bool check_semantic_overload_before(const Parser* parser, const CheckInput* input, const TypeTable* types, const CheckOverloadCandidate* candidates, const CheckOverloadExplained* left,
                                            const CheckOverloadExplained* right, uint32_t argument_count)
 {
     const bool left_arity = left->failure == CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS || left->failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS;
@@ -2098,7 +2098,13 @@ static bool check_semantic_overload_before(const TypeTable* types, const CheckOv
     type_parameters(types, type_strip_aligned(types, candidates[right->candidate].type), &right_count);
     const uint32_t left_distance = left_count > argument_count ? left_count - argument_count : argument_count - left_count;
     const uint32_t right_distance = right_count > argument_count ? right_count - argument_count : argument_count - right_count;
-    const bool located = candidates[left->candidate].declaration < candidates[right->candidate].declaration;
+    const CheckOverloadCandidate* first = candidates + left->candidate;
+    const CheckOverloadCandidate* second = candidates + right->candidate;
+    const uint32_t first_pragma = check_input_symbol_overload_source(input, first);
+    const uint32_t second_pragma = check_input_symbol_overload_source(input, second);
+    const uint32_t first_source = first_pragma != BUSTER_CHECK_NONE ? first_pragma : parser->tokens.sources[first->declaration];
+    const uint32_t second_source = second_pragma != BUSTER_CHECK_NONE ? second_pragma : parser->tokens.sources[second->declaration];
+    const bool located = first_source < second_source;
     return left_arity != right_arity ? right_arity :
            !left_arity ? located :
            left_distance != right_distance ? left_distance < right_distance :
@@ -2206,7 +2212,7 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     {
         const CheckOverloadExplained moved = explained[i];
         uint32_t j = i;
-        while (j > 0 && check_semantic_overload_before(types, graph->overload_candidates, &moved, explained + j - 1, argument_count))
+        while (j > 0 && check_semantic_overload_before(parser, input, types, graph->overload_candidates, &moved, explained + j - 1, argument_count))
         {
             explained[j] = explained[j - 1];
             j -= 1;
@@ -2217,6 +2223,7 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     for (uint32_t i = 0; renderable && i < shown; i += 1)
     {
         const CheckOverloadCandidate* candidate = graph->overload_candidates + explained[i].candidate;
+        const uint32_t pragma_source = check_input_symbol_overload_source(input, candidate);
         const char* text = "candidate function";
         if (explained[i].failure == CHECK_OVERLOAD_FAILURE_DISABLED)
         {
@@ -2277,7 +2284,7 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
             const bool variadic = (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
             const bool few = explained[i].failure == CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS;
             const uint32_t place = parameter_count == 1 ? check_driver_parameter_place(parser, input, candidate->declaration, 0) : BUSTER_CHECK_NONE;
-            const bool named = place < parser->tokens.count && parser->tokens.kinds[place] == PARSE_KIND_IDENTIFIER;
+            const bool named = pragma_source == BUSTER_CHECK_NONE && place < parser->tokens.count && parser->tokens.kinds[place] == PARSE_KIND_IDENTIFIER;
             const String8 parameter = named ? check_semantic_name(parser, pp, place) : (String8){ 0 };
             char provided[32];
             snprintf(provided, sizeof(provided), "%u", argument_count);
@@ -2287,7 +2294,14 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
                            check_warning_text(scratch, "candidate function not viable: requires%s %u argument%s, but %u %s provided", few && variadic ? " at least" : "",
                                               parameter_count, parameter_count == 1 ? "" : "s", argument_count, argument_count == 1 ? "was" : "were");
         }
-        check_semantic_add_note(parser, note, note_count, candidate->declaration, text);
+        if (pragma_source != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
+        {
+            note[(*note_count)++] = (PPOutputDiagnosticNote){ .token = pragma_source, .message = text };
+        }
+        else
+        {
+            check_semantic_add_note(parser, note, note_count, candidate->declaration, text);
+        }
     }
     if (renderable)
     {

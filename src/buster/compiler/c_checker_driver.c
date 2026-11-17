@@ -4248,7 +4248,7 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     const uint32_t candidate_count = multiversioned ? 1u : graph->overload_candidate_count;
     // (A plain function's name has a candidate too: only an overloadable one's set is clang's '<overloaded function type>'.)
     const uint32_t head = multiversioned ? 1u : found != 0 && found - 1 < graph->overload_candidate_count &&
-                          (graph->overload_candidates[found - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0 ? found : 0;
+                          (graph->overload_candidates[found - 1].flags & (BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA)) != 0 ? found : 0;
     const TypeId target = head == 0 ? 0 : op == CHECK_OP_INITIALIZE ? graph->types[node] :
                           graph->operand0[node] < stream->count ? check_stream_type(stream, graph->operand0[node]) : 0;
     const TypeId pointer = target != 0 ? type_strip_aligned(types, target) : 0;
@@ -4327,7 +4327,15 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
             text = check_warning_text(scratch, "candidate function has different return type (%.*s expected but has %.*s)", (int)wanted_text.length,
                                       wanted_text.pointer, (int)have_text.length, have_text.pointer);
         }
-        check_semantic_add_note(parser, notes, &note_count, at, text);
+        const uint32_t pragma_source = multiversioned ? BUSTER_CHECK_NONE : check_input_symbol_overload_source(input, candidate);
+        if (pragma_source != BUSTER_CHECK_NONE && note_count < BUSTER_CHECK_SEMANTIC_NOTES)
+        {
+            notes[note_count++] = (PPOutputDiagnosticNote){ .token = pragma_source, .message = text };
+        }
+        else
+        {
+            check_semantic_add_note(parser, notes, &note_count, at, text);
+        }
     }
     // With one candidate left by the enable_ifs, clang converts its address, a function pointer's conversion.
     const bool ineligible = eligible == 1;
@@ -4406,7 +4414,8 @@ static const char* check_driver_overload_operand(const Parser* parser, Preproces
                                      operand;
         const uint32_t named = at < stream->count && graph->ops[at] == CHECK_OP_ADDRESS ? graph->operand0[at] : at;
         const uint32_t found = named < stream->count ? check_stream_overload_head(stream, named) : 0;
-        head = found != 0 && found - 1 < graph->overload_candidate_count && (graph->overload_candidates[found - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0 ?
+        head = found != 0 && found - 1 < graph->overload_candidate_count &&
+               (graph->overload_candidates[found - 1].flags & (BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA)) != 0 ?
                found : 0;
         const uint32_t version = named < stream->count ? check_input_target_candidate(input, graph->tokens[named]) : BUSTER_CHECK_NONE;
         multiversioned = version != 0 && version <= input->token_count;
@@ -4629,6 +4638,58 @@ static bool check_driver_jump_kept(const Parser* parser, const CheckInput* input
         }
     }
     return kept;
+}
+
+// An ambiguous reference's candidates where its lookup set holds an object (#2449, CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS):
+// every `#pragma weak A = T` clone of the name made before the reference, newest first as clang's lookup lists them
+// (an object clone at T's declaration, a function clone at the pragma's A), then A's earlier declaration at
+// `declaration`. Their count, 0 where the notes have no room in `scratch`.
+static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t declaration, const char* message,
+                                                   PPOutputDiagnosticNote** notes, Arena* scratch)
+{
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t name = parser->tokens.names[token];
+    uint32_t clones = 0;
+    for (uint32_t i = 0; history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
+        clones += record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token;
+    }
+    PPOutputDiagnosticNote* listed = clones != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, (uint64_t)clones + 1) : NULL;
+    uint64_t* order = listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, clones) : NULL;
+    uint32_t listed_count = 0;
+    for (uint32_t i = 0; order != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
+        if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token)
+        {
+            // Newest first: by creation, then by directive, both descending (an insertion of a few records).
+            const uint64_t key = (uint64_t)made << 32 | i;
+            uint32_t at = listed_count;
+            while (at != 0 && order[at - 1] < key)
+            {
+                order[at] = order[at - 1];
+                at -= 1;
+            }
+            order[at] = key;
+            listed_count += 1;
+        }
+    }
+    for (uint32_t c = 0; order != NULL && c < listed_count; c += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + (uint32_t)order[c];
+        const bool function = input->declaration_kinds[record->alias_declaration] == C_BINDING_FUNCTION;
+        listed[c] = (PPOutputDiagnosticNote){ .token = function ? record->source + 3 : parser->tokens.sources[record->alias_declaration], .message = message };
+    }
+    if (order != NULL)
+    {
+        listed[listed_count] = (PPOutputDiagnosticNote){ .token = declaration, .message = message };
+    }
+    *notes = listed;
+    return order != NULL ? listed_count + 1 : 0;
 }
 
 // `from`: the first token whose reports, warnings, pragmas' diagnostics and packed members' warnings it publishes, 0 for
@@ -6139,9 +6200,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             const CheckInputReport* conflict = input->reports + index;
                             const uint32_t previous = conflict->note_token;
+                            const bool pragma_note = conflict->note_kind == CHECK_INPUT_NOTE_PRAGMA_DEFINITION ||
+                                                     conflict->note_kind == CHECK_INPUT_NOTE_PRAGMA_DECLARATION;
                             const PPOutputDiagnosticNote note = {
-                                .token = previous < count ? parser->tokens.sources[previous] : source,
-                                .message = conflict->note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION ?
+                                .token = pragma_note ? conflict->attribute : previous < count ? parser->tokens.sources[previous] : source,
+                                .message = conflict->note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION || conflict->note_kind == CHECK_INPUT_NOTE_PRAGMA_DEFINITION ?
                                            "previous definition is here" : "previous declaration is here",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u, "%s", message);
@@ -6513,14 +6576,24 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool object = kind == CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS;
                             const char* candidate = object ? check_warning_text(scratch, "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name),
                                                                                 intern_bytes(pp->table, name)) : "candidate function";
-                            const uint32_t second = object && report->value < count ? parser->tokens.sources[report->value] : (uint32_t)report->value;
-                            const uint32_t first = object && report->detail != 0 ? report->detail - 1 : previous < count ? parser->tokens.sources[previous] : 0;
+                            const uint32_t later = object && report->value < count ? parser->tokens.sources[report->value] : (uint32_t)report->value;
+                            const uint32_t earlier = object && report->detail != 0 ? report->detail - 1 : previous < count ? parser->tokens.sources[previous] : 0;
+                            // An object's lookup set lists its candidates newest first. Two equally viable functions are
+                            // clang's overload candidates instead, whose notes are sorted by location: a declaration
+                            // written after the pragma, before TARGET's declaration creates the clone, follows the pragma.
+                            const bool swapped = kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS && later < earlier;
+                            const uint32_t first = swapped ? later : earlier;
+                            const uint32_t second = swapped ? earlier : later;
                             const PPOutputDiagnosticNote notes[2] = {
                                 { .token = first, .message = kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? candidate : "previous definition is here" },
                                 { .token = second, .message = candidate },
                             };
+                            // An object's set lists each clone made before the reference, where several directives name A.
+                            PPOutputDiagnosticNote* listed = NULL;
+                            const uint32_t listed_count = object ? check_driver_weak_alias_candidates(parser, input, token, later, candidate, &listed, scratch) : 0;
                             const bool call = token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? 2u : 1u,
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, listed_count != 0 ? listed : notes,
+                                                        listed_count != 0 ? listed_count : kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? 2u : 1u,
                                                         kind == CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? "redefinition of '%.*s' as different kind of symbol" :
                                                         call && !object ? "call to '%.*s' is ambiguous" : "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
@@ -9029,13 +9102,38 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
 
 // One of check_driver_alias_warnings' warnings, as the warning options and the source's pragmas map it at `token`, after the
 // errors and warnings published before it: whether it is an error now (`errors` counts it).
-static void check_driver_alias_warning(const CheckProgram* program, const Parser* parser, Preprocessor* pp, uint32_t token, uint32_t id, const char* message,
+static void check_driver_alias_warning(const CheckProgram* program, const Parser* parser, Preprocessor* pp, const CheckInputSymbolPragma* pragma,
+                                       uint32_t token, uint32_t id, const char* message,
                                        const CheckCommonNote* notes, uint32_t note_count, Arena* scratch, uint32_t* errors)
 {
-    const CheckWarningSeverity severity = token < parser->tokens.count && !pp->fatal ? check_common_severity(pp, parser, program->input, token, id, false) : CHECK_WARNING_IGNORE;
-    if (severity != CHECK_WARNING_IGNORE)
+    const CheckWarningEvent event = {
+        .kind = CHECK_WARNING_EVENT_PRAGMA,
+        .id = id,
+        .token = pragma != NULL ? pragma->token : token,
+        .source = pragma != NULL ? pragma->source + 3 : BUSTER_CHECK_NONE,
+    };
+    const CheckWarningSeverity severity = pp->fatal ? CHECK_WARNING_IGNORE :
+        pragma != NULL ? check_driver_warning_severity(pp, program->input, &event) :
+        token < parser->tokens.count ? check_common_severity(pp, parser, program->input, token, id, false) : CHECK_WARNING_IGNORE;
+    if (severity != CHECK_WARNING_IGNORE && pragma == NULL)
     {
         check_common_publish(parser, pp, token, pp->output.count + 1u, PP_DIAGNOSTIC_SEMANTIC, id, severity, message, notes, note_count, scratch);
+    }
+    else if (severity != CHECK_WARNING_IGNORE)
+    {
+        PPOutputDiagnosticNote attached[8];
+        const uint32_t used = note_count < BUSTER_ARRAY_LENGTH(attached) ? note_count : (uint32_t)BUSTER_ARRAY_LENGTH(attached);
+        for (uint32_t i = 0; i < used; i += 1)
+        {
+            attached[i] = (PPOutputDiagnosticNote){
+                .token = notes[i].token < parser->tokens.count ? parser->tokens.sources[notes[i].token] : event.source,
+                .message = notes[i].message,
+            };
+        }
+        const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity >= CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        pp_diagnose_output_notes_at(pp, disposition, event.source, pp->output.count + 1u, used != 0 ? attached : NULL, used,
+                                    "%s [%s%s]", message, check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR), check_warning_descriptions[id].option);
     }
     *errors += severity >= CHECK_WARNING_ERROR ? 1 : 0;
 }
@@ -9045,17 +9143,19 @@ static void check_driver_alias_warning(const CheckProgram* program, const Parser
 // (-Wattribute-alias, at the alias attribute, with the definition noted); a section attribute (its first) whose name
 // isn't the aliasee's or the resolver's (the section attribute's, or none), at it; and an immediate target that is a
 // weak alias, which the symbol doesn't follow, at the attribute. Returns false without room.
-static bool check_driver_alias_warnings(const CheckProgram* program, const Parser* parser, Preprocessor* pp, const CheckProgramAlias* alias, Arena* scratch,
+static bool check_driver_alias_warnings(const CheckProgram* program, const Parser* parser, Preprocessor* pp, const CheckProgramAlias* alias,
+                                        const CheckInputSymbolPragma* pragma, Arena* scratch,
                                         uint32_t* errors)
 {
     const CheckInput* input = program->input;
     const bool ifunc = alias->kind == CHECK_PROGRAM_IFUNC;
     const uint32_t at = alias->attribute < parser->tokens.count ? alias->attribute : 0;
+    const uint32_t declaration = pragma != NULL ? pragma->alias_declaration : alias->token;
     const uint32_t definition = alias->definition;
     bool valid = true;
-    const bool functions = !ifunc && definition < input->token_count && input->declaration_kinds[alias->token] == C_BINDING_FUNCTION &&
+    const bool functions = !ifunc && definition < input->token_count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
                            input->declaration_kinds[definition] == C_BINDING_FUNCTION;
-    const TypeId own = functions ? input->declared_types[alias->token] : 0;
+    const TypeId own = functions ? input->declared_types[declaration] : 0;
     const TypeId aliased = functions ? input->declared_types[definition] : 0;
     if (functions && own != 0 && aliased != 0 && type_compatible(program->types, own, aliased) == TYPE_ANSWER_NO)
     {
@@ -9069,10 +9169,10 @@ static bool check_driver_alias_warnings(const CheckProgram* program, const Parse
         const CheckCommonNote note = { .token = definition, .message = "aliasee is declared here" };
         if (valid)
         {
-            check_driver_alias_warning(program, parser, pp, at, CHECK_WARNING_ID_ATTRIBUTE_ALIAS, message, &note, 1, scratch, errors);
+            check_driver_alias_warning(program, parser, pp, pragma, at, CHECK_WARNING_ID_ATTRIBUTE_ALIAS, message, &note, 1, scratch, errors);
         }
     }
-    const CheckInputAttributes* attributes = check_input_attributes_at(input, alias->token);
+    const CheckInputAttributes* attributes = pragma == NULL ? check_input_attributes_at(input, alias->token) : NULL;
     const CheckInputAttribute* section = NULL;
     for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
     {
@@ -9092,7 +9192,7 @@ static bool check_driver_alias_warnings(const CheckProgram* program, const Parse
         valid = message != NULL;
         if (valid)
         {
-            check_driver_alias_warning(program, parser, pp, section->name_token, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, message, NULL, 0, scratch, errors);
+            check_driver_alias_warning(program, parser, pp, NULL, section->name_token, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, message, NULL, 0, scratch, errors);
         }
     }
     // The immediate target: an alias of the unit's that a weak attribute (or `#pragma weak`) makes weak.
@@ -9115,7 +9215,212 @@ static bool check_driver_alias_warnings(const CheckProgram* program, const Parse
         valid = message != NULL;
         if (valid)
         {
-            check_driver_alias_warning(program, parser, pp, at, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, message, NULL, 0, scratch, errors);
+            check_driver_alias_warning(program, parser, pp, pragma, at, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, message, NULL, 0, scratch, errors);
+        }
+    }
+    return valid;
+}
+
+// Publish one code-generation alias error at its original preprocessing coordinate. A pragma's implicit attribute
+// lives in the retained directive, not at the real declaration whose object carries its alias metadata.
+static bool check_driver_alias_error(const CheckProgram* program, const Parser* parser, Preprocessor* pp, const CheckProgramAlias* alias,
+                                      CheckProgramAliasError error, uint32_t source, bool scalar, Arena* scratch)
+{
+    bool valid = true;
+    const bool ifunc = alias->kind == CHECK_PROGRAM_IFUNC;
+    const char* message = error == CHECK_PROGRAM_ALIAS_CYCLE ? (ifunc ? "ifunc definition is part of a cycle" : "alias definition is part of a cycle") :
+                          error == CHECK_PROGRAM_ALIAS_TO_VARIABLE ? "cannot alias a variable with a function" :
+                          error == CHECK_PROGRAM_ALIAS_TO_FUNCTION ? "cannot alias a function with a variable" :
+                          error == CHECK_PROGRAM_ALIAS_RESOLVER ? "ifunc resolver function must return a pointer" :
+                          ifunc ? "ifunc must point to a defined function" : "alias must point to a defined variable or function";
+    const uint32_t aliasee = alias->definition < parser->tokens.count ? alias->definition : 0;
+    // An undefined one's notes: that the name must be the mangled one, and for each object whose identifier its
+    // aliasee's name spells and that clang gives a name (MangledDeclNames' alternatives: the program's symbols, the
+    // definitions and referenced declarations, and the aliasee where the selection leaves out its definition, an
+    // inline one's), that name: another where an asm label renames it, or the same. Their messages are in `scratch`.
+    const bool undefined = error == CHECK_PROGRAM_ALIAS_UNDEFINED;
+    const String8 named = alias->aliasee_name;
+    const IdentId spelled = undefined && named.length != 0 && named.length < UINT32_MAX ? intern_find(pp->table, (const uint8_t*)named.pointer, (uint32_t)named.length) : 0;
+    const bool unselected = spelled != 0 && alias->aliasee != 0 && program->object_symbols[alias->aliasee] == 0 && alias->definition != BUSTER_CHECK_NONE;
+    uint32_t alternatives = unselected ? 1 : 0;
+    for (uint32_t s = 0; spelled != 0 && s < program->symbol_count; s += 1)
+    {
+        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+        alternatives += declaration < parser->tokens.count && parser->tokens.names[declaration] == spelled;
+    }
+    PPOutputDiagnosticNote* notes = BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, (uint64_t)alternatives + 1);
+    valid = notes != 0;
+    uint32_t note_count = 0;
+    if (valid && (undefined || error == CHECK_PROGRAM_ALIAS_TO_VARIABLE || error == CHECK_PROGRAM_ALIAS_TO_FUNCTION))
+    {
+        notes[note_count++] = (PPOutputDiagnosticNote){
+            .token = undefined ? source : parser->tokens.sources[aliasee],
+            .message = undefined ? (ifunc ? "the function specified in an ifunc must refer to its mangled name" :
+                                            "the function or variable specified in an alias must refer to its mangled name") :
+                                   "aliasee is declared here",
+        };
+    }
+    for (uint32_t s = 0; valid && alternatives != 0 && s < program->symbol_count; s += 1)
+    {
+        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+        if (declaration < parser->tokens.count && parser->tokens.names[declaration] == spelled)
+        {
+            const String8 label = check_program_object_label(program, program->symbol_objects[s], scalar);
+            const String8 mangled = label.length == 0 ? check_driver_overload_name(program, parser, pp->table, program->symbol_objects[s], scratch) : (String8){ 0 };
+            const String8 name = label.length != 0   ? label :
+                                 mangled.length != 0 ? mangled :
+                                                       (String8){ .pointer = (char*)intern_bytes(pp->table, spelled), .length = intern_length(pp->table, spelled) };
+            char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, name.length + 64);
+            valid = text != 0;
+            if (valid)
+            {
+                snprintf(text, name.length + 64, "function by that name is mangled as \"%.*s\"", (int)name.length, name.pointer);
+                notes[note_count++] = (PPOutputDiagnosticNote){ .token = source, .message = text };
+            }
+        }
+    }
+    char* unselected_text = valid && unselected ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, named.length + 64) : 0;
+    valid = valid && (!unselected || unselected_text != 0);
+    if (valid && unselected)
+    {
+        snprintf(unselected_text, named.length + 64, "function by that name is mangled as \"%.*s\"", (int)named.length, named.pointer);
+        notes[note_count++] = (PPOutputDiagnosticNote){ .token = source, .message = unselected_text };
+    }
+    if (valid)
+    {
+        pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, pp->output.count + 1u, notes, note_count, "%s", message);
+    }
+    return valid;
+}
+
+// A retained weak pragma whose implicit clone is carried by a real declaration's alias metadata. An ordinary alias
+// has no such record. The clone's attribute location and emission order belong to the directive, not that declaration.
+static const CheckInputSymbolPragma* check_driver_alias_pragma(const CheckProgram* program, const CheckProgramAlias* alias)
+{
+    const CheckInputSymbolPragmas* history = program->input->symbol_pragmas;
+    const CheckInputSymbolPragma* found = NULL;
+    for (uint32_t i = 0; found == NULL && alias->kind == CHECK_PROGRAM_ALIAS && history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        found = record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->alias_declaration != BUSTER_CHECK_NONE && record->declaration == alias->token ? record : NULL;
+    }
+    return found;
+}
+
+// Clang hands implicit weak-pragma declarations to code generation after every ordinary top-level declaration, in
+// the order their targets became visible (ParseAST's WeakTopLevelDecls). They therefore follow ordinary aliases'
+// diagnostics, even when the pragma occurs first. Only these rare units allocate the keys and clone descriptors.
+// Separate clones reuse the ordinary aliases' batched symbol-name/definition lookup. Their descriptors are temporary
+// diagnostic records, with no object identity of their own; they never enter program numbering or alias chains.
+// A target already carrying alias is ignored by the reader; one that acquires it later follows the program's resolved
+// alias chain. An ifunc is a defined indirect function, and a weakref's C identifier is not an emitted symbol.
+static bool check_driver_pragma_aliases(const CheckProgram* program, const Parser* parser, Preprocessor* pp, bool scalar, Arena* scratch, uint32_t* errors)
+{
+    const CheckInput* input = program->input;
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    bool present = false;
+    for (uint32_t i = 0; !present && history != NULL && i < history->count; i += 1)
+    {
+        present = history->records[i].kind == CHECK_SYMBOL_PRAGMA_ALIAS && history->records[i].alias_declaration < input->token_count;
+    }
+    const uint32_t capacity = present ? history->count : 0;
+    uint64_t* keys = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)capacity * 2) : NULL;
+    CheckProgramAlias* clones = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramAlias, capacity) : NULL;
+    uint32_t* entries = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : NULL;
+    bool valid = capacity == 0 || (keys != NULL && clones != NULL && entries != NULL);
+    uint32_t count = 0;
+    uint32_t clone_count = 0;
+    for (uint32_t i = 0; valid && i < capacity; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        entries[i] = BUSTER_CHECK_NONE;
+        const bool separate = record->alias_target < input->token_count;
+        const uint32_t object = record->declaration < input->token_count ? input->objects[record->declaration] : 0;
+        const uint32_t entry = object != 0 ? check_program_alias_of(program->aliases, program->alias_count, object) : 0;
+        const CheckProgramAlias* alias = entry != 0 ? program->aliases + entry - 1 : NULL;
+        if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->alias_declaration < input->token_count &&
+            (separate || (alias != NULL && check_driver_alias_pragma(program, alias) == record)))
+        {
+            const uint32_t point = record->token > record->alias_declaration ? record->token : record->alias_declaration;
+            keys[count++] = (uint64_t)point << 32 | i;
+            if (separate)
+            {
+                entries[i] = clone_count;
+                clones[clone_count++] = (CheckProgramAlias){
+                    .token = record->alias_declaration,
+                    .attribute = record->token,
+                    .target = { .pointer = (char*)intern_bytes(pp->table, record->target), .length = intern_length(pp->table, record->target) },
+                    .definition = BUSTER_CHECK_NONE,
+                    .kind = CHECK_PROGRAM_ALIAS,
+                };
+            }
+        }
+    }
+    valid = valid && (clone_count == 0 || check_program_alias_names(program, clones, clone_count, pp->table, scalar, scratch));
+    const uint64_t* sorted = valid && count > 1 ? c_bindings_sort(keys, keys + capacity, count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : keys;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const uint32_t index = (uint32_t)sorted[i];
+        const CheckInputSymbolPragma* record = history->records + index;
+        const bool separate = entries[index] != BUSTER_CHECK_NONE;
+        const uint32_t object = !separate ? input->objects[record->declaration] : 0;
+        const uint32_t entry = !separate ? check_program_alias_of(program->aliases, program->alias_count, object) : 0;
+        CheckProgramAlias* clone = separate ? clones + entries[index] : NULL;
+        const CheckProgramAlias* alias = separate ? clone : program->aliases + entry - 1;
+        bool unemitted = !separate && (program->alias_states[entry - 1] & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0;
+        if (clone != NULL)
+        {
+            clone->aliasee = clone->target_object;
+            clone->aliasee_name = clone->target;
+            clone->base = clone->definition != BUSTER_CHECK_NONE ? clone->target_object : 0;
+            const uint32_t target_entry = clone->target_object != 0 ? check_program_alias_of(program->aliases, program->alias_count, clone->target_object) : 0;
+            const CheckProgramAlias* target = target_entry != 0 ? program->aliases + target_entry - 1 : NULL;
+            const bool indirect = target != NULL && (target->kind == CHECK_PROGRAM_IFUNC || target->type == BUSTER_LINK_SYMBOL_IFUNC);
+            if (target != NULL && target->kind == CHECK_PROGRAM_ALIAS)
+            {
+                clone->aliasee = target->aliasee;
+                clone->aliasee_name = target->aliasee_name;
+                clone->base = target->base;
+                clone->definition = target->definition;
+                clone->error = target->error == CHECK_PROGRAM_ALIAS_CYCLE || target->error == CHECK_PROGRAM_ALIAS_UNDEFINED ? target->error : CHECK_PROGRAM_ALIAS_OK;
+            }
+            else if (target != NULL && target->kind == CHECK_PROGRAM_IFUNC)
+            {
+                clone->base = target->base;
+                clone->definition = target->token;
+            }
+            const bool function = input->declaration_kinds[clone->token] == C_BINDING_FUNCTION;
+            const bool function_target = indirect || (clone->definition < input->token_count && input->declaration_kinds[clone->definition] == C_BINDING_FUNCTION);
+            clone->error = clone->error != CHECK_PROGRAM_ALIAS_OK ? clone->error :
+                           clone->definition == BUSTER_CHECK_NONE && !indirect ? CHECK_PROGRAM_ALIAS_UNDEFINED :
+                           function && !function_target ? CHECK_PROGRAM_ALIAS_TO_VARIABLE :
+                           !function && function_target ? CHECK_PROGRAM_ALIAS_TO_FUNCTION : CHECK_PROGRAM_ALIAS_OK;
+            // Selection roots the target, but an inline-only function still supplies no emitted definition.
+            bool body = false;
+            for (uint32_t b = 0; function_target && target == NULL && !body && b < program->body_count; b += 1)
+            {
+                body = program->bodies[b].object == clone->target_object;
+            }
+            unemitted = target != NULL ? target->kind == CHECK_PROGRAM_ALIAS && (program->alias_states[target_entry - 1] & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0 :
+                                        function_target && !body;
+        }
+        // Multiple clones of one name encounter the first one's already-defined module symbol; subsequent clones
+        // are ignored by EmitAliasDefinition. Keep that same ordering for their code-generation errors.
+        bool duplicate = false;
+        for (uint32_t prior = 0; !duplicate && prior < i; prior += 1)
+        {
+            duplicate = history->records[(uint32_t)sorted[prior]].name == record->name;
+        }
+        const bool reported = !duplicate && alias->error != CHECK_PROGRAM_ALIAS_THREAD_LOCAL && (alias->error != CHECK_PROGRAM_ALIAS_OK || unemitted);
+        if (reported)
+        {
+            const CheckProgramAliasError error = alias->error != CHECK_PROGRAM_ALIAS_OK ? (CheckProgramAliasError)alias->error : CHECK_PROGRAM_ALIAS_UNDEFINED;
+            *errors += 1;
+            valid = check_driver_alias_error(program, parser, pp, alias, error, record->source + 3, scalar, scratch);
+        }
+        else if (!duplicate && alias->error != CHECK_PROGRAM_ALIAS_THREAD_LOCAL)
+        {
+            valid = check_driver_alias_warnings(program, parser, pp, alias, record, scratch, errors);
         }
     }
     return valid;
@@ -9148,13 +9453,16 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
     bool valid = program->alias_count == 0 || keys != 0;
     // The first alias or ifunc that names itself, by its first declaration with the attribute, or none.
     uint32_t itself = BUSTER_CHECK_NONE;
-    uint32_t itself_token = BUSTER_CHECK_NONE;
+    uint64_t itself_token = UINT64_MAX;
     for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
     {
         const CheckProgramAlias* alias = program->aliases + k;
         const bool named = alias->kind != CHECK_PROGRAM_WEAKREF && alias->target_object != 0 && alias->target_object == alias->object;
-        itself = named && alias->token < itself_token ? k : itself;
-        itself_token = named && alias->token < itself_token ? alias->token : itself_token;
+        const CheckInputSymbolPragma* pragma = check_driver_alias_pragma(program, alias);
+        const uint32_t point = pragma != NULL ? (pragma->token > pragma->alias_declaration ? pragma->token : pragma->alias_declaration) : alias->token;
+        const uint64_t order = (uint64_t)(pragma != NULL) << 32 | point;
+        itself = named && order < itself_token ? k : itself;
+        itself_token = named && order < itself_token ? order : itself_token;
     }
     // Each alias and ifunc that clang emits, with its error, or else its warnings (#1849): unless one names itself, which
     // stops clang's code generation before its check.
@@ -9163,11 +9471,12 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
     for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
     {
         const CheckProgramAlias* alias = program->aliases + k;
+        const CheckInputSymbolPragma* pragma = check_driver_alias_pragma(program, alias);
         const bool unemitted = (program->alias_states[k] & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0;
         const bool refused = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL;
         const bool reported = itself != BUSTER_CHECK_NONE ? k == itself :
-                                                            alias->kind != CHECK_PROGRAM_WEAKREF && ((alias->error != CHECK_PROGRAM_ALIAS_OK && !refused) || unemitted);
-        const bool checked = itself == BUSTER_CHECK_NONE && alias->kind != CHECK_PROGRAM_WEAKREF && !refused;
+                                                            pragma == NULL && alias->kind != CHECK_PROGRAM_WEAKREF && ((alias->error != CHECK_PROGRAM_ALIAS_OK && !refused) || unemitted);
+        const bool checked = itself == BUSTER_CHECK_NONE && pragma == NULL && alias->kind != CHECK_PROGRAM_WEAKREF && !refused;
         if (reported || checked)
         {
             keys[count++] = (uint64_t)alias->token << 32 | k << 1 | (reported ? 1u : 0u);
@@ -9179,77 +9488,17 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
         const CheckProgramAlias* alias = program->aliases + ((uint32_t)sorted[i] >> 1);
         if ((sorted[i] & 1) == 0)
         {
-            valid = check_driver_alias_warnings(program, parser, pp, alias, scratch, &errors);
+            valid = check_driver_alias_warnings(program, parser, pp, alias, NULL, scratch, &errors);
             continue;
         }
         errors += 1;
-        const bool ifunc = alias->kind == CHECK_PROGRAM_IFUNC;
         const CheckProgramAliasError error = itself != BUSTER_CHECK_NONE ? CHECK_PROGRAM_ALIAS_CYCLE :
                                              alias->error != CHECK_PROGRAM_ALIAS_OK ? (CheckProgramAliasError)alias->error : CHECK_PROGRAM_ALIAS_UNDEFINED;
-        const char* message = error == CHECK_PROGRAM_ALIAS_CYCLE ? (ifunc ? "ifunc definition is part of a cycle" : "alias definition is part of a cycle") :
-                              error == CHECK_PROGRAM_ALIAS_TO_VARIABLE ? "cannot alias a variable with a function" :
-                              error == CHECK_PROGRAM_ALIAS_TO_FUNCTION ? "cannot alias a function with a variable" :
-                              error == CHECK_PROGRAM_ALIAS_RESOLVER ? "ifunc resolver function must return a pointer" :
-                              ifunc ? "ifunc must point to a defined function" : "alias must point to a defined variable or function";
         const uint32_t at = alias->attribute < parser->tokens.count ? alias->attribute : 0;
-        const uint32_t aliasee = alias->definition < parser->tokens.count ? alias->definition : 0;
-        // An undefined one's notes: that the name must be the mangled one, and for each object whose identifier its
-        // aliasee's name spells and that clang gives a name (MangledDeclNames' alternatives: the program's symbols, the
-        // definitions and referenced declarations, and the aliasee where the selection leaves out its definition, an
-        // inline one's), that name: another where an asm label renames it, or the same. Their messages are in `scratch`.
-        const bool undefined = error == CHECK_PROGRAM_ALIAS_UNDEFINED;
-        const String8 named = alias->aliasee_name;
-        const IdentId spelled = undefined && named.length != 0 && named.length < UINT32_MAX ? intern_find(pp->table, (const uint8_t*)named.pointer, (uint32_t)named.length) : 0;
-        const bool unselected = spelled != 0 && alias->aliasee != 0 && program->object_symbols[alias->aliasee] == 0 && alias->definition != BUSTER_CHECK_NONE;
-        uint32_t alternatives = unselected ? 1 : 0;
-        for (uint32_t s = 0; spelled != 0 && s < program->symbol_count; s += 1)
-        {
-            const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
-            alternatives += declaration < parser->tokens.count && parser->tokens.names[declaration] == spelled;
-        }
-        PPOutputDiagnosticNote* notes = BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, (uint64_t)alternatives + 1);
-        valid = notes != 0;
-        uint32_t note_count = 0;
-        if (valid && (undefined || error == CHECK_PROGRAM_ALIAS_TO_VARIABLE || error == CHECK_PROGRAM_ALIAS_TO_FUNCTION))
-        {
-            notes[note_count++] = (PPOutputDiagnosticNote){
-                .token = parser->tokens.sources[undefined ? at : aliasee],
-                .message = undefined ? (ifunc ? "the function specified in an ifunc must refer to its mangled name" :
-                                                "the function or variable specified in an alias must refer to its mangled name") :
-                                       "aliasee is declared here",
-            };
-        }
-        for (uint32_t s = 0; valid && alternatives != 0 && s < program->symbol_count; s += 1)
-        {
-            const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
-            if (declaration < parser->tokens.count && parser->tokens.names[declaration] == spelled)
-            {
-                const String8 label = check_program_alias_label(program->input, declaration);
-                const String8 mangled = label.length == 0 ? check_driver_overload_name(program, parser, pp->table, program->symbol_objects[s], scratch) : (String8){ 0 };
-                const String8 name = label.length != 0   ? label :
-                                     mangled.length != 0 ? mangled :
-                                                           (String8){ .pointer = (char*)intern_bytes(pp->table, spelled), .length = intern_length(pp->table, spelled) };
-                char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, name.length + 64);
-                valid = text != 0;
-                if (valid)
-                {
-                    snprintf(text, name.length + 64, "function by that name is mangled as \"%.*s\"", (int)name.length, name.pointer);
-                    notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[at], .message = text };
-                }
-            }
-        }
-        char* unselected_text = valid && unselected ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, named.length + 64) : 0;
-        valid = valid && (!unselected || unselected_text != 0);
-        if (valid && unselected)
-        {
-            snprintf(unselected_text, named.length + 64, "function by that name is mangled as \"%.*s\"", (int)named.length, named.pointer);
-            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[at], .message = unselected_text };
-        }
-        if (valid)
-        {
-            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[at], pp->output.count + 1u, notes, note_count, "%s", message);
-        }
+        const CheckInputSymbolPragma* pragma = check_driver_alias_pragma(program, alias);
+        valid = check_driver_alias_error(program, parser, pp, alias, error, pragma != NULL ? pragma->source + 3 : parser->tokens.sources[at], scalar, scratch);
     }
+    valid = valid && (itself != BUSTER_CHECK_NONE || check_driver_pragma_aliases(program, parser, pp, scalar, scratch, &errors));
     if (!valid)
     {
         check_driver_resource(pp, "checker program capacity exhausted");

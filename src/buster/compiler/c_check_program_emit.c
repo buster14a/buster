@@ -6029,12 +6029,34 @@ static bool check_program_define_pragma_aliases(CheckProgramCode* code, const Ch
     for (uint32_t i = 0; valid && history != NULL && i < history->count; i += 1)
     {
         const CheckInputSymbolPragma* record = history->records + i;
-        const uint32_t object = record->alias_target < input->token_count ? input->objects[record->alias_target] : 0;
+        bool first = record->alias_target < input->token_count;
+        const uint32_t point = record->token > record->alias_declaration ? record->token : record->alias_declaration;
+        // A second clone encounters an already-defined alias and contributes no symbol. A forward directive's
+        // clone is created only when its target appears, so directive order alone cannot choose the winner.
+        for (uint32_t j = 0; first && j < history->count; j += 1)
+        {
+            const CheckInputSymbolPragma* previous = history->records + j;
+            const uint32_t before = previous->token > previous->alias_declaration ? previous->token : previous->alias_declaration;
+            const bool materialized = previous->alias_target < input->token_count || previous->declaration < input->token_count;
+            const bool earlier = before < point || (before == point && j < i);
+            first = !(previous->kind == CHECK_SYMBOL_PRAGMA_ALIAS && previous->name == record->name && materialized && earlier);
+        }
+        const uint32_t object = first ? input->objects[record->alias_target] : 0;
         const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
         const SymbolId base = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
         const AtomId atom = base != 0 && base < link->symbols.count ? link->symbols.atom[base] : 0;
+        // A clone cannot be placed at a common symbol's linker-owned storage, just as an explicit alias cannot.
+        // Refuse before publication even when this unit has no atom for that common definition.
+        if (record->alias_target != BUSTER_CHECK_NONE && base != 0 && base < link->symbols.count &&
+            (link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON)
+        {
+            code->status = CHECK_PROGRAM_UNSUPPORTED;
+            code->reason = "an alias of a common symbol, which clang's assembler refuses";
+            code->token = record->token;
+            valid = false;
+        }
         // A unit of several (#777) without T's definition leaves the alias to the unit with it.
-        if (record->alias_target != BUSTER_CHECK_NONE && identifiers != NULL && atom != 0)
+        if (valid && record->alias_target != BUSTER_CHECK_NONE && identifiers != NULL && atom != 0)
         {
             const NameId name = link_add_name(link, intern_bytes(identifiers, record->name), intern_length(identifiers, record->name));
             const uint8_t flags = (uint8_t)((link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_WEAK);
