@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Original real-driver regressions for unknown warning options (#1467). Every diagnostic has an independent
-// expected name, severity and count, and Clang checks the complete text except its optional spelling suggestion.
+// Original real-driver regressions for unknown warning names (#1467) and missing capabilities (#1365). Unknown-name
+// diagnostics have independent names, severities and counts and a Clang text oracle, excluding its optional hint.
+// Capability errors have Buster's explicit refusal contract rather than an invented Clang counterpart.
 // This file is included after the CC compatibility process helpers; no production option classifier is its oracle.
 
 typedef struct CCWarningOptionCase CCWarningOptionCase;
@@ -13,6 +14,14 @@ struct CCWarningOptionCase
     uint32_t warnings;
     uint32_t errors;
     bool fatal;
+};
+
+typedef struct CCWarningCapabilityCase CCWarningCapabilityCase;
+struct CCWarningCapabilityCase
+{
+    const char* arguments[6];
+    const char* refused;
+    const char* family;
 };
 
 // Only Clang's optional hint on an unknown-option line is omitted. Keep every other byte, including the diagnosed
@@ -213,12 +222,7 @@ static void cc_compat_warning_capabilities(CCCompatibilityTest* test)
             cc_warning_capability_run(test, cancelled, NULL, NULL);
             cc_warning_capability_run(test, demoted, NULL, NULL);
         }
-        static const struct
-        {
-            const char* arguments[6];
-            const char* refused;
-            const char* family;
-        } policies[] =
+        static const CCWarningCapabilityCase policies[] =
         {
             { { "-Wshadow", "-Werror" }, "-Wshadow", "shadow" },
             { { "-Wshadow", "-w" }, "-Wshadow", "shadow" },
@@ -260,8 +264,9 @@ static void cc_compat_warning_capabilities(CCCompatibilityTest* test)
         cc_compat_expect(test, dash && run.status == 0 && run.errors != NULL && run.errors[0] == 0, "a post-double-dash warning spelling remains an input path");
         cc_compat_release(&run);
         const char* stdin_arguments[] = { "-fsyntax-only", "-Wshadow", "-x", "c", "-", NULL };
-        run = cc_compat_run(test, test->compiler, "#error source must not be checked\n", stdin_arguments);
-        cc_compat_expect(test, run.status != 0 && run.errors != NULL && strstr(run.errors, "unsupported warning option '-Wshadow'") != NULL &&
+        const bool stdin_written = cc_compat_write(test, "warning-capability-stdin.c", "#error source must not be checked\n");
+        run = cc_compat_run(test, test->compiler, "warning-capability-stdin.c", stdin_arguments);
+        cc_compat_expect(test, stdin_written && run.status != 0 && run.errors != NULL && strstr(run.errors, "unsupported warning option '-Wshadow'") != NULL &&
                          strstr(run.errors, "source must not be checked") == NULL, "an unsupported warning request refuses stdin before source checking");
         cc_compat_release(&run);
         const char* deferred[] = { "-fsyntax-only", "--lanes", "2", "--deferred-bodies", "-Wshadow", "warning-capabilities.c", NULL };

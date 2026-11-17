@@ -303,37 +303,46 @@ static uint32_t pp_warning_unimplemented_index(const char* name)
 // groups retain their documented subset; -w suppresses diagnostics, never a missing-capability error.
 static bool pp_warning_options_supported(const PPOptions* options)
 {
-    uint32_t requested[BUSTER_ARRAY_LENGTH(pp_warning_unimplemented)] = { 0 };
+    _Static_assert(BUSTER_ARRAY_LENGTH(pp_warning_unimplemented) <= 32, "warning capability requests fit the active mask");
+    // Only active lanes read their request index. Ordinary commands do not initialize or scan optional state.
+    uint32_t requested[BUSTER_ARRAY_LENGTH(pp_warning_unimplemented)];
+    uint32_t active = 0;
     const uint32_t count = options->semantic_warning_option_count;
     const char* const* arguments = options->semantic_warning_options;
     for (uint32_t i = 0; i < count; i += 1)
     {
         const PPWarningOption option = pp_warning_option(arguments[i]);
-        const uint32_t family = pp_warning_unimplemented_index(option.name);
         const bool enables = !option.negative && (option.kind == PP_WARNING_OPTION_GROUP || option.kind == PP_WARNING_OPTION_ERROR ||
                                                  option.kind == PP_WARNING_OPTION_FATAL);
-        if (enables && family != UINT32_MAX)
+        if (enables)
         {
-            requested[family] = i + 1;
+            const uint32_t family = pp_warning_unimplemented_index(option.name);
+            if (family != UINT32_MAX)
+            {
+                requested[family] = i + 1;
+                active |= (uint32_t)1 << family;
+            }
         }
-        else if (option.negative && option.kind == PP_WARNING_OPTION_GROUP)
+        else if (active != 0 && option.negative && option.kind == PP_WARNING_OPTION_GROUP)
         {
             const bool everything = strcmp(option.name, "everything") == 0;
             const uint32_t holder = pp_warning_group_index(option.name);
-            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(pp_warning_unimplemented); f += 1)
+            for (uint32_t remaining = active; remaining != 0; remaining &= remaining - 1)
             {
-                if (requested[f] != 0 && (everything || (holder != UINT32_MAX && pp_warning_group_holds(holder, pp_warning_group_index(pp_warning_unimplemented[f])))))
+                const uint32_t f = (uint32_t)__builtin_ctz(remaining);
+                if (everything || (holder != UINT32_MAX && pp_warning_group_holds(holder, pp_warning_group_index(pp_warning_unimplemented[f]))))
                 {
-                    requested[f] = 0;
+                    active &= ~((uint32_t)1 << f);
                 }
             }
         }
     }
     uint32_t first = UINT32_MAX;
     uint32_t family = 0;
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(pp_warning_unimplemented); f += 1)
+    for (uint32_t remaining = active; remaining != 0; remaining &= remaining - 1)
     {
-        if (requested[f] != 0 && requested[f] < first)
+        const uint32_t f = (uint32_t)__builtin_ctz(remaining);
+        if (requested[f] < first)
         {
             first = requested[f];
             family = f;
