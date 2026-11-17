@@ -4676,9 +4676,20 @@ it. It writes every kind the direct path writes: static executables (with
   library's unversioned reference keeps no library and a versioned one still
   loads the archive members that define its name, as before; GNU ld and lld
   key a library's versioned reference as `name@VERSION`, which no unversioned
-  definition, an archive member's or the executable's, satisfies. Both passes
-  are scalar on lane 0, shared by both paths, over the needed libraries'
-  versioned references and the loaded libraries' needs.
+  definition, an archive member's or the executable's, satisfies (#2911).
+  Both passes are scalar on lane 0, shared by both paths, over the needed
+  libraries' versioned references and the loaded libraries' needs: a lookup is
+  two probes of an index per library before its provider (the exports' and
+  the hidden exports', which each library's read indexes on the lanes), and
+  each reference is looked up once, the follow recording the first that no
+  library exports. On the 9700X a C program's mixed link with `-lm` (21 and
+  26 references of `libc.so.6` and `libm.so.6`, 9 needs) takes 104,000 more
+  instructions than main's (26.24 to 26.35 million, +0.40%) and 1.5 to 1.9%
+  more user cycles (main again: -0.05 to +0.75%); the first version, which
+  scanned each library's version definitions and hidden exports for every
+  lookup (`libc.so.6` has 537) and looked every reference up twice, took
+  307,000 more ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/library-versions-1590-2026-11-17)).
+  The direct link of the same program is unchanged.
 - **The static kinds and shared libraries (#394).** A static executable and a
   static PIE get what `dynamic.c` gives the direct path's: the start file's
   ABI note and the link's `__tls_get_addr`, which `libc.a` doesn't define and
