@@ -7,8 +7,10 @@
 // `||` and `?:`), and its evaluated operands their contexts and targets (in its loop, node_machine_evaluate_at, for the
 // operands a case names; node_machine_evaluate for the rest); a call's by node_machine_classify_call, the lowering's
 // plain call; an update's by its plan (node_machine_classify_update, node_machine_update_plan, check_lower_update's);
-// then the labels' numbers (node_machine_number_labels). It reads the records T typed through the record accessors
-// alone, and writes its own columns through them.
+// an operator a condition takes as branches by node_machine_classify_branches (check_lower_branch's, #2890), which gives
+// each operand a target and a sense in place of a value's context; then the labels' numbers
+// (node_machine_number_labels). It reads the records T typed through the record accessors alone, and writes its own
+// columns through them.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_CONTEXTS_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_CONTEXTS_INCLUDED
 
@@ -183,7 +185,7 @@ static bool node_machine_branch_operator(const NodeMachine* machine, uint32_t r,
 
 // Whether condition record `r` (a statement's CONDITION, or a conditional's, an `&&`'s or an `||`'s first operand) is
 // branches, the lowering's rule (check_lower_branch_condition) from the records: under its `!`s, an `&&` or `||`
-// (node_machine_branch_operator). The tasks write such a condition, and a conditional, an `&&` or an `||` of one.
+// (node_machine_branch_operator). C evaluates such a condition as branches (node_machine_classify_branches).
 static bool node_machine_branch_condition(const NodeMachine* machine, uint32_t r)
 {
     uint32_t at = r;
@@ -201,12 +203,78 @@ static bool node_machine_branch_condition(const NodeMachine* machine, uint32_t r
     return found;
 }
 
+// Operand `k` of branched operator `r`, record `child`, as a condition (check_lower_branch_operand's): a branch to
+// `owner`'s label where its truth is `sense`. An operand that is an operator a condition takes as branches
+// (node_machine_branch_operator) is branched in its turn. Any other is its value, converted to the operator's
+// conversion's type, then its test and the branch, after its row (BUSTER_NODE_MACHINE_AFTER_BRANCH): its type has to be
+// one a truth's entries test (node_machine_testable; a complex value's or a __float128's test is the tasks'). Whether
+// the machine takes it. (The operand is a record of the expression: T refuses a shape with one outside it, and each of
+// these operators has every operand it reads here.)
+static bool node_machine_branch_operand(NodeMachine* machine, uint32_t r, uint32_t k, uint32_t child, uint32_t owner, bool sense)
+{
+    bool takes = true;
+    if (node_machine_branch_operator(machine, child, false))
+    {
+        node_machine_evaluate(machine, r, child, false, 0);
+        node_machine_record_set_branch(machine, child, owner, sense, true);
+    }
+    else
+    {
+        const TypeId type = node_machine_record_converted(machine, r, k);
+        takes = node_machine_testable(machine, type);
+        if (takes)
+        {
+            node_machine_evaluate(machine, r, child, false, type);
+            node_machine_record_set_branch(machine, child, owner, sense, false);
+        }
+    }
+    return takes;
+}
+
+// C's operator evaluated as branches at record `r` (BUSTER_NODE_MACHINE_BRANCHED; check_lower_branch's, the tasks'
+// BRANCH): its operands as conditions in their turn, each a branch to a target where its truth is a sense, and the next
+// entry where it isn't. Its own target is its hook's label and its sense its state's.
+// - An `&&` where false and an `||` where true send both operands to its target with its sense.
+// - An `&&` where true and an `||` where false branch on their first operand the other way, to a label of their own past
+//   their second operand, which then decides: the record is a labeled one, of that one label.
+// - A `!` swaps the sense; a statement's CONDITION hands its own on.
+// NODE_MACHINE_TEMPLATE_BRANCHES, or CHECK_LOWER_TEMPLATE_NONE where an operand isn't taken. Out of C's loop, as the
+// logical operators' values are.
+static __attribute__((noinline)) CheckLowerTemplate node_machine_classify_branches(NodeMachine* machine, uint32_t r)
+{
+    const CheckOp op = node_machine_record_op(machine, r);
+    const uint32_t a = node_machine_record_left(machine, r);
+    const uint32_t owner = node_machine_record_hook(machine, r);
+    const bool sense = (node_machine_record_state(machine, r) & BUSTER_NODE_MACHINE_BRANCH_TRUE) != 0;
+    bool takes = false;
+    if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        const bool past = node_machine_record_past(machine, r);
+        if (past)
+        {
+            machine->stack[machine->labeled_count] = r;
+            machine->labeled_count += 1;
+            machine->label_count += 1;
+        }
+        takes = node_machine_branch_operand(machine, r, 0, a, past ? r : owner, past ? !sense : sense) &&
+                node_machine_branch_operand(machine, r, 1, node_machine_record_right(machine, r), owner, sense);
+    }
+    else
+    {
+        takes = node_machine_branch_operand(machine, r, 0, a, owner, op == CHECK_OP_NOT ? !sense : sense);
+    }
+    return takes ? (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_BRANCHES : CHECK_LOWER_TEMPLATE_NONE;
+}
+
 // C's logical operator or conditional at record `r` (`op`), of value class `class` (check_lower_logical's rules, which
 // check_lower_expand reaches for one that isn't folded, of a scalar class, or a conditional's of void, whose condition is
 // no vector): its template, with its evaluated operands given their targets and its segments after them, or
 // CHECK_LOWER_TEMPLATE_NONE. A condition the program knows (check_program_runtime_truth's, from its record) leaves its
 // untaken operand unevaluated and numbers no label; a conditional of one operand twice (`a ?: b`), whose condition the
-// tasks keep in a temporary, is the tasks'.
+// tasks keep in a temporary, is the tasks'. A condition that isn't known and is branches (node_machine_branch_condition:
+// a conditional's, #2883, and an `&&`'s or an `||`'s first operand, #2891) is evaluated as branches to the record's
+// alternate, where a conditional's condition and an `&&`'s first operand are false and an `||`'s is true: no value of it
+// is made and tested after its row.
 static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r, CheckOp op, uint8_t class)
 {
     const uint32_t a = node_machine_record_left(machine, r);
@@ -217,9 +285,7 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_log
     const TypeId type_a = node_machine_record_converted(machine, r, 0);
     const TypeId type_b = node_machine_record_converted(machine, r, 1);
     const bool scalar = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 && (node_machine_record_facts(machine, r) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0;
-    // A conditional whose condition is branches (node_machine_branch_condition, #2883), and an `&&` or `||` whose first
-    // operand is (#2891), are the tasks'.
-    const bool shape = a < r && b < r && (!conditional || (c < r && a != b)) && !node_machine_branch_condition(machine, a);
+    const bool shape = a < r && b < r && (!conditional || (c < r && a != b));
     CheckLowerTemplate kind = CHECK_LOWER_TEMPLATE_NONE;
     if (shape && (scalar || (conditional && class == BUSTER_TYPED_CLASS_VOID)))
     {
@@ -255,9 +321,20 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_log
         else if (node_machine_testable(machine, type_a) && (conditional || node_machine_testable(machine, type_b)))
         {
             kind = (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_BRANCH;
-            machine->stack[machine->label_count / 2] = r;
+            machine->stack[machine->labeled_count] = r;
+            machine->labeled_count += 1;
             machine->label_count += 2;
-            node_machine_evaluate_hooked(machine, a, type_a, r, BUSTER_NODE_MACHINE_AFTER_CONDITION);
+            // A condition that is branches (an `int`'s, so one the test above takes): to the alternate, where a
+            // conditional's condition and an `&&`'s first operand are false and an `||`'s is true.
+            if (node_machine_branch_condition(machine, a))
+            {
+                node_machine_evaluate(machine, r, a, false, 0);
+                node_machine_record_set_branch(machine, a, r, op == CHECK_OP_LOGICAL_OR, true);
+            }
+            else
+            {
+                node_machine_evaluate_hooked(machine, a, type_a, r, BUSTER_NODE_MACHINE_AFTER_CONDITION);
+            }
             if (conditional)
             {
                 node_machine_evaluate_hooked(machine, b, type, r, BUSTER_NODE_MACHINE_AFTER_ARM);
@@ -534,10 +611,8 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
                 const TypeId type_a = node_machine_record_converted(machine, r, 0);
                 const uint32_t word_a = node_machine_word(machine, type_a);
                 const uint8_t operand_class = (uint8_t)word_a;
-                // A statement's condition with `&&` or `||` is the lowering's branches (node_machine_branch_condition, #2883):
-                // the tasks'.
-                const bool branches = op == CHECK_OP_CONDITION && node_machine_branch_condition(machine, r);
-                if (plain && !branches && ((word_a >> 8) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 && operand_class < BUSTER_TYPED_CLASS_VECTOR &&
+                // (A statement's condition with `&&` or `||` under its `!`s isn't here: node_machine_root branched it.)
+                if (plain && ((word_a >> 8) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 && operand_class < BUSTER_TYPED_CLASS_VECTOR &&
                     operand_class != BUSTER_TYPED_CLASS_VOID)
                 {
                     kind = CHECK_LOWER_TEMPLATE_TRUTH;
@@ -663,15 +738,16 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
 
 // The labels' numbers (NodeMachine.label_bases), each labeled record's first, in the order the tasks number them: the
 // order they pop the records, a preorder from the root with each record's operands in the order of their entries, which
-// is the records' (X's postorder). A labeled record's rank in it among the labeled records is the number of those that are
-// its ancestors (whose subtree, from its first record to it, holds it) and of those before its subtree's first record (to
+// is the records' (X's postorder). A labeled record's first label is the count of the labels of the labeled records
+// before it in that order (two a value's, one a branched operator's own, node_machine_record_labels): those that are
+// its ancestors (whose subtree, from its first record to it, holds it) and those before its subtree's first record (to
 // its left). A subtree's first record is its least (node_machine_record_lowest, T's, a call's arguments included). Only
 // an expression with labels runs it, and it reads the labeled records alone (C listed them in `stack`, their subtrees'
 // first records after them): a walk of every record cost C 125 cycles a new taken node on sqlite3.c on the 9700X, three
 // times its average, by its branches. Scalar: an expression has a few, and their order is the tree's.
 static __attribute__((noinline)) void node_machine_number_labels(NodeMachine* machine)
 {
-    const uint32_t labeled = machine->label_count / 2;
+    const uint32_t labeled = machine->labeled_count;
     uint32_t* records = machine->stack;
     uint32_t* firsts = machine->stack + labeled;
     for (uint32_t i = 0; i < labeled; i += 1)
@@ -681,13 +757,30 @@ static __attribute__((noinline)) void node_machine_number_labels(NodeMachine* ma
     for (uint32_t i = 0; i < labeled; i += 1)
     {
         const uint32_t r = records[i];
-        uint32_t rank = 0;
+        uint32_t base = 0;
         for (uint32_t j = 0; j < labeled; j += 1)
         {
             const uint32_t other = records[j];
-            rank += (other > r && firsts[j] <= r) || other < firsts[i];
+            const bool before = (other > r && firsts[j] <= r) || other < firsts[i];
+            base += before ? node_machine_record_labels(machine, other) : 0;
         }
-        node_machine_record_set_label_base(machine, r, 2 * rank);
+        node_machine_record_set_label_base(machine, r, base);
+    }
+}
+
+// The root's start, C's and the one sweep's (node_machine_lower): evaluated in `context`, its control's sense aside, and
+// converted to `target`, below no call. A statement's CONDITION that is branches (node_machine_branch_condition, #2883)
+// is branched to its control's own label, where its truth is the control's sense
+// (BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE): the control's branch is then the condition's operands'.
+static inline __attribute__((always_inline)) void node_machine_root(NodeMachine* machine, uint32_t root, uint8_t context, TypeId target)
+{
+    node_machine_record_set_evaluated(machine, root);
+    node_machine_record_set_context(machine, root, context & (uint8_t)~BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE);
+    node_machine_record_set_target(machine, root, target);
+    node_machine_record_set_call_depth(machine, root, 0);
+    if (node_machine_record_op(machine, root) == CHECK_OP_CONDITION && node_machine_branch_condition(machine, root))
+    {
+        node_machine_record_set_branch(machine, root, BUSTER_NODE_MACHINE_NO_OWNER, (context & BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE) != 0, true);
     }
 }
 
@@ -700,25 +793,25 @@ static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t co
     const uint32_t count = machine->count;
     node_machine_records_set_unevaluated(machine, count);
     machine->label_count = 0;
+    machine->labeled_count = 0;
     machine->update_count = 0;
     const uint32_t root = count - 1;
-    node_machine_record_set_evaluated(machine, root);
-    node_machine_record_set_context(machine, root, context);
-    node_machine_record_set_target(machine, root, target);
-    node_machine_record_set_call_depth(machine, root, 0);
+    node_machine_root(machine, root, context, target);
     uint32_t r = count;
     uint32_t stopped = root;
     while (refusal == NODE_MACHINE_TAKEN && r != 0)
     {
         r -= 1;
-        if (node_machine_record_evaluated(machine, r))
+        const uint8_t state = node_machine_record_state(machine, r);
+        if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
         {
             // A common case's operands are evaluated here, in one place, below the record's calls; the rarer cases evaluate
             // their own (node_machine_evaluate).
             NodeMachineUse use = {
                 .count = 0,
             };
-            const CheckLowerTemplate kind = node_machine_record_op(machine, r) == CHECK_OP_CALL ? node_machine_classify_call(machine, r) :
+            const CheckLowerTemplate kind = __builtin_expect((state & BUSTER_NODE_MACHINE_BRANCHED) != 0, 0) ? node_machine_classify_branches(machine, r) :
+                                            node_machine_record_op(machine, r) == CHECK_OP_CALL ? node_machine_classify_call(machine, r) :
                                                                                                    node_machine_classify(machine, r, r == root ? object : 0, &use);
             node_machine_record_set_template(machine, r, kind);
             refusal = kind == CHECK_LOWER_TEMPLATE_NONE ? NODE_MACHINE_REFUSED_TEMPLATE : NODE_MACHINE_TAKEN;

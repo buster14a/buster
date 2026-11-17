@@ -67,7 +67,20 @@ struct NodeMachineReader
     uint32_t strings;
     // The census's tests at reader time (c_check_node_census.c's), or null.
     struct NodeCensusReader* tests;
+    // #2850's fact words' kernel at reader time (c_check_node_machine_facts.c's), or null.
+    struct NodeFactsReader* facts;
 };
+
+// The fact words' kernel at reader time (c_check_node_machine_facts.c, which follows this file in the unit): its state
+// for the unit `reader` reads, whose machine there is `machine`, its counts kept in `types`; the machine's current
+// expression, which T has taken (nodes `first` to its root `root`, `count` records; the front's root `record`, whose
+// operand's record is `operand`; `taken`: the whole machine takes it there), appended to the chunk's windows; and, once T
+// has run on each of a chunk's roots, the kernel on the chunk's windows, checked against T's records and timed.
+struct NodeFactsReader;
+static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader, NodeMachine* machine, NodeFrontTypes* types);
+static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
+                                         uint32_t operand, bool taken);
+static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front);
 
 // The census's tests at reader time (c_check_node_census.c, which follows this file in the unit): their state for the
 // unit `reader` reads, whose machine there is `machine`, with columns for `node_capacity` nodes and the unit's policy
@@ -347,6 +360,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         typer->types = types;
         typer->strings = 0;
         typer->tests = NULL;
+        typer->facts = NULL;
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
                                          symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
     }
@@ -385,6 +399,11 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
             typer->tests = node_census_reader_begin(reader, &typer->machine, types, capacity);
             room = typer->tests != NULL;
         }
+        if (room && (options & BUSTER_NODE_READER_FACTS) != 0 && (reader->pp->options.node_front & BUSTER_NODE_FRONT_LEAN) != 0)
+        {
+            // It reads the lean front's records. Without room for its windows it doesn't run, and the shadow reports that.
+            typer->facts = node_facts_reader_begin(reader, &typer->machine, types);
+        }
         types->setup_ticks = __rdtsc() - start;
         shadow->types = room ? types : NULL;
     }
@@ -409,19 +428,28 @@ static void node_machine_reader_strings(NodeMachineReader* typer, const CheckInp
 }
 
 // What the lowering's task gives a root of the front's that T has just typed (record `record`, the machine's current
-// expression): no context, and a conversion's target and an object for an initialization alone, into `target` and
-// `object`: its INITIALIZE's type, the object's, without its qualifiers, where the value's conversion to it writes
-// entries, and the object its declaration names.
-static inline void node_machine_reader_root(const NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader, uint32_t record, TypeId* target,
-                                            uint32_t* object)
+// expression): a conversion's target and an object for an initialization alone, into `target` and `object`: its
+// INITIALIZE's type, the object's, without its qualifiers, where the value's conversion to it writes entries, and the
+// object its declaration names. Its context, which it returns, is none but a do statement's condition's sense
+// (BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE): its control branches back where the condition holds, where an if's, a while's
+// and a for's branch away where it doesn't. By the parser's tree, as the program's controls find it
+// (check_control_statement): a do statement's condition is a child of the statement's terminator, and any other
+// condition is its statement's own token. A root that is no condition takes no sense, whatever its token's parent
+// (node_machine_root reads it of a CONDITION alone).
+static inline uint8_t node_machine_reader_root(const NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader, uint32_t record, TypeId* target,
+                                               uint32_t* object)
 {
     const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE;
     const uint32_t node = front->nodes[record];
     const uint32_t token = front->tokens[record];
+    const Parser* parser = reader->parser;
+    const uint32_t parent = token < parser->tokens.count ? parser->tree.parents[token] : BUSTER_PARSE_NONE;
+    const bool repeats = parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR;
     const uint32_t declaration = initialization && token < reader->parser->tokens.count ? reader->initializer_declarations[token] : BUSTER_CHECK_NONE;
     // The initializer's plan converts the value to the object's type without its qualifiers (check_action_convert's).
     *target = initialization && node < typer->graph.count ? node_machine_reader_target(&typer->machine, type_unqualified(typer->graph.types[node])) : 0;
     *object = declaration < reader->output->token_count ? reader->output->objects[declaration] : 0;
+    return repeats ? BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE : 0;
 }
 
 // Whether the front's root `record`, whose operand's record is `operand`, is a declaration's discard: at a declaration's
@@ -541,8 +569,8 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     {
                         TypeId target = 0;
                         uint32_t object = 0;
-                        node_machine_reader_root(typer, front, reader, record, &target, &object);
-                        swept = node_machine_contexts(machine, 0, target, object);
+                        const uint8_t context = node_machine_reader_root(typer, front, reader, record, &target, &object);
+                        swept = node_machine_contexts(machine, context, target, object);
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
                         if (pass != 0)
                         {
@@ -570,6 +598,13 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         }
                     }
                     }
+                    if (pass != 0 && typer->facts != NULL && refusal == NODE_MACHINE_TAKEN)
+                    {
+                        // The fact words' kernel's expression, after the tests and C and X, which write none of T's
+                        // records: with both, whether the whole machine takes it there.
+                        node_facts_reader_expression(typer->facts, front, first, root, records, record, operand,
+                                                     tested && sweeps && verdict == 0 && swept == NODE_MACHINE_TAKEN);
+                    }
                 }
                 else if (pass != 0)
                 {
@@ -581,6 +616,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
         {
             types->ticks += __rdtsc() - start;
         }
+    }
+    if (typer->facts != NULL)
+    {
+        node_facts_reader_chunk(typer->facts, front);
     }
 }
 

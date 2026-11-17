@@ -265,8 +265,10 @@ c`, `(a && b) || c`), `check_lower_logical` pushes the `CHECK_LOWER_BRANCH` task
 for it, as for a conditional's condition, to the value's own constant label:
 where false for an `&&`, where true for an `||` (#2891). No value of the first
 operand is made, joined and tested again; the value's outermost join is the one
-left. The node machine leaves such a condition, a conditional whose condition is
-branches, and an `&&` or `||` whose first operand is, to the tasks.
+left. The node machine writes the same branches (#2890): its C sweep gives such
+an operator a target and a sense where a value has a context, and X writes each
+operand's test and branch after its row ([the design](../node-machine.md), "The
+logical operators and the conditional").
 
 `tests/checker/branch-conditions` holds the regressions, which run natively
 against clang (`c_check_branch_condition_test.c`): conditions written as
@@ -353,7 +355,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests|--front-own-tests] [--front-tests-last] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests|--front-own-tests] [--front-tests-last] [--front-facts] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -827,6 +829,11 @@ takes its entries.
     what sent them, the expressions walked, and the differences.
   - **`--front-tests-last`** (bit 16) runs either form after C and X in the
     timed run, on the expressions those take.
+- `--front-facts` runs **the fact words' kernel where the machine sits**
+  (`PPOptions.node_reader`'s bit 32, with `--front-types`' and
+  `--front-lean`'s bits): #2850's kernel on each expression T takes at reader
+  time, its windows' inputs made from the lean front's records.
+  [Its section](#the-kernel-where-the-machine-sits-2850s-step-2) has it.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -844,7 +851,14 @@ construct a line, each taken or refused by a named reason), with `--verify`
 and with `--scalar`, each time with `--fused` and `--interleave 3`: the one
 sweep must give C's and X's refusal, tape, labels and calls for every
 expression of the fixture, nested calls, labels under and around calls and
-several postfix updates through addresses in one expression among them. The
+several postfix updates through addresses in one expression among them. Its
+conditions that are branches (#2890) are there by shape: an `&&` and an `||`
+where true and where false, under an if, a while and a do statement, under a
+`!` and two, three deep, as a conditional's condition and as a value's first
+operand, with a call, an update and a conditional as operands; and what stays
+a value. Reader time sweeps what the census leaves too, so its refusals there
+are counted: four operands a truth's entries don't test (a cast to
+`__float128`) must be C's refusals, not X's. The
 front runs over the fixture too (after the walk in the `--verify` run, before
 it in the `--scalar` one, lean in the `-funsigned-char` one): every record the
 walk's node, no value left waiting, and each taken line's expressions the
@@ -900,6 +914,30 @@ decide where every warning would send them to the census's code, and a `for`
 statement in the first (its clauses under `-Wfor-loop-analysis`). Each of the
 91 faults that can be put into the own form fails this part of
 `test-checker`.
+The fact words' kernel runs at reader time on the fixture twice
+(`node_shadow_test_kernel`: after T alone, and in the `--scalar` run with the
+census's tests and C and X beside it) and on the two generated texts: no
+record differs from T's over poison or over decoys, no list from its twin's,
+no input made from the front's records from the one made from T's columns,
+as each expression came and made again; the second making makes as many
+records' as the first; and the counts are exact: the expressions the front's
+records don't give (3 of the fixture's, cut by a chunk's end; 5 of the
+chunk-boundary text's, four cut and one out of reach), the records the
+kernel leaves to T (24 and 3), the literals' leaves that are a line's (125,
+and one in each generated text), and in the second run the whole machine's
+records and those of them made (1,223 and 1,088). What the corpora showed
+the kernel needs there has a line each:
+
+- an enumerator whose value is past 64 bits beside one that isn't: the
+  reader's own column has both before the input's list is made;
+- a sum whose first operand, a call, is 260 records before it, past a byte's
+  distance: its inputs are the other making's;
+- `*&narrow`, twice, in the fixture's last body: T derives the pointer type
+  there, and its row has to be made before the expression is appended (Lua's
+  `lua_numbertointeger` showed it);
+- a third generated text, one body of 16,500 statements `x += 1;`
+  (`node_facts_test_reader_lines`): more literals than a batch's lines hold,
+  so each has a line only if a batch's lines are taken away with it.
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.
 
 ### The fact words (#2850's step 1)
@@ -1171,3 +1209,87 @@ source are zeroed for it. A pull request's checks don't run the sanitizer
 rows: before queueing a change to the census or to a reader, build with
 `BUSTER_HOST_ARCH=x86-64 BUSTER_SANITIZER=memory` (then `address` and
 `thread`) and run the part of `test-checker` that has the census's tests.
+
+### The kernel where the machine sits (#2850's step 2)
+
+`./build/compiler measure-node-machine --shadow --front-facts [--front-tests|--front-own-tests] [--verify] [--passes 0] [--list N] [preprocessor options] file...`
+is step 2's third piece of [the one-core path](../one-core-path.md): the fact
+words' kernel with the operators' ([above](#the-fact-words-2850s-step-1)) run
+at reader time, after T types a chunk's roots there, on windows whose inputs
+come from the lean front's records. It implies `--front-types` and
+`--front-lean`, after the walk unless an order is given. No compile takes any
+of it, and on a host without the vector paths, where no front runs, it runs
+nothing. Its code is the last part of `c_check_node_machine_facts.c`; the
+hook is in `node_machine_reader_chunk`, after the tests and C and X.
+
+- **A batch** is the expressions T takes among a chunk's roots
+  (`node_facts_reader_expression` appends each; `node_facts_reader_flush`
+  runs the batch after the chunk's last root, or where it would pass
+  `BUSTER_NODE_FACTS_READER_RECORDS` records or
+  `BUSTER_NODE_FACTS_READER_EXPRESSIONS` expressions). Its windows are cut as
+  after the pipeline.
+- **The words at reader time.** `node_facts_settle` makes the rows of the
+  types made since the last expression, before the next is appended. A
+  declaration's line is made at its first use (`node_facts_front_line`, which
+  takes a line at hand whose type is still the declaration's, and else
+  `node_facts_declaration`). An enumerator's value is read from the reader's
+  own column (`NodeFacts.enum_values`; the input's list, which the kernel
+  reads after the pipeline, is made when the reader ends), and one past 64
+  bits makes its line's leaf T's (`BUSTER_NODE_FACTS_HIGH`). A literal's line
+  is a batch's own (`node_facts_front_integer`, `node_facts_front_literal`).
+- **The inputs from the front's records** (`node_facts_front_expression`):
+  each record's operator, kind, class, operands' distances, its entry (a
+  leaf's line, a member's name, a cast's or a return's type, a call's first
+  argument's place), its count of arguments and its source position, from
+  `NodeFront`'s columns and the reader's by token. It returns why an
+  expression isn't given whole (`BUSTER_NODE_FACTS_WHY_*`): a chunk's end cut
+  its records, an operand is past a byte's distance, a literal isn't decoded
+  again, a call has 255 operands or more.
+- **Their twin** is `node_facts_append`'s making from T's columns and the
+  walk's nodes. `node_facts_front_same` compares the two a record: every
+  field, a literal's line by its content, a call's arguments one by one. An
+  expression the front's records don't give takes the twin's inputs and is
+  counted.
+- **A batch's runs:** the kernel as it finds the words, timed (`the kernel's
+  first run`); the front's inputs made again, the batch's expressions in one
+  loop, timed and compared again; the kernel over poisoned records from the
+  front's inputs, every record compared with T's and the lists with their
+  twin's; the kernel over decoys; and a timed turn, the kernel on the
+  batch's windows and T again on its expressions, the kernel first in every
+  other batch. With `--verify` T isn't run again for its time: it checks
+  itself against the action there, which counts what the action warns of.
+- **With `--front-tests` or `--front-own-tests`** the report adds the share
+  of the records the kernel makes in the expressions the whole machine takes
+  at reader time (T, the tests, C and X), which is the set nearest to the
+  kernel's windows after the pipeline.
+
+The report's `node-shadow: reader-time fact words` lines give the expressions,
+their records and windows, the literals, the records to make, those made
+(with those a short path or a class's loop made) and left, the differences
+(`differences`, `over decoys`, `list-differences`) and the batches that
+didn't fit (`failures`); with the tests and the sweeps, the same share `in
+the expressions the whole machine takes there`; each operator's records left
+(`left op=OP records=N of N`); the words made (`rows`, `declarations'-lines`
+with those made again, `member-slots`, `pointer-conversion-slots`) and their
+ticks each; the ticks a record of the windows (`the kernel's first run`, `a
+later run`, `T again`, `the rows' and the lines' making`, `the windows'
+making from T's columns`) and their totals; `inputs from the front's
+records` (the expressions and records given, the `differences` from the
+twin's, the `expressions-not-given-whole`, the ticks as each expression came
+and `again-ticks`, the second making's); and `not given by the front's
+records`, by why. T's own first run is `reader-time T`'s `ticks`, as without
+the option. `--list N` prints the first N differences (`reader-time fact
+words difference`, with the file, the line, the operator and what differs:
+a record, a record over decoys, a window's lists, the front's inputs) and,
+on a count of their own, the first N expressions not given, with why. The
+command exits 1 on a difference or a failure.
+
+`test-checker` runs it on the node machine's fixture and on three generated
+texts, as "The shadow" above has. Of the 52 faults put into this part one at a
+time, 50 fail those tests. The two that pass change nothing a text can show
+at reader time: a line at hand taken without its type compared (no
+declaration is read there with two types), and a return's type read from its
+token's query type (the walk's action at a return has copied it there). The
+record's campaign has the three runs and what each changed. [The
+design](../one-core-path.md#step-2s-third-piece-the-kernel-where-the-machine-sits)
+has what it measured.

@@ -82,10 +82,92 @@
 // BUSTER_NODE_READER_LAST: the tests after C and X, on the expressions those take, where they otherwise come between T
 // and C (--front-tests-last).
 #define BUSTER_NODE_READER_LAST 16u
+// #2850's fact words' kernel at reader time too (measure-node-machine --shadow --front-facts;
+// c_check_node_machine_facts.c's node_facts_reader_chunk): on each chunk's expressions T took there, T's records the oracle.
+#define BUSTER_NODE_READER_FACTS 32u
 // A lean leaf's kind, in its record's `leaf_categories`.
 #define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
 #define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
 #define BUSTER_NODE_FRONT_LEAF_STRING 2u
+
+// The counts of the fact words' kernel at reader time (NodeFrontTypes.facts_counts; c_check_node_machine_facts.c's
+// node_facts_reader_flush), a unit's.
+// - What it ran on: the expressions T took there, their records, and the windows they made.
+// - Of the records: the leaves that name no declaration (literals); the records the kernel is to make besides a
+//   literal's leaf (an identifier's leaf, a lookup, another operator its rules cover), those it made, and those of them
+//   a short path or a class's loop made; and the literals' leaves it is to make from a line, and those it made.
+// - The records that differ from T's over poison or over decoys, those over decoys alone, the windows whose lists
+//   differ from their twin's, and the batches that had no room.
+// - TSC ticks. The kernel's first run on each window (which fills the members' and the pointer conversions' slots it
+//   meets first); a later run, all it reads where the runs before left it; T again on the same expressions, in the same
+//   turn as that run (the kernel first in every other batch), with the records T ran again on; and the windows' making
+//   from T's columns and the walk's nodes (the shadow's own: node_facts_append).
+// - The words: the types' rows and their ticks, the declarations' lines and theirs, the lines made again for a
+//   declaration, and the members' and the pointer conversions' slots filled.
+// - The same counts of the records in the expressions the whole machine takes there (no test of the census's refuses
+//   them, and C and X take them: with --front-tests), which are what the kernel's windows hold after the pipeline.
+// - The windows' inputs made from the front's records and the reader's columns alone (node_facts_front_expression):
+//   the expressions they were made for and their records, the records whose inputs differ from the window's (which
+//   node_facts_append made from T's columns and the walk's nodes), the expressions the front's records don't give
+//   whole, the ticks of making them as each expression came (a read of the counter before and after each), and the
+//   ticks and the records of making a batch's again in one loop.
+typedef enum NodeFactsCount
+{
+    NODE_FACTS_COUNT_EXPRESSIONS,
+    NODE_FACTS_COUNT_RECORDS,
+    NODE_FACTS_COUNT_WINDOWS,
+    NODE_FACTS_COUNT_LITERALS,
+    NODE_FACTS_COUNT_WANTED,
+    NODE_FACTS_COUNT_MADE,
+    NODE_FACTS_COUNT_SHORT,
+    NODE_FACTS_COUNT_LINES,
+    NODE_FACTS_COUNT_LINES_MADE,
+    NODE_FACTS_COUNT_DIFFERENCES,
+    NODE_FACTS_COUNT_DECOY_DIFFERENCES,
+    NODE_FACTS_COUNT_LIST_DIFFERENCES,
+    NODE_FACTS_COUNT_FAILURES,
+    NODE_FACTS_COUNT_FIRST_TICKS,
+    NODE_FACTS_COUNT_TICKS,
+    NODE_FACTS_COUNT_AGAIN_TICKS,
+    NODE_FACTS_COUNT_AGAIN_RECORDS,
+    NODE_FACTS_COUNT_APPEND_TICKS,
+    NODE_FACTS_COUNT_ROWS,
+    NODE_FACTS_COUNT_ROW_TICKS,
+    NODE_FACTS_COUNT_DECLARATION_LINES,
+    NODE_FACTS_COUNT_LINE_TICKS,
+    NODE_FACTS_COUNT_LINE_VERSIONS,
+    NODE_FACTS_COUNT_MEMBER_SLOTS,
+    NODE_FACTS_COUNT_PAIR_SLOTS,
+    NODE_FACTS_COUNT_TAKEN_RECORDS,
+    NODE_FACTS_COUNT_TAKEN_LITERALS,
+    NODE_FACTS_COUNT_TAKEN_WANTED,
+    NODE_FACTS_COUNT_TAKEN_MADE,
+    NODE_FACTS_COUNT_FRONT_EXPRESSIONS,
+    NODE_FACTS_COUNT_FRONT_RECORDS,
+    NODE_FACTS_COUNT_FRONT_DIFFERENCES,
+    NODE_FACTS_COUNT_FRONT_SKIPPED,
+    NODE_FACTS_COUNT_FRONT_TICKS,
+    NODE_FACTS_COUNT_FRONT_AGAIN_TICKS,
+    NODE_FACTS_COUNT_FRONT_AGAIN_RECORDS,
+    NODE_FACTS_COUNTS,
+} NodeFactsCount;
+
+// Why the front's records don't give an expression's inputs (node_facts_front_expression): its records are not all the
+// chunk's own (a chunk's end cut it); an operand is out of a byte's reach; a literal the reader doesn't decode again; a
+// call of 255 operands or more.
+#define BUSTER_NODE_FACTS_WHY_GIVEN 0u
+#define BUSTER_NODE_FACTS_WHY_CUT 1u
+#define BUSTER_NODE_FACTS_WHY_REACH 2u
+#define BUSTER_NODE_FACTS_WHY_LITERAL 3u
+#define BUSTER_NODE_FACTS_WHY_CALL 4u
+#define BUSTER_NODE_FACTS_WHYS 5u
+
+// What a listed difference of the kernel's at reader time is of: a record over poison, a record over decoys, a window's
+// lists, or a record's inputs as the front's records give them.
+#define BUSTER_NODE_FACTS_DIFFERENCE_RECORD 0u
+#define BUSTER_NODE_FACTS_DIFFERENCE_DECOY 1u
+#define BUSTER_NODE_FACTS_DIFFERENCE_LISTS 2u
+#define BUSTER_NODE_FACTS_DIFFERENCE_FRONT 3u
 
 // What T made, at reader time, of the full expressions the front made whole (BUSTER_NODE_FRONT_TYPES;
 // c_check_node_machine_reader.c), in the output's arena: by each expression's root's graph node, for the shadow's
@@ -194,6 +276,23 @@ struct NodeFrontTypes
     uint64_t own_thirds;
     uint64_t own_differences;
     uint64_t own_count_differences;
+    // The fact words' kernel at reader time (BUSTER_NODE_READER_FACTS; c_check_node_machine_facts.c's
+    // node_facts_reader_flush): its counts (NodeFactsCount); the records it is to make and those it left to T, by
+    // operator; and the first differences, each by its record's token, its operator and what differed
+    // (BUSTER_NODE_FACTS_DIFFERENCE_*).
+    uint64_t facts_counts[NODE_FACTS_COUNTS];
+    uint64_t facts_wanted_ops[CHECK_OP_COUNT];
+    uint64_t facts_left_ops[CHECK_OP_COUNT];
+    uint32_t facts_difference_tokens[BUSTER_NODE_FRONT_LISTED];
+    uint8_t facts_difference_ops[BUSTER_NODE_FRONT_LISTED];
+    uint8_t facts_difference_kinds[BUSTER_NODE_FRONT_LISTED];
+    uint32_t facts_listed;
+    // The expressions the front's records don't give, by why (BUSTER_NODE_FACTS_WHY_*), and the first, each by its
+    // root's token and why.
+    uint64_t facts_skipped_whys[BUSTER_NODE_FACTS_WHYS];
+    uint32_t facts_skipped_tokens[BUSTER_NODE_FRONT_LISTED];
+    uint8_t facts_skipped_reasons[BUSTER_NODE_FRONT_LISTED];
+    uint32_t facts_skipped_listed;
     uint32_t own_listed;
 };
 
