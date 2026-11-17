@@ -3,8 +3,8 @@
 // Counter/timing/sort helpers follow the encoder/lexer harness and retain MIT and the upstream notice:
 // Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
 //
-// Original decoder benchmark. Generation and initialization are excluded. Twenty-one alternating passes measure
-// raw-byte decoding, prefix classification, and decoding plus Intel formatting. Each retained batch lasts >= 2 ms.
+// Original decoder benchmark. Generation and initialization are excluded. Twenty-one passes measure raw-byte
+// decoding, prefix classification, and decoding plus Intel formatting or listing. Each retained batch lasts >= 2 ms.
 // The synthetic compiler and vector streams are separate; --file accepts real raw .text bytes with coverage errors.
 
 #include "host_isa.h"
@@ -63,7 +63,7 @@ static int x86_decode_benchmark_compare(const void* left, const void* right)
 }
 
 // The disassembly workloads, phases and state-conditioned measurement loop are original project code.
-static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, X86Decoded* decoded, uint32_t capacity, uint32_t phase, uint32_t variant, uint32_t repeats)
+static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, X86Decoded* decoded, uint32_t capacity, uint32_t phase, uint32_t repeats)
 {
     uint64_t checksum = 0;
     for (uint32_t repeat = 0; repeat < repeats; repeat += 1)
@@ -73,12 +73,12 @@ static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, 
             for (uint32_t at = 0; at < size; at += 64)
             {
                 const uint32_t length = size - at < 64 ? size - at : 64;
-                checksum += variant == 1 || variant == 2 ? x86_decode_classify(source + at, length) : x86_decode_classify_scalar(source + at, length);
+                checksum += x86_decode_classify(source + at, length);
             }
         }
         else
         {
-            const X86DecodeResult result = variant == 3 ? x86_disassemble_impl(source, size, decoded, capacity, false, true) : variant == 2 ? x86_disassemble(source, size, decoded, capacity) : variant == 1 ? x86_disassemble_impl(source, size, decoded, capacity, true, true) : x86_disassemble_scalar(source, size, decoded, capacity);
+            const X86DecodeResult result = x86_disassemble(source, size, decoded, capacity);
             // Retain every published record store even in the decode-only phase.
             __asm__ volatile("" : : "r"(decoded) : "memory");
             checksum += result.consumed + result.count + result.status;
@@ -87,7 +87,7 @@ static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, 
                 for (uint64_t i = 0; i < result.count; i += 1)
                 {
                     char text[512];
-                    const int64_t length = phase == 3 ? x86_disassembly_listing(&decoded[i], source, 0, text, sizeof(text), variant == 0) : variant == 0 ? x86_disassembly_format_scalar(&decoded[i], text, sizeof(text)) : x86_disassembly_format(&decoded[i], text, sizeof(text));
+                    const int64_t length = phase == 3 ? x86_disassembly_listing(&decoded[i], source, 0, text, sizeof(text)) : x86_disassembly_format(&decoded[i], text, sizeof(text));
                     // The full rendered text is observable, including bytes beyond the checksum's first byte.
                     __asm__ volatile("" : : "r"(text) : "memory");
                     checksum += (uint64_t)length + (uint8_t)text[0];
@@ -98,15 +98,19 @@ static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, 
     return checksum;
 }
 
-// Keep the core busy with the scalar decoder before each retained sample. Sleeping would measure an idle-state
-// transition instead. The scalar decoder performs no vector prefix classification or candidate comparisons.
-static void x86_decode_benchmark_after_scalar(const uint8_t* source, uint32_t size, X86Decoded* decoded, uint32_t capacity, uint32_t milliseconds)
+// Keep the core busy with scalar work before each retained sample: an FNV-1a hash of the stream, one dependent
+// multiply a byte, which the compiler can't vectorize. Sleeping would measure an idle-state transition instead.
+static void x86_decode_benchmark_after_scalar(const uint8_t* source, uint32_t size, uint32_t milliseconds)
 {
     const uint64_t end = x86_decode_benchmark_time() + (uint64_t)milliseconds * 1000000;
+    uint64_t hash = 0xcbf29ce484222325ull;
     while (x86_decode_benchmark_time() < end)
     {
-        const X86DecodeResult result = x86_disassemble_scalar(source, size, decoded, capacity);
-        x86_decode_benchmark_sink = result.count + result.consumed;
+        for (uint32_t i = 0; i < size; i += 1)
+        {
+            hash = (hash ^ source[i]) * 0x100000001b3ull;
+        }
+        x86_decode_benchmark_sink = hash;
     }
 }
 
@@ -166,7 +170,6 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
     bool vectors = false;
     bool valid = true;
     const char* file = 0;
-    int only = -1;
     int only_phase = -1;
     uint32_t iterations = 0;
     uint32_t after_scalar = 0;
@@ -180,12 +183,6 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
         {
             i += 1;
             file = argv[i];
-        }
-        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            only = strcmp(argv[i], "scalar") == 0 ? 0 : strcmp(argv[i], "avx512") == 0 ? 1 : strcmp(argv[i], "batched") == 0 ? 2 : strcmp(argv[i], "compact") == 0 ? 3 : -1;
-            valid = valid && only >= 0;
         }
         else if (strcmp(argv[i], "--phase") == 0 && i + 1 < argc)
         {
@@ -223,8 +220,7 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
     }
     uint8_t* bytes = malloc(capacity);
     X86Decoded* decoded = malloc((uint64_t)capacity * sizeof(*decoded));
-    X86Decoded* reference = malloc((uint64_t)capacity * sizeof(*reference));
-    valid = valid && bytes != 0 && decoded != 0 && reference != 0;
+    valid = valid && bytes != 0 && decoded != 0;
     const uint64_t initialization_start = x86_decode_benchmark_time();
     valid = valid && (x86_encoder_initialized || x86_encoder_initialize());
     const uint64_t normal_initialized = x86_decode_benchmark_time();
@@ -250,13 +246,16 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
     X86DecodeResult result = {0};
     if (valid)
     {
+        // The whole input decodes. A synthetic stream decodes to its own instructions: as many records as the
+        // generator wrote, each re-encoding to its own bytes.
         result = x86_disassemble(bytes, size, decoded, capacity);
-        const X86DecodeResult scalar = x86_disassemble_scalar(bytes, size, reference, capacity);
-        valid = result.status == X86_DECODE_OK && scalar.status == X86_DECODE_OK && result.count == scalar.count && memcmp(decoded, reference, result.count * sizeof(*decoded)) == 0;
-        const X86DecodeResult basic = x86_disassemble_impl(bytes, size, reference, capacity, true, true);
-        valid = valid && basic.status == X86_DECODE_OK && result.count == basic.count && memcmp(decoded, reference, result.count * sizeof(*decoded)) == 0;
-        const X86DecodeResult compact = x86_disassemble_impl(bytes, size, reference, capacity, false, true);
-        valid = valid && compact.status == X86_DECODE_OK && result.count == compact.count && memcmp(decoded, reference, result.count * sizeof(*decoded)) == 0;
+        valid = result.status == X86_DECODE_OK && result.consumed == size && (file != 0 || result.count == BUSTER_X86_DECODE_BENCH_COUNT);
+        for (uint64_t i = 0; valid && file == 0 && i < result.count; i += 1)
+        {
+            uint8_t encoded[32];
+            const uint32_t length = encode_one(&decoded[i].instruction, encoded, X86_ENCODER_MODE_64);
+            valid = length == decoded[i].length && memcmp(encoded, bytes + decoded[i].offset, length) == 0;
+        }
         if (!valid)
         {
             fprintf(stderr, "benchmark decoder coverage/error at %llu/%u bytes, status=%u, decoded=%llu\n", (unsigned long long)result.consumed, size, result.status, (unsigned long long)result.count);
@@ -274,63 +273,42 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
                (unsigned long long)table_bytes, x86_decode_entry_count, x86_decode_index_count);
         for (uint32_t phase = only_phase < 0 ? 0 : (uint32_t)only_phase; phase < (only_phase < 0 ? 4 : (uint32_t)only_phase + 1); phase += 1)
         {
-            double samples[4][3][BUSTER_X86_DECODE_BENCH_PASSES];
+            double samples[3][BUSTER_X86_DECODE_BENCH_PASSES];
             uint32_t repeats = iterations != 0 ? iterations : 1;
             uint64_t duration = 0;
             do
             {
-                duration = UINT64_MAX;
-                for (uint32_t variant = 0; variant < 4; variant += 1)
-                {
-                    if (only < 0 || only == (int)variant)
-                    {
-                        const uint64_t start = x86_decode_benchmark_time();
-                        x86_decode_benchmark_sink = x86_decode_benchmark_pass(bytes, size, decoded, capacity, phase, variant, repeats);
-                        const uint64_t elapsed = x86_decode_benchmark_time() - start;
-                        duration = elapsed < duration ? elapsed : duration;
-                    }
-                }
+                const uint64_t start = x86_decode_benchmark_time();
+                x86_decode_benchmark_sink = x86_decode_benchmark_pass(bytes, size, decoded, capacity, phase, repeats);
+                duration = x86_decode_benchmark_time() - start;
                 repeats = duration < 2000000 && iterations == 0 ? repeats * 2 : repeats;
             } while (duration < 2000000 && repeats < (1u << 24) && iterations == 0);
             for (uint32_t pass = 0; pass < BUSTER_X86_DECODE_BENCH_PASSES; pass += 1)
             {
-                for (uint32_t order = 0; order < 4; order += 1)
+                if (after_scalar != 0)
                 {
-                    const uint32_t variant = (pass + order) % 4;
-                    if (only < 0 || only == (int)variant)
-                    {
-                        if (after_scalar != 0)
-                        {
-                            x86_decode_benchmark_after_scalar(bytes, size, decoded, capacity, after_scalar);
-                        }
-                        const uint64_t c0 = x86_decode_benchmark_read(cycles);
-                        const uint64_t i0 = x86_decode_benchmark_read(instructions);
-                        const uint64_t t0 = x86_decode_benchmark_time();
-                        x86_decode_benchmark_sink = x86_decode_benchmark_pass(bytes, size, decoded, capacity, phase, variant, repeats);
-                        const uint64_t elapsed = x86_decode_benchmark_time() - t0;
-                        const uint64_t c1 = x86_decode_benchmark_read(cycles);
-                        const uint64_t i1 = x86_decode_benchmark_read(instructions);
-                        const double items = (double)repeats * (phase == 1 ? size : result.count);
-                        samples[variant][0][pass] = elapsed / items;
-                        samples[variant][1][pass] = (c1 - c0) / items;
-                        samples[variant][2][pass] = (i1 - i0) / items;
-                    }
+                    x86_decode_benchmark_after_scalar(bytes, size, after_scalar);
                 }
+                const uint64_t c0 = x86_decode_benchmark_read(cycles);
+                const uint64_t i0 = x86_decode_benchmark_read(instructions);
+                const uint64_t t0 = x86_decode_benchmark_time();
+                x86_decode_benchmark_sink = x86_decode_benchmark_pass(bytes, size, decoded, capacity, phase, repeats);
+                const uint64_t elapsed = x86_decode_benchmark_time() - t0;
+                const uint64_t c1 = x86_decode_benchmark_read(cycles);
+                const uint64_t i1 = x86_decode_benchmark_read(instructions);
+                const double items = (double)repeats * (phase == 1 ? size : result.count);
+                samples[0][pass] = elapsed / items;
+                samples[1][pass] = (c1 - c0) / items;
+                samples[2][pass] = (i1 - i0) / items;
             }
-            for (uint32_t variant = 0; variant < 4; variant += 1)
+            for (uint32_t metric = 0; metric < 3; metric += 1)
             {
-                if (only < 0 || only == (int)variant)
-                {
-                    for (uint32_t metric = 0; metric < 3; metric += 1)
-                    {
-                        qsort(samples[variant][metric], BUSTER_X86_DECODE_BENCH_PASSES, sizeof(double), x86_decode_benchmark_compare);
-                    }
-                    const double ns = samples[variant][0][10];
-                    const double cy = samples[variant][1][10];
-                    const double ins = samples[variant][2][10];
-                    printf("%-13s %-7s ns/%s=%.3f [%.3f,%.3f] cycles=%.3f instructions=%.3f IPC=%.3f\n", phase == 0 ? "decode" : phase == 1 ? "classify" : phase == 2 ? "decode+format" : "decode+listing", variant == 3 ? "compact" : variant == 2 ? "batched" : variant == 1 ? "avx512" : "scalar", phase == 1 ? "byte" : "insn", ns, samples[variant][0][0], samples[variant][0][20], cy, ins, cy != 0 ? ins / cy : 0);
-                }
+                qsort(samples[metric], BUSTER_X86_DECODE_BENCH_PASSES, sizeof(double), x86_decode_benchmark_compare);
             }
+            const double ns = samples[0][10];
+            const double cy = samples[1][10];
+            const double ins = samples[2][10];
+            printf("%-15s ns/%s=%.3f [%.3f,%.3f] cycles=%.3f instructions=%.3f IPC=%.3f\n", phase == 0 ? "decode" : phase == 1 ? "classify" : phase == 2 ? "decode+format" : "decode+listing", phase == 1 ? "byte" : "insn", ns, samples[0][0], samples[0][20], cy, ins, cy != 0 ? ins / cy : 0);
         }
         if (cycles >= 0)
         {
@@ -341,7 +319,6 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
             close(instructions);
         }
     }
-    free(reference);
     free(decoded);
     free(bytes);
     return valid ? 0 : 1;
