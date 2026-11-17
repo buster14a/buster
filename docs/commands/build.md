@@ -1278,7 +1278,7 @@ go first, together, in a section of their own before `.text`
 (`.text.buster_start`), and the C library's ones right after it, first in
 `.text`. They are what every compile measured runs, exactly (#2873): the
 four small commands' functions, then those of musl's units and of
-`sqlite3.c`'s `-c`, 1,440 functions of the executable's 13,666, 4.2 MB of
+`sqlite3.c`'s `-c`, 1,441 functions of the executable's 13,689, 4.2 MB of
 code. The checker's own code stays in its section, `.text.buster_checker`
 (one section of each unit, which starts on a page, `main.c`'s pragmas, #502),
 which held 18 of the empty file's windows and 60 of `hello.c`'s; the script

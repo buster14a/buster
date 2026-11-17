@@ -598,10 +598,12 @@ static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t l
 // into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
 // MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
 // arenas, says why it fails). A path whose first `directory_length` bytes are a directory the search looks in, followed
-// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent):
-// a path the listing rules out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
+// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent),
+// or by what the directory answered about the path's first component (file_cache_component_absent): a path either rules
+// out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
 // `*known` (if `known` isn't null) caches the directory's FileCacheDirectory for its caller: a search directory's.
-// Until some directory has a listing, only a failed probe looks its directory up. One lane at a time.
+// Until some directory has a listing or lacks a component it was asked for, only a failed probe looks its directory up.
+// One lane at a time.
 static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, uint32_t directory_length, FileCacheDirectory** known,
                                        FileCacheCounts* counts, int* error)
 {
@@ -612,16 +614,17 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
     {
         const bool in_directory = file_cache_in_directory(path, length, directory_length);
         FileCacheDirectory* directory = known != 0 ? *known : 0;
-        directory = directory == 0 && in_directory && cache->listed_directories != 0 ? file_cache_directory(cache, path, directory_length) : directory;
+        const bool answers = cache->listed_directories != 0 || cache->absent_components != 0;
+        directory = directory == 0 && in_directory && answers ? file_cache_directory(cache, path, directory_length) : directory;
         FileProbe probe = { .record = BUSTER_PP_NONE, .error = ENOENT };
-        const bool absent = directory != 0 && file_cache_listed_absent(directory, path, length);
+        const bool absent = directory != 0 && (file_cache_listed_absent(directory, path, length) || file_cache_component_absent(directory, path, length));
         counts->listed += absent;
         if (!absent)
         {
             Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
             file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
             directory = directory == 0 && in_directory && probe.error == ENOENT ? file_cache_directory(cache, path, directory_length) : directory;
-            file_cache_count_miss(cache, directory, &probe, counts);
+            file_cache_count_miss(cache, directory, path, length, &probe, counts);
         }
         if (known != 0 && directory != 0)
         {

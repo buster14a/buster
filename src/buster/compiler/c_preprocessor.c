@@ -685,8 +685,9 @@ struct PPFile
 // file is there), fstat attempts (one per successful open, even for a non-regular file or a failed fstat), and files
 // mapped/read (the latter counts file-read operations, not individual pread attempts). Each unit/lane owns its counts.
 // `listings` counts directories whose names were read (file_cache_list_directory: an open, an fstatfs, getdents64 to the
-// end and a close, or fewer system calls if one of them fails), and `listed` the paths a listing answered without a
-// system call.
+// end and a close, or fewer system calls if one of them fails), `asks` the directories asked for a path's first
+// component (file_cache_miss_component: a stat), and `listed` the paths a listing or such an answer ruled out without
+// a system call.
 typedef struct FileCacheCounts FileCacheCounts;
 struct FileCacheCounts
 {
@@ -696,6 +697,7 @@ struct FileCacheCounts
     uint64_t reads;
     uint64_t listings;
     uint64_t listed;
+    uint64_t asks;
 };
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
@@ -741,6 +743,13 @@ struct FileCachePath
     FileProbe probe;
 };
 
+// The first components a directory counts the failed probes under (FileCacheDirectory.component_names, #2873): this
+// many, each a name of at most this many bytes. One past either is not counted, and its paths are probed as before.
+#define BUSTER_FILE_CACHE_COMPONENTS 16u
+#define BUSTER_FILE_CACHE_COMPONENT_NAME 15u
+_Static_assert(BUSTER_FILE_CACHE_COMPONENTS == 16 && BUSTER_FILE_CACHE_COMPONENT_NAME == 15,
+               "a component's key is 16 bytes, and file_cache_find_component compares it with 16 slots, four a vector");
+
 // A directory the include search looked up paths in (a search directory, or an includer's), which the cache counts the
 // failed probes of: the paths in it that had no file (ENOENT). When the count reaches BUSTER_FILE_CACHE_LISTING_MISSES,
 // the cache reads the directory's names once (file_cache_list_directory). The listing then answers a path in the
@@ -759,6 +768,16 @@ struct FileCacheDirectory
     uint32_t name_mask;
     bool deferred;
     bool unlisted;
+    // The first components of the paths that had no file here (file_cache_miss_component), `component_count` of them,
+    // each in a slot of 16 bytes: its name's bytes and zeros after them (a key, file_cache_component_key), so that one
+    // compare finds a component among four slots a vector. A slot not taken is all zeros. Its paths' failed probes, at
+    // most 255 counted: at the cache's asking_misses-th the directory was asked for it, once. And a bit of
+    // `component_absent` for each one the directory then lacked, under which no file can be: until it lacks one, a
+    // lookup here reads none of them.
+    uint8_t component_names[BUSTER_FILE_CACHE_COMPONENTS][BUSTER_FILE_CACHE_COMPONENT_NAME + 1];
+    uint8_t component_misses[BUSTER_FILE_CACHE_COMPONENTS];
+    uint32_t component_count;
+    uint32_t component_absent;
     FileCacheDirectory* next;
 };
 
@@ -814,6 +833,11 @@ struct FileCache
     uint32_t listing_misses;
     // The directories with a listing: until there is one, a lookup that finds a file looks no directory up.
     uint32_t listed_directories;
+    // A directory is asked for a path's first component at the component's `asking_misses`-th failed probe there
+    // (BUSTER_FILE_CACHE_ASKING_MISSES; 0 for never, which the tests compare with: a component's first miss is its
+    // count's 1), and the components their directories lack, which answer as a listing does.
+    uint32_t asking_misses;
+    uint32_t absent_components;
     // The four arrays' arena of tables, file_cache_initialize's (#1521), or empty where they are tables of a unit's
     // (pp_initialize_once).
     Arena arrays;
@@ -3875,6 +3899,15 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 // with first looks at 32 misses or none, and 64 us at 16; deflate.c's 159, 154 and 158 us, and sqlite3.c's 582, 576
 // and 601 us. Listing every directory whole at 16 made the first 77 us and sqlite3.c's 540 (file_cache_list_directory).
 #define BUSTER_FILE_CACHE_LISTING_MISSES 32u
+// The failed probes under one first component of a directory after which the directory is asked for the component
+// itself (file_cache_miss_component). An ask pays where the component is absent and fails again; it is lost on one
+// that fails no more, and on one the directory has. From the 9700X's traces (#2873): a unit with only <stdio.h> has two
+// absent components that fail 17 times and two that fail twice, and sqlite3.c's fail up to 86 times; musl's 1,336
+// units, with seven -I directories, have 2,826 absent components that fail twice or more, 259 of them a third time,
+// and 1,332 present ones that fail twice or more. By the calls' costs (file_cache_miss_component), asking at the
+// second miss loses musl's units 2,900 cycles each, at the third 600 and at the fourth 160, where the unit with
+// <stdio.h> gains 34,000, 33,400 and 30,900 and sqlite3.c 170,000, 162,900 and 155,000.
+#define BUSTER_FILE_CACHE_ASKING_MISSES 3u
 #define BUSTER_FILE_CACHE_SMALL_LISTING 1024u
 #define BUSTER_FILE_CACHE_LARGE_LISTING 8u
 #define BUSTER_FILE_CACHE_RECORD_MAX 280u
@@ -3914,6 +3947,7 @@ static bool file_cache_start(FileCache* cache, InternTable* table, PPPrepare pre
     cache->table = table;
     cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
     cache->listing_misses = BUSTER_FILE_CACHE_LISTING_MISSES;
+    cache->asking_misses = BUSTER_FILE_CACHE_ASKING_MISSES;
     cache->capacity_shift = shift;
     const bool reserved = arrays[0] != 0 && arrays[1] != 0 && arrays[2] != 0 && arrays[3] != 0;
     cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
@@ -4512,11 +4546,125 @@ static bool file_cache_listed_absent(const FileCacheDirectory* directory, const 
     return result;
 }
 
-// After a probe of a path in `directory` (null for none): a path without a file there (ENOENT, which also says the
-// directory could be searched) counts towards the directory's listing, which the cache reads at the
+// The key of `path`'s first component after `directory`'s own bytes and a '/', where more of the path follows it: the
+// component's bytes and zeros after them, sixteen in all, as a slot holds it; and its length in `*component`. Or 0
+// there, and no key: the path is a name in the directory itself (which fails once, and is most of the misses), or the
+// component is empty, "." or "..", which every directory has, or longer than a slot holds
+// (BUSTER_FILE_CACHE_COMPONENT_NAME). The sixteen bytes after the '/' are looked at in one masked load, which reads no
+// byte past the path's end, and the first '/' among them ends the component: no loop over its bytes, and no branch on
+// one.
+static __m128i file_cache_component_key(const FileCacheDirectory* directory, const char* path, uint32_t length, uint32_t* component)
+{
+    const uint32_t first = directory->length + 1;
+    const uint32_t rest = length - first;
+    const __mmask16 looked = (__mmask16)_bzhi_u32(0xffffu, rest < 16 ? rest : 16);
+    const __m128i bytes = _mm_maskz_loadu_epi8(looked, path + first);
+    const uint32_t slashes = _mm_cmpeq_epi8_mask(bytes, _mm_set1_epi8('/'));
+    const uint32_t dotted = _mm_cmpeq_epi8_mask(bytes, _mm_set1_epi8('.'));
+    // The component's length, or 16 where no '/' is among the bytes; and the mask of its bytes.
+    const uint32_t count = _tzcnt_u32(slashes | 0x10000u);
+    const uint32_t name = _bzhi_u32(0xffffu, count);
+    // One or two bytes, each a dot; an empty component has no byte that isn't one.
+    const bool dots = count <= 2 && (dotted & name) == name;
+    const bool counted = count <= BUSTER_FILE_CACHE_COMPONENT_NAME && !dots;
+    *component = counted ? count : 0;
+    return _mm_maskz_mov_epi8((__mmask16)name, bytes);
+}
+
+// The slot of `directory`'s that counts the component with key `key`, or BUSTER_FILE_CACHE_COMPONENTS for none: the key
+// is compared with every slot at once, four a vector, by a slot's two halves. No key is all zeros, as a slot not taken
+// is: a component has a byte. Its bytes are compared in their case: what the directory was asked is that spelling.
+static uint32_t file_cache_find_component(const FileCacheDirectory* directory, __m128i key)
+{
+    const __m512i keys = _mm512_broadcast_i32x4(key);
+    uint32_t found = 0;
+    for (uint32_t v = 0; v < BUSTER_FILE_CACHE_COMPONENTS / 4; v += 1)
+    {
+        const uint32_t halves = _mm512_cmpeq_epi64_mask(keys, _mm512_loadu_si512(directory->component_names[4 * v]));
+        found |= (halves & (halves >> 1) & 0x55u) << (8 * v);
+    }
+    // A slot's bit is at twice its number; no bit counts 32 zeros.
+    return _tzcnt_u32(found) / 2;
+}
+
+// Whether `directory` was asked for `path`'s first component and has none (file_cache_miss_component): no file can be
+// at the path, and a lookup gets ENOENT without a probe, as from a listing. Lanes may read at once while no lane adds.
+static bool file_cache_component_absent(const FileCacheDirectory* directory, const char* path, uint32_t length)
+{
+    bool result = false;
+    if (directory->component_absent != 0)
+    {
+        uint32_t component = 0;
+        const __m128i key = file_cache_component_key(directory, path, length, &component);
+        const uint32_t slot = component != 0 ? file_cache_find_component(directory, key) : BUSTER_FILE_CACHE_COMPONENTS;
+        result = ((directory->component_absent >> slot) & 1) != 0;
+    }
+    return result;
+}
+
+// After a probe of `path` in `directory` found no file there (ENOENT): its first component, where more of the path
+// follows, is counted in a slot of the directory's, and at the component's cache->asking_misses-th miss the directory
+// is asked for it, once: a stat of the component's own path, which is the path's bytes up to the component's end.
+// ENOENT says the directory has none by that name, and every later path under it is answered without a probe
+// (file_cache_component_absent). Any other answer (it is there; an error) leaves its paths to be probed as before. The
+// ask is the lookup every path under the component begins with, a link followed as theirs is, so it is right on every
+// file system, those a listing can't answer for among them (file_cache_exact_names). A directory with a listing is
+// asked nothing: its listing answers. A component that finds every slot taken is not counted.
+//
+// glibc's headers include one another as <bits/...>, <sys/...>, <gnu/...>, <linux/...> and <asm/...>, and each such
+// include is probed in every search directory before the one that has it: clang's resource directory and
+// /usr/local/include have no `bits`. Those are 40 of the 52 failed opens of a unit with only <stdio.h> and 167 of
+// sqlite3.c's 207 (#2873). A listing comes too late for a small unit (BUSTER_FILE_CACHE_LISTING_MISSES) and not at all
+// in a large directory that fails fewer than BUSTER_FILE_CACHE_LARGE_LISTING times as often. On the 9700X, on a warm
+// dentry cache, a failed open costs 1,270 cycles and a stat 990 of an absent path and 1,100 of one that is there, where
+// an open and a close cost 2,400. Every failed probe comes here, in units that never ask too, so a miss is counted
+// without a loop: its key by one masked load and its slot by one compare of every slot (as loops over the name's bytes
+// and the slots, the counting gave a musl unit 200 to 400 more mispredicted branches). The slots are the directory's own
+// bytes, and an ask keeps its path among the cache's. One lane at a time.
+static void file_cache_miss_component(FileCache* cache, FileCacheDirectory* directory, const char* path, uint32_t length, FileCacheCounts* counts)
+{
+    uint32_t component = 0;
+    __m128i key = _mm_setzero_si128();
+    if (directory->names == 0)
+    {
+        key = file_cache_component_key(directory, path, length, &component);
+    }
+    uint32_t slot = component != 0 ? file_cache_find_component(directory, key) : BUSTER_FILE_CACHE_COMPONENTS;
+    if (component != 0 && slot == BUSTER_FILE_CACHE_COMPONENTS && directory->component_count < BUSTER_FILE_CACHE_COMPONENTS)
+    {
+        slot = directory->component_count;
+        _mm_storeu_si128((__m128i*)(void*)directory->component_names[slot], key);
+        directory->component_count += 1;
+    }
+    if (slot < BUSTER_FILE_CACHE_COMPONENTS)
+    {
+        directory->component_misses[slot] += directory->component_misses[slot] < UINT8_MAX;
+        if (directory->component_misses[slot] == cache->asking_misses)
+        {
+            // The component's own path, among the cache's: a frame here would be a page of every miss's stack.
+            const uint32_t end = directory->length + 1 + component;
+            char* asked = arena_push(&cache->path_arena, (uint64_t)end + 1, 1);
+            if (asked != 0)
+            {
+                memcpy(asked, path, end);
+                asked[end] = 0;
+                struct stat status;
+                const int error = stat(asked, &status) == 0 ? 0 : errno;
+                const uint32_t absent = error == ENOENT;
+                counts->asks += 1;
+                directory->component_absent |= absent << slot;
+                cache->absent_components += absent;
+            }
+        }
+    }
+}
+
+// After a probe of `path` (`length` bytes) in `directory` (null for none): a path without a file there (ENOENT, which
+// also says the directory could be searched) counts towards the directory's listing, which the cache reads at the
 // cache->listing_misses-th, or BUSTER_FILE_CACHE_LARGE_LISTING times that for a directory its first look found large
-// (file_cache_list_directory). One lane at a time.
-static void file_cache_count_miss(FileCache* cache, FileCacheDirectory* directory, const FileProbe* probe, FileCacheCounts* counts)
+// (file_cache_list_directory); and towards its first component's ask (file_cache_miss_component). One lane at a time.
+static void file_cache_count_miss(FileCache* cache, FileCacheDirectory* directory, const char* path, uint32_t length, const FileProbe* probe,
+                                  FileCacheCounts* counts)
 {
     if (directory != 0 && probe->error == ENOENT)
     {
@@ -4526,6 +4674,7 @@ static void file_cache_count_miss(FileCache* cache, FileCacheDirectory* director
         {
             file_cache_list_directory(cache, directory, counts);
         }
+        file_cache_miss_component(cache, directory, path, length, counts);
     }
 }
 

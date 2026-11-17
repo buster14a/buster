@@ -218,8 +218,9 @@ struct FilesPath
     // The length of the directory the search looks in (file_cache_lookup_path's `directory_length`), or BUSTER_PP_NONE.
     uint32_t directory_length;
     uint64_t hash;
-    // A path its directory's listing rules out (file_cache_listed_absent): not probed, but added to the cache with the
-    // entry a failed probe gives it, as a unit's lookup adds it (file_cache_lookup_path).
+    // A path its directory's listing rules out (file_cache_listed_absent), or its directory's answer about its first
+    // component (file_cache_component_absent): not probed, but added to the cache with the entry a failed probe gives
+    // it, as a unit's lookup adds it (file_cache_lookup_path).
     bool listed;
 };
 
@@ -1209,8 +1210,9 @@ static PPCandidate files_candidate(const FilesRun* run, const FilesSearch* searc
 }
 
 // This lane's range of the round's searches goes through its candidates in order: a path the cache knows answers at
-// once (a file there ends the search; none, the next candidate), and so does a path its directory's listing rules out
-// (file_cache_listed_absent: none there), until the last candidate or a path the cache never looked up, which the lane
+// once (a file there ends the search; none, the next candidate), and so does a path its directory's listing or its
+// answer about the path's first component rules out (file_cache_listed_absent, file_cache_component_absent: none
+// there), until the last candidate or a path the cache never looked up, which the lane
 // lists for this wave's probes (its bytes in the lane's names). A place the preprocessor's search can't look in (a path
 // too long for one, or one that couldn't be opened for another reason than there being no file there) ends the search
 // too, as it ends the preprocessor's with a fatal error (pp_find_include).
@@ -1234,11 +1236,11 @@ static void files_advance(FilesRun* run, FilesLane* mine)
             const PPCandidate candidate = files_candidate(run, search, search->candidate, path, &path_length, &directory, &directory_length);
             const uint64_t hash = candidate == PP_CANDIDATE_PATH ? intern_hash_bytes((const uint8_t*)path, path_length) : 0;
             const FileCachePath* entry = candidate == PP_CANDIDATE_PATH ? file_cache_find_path(cache, path, path_length, hash) : 0;
-            const bool listed = candidate == PP_CANDIDATE_PATH && entry == 0 && cache->listed_directories != 0 &&
+            const bool listed = candidate == PP_CANDIDATE_PATH && entry == 0 && (cache->listed_directories != 0 || cache->absent_components != 0) &&
                                 file_cache_in_directory(path, path_length, directory_length);
             const FileCacheDirectory* place =
                 listed ? file_cache_find_directory(cache, path, directory_length, intern_hash_bytes((const uint8_t*)path, directory_length)) : 0;
-            const bool absent = place != 0 && file_cache_listed_absent(place, path, path_length);
+            const bool absent = place != 0 && (file_cache_listed_absent(place, path, path_length) || file_cache_component_absent(place, path, path_length));
             mine->counts.listed += absent;
             if (candidate == PP_CANDIDATE_END || __atomic_load_n(&run->failed, __ATOMIC_RELAXED))
             {
@@ -1338,9 +1340,9 @@ static void files_collect_probes(FilesRun* run)
 }
 
 // On one lane: the wave's probed paths added to the cache, in order, each with its file's record (file_cache_identify),
-// and those a listing ruled out with ENOENT. A probe that found no file there counts towards its directory's listing
-// (file_cache_count_miss), which the next waves' searches read: added in the probes' order, the listings are those of
-// any lane count.
+// and those a listing or a directory's answer ruled out with ENOENT. A probe that found no file there counts towards
+// its directory's listing and its first component's ask (file_cache_count_miss), which the next waves' searches read:
+// added in the probes' order, the listings and the asks are those of any lane count.
 static void files_add_probes(FilesRun* run, FileCacheCounts* counts)
 {
     FileCache* cache = run->cache;
@@ -1349,7 +1351,7 @@ static void files_add_probes(FilesRun* run, FileCacheCounts* counts)
         const FilesPath* path = &run->probes[p];
         const bool missed = !path->listed && run->found[p].error == ENOENT && file_cache_in_directory(path->path, path->length, path->directory_length);
         FileCacheDirectory* directory = missed ? file_cache_directory(cache, path->path, path->directory_length) : 0;
-        file_cache_count_miss(cache, directory, &run->found[p], counts);
+        file_cache_count_miss(cache, directory, path->path, path->length, &run->found[p], counts);
         FileCachePath* entry = file_cache_add_path(cache, path->path, path->length, path->hash, &run->found[p]);
         if (entry != 0)
         {
