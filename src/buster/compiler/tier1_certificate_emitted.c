@@ -228,6 +228,9 @@ struct Tier1CertEmittedStep
     bool vector;
     // A COPY into a stack slot (a SPLIT location's, or a STACK one's eightbyte), which the call reads there.
     bool slot;
+    // A STORE's room: the bytes of the call's result object from `to` on, by the IR's size of it, inside which its records
+    // must write (#2798, tier1_cert_emitted_inside).
+    uint32_t room;
 };
 
 typedef struct Tier1CertEmittedBuild Tier1CertEmittedBuild;
@@ -814,12 +817,35 @@ static uint32_t tier1_cert_emitted_store_part(uint8_t reg, uint32_t bytes, uint8
 }
 
 // A call's aggregate result's object (#789): its into operand's frame object, at `*displacement` from the frame base
-// register.
-static bool tier1_cert_emitted_into(const Tier1CertEmittedBuild* build, uint32_t node, int32_t* displacement)
+// register, of `*bytes` (the IR's slot's size).
+static bool tier1_cert_emitted_into(const Tier1CertEmittedBuild* build, uint32_t node, int32_t* displacement, uint64_t* bytes)
 {
     const IrFunction* function = build->plan->function;
     const uint32_t into = function->c[node];
-    return into < function->instruction_count && function->op[into] == IR_STACK_ADDR && tier1_emit_cfg_object(function, build->emitted, function->a[into], displacement);
+    const bool found = into < function->instruction_count && function->op[into] == IR_STACK_ADDR && function->a[into] < function->slot_count &&
+                       tier1_emit_cfg_object(function, build->emitted, function->a[into], displacement);
+    *bytes = found ? function->slots[function->a[into]].size : 0;
+    return found;
+}
+
+// Whether records [0, count) write memory only through `base`, inside [to, to + room) (#2798): a call's result part's
+// stores stay in its result object, by the IR's size of it, whatever sequence the selection gives the part (a record's
+// payload in a register wider than it, whose whole store would run past the object).
+static bool tier1_cert_emitted_inside(const X86Instruction* records, uint32_t count, uint8_t base, int32_t to, uint32_t room)
+{
+    bool inside = true;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        uint64_t read = 0;
+        uint64_t written = 0;
+        x86_instruction_effects_scalar(&records[k], &read, &written);
+        const X86FormDescription* description = x86_form_description(records[k].form & (BUSTER_X86_FORM_FIXUP - 1));
+        const int64_t at = records[k].displacement;
+        const int64_t end = at + (description->operand_bytes != 0 ? description->operand_bytes : BUSTER_CERT_MAX_WIDTH);
+        const bool store = (written & BUSTER_X86_RESOURCE_MEMORY) != 0;
+        inside = inside && (!store || (records[k].mode == BUSTER_X86_MEMORY_BASE && records[k].rm == base && at >= to && end <= (int64_t)to + room));
+    }
+    return inside;
 }
 
 // The width of a value of a vector register's part of `bytes`: the part's form's (tier1_select_part_form: movsd's 8 for
@@ -933,7 +959,8 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
     const bool hidden = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY;
     const bool returned = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_REGISTERS;
     int32_t into = 0;
-    valid = valid && ((!hidden && !returned) || tier1_cert_emitted_into(build, node, &into));
+    uint64_t into_bytes = 0;
+    valid = valid && ((!hidden && !returned) || tier1_cert_emitted_into(build, node, &into, &into_bytes));
     if (valid && hidden)
     {
         valid = n < BUSTER_CERT_EMITTED_STEPS;
@@ -958,6 +985,7 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
         steps[valid ? n : 0] = (Tier1CertEmittedStep){
             .pseudo = pseudo,
             .to = into + results[k].offset,
+            .room = into_bytes > results[k].offset ? (uint32_t)(into_bytes - results[k].offset < UINT32_MAX ? into_bytes - results[k].offset : UINT32_MAX) : 0,
             .kind = TIER1_CERT_STEP_STORE,
             .reg = (uint8_t)(results[k].reg & 0x1f),
             .bytes = results[k].bytes,
@@ -1199,7 +1227,7 @@ static bool tier1_cert_emitted_step(Tier1CertEmittedBuild* build, uint32_t node,
             expected_count = parts;
         }
         const uint32_t location = step->vector ? tier1_cert_emitted_vector(build, step->reg, step->width) : tier1_cert_emitted_gpr(step->reg, 8);
-        valid = valid && tier1_cert_emitted_add_use(&kernel, step->pseudo, location);
+        valid = valid && tier1_cert_emitted_inside(expected, expected_count, base, step->to, step->room) && tier1_cert_emitted_add_use(&kernel, step->pseudo, location);
     }
     // An ORIGINAL of the expected records: its uses read, what they write killed; then the value it defines.
     for (uint32_t k = 0; valid && k < expected_count; k += 1)

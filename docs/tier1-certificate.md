@@ -646,7 +646,11 @@ The decoding:
   pointer, are regenerated as the emitter writes them and compared. A record's
   payload no register is as wide as (#2798) is a value of its register's
   width; its loads and stores in pieces (`tier0_payload_load`,
-  `tier0_payload_store`) are one instruction, the selection's sequence. Each part
+  `tier0_payload_store`) are one instruction, the selection's sequence. A
+  call's result parts' stores must also write inside the call's result object,
+  by the IR's size of it (`tier1_cert_emitted_inside`), whatever sequence the
+  selection gives a part: a payload's register stored whole would run past the
+  record. Each part
   is a value of the certificate, defined where its copy puts it and read where
   it is consumed: a part loaded from the wrong slot, or a copy's address
   overwritten before its last piece, fails.
