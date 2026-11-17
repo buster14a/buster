@@ -9236,6 +9236,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_pointer_cast_driver_test.c"
 #include "c_check_unsequenced_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
+#include "c_check_uninitialized_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
 #include "c_check_call_count_driver_test.c"
 
@@ -9436,6 +9437,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     const char* executable = NULL;
     bool lazy = false;
     bool sign_compare_only = false;
+    // --uninitialized-only: loop initialization diagnostics with an admitted two-lane reader (#1391).
+    bool uninitialized_only = false;
     // --cpu-dispatch-only: the cpu_specific and cpu_dispatch section alone (#1447).
     bool cpu_dispatch_only = false;
     // --target-versions-only: GNU multiversioning's target and target_clones section alone (#1838).
@@ -9482,6 +9485,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--sign-compare-only") == 0)
         {
             sign_compare_only = true;
+        }
+        else if (strcmp(argv[i], "--uninitialized-only") == 0)
+        {
+            uninitialized_only = true;
         }
         else if (strcmp(argv[i], "--cpu-dispatch-only") == 0)
         {
@@ -9577,7 +9584,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
+    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)uninitialized_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only +
@@ -10077,6 +10084,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && sign_compare_only)
     {
         check_test_driver_sign_compare(&test, clang, executable, directory);
+    }
+    if (temporary && uninitialized_only)
+    {
+        check_test_driver_uninitialized(&test, clang, executable, directory, true);
     }
     if (temporary && cpu_dispatch_only)
     {
@@ -10634,6 +10645,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy)
             {
                 check_test_driver_self_assign_macros(&test, clang, executable, directory);
+            }
+            if (!lazy)
+            {
+                check_test_driver_uninitialized(&test, clang, executable, directory, false);
             }
             if (!lazy && check_test_driver_takes())
             {
