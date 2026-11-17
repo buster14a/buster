@@ -9,14 +9,15 @@ requirements. [Command index](README.md).
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
-  (`size_branches`, its scalar twin `size_branches_scalar`, and
-  `branch_sizing_validate`, the checks the two leave to the code generator, as
-  `x86_encode` leaves `x86_validate`'s; `branch_sizing_validate_branches` and
-  its twin are those checks but `x86_validate`, the branch columns alone,
-  which the C driver's emission runs on Tier 0's valid records, keeping
-  `x86_validate` for `--verify`, #532). The scalar path gets its initial
-  offsets from `x86_measure_scalar`; neither sizing path retains machine
-  code. The former encoded-byte scratch column, chunk-size setting and chunk
+  (`size_branches`, and `branch_sizing_validate`, the checks it leaves to the
+  code generator, as `x86_encode` leaves `x86_validate`'s;
+  `branch_sizing_validate_branches` is those checks but `x86_validate`, the
+  branch columns alone, which the C driver's emission runs on Tier 0's valid
+  records, keeping `x86_validate` for `--verify`, #532). Each has one
+  implementation, the vector one: #2924 removed the scalar twins, after
+  [the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17)
+  measured the vector path 6.4 to 20 times as fast in every row. Sizing retains
+  no machine code. The former encoded-byte scratch column, chunk-size setting and chunk
   rebasing are removed. `branch_sizing_generate.c` generates
   functions for its tests and benchmark: shaped like clang's -O0 and -O2 code,
   and chains of branches that take a round each. `branch_sizing_test.c` holds
@@ -30,11 +31,9 @@ requirements. [Command index](README.md).
 `./build/compiler test-branch-sizing [--seed N] [--count N] [--cross-check]
 [--keep]` (about 1.4 s on the 9700X, and 2.5 s with `--cross-check`) checks
 `branch_sizing.c`. Every function it sizes must be one `branch_sizing_validate`
-accepts, as the code generator's are, and so must both paths of the branch
-columns' check (`branch_sizing_validate_branches` and its twin), and both
-sizing paths must give identical
-results: the records, the offsets, the length, the rounds, the long branches
-and the worklist's evaluations. Each result must also be the test's reference's
+accepts, as the code generator's are, and so must the branch columns' check
+(`branch_sizing_validate_branches`). With one implementation (#2924), the
+oracles aren't a second path. Each result must be the test's reference's
 (relaxation over the records, as an assembler does it, with each record's
 length from `x86_encode_scalar`), pass `x86_validate`, have
 `x86_encode_scalar`'s offsets and length, aim every branch at its label's
@@ -43,17 +42,16 @@ record, and be long exactly where a rel8 can't reach:
 - forms: every form number as a branch's record, with and without a segment
   override or the fixup flag: `branch_sizing_validate` accepts `JMP_REL8` and
   the 16 `Jcc_REL8` (found from the form table's opcodes), which grow by 3 and
-  4 to the rel32 forms after them, and refuses every other, and so do both
-  paths of the columns' check (the vector path's bitmap of the forms against
-  the scalar path's list);
+  4 to the rel32 forms after them, and refuses every other, and so does the
+  columns' check (its bitmap of the forms against the form table);
 - errors, `branch_sizing_validate`'s: a branch's index equal to the one
   before, below it, at the count and past it, a target past the count, a form
   that isn't a branch's, a branch's form with FS, GS or the fixup flag, at
   every place among 40 branches (the first error is the one reported), more
-  branches than records, more records than `x86_encode` takes (which both
-  paths refuse too), and a record `x86_validate` rejects, after a branch's
-  error; both paths of the columns' check must give each but the last, which
-  they take;
+  branches than records, more records than `x86_encode` takes (which
+  `size_branches` refuses too), and a record `x86_validate` rejects, after a
+  branch's error; the columns' check must give each but the last, which it
+  takes;
 - boundaries: a probe branch, forward and backward, jmp and jcc, at every
   displacement from 100 to 135 and from −140 to −105 with every branch short,
   over 0 to 3 branches that grow or don't: it must end long exactly when its
@@ -62,19 +60,23 @@ record, and be long exactly where a rel8 can't reach:
   a branch every 1 to 12, at uniform and compiler-like distances, with
   `branch_sizing_generate.c`'s filler or random instructions of every form;
   also with the worklist from rounds 1, 2 and 3 and with no round limit,
-  which must give the same records and offsets;
+  which must give the same records and offsets; with the default seed and
+  count, the rounds' histogram and the worklist's evaluations (85,984) are
+  frozen, from main's run before #2924 that the scalar twin matched;
 - columns: 4,000 random functions of up to 1,200 records broken 0 to 3 times
   at random (an index, a target, a branch's form, or a record `x86_validate`
-  rejects): both paths of the columns' check must give
-  `branch_sizing_validate`'s first error, or take the function where only
-  `x86_validate` refuses it;
+  rejects): the columns' check and `branch_sizing_validate` must give the
+  first error by the contract's rules as the test states them, with the
+  branches' forms from the form table (`branch_sizing_test_first_error`), or
+  the columns' check take the function where only `x86_validate` refuses it;
 - chains (`branch_sizing_chain`) of 1 to 1,000 links, forward and backward,
   which take a round per link: up to `BUSTER_BRANCH_SIZING_ROUNDS`, then the
-  worklist;
+  worklist, which evaluates each link left once (each growth puts only the
+  next link out of range);
 - page edges: the records, the branch columns and the offsets each ending at a
   `PROT_NONE` page, for every count up to 70 records at every branch density
-  and every branch count up to 40, checked by both paths of the columns'
-  check and sized: a read past an end faults, and the command then names the
+  and every branch count up to 40, checked by the columns' check and sized,
+  with the result sizing gives away from the edges: a read past an end faults, and the command then names the
   case and exits with status 1;
 - memory: a function sized with no scratch memory to spare, then 64 bytes
   more at a time until it succeeds: every failure must be
@@ -101,11 +103,10 @@ sizes of sqlite3 at -O0, and chains of 1,000 links forward and backward. After
 checking that every way of sizing them gives the same records and offsets, it
 reports medians of 21 samples, in nanoseconds per record with p10/p90 and in
 cycles per branch and per record with IPC, of `x86_encode` of each function
-(the caller's encode after sizing, the reference), `size_branches`,
-`size_branches_scalar`, and `size_encode` (vector sizing followed immediately
-by final encoding in the same timed interval),
-and each path's phases as the difference between runs that stop after a phase
-and before it: the vector path, the scalar path, and the vector path with each
+(the caller's encode after sizing, the reference), `size_branches`, and
+`size_encode` (sizing followed immediately by final encoding in the same timed
+interval), and each path's phases as the difference between runs that stop
+after a phase and before it: the vector path, and the vector path with each
 alternative to its gathers measured against it (`compress` and `window`). A sample sizes the pool
 in groups of at least 2,048 records, each group's records read into cache and
 its branches' records put back outside the time (as generated, or as sized for
@@ -116,18 +117,16 @@ Nanoseconds are reported even when hardware counters are unavailable; cycles
 and IPC then read as zero. The default phase table includes both nanoseconds
 and cycles per branch. Both encoding rows produce offsets without collecting
 fixup ends. The pools are larger than the branch predictor learns (a pool of
-33,000 records sized again and again let it learn the scalar path's branches).
+33,000 records sized again and again let it learn the removed scalar path's
+branches).
 `--rounds N` sizes with another round limit, `--only ROW` runs one row, and `--measure NAME`
-one measurement (`x86_encode`, `size_branches`, `size_branches_scalar`,
-`size_encode`, or a path's run through a phase, as `vector-lengths` or
-`vector-setup`) for `--samples N` samples, for perf. Nonzero `--after-scalar MS`
-requires one isolated vector measurement and runs its scalar counterpart for
-at least MS milliseconds before each recorded sample, outside the timed
-interval (at most 1,000 ms; zero disables it). For `size_encode`, that is
-scalar sizing followed by scalar encoding. The scalar lengths phase now uses
-`x86_measure_scalar`; old scalar sizing timings used the vector encoder and
-are not a baseline for the vector optimization. Compare old and new vector
-paths with the same harness, and include `size_encode` for the caller's
+one measurement (`x86_encode`, `size_branches`, `size_encode`, or a path's run
+through a phase, as `vector-lengths` or `vector-setup`) for `--samples N`
+samples, for perf. Nonzero `--after-scalar MS` requires one isolated
+measurement and keeps the core busy with scalar work (an FNV-1a hash of the
+pool's records) for at least MS milliseconds before each recorded sample,
+outside the timed interval (at most 1,000 ms; zero disables it). Compare old
+and new vector paths with the same harness, and include `size_encode` for the caller's
 combined cost. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/branch-sizing.md` explains the current method and labels the older
 numbers as historical;
@@ -135,6 +134,7 @@ numbers as historical;
 Clang 23 implementation, comparison protocol and initial candidate's evidence.
 The default 9700X job runs the benchmark after the tests, pinned to one allowed
 CPU. For relevant pull requests it also runs three matched process pairs using
-the same harness, including the sizing-and-encoding pipeline on one and eight
+the same harness (the pull request's, adapted for a base from before #2924,
+whose internal functions still took the path as an argument), including the sizing-and-encoding pipeline on one and eight
 distinct physical cores. Its measurements are informational; correctness,
 report completeness and matching workload identities are checked.

@@ -8,26 +8,23 @@
 //
 // main.c includes this file after branch_sizing.c, branch_sizing_generate.c and x86_64_encoder_test.c, whose random
 // instructions and printer it takes, and calls run_branch_sizing_tests for the command. Every function sized must be one
-// branch_sizing_validate accepts, as the code generator's are, and so must both paths of the branch columns' check
-// (branch_sizing_validate_branches and its twin); every check runs both paths, size_branches and size_branches_scalar,
-// which must give identical results: the records, the offsets, the length and the counts (rounds, long branches and the
-// worklist's evaluations), or the same error. Where a function is sized successfully, the result
-// must also be the reference's, branch_sizing_test_reference (relaxation over the records, as an assembler does it,
+// branch_sizing_validate accepts, as the code generator's are, and so must the branch columns' check
+// (branch_sizing_validate_branches). Sizing has one implementation, the vector one (#2924), so the oracles aren't a
+// second path. Where a function is sized successfully, the result must be the reference's, branch_sizing_test_reference (relaxation over the records, as an assembler does it,
 // with each record's length from x86_encode_scalar), and keep the properties branch_sizing_test_properties checks:
 // x86_validate passes, x86_encode_scalar's offsets and length are the result's, every branch's target worked out from
 // the final offsets is its label's record, a branch is long exactly when its displacement is out of rel8's range, and
 // every other record and field is as it was. The checks, in this order:
 //   - Forms: every form number, with and without a segment override or the fixup flag, as a branch's record:
 //     branch_sizing_validate accepts JMP_REL8 and the 16 Jcc_REL8 (found from the form table's opcodes), which size and
-//     grow by 3 and 4 to the rel32 forms after them, and refuses every other with BRANCH_SIZING_ERROR_FORM; and both
-//     paths of the branch columns' check do the same (the vector path's bitmap of the forms against the scalar path's
-//     list).
+//     grow by 3 and 4 to the rel32 forms after them, and refuses every other with BRANCH_SIZING_ERROR_FORM; and the
+//     branch columns' check does the same (its bitmap of the forms against the form table).
 //   - Errors, branch_sizing_validate's: a branch index equal to the one before, below it, at the count and past it, a
 //     target past the count, a form that isn't a branch's, a branch's form with FS, GS or the fixup flag, at every place
 //     among 40 branches (the first error is the one reported), more branches than records, more records than
-//     x86_encode takes (which both paths refuse too), a record x86_validate rejects (after a branch's error), and the
-//     length past which a function is too large. Both paths of the branch columns' check must give each error but
-//     x86_validate's, and take the records x86_validate rejects.
+//     x86_encode takes (which size_branches refuses too), a record x86_validate rejects (after a branch's error), and the
+//     length past which a function is too large. The branch columns' check must give each error but x86_validate's, and
+//     take the records x86_validate rejects.
 //   - Boundaries: a probe branch, forward and backward, jmp and jcc, at every displacement from 100 to 135 and from -140
 //     to -105 with every branch short, over 0 to 3 branches (jmp or jcc) that grow or don't: it must end long exactly
 //     when its displacement with theirs is past 127 or below -128.
@@ -36,13 +33,14 @@
 //     branch_sizing_generate.c's patterns or random instructions of every form; also with the worklist from rounds 1, 2
 //     and 3 and with no round limit, which must give the same records and offsets.
 //   - Columns: random functions of up to BUSTER_BRANCH_SIZING_TEST_COLUMN_RECORDS records broken 0 to 3 times at random
-//     (branch_sizing_test_break): both paths of the branch columns' check must give branch_sizing_validate's first error,
-//     or take the function where only x86_validate refuses it.
+//     (branch_sizing_test_break): the branch columns' check and branch_sizing_validate must give the first error by the
+//     contract's rules as this file states them (branch_sizing_test_first_error, from the form table), or the columns'
+//     check take the function where only x86_validate refuses it.
 //   - Chains: forward and backward chains (branch_sizing_chain) of 1 to 1,000 links, which take a round per link: the
 //     rounds must be the links' plus one up to BUSTER_BRANCH_SIZING_ROUNDS, and past it the worklist must finish.
 //   - Page edges: the records, the branch columns and the offsets each ending at a PROT_NONE page, for every count up
-//     to 70 records with branches at every density, and every branch count up to 40, checked by both paths of the
-//     branch columns' check and sized: a read or write past an end faults, and the fault handler names the case and
+//     to 70 records with branches at every density, and every branch count up to 40, checked by the branch columns'
+//     check and sized, with the result sizing gives away from the edges: a read or write past an end faults, and the fault handler names the case and
 //     exits with status 1.
 //   - Memory: a function sized with no scratch memory to spare, then 64 bytes more at a time until it succeeds: every
 //     failure must be BRANCH_SIZING_ERROR_MEMORY and leave the records and offsets as they were.
@@ -77,6 +75,8 @@
 #define BUSTER_BRANCH_SIZING_TEST_REPORTED 3
 // Random functions by default, and the most records one has.
 #define BUSTER_BRANCH_SIZING_TEST_FUNCTIONS 1500
+// The worklist's evaluations over the default seed's random functions (branch_sizing_test_random).
+#define BUSTER_BRANCH_SIZING_TEST_FROZEN_EVALUATIONS 85984
 #define BUSTER_BRANCH_SIZING_TEST_MAX_RECORDS 100000
 // The test's own arena: the functions, their outcomes and the reference's buffers.
 #define BUSTER_BRANCH_SIZING_TEST_ARENA_BYTES (16ull << 30)
@@ -149,15 +149,8 @@ struct BranchSizingTestOutcome
     uint32_t* offsets;
 };
 
-// The paths a check runs: the vector one, the scalar one, and each with another round limit.
-typedef enum BranchSizingTestPath
-{
-    BRANCH_SIZING_TEST_VECTOR,
-    BRANCH_SIZING_TEST_SCALAR,
-} BranchSizingTestPath;
-
-// Sizes a copy of the function's records on the path, with the round limit, into an outcome from the arena.
-static BranchSizingTestOutcome branch_sizing_test_size(Arena* arena, const BranchSizingTestFunction* function, BranchSizingTestPath path, uint32_t round_limit)
+// Sizes a copy of the function's records with the round limit, into an outcome from the arena.
+static BranchSizingTestOutcome branch_sizing_test_size(Arena* arena, const BranchSizingTestFunction* function, uint32_t round_limit)
 {
     BranchSizingTestOutcome result = {
         .records = BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction, function->count + 1),
@@ -166,7 +159,7 @@ static BranchSizingTestOutcome branch_sizing_test_size(Arena* arena, const Branc
     memcpy(result.records, function->records, function->count * sizeof(X86Instruction));
     memset(result.offsets, 0, function->count * sizeof(uint32_t));
     result.result = branch_sizing_run(result.records, function->count, function->branches, function->targets, function->branch_count, result.offsets,
-                                      path == BRANCH_SIZING_TEST_VECTOR, round_limit);
+                                      round_limit);
     return result;
 }
 
@@ -306,37 +299,32 @@ static BranchSizingCheck branch_sizing_test_columns_of(BranchSizingCheck full)
     return full.error == BRANCH_SIZING_ERROR_INVALID_INSTRUCTION ? taken : full;
 }
 
-// Both paths of the branch columns' check, branch_sizing_validate_branches and its twin, must give `expected` for the
-// function: the error and its index.
+// The branch columns' check, branch_sizing_validate_branches, must give `expected` for the function: the error and its
+// index.
 static void branch_sizing_test_columns(BranchSizingTestTally* tally, const BranchSizingTestFunction* function, BranchSizingCheck expected, const char* what,
                                        uint64_t index)
 {
-    const BranchSizingCheck vector = branch_sizing_validate_branches(function->records, function->count, function->branches, function->targets, function->branch_count);
-    const BranchSizingCheck scalar = branch_sizing_validate_branches_scalar(function->records, function->count, function->branches, function->targets,
-                                                                            function->branch_count);
-    const bool same = vector.error == expected.error && vector.index == expected.index && scalar.error == expected.error && scalar.index == expected.index;
+    const BranchSizingCheck columns = branch_sizing_validate_branches(function->records, function->count, function->branches, function->targets, function->branch_count);
+    const bool same = columns.error == expected.error && columns.index == expected.index;
     if (!same && tally->failures < BUSTER_BRANCH_SIZING_TEST_REPORTED)
     {
-        printf("  %s: %s (%llu): the branch columns' check gives error %u at %llu on the vector path and %u at %llu on the scalar one, not %u at %llu\n",
-               tally->check, what, (unsigned long long)index, (unsigned)vector.error, (unsigned long long)vector.index, (unsigned)scalar.error,
-               (unsigned long long)scalar.index, (unsigned)expected.error, (unsigned long long)expected.index);
+        printf("  %s: %s (%llu): the branch columns' check gives error %u at %llu, not %u at %llu\n", tally->check, what, (unsigned long long)index,
+               (unsigned)columns.error, (unsigned long long)columns.index, (unsigned)expected.error, (unsigned long long)expected.index);
     }
     tally->checked += 1;
     tally->failures += same ? 0 : 1;
 }
 
-// Sizes the function on both paths and with the reference: the function must be one branch_sizing_validate and both
-// paths of the branch columns' check accept, the paths' outcomes must be the same, and on success the reference's, with
-// the properties. Returns the vector path's outcome (in the arena, which the caller pops).
+// Sizes the function and the reference: the function must be one branch_sizing_validate and the branch columns' check
+// accept, and on success the outcome must be the reference's, with the properties. Returns the outcome (in the arena,
+// which the caller pops).
 static BranchSizingTestOutcome branch_sizing_test_all(BranchSizingTestTally* tally, Arena* arena, const BranchSizingTestFunction* function, uint64_t index)
 {
     const BranchSizingCheck check = branch_sizing_validate(function->records, function->count, function->branches, function->targets, function->branch_count);
     branch_sizing_test_expect(tally, check.error == BRANCH_SIZING_OK, "branch_sizing_validate accepts the function", index);
     branch_sizing_test_columns(tally, function, check, "the branch columns' check accepts the function", index);
-    const BranchSizingTestOutcome vector = branch_sizing_test_size(arena, function, BRANCH_SIZING_TEST_VECTOR, BUSTER_BRANCH_SIZING_ROUNDS);
+    const BranchSizingTestOutcome vector = branch_sizing_test_size(arena, function, BUSTER_BRANCH_SIZING_ROUNDS);
     const uint64_t mark = arena->length;
-    const BranchSizingTestOutcome scalar = branch_sizing_test_size(arena, function, BRANCH_SIZING_TEST_SCALAR, BUSTER_BRANCH_SIZING_ROUNDS);
-    branch_sizing_test_expect(tally, branch_sizing_test_same(&vector, &scalar, function->count, true), "the vector and scalar paths agree", index);
     if (vector.result.error == BRANCH_SIZING_OK)
     {
         X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction, function->count + 1);
@@ -391,16 +379,14 @@ static bool branch_sizing_test_forms(Arena* arena)
         const uint64_t mark = arena->length;
         branch_sizing_test_one_branch(&function, (uint16_t)form);
         const BranchSizingCheck check = branch_sizing_validate(function.records, function.count, function.branches, function.targets, function.branch_count);
-        // The vector path's bitmap of the forms, against the scalar path's list and branch_sizing_validate (whose
-        // filler x86_validate passes).
+        // The columns' check's bitmap of the forms, against branch_sizing_validate (whose filler x86_validate passes); and
+        // both against the form table, below.
         branch_sizing_test_columns(&tally, &function, check, "the branch columns' check takes the form as branch_sizing_validate does", form);
         if (branch_sizing_test_is_branch(form))
         {
             const bool jump = x86_form_descriptions[form].opcode == 0xeb;
             branch_sizing_test_expect(&tally, check.error == BRANCH_SIZING_OK, "branch_sizing_validate accepts a branch's rel8 form", form);
-            const BranchSizingTestOutcome vector = branch_sizing_test_size(arena, &function, BRANCH_SIZING_TEST_VECTOR, BUSTER_BRANCH_SIZING_ROUNDS);
-            const BranchSizingTestOutcome scalar = branch_sizing_test_size(arena, &function, BRANCH_SIZING_TEST_SCALAR, BUSTER_BRANCH_SIZING_ROUNDS);
-            branch_sizing_test_expect(&tally, branch_sizing_test_same(&vector, &scalar, function.count, true), "the vector and scalar paths agree", form);
+            const BranchSizingTestOutcome vector = branch_sizing_test_size(arena, &function, BUSTER_BRANCH_SIZING_ROUNDS);
             const uint64_t length = 5 + (jump ? 0 : 1) + BUSTER_BRANCH_SIZING_TEST_TAIL_BYTES;
             branch_sizing_test_expect(&tally, vector.result.error == BRANCH_SIZING_OK && vector.result.long_branches == 1 && vector.result.length == length,
                                       "a branch's rel8 form grows by 3 for jmp and 4 for jcc", form);
@@ -420,8 +406,8 @@ static bool branch_sizing_test_forms(Arena* arena)
     return branch_sizing_test_report(&tally);
 }
 
-// branch_sizing_validate must refuse the function with the error at the index, and both paths of the branch columns'
-// check with the same, but take a record x86_validate rejects.
+// branch_sizing_validate must refuse the function with the error at the index, and the branch columns' check with the
+// same, but take a record x86_validate rejects.
 static void branch_sizing_test_refused(BranchSizingTestTally* tally, const BranchSizingTestFunction* function, BranchSizingError error, uint64_t index, const char* what)
 {
     const BranchSizingCheck check = branch_sizing_validate(function->records, function->count, function->branches, function->targets, function->branch_count);
@@ -518,14 +504,12 @@ static bool branch_sizing_test_errors(Arena* arena, uint64_t seed)
     }
     function.branch_count = function.count + 2;
     branch_sizing_test_refused(&tally, &function, BRANCH_SIZING_ERROR_BRANCH_INDEX, function.count, "more branches than records");
-    // More records than x86_encode takes: refused by branch_sizing_validate, and by both paths before anything is read.
+    // More records than x86_encode takes: refused by branch_sizing_validate, and by size_branches before anything is read.
     function.count = BUSTER_X86_ENCODER_MAX_INSTRUCTIONS + 1ull;
     function.branch_count = 0;
     branch_sizing_test_refused(&tally, &function, BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS, 0, "more records than x86_encode takes");
     BranchSizing result = size_branches(function.records, function.count, function.branches, function.targets, 0, 0);
     branch_sizing_test_expect(&tally, result.error == BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS, "size_branches refuses more records than x86_encode takes", 0);
-    result = size_branches_scalar(function.records, function.count, function.branches, function.targets, 0, 0);
-    branch_sizing_test_expect(&tally, result.error == BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS, "size_branches_scalar refuses more records than x86_encode takes", 0);
     // A record x86_validate rejects (AH with a REX prefix, which R8B needs): the index is x86_validate's, and a branch's
     // error comes first.
     branch_sizing_test_error_function(&state, &function);
@@ -706,7 +690,7 @@ static void branch_sizing_test_random_forms(uint64_t* state, BranchSizingTestFun
     }
 }
 
-// Each of the round limits but the default, with which both paths must give the same records and offsets.
+// Each of the round limits but the default, with which sizing must give the same records and offsets.
 static const uint32_t branch_sizing_test_limits[] = { 1, 2, 3, UINT32_MAX };
 
 static bool branch_sizing_test_random(Arena* arena, uint64_t seed, uint64_t functions)
@@ -723,6 +707,7 @@ static bool branch_sizing_test_random(Arena* arena, uint64_t seed, uint64_t func
     // The functions that settled in 1, 2, 3 and more rounds (with the default limit).
     uint64_t rounds[5] = { 0 };
     uint64_t listed = 0;
+    uint64_t evaluations = 0;
     for (uint64_t i = 0; i < functions; i += 1)
     {
         const uint64_t mark = arena->length;
@@ -737,9 +722,7 @@ static bool branch_sizing_test_random(Arena* arena, uint64_t seed, uint64_t func
         for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(branch_sizing_test_limits); l += 1)
         {
             const uint64_t inner = arena->length;
-            const BranchSizingTestOutcome vector = branch_sizing_test_size(arena, &function, BRANCH_SIZING_TEST_VECTOR, branch_sizing_test_limits[l]);
-            const BranchSizingTestOutcome scalar = branch_sizing_test_size(arena, &function, BRANCH_SIZING_TEST_SCALAR, branch_sizing_test_limits[l]);
-            branch_sizing_test_expect(&tally, branch_sizing_test_same(&vector, &scalar, function.count, true), "the paths agree with another round limit", i);
+            const BranchSizingTestOutcome vector = branch_sizing_test_size(arena, &function, branch_sizing_test_limits[l]);
             branch_sizing_test_expect(&tally, branch_sizing_test_same(&vector, &outcome, function.count, false), "another round limit gives the same records and offsets", i);
             arena_pop_to(arena, inner);
         }
@@ -748,12 +731,21 @@ static bool branch_sizing_test_random(Arena* arena, uint64_t seed, uint64_t func
         long_branches += outcome.result.long_branches;
         rounds[outcome.result.rounds < 4 ? outcome.result.rounds : 4] += 1;
         listed += outcome.result.evaluations != 0;
+        evaluations += outcome.result.evaluations;
         arena_pop_to(arena, mark);
     }
+    // The counts no oracle above checks (the rounds past what the records show, and the worklist's evaluations), frozen
+    // for the default seed and count from main's run before #2924, where the scalar twin's counts matched them.
+    if (seed == 1 && functions == BUSTER_BRANCH_SIZING_TEST_FUNCTIONS)
+    {
+        const bool frozen = rounds[1] == 507 && rounds[2] == 414 && rounds[3] == 359 && rounds[4] == 220 && listed == 68 &&
+                            evaluations == BUSTER_BRANCH_SIZING_TEST_FROZEN_EVALUATIONS;
+        branch_sizing_test_expect(&tally, frozen, "the default functions' rounds and the worklist's evaluations are the frozen ones", evaluations);
+    }
     printf("random functions: %llu functions, %llu records, %llu branches, %llu long; %llu settled in 1 round, %llu in 2, %llu in 3 and %llu in more (%llu "
-           "with the worklist)\n",
+           "with the worklist, %llu evaluations)\n",
            (unsigned long long)functions, (unsigned long long)records, (unsigned long long)branches, (unsigned long long)long_branches, (unsigned long long)rounds[1],
-           (unsigned long long)rounds[2], (unsigned long long)rounds[3], (unsigned long long)rounds[4], (unsigned long long)listed);
+           (unsigned long long)rounds[2], (unsigned long long)rounds[3], (unsigned long long)rounds[4], (unsigned long long)listed, (unsigned long long)evaluations);
     return branch_sizing_test_report(&tally);
 }
 
@@ -835,14 +827,38 @@ static void branch_sizing_test_break(uint64_t* state, BranchSizingTestFunction* 
     }
 }
 
-// The branch columns' check against branch_sizing_validate on random functions broken at random: both paths must give
-// its first error, but take a record x86_validate rejects. The functions have up to
+// The first error of the function's branch columns by the contract's rules, as size_branches's comment states them and
+// with the branches' forms from the form table (branch_sizing_test_is_branch), not from branch_sizing.c: the record
+// count, then each branch in order, its record index below the count and above the branch before it's, its target at
+// most the count, and its record's form a branch's rel8 one (a segment override or the fixup flag makes another number).
+static BranchSizingCheck branch_sizing_test_first_error(const BranchSizingTestFunction* function)
+{
+    BranchSizingCheck result = {
+        .error = function->count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS ? BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS : BRANCH_SIZING_OK,
+    };
+    for (uint64_t k = 0; result.error == BRANCH_SIZING_OK && k < function->branch_count; k += 1)
+    {
+        const uint32_t record = function->branches[k];
+        const bool ordered = record < function->count && (k == 0 || record > function->branches[k - 1]);
+        result.error = !ordered                                                  ? BRANCH_SIZING_ERROR_BRANCH_INDEX :
+                       function->targets[k] > function->count                    ? BRANCH_SIZING_ERROR_TARGET :
+                       !branch_sizing_test_is_branch(function->records[record].form) ? BRANCH_SIZING_ERROR_FORM :
+                                                                                   BRANCH_SIZING_OK;
+        result.index = k;
+    }
+    result.index = result.error != BRANCH_SIZING_OK ? result.index : 0;
+    return result;
+}
+
+// The branch columns' check and branch_sizing_validate on random functions broken at random: both must give the first
+// error branch_sizing_test_first_error finds, and where it finds none, the columns' check takes the function and
+// branch_sizing_validate takes it or names a record x86_validate rejects. The functions have up to
 // BUSTER_BRANCH_SIZING_TEST_COLUMN_RECORDS records, a branch every 1 to 12, so that errors fall in every lane of the
 // vector path's first vector, its last (partial) one and those between.
 static bool branch_sizing_test_columns_random(Arena* arena, uint64_t seed)
 {
     BranchSizingTestTally tally = {
-        .check = "columns: random breaks, against branch_sizing_validate",
+        .check = "columns: random breaks, against the contract's first error",
     };
     uint64_t state = seed ^ 0x5bd1e995u;
     BranchSizingTestFunction function = branch_sizing_test_function(arena, BUSTER_BRANCH_SIZING_TEST_COLUMN_RECORDS);
@@ -856,8 +872,11 @@ static bool branch_sizing_test_columns_random(Arena* arena, uint64_t seed)
         function.branch_count = branch_sizing_generate(&state, &shape, function.records, function.branches, function.targets);
         branch_sizing_test_break(&state, &function);
         const BranchSizingCheck full = branch_sizing_validate(function.records, function.count, function.branches, function.targets, function.branch_count);
-        const BranchSizingCheck expected = branch_sizing_test_columns_of(full);
+        const BranchSizingCheck expected = branch_sizing_test_first_error(&function);
         branch_sizing_test_columns(&tally, &function, expected, "a function broken at random", i);
+        const bool validated = expected.error != BRANCH_SIZING_OK ? full.error == expected.error && full.index == expected.index :
+                                                                    full.error == BRANCH_SIZING_OK || full.error == BRANCH_SIZING_ERROR_INVALID_INSTRUCTION;
+        branch_sizing_test_expect(&tally, validated, "branch_sizing_validate gives the contract's first error", i);
         outcomes[expected.error] += 1;
     }
     printf("columns: %llu functions, %llu taken, %llu refused by an index, %llu by a target and %llu by a form\n",
@@ -892,8 +911,10 @@ static bool branch_sizing_test_chains(Arena* arena, uint64_t seed)
             const uint32_t rounds = (links < BUSTER_BRANCH_SIZING_ROUNDS ? links : BUSTER_BRANCH_SIZING_ROUNDS) + 1;
             branch_sizing_test_expect(&tally, outcome.result.long_branches == links, "every link grows", links);
             branch_sizing_test_expect(&tally, outcome.result.rounds == rounds, "a round per link, up to the limit, and one more", links);
-            branch_sizing_test_expect(&tally, (outcome.result.evaluations != 0) == (links > BUSTER_BRANCH_SIZING_ROUNDS), "the worklist past the limit", links);
-            const BranchSizingTestOutcome unlimited = branch_sizing_test_size(arena, &function, BRANCH_SIZING_TEST_VECTOR, UINT32_MAX);
+            // Past the limit, each growth puts only the next link out of range: the worklist evaluates each link left once.
+            branch_sizing_test_expect(&tally, outcome.result.evaluations == (links > BUSTER_BRANCH_SIZING_ROUNDS ? links - BUSTER_BRANCH_SIZING_ROUNDS : 0),
+                                      "the worklist past the limit, an evaluation a link left", links);
+            const BranchSizingTestOutcome unlimited = branch_sizing_test_size(arena, &function, UINT32_MAX);
             branch_sizing_test_expect(&tally, unlimited.result.rounds == links + 1 && branch_sizing_test_same(&outcome, &unlimited, function.count, false),
                                       "without the worklist, a round per link and the same result", links);
             arena_pop_to(arena, mark);
@@ -902,20 +923,17 @@ static bool branch_sizing_test_chains(Arena* arena, uint64_t seed)
     return branch_sizing_test_report(&tally);
 }
 
-// The page-edge check's case, for the fault handler: the records, the branches, the path, and whether it was checking
-// the branch columns (branch_sizing_validate_branches or its twin) or sizing.
+// The page-edge check's case, for the fault handler: the records, the branches, and whether it was checking the branch
+// columns (branch_sizing_validate_branches) or sizing.
 static volatile uint64_t branch_sizing_test_edge_count;
 static volatile uint64_t branch_sizing_test_edge_branches;
-static volatile uint32_t branch_sizing_test_edge_path;
 static volatile bool branch_sizing_test_edge_checking;
 
 static void branch_sizing_test_report_fault(int signal_number)
 {
     (void)signal_number;
     char message[200];
-    const int length = snprintf(message, sizeof(message), "page edges: the %s path faulted %s on %lu records and %lu branches\n",
-                                branch_sizing_test_edge_path == BRANCH_SIZING_TEST_VECTOR ? "vector" : "scalar",
-                                branch_sizing_test_edge_checking ? "checking the branch columns" : "sizing", (unsigned long)branch_sizing_test_edge_count,
+    const int length = snprintf(message, sizeof(message), "page edges: faulted %s on %lu records and %lu branches\n", branch_sizing_test_edge_checking ? "checking the branch columns" : "sizing", (unsigned long)branch_sizing_test_edge_count,
                                 (unsigned long)branch_sizing_test_edge_branches);
     if (length > 0 && write(STDOUT_FILENO, message, (size_t)length) < 0)
     {
@@ -994,35 +1012,26 @@ static bool branch_sizing_test_page_edges(Arena* arena, uint64_t seed)
                 BranchSizingTestFunction cut = function;
                 cut.branch_count = branch_count;
                 const uint64_t inner = arena->length;
-                const BranchSizingTestOutcome expected = branch_sizing_test_size(arena, &cut, BRANCH_SIZING_TEST_SCALAR, BUSTER_BRANCH_SIZING_ROUNDS);
+                // Sizing's result away from the edges, which the reference checks elsewhere: at the edges it must be the same.
+                const BranchSizingTestOutcome expected = branch_sizing_test_size(arena, &cut, BUSTER_BRANCH_SIZING_ROUNDS);
                 X86Instruction* edge_records = (X86Instruction*)(records.end - count * sizeof(X86Instruction));
                 uint32_t* edge_branches = (uint32_t*)(branches.end - branch_count * sizeof(uint32_t));
                 uint32_t* edge_targets = (uint32_t*)(targets.end - branch_count * sizeof(uint32_t));
                 uint32_t* edge_offsets = (uint32_t*)(offsets.end - count * sizeof(uint32_t));
-                for (uint32_t path = 0; path < 2; path += 1)
-                {
-                    memcpy(edge_records, function.records, count * sizeof(X86Instruction));
-                    memcpy(edge_branches, function.branches, branch_count * sizeof(uint32_t));
-                    memcpy(edge_targets, function.targets, branch_count * sizeof(uint32_t));
-                    branch_sizing_test_edge_count = count;
-                    branch_sizing_test_edge_branches = branch_count;
-                    branch_sizing_test_edge_path = path;
-                    branch_sizing_test_edge_checking = true;
-                    const BranchSizingCheck columns = path == BRANCH_SIZING_TEST_VECTOR ?
-                                                          branch_sizing_validate_branches(edge_records, count, edge_branches, edge_targets, branch_count) :
-                                                          branch_sizing_validate_branches_scalar(edge_records, count, edge_branches, edge_targets, branch_count);
-                    branch_sizing_test_expect(&tally, columns.error == BRANCH_SIZING_OK,
-                                              path == BRANCH_SIZING_TEST_VECTOR ? "the vector path's branch columns' check takes the function" :
-                                                                                  "the scalar path's branch columns' check takes the function",
-                                              count);
-                    branch_sizing_test_edge_checking = false;
-                    const BranchSizing result = branch_sizing_run(edge_records, count, edge_branches, edge_targets, branch_count, edge_offsets,
-                                                                  path == BRANCH_SIZING_TEST_VECTOR, BUSTER_BRANCH_SIZING_ROUNDS);
-                    const bool same = result.error == expected.result.error && result.length == expected.result.length && result.rounds == expected.result.rounds &&
-                                      memcmp(edge_records, expected.records, count * sizeof(X86Instruction)) == 0 &&
-                                      (result.error != BRANCH_SIZING_OK || memcmp(edge_offsets, expected.offsets, count * sizeof(uint32_t)) == 0);
-                    branch_sizing_test_expect(&tally, same, path == BRANCH_SIZING_TEST_VECTOR ? "the vector path's result" : "the scalar path's result", count);
-                }
+                memcpy(edge_records, function.records, count * sizeof(X86Instruction));
+                memcpy(edge_branches, function.branches, branch_count * sizeof(uint32_t));
+                memcpy(edge_targets, function.targets, branch_count * sizeof(uint32_t));
+                branch_sizing_test_edge_count = count;
+                branch_sizing_test_edge_branches = branch_count;
+                branch_sizing_test_edge_checking = true;
+                const BranchSizingCheck columns = branch_sizing_validate_branches(edge_records, count, edge_branches, edge_targets, branch_count);
+                branch_sizing_test_expect(&tally, columns.error == BRANCH_SIZING_OK, "the branch columns' check takes the function", count);
+                branch_sizing_test_edge_checking = false;
+                const BranchSizing result = branch_sizing_run(edge_records, count, edge_branches, edge_targets, branch_count, edge_offsets, BUSTER_BRANCH_SIZING_ROUNDS);
+                const bool same = result.error == expected.result.error && result.length == expected.result.length && result.rounds == expected.result.rounds &&
+                                  memcmp(edge_records, expected.records, count * sizeof(X86Instruction)) == 0 &&
+                                  (result.error != BRANCH_SIZING_OK || memcmp(edge_offsets, expected.offsets, count * sizeof(uint32_t)) == 0);
+                branch_sizing_test_expect(&tally, same, "sizing at the edges gives its result away from them", count);
                 arena_pop_to(arena, inner);
                 cases += 1;
             }
@@ -1059,10 +1068,9 @@ static bool branch_sizing_test_memory(Arena* arena, uint64_t seed)
     function.count = shape.count;
     function.branch_count = branch_sizing_generate(&state, &shape, function.records, function.branches, function.targets);
     uint64_t attempts = 0;
-    for (uint32_t path = 0; path < 2; path += 1)
     {
         const uint64_t mark = arena->length;
-        const BranchSizingTestOutcome expected = branch_sizing_test_size(arena, &function, (BranchSizingTestPath)path, BUSTER_BRANCH_SIZING_ROUNDS);
+        const BranchSizingTestOutcome expected = branch_sizing_test_size(arena, &function, BUSTER_BRANCH_SIZING_ROUNDS);
         X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction, function.count);
         uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function.count);
         bool sized = false;
@@ -1076,7 +1084,7 @@ static bool branch_sizing_test_memory(Arena* arena, uint64_t seed)
             // (a commit that large may refuse where the reservation's address space did not).
             scratch.arena->capacity = room < capacity - scratch.arena->length ? scratch.arena->length + room : capacity;
             const BranchSizing result = branch_sizing_run(records, function.count, function.branches, function.targets, function.branch_count, offsets,
-                                                          path == BRANCH_SIZING_TEST_VECTOR, BUSTER_BRANCH_SIZING_ROUNDS);
+                                                          BUSTER_BRANCH_SIZING_ROUNDS);
             scratch.arena->capacity = capacity;
             scratch_end(scratch);
             sized = result.error == BRANCH_SIZING_OK;
@@ -1099,7 +1107,7 @@ static bool branch_sizing_test_memory(Arena* arena, uint64_t seed)
             }
             attempts += 1;
         }
-        branch_sizing_test_expect(&tally, sized, "the function is sized in the end", path);
+        branch_sizing_test_expect(&tally, sized, "the function is sized in the end", 0);
         arena_pop_to(arena, mark);
     }
     printf("memory: %llu attempts\n", (unsigned long long)attempts);
@@ -1298,7 +1306,7 @@ static bool branch_sizing_test_assembler(Arena* arena, uint64_t seed, const char
         for (uint64_t number = 0; branch_sizing_test_assembler_function(&state, &x86_state, number, &function); number += 1)
         {
             const uint64_t mark = arena->length;
-            const BranchSizingTestOutcome outcome = branch_sizing_test_size(arena, &function, BRANCH_SIZING_TEST_VECTOR, BUSTER_BRANCH_SIZING_ROUNDS);
+            const BranchSizingTestOutcome outcome = branch_sizing_test_size(arena, &function, BUSTER_BRANCH_SIZING_ROUNDS);
             char name[64];
             snprintf(name, sizeof(name), ".text.f%llu", (unsigned long long)number);
             const Elf64_Shdr* header = 0;

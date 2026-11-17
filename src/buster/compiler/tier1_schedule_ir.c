@@ -644,7 +644,6 @@ static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t
         uint64_t set = 0;
         uint64_t cut = 0;
         uint64_t joins = 0;
-#if BUSTER_HOST_VECTOR
         if (!scalar)
         {
             const __mmask64 valid = UINT64_MAX >> (64 - lanes);
@@ -661,7 +660,6 @@ static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t
             joins = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_PHI));
         }
         else
-#endif
         {
             for (uint32_t lane = 0; lane < lanes; lane += 1)
             {
@@ -686,7 +684,6 @@ static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t
 static uint64_t tier1_sink_ir_readers(const IrFunction* f, uint32_t from, uint32_t to, uint32_t value, bool scalar)
 {
     uint64_t read = 0;
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         const uint32_t* columns[3] = { f->a, f->b, f->c };
@@ -710,7 +707,6 @@ static uint64_t tier1_sink_ir_readers(const IrFunction* f, uint32_t from, uint32
         }
     }
     else
-#endif
     {
         for (uint32_t j = from; j < to; j += 1)
         {

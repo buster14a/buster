@@ -119,8 +119,7 @@ static bool cbuiltin_lower_benchmark_compile(Arena* arena, const CBuiltinLowerCa
         result = offsets != 0 && output->bytes != 0;
         if (result)
         {
-            const BranchSizing sized = scalar ? size_branches_scalar(output->code.records, output->code.count, output->code.branches, output->code.targets, output->code.branch_count, offsets)
-                                              : size_branches(output->code.records, output->code.count, output->code.branches, output->code.targets, output->code.branch_count, offsets);
+            const BranchSizing sized = size_branches(output->code.records, output->code.count, output->code.branches, output->code.targets, output->code.branch_count, offsets);
             const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 :
                 (scalar ? x86_encode_scalar(output->code.records, output->code.count, output->bytes, capacity, 0, 0)
                         : x86_encode(output->code.records, output->code.count, output->bytes, capacity, 0, 0));

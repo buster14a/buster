@@ -260,7 +260,6 @@ static bool ir_unroll_classify(const IrFunction* f, uint8_t* classes, bool scala
 {
     const uint32_t count = f->instruction_count;
     bool phis = false;
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         const __m512i low = _mm512_loadu_si512(ir_unroll_classes);
@@ -278,7 +277,6 @@ static bool ir_unroll_classify(const IrFunction* f, uint8_t* classes, bool scala
         phis = found != 0;
     }
     else
-#endif
     {
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -294,7 +292,6 @@ static bool ir_unroll_classify(const IrFunction* f, uint8_t* classes, bool scala
 static uint32_t ir_unroll_block_classes(const uint8_t* classes, uint32_t first, uint32_t end, bool scalar)
 {
     uint32_t result = 0;
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         __m512i any = _mm512_setzero_si512();
@@ -310,7 +307,6 @@ static uint32_t ir_unroll_block_classes(const uint8_t* classes, uint32_t first, 
         result = (uint32_t)(word & 0xff);
     }
     else
-#endif
     {
         for (uint32_t at = first; at < end; at += 1)
         {
@@ -962,7 +958,6 @@ static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count,
     memcpy(view->type + out, f->type + first, count);
     memcpy(view->flags + out, f->flags + first, count);
     memcpy(view->alignment_log2 + out, f->alignment_log2 + first, count);
-#if BUSTER_HOST_VECTOR
     if (!scalar && f->instruction_count <= INT32_MAX)
     {
         const __m512i none = _mm512_set1_epi32(-1);
@@ -989,7 +984,6 @@ static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count,
         }
     }
     else
-#endif
     {
         for (uint32_t k = 0; k < count; k += 1)
         {
@@ -1609,7 +1603,6 @@ static __attribute__((unused)) IrCheck ir_optimize_unroll(const IrFunction* func
         };
         DominatorOptions dom = dominators_options();
         dom.outputs = BUSTER_DOMINATOR_LOOPS;
-        dom.path = scalar ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, dom, &work.loops);
         // A function past the analysis' limits is left as it is.
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_UNSUPPORTED;

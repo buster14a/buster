@@ -44,7 +44,6 @@ static void ir_verified_test_rebuild(IrOptimizeTest* test, const IrFunction* fun
         };
         DominatorOptions options = dominators_options();
         options.outputs = 0;
-        options.path = DOMINATOR_SCALAR;
         Dominators rebuilt = { 0 };
         ok = dominators_analyze(output, scratch, &graph, options, &rebuilt) == DOMINATOR_OK;
         ir_optimize_test_expect(test, ok, "verified handoff: independent dominator rebuild");
@@ -103,9 +102,6 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
     ir_optimize_test_expect(test, after.error == IR_OK, "verified handoff: fixture accepted");
     if (before.error == IR_OK && after.error == IR_OK)
     {
-        // Dominator AUTO and the explicit scalar controls alike solve the final dominance by SEMI-NCA (#1352).
-        ir_optimize_test_expect(test, analysis.dominators.path == DOMINATOR_SCALAR,
-                                "verified handoff: final dominance solved by SEMI-NCA, whatever the pass heuristic");
         ir_optimize_test_expect(test, ir_optimize_test_equal(&expected.function, &actual.function), "verified handoff: unchanged optimized IR");
         ir_optimize_test_expect(test, expected.folded == actual.folded && expected.removed_blocks == actual.removed_blocks &&
                                 expected.removed_instructions == actual.removed_instructions && expected.sccp_visits == actual.sccp_visits &&
@@ -700,8 +696,7 @@ static void ir_verified_test_dominator_policy(IrOptimizeTest* test, Arena* input
             ir_optimize_test_expect(test, check.error == IR_OK, "dominator policy: preparation accepted");
             if (check.error == IR_OK)
             {
-                ir_optimize_test_expect(test, work.scalar && work.dominators.path == DOMINATOR_SCALAR,
-                                        "dominator policy: AUTO and explicit scalar dominance both solve by SEMI-NCA");
+                ir_optimize_test_expect(test, work.scalar, "dominator policy: AUTO and explicit scalar both prepare the scalar passes");
                 // Independently known diamond: entry dominates every block, neither arm dominates the join.
                 const uint32_t join = function.block_count - 1;
                 ir_optimize_test_expect(test, dominators_dominates(&work.dominators, 0, join) &&

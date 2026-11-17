@@ -451,9 +451,8 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
                 dominators_valid = dominators_valid && qualified;
                 if (!qualified)
                 {
-                    printf("ir-source: file=%s function=%s form=%s dominators_failed=\"%s\" cfg_error=%u scalar=%u vector=%u auto=%u\n",
-                           name, source->name, form_names[form], dominance.reason, (unsigned)dominance.cfg_error,
-                           (unsigned)dominance.status[0], (unsigned)dominance.status[1], (unsigned)dominance.status[2]);
+                    printf("ir-source: file=%s function=%s form=%s dominators_failed=\"%s\" cfg_error=%u status=%u\n",
+                           name, source->name, form_names[form], dominance.reason, (unsigned)dominance.cfg_error, (unsigned)dominance.status);
                 }
             }
         }
@@ -710,8 +709,8 @@ static int ir_source_tests_command(int count, char** arguments)
     if (dominators)
     {
         passed = passed && totals.left_out == 0 && totals.dominator_failed == 0 && totals.dominator_forms == 3 * totals.functions;
-        printf("ir-source: dominators forms=%" PRIu64 " checks=%" PRIu64 " failed=%" PRIu64 " excluded=%" PRIu64 " host-vector=%u %s\n",
-               totals.dominator_forms, totals.dominator_checks, totals.dominator_failed, totals.left_out, BUSTER_HOST_VECTOR, passed ? "passed" : "FAILED");
+        printf("ir-source: dominators forms=%" PRIu64 " checks=%" PRIu64 " failed=%" PRIu64 " excluded=%" PRIu64 " %s\n",
+               totals.dominator_forms, totals.dominator_checks, totals.dominator_failed, totals.left_out, passed ? "passed" : "FAILED");
     }
     if (graphs != 0)
     {
@@ -734,7 +733,7 @@ static int ir_source_tests_command(int count, char** arguments)
     }
     if (benchmark_dataflow)
     {
-        printf("ir-dataflow-benchmark: qualified=%u forms=%" PRIu64 " left_out=%" PRIu64 " vector_host=%u\n", passed, totals.dataflow_forms, totals.left_out, BUSTER_HOST_VECTOR);
+        printf("ir-dataflow-benchmark: qualified=%u forms=%" PRIu64 " left_out=%" PRIu64 "\n", passed, totals.dataflow_forms, totals.left_out);
     }
     if (counters.cycles >= 0)
     {

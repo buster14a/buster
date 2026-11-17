@@ -82,6 +82,12 @@ the guard spelled the same, and the walk must do what it did:
   directory rules out leaves the cache the same paths, each with a file or none
   and the same error, as a walk with listings off, on every lane count and
   before any unit runs; a unit of its root then opens no path through either;
+- asks (#2873): a walk whose first round fails ten probes under a subdirectory
+  its first search directory lacks asks that directory once, and its answer
+  rules out the second round's ten candidates there; the cache then holds the
+  same paths, each with a file or none and the same error, as a walk with the
+  asks off, on every lane count and before any unit runs, and a unit of its
+  root opens no path through either;
 - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
   probe mustn't block) and an active one names (an error, as alone), and a
   quoted name of 2,400 bytes in a directory of 2,539, three requests of which

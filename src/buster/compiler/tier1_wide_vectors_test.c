@@ -145,8 +145,8 @@ static const Tier1WideVectorFixture tier1_wide_vector_fixtures[] = {
                 "}\n",
     },
     {
-        // A frame object's: a 64-byte vector stored into it and loaded back, its first 32 bytes too, as the typed
-        // stream's union of a vector and its lanes is (host_scalar_vectors.h's HostV512).
+        // A frame object's: a 64-byte vector stored into it and loaded back, its first 32 bytes too, as a union of a
+        // vector and its lanes is.
         .name = "a frame object's wide vectors",
         .text = "function (ptr) -> void {\n"
                 "  slot $0 size=64 align=64 type=void flags=0x01\n"

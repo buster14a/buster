@@ -140,7 +140,8 @@ struct Arena
     uint64_t peak;
     // The bytes at its start that are base pages (arena_reserve_small's `small`, with the floor).
     uint64_t small;
-    // Whether its pages past `small` have been advised huge (arena_commit, as the first commit reaches them).
+    // Whether its pages past `small` have been advised huge: by arena_commit, as the first commit reaches them, or from
+    // its reservation, by the advice of the region it was taken from (arena_reservation_map).
     bool huge;
     // Owned mapping size and writable end, measured from base - mapping_offset. Zero mapping_bytes denotes borrowed
     // storage (including arena_measure); its owner has already made the bytes writable. Neither follows logical
@@ -397,6 +398,9 @@ struct ArenaLimits
 {
     bool fixed;
     uint64_t address_share;
+    // Whether the kernel charges no commit against a limit (arena_commit_unbounded), read with the share (#2873): then
+    // an arena commits more at a time (arena_commit), and a pool reads neither again.
+    bool commit_unbounded;
 };
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern ArenaLimits arena_limits;
@@ -450,6 +454,57 @@ ArenaSlots arena_slots;
 static ArenaSlots arena_slots;
 #endif
 
+// Reservations taken together (#2873). A compile reserves about 33 arenas, each by an mmap of its own: on the 9700X a
+// third of a small unit's 98 system calls for its arenas. Where the address space is unlimited (arena_limits, fixed by
+// the command), a reservation instead takes its mapping from one stretch of the address space mapped once,
+// inaccessible: 2 * BUSTER_ARENA_REGION_BYTES, whose upper half gives the mappings that take huge pages past their base
+// pages (advised MADV_HUGEPAGE whole, once, for every arena's: arena_reservation_map) and whose lower half those mapped
+// base pages throughout (MAP_STACK: arena_reservation_flags) and the tables' (arena_reserve_tables). The halves are
+// carved from the middle, upwards and downwards, so that what a process reserves is one span around it, as its own
+// mappings, which the kernel places one below the other, were: four regions of their own flags, each carved from its
+// start, put a small unit's arenas under seven of the kernel's third-level tables where they had been under three, and
+// every exit and unmap, which scan those, took about 24,000 cycles more. Both halves are MAP_NORESERVE, which changes
+// nothing where commit is charged (strict overcommit ignores it, and RLIMIT_DATA counts writable pages whatever their
+// flags), and elsewhere only spares a commit the kernel's refusal of one larger than its memory, as #1521 spared the
+// tables'. What a reservation gets is what its own mmap would have given it: inaccessible bytes, which its commits
+// make writable and its release unmaps (a hole, which the kernel may give to any later mapping) or its pool keeps. A
+// stretch the kernel refuses, or a half that is full, leaves each reservation to map its own, as do a finite RLIMIT_AS
+// (whose reservations take shares or grow in slots, #1118), a thread switched to compact reservations, a sanitizer's
+// build, which lays the address space out itself, and a pool that makes its arenas inaccessible again as it takes them
+// (bounded commit charge: an inaccessible part that was once written would join its neighbours, and a core dump walk
+// all of them).
+#define BUSTER_ARENA_REGIONS (!BUSTER_SANITIZER_RESOURCES)
+#define BUSTER_ARENA_REGION_BYTES (8ull << 40)
+// The stretch: its middle, 0 before the first reservation and BUSTER_ARENA_REGION_REFUSED once the kernel refused it,
+// and the bytes carved from each half, upwards (0) and downwards (1). Reservations on every thread carve, so all are
+// read and written atomically; main.c's units share them.
+typedef struct ArenaRegions ArenaRegions;
+struct ArenaRegions
+{
+    uintptr_t middle;
+    uint64_t carved[2];
+    // The releases that left their arena mapped (arena_release_keeps).
+    uint32_t kept;
+};
+#define BUSTER_ARENA_REGION_REFUSED ((uintptr_t)1)
+// A release without a pool unmaps its arena: a call that splits the stretch's mapping twice and frees the arena's pages
+// apart from the exit's, about 15,000 kernel cycles more than leaving them to the exit on the 9700X. A small unit
+// makes six. So the first BUSTER_ARENA_KEPT_COUNT releases of a process whose arena was taken from the stretch and
+// pushed no more than BUSTER_ARENA_KEPT_BYTES leave it mapped: the address space is not taken again either way, and
+// the pages, 32 MiB of them at the very most, are the exit's to free, with everything else. A larger arena's release
+// gives its pages back at once, as before, and so does every release after those: a process that reserves and
+// releases without end keeps no more. Where commit is charged (strict overcommit, a finite RLIMIT_DATA) every release
+// unmaps, as before, and returns its charge.
+#define BUSTER_ARENA_KEPT_BYTES (1ull << 20)
+#define BUSTER_ARENA_KEPT_COUNT 32
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern ArenaRegions arena_regions;
+#elif defined(BUSTER_UNIT)
+ArenaRegions arena_regions;
+#else
+static ArenaRegions arena_regions;
+#endif
+
 // The share of a finite RLIMIT_AS that one arena admits, or BUSTER_ARENA_MAX_CAPACITY.
 static uint64_t arena_address_share(void)
 {
@@ -487,7 +542,7 @@ static void arena_pool_limits(ArenaPool* pool)
     if (!pool->limits)
     {
         pool->address_share = arena_limits.fixed ? arena_limits.address_share : arena_address_share();
-        pool->keeps_commits = arena_commit_unbounded();
+        pool->keeps_commits = arena_limits.fixed ? arena_limits.commit_unbounded : arena_commit_unbounded();
         pool->limits = true;
     }
 }
@@ -497,6 +552,7 @@ static __attribute__((unused)) void arena_limits_fix(void)
     arena_limits = (ArenaLimits){
         .fixed = true,
         .address_share = arena_address_share(),
+        .commit_unbounded = arena_commit_unbounded(),
     };
 }
 
@@ -586,6 +642,67 @@ static int arena_reservation_flags(uint64_t capacity, uint64_t small, uint64_t m
     const uint64_t base_pages = capacity > small ? small : mapping_bytes;
     const bool advised = (arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES) || base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES;
     return MAP_PRIVATE | MAP_ANONYMOUS | (advised && arena_stack_base_pages ? MAP_STACK : 0);
+}
+
+// `bytes` of inaccessible address space for a reservation that would map them with `flags`: from the stretch above,
+// mapped at its first reservation (its lower half for MAP_STACK's and MAP_NORESERVE's mappings, its upper half for the
+// others), or else by an mmap of the reservation's own, whose failure is the result (MAP_FAILED, with errno). `pool`
+// is the reserving thread's, or null: its limits are read here if they haven't been, as its releases read them. *huge
+// is whether the bytes are advised huge pages already, as the upper half's are: an arena's base pages stay base pages
+// there as anywhere, by where they are (the 2 MB that hold them start in bytes that are never writable).
+static uint8_t* arena_reservation_map(uint64_t bytes, int flags, ArenaPool* pool, bool* huge)
+{
+    uint8_t* result = MAP_FAILED;
+    *huge = false;
+    if (pool != 0)
+    {
+        arena_pool_limits(pool);
+    }
+    const bool together = BUSTER_ARENA_REGIONS && arena_limits.fixed && arena_limits.address_share == BUSTER_ARENA_MAX_CAPACITY && !arena_compact &&
+                          (pool == 0 || pool->keeps_commits) && bytes <= BUSTER_ARENA_REGION_BYTES;
+    if (together)
+    {
+        const uint32_t down = (flags & (MAP_STACK | MAP_NORESERVE)) != 0 ? 1 : 0;
+        uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
+        if (middle == 0)
+        {
+            // The first reservation maps the stretch and its lower half over it; of two threads' at once, one keeps
+            // its own.
+            const int plain = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+            uint8_t* mapped = mmap(0, 2 * BUSTER_ARENA_REGION_BYTES, PROT_NONE, plain, -1, 0);
+            const bool halved = mapped != MAP_FAILED && mmap(mapped, BUSTER_ARENA_REGION_BYTES, PROT_NONE, plain | MAP_STACK | MAP_FIXED, -1, 0) == mapped;
+            if (halved)
+            {
+                madvise(mapped + BUSTER_ARENA_REGION_BYTES, BUSTER_ARENA_REGION_BYTES, MADV_HUGEPAGE);
+            }
+            const uintptr_t made = halved ? (uintptr_t)mapped + BUSTER_ARENA_REGION_BYTES : BUSTER_ARENA_REGION_REFUSED;
+            if (__atomic_compare_exchange_n(&arena_regions.middle, &middle, made, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            {
+                middle = made;
+            }
+            if (mapped != MAP_FAILED && middle != (uintptr_t)mapped + BUSTER_ARENA_REGION_BYTES)
+            {
+                munmap(mapped, 2 * BUSTER_ARENA_REGION_BYTES);
+            }
+        }
+        uint64_t carved = __atomic_load_n(&arena_regions.carved[down], __ATOMIC_RELAXED);
+        bool taken = false;
+        while (middle != BUSTER_ARENA_REGION_REFUSED && !taken && bytes <= BUSTER_ARENA_REGION_BYTES - carved)
+        {
+            taken = __atomic_compare_exchange_n(&arena_regions.carved[down], &carved, carved + bytes, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        }
+        if (taken)
+        {
+            result = down != 0 ? (uint8_t*)middle - carved - bytes : (uint8_t*)middle + carved;
+            *huge = down == 0;
+        }
+    }
+    if (result == MAP_FAILED)
+    {
+        errno = ENOMEM;
+        result = mmap(0, bytes, PROT_NONE, flags, -1, 0);
+    }
+    return result;
 }
 
 // A free slot of the growing arenas', claimed (1), or BUSTER_ARENA_SLOT_COUNT for none.
@@ -807,7 +924,8 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
         allowed = allowed && arena_test_reservation_allowed(arena_mapping_bytes(requested));
 #endif
         errno = ENOMEM;
-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, arena_reservation_flags(capacity, small, mapping_bytes), -1, 0) : MAP_FAILED;
+        bool advised_huge = false;
+        uint8_t* mapping = allowed ? arena_reservation_map(mapping_bytes, arena_reservation_flags(capacity, small, mapping_bytes), pool, &advised_huge) : MAP_FAILED;
         // Do not evade an injected failure. Valgrind may reject a valid oversized mapping with EINVAL rather than
         // ENOMEM. Both layout refusals get a bounded retry, never a greedy half-limit map.
         if (bounded && allowed && mapping == MAP_FAILED && (errno == ENOMEM || errno == EINVAL) && capacity > BUSTER_ARENA_COMPACT_BYTES)
@@ -815,7 +933,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
             arena_compact = true;
             capacity = BUSTER_ARENA_COMPACT_BYTES;
             mapping_bytes = arena_mapping_bytes(capacity);
-            mapping = mmap(0, mapping_bytes, PROT_NONE, arena_reservation_flags(capacity, small, mapping_bytes), -1, 0);
+            mapping = arena_reservation_map(mapping_bytes, arena_reservation_flags(capacity, small, mapping_bytes), pool, &advised_huge);
         }
         if (mapping != MAP_FAILED)
         {
@@ -843,6 +961,8 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
             result.capacity = capacity;
             result.mapping_offset = offset;
             result.small = small;
+            // Its region's advice is its own already, but a busy host's arena, advised base pages above.
+            result.huge = advised_huge && !arena_pages_busy;
             result.mapping_bytes = mapping_bytes;
             result.committed = offset & ~(BUSTER_ARENA_PAGE_BYTES - 1);
             result.requested_capacity = requested;
@@ -962,7 +1082,8 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
         // (arena_stack_base_pages: MAP_STACK) or else by advice.
         const bool advised = bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES;
         const int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (advised && arena_stack_base_pages ? MAP_STACK : 0);
-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, flags, -1, 0) : MAP_FAILED;
+        bool advised_huge = false;
+        uint8_t* mapping = allowed ? arena_reservation_map(mapping_bytes, flags, pool, &advised_huge) : MAP_FAILED;
         if (mapping != MAP_FAILED)
         {
             // The base, `phase` past a huge-page boundary, a page or more past the mapping's start (and so at most a huge
@@ -1143,6 +1264,17 @@ static Arena arena_measure(void)
     };
 }
 
+// Whether a release without a pool leaves `arena`, whose mapping starts at `mapping`, mapped (above).
+static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+{
+    const uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
+    const bool taken = BUSTER_ARENA_REGIONS && middle > BUSTER_ARENA_REGION_REFUSED && (uintptr_t)mapping >= middle - BUSTER_ARENA_REGION_BYTES &&
+                       (uintptr_t)mapping < middle + BUSTER_ARENA_REGION_BYTES;
+    // Not where commit is charged: an arena left mapped would keep its charge until the exit (#1521).
+    const bool small = taken && arena_limits.fixed && arena_limits.commit_unbounded && !arena->unaccounted && arena->peak <= BUSTER_ARENA_KEPT_BYTES;
+    return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
+}
+
 static void arena_release(Arena* arena)
 {
     if (arena->base != 0 && arena->grows)
@@ -1204,7 +1336,7 @@ static void arena_release(Arena* arena)
                 .layout = arena->layout,
             };
         }
-        else
+        else if (!arena_release_keeps(arena, mapping))
         {
             munmap(mapping, bytes);
         }
@@ -1256,8 +1388,25 @@ static void arena_unaccounted(Arena* arena, uint64_t at)
     arena->capacity = room < arena->capacity ? room : arena->capacity;
 }
 
+// The most of an arena's base pages that its first commit makes writable at once where commit charge is unbounded, and
+// the factor its later commits grow by there (arena_commit).
+#define BUSTER_ARENA_COMMIT_BYTES (16ull << 20)
+#define BUSTER_ARENA_COMMIT_GROWTH 4
+
 // Cold path: amortize protection changes geometrically, keeping tiny arenas in base pages and the huge-page region
 // aligned. The descriptor is published only after mprotect succeeds: a failed push changes neither length nor peak.
+//
+// How much a commit takes past what its push needs is a matter of system calls alone where the kernel charges no
+// commit (arena_limits.commit_unbounded, #2873): writable pages that are never written cost nothing, and each
+// mprotect about 6,000 kernel cycles on the 9700X. There the first commit takes all of the arena's base pages, up to
+// BUSTER_ARENA_COMMIT_BYTES (an arena of a few megabytes of base pages committed 64 KB, then a page, then doubled: six
+// calls for 800 KB), and later ones BUSTER_ARENA_COMMIT_GROWTH times what is committed. A core dump walks a written
+// mapping whole, so what is committed stays a small multiple of what is used. Where commit is charged (strict
+// overcommit, a finite RLIMIT_DATA) or the limits aren't fixed, a commit takes 64 KB at first and then doubles, as
+// before, so that the charge stays within twice the use (#1521). So it does on a thread with a pool: the pool keeps
+// what its arenas committed, so their commits are few already (0.15 a unit of musl's as one command), and its
+// releases discard each arena's pages, which frees the page tables of every whole 2 MB they cover: with larger commits
+// each unit built them again, 37,000 kernel cycles a unit.
 static bool arena_commit(Arena* arena, uint64_t end)
 {
     const uint64_t offset = arena->mapping_offset;
@@ -1271,7 +1420,11 @@ static bool arena_commit(Arena* arena, uint64_t end)
     else if (arena->mapping_bytes != 0 && needed > committed)
     {
         const uint64_t used = committed > offset ? committed - offset : 0;
-        uint64_t grown = used > BUSTER_ARENA_SMALL_BYTES ? used * 2 : BUSTER_ARENA_SMALL_BYTES;
+        const bool unbounded = arena_limits.fixed && arena_limits.commit_unbounded && arena_pool == 0;
+        const uint64_t base_pages = arena->small < BUSTER_ARENA_COMMIT_BYTES ? arena->small : BUSTER_ARENA_COMMIT_BYTES;
+        const uint64_t charged = used > BUSTER_ARENA_SMALL_BYTES ? used * 2 : BUSTER_ARENA_SMALL_BYTES;
+        const uint64_t free = used < base_pages ? base_pages : used * BUSTER_ARENA_COMMIT_GROWTH;
+        uint64_t grown = unbounded ? free : charged;
         grown = grown > end ? grown : end;
         grown = grown < arena->capacity ? grown : arena->capacity;
         uint64_t target = (offset + grown + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);

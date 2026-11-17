@@ -1933,22 +1933,14 @@ static bool ir_function_has_vectors_path(const IrFunction* function, bool vector
 
 static __attribute__((unused)) bool ir_function_has_vectors(const IrFunction* function)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_function_has_vectors_path(function, false);
-#else
     return ir_function_has_vectors_path(function, true);
-#endif
 }
 
 static __attribute__((unused)) bool ir_function_has_simd_scalar(const IrFunction* function);
 
 static __attribute__((unused)) bool ir_function_has_simd(const IrFunction* function)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_function_has_simd_scalar(function);
-#else
     return ir_function_has_simd_path(function, true);
-#endif
 }
 
 static __attribute__((unused)) bool ir_function_has_simd_scalar(const IrFunction* function)
@@ -3610,11 +3602,7 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFun
 
 static IrCheck ir_verify(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_verify_scalar(f, scratch, dominance);
-#else
     return ir_verify_path(f, scratch, dominance, true);
-#endif
 }
 
 static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDominance* dominance)

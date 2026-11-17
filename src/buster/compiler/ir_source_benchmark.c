@@ -471,7 +471,7 @@ static bool ir_source_functions(const IrSourceCorpus* corpus, Arena* output, Are
 }
 
 // The correctness command shares corpus preparation and the measured paths, but opens no counters and reports no
-// timings. It is available on scalar host builds too: target-feature handoffs must be checked on every CI host.
+// timings: target-feature handoffs must be checked on every CI host.
 static int ir_source_benchmark_command(int count, char** arguments, bool testing)
 {
     uint32_t only = BUSTER_IR_SOURCE_VARIANTS;

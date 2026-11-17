@@ -2137,7 +2137,7 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
         memset(shared->out, 0xa5, sizeof(shared->out));
         memset(shared->results, 0xa5, sizeof(shared->results));
         // The C helpers' wide-vector calling convention also requires a vector host build.
-        const bool ran = length != 0 && BUSTER_HOST_VECTOR && tier0_test_vector_can_run() &&
+        const bool ran = length != 0 && tier0_test_vector_can_run() &&
                          tier0_test_expect(tally, tier0_test_vector_native(image, length, run, shared), "vectors", "%s: the native run failed", name);
         uint8_t expected[64];
         memset(expected, 0xa5, sizeof(expected));
@@ -2594,10 +2594,6 @@ static void tier0_test_vectors(Tier0TestTally* tally, Tier0Tables* tables, uint6
         if (!tier0_test_vector_can_run())
         {
             printf("  vectors: native execution skipped (required CPU features or OS save state unavailable); encoding and interpreter checks run\n");
-        }
-        else if (!BUSTER_HOST_VECTOR)
-        {
-            printf("  vectors: native wide-vector ABI calls skipped (scalar host build); other native runs execute\n");
         }
         tier0_test_vector_baselines(tally, shared, seed);
         tier0_test_vector_rules(tally);

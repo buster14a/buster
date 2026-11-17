@@ -128,7 +128,7 @@ static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bo
     const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the ties' fixture is valid IR");
     IrDominance dominance;
-    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;

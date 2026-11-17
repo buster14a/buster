@@ -192,9 +192,6 @@ static void parse_tokens_from_output_scalar(const PPTokens* output, ParseTokens*
 // pragmas, with the padding on both sides.
 static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
 {
-#if !BUSTER_HOST_VECTOR
-    parse_tokens_from_output_scalar(output, tokens);
-#else
     const __m512i table0 = _mm512_load_si512(parse_kind_table);
     const __m512i table1 = _mm512_load_si512(parse_kind_table + 64);
     const __m512i table2 = _mm512_load_si512(parse_kind_table + 128);
@@ -239,7 +236,6 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
     }
     tokens->count = written;
     parse_tokens_pad(tokens);
-#endif
 }
 
 static const char* const parse_role_names[PARSE_ROLE_COUNT] =
@@ -8839,9 +8835,6 @@ static void parse_classify_mask_avx512(ParseKernels* kernels, const uint8_t* kin
 // the twin's stack), and the depth of their groups is a prefix sum of their deltas, added to each token's depth.
 static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32_t* secondary)
 {
-#if !BUSTER_HOST_VECTOR
-    parse_secondary_scalar(kernels, count, secondary);
-#else
     uint32_t open = 0;
     for (uint32_t block = 0; block < count; block += 64)
     {
@@ -8926,7 +8919,6 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
         const __m512i last = _mm512_permutexvar_epi8(_mm512_set1_epi8((char)(live - 1)), after);
         inner += (uint32_t)(int32_t)(int8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(last));
     }
-#endif
 }
 
 // parse_after_colons over the `{` tokens after a resolved colon only.
@@ -10981,7 +10973,6 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
     {
         uint64_t places = 0;
         const uint32_t length = count - first < 64 ? count - first : 64;
-#if BUSTER_HOST_VECTOR
         if (!BUSTER_SCALAR_PATH(parser->options.scalar))
         {
             const __mmask64 live = _bzhi_u64(~UINT64_C(0), length);
@@ -11001,7 +10992,6 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             places = live & number & (name | (comma & past));
         }
         else
-#endif
         {
             for (uint32_t i = 0; i < length; i += 1)
             {

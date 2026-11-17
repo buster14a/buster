@@ -598,10 +598,12 @@ static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t l
 // into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
 // MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
 // arenas, says why it fails). A path whose first `directory_length` bytes are a directory the search looks in, followed
-// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent):
-// a path the listing rules out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
+// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent),
+// or by what the directory answered about the path's first component (file_cache_component_absent): a path either rules
+// out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
 // `*known` (if `known` isn't null) caches the directory's FileCacheDirectory for its caller: a search directory's.
-// Until some directory has a listing, only a failed probe looks its directory up. One lane at a time.
+// Until some directory has a listing or lacks a component it was asked for, only a failed probe looks its directory up.
+// One lane at a time.
 static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, uint32_t directory_length, FileCacheDirectory** known,
                                        FileCacheCounts* counts, int* error)
 {
@@ -612,16 +614,17 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
     {
         const bool in_directory = file_cache_in_directory(path, length, directory_length);
         FileCacheDirectory* directory = known != 0 ? *known : 0;
-        directory = directory == 0 && in_directory && cache->listed_directories != 0 ? file_cache_directory(cache, path, directory_length) : directory;
+        const bool answers = cache->listed_directories != 0 || cache->absent_components != 0;
+        directory = directory == 0 && in_directory && answers ? file_cache_directory(cache, path, directory_length) : directory;
         FileProbe probe = { .record = BUSTER_PP_NONE, .error = ENOENT };
-        const bool absent = directory != 0 && file_cache_listed_absent(directory, path, length);
+        const bool absent = directory != 0 && (file_cache_listed_absent(directory, path, length) || file_cache_component_absent(directory, path, length));
         counts->listed += absent;
         if (!absent)
         {
             Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
             file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
             directory = directory == 0 && in_directory && probe.error == ENOENT ? file_cache_directory(cache, path, directory_length) : directory;
-            file_cache_count_miss(cache, directory, &probe, counts);
+            file_cache_count_miss(cache, directory, path, length, &probe, counts);
         }
         if (known != 0 && directory != 0)
         {
@@ -1374,9 +1377,6 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
 
 static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
 {
-#if !BUSTER_HOST_VECTOR
-    pp_scan_body_scalar(kinds, values, begin, end, pastes, hashes, va_opt);
-#else
     uint64_t found_pastes = 0;
     uint64_t found_hashes = 0;
     uint64_t found_va_opt = 0;
@@ -1398,7 +1398,6 @@ static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, ui
     *pastes = found_pastes != 0;
     *hashes = found_hashes != 0;
     *va_opt = found_va_opt != 0;
-#endif
 }
 
 // pp_scan_body_vector's scalar twin.
@@ -3040,9 +3039,6 @@ static inline __attribute__((always_inline)) bool pp_append_stack_tokens(Preproc
 
 static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_copy_file_run_scalar(pp, data, base, position, limit);
-#else
     PPTokens* target = pp_target(pp);
     uint32_t p = position;
     bool stopped = false;
@@ -3072,7 +3068,6 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
         p += take;
     }
     return p;
-#endif
 }
 
 // pp_copy_file_run_vector for a file's text read straight into the output (pp_step_file's `text`), which doesn't stop at
@@ -3183,9 +3178,6 @@ static uint32_t pp_copy_file_run_scalar(Preprocessor* pp, const PPFileData* data
 
 static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* tokens, uint32_t position, uint32_t end)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_copy_buffer_run_scalar(pp, tokens, position, end);
-#else
     PPTokens* target = pp_target(pp);
     uint32_t p = position;
     bool stopped = false;
@@ -3231,7 +3223,6 @@ static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* toke
         p += take;
     }
     return p;
-#endif
 }
 
 static uint32_t pp_copy_buffer_run_scalar(Preprocessor* pp, const PPTokens* tokens, uint32_t position, uint32_t end)
@@ -14816,11 +14807,7 @@ static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t
 
 static __attribute__((unused)) void pp_resolve_keywords_vector(Preprocessor* pp)
 {
-#if !BUSTER_HOST_VECTOR
-    pp_resolve_keywords_scalar(pp);
-#else
     pp_resolve_keywords_range(pp, 0, pp->output.count);
-#endif
 }
 
 static void pp_resolve_keywords_scalar(Preprocessor* pp)
@@ -14838,9 +14825,6 @@ static void pp_resolve_keywords_scalar(Preprocessor* pp)
 // The output's keywords their kinds: the tokens the vectorized kernels' chunks left (pp_run_contexts), or all of them.
 static void pp_resolve_keywords(Preprocessor* pp)
 {
-#if !BUSTER_HOST_VECTOR
-    pp_resolve_keywords_scalar(pp);
-#else
     if (BUSTER_VECTOR_PATH(pp->vectorized))
     {
         pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
@@ -14850,7 +14834,6 @@ static void pp_resolve_keywords(Preprocessor* pp)
     {
         pp_resolve_keywords_scalar(pp);
     }
-#endif
 }
 
 // The characters that can join a punctuator before them into a longer one, or start a comment after '/'.
@@ -15292,9 +15275,6 @@ static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp,
 
 static uint64_t pp_embed_text_vector(const uint8_t* bytes, uint64_t count, bool separated, uint8_t* out)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_embed_text_scalar(bytes, count, separated, out);
-#else
     // Slot j of 8: the separator (quarter 3's ", "), byte j's hundreds, tens and ones (quarters 0 to 2), and zeros.
     static const uint8_t slots[2][64] __attribute__((aligned(64))) = {
         {
@@ -15339,7 +15319,6 @@ static uint64_t pp_embed_text_vector(const uint8_t* bytes, uint64_t count, bool 
         used += (uint64_t)__builtin_popcountll(high_kept);
     }
     return used;
-#endif
 }
 
 // pp_embed_text_vector's scalar twin, a byte at a time.
@@ -16389,20 +16368,12 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
 
 static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_print_scalar(pp, stream, markers);
-#else
     return markers ? pp_print_vector_mode(pp, stream, true) : pp_print_vector_mode(pp, stream, false);
-#endif
 }
 
 BUSTER_PREPROCESSOR_ENTRY bool pp_print(Preprocessor* pp, FILE* stream, bool markers)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_print_scalar(pp, stream, markers);
-#else
     return BUSTER_VECTOR_PATH(pp->vectorized) ? pp_print_vector(pp, stream, markers) : pp_print_scalar(pp, stream, markers);
-#endif
 }
 
 BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)

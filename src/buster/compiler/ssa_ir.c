@@ -1005,11 +1005,7 @@ static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Are
 
 static IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ssa_ir_promote_scalar(input, output, scratch, result);
-#else
     return ssa_ir_promote_path(input, output, scratch, result, true, 0, false);
-#endif
 }
 
 static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)

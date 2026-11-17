@@ -355,7 +355,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests|--front-own-tests] [--front-tests-last] [--front-facts] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -810,30 +810,21 @@ takes its entries.
     nodes-whose-value-is-not-the-action's=0 nodes-whose-action-warns=0`): a
     row or a rule knows no warning, so the action must give none where one
     typed the node. A value that differs fails the command.
-- `--front-own-tests` runs the same tests in **the machine's own form**
-  (`node_tests_expression`; `PPOptions.node_reader`'s bit 4): one loop over
-  T's records, the unit's tables by operator (`node_tests_tables`), three
-  lists of records, and the census's code only on the records a silence test
-  may refuse. [The design](../node-machine.md#the-tests-in-the-machines-own-form)
-  has what it measured.
-  - **It asks nothing that is decided before it runs:** what T refuses (a
-    pragma's region, a callee without a prototype, an overload set's leaf)
-    and what the front leaves to the walk (sizeof, `_Alignof`, a compound
-    literal). The design's table has each with what decides it.
-  - **With `--verify` the census's code runs beside it** on every expression
-    (bit 8): a bit, a span of tokens or a count of nodes that differs is
-    listed (`node-tests: difference`, with `--list N`) and fails the command.
-  - **The report** (`node-shadow: own tests`): the records the loop listed
-    (leaves, the tree's, operators, and of those the calls and the ones with
-    a constant or a third operand), the records sent to the census's code by
-    what sent them, the expressions walked, and the differences.
-  - **`--front-tests-last`** (bit 16) runs either form after C and X in the
+  - **`--front-tests-last`** (bit 16) runs the tests after C and X in the
     timed run, on the expressions those take.
 - `--front-facts` runs **the fact words' kernel where the machine sits**
   (`PPOptions.node_reader`'s bit 32, with `--front-types`' and
   `--front-lean`'s bits): #2850's kernel on each expression T takes at reader
   time, its windows' inputs made from the lean front's records.
   [Its section](#the-kernel-where-the-machine-sits-2850s-step-2) has it.
+- `--front-window` has **the lean front write the kernel's window** as it
+  makes each record, and the kernel read it where it is written
+  (`PPOptions.node_reader`'s bit 64, with `--front-facts`' bits).
+  [Its section](#the-front-writes-the-window-2850) has it.
+- `--window-tests` runs the tests in **the machine's own form, on that
+  window** (`PPOptions.node_reader`'s bit 128, with `--front-window`'s and
+  `--front-tests`' bits): their loop 64 records a step over the records the
+  kernel has just made. [Its section](#the-tests-on-the-window-2850) has it.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -897,11 +888,12 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's seven fixtures run again with its tests at reader time, in both
-forms (`node_tests_test_fixture`: `--front-tests` with `--verify`, then
-`--front-own-tests` with the census's code beside it, whose bits, spans and
-counts must be its; after the walk,
-before it, and lean): no expression taken there is one the census refuses, no
+The census's seven fixtures run again with its tests at reader time
+(`node_tests_test_fixture`: `--front-tests` with `--verify`, then the same
+with the lean front's window and `--window-tests`, the machine's own form
+beside the census's code, whose bits, root's kinds and spans must be its;
+after the walk, before it, and lean): no expression taken there is one the
+census refuses, no
 test differs, every root the tests ran on is compared, T's rows and rules are
 the action's without a warning, each fixture's count of expressions a test
 refuses there is exact, and so is its count of declarations' discards left
@@ -911,9 +903,13 @@ a constant, a call's argument whose conversion does, two members of one
 record written in one expression, and a body with a diagnostic pragma. For
 the own form: the seventh fixture, whose lines the own form's conditions
 decide where every warning would send them to the census's code, and a `for`
-statement in the first (its clauses under `-Wfor-loop-analysis`). Each of the
-91 faults that can be put into the own form fails this part of
-`test-checker`.
+statement in the first (its clauses under `-Wfor-loop-analysis`). For its
+loop on the window: the seventh's last function (a name's leaf without a
+line, a register object's member, an ordering under a bitwise operator, an
+operator listed for an address constant the record doesn't hold whole, and
+four expressions of some 140 records, whose operands are further back than
+the block before), and each fixture's counts of what the loop lists and
+sends (`NodeTestsWindowed`), which no verdict shows.
 The fact words' kernel runs at reader time on the fixture twice
 (`node_shadow_test_kernel`: after T alone, and in the `--scalar` run with the
 census's tests and C and X beside it) and on the two generated texts: no
@@ -938,6 +934,54 @@ the kernel needs there has a line each:
 - a third generated text, one body of 16,500 statements `x += 1;`
   (`node_facts_test_reader_lines`): more literals than a batch's lines hold,
   so each has a line only if a batch's lines are taken away with it.
+
+Where the front writes the window (`BUSTER_NODE_READER_WINDOW`) the same
+texts run again: the fixture after T alone and with the census's tests and C
+and X beside it, the two generated texts, and the 16,500 literals. No input
+the front wrote differs from either other making's; the kernel in place makes
+the records it makes of the batch, each of them T's; the names' pass's scalar
+path gives every leaf the same kind and line; and the same front without the
+window makes the same records of every chunk. The rows kept at the chunks'
+ends give the expressions the copy alone lost: none of the fixture's is cut,
+and of the chunk-boundary text's five the window gives all and the copy four
+(the sum whose operand is past a byte's distance stays the other making's for
+the copy; the window's distances are whole). Four more generated texts are
+the window's own, each with its counts of values kept whole, of their
+records and of values cut pinned:
+
+- `node_facts_test_window_room`: an initializer of 3,000 sums, whose values
+  wait for the list's end and leave the arrays room for the first few rows
+  alone, then 7,280 statements of seven kinds in turn, each with a sum of
+  five terms (nine records) as one operand of what follows it: an if
+  statement's condition, an operator's first and second operand, a
+  conditional's three, a call's argument. The seven's tokens are 115, an odd
+  count, so the chunks' ends, every 1,024 tokens, fall at each of the 115
+  places in turn. The room left is a few records, by how many of the
+  statement's values wait, and never nine: a whole sum that waits at an end
+  keeps its place alone and is cut, with every record made above it. 64
+  expressions are neither the window's nor the copy's, and nothing resets
+  the stack;
+- `node_facts_test_window_wait`: an if statement's condition, a call of two
+  calls with a sum of a literal among their arguments, that waits through
+  six chunks' ends. Its ten records are moved once and then kept where they
+  are, with its literal's line and its calls' arguments, and the calls made
+  meanwhile take the arguments' places after theirs. What it is moved over
+  and what is made after it show a column, a line or an argument that did
+  not move: twelve long's literals where its leaves go, fifteen arguments
+  before its own in the list, and in the body sixty literals' lines in a
+  row, over its `1`'s first number. Three more lines before it are for the
+  writers: a call whose first argument asks a later round than its last, an
+  imaginary literal (no line's leaf), and `__extension__` over a sum (an
+  operator the kernel makes no record of);
+- `node_facts_test_window_calls`: an initializer of 2,000 calls of three
+  arguments. A cut call's arguments are not kept, or the list would pass
+  its room at the 1,366th waiting call; the most it held is read;
+- `node_facts_test_window_again`: a sum of 599 records waits as a call's
+  first argument while a compound literal's 2,300 elements wait above it.
+  It is kept whole at four ends and cut at the fifth; the literal's end then
+  frees the room, and at the next end the sum stays cut, its records being
+  gone.
+
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.
 
 ### The fact words (#2850's step 1)
@@ -1212,7 +1256,7 @@ rows: before queueing a change to the census or to a reader, build with
 
 ### The kernel where the machine sits (#2850's step 2)
 
-`./build/compiler measure-node-machine --shadow --front-facts [--front-tests|--front-own-tests] [--verify] [--passes 0] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow --front-facts [--front-tests] [--verify] [--passes 0] [--list N] [preprocessor options] file...`
 is step 2's third piece of [the one-core path](../one-core-path.md): the fact
 words' kernel with the operators' ([above](#the-fact-words-2850s-step-1)) run
 at reader time, after T types a chunk's roots there, on windows whose inputs
@@ -1258,7 +1302,7 @@ hook is in `node_machine_reader_chunk`, after the tests and C and X.
   batch's windows and T again on its expressions, the kernel first in every
   other batch. With `--verify` T isn't run again for its time: it checks
   itself against the action there, which counts what the action warns of.
-- **With `--front-tests` or `--front-own-tests`** the report adds the share
+- **With `--front-tests`** the report adds the share
   of the records the kernel makes in the expressions the whole machine takes
   at reader time (T, the tests, C and X), which is the set nearest to the
   kernel's windows after the pipeline.
@@ -1293,3 +1337,171 @@ token's query type (the walk's action at a return has copied it there). The
 record's campaign has the three runs and what each changed. [The
 design](../one-core-path.md#step-2s-third-piece-the-kernel-where-the-machine-sits)
 has what it measured.
+
+### The front writes the window (#2850)
+
+`./build/compiler measure-node-machine --shadow --front-window [--front-tests] [--front-warm] [--verify] [--passes 0] [--list N] [preprocessor options] file...`
+is the first part of step 3 of [the one-core path](../one-core-path.md): the
+lean front writes each record's inputs of the fact words' kernel as it makes
+the record, and the kernel reads them in the front's arrays. It implies
+`--front-facts`, whose batch and copy run beside it as its twins. No compile
+takes any of it, and on a host without the vector paths, where no front runs,
+it runs nothing. The front's part is in `c_check_node_machine_front.c` (the
+columns and the chunk's end); the writers, the names' pass and the kernel's
+runs in place are the last part of `c_check_node_machine_facts.c`.
+
+- **The columns** (`NodeFront.window_kinds`, `window_classes`, `window_left`,
+  `window_right`, `window_counts`, `window_entries`, `window_positions`, and
+  the calls' `window_arguments`) are the kernel's `NodeFactsInputs`, one of
+  each a record of the front's. `node_front_chunk_window` is the lean
+  front's pass with the writers' calls (`node_front_chunk_by`'s `window`):
+  without the option the lean front is the code it was.
+- **The writers.** `node_facts_window_leaf`: a literal's line is written at
+  its record's number (`record + 1`; a batch's first
+  `BUSTER_NODE_FRONT_RECORDS` lines are the front's records'), and a name
+  gets its declaration and a prefetch of its line's number; a float and a
+  string go through `node_facts_window_rare_leaf`.
+  `node_facts_window_operator`: the kind and code by the operator
+  (`window_op_kinds`, `window_op_codes`), the class from the operands'
+  classes, the distances whole, the entry. `node_facts_window_call`: the
+  arguments' distances, appended to the front's list.
+- **The names' pass** (`node_facts_window_names`, after each chunk's pass)
+  is three sweeps over the chunk's records: the names' places by a compare
+  and a compress of sixteen kinds a step; a prefetch of each one's line; the
+  read, where a first use makes the line and an enumerator past 64 bits makes
+  the leaf T's. Its scalar path runs on a copy of the kinds and entries, and
+  the two are compared.
+- **A chunk's end** (`node_front_keep`): a waiting value keeps its records as
+  a row where they fit in what a record a waiting value and a chunk's
+  records leave of the arrays (`spare`). A row already in place is not
+  moved. `node_facts_window_kept` moves a kept literal's line to its
+  record's new number and a kept call's arguments to the list's start. A
+  value without room keeps its place alone and takes the class
+  `BUSTER_NODE_FACTS_CLASS_CUT`, which every record made above it takes from
+  it; it is cut for good, and its calls' arguments are not kept. The list
+  then holds no more arguments than the arrays hold records, which is its
+  room.
+- **The kernel in place** (`node_facts_window_run`, from
+  `node_facts_reader_flush`): the batch's inputs, T's expected records and
+  the windows' bounds are exchanged for the front's arrays and one window of
+  the records the front holds. The kernel runs over poison with every record
+  of the taken expressions compared with T's and the lists with their
+  twin's, over decoys, and once more for its time. The records of the
+  expressions T didn't take read as given (`NodeFactsReader.place_kinds`).
+- **Its twins.** `node_facts_window_expression` compares each record's
+  inputs with those made from T's columns and, where the copy gives the
+  expression, with the copy's (`node_facts_window_same`: a leaf's line by
+  its number or its 32 bytes, a call's arguments one by one, a root's
+  operand by its place). An expression with a cut record is counted and not
+  read in place.
+- **The front without the window** (`node_front_chunk_windowed`): a second
+  lean front runs on the same chunks, first or second by the chunk's
+  parity. Its ticks are what the window's are read against, and its records
+  and waiting values must be the window front's.
+
+The report adds six `node-shadow: reader-time fact words` lines:
+
+- `windows the front wrote`: the expressions and records read in place, the
+  inputs' `differences` from either twin's, and the
+  `expressions-not-there-in-a-row`;
+- `the kernel in place`: the records to make, made and left, the
+  `differences` from T's records, and its ticks;
+- `the front with the window`: its ticks and records, `the same front
+  without it` on the same chunks with the `chunks-that-differ`, and `the
+  rise`;
+- `the names' pass`: the names, its ticks, of which `the declarations' lines
+  it made`, `the rest`, and the `leaves-its-scalar-path-gives-otherwise`;
+- `chunks' ends`: the waiting values `kept whole` with their records, those
+  `kept as their place alone, cut`, and the most `the calls' arguments'
+  list` held at an end, beside its room;
+- `ticks a record of the windows`: the kernel in place, the names' pass less
+  the lines it made, the front's rise, and their sum, which the piece's gate
+  reads.
+
+`--list N` prints the first N differences (`a record's inputs as the front
+wrote them`, `a record the kernel made of the front's window in place`) and
+the first N expressions `not given by the front's window`, with why. The
+command exits 1 on a difference of the inputs, of the kernel's records in
+place, of the two fronts' records or of the names' two paths, and where the
+calls' arguments' list held more than its room.
+
+`test-checker` runs it on the fixture, on the three generated texts and on
+four of its own, as "The shadow" above has. Each of the 122 faults put into
+this part one at a time fails those tests. The record's campaign has the
+three runs and what the first two changed: a cut call's arguments, which a
+chunk's end kept and the list had no room for; three tests no text can
+fail, removed; and the four texts above, made so that each operand's cut, a
+kept leaf's columns, a kept line and a kept call's arguments show. [The
+design](../one-core-path.md#the-front-writes-the-window) has what it
+measured.
+
+### The tests on the window (#2850)
+
+`./build/compiler measure-node-machine --shadow --window-tests [--verify] [--passes 0] [--list N] [preprocessor options] file...`
+is the next part of step 2 of [the one-core path](../one-core-path.md): the
+set's and the silence tests in the machine's own form, made from the window
+the front wrote once the kernel has made a chunk's records in place. It
+implies `--front-window` and `--front-tests`, whose verdict (the census's
+code on T's records) is its reference. No compile takes any of it. The code
+is the last part of the tests in `c_check_node_census.c`
+(`node_tests_window_chunk` and what it calls), behind a hook after the
+kernel's run in place (`node_facts_window_run`).
+
+- **One form.** `node_tests_expression` has no loop of its own over T's
+  records and no leaves' pass: it takes what the window's loop made of the
+  expression (`NodeTestsLoop`). `--front-own-tests` and its mode bits are
+  gone.
+- **A type's bits ride in its word.** `node_machine_make_word` puts the six
+  bits the tests ask of a value's type at every record in the type's word
+  (`BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT`: a type the machine has no kind
+  for, a struct or union, an enumeration, a pointer, a pointer whose pointee
+  may be void, an array). A record has its type's word whichever path wrote
+  it.
+- **The records' bytes** (`node_tests_window_bytes`), sixteen records a
+  step: four gathers from the kernel's 64-byte records (the word, the flags,
+  the object, the standing), one of a name's declaration's line's byte
+  (`NodeCensusReader.line_bytes`, which the census's code makes at the
+  line's first leaf), and one of the token's role. Three byte columns come
+  out: the type's byte, the value's (a constant a test may read, a
+  bit-field, a declaration the tests refuse) and the role.
+- **The loop** (`node_tests_window_loop`), 64 records a step. Each of the
+  five tables by operator is one byte permute of two registers. An operand's
+  byte comes by its distance, from this block's bytes and the block
+  before's, one permute a side; an operand further back is read by a load,
+  and counted. It writes what each record is as an operand, its operands'
+  bytes together, its part of the set's tests, and three masks a block: the
+  records with a tree's test, the operators with tests of their own, the
+  writes.
+- **An expression's part** (`node_tests_window_chunk`'s first sweep). The
+  set is an OR of its records' bytes. Its lists are the masks' words aligned
+  at its first record (`node_tests_window_word`), its root's bit last. Its
+  tokens' span is a masked minimum and maximum.
+- **The tests that read T's records still** (the tree's, the operators', the
+  expression's own, and the census's code for a record sent to it) run in a
+  second sweep, each expression's after T has made its records again. A
+  third sweep runs T alone on the same expressions, and its ticks are taken
+  off the second's.
+- **The comparison:** each expression's bits, its root's kind and its
+  tokens' span, against what the census's code gave at reader time.
+
+The report adds:
+
+- `node-shadow: window tests expressions=N records=N differences=0
+  operands-before-the-block-before=N lines'-bytes-made=N records-swept=N
+  roots-apart-from-their-operand=N`;
+- `node-shadow: window tests ticks=N (N a record)`, then by sweep: `the
+  records' bytes`, `the loop`, `an expression's part`, `the tests on T's
+  records`, and `T again for them, not counted`;
+- `node-shadow: own tests`: the expressions with a record sent to the
+  census's code, the records sent and the walks; what the loop listed (the
+  tree's records, the operators, and of those the calls and the ones with a
+  constant or a third operand); and the records sent, by what sent them.
+
+`--list N` lists the first differences (`node-tests: window difference`),
+and a difference fails the command.
+
+`test-checker` runs it on the census's seven fixtures, as "The shadow" above
+has, and on the window's test of values without room at a chunk's end: the
+tests run on the 8,259 expressions the kernel makes in place there, and on
+none of the 64 that the ends cut. [The
+design](../node-machine.md#the-tests-on-the-window) has what it measured.

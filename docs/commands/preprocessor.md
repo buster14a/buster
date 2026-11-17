@@ -170,6 +170,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
   ASCII never listed, one of 64 names put off by its first look and listed at its 256th, and every path, file and
   error the same as with listings off;
+  the search directories' answers about a subdirectory (`pp_test_directory_asks`, #2873): a directory asked for a
+  path's first component at the component's third failed probe there, once, and the opens its answer saves; what it
+  can't rule out still opened (a component the directory has, a regular file by its name, another spelling, a name
+  it begins with, `.` and `..`, a component past `NAME_MAX`); a dangling link and a name past ASCII asked as any other, and a name without a
+  `/` never; a cache another unit shares; a listed directory asked nothing; and every path, file and error the same
+  as with the asks off, whose unit opens exactly the candidates the answers spared;
   with no descriptor left after a listing (`pp_test_listing_descriptors`), a ruled-out name's ENOENT and the next
   directory's EMFILE, reported there, against the first directory's EMFILE without listings, and the answers a unit
   sharing the cache then gets;
@@ -499,8 +505,9 @@ must all give the same output. `--listing-misses` does the same for the failed
 probes after which a search directory's names are first looked at (32 by default; 0 never
 reads them: `docs/c-files.md`, "Search directories' listings"), each with each
 read limit, so that one executable compares listings on and off, in turns.
-The probe counts then also give the directories listed and the opens their
-listings saved.
+The probe counts then also give the directories listed, the directories asked
+for a subdirectory (`docs/c-files.md`, "A search directory asked for a
+subdirectory") and the opens they saved.
 `--clang` also times `clang -E -P` with the same options, a process per file, with `--buster-headers` translated to ours' search and every argument passed (`pp_clang_preprocess`). A failed clang run fails the benchmark and reports no timing.
 Our predefines follow the target options as clang's do; `--predefines FILE`
 still replaces them (the benchmark leaves it out of clang's command line). The
@@ -557,17 +564,12 @@ after a warm-up: medians per input byte, and the text's throughput. The two
 texts must be the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
 the 9700X's numbers.
 
-## Scalar-host preparation (#1369)
+## Preparation's request (#1369)
 
-Production preparation chooses vector kernels only when the host build supports
-BUSTER_HOST_VECTOR and the caller has not requested scalar execution. This also
-selects whole-file scalar refinement instead of emulated 512-bit chunk/window
-refinement on baseline hosts. Shared file caches inherit the same preparation
-policy. Explicit low-level window tests still exercise both kernel protocols on
-baseline hosts; the scalar-reference and window-unit fixtures check the default
-host/option policy before those test-only overrides.
-
-This bounded change does not change parser dispatch or replace the scalar hash's
-software AES implementation. Existing token, macro, diagnostic and window twins
-remain the correctness checks. Baseline/AVX2-host end-to-end timing on the approved
-9700X remains pending; no measured speedup is claimed here.
+Production preparation chooses the vector kernels unless the caller has
+requested scalar execution, which selects whole-file scalar refinement instead
+of the 512-bit chunk/window refinement. Shared file caches inherit the same
+preparation policy. Explicit low-level window tests exercise both kernel
+protocols; the scalar-reference and window-unit fixtures check the default
+option policy before those test-only overrides. The scalar host, whose builds
+took the scalar preparation always, went with #2924.

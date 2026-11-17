@@ -26,11 +26,11 @@
 #                                            them where `build` puts them and exports the same paths.
 #
 # Any difference fails the shard: nothing is rebuilt and nothing is fetched again, so a bad product stops the row
-# rather than starting four builds. Only an explicit target is shared: BUSTER_HOST_ARCH=x86-64, the baseline that every
-# x86-64 runner executes, and BUSTER_HOST_ARCH=vector (#2033), host_isa.h's predicate, which only a runner whose probe
-# qualifies executes: there, both sides run the vector row's probe (BUSTER_VECTOR_PROBE, built with the target's flags
-# by hosted-correctness.yml) again, which must pass, and its answers are part of the identity. A native build is its
-# runner's CPU's and is never packed or installed.
+# rather than starting four builds. Only the explicit target is shared: BUSTER_HOST_ARCH=vector (#2033), host_isa.h's
+# predicate, which only a runner whose probe qualifies executes: there, both sides run the vector draw's probe
+# (BUSTER_VECTOR_PROBE, which tools/ci/vector-draw.sh builds with the target's flags) again, which must pass, and its
+# answers are part of the identity. A native build is its runner's CPU's and is never packed or installed; the scalar
+# host's x86-64 target, which every runner ran, is gone (#2924).
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -53,13 +53,12 @@ summary()
     fi
 }
 
-# Whether this runner runs the row's explicit target: always for x86-64; for vector, when the row's probe, run again
-# here, finds every feature the target uses (status 0 and every answer `yes`), which it prints.
+# Whether this runner runs the row's explicit vector target: when the row's probe, run again here, finds every feature
+# the target uses (status 0 and every answer `yes`), which it prints.
 portable()
 {
     local answers status=0
     case "${BUSTER_HOST_ARCH:-native}" in
-        x86-64) ;;
         vector)
             [ -n "${BUSTER_VECTOR_PROBE:-}" ] && [ -x "$BUSTER_VECTOR_PROBE" ] ||
                 die "a vector product needs this runner's probe (BUSTER_VECTOR_PROBE), which the vector row's draw builds: '${BUSTER_VECTOR_PROBE:-}'"
@@ -69,7 +68,7 @@ portable()
                 die "this runner's CPU doesn't run the vector target (its probe: status $status), so it can't run or pack a vector product"
             fi
             ;;
-        *) die "only the explicit x86-64 and vector targets are shared between runners; BUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native} is built on each shard's own runner (#2032)" ;;
+        *) die "only the explicit vector target is shared between runners; BUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native} is built on each item's own runner (#2032, #2924)" ;;
     esac
 }
 
@@ -121,14 +120,14 @@ toolchain_root()
 # The identity a product must share with the shard that runs it, which both sides compute with this function and
 # compare byte for byte: what it was built from (the repository, run, commit and its tree, unmodified); how (build.sh's
 # own record of the toolchain, tools and settings it configured with, and its descriptions of the flags and sources);
-# for which target (its flags, build.sh's print-host-flags, and the host ISA's predefined macros with them,
-# BUSTER_HOST_VECTOR's among them, which must be 1 for vector and 0 for x86-64; for vector, the probe's answers on this
-# runner, every feature `yes`); with which toolchain (every file of the hosted installation: clang, its resource
-# directory and sanitizer runtimes, the linkers, libclang-cpp, CMake and Ninja) and baseline runtime
-# (BUSTER_HOST_RUNTIME's tree); and what the product's executables load on this runner (ldd's resolution of each).
+# for which target (its flags, build.sh's print-host-flags, and the host ISA's predefined macros with them, which
+# host_isa.h must take: it refuses a target without every feature of the AVX-512 host's, #2924; for vector, the probe's
+# answers on this runner, every feature `yes`); with which toolchain (every file of the hosted installation: clang, its
+# resource directory and sanitizer runtimes, the linkers, libclang-cpp, CMake and Ninja); and what the product's
+# executables load on this runner (ldd's resolution of each).
 identity()
 {
-    local product=$1 out=$2 stamp file revision tree root toolchain runtime=none vector
+    local product=$1 out=$2 stamp file revision tree root toolchain
     local -a host_flags
     mkdir -p "$out"
     git diff --quiet HEAD -- || die "the checkout's tracked files differ from its commit"
@@ -139,9 +138,6 @@ identity()
     [ "${#host_flags[@]}" -gt 0 ] || die "build.sh gave no host target's flags"
     root=$(toolchain_root)
     toolchain=$(timed tree_digest "$root")
-    if [ -n "${BUSTER_HOST_RUNTIME:-}" ]; then
-        runtime=$(tree_digest "$BUSTER_HOST_RUNTIME")
-    fi
     {
         printf 'format\t%s\n' "$format"
         printf 'repository\t%s\n' "${GITHUB_REPOSITORY_ID:?}"
@@ -151,7 +147,6 @@ identity()
         printf 'row\t%s %s O%s\n' "$BUSTER_HOST_ARCH" "${BUSTER_SANITIZER:-none}" "${BUSTER_SANITIZER_OPTIMIZATION:-3}"
         printf 'host-flags\t%s\n' "${host_flags[*]}"
         printf 'toolchain\t%s\n' "$toolchain"
-        printf 'runtime\t%s\n' "$runtime"
     } > "$out/summary"
     # build.sh's configuration record for these settings: it writes it when it configures the tree, the same text
     # whether the tree was built or only configured.
@@ -162,11 +157,11 @@ identity()
     ./build.sh print-compile-flags --config Release | tr '\0' '\n' > "$out/compile-flags"
     ./build.sh print-sanitizer-flags | tr '\0' '\n' > "$out/sanitizer-flags"
     ./build.sh print-sources | tr '\0' '\n' > "$out/sources"
-    clang "${host_flags[@]}" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null | LC_ALL=C sort > "$out/target"
-    vector=0
-    [ "$BUSTER_HOST_ARCH" != vector ] || vector=1
-    grep -qx "#define BUSTER_HOST_VECTOR $vector" "$out/target" || die "the $BUSTER_HOST_ARCH target (${host_flags[*]}) doesn't select BUSTER_HOST_VECTOR $vector"
-    if [ "$vector" -eq 1 ]; then
+    clang "${host_flags[@]}" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null > "$out/.target" ||
+        die "host_isa.h refuses the $BUSTER_HOST_ARCH target (${host_flags[*]})"
+    LC_ALL=C sort "$out/.target" > "$out/target"
+    rm -f -- "$out/.target"
+    if [ "$BUSTER_HOST_ARCH" = vector ]; then
         "$BUSTER_VECTOR_PROBE" > "$out/probe"
     fi
     : > "$out/libraries"

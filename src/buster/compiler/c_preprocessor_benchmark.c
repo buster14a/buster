@@ -55,7 +55,6 @@
 
 #include "buster/compiler/test_paths.h"
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -196,6 +195,7 @@ static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, uint32_
         sample->probes.maps += pp.probes.maps;
         sample->probes.reads += pp.probes.reads;
         sample->probes.listings += pp.probes.listings;
+        sample->probes.asks += pp.probes.asks;
         sample->probes.listed += pp.probes.listed;
         for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
         {
@@ -1205,9 +1205,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
                        (double)include_ticks[BUSTER_PP_BENCHMARK_PASSES / 2] * milliseconds_per_tick,
                        (double)embed_ticks[BUSTER_PP_BENCHMARK_PASSES / 2] * milliseconds_per_tick);
                 printf("             direct file calls/pass: %lu open, %lu fstat; stat: %lu embed, %lu directory setup (not process-wide syscall totals); "
-                       "%lu directories listed, %lu opens they saved\n",
+                       "%lu directories listed, %lu asked for a subdirectory, %lu opens they saved\n",
                        (unsigned long)memory->probes.opens, (unsigned long)memory->probes.fstats, (unsigned long)lookups->embed_stats,
-                       (unsigned long)lookups->directory_stats, (unsigned long)memory->probes.listings, (unsigned long)memory->probes.listed);
+                       (unsigned long)lookups->directory_stats, (unsigned long)memory->probes.listings, (unsigned long)memory->probes.asks,
+                       (unsigned long)memory->probes.listed);
                 printf("             includes/pass: %lu searches, %lu found, %lu open, %lu fstat (subset of direct file calls); embeds: %lu searches, %lu found\n",
                        (unsigned long)lookups->include_searches, (unsigned long)lookups->include_found, (unsigned long)lookups->include_opens,
                        (unsigned long)lookups->include_fstats, (unsigned long)lookups->embed_searches, (unsigned long)lookups->embed_found);
@@ -1274,11 +1275,3 @@ int run_preprocessor_benchmark(int argc, char** argv)
     return result;
 }
 
-#else
-int run_preprocessor_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

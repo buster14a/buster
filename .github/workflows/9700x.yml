@@ -272,6 +272,9 @@ jobs:
           bash tests/ci/caches.sh
           bash tests/ci/build-benchmarks.sh
           bash tests/ci/vector-draw.sh
+          # The products' packing and refusals (tools/ci/hosted-product.sh), which the x86-64 rows' build job ran
+          # before #2924; a fake checkout, toolchain and build, no network.
+          bash tests/ci/hosted-product.sh
           node tests/ci/vector-runtime.cjs
           bash tests/ci/rerun.sh
 
@@ -307,7 +310,10 @@ jobs:
       # one detector's failure must not hide what the others find.
       fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
-        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64"]' || '["x86-64", "native"]') }}
+        # The x86-64 rows, the scalar host's, are gone (#2924, the owner's decision on 2026-11-17): a pull request's
+        # rows are the vector row alone, every other run's the `native` plain row and, where the sanitizer rows run, the
+        # vector pool.
+        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["vector"]' || '["native"]') }}
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
         # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
         # in the nightly mode (#2057, until the merge queue carries the full suite). Merge-queue candidates (#1430),
@@ -317,11 +323,11 @@ jobs:
         # available for diagnosis but does not repeat the entire hosted suite.
         sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
         optimization: [3]
-        # The vector row, one pool of its configurations' items: `none` on a pull request; the four where the sanitizer
-        # rows run; none in the `plain` scope elsewhere, whose `native` rows stay until the vector row replaces them.
-        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"host_arch":"vector","sanitizer":"none","optimization":3}]' || needs.evidence.outputs.scope == 'plain' && '[]' || '[{"host_arch":"vector","sanitizer":"none address thread memory","optimization":3}]') }}
+        # The vector row, one pool of its configurations' items, where the sanitizer rows run (on a pull request it is
+        # the matrix's own row, `none`); none in the `plain` scope, whose `native` row is its plain row.
+        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{"host_arch":"vector","sanitizer":"none address thread memory","optimization":3}]') }}
         # The `native` architecture keeps its plain row alone (#2032): tools/ci/nightly.c's plain verdict, the nightly
-        # window's credit from a candidate's run, reads both architectures' plain rows.
+        # window's credit from a candidate's run, reads it.
         exclude:
           - host_arch: native
             sanitizer: address
@@ -339,152 +345,25 @@ jobs:
       host_arch: ${{ matrix.host_arch }}
       sanitizer: ${{ matrix.sanitizer }}
       optimization: ${{ matrix.optimization }}
-      # How many shards the row runs as (#2031), by its own costs (tools/ci/costs/, `costs plan`): the plain rows 4, both
-      # host architectures alike (tools/ci/nightly.c counts their shards as one N). A portable row's shards share its one
-      # build and a shard costs it about a minute of setup, so its TSan and MSan rows run as 7, at their longest
-      # commands (#2703: the x86-64 MSan row finished last in every candidate after #2708, and `costs plan` gives its
-      # longest shard 975 s as 6 and 841 s as 7, TSan's 909 and 872 s, the same runner-minutes); its ASan row runs as 4. The vector row's N is each configuration's items' count (4,
-      # BUSTER_VECTOR_ITEMS), which its draws are sized for. tools/ci/changes.c's self-test checks each number against
-      # the row workflow's lookup (changes_shard_policy).
-      shards: ${{ matrix.host_arch == 'x86-64' && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && 7 || 4 }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
 
+  # The fuzz campaigns: libFuzzer with ASan, UBSan and leaks, each of the frontend, the ELF import's override and the
+  # crash-replay proof. Each builds the compiler for its runner's CPU and runs it, so they draw AVX-512 runners as one
+  # pool of 3 items, one a campaign (drawn.yml's `fuzz` row, which holds their steps; #2924). Its verdict is the job
+  # the merge queue's coverage credits (tools/ci/nightly.c), and a failed campaign fails this call as its job did.
   fuzz:
-    name: libFuzzer (ASan + UBSan + leaks, ${{ matrix.entry }})
+    name: libFuzzer (ASan + UBSan + leaks)
     needs: [changes, evidence, prepare-hosted-tools]
     # Like the sanitizer rows, not on pull requests, nor in the `plain` scope.
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    strategy:
-      # A merge-queue candidate's first failing campaign cancels the others, as its test rows fail fast (#1430). The
-      # daily and dispatched runs, and pushes before the nightly mode, run every campaign to its end.
-      fail-fast: ${{ github.event_name == 'merge_group' }}
-      matrix:
-        include:
-          - entry: frontend
-            host_arch: native
-            source: src/buster/compiler/fuzz.c
-          - entry: elf-override
-            host_arch: x86-64
-            source: tests/fuzz/entry_override.c
-          - entry: crash-replay-proof
-            host_arch: x86-64
-            source: tests/fuzz/entry_probe.c
-    defaults:
-      run:
-        shell: bash
-    env:
-      BUSTER_HOST_ARCH: ${{ matrix.host_arch }}
-      BUSTER_SANITIZER: address
-      BUSTER_FUZZ_AVAILABLE: '1'
-      BUSTER_FUZZ_ENTRY: ${{ matrix.source }}
-      BUSTER_LINKER: lld
-    steps:
-      - name: Check out triggering commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Restore verified hosted release inputs
-        uses: ./.github/actions/hosted-tools
-        with:
-          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
-
-      - name: Install official Clang, sanitizer and libFuzzer runtimes
-        run: bash tools/ci/setup-hosted.sh
-
-      # Before the build, as in the sanitizer rows (#2060). It never fails the job.
-      - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
-        continue-on-error: true
-        run: bash tools/ci/sanitizers.sh host
-
-      - name: Set fatal sanitizer policy and verify detectors
-        run: |
-          bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
-          bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
-
-      - name: Build the selected coverage-instrumented entry and check ordinary dispatch
-        run: |
-          ./build.sh --config Release
-          compiler=$(./build.sh print-output --config Release)
-          test build/compiler -ef "$compiler"
-          printf 'BUSTER_COMPILER=%s\n' "$compiler" >> "$GITHUB_ENV"
-          "$compiler" -fsyntax-only tests/fuzz/corpus/basic.c
-
-      - name: Fuzz the compiler with retained seeds and deterministic mutation seed
-        if: matrix.entry != 'crash-replay-proof'
-        run: |
-          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts"
-          cp tests/fuzz/corpus/* "$RUNNER_TEMP/fuzz-corpus/"
-          clang -c -march=x86-64 tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/object.elf"
-          clang -shared -fPIC tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/shared.elf"
-          runs=10000
-          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then runs=100000; fi
-          "$BUSTER_COMPILER" --fuzz -seed=133 -runs="$runs" -max_len=4096 -timeout=10 -rss_limit_mb=4096 \
-            -dict=tests/fuzz/c.dict -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
-            "$RUNNER_TEMP/fuzz-corpus" 2>&1 | tee "$RUNNER_TEMP/fuzzer.log"
-          if [ '${{ matrix.entry }}' = elf-override ]; then
-            grep -Fq 'Buster fuzz entry: ELF import' "$RUNNER_TEMP/fuzzer.log"
-          fi
-
-      - name: Prove entry override, crash preservation and exact-input replay
-        if: matrix.entry == 'crash-replay-proof'
-        run: |
-          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts" "$RUNNER_TEMP/fuzz-replay" "$RUNNER_TEMP/fuzz-planted"
-          printf %s BUSTER_FUZZ_ENTRY_PROBE > "$RUNNER_TEMP/fuzz-corpus/trigger"
-          # The planted abort's stack traces go to reports of their own, each of which must be the probe's; the
-          # audit below still rejects any other diagnostic. configure writes log_path last, and the combined runtime
-          # takes it from whichever of these options it parses last.
-          planted() { env "ASAN_OPTIONS=${ASAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
-              "UBSAN_OPTIONS=${UBSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
-              "LSAN_OPTIONS=${LSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" "$@"; }
-          status=0
-          planted "$BUSTER_COMPILER" --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
-            "$RUNNER_TEMP/fuzz-corpus" > "$RUNNER_TEMP/fuzzer.log" 2>&1 || status=$?
-          test "$status" -eq 77
-          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer.log"
-          artifacts=("$RUNNER_TEMP/fuzz-artifacts/"crash-*)
-          test "${#artifacts[@]}" -eq 1
-          cmp "$RUNNER_TEMP/fuzz-corpus/trigger" "${artifacts[0]}"
-          status=0
-          planted "$BUSTER_COMPILER" --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
-            "${artifacts[0]}" > "$RUNNER_TEMP/fuzzer-replay.log" 2>&1 || status=$?
-          test "$status" -eq 77
-          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer-replay.log"
-          reports=("$RUNNER_TEMP/fuzz-planted/"report.*)
-          test "${#reports[@]}" -eq 2
-          for report in "${reports[@]}"; do
-              grep -Fq 'in buster_fuzz_test_input' "$report"
-              grep -Fq 'tests/fuzz/entry_probe.c:' "$report"
-          done
-
-      - name: Reject every unexpected sanitizer diagnostic
-        if: ${{ !cancelled() }}
-        run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
-
-      - name: Preserve corpus, crash inputs, reports and the matching executable
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: libfuzzer-${{ matrix.entry }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/fuzz-corpus
-            ${{ runner.temp }}/fuzz-artifacts
-            ${{ runner.temp }}/fuzz-replay
-            ${{ runner.temp }}/fuzz-planted
-            ${{ runner.temp }}/fuzzer*.log
-            ${{ runner.temp }}/sanitizer-reports
-            ${{ runner.temp }}/sanitizer-probes
-            build/compiler
-            build/compile_commands.json
-            LICENSE
-            THIRD_PARTY_NOTICES.md
-            LICENSES/
-          if-no-files-found: error
-          retention-days: 14
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/drawn.yml
+    with:
+      row: fuzz
+      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
 
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
@@ -694,13 +573,12 @@ jobs:
 
       - name: Require the complete native vector feature set
         run: |
-          defines=$(clang -march="$BUSTER_HOST_ARCH" -Isrc -dM -E \
-            -include src/buster/compiler/host_isa.h -x c /dev/null)
-          if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
-            printf '%s\n' '::error::9700X correctness requires BUSTER_HOST_VECTOR=1; vector coverage cannot be qualified by scalar kernels.'
+          # host_isa.h refuses a target without every feature its predicate names (#2924).
+          if ! clang -march="$BUSTER_HOST_ARCH" -Isrc -E -include src/buster/compiler/host_isa.h -x c /dev/null -o /dev/null; then
+            printf '%s\n' '::error::host_isa.h refuses the 9700X'"'"'s target; its correctness can'"'"'t be qualified.'
             exit 1
           fi
-          printf 'Selected host path: vector (%s)\n' "$BUSTER_HOST_ARCH"
+          printf 'Host target: %s\n' "$BUSTER_HOST_ARCH"
 
       - name: Build the external Clang pragma oracle and the Zen 5 executable
         id: compiler_builds
@@ -888,8 +766,9 @@ jobs:
                   cp src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/branch_sizing_generate.c \
                       "$ab_dir/$side/src/buster/compiler/"
                   # The shared harness includes the host-ISA adapter and the encoder's baked-table header. Keep each
-                  # revision's headers when present; a base predating one uses the current header on this host.
-                  for header in host_isa.h host_scalar.h host_scalar_vectors.h baked.h; do
+                  # revision's headers when present; a base predating one uses the current header on this host. With
+                  # the 9700X's flags a base's host_isa.h before #2924 never reaches its scalar headers.
+                  for header in host_isa.h baked.h; do
                       dest="$ab_dir/$side/src/buster/compiler/$header"
                       if [[ "$side" == before ]] && git cat-file -e "${AB_BASE_SHA}:src/buster/compiler/$header" 2>/dev/null; then
                           git show "${AB_BASE_SHA}:src/buster/compiler/$header" > "$dest"
@@ -899,16 +778,27 @@ jobs:
                   done
               done
               before="$ab_dir/before/src/buster/compiler"
-              new='branch_sizing_lengths(records, count, offsets, vector)'
-              old='branch_sizing_lengths(records, count, offsets, columns.encoded, vector)'
-              interface='branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets, bool vector)'
-              test "$(grep -Fo "$new" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
-              if grep -Fq "$old" "$before/branch_sizing.c"; then
-                  sed -i "s/$new/$old/" "$before/branch_sizing_benchmark.c"
-                  test "$(grep -Fo "$old" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
-                  echo 'Baseline harness adaptation: old lengths scratch argument only'
-              # Since the host-ISA adapter, the call reads BUSTER_VECTOR_PATH(vector), so check the definition instead.
-              elif ! grep -Fq "$interface" "$before/branch_sizing.c"; then
+              # The harness is this revision's. A base from before #2924 removed branch sizing's scalar path still
+              # takes the path as a `vector` argument in four internal functions: the harness's calls there get the
+              # vector path's `true`. Each call is the text, its sed replacement and the result, exactly once.
+              if grep -Fq 'uint32_t* offsets, bool vector, uint32_t round_limit)' "$before/branch_sizing.c"; then
+                  harness="$before/branch_sizing_benchmark.c"
+                  adapt()
+                  {
+                      test "$(grep -Fo "$1" "$harness" | wc -l)" -eq 1
+                      sed -i "s|$1|$2|" "$harness"
+                      test "$(grep -Fo "$3" "$harness" | wc -l)" -eq 1
+                  }
+                  adapt 'branch_sizing_allocate(scratch.arena, count, branch_count)' 'branch_sizing_allocate(scratch.arena, count, branch_count, true)' \
+                      'branch_sizing_allocate(scratch.arena, count, branch_count, true)'
+                  adapt 'branch_sizing_lengths(records, count, offsets)' 'branch_sizing_lengths(records, count, offsets, true)' \
+                      'branch_sizing_lengths(records, count, offsets, true)'
+                  adapt 'branch_sizing_worklist(branch_count, &columns, current)' 'branch_sizing_worklist(branch_count, \&columns, current, true)' \
+                      'branch_sizing_worklist(branch_count, &columns, current, true)'
+                  adapt 'result.offsets, round_limit)' 'result.offsets, true, round_limit)' 'result.offsets, true, round_limit)'
+                  adapt 'pool->offsets, measurement.round_limit)' 'pool->offsets, true, measurement.round_limit)' 'pool->offsets, true, measurement.round_limit)'
+                  echo 'Baseline harness adaptation: the vector path argument of a base before #2924'
+              elif ! grep -Fq 'branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets)' "$before/branch_sizing.c"; then
                   echo 'Unsupported baseline branch_sizing_lengths interface' >&2
                   exit 1
               fi
@@ -920,9 +810,8 @@ jobs:
               for side in before after; do
                   tree="$ab_dir/$side/src"
                   sha256sum "$tree"/buster/compiler/*.[ch]
-                  host_defines=$(clang "${flags[@]}" -I "$tree" -dM -E \
-                      -include "$tree/buster/compiler/host_isa.h" -x c /dev/null)
-                  grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$host_defines"
+                  # Each side's host_isa.h takes the flags: the vector paths, before #2924 and since.
+                  clang "${flags[@]}" -I "$tree" -E -include "$tree/buster/compiler/host_isa.h" -x c /dev/null -o /dev/null
                   timeout 60s clang "${flags[@]}" -I "$tree" "$tree/buster/compiler/branch_sizing_benchmark.c" \
                       "$fixture/benchmark-main.c" -o "$ab_dir/$side-module"
                   timeout 60s clang "${flags[@]}" -I "$tree" "$fixture/scaling.c" -o "$ab_dir/$side-scaling"
@@ -1019,8 +908,8 @@ jobs:
 
       - name: Benchmark dominator analysis on synthetic and exported source CFGs
         # The --cfg run is #174's real-function importer smoke: test-ir-source --dominators-cfg writes the
-        # qualified CFGs of the focused fixture and benchmark-dominators --cfg reads them back, checks all three
-        # paths' agreement and times the scalar, vector and AUTO selections by block-count bucket.
+        # qualified CFGs of the focused fixture and benchmark-dominators --cfg reads them back and times the
+        # analysis by block-count bucket.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',dominators,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -2086,6 +1975,10 @@ jobs:
     name: Auxiliary (build.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/build.yml
 
   auxiliary-build-pgo:
@@ -2098,12 +1991,20 @@ jobs:
     name: Auxiliary (selfhost.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',selfhost,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/selfhost.yml
 
   auxiliary-tier1-problem:
     name: Auxiliary (tier1-problem.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',tier1-problem,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/tier1-problem.yml
 
   qualification:
@@ -2143,7 +2044,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       # A merge-queue candidate's expected coverage, from this run's own jobs (tools/ci/nightly.c's `coverage`): every
-      # shard 1..N of every row (x86-64 and native, each sanitizer, one N per row), the vector pool's verdict, each
+      # shard 1..N of the native plain row, the vector pool's verdict (its plain and sanitizer configurations), each
       # fuzz campaign and every job of each auxiliary workflow the selector named, all completed and successful, and no
       # job of an auxiliary workflow it didn't name. A job missing, skipped, cancelled, failed or timed out, or a row
       # whose shards disagree, fails it; so does an API failure. The predicate below reads its outcome, so that a test

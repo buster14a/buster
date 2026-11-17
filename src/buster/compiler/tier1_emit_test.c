@@ -1407,7 +1407,7 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             IrDominance dominance;
-            const bool dominated = branching == 0 || tier1_terminal_dominance(test, &function, vector != 0, &dominance);
+            const bool dominated = branching == 0 || tier1_terminal_dominance(test, &function, &dominance);
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
             const bool planned = dominated && tier1_select_plan(&function, branching != 0 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;

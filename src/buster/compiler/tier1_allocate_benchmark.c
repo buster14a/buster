@@ -7,7 +7,6 @@
 // Run each process under the shared 9700X lock, pinned to CPU 2. Options: --only vector|scalar, --after-scalar MS.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -252,11 +251,3 @@ int run_tier1_allocate_benchmark(int argc, char** argv)
     return valid ? 0 : 1;
 }
 
-#else
-int run_tier1_allocate_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

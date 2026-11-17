@@ -2496,7 +2496,7 @@ static uint32_t check_common_range_lanes(const CheckGraph* graph, const CheckStr
             const __m512i low = _mm512_permutexvar_epi32(slot, _mm512_loadu_si512(lows));
             const __m512i high = _mm512_permutexvar_epi32(slot, _mm512_loadu_si512(highs));
             const __mmask16 unsigned_constant = _mm512_mask_cmpeq_epi32_mask(int_constant, constant_code, _mm512_set1_epi32(BUSTER_TYPE_CODE_UINT));
-            // (Unmasked signed compares, which the baseline host's scalar emulation has too.)
+            // (Unmasked signed compares.)
             const __mmask16 signed_in = (__mmask16)(int_constant & ~unsigned_constant & _mm512_cmpge_epi32_mask(values, low) & _mm512_cmpge_epi32_mask(high, values));
             const __mmask16 unsigned_in = _mm512_mask_cmple_epu32_mask(unsigned_constant, values, high);
             in_range = (__mmask16)(signed_in | unsigned_in);

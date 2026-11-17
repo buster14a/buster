@@ -3,15 +3,16 @@
 //
 // Backward liveness over a CFG's successor columns and per-block bitsets. The caller owns the CFG and fills use/def;
 // dataflow_postorder validates its edges and builds a DFS forest with an explicit stack, including unreachable
-// blocks. Both liveness solvers start with empty in rows and visit that same postorder until in stops changing, storing
-// every block's out row in each sweep. Their iteration counts include the final stable sweep. The scalar solver is the
-// word-at-a-time test oracle.
+// blocks. The liveness solver starts with empty in rows and visits that same postorder until in stops changing, storing
+// every block's out row in each sweep. Its iteration count includes the final stable sweep. It is AVX-512 alone
+// (#2924): the tests check it against the liveness equations, use-before-def reachability and the sweep search of
+// dataflow_sweeps_test.c, which gives every live bit's sweep and so the exact count.
 //
 // Each matrix is block_count contiguous rows of row_words uint64_t words, rounded to a whole 512-bit vector.
 // Every row starts at a 64-byte boundary, and the caller keeps the use/def padding bits zero. The matrices are
 // disjoint, owned by the arena supplied to dataflow_create. Solvers require a successfully prepared postorder and
-// do not allocate or validate the CFG again. Zero values means zero words: neither solver accesses matrix pointers.
-// dataflow_intersects_* takes two rows with the same alignment, length and padding contract; zero words permits
+// do not allocate or validate the CFG again. Zero values means zero words: the solver accesses no matrix pointer.
+// dataflow_intersects takes two rows with the same alignment, length and padding contract; zero words permits
 // null pointers. This primitive only reports whether the rows share a bit, without building an interference graph.
 //
 // main.c and dataflow_benchmark.c include this file after lane.c.
@@ -52,11 +53,8 @@ static __attribute__((unused)) bool dataflow_create(Arena* arena, uint32_t block
 static __attribute__((unused)) bool dataflow_postorder(Dataflow* dataflow, Arena* scratch);
 static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow);
 static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_rows(Dataflow* dataflow);
-static __attribute__((unused)) uint64_t dataflow_liveness_vector(Dataflow* dataflow);
-static __attribute__((unused)) uint64_t dataflow_liveness_scalar(Dataflow* dataflow);
 static __attribute__((unused)) uint64_t dataflow_liveness(Dataflow* dataflow);
-static __attribute__((unused)) bool dataflow_intersects_vector(const uint64_t* left, const uint64_t* right, uint64_t row_words);
-static __attribute__((unused)) bool dataflow_intersects_scalar(const uint64_t* left, const uint64_t* right, uint64_t row_words);
+static __attribute__((unused)) bool dataflow_intersects(const uint64_t* left, const uint64_t* right, uint64_t row_words);
 
 static bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_count, uint32_t edge_count, Dataflow* result)
 {
@@ -238,30 +236,54 @@ static __attribute__((noinline, aligned(64), no_builtin("memset"))) uint64_t dat
     bool changed;
     do
     {
-        __mmask8 changes = 0;
+        // Every block's difference, ORed in a register: a mask moved to a general register each block took one more
+        // general register, and with the previous block's number the loop then spilled the successors' base.
+        __m512i changes = _mm512_setzero_si512();
+        // The block the sweep visited last, whose in row it has just stored. A successor that is that block takes the
+        // row from this register, by a branch: loaded, the row comes back through the 64-byte store's forwarding,
+        // whose latency every block of a chain then waits on in turn. On a chain of 48 blocks with 24 values, the sweep
+        // took 13 cycles a block that way, 1.8 times the scalar twin's time, and 0.4 of that with the branch; a masked
+        // blend of the load and the register waited on the load all the same (#2950, docs/dataflow.md, "The previous
+        // block's row").
+        uint32_t previous_block = UINT32_MAX;
+        __m512i previous_in = _mm512_setzero_si512();
         #pragma clang loop unroll(disable)
         for (uint32_t order = 0; order < block_count; order += 1)
         {
             const uint32_t block = postorder[order];
             const uint64_t row = (uint64_t)block * BUSTER_DATAFLOW_VECTOR_WORDS;
-            const uint32_t begin = successor_offsets[block];
-            const uint32_t end = successor_offsets[(uint64_t)block + 1];
+            const uint32_t* edge = successors + successor_offsets[block];
+            const uint32_t* const end = successors + successor_offsets[(uint64_t)block + 1];
             __m512i out = _mm512_setzero_si512();
             #pragma clang loop unroll(disable)
-            for (uint32_t edge = begin; edge < end; edge += 1)
+            for (; edge < end; edge += 1)
             {
-                out = _mm512_or_si512(out, _mm512_load_si512(in_rows + (uint64_t)successors[edge] * BUSTER_DATAFLOW_VECTOR_WORDS));
+                const uint32_t successor = *edge;
+                __m512i successor_in;
+                if (__builtin_expect(successor == previous_block, 1))
+                {
+                    successor_in = previous_in;
+                    // Keeps Clang from making the two arms a load and a blend, which would wait on the load again.
+                    __asm__ volatile("" : "+v"(successor_in));
+                }
+                else
+                {
+                    successor_in = _mm512_load_si512(in_rows + (uint64_t)successor * BUSTER_DATAFLOW_VECTOR_WORDS);
+                }
+                out = _mm512_or_si512(out, successor_in);
             }
             const __m512i use = _mm512_load_si512(use_rows + row);
             const __m512i def = _mm512_load_si512(def_rows + row);
             const __m512i previous = _mm512_load_si512(in_rows + row);
             const __m512i in = _mm512_ternarylogic_epi64(use, out, def, 0xF4);
             const __m512i difference = _mm512_xor_si512(in, previous);
-            changes |= _mm512_test_epi64_mask(difference, difference);
+            changes = _mm512_or_si512(changes, difference);
             _mm512_store_si512(out_rows + row, out);
             _mm512_store_si512(in_rows + row, in);
+            previous_block = block;
+            previous_in = in;
         }
-        changed = changes != 0;
+        changed = _mm512_test_epi64_mask(changes, changes) != 0;
         iterations += changed;
     } while (changed);
     return iterations;
@@ -326,101 +348,24 @@ static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_
 // The two loops are separate functions, so that neither changes how Clang compiles the other: inlined together, the
 // general loop's registers and stack slots changed, and medium-nested took 3.6% more cycles after scalar code. Each
 // starts a 64-byte line, so that a build's code before them doesn't decide where their loops fall in lines.
-static uint64_t dataflow_liveness_scalar(Dataflow* dataflow);
-
-static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
+static uint64_t dataflow_liveness(Dataflow* dataflow)
 {
-#if !BUSTER_HOST_VECTOR
-    return dataflow_liveness_scalar(dataflow);
-#else
-    uint64_t iterations;
+    // With no row to solve the count is the one sweep that changes nothing, here, without calling either loop: the call
+    // was most of a solve of a function with no value live across blocks (#2950).
+    uint64_t iterations = 1;
     if (dataflow->row_words == BUSTER_DATAFLOW_VECTOR_WORDS && dataflow->block_count != 0)
     {
         iterations = dataflow_liveness_vector_one(dataflow);
     }
-    else
+    else if (dataflow->row_words != 0 && dataflow->block_count != 0)
     {
         iterations = dataflow_liveness_vector_rows(dataflow);
     }
     return iterations;
-#endif
 }
 
-static uint64_t dataflow_liveness_scalar(Dataflow* dataflow)
+static bool dataflow_intersects(const uint64_t* left, const uint64_t* right, uint64_t row_words)
 {
-    uint64_t iterations = 1;
-    const uint32_t block_count = dataflow->block_count;
-    const uint64_t row_words = dataflow->row_words;
-    const uint64_t value_words = ((uint64_t)dataflow->value_count + 63) / 64;
-    const uint32_t* restrict successor_offsets = dataflow->successor_offsets;
-    const uint32_t* restrict successors = dataflow->successors;
-    const uint32_t* restrict postorder = dataflow->postorder;
-    const uint64_t* restrict use_rows = dataflow->use;
-    const uint64_t* restrict def_rows = dataflow->def;
-    uint64_t* restrict in_rows = dataflow->in;
-    uint64_t* restrict out_rows = dataflow->out;
-    // As in the vector kernel, every access to in stays based on one restricted matrix pointer, including
-    // self-loop reads. The scalar bound excludes whole padding words; clearing still covers every padded row.
-    if (row_words != 0 && block_count != 0)
-    {
-        const uint64_t matrix_bytes = (uint64_t)block_count * row_words * sizeof(uint64_t);
-        memset(in_rows, 0, matrix_bytes);
-        memset(out_rows, 0, matrix_bytes);
-        bool changed;
-        do
-        {
-            uint64_t changes = 0;
-            for (uint32_t order = 0; order < block_count; order += 1)
-            {
-                const uint32_t block = postorder[order];
-                const uint64_t row = (uint64_t)block * row_words;
-                const uint32_t begin = successor_offsets[block];
-                const uint32_t end = successor_offsets[(uint64_t)block + 1];
-                // Keep a distinct 64-bit oracle and a genuine scalar benchmark alternative at -O3.
-                #pragma clang loop vectorize(disable) interleave(disable)
-                for (uint64_t word = 0; word < value_words; word += 1)
-                {
-                    uint64_t out = 0;
-                    // Not unrolled: unrolled by 8, this loop over a block's few successors split each word into a
-                    // header, a remainder loop and a latch, two taken jumps apart, which the front end ran up to 24%
-                    // slower, and in states that differ between processes, depending on where the code fell in 64-byte
-                    // lines. Instead Clang unrolls the word loop by 4, which runs four words of a block with one
-                    // successor per taken branch (docs/dataflow.md, "Where the scalar twin's code falls").
-                    #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
-                    for (uint32_t edge = begin; edge < end; edge += 1)
-                    {
-                        const uint64_t* successor_in = in_rows + (uint64_t)successors[edge] * row_words;
-                        out |= successor_in[word];
-                    }
-                    const uint64_t in = use_rows[row + word] | (out & ~def_rows[row + word]);
-                    changes |= in ^ in_rows[row + word];
-                    out_rows[row + word] = out;
-                    in_rows[row + word] = in;
-                }
-            }
-            changed = changes != 0;
-            iterations += changed;
-        } while (changed);
-    }
-    return iterations;
-}
-
-static uint64_t dataflow_liveness(Dataflow* dataflow)
-{
-#if !BUSTER_HOST_VECTOR
-    return dataflow_liveness_scalar(dataflow);
-#else
-    return dataflow_liveness_vector(dataflow);
-#endif
-}
-
-static bool dataflow_intersects_scalar(const uint64_t* left, const uint64_t* right, uint64_t row_words);
-
-static bool dataflow_intersects_vector(const uint64_t* left, const uint64_t* right, uint64_t row_words)
-{
-#if !BUSTER_HOST_VECTOR
-    return dataflow_intersects_scalar(left, right, row_words);
-#else
     // Nonempty rows contain whole aligned vectors; a zero-length row may use any pointer without accessing it.
     assert(row_words % BUSTER_DATAFLOW_VECTOR_WORDS == 0);
     assert(row_words == 0 || (((uintptr_t)left | (uintptr_t)right) & (BUSTER_DATAFLOW_VECTOR_BYTES - 1)) == 0);
@@ -430,18 +375,6 @@ static bool dataflow_intersects_vector(const uint64_t* left, const uint64_t* rig
         const __m512i left_values = _mm512_load_si512(left + word);
         const __m512i right_values = _mm512_load_si512(right + word);
         intersections |= _mm512_test_epi64_mask(left_values, right_values);
-    }
-    return intersections != 0;
-#endif
-}
-
-static bool dataflow_intersects_scalar(const uint64_t* left, const uint64_t* right, uint64_t row_words)
-{
-    uint64_t intersections = 0;
-    #pragma clang loop vectorize(disable) interleave(disable)
-    for (uint64_t word = 0; word < row_words; word += 1)
-    {
-        intersections |= left[word] & right[word];
     }
     return intersections != 0;
 }

@@ -246,9 +246,6 @@ static void tier1_schedule_graph_scalar(Tier1ScheduleGraph* graph, uint32_t coun
 
 static void tier1_schedule_graph_vector(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
 {
-#if !BUSTER_HOST_VECTOR
-    tier1_schedule_graph_scalar(graph, count, stats);
-#else
     for (uint32_t current = 0; current < count; current += 1)
     {
         const __m512i written = _mm512_set1_epi64((int64_t)graph->writes[current]);
@@ -271,7 +268,6 @@ static void tier1_schedule_graph_vector(Tier1ScheduleGraph* graph, uint32_t coun
             tier1_schedule_add_edges(graph, current, first, hazards & active, data, stats);
         }
     }
-#endif
 }
 
 static bool tier1_schedule_intersects(const uint64_t* left, const uint64_t* right, uint32_t words)
@@ -321,9 +317,6 @@ static void tier1_schedule_heights_scalar(Tier1ScheduleGraph* graph, uint32_t co
 
 static void tier1_schedule_heights_vector(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
 {
-#if !BUSTER_HOST_VECTOR
-    tier1_schedule_heights_scalar(graph, count, stats);
-#else
     uint64_t pending[BUSTER_TIER1_SCHEDULE_WORDS];
     tier1_schedule_pending(pending, count);
     const uint32_t words = (count + 63) / 64;
@@ -368,7 +361,6 @@ static void tier1_schedule_heights_vector(Tier1ScheduleGraph* graph, uint32_t co
         }
     }
     stats->levels = level;
-#endif
 }
 
 static void tier1_schedule_order(const Tier1ScheduleGraph* graph, uint32_t count, uint16_t* order, Tier1ScheduleStats* stats)

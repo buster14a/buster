@@ -53,6 +53,13 @@
 // there are the oracle. The words are made as the unit is read: a type's row when the type is (node_facts_settle), a
 // declaration's line at its first use, a literal's a batch's own. The end of the file has it (node_facts_reader_flush).
 //
+// The piece after it (--front-window; docs/one-core-path.md, "The front writes the window"): the lean front writes each
+// record's inputs for the kernel as it makes the record (node_facts_window_leaf, node_facts_window_operator and
+// node_facts_window_call here, called from c_check_node_machine_front.c's pass), a pass over a chunk's records gives
+// each name's leaf its declaration's line (node_facts_window_names), and the kernel reads the front's columns where
+// they are written: a chunk's records are its window (node_facts_window_run). The two other makings of the same inputs
+// are its twins.
+//
 // No compile takes any of it.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_FACTS_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_FACTS_INCLUDED
@@ -491,6 +498,15 @@ static inline uint32_t node_facts_round(uint32_t round, uint32_t code, uint32_t 
 {
     const uint32_t needed = operand == BUSTER_NODE_FACTS_NO_CLASS ? 0 : (operand >> 4) + ((operand & 0x0fu) > code ? 1u : 0u);
     return needed > round ? needed : round;
+}
+
+// What node_facts_round asks of one operand, by arithmetic alone: the operand's round, and one more where its code is
+// after `code`; none for a record no operator made. A class's code is under 15 and `code` at most 15, so the sum of the
+// operand's code and 15 less `code` carries into its round exactly where the operand's code is the greater; and
+// BUSTER_NODE_FACTS_NO_CLASS, all ones, comes out sixteen, which the mask takes away.
+static inline __attribute__((always_inline)) uint32_t node_facts_round_of(uint32_t code, uint32_t operand)
+{
+    return ((operand + 15u - code) >> 4) & 15u;
 }
 
 // A made operator's class: its round (the deeper together) and its code.
@@ -1168,29 +1184,14 @@ static inline __attribute__((always_inline)) bool node_facts_leaf(NodeFactsRecor
 {
     const uint64_t* line = view->lines + 4 * (uint64_t)view->inputs[w];
     const bool taken = (uint32_t)(line[3] >> 32) == 0;
-    if (BUSTER_SCALAR_PATH(false))
+    const __m256i half = _mm256_loadu_si256((const __m256i*)(const void*)line);
+    if (taken && lean)
     {
-        if (taken)
-        {
-            memcpy(records + w, line, 4 * sizeof(uint64_t));
-            if (!lean)
-            {
-                node_facts_conversions(records, w, (TypeId)line[0], 0, 0, 0, 0);
-                node_facts_store(records + w, 56, 0);
-            }
-        }
+        _mm256_storeu_si256((__m256i*)(void*)(records + w), half);
     }
-    else
+    else if (taken)
     {
-        const __m256i half = _mm256_loadu_si256((const __m256i*)(const void*)line);
-        if (taken && lean)
-        {
-            _mm256_storeu_si256((__m256i*)(void*)(records + w), half);
-        }
-        else if (taken)
-        {
-            _mm512_storeu_si512(records + w, _mm512_inserti64x4(_mm512_castsi256_si512(half), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)(uint32_t)line[0])), 1));
-        }
+        _mm512_storeu_si512(records + w, _mm512_inserti64x4(_mm512_castsi256_si512(half), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)(uint32_t)line[0])), 1));
     }
     return taken;
 }
@@ -2498,42 +2499,26 @@ static inline __attribute__((always_inline)) void node_facts_list(uint32_t* leaf
     uint32_t leaves = 0;
     uint32_t lookups = 0;
     uint32_t present = 0;
-    if (BUSTER_SCALAR_PATH(false))
+    const __m512i step = _mm512_set1_epi32(16);
+    __m512i places = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    __m512i seen = _mm512_setzero_si512();
+    for (uint32_t w = 0; w < count; w += 16)
     {
-        for (uint32_t w = 0; w < count; w += 1)
-        {
-            const uint8_t kind = kinds[w] & 0x03u;
-            leaf_list[leaves] = w;
-            lookup_list[lookups] = w;
-            keys[lookups] = classes[w];
-            present |= kind == 0x03u ? 1u << (classes[w] >> 4) : 0;
-            leaves += kind == 0x02u;
-            lookups += kind == 0x03u;
-        }
+        const uint32_t live = count - w < 16 ? count - w : 16;
+        const __mmask16 mask = (__mmask16)((1u << live) - 1);
+        const __m128i block = _mm_and_si128(_mm_maskz_loadu_epi8(mask, kinds + w), _mm_set1_epi8(0x03));
+        const __mmask16 leaf = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x02));
+        const __mmask16 lookup = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x03));
+        const __m128i own = _mm_maskz_loadu_epi8(lookup, classes + w);
+        _mm512_storeu_si512(leaf_list + leaves, _mm512_maskz_compress_epi32(leaf, places));
+        _mm512_storeu_si512(lookup_list + lookups, _mm512_maskz_compress_epi32(lookup, places));
+        _mm_storeu_si128((__m128i*)(void*)(keys + lookups), _mm_maskz_compress_epi8(lookup, own));
+        seen = _mm512_or_si512(seen, _mm512_maskz_sllv_epi32(lookup, _mm512_set1_epi32(1), _mm512_srli_epi32(_mm512_cvtepu8_epi32(own), 4)));
+        leaves += (uint32_t)__builtin_popcount((uint32_t)leaf);
+        lookups += (uint32_t)__builtin_popcount((uint32_t)lookup);
+        places = _mm512_add_epi32(places, step);
     }
-    else
-    {
-        const __m512i step = _mm512_set1_epi32(16);
-        __m512i places = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        __m512i seen = _mm512_setzero_si512();
-        for (uint32_t w = 0; w < count; w += 16)
-        {
-            const uint32_t live = count - w < 16 ? count - w : 16;
-            const __mmask16 mask = (__mmask16)((1u << live) - 1);
-            const __m128i block = _mm_and_si128(_mm_maskz_loadu_epi8(mask, kinds + w), _mm_set1_epi8(0x03));
-            const __mmask16 leaf = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x02));
-            const __mmask16 lookup = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x03));
-            const __m128i own = _mm_maskz_loadu_epi8(lookup, classes + w);
-            _mm512_storeu_si512(leaf_list + leaves, _mm512_maskz_compress_epi32(leaf, places));
-            _mm512_storeu_si512(lookup_list + lookups, _mm512_maskz_compress_epi32(lookup, places));
-            _mm_storeu_si128((__m128i*)(void*)(keys + lookups), _mm_maskz_compress_epi8(lookup, own));
-            seen = _mm512_or_si512(seen, _mm512_maskz_sllv_epi32(lookup, _mm512_set1_epi32(1), _mm512_srli_epi32(_mm512_cvtepu8_epi32(own), 4)));
-            leaves += (uint32_t)__builtin_popcount((uint32_t)leaf);
-            lookups += (uint32_t)__builtin_popcount((uint32_t)lookup);
-            places = _mm512_add_epi32(places, step);
-        }
-        present = (uint32_t)_mm512_reduce_or_epi32(seen);
-    }
+    present = (uint32_t)_mm512_reduce_or_epi32(seen);
     *leaf_count = leaves;
     *lookup_count = lookups;
     *rounds = present;
@@ -3908,8 +3893,10 @@ static bool node_facts_derived(NodeFacts* facts, uint32_t first, uint32_t w, boo
 
 // A batch's room: the records of the expressions T takes in a chunk of the reader's (a chunk is
 // BUSTER_CHECK_EXPRESSION_CHUNK tokens), and the expressions. A batch that would pass either is run where it stands.
-// The literals' lines of a batch: one a literal's leaf from each making of its windows' inputs (T's columns', the
-// front's, and the front's again for its time).
+// The literals' lines of a batch: one a literal's leaf from each making of its windows' inputs that takes one (T's
+// columns', the copy of the front's records by place, and that copy again for its time). Where the front writes the
+// window its own literals' lines are the first of them, a line a record of the front's (BUSTER_NODE_FRONT_RECORDS):
+// a literal's leaf is one record of two at least, so a batch's three makings and the front's lines have room.
 #define BUSTER_NODE_FACTS_READER_RECORDS (4u * BUSTER_NODE_FACTS_WINDOW)
 #define BUSTER_NODE_FACTS_READER_EXPRESSIONS 4096u
 #define BUSTER_NODE_FACTS_READER_LINES (3u * BUSTER_NODE_FACTS_READER_RECORDS)
@@ -3933,13 +3920,48 @@ struct NodeFactsInputs
     uint32_t argument_count;
 };
 
+// The census's tests on the window the front wrote (c_check_node_census.c, which follows this file in the unit;
+// BUSTER_NODE_READER_WINDOW_TESTS): `tests` is the unit's tests' state, and `state` has just run the kernel on `front`'s
+// chunk in place, whose records are the kernel's by the front's record.
+struct NodeCensusReader;
+struct NodeFactsReader;
+static void node_tests_window_chunk(struct NodeCensusReader* tests, struct NodeFactsReader* state, const NodeFront* front);
+static bool node_tests_window_lines(struct NodeCensusReader* tests, Arena* arena, uint32_t capacity);
+
 struct NodeFactsReader
 {
     NodeFacts facts;
     NodeFrontTypes* types;
     CheckInputReader* reader;
+    // The unit's tests' state where they run on the window too (BUSTER_NODE_READER_WINDOW_TESTS), or null.
+    struct NodeCensusReader* tests;
     // The batch's windows' inputs as the front's records give them (node_facts_front_expression).
     NodeFactsInputs front;
+    // Where the front writes the window (`windowed`), for the kernel's run on the front's columns in place
+    // (node_facts_window_run), each by the front's record: whether the record is one of an expression of the batch
+    // whose records are there in a row (the kernel makes those alone); the kinds as that run reads them, the front's
+    // for those records and a given record's for every other; T's record of each, as the batch has it by its own
+    // places (NodeFacts' expected_ columns); and zeros for the fits. `place_windows` is that run's one window.
+    bool windowed;
+    uint8_t* place_taken;
+    uint8_t* place_kinds;
+    uint8_t* place_fits;
+    TypeId* place_types;
+    uint32_t* place_flags;
+    uint32_t* place_objects;
+    uint64_t* place_payloads;
+    uint8_t* place_standings;
+    uint16_t* place_exponents;
+    uint32_t* place_words;
+    TypeId* place_converted;
+    uint32_t* place_conversion_flags;
+    uint64_t* place_member_offsets;
+    uint32_t place_windows[2];
+    // The names' pass's own: a chunk's names' places, a vector's past the front's records; and its scalar path's
+    // scratch, a chunk's kinds and entries as the front left them.
+    uint32_t* name_list;
+    uint8_t* name_kinds;
+    uint32_t* name_entries;
     // The batch's expressions as T ran on them: each one's first node, its root and its records; its first record in the
     // batch; the front's root and its operand's record; its calls' first argument's place among the batch's; and whether
     // the front's records gave its inputs.
@@ -3951,6 +3973,9 @@ struct NodeFactsReader
     uint32_t* operands;
     uint32_t* argument_bases;
     uint8_t* given;
+    // Whether the expression's records are the front's window's in a row, which the kernel's run in place then makes
+    // (node_facts_window_expression).
+    uint8_t* placed;
     uint32_t expression_count;
     // By the batch's record: whether its expression is one the whole machine takes there.
     uint8_t* taken;
@@ -3985,6 +4010,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->operands = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->argument_bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->given = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->placed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->taken = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
         state->front.ops = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
         state->front.kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
@@ -3997,9 +4023,52 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->front.positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, records);
         state->front.arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, records);
         room = state->firsts != NULL && state->roots != NULL && state->counts != NULL && state->bases != NULL && state->records != NULL && state->operands != NULL &&
-               state->argument_bases != NULL && state->given != NULL && state->taken != NULL && state->front.ops != NULL && state->front.kinds != NULL && state->front.classes != NULL &&
-               state->front.fits != NULL && state->front.left != NULL && state->front.right != NULL && state->front.inputs != NULL && state->front.counts != NULL &&
-               state->front.positions != NULL && state->front.arguments != NULL;
+               state->argument_bases != NULL && state->given != NULL && state->placed != NULL && state->taken != NULL && state->front.ops != NULL && state->front.kinds != NULL &&
+               state->front.classes != NULL && state->front.fits != NULL && state->front.left != NULL && state->front.right != NULL && state->front.inputs != NULL &&
+               state->front.counts != NULL && state->front.positions != NULL && state->front.arguments != NULL;
+    }
+    const bool window = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW) != 0;
+    if (room && window)
+    {
+        // By the front's record, each with a vector's records past the front's.
+        const uint64_t places = (uint64_t)BUSTER_NODE_FRONT_RECORDS + 64;
+        state->place_taken = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_fits = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_types = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, places);
+        state->place_flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        state->place_objects = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        state->place_payloads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, places);
+        state->place_standings = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_exponents = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, places);
+        state->place_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        state->place_converted = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, 2 * places);
+        state->place_conversion_flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * places);
+        state->place_member_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, places);
+        state->name_list = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        state->name_kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->name_entries = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        room = state->place_taken != NULL && state->place_kinds != NULL && state->place_fits != NULL && state->place_types != NULL && state->place_flags != NULL &&
+               state->place_objects != NULL && state->place_payloads != NULL && state->place_standings != NULL && state->place_exponents != NULL &&
+               state->place_words != NULL && state->place_converted != NULL && state->place_conversion_flags != NULL && state->place_member_offsets != NULL &&
+               state->name_list != NULL && state->name_kinds != NULL && state->name_entries != NULL;
+        if (room)
+        {
+            // T's records of the places no expression has taken are read as given records': zeros, not what the arena had.
+            memset(state->place_taken, 0, places);
+            memset(state->place_kinds, 0, places);
+            memset(state->place_fits, 0, places);
+            memset(state->place_types, 0, places * sizeof(TypeId));
+            memset(state->place_flags, 0, places * sizeof(uint32_t));
+            memset(state->place_objects, 0, places * sizeof(uint32_t));
+            memset(state->place_payloads, 0, places * sizeof(uint64_t));
+            memset(state->place_standings, 0, places);
+            memset(state->place_exponents, 0, places * sizeof(uint16_t));
+            memset(state->place_words, 0, places * sizeof(uint32_t));
+            memset(state->place_converted, 0, 2 * places * sizeof(TypeId));
+            memset(state->place_conversion_flags, 0, 2 * places * sizeof(uint32_t));
+            memset(state->place_member_offsets, 0, places * sizeof(uint64_t));
+        }
     }
     room = room && node_facts_begin(&state->facts, machine, BUSTER_NODE_FACTS_READER_RECORDS, 0, true, false, true, BUSTER_NODE_FACTS_READER_LINES, arena);
     if (room)
@@ -4191,8 +4260,10 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
     const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE;
     const uint32_t size = operand < record ? front->sizes[operand] : 0;
     // Its subtree's records are the chunk's own, which are in a row: a record kept from an earlier chunk has its place
-    // alone (node_front_keep), and the records below it are gone.
-    bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 && operand + 1 - size >= front->made;
+    // alone (node_front_keep), and the records below it are gone. Where the front writes the window it keeps a waiting
+    // value's records whole, in a row, and says of each record whether its subtree is there.
+    const bool row = front->window ? front->window_classes[operand < record ? operand : record] != BUSTER_NODE_FACTS_CLASS_CUT : operand + 1 - size >= front->made;
+    bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 && row;
     uint32_t why = whole ? BUSTER_NODE_FACTS_WHY_GIVEN : BUSTER_NODE_FACTS_WHY_CUT;
     const uint32_t start = whole ? operand + 1 - size : 0;
     for (uint32_t r = 0; whole && r < count; r += 1)
@@ -4332,16 +4403,599 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
     return why;
 }
 
+// The inputs of the batch's records from `base`, `count` of them, and of their calls' arguments, from `argument_base` to
+// `argument_end`, taken into `set` from the windows' own, node_facts_append's: an expression `set`'s making doesn't give.
+static void node_facts_inputs_take(NodeFactsInputs* set, const NodeFacts* facts, uint32_t base, uint32_t count, uint32_t argument_base, uint32_t argument_end)
+{
+    memcpy(set->ops + base, facts->ops + base, count);
+    memcpy(set->kinds + base, facts->kinds + base, count);
+    memcpy(set->classes + base, facts->classes + base, count);
+    memcpy(set->left + base, facts->left + base, (uint64_t)count * sizeof(uint16_t));
+    memcpy(set->right + base, facts->right + base, (uint64_t)count * sizeof(uint16_t));
+    memcpy(set->inputs + base, facts->inputs + base, (uint64_t)count * sizeof(uint32_t));
+    memcpy(set->counts + base, facts->counts + base, (uint64_t)count * sizeof(uint16_t));
+    memcpy(set->positions + base, facts->positions + base, (uint64_t)count * sizeof(uint32_t));
+    memcpy(set->arguments + argument_base, facts->arguments + argument_base, (uint64_t)(argument_end - argument_base) * sizeof(uint16_t));
+}
+
+// The window the front writes (BUSTER_NODE_READER_WINDOW; measure-node-machine --shadow --front-window;
+// docs/one-core-path.md, "The front writes the window"). The copy above reads a record's fields back from the front's
+// columns, by a branch on its operator, after the front made the chunk: the front had each of those values in a register
+// when it made the record, and had branched on what the record is. Here the front's pass writes a record's inputs as it
+// makes the record, into columns of its own beside its others (NodeFront.window_kinds and the rest), and the kernel
+// reads them there: a chunk's records are its window, with nothing copied (node_facts_window_run).
+//
+// What the front has when it makes a record is all of a record's inputs but one:
+// - A literal's leaf's line is a batch's own. The batch's first lines have the front's records' numbers, so a
+//   literal's line is its record's, written as the record is.
+// - A call's arguments are the records the front has just taken off its stack: their distances go to a list of the
+//   front's, a call's in a row.
+// - A name's leaf's line is its declaration's, two loads from the leaf (the line's number by the declaration, then the
+//   line) that miss the nearest caches where the declaration is far. In the front's own pass, which retires some two
+//   hundred instructions a record, a load that misses holds the pass up: measured there on the 9700X the two cost
+//   three times what they cost in a loop of their own (docs/one-core-path.md). So the front writes the declaration and
+//   asks the cache for its line's number, and a pass over the chunk's records right after it gives each name's leaf
+//   its line (node_facts_window_names), by sweeps that ask for a load before they read it. A line is made at its
+//   declaration's first use, which is there.
+//
+// A record's subtree is the `NodeFront.sizes` records that end at it: the front makes an expression's records in its
+// postorder, each operand's subtree in a row before the next's, and the walk acts at no token within an expression
+// whose value no token takes (such a record among them would show in the front's comparison with the walk's nodes and
+// in T's own test of an expression's range). A chunk's end keeps a waiting value's row whole, or keeps its place alone
+// and cuts it (node_front_keep; BUSTER_NODE_FACTS_CLASS_CUT in its class), and a record with a cut operand is cut as it
+// is made. An operand's distance is the difference of the two records' places. A root's operand is wherever its value
+// waited (a control's condition's, for its body): the kernel reads an operand by its distance, whatever lies between.
+//
+// The kernel makes the records of the expressions T took whose records are there in a row, and reads every other
+// record of the window as given (`place_kinds`): the shadow has T's records for those alone, and a compile's kernel
+// would make every record and refuse by expression.
+
+// Whether the front writes the window in the unit `reader` reads, whose kernel at reader time is `front`'s typer's: the
+// options ask, and the kernel runs there on the lean front's records. With it, the operators' kinds and codes for the
+// writers, and the same lean front without the window on the reader's scratch, run beside this one for its ticks
+// (NodeFront.plain; without room for it the window is still written, and its ticks have nothing to be read against).
+static void node_facts_window_begin(NodeFront* front, CheckInputReader* reader)
+{
+    struct NodeFactsReader* state = front->typer != NULL ? front->typer->facts : NULL;
+    _Static_assert(CHECK_OP_COUNT <= 256, "an operator's kind and code are a byte's index away");
+    if (state != NULL && front->lean && state->place_taken != NULL)
+    {
+        memset(front->window_op_kinds, BUSTER_NODE_FACTS_GIVEN, sizeof(front->window_op_kinds));
+        memset(front->window_op_codes, BUSTER_NODE_FACTS_CODES, sizeof(front->window_op_codes));
+        memcpy(front->window_op_kinds, state->op_kinds, CHECK_OP_COUNT);
+        memcpy(front->window_op_codes, state->op_codes, CHECK_OP_COUNT);
+        NodeFront* plain = arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64);
+        NodeFrontShadow* shadow = arena_push_array(reader->scratch, 1, sizeof(NodeFrontShadow), _Alignof(NodeFrontShadow));
+        if (plain != NULL && shadow != NULL)
+        {
+            if ((reader->pp->options.node_front & BUSTER_NODE_FRONT_WARM) != 0)
+            {
+                memset(plain, 0, sizeof(NodeFront));
+            }
+            // Its report is its own: no node of the walk's is its to mark (a node's capacity of none).
+            memset(shadow, 0, sizeof(*shadow));
+            plain->shadow = shadow;
+            plain->count = 0;
+            plain->pending = 0;
+            plain->made = 0;
+            plain->stack_count = 0;
+            plain->group_count = 0;
+            plain->full = false;
+            plain->lean = true;
+            plain->ordinal = 0;
+            plain->argument_count = 0;
+            plain->wide_count = 0;
+            plain->typer = NULL;
+            plain->flat = NULL;
+            plain->window = false;
+            plain->window_facts = NULL;
+            plain->window_numbers = NULL;
+            plain->window_argument_count = 0;
+            plain->plain = NULL;
+            plain->chunks = 0;
+            front->plain = plain;
+        }
+        front->window = true;
+        front->window_facts = &state->facts;
+        front->window_numbers = state->facts.numbers;
+        front->window_argument_count = 0;
+        state->windowed = true;
+        // The lines' first numbers are the front's records': a literal's leaf's line has its record's.
+        state->facts.literal_count = BUSTER_NODE_FRONT_RECORDS;
+    }
+}
+
+// A record the front kept at a chunk's end (node_front_keep), at `to` from `from`. A literal's or a string's leaf's
+// line has its record's number, and moves with it. A call's arguments are kept after those of the calls kept before
+// it (`arguments` of them), where the next chunk's follow.
+static inline void node_facts_window_kept(NodeFront* front, uint32_t to, uint32_t from, uint32_t* arguments)
+{
+    if (front->window_kinds[to] == BUSTER_NODE_FACTS_LITERAL_LINE && to != from)
+    {
+        NodeFacts* facts = front->window_facts;
+        memcpy(facts->lines + 4 * ((uint64_t)to + 1), facts->lines + 4 * ((uint64_t)from + 1), 4 * sizeof(uint64_t));
+        front->window_entries[to] = to + 1;
+    }
+    else if (front->ops[to] == CHECK_OP_CALL)
+    {
+        const uint32_t count = front->window_counts[to];
+        memmove(front->window_arguments + *arguments, front->window_arguments + front->window_entries[to], (uint64_t)count * sizeof(uint16_t));
+        front->window_entries[to] = *arguments;
+        *arguments += count;
+    }
+}
+
+// A literal's leaf whose type's row is no integer's, or a string's: its line, as node_facts_front_expression makes it
+// (of the reader's decoding `decoded` of the literal, which the front has at hand; of the string's type and object),
+// at the lines' number `number`. Whether the columns hold the value whole, which a line's leaf is.
+static __attribute__((noinline)) bool node_facts_window_rare_leaf(NodeFront* front, CheckInputReader* reader, uint32_t record, uint32_t token, uint32_t category,
+                                                                  const CheckLiteral* decoded, uint32_t number)
+{
+    NodeFacts* facts = front->window_facts;
+    const TypeId type = front->leaf_types[record];
+    CheckValue value = { 0 };
+    if (category == BUSTER_NODE_FRONT_LEAF_LITERAL)
+    {
+        value = check_input_literal_value(reader, token, *decoded);
+    }
+    else
+    {
+        const uint32_t object = (uint32_t)front->leaf_integers[record];
+        value = (CheckValue){
+            .type = type,
+            .category = CHECK_LVALUE,
+            .flags = BUSTER_CHECK_STATIC_OBJECT | (object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
+            .constant_kind = CHECK_CONSTANT_ADDRESS,
+            .object = object,
+        };
+    }
+    // Its type's word is the machine's since it began: a literal's type is a basic one, and a string's array was made
+    // when the unit's names were resolved, before the walk.
+    NodeFactsRecord line;
+    const bool whole = node_facts_value_line(facts->machine, &value, &line);
+    if (whole)
+    {
+        memcpy(facts->lines + 4 * (uint64_t)number, &line, 4 * sizeof(uint64_t));
+    }
+    return whole;
+}
+
+// A leaf's record's inputs, as the lean front makes the record `record` at `token`, of `category`
+// (BUSTER_NODE_FRONT_LEAF_*): node_facts_front_expression's of the same record, from what the front holds.
+// - A name's (its declaration `declaration`): an identifier's kind and its declaration, whose line the names' pass
+//   over the chunk finds (node_facts_window_names).
+// - A literal's or a string's: a line of its own, the batch's line of its record's number (the lines' first numbers
+//   are the front's records': node_facts_window_begin), made here of the type and the value the front has just written
+//   in its own columns. `decoded` is the reader's decoding of a literal.
+static inline __attribute__((always_inline)) void node_facts_window_leaf(NodeFront* front, CheckInputReader* reader, uint32_t record, uint32_t token, uint32_t category,
+                                                                         uint32_t declaration, const CheckLiteral* decoded)
+{
+    uint8_t kind = BUSTER_NODE_FACTS_IDENTIFIER;
+    uint32_t entry = declaration;
+    if (category == BUSTER_NODE_FRONT_LEAF_IDENTIFIER)
+    {
+        // Its declaration's line's number is asked for, not read: the names' pass reads it, once the chunk is made.
+        __builtin_prefetch(front->window_numbers + declaration);
+    }
+    else
+    {
+        NodeFacts* facts = front->window_facts;
+        const uint32_t number = record + 1;
+        const TypeId type = front->leaf_types[record];
+        const uint32_t index = type_index(type);
+        bool whole = true;
+        // A literal of an integer's type (a string's is an array's, which has no integer's row). Its type has a row: it
+        // was the unit's before the walk, as node_facts_window_rare_leaf says.
+        if ((facts->rows[index].flags & BUSTER_NODE_FACTS_INTEGER) != 0)
+        {
+            // check_input_literal_value's leaf: a constant expression's value, and the spelling of zero where it is a
+            // number's (node_facts_front_integer's line).
+            // The line's four quadwords, each from registers (a record's first half: its type and word; its flags and
+            // object; its payload; its standing and `taken`): a record built in memory and copied would have the copy's
+            // load wait for its fields' stores.
+            const Parser* parser = facts->parser;
+            const uint64_t integer = front->leaf_integers[record];
+            const bool zero = integer == 0 && parser->tokens.kinds[token] == PARSE_KIND_NUMBER && parser->tokens.names[token] == 0;
+            uint64_t* const line = facts->lines + 4 * (uint64_t)number;
+            line[0] = (uint64_t)type | (uint64_t)facts->rows[index].word << 32;
+            line[1] = BUSTER_CHECK_ICE | (zero ? BUSTER_CHECK_LITERAL_ZERO : 0);
+            line[2] = integer;
+            line[3] = (uint64_t)BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER) | UINT64_C(1) << 8;
+        }
+        else
+        {
+            whole = node_facts_window_rare_leaf(front, reader, record, token, category, decoded, number);
+        }
+        kind = whole ? BUSTER_NODE_FACTS_LITERAL_LINE : BUSTER_NODE_FACTS_LITERAL;
+        entry = whole ? number : 0;
+    }
+    front->window_kinds[record] = kind;
+    front->window_classes[record] = BUSTER_NODE_FACTS_NO_CLASS;
+    front->window_left[record] = 0;
+    front->window_right[record] = 0;
+    front->window_entries[record] = entry;
+    front->window_positions[record] = check_input_expression_end(reader, token);
+}
+
+// An operator's record's inputs, as the lean front makes the record `record` of `op` at `token` with operands the
+// records a, b and c (BUSTER_NODE_FRONT_UNKNOWN for none; a conditional with its middle omitted has its first twice):
+// node_facts_front_expression's of the same record, from what the front holds. `entry` is a member's name, a cast's
+// type (void: a discard, a root's a statement's) or a return's conversion's; a conditional's is its third operand's
+// distance. A root's operand is wherever its value waited, and its distance says so.
+static inline __attribute__((always_inline)) void node_facts_window_operator(NodeFront* front, const CheckInputReader* reader, uint32_t record, CheckOp op, uint32_t token,
+                                                                             uint32_t a, uint32_t b, uint32_t c, uint32_t entry)
+{
+    const bool second = b != BUSTER_NODE_FRONT_UNKNOWN;
+    const bool third = c != BUSTER_NODE_FRONT_UNKNOWN;
+    const uint32_t class_a = front->window_classes[a];
+    const uint32_t class_b = second ? front->window_classes[b] : BUSTER_NODE_FACTS_NO_CLASS;
+    const uint32_t class_c = third ? front->window_classes[c] : BUSTER_NODE_FACTS_NO_CLASS;
+    const bool discard = op == CHECK_OP_CAST && entry == BUSTER_TYPE_VOID;
+    const uint8_t kind = discard ? BUSTER_NODE_FACTS_LOOKUP : front->window_op_kinds[op];
+    const uint32_t code = discard ? BUSTER_NODE_FACTS_CODE_DISCARD : front->window_op_codes[op];
+    const bool made = kind == BUSTER_NODE_FACTS_LOOKUP || kind == BUSTER_NODE_FACTS_OPERATOR;
+    // Its round: the greatest its operands ask (node_facts_round's).
+    const uint32_t round_a = node_facts_round_of(code, class_a);
+    const uint32_t round_b = node_facts_round_of(code, class_b);
+    const uint32_t round_c = node_facts_round_of(code, class_c);
+    const uint32_t round_ab = round_a > round_b ? round_a : round_b;
+    const uint32_t round = round_ab > round_c ? round_ab : round_c;
+    // Its records are in a row that ends at it unless an operand's are not.
+    const bool cut = class_a == BUSTER_NODE_FACTS_CLASS_CUT || class_b == BUSTER_NODE_FACTS_CLASS_CUT || class_c == BUSTER_NODE_FACTS_CLASS_CUT;
+    front->window_kinds[record] = kind;
+    front->window_classes[record] = (uint8_t)(cut ? BUSTER_NODE_FACTS_CLASS_CUT : made ? node_facts_class(round, code) : BUSTER_NODE_FACTS_NO_CLASS);
+    front->window_left[record] = (uint16_t)(record - a);
+    front->window_right[record] = (uint16_t)(second ? record - b : 0);
+    front->window_entries[record] = op == CHECK_OP_CONDITIONAL ? (third ? record - c : 0) : entry;
+    front->window_positions[record] = check_input_expression_end(reader, token);
+}
+
+// A call's record's inputs, as the lean front makes the record `record` at `token`: its callee's record and its
+// arguments' are `values`, `count` of them. Its arguments' distances are the next of the front's list.
+static inline __attribute__((always_inline)) void node_facts_window_call(NodeFront* front, const CheckInputReader* reader, uint32_t record, uint32_t token,
+                                                                         const uint32_t* values, uint32_t count)
+{
+    const uint32_t code = front->window_op_codes[CHECK_OP_CALL];
+    const uint32_t arguments = front->window_argument_count;
+    uint32_t round = 0;
+    bool cut = false;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const uint32_t operand = values[k];
+        const uint32_t class = front->window_classes[operand];
+        const uint32_t asked = node_facts_round_of(code, class);
+        round = asked > round ? asked : round;
+        cut = cut || class == BUSTER_NODE_FACTS_CLASS_CUT;
+        // The list has the arguments' distances: the callee's is written where the first argument's then is.
+        front->window_arguments[arguments + k - (k != 0 ? 1u : 0u)] = (uint16_t)(record - operand);
+    }
+    front->window_kinds[record] = front->window_op_kinds[CHECK_OP_CALL];
+    front->window_classes[record] = (uint8_t)(cut ? BUSTER_NODE_FACTS_CLASS_CUT : node_facts_class(round, code));
+    front->window_left[record] = (uint16_t)(record - values[0]);
+    front->window_right[record] = 0;
+    front->window_entries[record] = arguments;
+    front->window_counts[record] = (uint16_t)(count - 1);
+    front->window_positions[record] = check_input_expression_end(reader, token);
+    front->window_argument_count = arguments + count - 1;
+}
+
+// A name's leaf of the front's, at `r` among the records whose kinds and entries are `kinds` and `entries`, its token
+// `token`: its entry, its declaration, becomes its declaration's line's number, found by a load where an earlier use
+// made the line and made here at its first (node_facts_front_line); a literal's kind where the line is no leaf's of the
+// columns' (an enumerator past 64 bits, whose record T's columns don't hold).
+static inline __attribute__((always_inline)) void node_facts_window_name(NodeFacts* facts, uint8_t* kinds, uint32_t* entries, uint32_t r, uint32_t token)
+{
+    const uint32_t number = node_facts_front_line(facts, entries[r], token);
+    const bool high = number != 0 && ((uint32_t)(facts->lines[4 * (uint64_t)number + 3] >> 32) & BUSTER_NODE_FACTS_HIGH) != 0;
+    const bool named = number != 0 && !high;
+    kinds[r] = named ? BUSTER_NODE_FACTS_IDENTIFIER : BUSTER_NODE_FACTS_LITERAL;
+    entries[r] = named ? number : 0;
+}
+
+// The names' leaves among `count` records from the front's `first`, whose kinds and entries are `kinds` and `entries`
+// (the front's own columns, or a copy of them): each gets its declaration's line (node_facts_window_name). How many
+// there were. By three sweeps, each a loop of a few loads that the next record's don't wait for:
+// - the names' places into `list`, by a compare of the kinds and a compress of the lanes, sixteen records a step;
+// - each name's line asked for: its number is a load (the front asked for it as it made the leaf), and the line a
+//   prefetch;
+// - each name's line read and its kind and entry written.
+// A name's two loads are then in the cache when they are read, where one loop a name has the second wait for the
+// first (docs/one-core-path.md). The scalar path (`scalar`, a constant where this is inlined; a host without the
+// vectors has no other) is that loop, a test a record: the same kinds and entries.
+static inline __attribute__((always_inline)) uint32_t node_facts_window_names_by(NodeFacts* facts, const NodeFront* front, uint8_t* kinds, uint32_t* entries, uint32_t* list,
+                                                                                 uint32_t first, uint32_t count, const bool scalar)
+{
+    uint32_t names = 0;
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            if (kinds[r] == BUSTER_NODE_FACTS_IDENTIFIER)
+            {
+                node_facts_window_name(facts, kinds, entries, r, front->tokens[first + r]);
+                names += 1;
+            }
+        }
+    }
+    else
+    {
+        const __m512i step = _mm512_set1_epi32(16);
+        __m512i places = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+        for (uint32_t i = 0; i < count; i += 16)
+        {
+            const uint32_t live = count - i < 16 ? count - i : 16;
+            const __mmask16 mask = (__mmask16)((1u << live) - 1);
+            const __mmask16 found = _mm_mask_cmpeq_epi8_mask(mask, _mm_maskz_loadu_epi8(mask, kinds + i), _mm_set1_epi8(BUSTER_NODE_FACTS_IDENTIFIER));
+            _mm512_storeu_si512(list + names, _mm512_maskz_compress_epi32(found, places));
+            names += (uint32_t)__builtin_popcount((uint32_t)found);
+            places = _mm512_add_epi32(places, step);
+        }
+        const uint32_t* numbers = facts->numbers;
+        const uint64_t* lines = facts->lines;
+        for (uint32_t k = 0; k < names; k += 1)
+        {
+            __builtin_prefetch(lines + 4 * (uint64_t)numbers[entries[list[k]]]);
+        }
+        for (uint32_t k = 0; k < names; k += 1)
+        {
+            const uint32_t r = list[k];
+            node_facts_window_name(facts, kinds, entries, r, front->tokens[first + r]);
+        }
+    }
+    return names;
+}
+
+static __attribute__((noinline)) uint32_t node_facts_window_names_vector(NodeFacts* facts, const NodeFront* front, uint8_t* kinds, uint32_t* entries, uint32_t* list,
+                                                                         uint32_t first, uint32_t count)
+{
+    return node_facts_window_names_by(facts, front, kinds, entries, list, first, count, false);
+}
+
+static __attribute__((noinline)) uint32_t node_facts_window_names_scalar(NodeFacts* facts, const NodeFront* front, uint8_t* kinds, uint32_t* entries, uint32_t* list,
+                                                                         uint32_t first, uint32_t count)
+{
+    return node_facts_window_names_by(facts, front, kinds, entries, list, first, count, true);
+}
+
+// The names' pass over the chunk the front has just made (its records from `made`): each name's leaf gets its
+// declaration's line, in the front's own columns. A line made here reads its declaration's type's word, which the
+// machine has had since it began: the reader made the declarations' types before the walk. The pass's ticks, the names
+// and the lines it made with theirs go to the front's report. Then the same by the scalar path, on a copy of the
+// chunk's kinds and entries as the front left them: a leaf whose kind or line is not the pass's is counted.
+static void node_facts_window_names(NodeFront* front)
+{
+    struct NodeFactsReader* state = front->typer->facts;
+    NodeFacts* facts = &state->facts;
+    NodeFrontShadow* shadow = front->shadow;
+    const uint32_t first = front->made;
+    const uint32_t count = front->count - first;
+    memcpy(state->name_kinds, front->window_kinds + first, count);
+    memcpy(state->name_entries, front->window_entries + first, (uint64_t)count * sizeof(uint32_t));
+    const uint64_t lines = facts->line_count;
+    const uint64_t line_ticks = facts->line_ticks;
+    const uint64_t t0 = __rdtsc();
+    const uint32_t names = node_facts_window_names_vector(facts, front, front->window_kinds + first, front->window_entries + first, state->name_list, first, count);
+    shadow->window_name_ticks += __rdtsc() - t0;
+    shadow->window_names += names;
+    shadow->window_lines += facts->line_count - lines;
+    shadow->window_line_ticks += facts->line_ticks - line_ticks;
+    const uint32_t again = node_facts_window_names_scalar(facts, front, state->name_kinds, state->name_entries, state->name_list, first, count);
+    uint32_t differences = again != names;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        differences += state->name_kinds[r] != front->window_kinds[first + r] || state->name_entries[r] != front->window_entries[first + r];
+    }
+    shadow->window_name_differences += differences;
+}
+
+// Whether the inputs the front wrote of its record `x` are the batch's record `w`'s, as `facts` has them now
+// (node_facts_append's, or the copy's while they are exchanged for those): every field the kernel reads of a record, a
+// leaf's line by its number or its words, and a call's arguments. `root`: the record is its expression's root, whose
+// operand the front has at `distance` and the batch's record at one.
+static bool node_facts_window_same(const NodeFacts* facts, const NodeFront* front, uint32_t x, uint32_t w, bool root, uint32_t distance)
+{
+    const uint8_t kind = facts->kinds[w];
+    const CheckOp op = (CheckOp)facts->ops[w];
+    bool same = front->ops[x] == facts->ops[w] && front->window_kinds[x] == kind && front->window_classes[x] == facts->classes[w] &&
+                (root ? front->window_left[x] == distance && facts->left[w] == 1 : front->window_left[x] == facts->left[w]) &&
+                front->window_right[x] == facts->right[w] && front->window_positions[x] == facts->positions[w];
+    if (same && (kind == BUSTER_NODE_FACTS_LITERAL_LINE || kind == BUSTER_NODE_FACTS_IDENTIFIER))
+    {
+        same = front->window_entries[x] == facts->inputs[w] ||
+               memcmp(facts->lines + 4 * (uint64_t)front->window_entries[x], facts->lines + 4 * (uint64_t)facts->inputs[w], 4 * sizeof(uint64_t)) == 0;
+    }
+    else if (same && op == CHECK_OP_CALL && kind == BUSTER_NODE_FACTS_LOOKUP)
+    {
+        same = front->window_counts[x] == facts->counts[w];
+        for (uint32_t i = 0; same && i < facts->counts[w]; i += 1)
+        {
+            same = front->window_arguments[front->window_entries[x] + i] == facts->arguments[facts->inputs[w] + i];
+        }
+    }
+    else if (same && kind != BUSTER_NODE_FACTS_LITERAL)
+    {
+        same = front->window_entries[x] == facts->inputs[w];
+    }
+    return same;
+}
+
+// T's records as the batch has them by its own places, exchanged with `state`'s by the front's records (and back): the
+// kernel's run in place reads a given record and compares a made one by the front's place.
+static void node_facts_window_expected_exchange(struct NodeFactsReader* state)
+{
+    NodeFacts* facts = &state->facts;
+#define BUSTER_NODE_FACTS_EXCHANGE(type, mine, theirs) \
+    do \
+    { \
+        type* const kept = facts->theirs; \
+        facts->theirs = state->mine; \
+        state->mine = kept; \
+    } while (0)
+    BUSTER_NODE_FACTS_EXCHANGE(TypeId, place_types, expected_types);
+    BUSTER_NODE_FACTS_EXCHANGE(uint32_t, place_flags, expected_flags);
+    BUSTER_NODE_FACTS_EXCHANGE(uint32_t, place_objects, expected_objects);
+    BUSTER_NODE_FACTS_EXCHANGE(uint64_t, place_payloads, expected_payloads);
+    BUSTER_NODE_FACTS_EXCHANGE(uint8_t, place_standings, expected_standings);
+    BUSTER_NODE_FACTS_EXCHANGE(uint16_t, place_exponents, expected_exponents);
+    BUSTER_NODE_FACTS_EXCHANGE(uint32_t, place_words, expected_words);
+    BUSTER_NODE_FACTS_EXCHANGE(TypeId, place_converted, expected_converted);
+    BUSTER_NODE_FACTS_EXCHANGE(uint32_t, place_conversion_flags, expected_conversion_flags);
+    BUSTER_NODE_FACTS_EXCHANGE(uint64_t, place_member_offsets, expected_member_offsets);
+#undef BUSTER_NODE_FACTS_EXCHANGE
+}
+
+// An expression of the batch whose records the front has in a row, the front's from `start` (`size` of them, its
+// operand's subtree) and its root `record` (but an initialization's), the batch's `count` from `base`: each of its
+// records is one the kernel's run in place makes (`place_taken`), with T's record of it at the front's place; and the
+// inputs the front wrote of it are compared with the batch's, node_facts_append's and, where the copy gave the
+// expression (`copied`), the copy's.
+static void node_facts_window_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t base, uint32_t count, uint32_t record, uint32_t start, uint32_t size,
+                                         bool copied)
+{
+    NodeFacts* facts = &state->facts;
+    NodeFrontTypes* types = state->types;
+    const uint32_t distance = record - (start + size - 1);
+    for (uint32_t twin = 0; twin < (copied ? 2u : 1u); twin += 1)
+    {
+        if (twin != 0)
+        {
+            node_facts_inputs_exchange(facts, &state->front);
+        }
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            const uint32_t x = r < size ? start + r : record;
+            if (!node_facts_window_same(facts, front, x, base + r, r == size, distance))
+            {
+                types->facts_counts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] += 1;
+                node_facts_reader_difference(state, base + r, front->tokens[x], BUSTER_NODE_FACTS_DIFFERENCE_WINDOW);
+            }
+        }
+        if (twin != 0)
+        {
+            node_facts_inputs_exchange(facts, &state->front);
+        }
+    }
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const uint32_t x = r < size ? start + r : record;
+        const uint64_t w = (uint64_t)base + r;
+        state->place_taken[x] = 1;
+        state->place_types[x] = facts->expected_types[w];
+        state->place_flags[x] = facts->expected_flags[w];
+        state->place_objects[x] = facts->expected_objects[w];
+        state->place_payloads[x] = facts->expected_payloads[w];
+        state->place_standings[x] = facts->expected_standings[w];
+        state->place_exponents[x] = facts->expected_exponents[w];
+        state->place_words[x] = facts->expected_words[w];
+        state->place_converted[2 * (uint64_t)x] = facts->expected_converted[2 * w];
+        state->place_converted[2 * (uint64_t)x + 1] = facts->expected_converted[2 * w + 1];
+        state->place_conversion_flags[2 * (uint64_t)x] = facts->expected_conversion_flags[2 * w];
+        state->place_conversion_flags[2 * (uint64_t)x + 1] = facts->expected_conversion_flags[2 * w + 1];
+        state->place_member_offsets[x] = facts->expected_member_offsets[w];
+    }
+}
+
+// The kernel on the front's columns in place: the chunk's records the front holds are one window, read where the
+// front wrote them. Nothing is copied but, for the shadow, the kinds: the kernel makes the records of the batch's
+// expressions whose records are there in a row (node_facts_window_expression), and every other record is a given one.
+// Three runs, as the batch's: over poison, with every record it made compared with T's and its lists with their
+// twin's; over decoys; and a timed one, the later run's ticks. The batch's own inputs, T's records and windows are
+// exchanged for the front's while it runs, and are the batch's again after.
+static void node_facts_window_run(struct NodeFactsReader* state, const NodeFront* front)
+{
+    NodeFacts* facts = &state->facts;
+    uint64_t* counts = state->types->facts_counts;
+    const uint32_t mode = BUSTER_NODE_FACTS_WHOLE;
+    const uint32_t count = front->count;
+    for (uint32_t x = 0; x < count; x += 1)
+    {
+        state->place_kinds[x] = state->place_taken[x] != 0 ? front->window_kinds[x] : BUSTER_NODE_FACTS_GIVEN;
+    }
+    // The kernel reads its inputs through these; it writes none of them.
+    NodeFactsInputs place = {
+        .ops = (uint8_t*)(uintptr_t)front->ops,
+        .kinds = state->place_kinds,
+        .classes = (uint8_t*)(uintptr_t)front->window_classes,
+        .fits = state->place_fits,
+        .left = (uint16_t*)(uintptr_t)front->window_left,
+        .right = (uint16_t*)(uintptr_t)front->window_right,
+        .inputs = (uint32_t*)(uintptr_t)front->window_entries,
+        .counts = (uint16_t*)(uintptr_t)front->window_counts,
+        .positions = (uint32_t*)(uintptr_t)front->window_positions,
+        .arguments = (uint16_t*)(uintptr_t)front->window_arguments,
+        .argument_count = front->window_argument_count,
+    };
+    uint32_t* const windows = facts->windows;
+    const uint32_t window_count = facts->window_count;
+    node_facts_inputs_exchange(facts, &place);
+    node_facts_window_expected_exchange(state);
+    state->place_windows[0] = 0;
+    state->place_windows[1] = count;
+    facts->windows = state->place_windows;
+    facts->window_count = 0;
+    node_facts_given(facts, 0, BUSTER_NODE_FACTS_POISON_RECORDS);
+    node_facts_window(facts, 0, mode, false);
+    if (!node_facts_lists_same(facts, 0))
+    {
+        counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] += 1;
+        node_facts_reader_difference(state, 0, front->tokens[0], BUSTER_NODE_FACTS_DIFFERENCE_LISTS);
+    }
+    for (uint32_t x = 0; x < count; x += 1)
+    {
+        const uint8_t kind = facts->kinds[x];
+        const bool line = kind == BUSTER_NODE_FACTS_LITERAL_LINE;
+        const bool wanted = kind == BUSTER_NODE_FACTS_IDENTIFIER || kind == BUSTER_NODE_FACTS_LOOKUP || kind == BUSTER_NODE_FACTS_OPERATOR;
+        if (line || wanted)
+        {
+            const uint8_t by = facts->records[x].taken;
+            counts[NODE_FACTS_COUNT_WINDOW_WANTED] += wanted;
+            counts[NODE_FACTS_COUNT_WINDOW_MADE] += wanted && (by == BUSTER_NODE_FACTS_SHORT || by == BUSTER_NODE_FACTS_RULED);
+            if (!node_facts_same(facts, 0, x, mode))
+            {
+                counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] += 1;
+                node_facts_reader_difference(state, x, front->tokens[x], BUSTER_NODE_FACTS_DIFFERENCE_PLACE);
+            }
+        }
+    }
+    node_facts_given(facts, 0, BUSTER_NODE_FACTS_POISON_DECOY);
+    node_facts_window(facts, 0, mode, false);
+    for (uint32_t x = 0; x < count; x += 1)
+    {
+        if ((facts->kinds[x] & 0x02u) != 0 && !node_facts_same(facts, 0, x, mode))
+        {
+            counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] += 1;
+            node_facts_reader_difference(state, x, front->tokens[x], BUSTER_NODE_FACTS_DIFFERENCE_DECOY);
+        }
+    }
+    node_facts_given(facts, 0, BUSTER_NODE_FACTS_POISON_NONE);
+    const uint64_t t0 = __rdtsc();
+    node_facts_window(facts, 0, mode, false);
+    counts[NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS] += __rdtsc() - t0;
+    if (state->tests != NULL)
+    {
+        // The tests of the chunk's expressions, from the records the kernel has just made in place.
+        node_tests_window_chunk(state->tests, state, front);
+    }
+    facts->windows = windows;
+    facts->window_count = window_count;
+    node_facts_window_expected_exchange(state);
+    node_facts_inputs_exchange(facts, &place);
+    memset(state->place_taken, 0, count);
+}
+
 // Whether the front's inputs of the batch's record `w` are node_facts_append's: every field the kernel reads of a record,
-// a leaf's line by its words (each making has its own line of a literal), and a call's arguments.
+// a leaf's line by its number or its words, and a call's arguments.
 static bool node_facts_front_same(const NodeFacts* facts, const NodeFactsInputs* set, uint32_t w)
 {
     const uint8_t kind = facts->kinds[w];
     bool same = set->ops[w] == facts->ops[w] && set->kinds[w] == kind && set->classes[w] == facts->classes[w] && set->left[w] == facts->left[w] &&
                 set->right[w] == facts->right[w] && set->counts[w] == facts->counts[w] && set->positions[w] == facts->positions[w];
-    if (same && kind == BUSTER_NODE_FACTS_LITERAL_LINE)
+    if (same && (kind == BUSTER_NODE_FACTS_LITERAL_LINE || kind == BUSTER_NODE_FACTS_IDENTIFIER))
     {
-        same = memcmp(facts->lines + 4 * (uint64_t)set->inputs[w], facts->lines + 4 * (uint64_t)facts->inputs[w], 4 * sizeof(uint64_t)) == 0;
+        // A literal's line is each making's own. A declaration's is one, unless it was made again between two makings'
+        // reads of it (its type as a use reads it changed): then the two lines' words are the same.
+        same = set->inputs[w] == facts->inputs[w] ||
+               memcmp(facts->lines + 4 * (uint64_t)set->inputs[w], facts->lines + 4 * (uint64_t)facts->inputs[w], 4 * sizeof(uint64_t)) == 0;
     }
     else if (same && kind != BUSTER_NODE_FACTS_LITERAL)
     {
@@ -4368,6 +5022,10 @@ static void node_facts_reader_flush(struct NodeFactsReader* state, const NodeFro
         // An expression the windows had no room for (node_facts_append): the batch isn't run, and the next starts anew.
         counts[NODE_FACTS_COUNT_FAILURES] += 1;
         facts->room = true;
+        if (state->windowed)
+        {
+            memset(state->place_taken, 0, front->count);
+        }
     }
     else if (windows != 0)
     {
@@ -4508,6 +5166,11 @@ static void node_facts_reader_flush(struct NodeFactsReader* state, const NodeFro
         counts[NODE_FACTS_COUNT_EXPRESSIONS] += state->expression_count;
         counts[NODE_FACTS_COUNT_RECORDS] += facts->record_count;
         counts[NODE_FACTS_COUNT_WINDOWS] += windows;
+        if (state->windowed)
+        {
+            // The same kernel on the front's own columns, where the front wrote them.
+            node_facts_window_run(state, front);
+        }
     }
     // The words as they stand: the unit's totals so far.
     counts[NODE_FACTS_COUNT_ROWS] = facts->row_count;
@@ -4522,7 +5185,7 @@ static void node_facts_reader_flush(struct NodeFactsReader* state, const NodeFro
     facts->window_count = 0;
     facts->window_body = UINT32_MAX;
     facts->windows[0] = 0;
-    facts->literal_count = 0;
+    facts->literal_count = state->windowed ? BUSTER_NODE_FRONT_RECORDS : 0;
     state->front.argument_count = 0;
     state->expression_count = 0;
     state->batches += 1;
@@ -4547,7 +5210,7 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
     const uint32_t argument_base = facts->argument_count;
     // The rows of the types made since: the walk's, and T's own derivations' for this expression.
     node_facts_settle(facts);
-    // The front's inputs first: a declaration's line is then made by whichever of the two meets its use first, here.
+    // The front's inputs first: a declaration's line is then made by whichever of the makings meets its use first, here.
     const uint64_t t0 = __rdtsc();
     const uint32_t why = node_facts_front_expression(state, front, base, count, record, operand);
     const bool given = why == BUSTER_NODE_FACTS_WHY_GIVEN;
@@ -4572,20 +5235,12 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
         types->facts_counts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] += state->front.argument_count != facts->argument_count;
     }
     const bool kept = given && state->front.argument_count == facts->argument_count;
+    bool placed = false;
     if (appended && !kept)
     {
         // The front's records don't give the expression: its inputs are node_facts_append's.
-        NodeFactsInputs* set = &state->front;
-        memcpy(set->ops + base, facts->ops + base, count);
-        memcpy(set->kinds + base, facts->kinds + base, count);
-        memcpy(set->classes + base, facts->classes + base, count);
-        memcpy(set->left + base, facts->left + base, (uint64_t)count * sizeof(uint16_t));
-        memcpy(set->right + base, facts->right + base, (uint64_t)count * sizeof(uint16_t));
-        memcpy(set->inputs + base, facts->inputs + base, (uint64_t)count * sizeof(uint32_t));
-        memcpy(set->counts + base, facts->counts + base, (uint64_t)count * sizeof(uint16_t));
-        memcpy(set->positions + base, facts->positions + base, (uint64_t)count * sizeof(uint32_t));
-        memcpy(set->arguments + argument_base, facts->arguments + argument_base, (uint64_t)(facts->argument_count - argument_base) * sizeof(uint16_t));
-        set->argument_count = facts->argument_count;
+        node_facts_inputs_take(&state->front, facts, base, count, argument_base, facts->argument_count);
+        state->front.argument_count = facts->argument_count;
         types->facts_counts[NODE_FACTS_COUNT_FRONT_SKIPPED] += !given;
         if (!given)
         {
@@ -4595,6 +5250,33 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
                 types->facts_skipped_tokens[types->facts_skipped_listed] = front->tokens[record];
                 types->facts_skipped_reasons[types->facts_skipped_listed] = (uint8_t)why;
                 types->facts_skipped_listed += 1;
+            }
+        }
+    }
+    if (appended && state->windowed)
+    {
+        // The front's own window: the expression's records are there in a row, its operand's subtree's and its root's
+        // (but an initialization's), or it is not the window's.
+        const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE;
+        const uint32_t size = operand < record ? front->sizes[operand] : 0;
+        const bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 &&
+                           front->window_classes[operand] != BUSTER_NODE_FACTS_CLASS_CUT;
+        placed = whole;
+        if (whole)
+        {
+            node_facts_window_expression(state, front, base, count, record, operand + 1 - size, size, kept);
+            types->facts_counts[NODE_FACTS_COUNT_WINDOW_EXPRESSIONS] += 1;
+            types->facts_counts[NODE_FACTS_COUNT_WINDOW_RECORDS] += count;
+        }
+        else
+        {
+            types->facts_counts[NODE_FACTS_COUNT_WINDOW_SKIPPED] += 1;
+            types->facts_window_whys[BUSTER_NODE_FACTS_WHY_CUT] += 1;
+            if (types->facts_window_listed < BUSTER_NODE_FRONT_LISTED)
+            {
+                types->facts_window_tokens[types->facts_window_listed] = front->tokens[record];
+                types->facts_window_reasons[types->facts_window_listed] = BUSTER_NODE_FACTS_WHY_CUT;
+                types->facts_window_listed += 1;
             }
         }
     }
@@ -4609,6 +5291,7 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
         state->operands[e] = operand;
         state->argument_bases[e] = argument_base;
         state->given[e] = kept;
+        state->placed[e] = placed;
         state->expression_count = e + 1;
     }
 }
@@ -4616,6 +5299,12 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
 static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front)
 {
     node_facts_reader_flush(state, front);
+}
+
+static void node_facts_reader_tests(struct NodeFactsReader* state, struct NodeCensusReader* tests)
+{
+    // The tests keep a byte a declaration's line: without room for them they don't run on the window.
+    state->tests = node_tests_window_lines(tests, state->reader->scratch, state->facts.line_capacity) ? tests : NULL;
 }
 
 #endif

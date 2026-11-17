@@ -301,7 +301,6 @@ static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
 // flags.
 static void ir_vectorize_kinds_vector(const IrFunction* f, uint8_t* kinds)
 {
-#if BUSTER_HOST_VECTOR
     const __m512i low = _mm512_loadu_si512(ir_vectorize_kind_table);
     const __m512i high = _mm512_loadu_si512(ir_vectorize_kind_table + 64);
     for (uint64_t first = 0; first < f->instruction_count; first += BUSTER_IR_VECTORIZE_BATCH)
@@ -317,10 +316,6 @@ static void ir_vectorize_kinds_vector(const IrFunction* f, uint8_t* kinds)
         const __m512i result = _mm512_mask_mov_epi8(kind, flagged, _mm512_setzero_si512());
         _mm512_mask_storeu_epi8(kinds + first, valid, result);
     }
-#else
-    (void)f;
-    (void)kinds;
-#endif
 }
 
 static void ir_vectorize_kinds_scalar(const IrFunction* f, uint8_t* kinds)
@@ -338,7 +333,6 @@ static void ir_vectorize_kinds_scalar(const IrFunction* f, uint8_t* kinds)
 static bool ir_vectorize_forbidden(const uint8_t* kinds, uint32_t first, uint32_t end, bool scalar)
 {
     bool forbidden = false;
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         for (uint64_t at = first; at < end; at += BUSTER_IR_VECTORIZE_BATCH)
@@ -351,7 +345,6 @@ static bool ir_vectorize_forbidden(const uint8_t* kinds, uint32_t first, uint32_
         }
     }
     else
-#endif
     {
         for (uint32_t at = first; at < end; at += 1)
         {

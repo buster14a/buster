@@ -7,7 +7,6 @@
 // The 9700X invocation takes its shared per-run lock and CPU 2 pin. --only and --after-scalar expose both power states.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -396,11 +395,3 @@ int run_tier1_select_benchmark(int argc, char** argv)
     return result;
 }
 
-#else
-int run_tier1_select_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

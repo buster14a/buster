@@ -124,8 +124,7 @@ static bool unwind_tier0_test_function(UnwindTier0Test* test, const Tier0Functio
         valid = unwind_tier0_test_expect(test, offsets[path] != 0 && check.error == BRANCH_SIZING_OK, "records and branch metadata validate", id);
         if (valid)
         {
-            const BranchSizing sized = path == 0 ? size_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count, offsets[path]) :
-                                                  size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets[path]);
+            const BranchSizing sized = size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets[path]);
             valid = unwind_tier0_test_expect(test, sized.error == BRANCH_SIZING_OK && sized.length <= INT32_MAX, "actual branch sizing succeeds", id);
             sizes[path] = (uint32_t)sized.length;
         }

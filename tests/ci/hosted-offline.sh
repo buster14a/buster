@@ -25,10 +25,9 @@ offline="$work/tools/ci/hosted-offline.sh"
 packages=$(sed -n 's/^packages=(\(.*\))$/\1/p' "$offline")
 [ -n "$packages" ] || fail 'hosted-offline.sh has no package list'
 
-# The pinned downloads: stand-ins for setup-baseline-runtime.sh's and fetch-corpus.sh's, which read theirs through the
-# real cached-download.sh from https URLs that the stand-in curl serves.
-printf 'libc runtime\n' > "$work/upstream/runtime.deb"
-printf 'gcc runtime\n' > "$work/upstream/gcc.deb"
+# The pinned download: a stand-in for fetch-corpus.sh's, which reads it through the real cached-download.sh from an
+# https URL that the stand-in curl serves. (The baseline runtime's, setup-baseline-runtime.sh's, went with the scalar
+# host, #2924.)
 mkdir "$work/corpus-tree"
 printf 'int x;\n' > "$work/corpus-tree/a.c"
 tar -cf "$work/upstream/corpus.tar" -C "$work/corpus-tree" .
@@ -43,13 +42,6 @@ printf 'int luac_fixture;\n' > "$work/lua-tree/lua-5.4.8/src/luac.c"
 tar -czf "$work/upstream/lua-5.4.8.tar.gz" -C "$work/lua-tree" lua-5.4.8
 lua_digest=$(digest "$work/upstream/lua-5.4.8.tar.gz")
 sed -i "s|https://www.lua.org/ftp/lua-5.4.8.tar.gz|https://fixture.invalid/lua-5.4.8.tar.gz|; s/4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae/$lua_digest/" "$offline"
-cat > "$work/tools/ci/setup-baseline-runtime.sh" << SCRIPT
-#!/usr/bin/env bash
-set -euo pipefail
-mkdir -p "\$RUNNER_TEMP/runtime"
-bash "\$(dirname "\$0")/cached-download.sh" https://fixture.invalid/runtime.deb $(digest "$work/upstream/runtime.deb") "\$RUNNER_TEMP/runtime/runtime.deb"
-bash "\$(dirname "\$0")/cached-download.sh" https://fixture.invalid/gcc.deb $(digest "$work/upstream/gcc.deb") "\$RUNNER_TEMP/runtime/gcc.deb"
-SCRIPT
 cat > "$work/tools/ci/fetch-corpus.sh" << SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
@@ -299,12 +291,12 @@ echo 2 > "$work/fail-update"
 echo 1 > "$work/fail-curl"
 reset_requests
 bash "$offline" prepare "$bundle" 2> "$work/log" || { cat "$work/log" >&2; fail 'a cold preparation failed'; }
-for input in apt baseline corpus c-testsuite sqlite lua; do
+for input in apt corpus c-testsuite sqlite lua; do
     grep -q "input=$input source=network" "$work/log" || fail "$input was not acquired"
 done
 grep -q 'apt-get update failed with status 100 (attempt 2 of 3)' "$work/log" || fail 'the update was not retried'
 test ! -e "$work/hosts" || fail 'a name that resolves was pinned'
-grep -q 'acquiring baseline failed (attempt 1 of 3)' "$work/log" || fail 'the download was not retried'
+grep -q 'acquiring corpus failed (attempt 1 of 3)' "$work/log" || fail 'the download was not retried'
 [ "$(grep -c '^-o Acquire::Retries=3 update$' "$work/apt-requests")" = 3 ] || fail 'the lists were not updated three times'
 [ "$(grep -c -- '--download-only' "$work/apt-requests")" = 1 ] || fail 'the closure was not downloaded once'
 [ "$(grep -c -- '--simulate' "$work/apt-requests")" = 1 ] || fail 'the closure was not checked offline'
@@ -333,7 +325,7 @@ git -C "$bundle/ci/sqlite.git" cat-file -e "refs/pinned/$BUSTER_SQLITE_COMMIT^{c
 hide_sources
 reset_requests
 bash "$offline" prepare "$bundle" 2> "$work/log" || { cat "$work/log" >&2; fail 'a warm preparation failed'; }
-for input in apt baseline corpus c-testsuite sqlite lua; do
+for input in apt corpus c-testsuite sqlite lua; do
     grep -q "input=$input source=cache" "$work/log" || fail "$input did not come from the cache"
 done
 [ "$(requests apt-requests)" = 0 ] && [ "$(requests curl-requests)" = 0 ] || fail 'a warm preparation made a request'
@@ -358,8 +350,7 @@ read_inputs()
 {
     rm -rf -- "$work/read"
     mkdir "$work/read"
-    offline_env env RUNNER_TEMP="$work/read" bash "$work/tools/ci/setup-baseline-runtime.sh" > /dev/null &&
-        offline_env bash "$work/tools/ci/fetch-corpus.sh" "$work/read/corpus" > /dev/null &&
+    offline_env bash "$work/tools/ci/fetch-corpus.sh" "$work/read/corpus" > /dev/null &&
         offline_env bash "$work/tools/ci/fetch-c-testsuite.sh" "$work/read/c-testsuite" &&
         offline_env bash "$work/tools/ci/fetch-sqlite.sh" "$work/read/sqlite" &&
         offline_env bash "$offline" lua "$work/read/lua"
@@ -444,7 +435,7 @@ reset_requests
 bash "$offline" prepare "$work/damaged" 2> "$work/log" || { cat "$work/log" >&2; fail 'a damaged bundle was not repaired'; }
 grep -q 'input=apt source=network reason=.*tcc_2.0.* is missing' "$work/log" || fail 'the missing .deb was not the reason'
 grep -q 'input=corpus source=network' "$work/log" || fail 'the tampered corpus was not acquired again'
-for input in baseline c-testsuite sqlite lua; do
+for input in c-testsuite sqlite lua; do
     grep -q "input=$input source=cache" "$work/log" || fail "the intact $input was acquired again"
 done
 [ "$(grep -c . "$work/curl-requests")" = 1 ] && grep -q 'corpus.tar' "$work/curl-requests" || fail 'the repair downloaded more than the corpus'
@@ -456,7 +447,7 @@ reset_requests
 ImageVersion=20261108.2 bash "$offline" prepare "$work/rolled" 2> "$work/log" || { cat "$work/log" >&2; fail 'a new image'"'"'s preparation failed'; }
 grep -q 'input=apt source=network reason=it was resolved on runner image ubuntu26 20261101.1 ' "$work/log" || fail 'the image change was not the reason'
 grep -qx "runner ubuntu26 20261108.2 .* $native" "$work/rolled/apt/MANIFEST" || fail 'the new image was not recorded'
-for input in baseline corpus c-testsuite sqlite lua; do
+for input in corpus c-testsuite sqlite lua; do
     grep -q "input=$input source=cache" "$work/log" || fail "$input was acquired again for a new image"
 done
 [ "$(requests curl-requests)" = 0 ] || fail 'a new image downloaded the pinned files'

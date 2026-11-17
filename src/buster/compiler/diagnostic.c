@@ -160,26 +160,11 @@ static void diagnostic_sort(DiagnosticOrder* items, uint32_t count, DiagnosticOr
                         const DiagnosticOrder item = input[begin + i];
                         digits[i] = (uint32_t)((pass < 8 ? item.sequence : item.source) >> shift) & 255;
                     }
-#if BUSTER_HOST_VECTOR
                     const __m512i conflicts = _mm512_conflict_epi32(_mm512_loadu_si512(digits));
                     _mm512_storeu_si512(ranks, _mm512_popcnt_epi32(conflicts));
                     const __mmask16 live = (__mmask16)((1u << width) - 1);
                     // Only live conflicts participate: inactive zero digits must not hide a live bucket's last key.
                     const uint32_t last = (uint32_t)live & ~(uint32_t)_mm512_mask_reduce_or_epi32(live, conflicts);
-#else
-                    uint32_t last = 0;
-                    for (uint32_t i = 0; i < width; i += 1)
-                    {
-                        ranks[i] = 0;
-                        bool final = true;
-                        for (uint32_t j = 0; j < width; j += 1)
-                        {
-                            ranks[i] += j < i && digits[j] == digits[i];
-                            final &= j <= i || digits[j] != digits[i];
-                        }
-                        last |= (uint32_t)final << i;
-                    }
-#endif
                     if (placing != 0)
                     {
                         for (uint32_t i = 0; i < width; i += 1)

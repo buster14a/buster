@@ -1797,9 +1797,6 @@ _Static_assert(BUSTER_TYPE_BUILTIN_COUNT == 64, "the builtins' rows are one 64-b
 // 64 masked to the `count` types), and writes `count` bytes of each column.
 static void check_lower_classify_types(const TypeTable* types, uint32_t count, uint8_t* classes, uint8_t* facts)
 {
-#if !BUSTER_HOST_VECTOR
-    check_lower_classify_types_scalar(types, count, classes, facts);
-#else
     const uint32_t builtins = count < BUSTER_TYPE_BUILTIN_COUNT ? count : BUSTER_TYPE_BUILTIN_COUNT;
     const __mmask64 prefix = builtins < 64 ? (UINT64_C(1) << builtins) - 1 : UINT64_MAX;
     const __mmask64 plain_char = types->char_unsigned ? UINT64_C(1) << BUSTER_TYPE_CODE_CHAR : 0;
@@ -1826,7 +1823,6 @@ static void check_lower_classify_types(const TypeTable* types, uint32_t count, u
             facts[index] = check_lower_type_facts(types, type);
         }
     }
-#endif
 }
 
 // A record's volatile subobjects are computed once before bodies share this immutable column. Pointer pointees are
@@ -2602,9 +2598,6 @@ static uint32_t check_lower_entry_classes_scalar(const uint8_t* classes, uint32_
 
 static uint32_t check_lower_entry_classes(const uint8_t* classes, uint32_t count)
 {
-#if !BUSTER_HOST_VECTOR
-    return check_lower_entry_classes_scalar(classes, count);
-#else
     uint64_t x87 = 0;
     uint64_t wide = 0;
     uint64_t vector = 0;
@@ -2619,7 +2612,6 @@ static uint32_t check_lower_entry_classes(const uint8_t* classes, uint32_t count
     }
     return (x87 != 0 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : 0) | (wide != 0 ? BUSTER_CHECK_LOWER_ENTRIES_WIDE : 0) |
            (vector != 0 ? BUSTER_CHECK_LOWER_ENTRIES_VECTOR : 0);
-#endif
 }
 
 static uint32_t check_lower_entry_classes_scalar(const uint8_t* classes, uint32_t count)

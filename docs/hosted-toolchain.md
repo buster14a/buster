@@ -8,12 +8,14 @@ absent or damaged inputs, in this order:
 
 **exact verified Actions cache → digest-pinned GHCR mirror → original upstream URL.**
 
-The test/fuzz matrix (`9700x.yml`, whose rows' jobs, a portable row's compiler
-build among them, are `hosted-correctness.yml`'s) and both self-host bootstrap
-rows (`selfhost.yml`) depend on successful preparation; they never independently
-fall back to a remote source. `build.yml`'s single job is its workflow's only
-consumer, so the `hosted-tools` action, given an empty `artifact-name`, runs the
-same preparation inside that job. `build-pgo.yml` and the 9700X need only CMake
+The test rows and fuzz campaigns (`9700x.yml`, whose rows' jobs are
+`hosted-correctness.yml`'s and whose campaigns are `drawn.yml`'s) and the
+self-host bootstrap (`selfhost.yml`, through `drawn.yml`) depend on successful
+preparation; they never independently fall back to a remote source.
+`build.yml`'s regressions, the one drawn job that holds them (`drawn.yml`'s
+`regressions` row), are their workflow's only consumer, so the `hosted-tools`
+action, given an empty `artifact-name`, runs the same preparation inside that
+job. `build-pgo.yml` and the 9700X need only CMake
 and Ninja: `setup-build-tools.sh` without `BUSTER_HOSTED_RELEASES` acquires each
 from the mirror, then upstream, with the same checks.
 
@@ -205,7 +207,6 @@ resolve Ubuntu's mirrors failed every hosted job of four main runs in setup.
 | Input | Acquired by | Pinned by |
 | --- | --- | --- |
 | apt closure of `setup-hosted.sh`'s packages | `apt-get install --download-only` on the preparation's runner | the package list (in `hosted-offline.sh`) and the runner image |
-| baseline runtime's 4 `.deb`s | `setup-baseline-runtime.sh`, through `cached-download.sh`, from the archive's snapshot of 2026-11-11 (`snapshot.ubuntu.com`), since the archive drops superseded updates | their SHA-256 digests |
 | frozen corpus | `fetch-corpus.sh`, through `cached-download.sh` | its SHA-256 digest |
 | c-testsuite and SQLite | `fetch-c-testsuite.sh`, `fetch-sqlite.sh` | their commits |
 | Lua 5.4.8 | `hosted-offline.sh lua`, through `cached-download.sh` | the release archive's SHA-256 digest |
@@ -309,8 +310,9 @@ two real-runner jobs:
 - **A shard's setup.** It takes Ubuntu's mirrors (every host apt's sources name,
   and plain HTTP), packages.microsoft.com, Lua and GitHub's release, raw and
   package hosts down before the handoff's restore, and github.com and
-  codeload.github.com right after it. Setup, the baseline runtime, the corpus
-  and both mirrors must still succeed, as must extracting Lua.
+  codeload.github.com right after it. Setup, the corpus and both mirrors must
+  still succeed, as must extracting Lua. (The baseline runtime's `.deb`s, for the
+  scalar host's emulation, went with it, #2924.)
 - **A warm preparation.** It prepares cold, keeps the bundle in a cache of its
   own, takes every source down, and requires a fresh restore to prepare with
   every input from the cache.
