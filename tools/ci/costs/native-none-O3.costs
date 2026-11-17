@@ -31,6 +31,7 @@
 #: cpu 3 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 1 0.65 Intel(R) Xeon(R) 6973P-C
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: unmeasured Test deterministic work and growth contracts [1 CPU]
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
@@ -192,6 +193,7 @@
 #: peak 56 Test Tier 1 integer truth round trips against native and instruction-shape oracles
 #: peak 59 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: peak 61 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+9.9 Test deterministic work and growth contracts [1 CPU]
 11.1 Check unity fixture ownership without rebuilding
 122.6 Test the foreign inputs [8 CPUs]
 150.4 Check the no-recursion rule on the call graph [8 CPUs]

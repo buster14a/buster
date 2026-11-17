@@ -29,6 +29,7 @@
 #: cpu 7 0.60 AMD EPYC 9V45 96-Core Processor
 #: cpu 6 0.80 AMD EPYC 9V74 80-Core Processor
 #: cpu 3 0.81 INTEL(R) XEON(R) PLATINUM 8573C
+#: unmeasured Test deterministic work and growth contracts [1 CPU]
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
@@ -190,6 +191,7 @@
 #: peak 110 Test Tier 1 integer truth round trips against native and instruction-shape oracles
 #: peak 134 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: peak 112 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+17.7 Test deterministic work and growth contracts [1 CPU]
 9.3 Check unity fixture ownership without rebuilding
 304.7 Test the foreign inputs [8 CPUs]
 168.9 Check the no-recursion rule on the call graph [8 CPUs]
