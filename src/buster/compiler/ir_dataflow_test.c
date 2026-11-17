@@ -5,10 +5,13 @@
 // operands by semantic opcode, NOT ir_operand_table/ir_operand. It scans instructions backwards and places phi uses
 // on the actual incoming edges. Small fixtures also use byte-per-original-value fixpoints, with numeric reverse block
 // order rather than dataflow.c's postorder. Every source form gets scalar/vector identity and independent equation,
-// dense-map, CFG and padding checks. No oracle is in a measured kernel.
+// dense-map, CFG and padding checks, the layout check of its successor columns, postorder and phi records from the IR,
+// and dataflow_sweeps_test.c's search for its live bits and sweep count. No oracle is in a measured kernel.
 
 #include <sys/mman.h>
 #include <unistd.h>
+
+#include "dataflow_sweeps_test.c"
 
 // IR_FENCE (#1059) uses no value: the default case's. IR_INTRINSIC uses a, and b where it has one: splat's (#1450) and
 // the unary kinds' is none. IR_ATOMIC_RMW (#1059) uses its address and its operand, as a store does, and a
@@ -301,6 +304,79 @@ static bool ir_dataflow_test_equations(const IrFunction* f, const IrDataflow* re
     return valid;
 }
 
+// The columns the equations don't read, from the IR itself. Each block's successors are its terminator's distinct
+// targets in their first order; the postorder holds every block once. Each predecessor's phi inputs are the phis'
+// pairs naming it, in block, phi and pair order, with their dense IDs and the phi's block.
+static bool ir_dataflow_test_layout(const IrFunction* f, const IrDataflow* result, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t blocks = f->block_count;
+    bool valid = result->instruction_count == f->instruction_count && result->flow.block_count == blocks;
+    uint32_t* seen = ir_allocate(scratch, blocks, sizeof(uint32_t), &valid);
+    uint32_t* cursor = ir_allocate(scratch, blocks, sizeof(uint32_t), &valid);
+    valid = valid && result->flow.successor_offsets[0] == 0 && result->flow.successor_offsets[blocks] == result->flow.edge_count;
+    valid = valid && result->phi_offsets[0] == 0 && result->phi_offsets[blocks] == result->phi_use_count;
+    for (uint32_t block = 0; valid && block < blocks; block += 1)
+    {
+        seen[block] = BUSTER_IR_NONE;
+        cursor[block] = result->phi_offsets[block];
+        valid = result->phi_offsets[block] <= result->phi_offsets[block + 1];
+    }
+    for (uint32_t block = 0; valid && block < blocks; block += 1)
+    {
+        const uint32_t last = f->block_offsets[block + 1] - 1;
+        uint32_t place = result->flow.successor_offsets[block];
+        for (uint32_t e = 0; valid && e < ir_successor_count(f, last); e += 1)
+        {
+            const uint32_t target = ir_successor(f, last, e);
+            if (seen[target] != block)
+            {
+                seen[target] = block;
+                valid = place < result->flow.successor_offsets[block + 1] && result->flow.successors[place] == target;
+                place += 1;
+            }
+        }
+        valid = valid && place == result->flow.successor_offsets[block + 1];
+    }
+    for (uint32_t block = 0; valid && block < blocks; block += 1)
+    {
+        seen[block] = BUSTER_IR_NONE;
+    }
+    for (uint32_t order = 0; valid && order < blocks; order += 1)
+    {
+        const uint32_t block = result->flow.postorder[order];
+        valid = block < blocks && seen[block] == BUSTER_IR_NONE;
+        if (valid)
+        {
+            seen[block] = order;
+        }
+    }
+    uint64_t pairs = 0;
+    for (uint32_t target = 0; valid && target < blocks; target += 1)
+    {
+        for (uint32_t phi = f->block_offsets[target]; valid && phi < f->block_offsets[target + 1] && f->op[phi] == IR_PHI; phi += 1)
+        {
+            for (uint32_t p = 0; valid && p < f->b[phi]; p += 1)
+            {
+                const uint32_t predecessor = f->extra[f->a[phi] + p * 2];
+                const uint32_t value = f->extra[f->a[phi] + p * 2 + 1];
+                const uint32_t place = cursor[predecessor];
+                valid = place < result->phi_offsets[predecessor + 1] && result->phi_values[place] == result->ids[value] &&
+                    result->phi_targets[place] == target;
+                cursor[predecessor] += 1;
+                pairs += 1;
+            }
+        }
+    }
+    valid = valid && pairs == result->phi_use_count;
+    for (uint32_t block = 0; valid && block < blocks; block += 1)
+    {
+        valid = cursor[block] == result->phi_offsets[block + 1];
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
 // A second algorithm for fixtures: full original-ID BYTE rows, reverse instruction transfer, reverse numeric block
 // order, and raw branch/phi semantics. It does not use the adapter's use/def, map, phi CSR, CFG CSR or postorder.
 static bool ir_dataflow_test_byte_oracle(const IrFunction* f, const IrDataflow* result, Arena* scratch)
@@ -396,8 +472,12 @@ static bool ir_dataflow_test_function(const IrFunction* f, Arena* output, Arena*
         const uint64_t vector_iterations = ir_dataflow_solve(&vector);
         const uint64_t scalar_iterations = ir_dataflow_solve_scalar(&scalar);
         ir_dataflow_expect(tests, vector_iterations == scalar_iterations, "scalar/vector sweep counts disagree");
+        uint64_t expected_iterations = 0;
+        ir_dataflow_expect(tests, dataflow_test_sweeps(&vector.flow, scratch, &expected_iterations) && expected_iterations == vector_iterations,
+            "the sweep search's live pairs or count disagree");
         ir_dataflow_expect(tests, ir_dataflow_test_equal(&vector, &scalar), "scalar/vector maps, edge uses or matrices disagree");
         ir_dataflow_expect(tests, ir_dataflow_test_equations(f, &vector, scratch), "independent IR equations, dense IDs or padding disagree");
+        ir_dataflow_expect(tests, ir_dataflow_test_layout(f, &vector, scratch), "CFG columns, postorder or phi lists differ from the IR");
         const uint64_t bytes = (uint64_t)vector.flow.block_count * vector.flow.row_words * 8;
         ir_dataflow_expect(tests, bytes == 0 ? vector.flow.in == NULL && vector.flow.out == NULL && vector.flow.use == NULL && vector.flow.def == NULL :
             (((uintptr_t)vector.flow.in | (uintptr_t)vector.flow.out | (uintptr_t)vector.flow.use | (uintptr_t)vector.flow.def) & 63) == 0,

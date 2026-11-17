@@ -55,7 +55,9 @@ then computes the transfer with `_mm512_ternarylogic_epi64(use, out, def,
 0xF4)`. An XOR with the previous input row and a mask test detect changes.
 Every vector access is inside the allocated padded row. Rows of one vector,
 up to 512 values, take a loop of their own without the word loop, which
-keeps its pointers and counters in registers. The two loops are separate
+keeps its pointers and counters in registers, and the row it has just
+computed: a successor that is the previous block takes it from there ("The
+previous block's row" below). The two loops are separate
 functions, so that Clang compiles each alone ("Where the AVX-512 solver's
 frame falls" below has why).
 
@@ -87,6 +89,8 @@ solvers, it checks the liveness equations, zero padding, repeatability and
 the least solution on small hand-checkable graphs. A separate reverse-CFG
 reachability oracle checks selected values at every block of 257- and
 2,049-block graphs; a planted incorrect bit checks the oracle itself.
+The sweep search below checks every value at every block, and the iteration
+count, of every graph, and IR dataflow's test runs it on every function.
 A handwritten multigraph checks repeated successors, self-edges and exit
 edges against the corresponding deduplicated CFG. Guard-page cases put
 the last row word immediately before an inaccessible page, including empty
@@ -103,9 +107,30 @@ seed with the public-domain SplitMix64 finalizer before drawing from the LCG,
 so small consecutive seeds do not all start with the same draw. The retained
 license and provenance are in `THIRD_PARTY_NOTICES.md`.
 
+
+### The sweep search
+
+`dataflow_sweeps_test.c` finds, without a fixpoint, the sweep in which the
+solver first sets each live bit, and with it the solver's exact iteration
+count. Each sweep visits the postorder and reads every successor's `in` row as
+the sweep has left it, so an edge to a later block in the postorder, or to the
+block itself, reads the previous sweep's row: call it stale. Value `v` is live
+into block `b` after sweep `t` exactly when some path from `b` reaches a use of
+`v` through blocks that neither use nor define it, crossing at most `t - 1`
+stale edges (by induction over the sweeps and, within one, over the
+postorder). With `D(b, v)` the fewest stale edges on such a path, `b`'s bit for
+`v` is first set in sweep `D(b, v) + 1`. A sweep reads only what the previous
+one left, so the first that changes nothing is a fixpoint, and the count, which
+includes that last sweep, is `2 + max D` over the live pairs, or 1 when nothing
+is live. A 0-1 breadth-first search per value, backwards from its uses over
+predecessor edges weighted 1 where stale, finds every `D`; the `in` rows must
+hold exactly the pairs it reaches. Over main's two solvers (#2924), the formula
+matched both counts on every generated graph of 16 seeds, c-testsuite's IR
+forms and sqlite3.c's.
+
 ## Measuring the alternatives
 
-`benchmark-dataflow` checks scalar/vector results before measuring four
+`benchmark-dataflow` checks scalar/vector results before measuring six
 generated functions. It reports 21 interleaved-pass medians and pass ranges,
 with elapsed time and hardware cycles per function, and cycles per block per
 iteration. Warm calibration repeatedly runs both variants in both orders,
@@ -443,6 +468,51 @@ also took 76.2 and 78.9 in one process each. The AVX-512 solver measured alike
 in all of them. Rebased onto main, whose changes to the units before this one
 moved the wrappers 0x82800 bytes, the change measured the same again ("9700X
 results and selection").
+
+## The previous block's row
+
+The sweep for rows of one vector reads each successor's `in` row with a 64-byte
+load. Where that successor is the block the sweep visited just before, which
+in a postorder is the common case on a chain, the row comes back through the
+forwarding of the store that just wrote it, and each block waits on that
+forwarding in turn: the sweep becomes a chain of store, load and transfer, one
+block after another. #2950 found it on the 9700X, on real functions and on two
+workloads added to `benchmark-dataflow` for the range real functions take
+(`mid-sparse-nested`, 48 blocks and 24 values, and `mid-sparse-diamond`, 96
+blocks and 60 values), where the AVX-512 solver took 1.8 and 1.3 times the
+scalar twin's time:
+
+| Workload | Scalar | AVX-512 | AVX-512, the previous row in a register |
+| --- | --- | --- | --- |
+| `small-diamond` | 78.9 ns | 48.9 ns | 39.5 ns |
+| `mid-sparse-nested` | 198 ns | 354 ns | 143 ns |
+| `mid-sparse-diamond` | 335 ns | 437 ns | 282 ns |
+
+Medians of three processes each, under the lock, `taskset -c 2`, an experiment
+build of main `8bd7f27ec` that chose the solver by an environment variable. On
+`mid-sparse-nested` the AVX-512 solve took 13 cycles a block and sweep; the
+store-to-load forwards fell from 62 million to 6.4 million (`ls_stlf`) with
+the row in a register. So the solver keeps the `in` row it has just computed,
+with the block's number, and a successor that is that block takes the row from
+the register, by a branch. A masked blend of the load and the register does
+not help: the blend waits on the load all the same (1.46 times slower than
+without it on sqlite3.c's 33- to 128-block functions). The branch is the one
+place the sweep isn't branch-free, and the measurements are why. It mispredicts
+only where a successor isn't the previous block.
+
+On sqlite3.c's functions (`test-ir-source --dataflow-benchmark`, the gate's
+options), the solve of 33- to 128-block functions with 64 values or fewer took
+1.15 times the scalar twin's cycles without the register and 0.79 times with
+it: 1,408 cycles a solve against 2,051, at 5.13 instructions a cycle against
+2.73. Solving every form, the AVX-512 solve took 0.65 times the twin's cycles,
+against 0.78. The records are buster-performance's
+`scalar-paths-removal-2924-2026-11-17/dataflow-2950/` (`exp2/`, `exp3/`).
+
+The extra register made Clang spill the successors' base, reloaded in every
+block, a slot that can share its low 12 address bits with an `in` row (below).
+The sweep now ORs each block's difference into a vector register, tested once a
+sweep, instead of moving a mask to a general register in every block, and walks
+each block's successors by pointer; it keeps everything in registers again.
 
 ## Where the AVX-512 solver's frame falls
 

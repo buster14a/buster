@@ -5,6 +5,7 @@
 // The generated cases compare both kernels and their iteration counts, equations, padding and repeatability.
 // dataflow_test_reachability independently derives liveness one value at a time by finding a use before a def.
 // dataflow_test_sampled_reachability checks selected values at every block of large graphs by backward reachability.
+// dataflow_test_sweeps (dataflow_sweeps_test.c) checks every value at every block, and the exact iteration count.
 // dataflow_test_repeated_edges compares a handwritten multigraph, including repeated self-edges, with its simple CFG.
 // dataflow_test_guards moves each whole matrix to a protected page boundary, including inaccessible zero-size rows.
 // dataflow_test_limits checks failure rollback and malformed successor columns. All fixtures are original C data.
@@ -16,6 +17,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#include "dataflow_sweeps_test.c"
 
 #define BUSTER_DATAFLOW_TEST_DEFAULT_COUNT 24
 #define BUSTER_DATAFLOW_TEST_ARENA_BYTES (32ull << 20)
@@ -384,6 +387,10 @@ static void dataflow_test_pair(DataflowTestTally* tally, Dataflow* vector, Dataf
     dataflow_test_expect(tally, vector_iterations == scalar_iterations && vector_iterations != 0, "iteration counts differ");
     dataflow_test_expect(tally, dataflow_test_rows_equal(vector, scalar), "scalar and vector rows differ");
     dataflow_test_expect(tally, dataflow_test_equations(vector), "liveness equations do not hold");
+    uint64_t expected_iterations = 0;
+    dataflow_test_expect(tally, dataflow_test_sweeps(vector, scratch, &expected_iterations), "in rows differ from the sweep search's live pairs");
+    dataflow_test_expect(tally, expected_iterations == vector_iterations && expected_iterations == scalar_iterations,
+        "iteration count differs from the sweep search's");
     dataflow_test_expect(tally, dataflow_test_padding(vector) && dataflow_test_padding(scalar), "padding bits are nonzero");
     if (reachability)
     {

@@ -94,6 +94,18 @@ static const DataflowBenchmarkWorkload dataflow_benchmark_workloads[] =
         .shape = BUSTER_DATAFLOW_SHAPE_DIAMOND,
     },
     {
+        .name = "mid-sparse-nested",
+        .blocks = 48,
+        .values = 24,
+        .shape = BUSTER_DATAFLOW_SHAPE_NESTED_LOOP,
+    },
+    {
+        .name = "mid-sparse-diamond",
+        .blocks = 96,
+        .values = 60,
+        .shape = BUSTER_DATAFLOW_SHAPE_DIAMOND,
+    },
+    {
         .name = "medium-nested",
         .blocks = 256,
         .values = 1025,

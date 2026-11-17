@@ -238,30 +238,54 @@ static __attribute__((noinline, aligned(64), no_builtin("memset"))) uint64_t dat
     bool changed;
     do
     {
-        __mmask8 changes = 0;
+        // Every block's difference, ORed in a register: a mask moved to a general register each block took one more
+        // general register, and with the previous block's number the loop then spilled the successors' base.
+        __m512i changes = _mm512_setzero_si512();
+        // The block the sweep visited last, whose in row it has just stored. A successor that is that block takes the
+        // row from this register, by a branch: loaded, the row comes back through the 64-byte store's forwarding,
+        // whose latency every block of a chain then waits on in turn. On a chain of 48 blocks with 24 values, the sweep
+        // took 13 cycles a block that way, 1.8 times the scalar twin's time, and 0.4 of that with the branch; a masked
+        // blend of the load and the register waited on the load all the same (#2950, docs/dataflow.md, "The previous
+        // block's row").
+        uint32_t previous_block = UINT32_MAX;
+        __m512i previous_in = _mm512_setzero_si512();
         #pragma clang loop unroll(disable)
         for (uint32_t order = 0; order < block_count; order += 1)
         {
             const uint32_t block = postorder[order];
             const uint64_t row = (uint64_t)block * BUSTER_DATAFLOW_VECTOR_WORDS;
-            const uint32_t begin = successor_offsets[block];
-            const uint32_t end = successor_offsets[(uint64_t)block + 1];
+            const uint32_t* edge = successors + successor_offsets[block];
+            const uint32_t* const end = successors + successor_offsets[(uint64_t)block + 1];
             __m512i out = _mm512_setzero_si512();
             #pragma clang loop unroll(disable)
-            for (uint32_t edge = begin; edge < end; edge += 1)
+            for (; edge < end; edge += 1)
             {
-                out = _mm512_or_si512(out, _mm512_load_si512(in_rows + (uint64_t)successors[edge] * BUSTER_DATAFLOW_VECTOR_WORDS));
+                const uint32_t successor = *edge;
+                __m512i successor_in;
+                if (__builtin_expect(successor == previous_block, 1))
+                {
+                    successor_in = previous_in;
+                    // Keeps Clang from making the two arms a load and a blend, which would wait on the load again.
+                    __asm__ volatile("" : "+v"(successor_in));
+                }
+                else
+                {
+                    successor_in = _mm512_load_si512(in_rows + (uint64_t)successor * BUSTER_DATAFLOW_VECTOR_WORDS);
+                }
+                out = _mm512_or_si512(out, successor_in);
             }
             const __m512i use = _mm512_load_si512(use_rows + row);
             const __m512i def = _mm512_load_si512(def_rows + row);
             const __m512i previous = _mm512_load_si512(in_rows + row);
             const __m512i in = _mm512_ternarylogic_epi64(use, out, def, 0xF4);
             const __m512i difference = _mm512_xor_si512(in, previous);
-            changes |= _mm512_test_epi64_mask(difference, difference);
+            changes = _mm512_or_si512(changes, difference);
             _mm512_store_si512(out_rows + row, out);
             _mm512_store_si512(in_rows + row, in);
+            previous_block = block;
+            previous_in = in;
         }
-        changed = changes != 0;
+        changed = _mm512_test_epi64_mask(changes, changes) != 0;
         iterations += changed;
     } while (changed);
     return iterations;
@@ -330,12 +354,14 @@ static uint64_t dataflow_liveness_scalar(Dataflow* dataflow);
 
 static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
 {
-    uint64_t iterations;
+    // With no row to solve the count is the one sweep that changes nothing, here, without calling either loop: the call
+    // was most of a solve of a function with no value live across blocks (#2950).
+    uint64_t iterations = 1;
     if (dataflow->row_words == BUSTER_DATAFLOW_VECTOR_WORDS && dataflow->block_count != 0)
     {
         iterations = dataflow_liveness_vector_one(dataflow);
     }
-    else
+    else if (dataflow->row_words != 0 && dataflow->block_count != 0)
     {
         iterations = dataflow_liveness_vector_rows(dataflow);
     }

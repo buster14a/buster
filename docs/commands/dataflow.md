@@ -33,6 +33,12 @@ liveness and interference primitives in `dataflow.c`:
   path reaches its use before its definition. Graphs of 257 and 2,049 blocks
   independently check selected boundary and seed-derived values at every
   block with a reverse-reachability oracle;
+- the sweep search (`dataflow_sweeps_test.c`), on every graph: for each value,
+  a 0-1 breadth-first search backwards from its uses finds the sweep in which
+  the solver first sets each block's bit, without a fixpoint. The `in` rows
+  must hold exactly the pairs it reaches, and the iteration count must be 2
+  plus the latest of those sweeps' distances, or 1 when nothing is live
+  ([the reasoning](../dataflow.md#the-sweep-search));
 - handwritten graphs: disconnected cycles, a self-loop without a use, a value
   both used and defined in one block, every combination of the transfer
   function's three input bits, the exact postorder of a chain, and repeated
@@ -55,11 +61,12 @@ the check and failure counts and exits with status 1 on any failure. The
 ## Dataflow benchmark
 
 `./build/compiler benchmark-dataflow [--seed N] [--after-scalar MS]
-[--only scalar|avx512]` compares the scalar and AVX-512 fixpoints on four
-generated functions: a small diamond CFG with
-16 blocks and 127 values, nested loops with 256 blocks and 1,025 values, and
-random local components and a connected dispatch loop, each with 4,096 blocks
-and 4,097 values. The local-components case is a streaming control, not a model
+[--only scalar|avx512]` compares the scalar and AVX-512 fixpoints on six
+generated functions: a small diamond CFG with 16 blocks and 127 values; two in
+the range most real functions take, nested loops with 48 blocks and 24 values
+and diamonds with 96 blocks and 60 values (#2950); nested loops with 256 blocks
+and 1,025 values; and random local components and a connected dispatch loop,
+each with 4,096 blocks and 4,097 values. The local-components case is a streaming control, not a model
 of a large real function. `--seed N` selects the inputs (1 by default); generator
 version 2 mixes the seed before generating topology and rows.
 
