@@ -7098,17 +7098,20 @@ A failed static assertion's tree is excluded from the rejected unit's warning
 walk. `check_driver_reports_from` therefore calls
 `check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
 Its bounded worklist visits the retained condition tree, using the existing
-integer and floating literal conversion emitters at the error's expression
-boundary and in the preceding diagnostic phase. Conditional conditions are
-checked first in source postorder, as Clang constructs them; the assertion's
-own conversion and nested logical operands then follow the completed
-expression's order. Static selections retain only their selected result,
-explicit casts do not create implicit conversions, and a conditional's arms
-do not inherit its outer boolean context. GNU omitted-middle conditionals
+integer and floating literal conversion emitters. The source span also locates
+retained conditional and comma nodes, including detached operands of static
+selections, through the token-to-node map (`check_common_failed_assert_source`).
+Those nodes are checked first in graph postorder, as Clang constructs their
+source expressions; the assertion's own conversion and nested logical operands
+then follow the completed expression's order. An inner assertion owns its own
+warnings. Explicit casts do not create implicit conversions, and a conditional's
+arms do not inherit its outer boolean context. GNU omitted-middle conditionals
 visit their shared condition once and do not diagnose that saved value as a
-new conversion of the written expression. This keeps the warnings before the
-unchanged assertion error, with the normal command-line and pragma policy,
-including promotion, suppression and fatal/error-limit handling. The original
+new conversion of the written expression. Discarded comma operands reuse the
+ordinary unused-value emitter: source warnings complete with the comma, while a
+block's scalar discarded value keeps its deferred function-end publication.
+The normal command-line and pragma policy applies, including promotion,
+suppression and fatal/error-limit handling. The original
 runtime sources `tests/driver/assert_bool_*.c`, through
 `c_check_assert_bool_driver_test.c`, compare complete Clang diagnostics for
 file, member and block scopes, nested and short-circuited logical operands,
@@ -7116,12 +7119,19 @@ conditional warning order, floating literals, selections, explicit casts,
 unevaluated controls, worklist growth, builtin arguments, repeated failures,
 successful and non-warning controls, unrelated errors, macro expansion notes,
 C17/C23 and both reader choices and lane requests. The focused driver selector
-is `--assert-bool-only`. Clang is the external behavioral oracle; the fixtures
-and implementation are original. The cold path does not reconstruct source
-operands erased by static selections or queries, or restore other warning
-families such as `-Wconstant-logical-operand`; those remain separate recovery
-work. Successful-assertion conditional warning ordering also continues to use
-the ordinary warning walk.
+is `--assert-bool-only`; `--assert-diagnostics-only` also runs requirement
+printing and member-recovery checks. Clang is the external behavioral oracle;
+the fixtures and implementation are original. The cold path cannot recover
+operands that queries or type declarations erased altogether; those and the
+ordinary successful-expression gaps are tracked in
+[#2899](https://github.com/buster14a/buster/issues/2899).
+`-Wconstant-logical-operand`, absent from ordinary expressions too, is tracked
+in [#2900](https://github.com/buster14a/buster/issues/2900).
+The ordinary equality emitter's extra assignment-suggestion note for a
+nonassignable left operand is tracked in
+[#2906](https://github.com/buster14a/buster/issues/2906).
+Successful-assertion conditional warning ordering continues to use the
+ordinary warning walk.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
@@ -11373,6 +11383,19 @@ enables, which this checker doesn't all give.
   `__builtin_choose_expr`, `__extension__`) is looked through as clang's
   IgnoreParenImpCasts does, so a selected literal is a literal and
   `_Generic(x, int: 1) == 2` notes nothing (`check_semantic_unselected`).
+  The failed conjunction-term search also looks through those selections: a
+  selected literal alone prints the plain error, while another nonliteral
+  failing term supplies the requirement. Pointer declarators keep the space
+  after their specifiers and between a qualifier and the next pointer.
+  Attributed type names in parentheses with a builtin, typedef or tagged base
+  and a direct pointer chain use the ordinary constant/type reader in private
+  arenas and a copied type table
+  (`check_semantic_requirement_types`): attribute arguments are folded,
+  address-space qualifiers use the type printer's spelling, and ignored
+  attributes disappear. Only a failed requirement containing attributes takes
+  this replay; it cannot change the checked input's types or warning state.
+  More complex declarators and attribute arguments needing unavailable reader
+  state retain their source spelling.
   Still separate: a type name's literals print as written
   (`sizeof(int[0x10])`, clang `int[16]`); a complex value's note.
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
