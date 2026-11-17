@@ -6854,6 +6854,17 @@ keyword, as a value of a conditional's arm or a comma's operand does, and so
 does a `_Generic`'s or `__builtin_choose_expr`'s chosen operand without an
 effect. `-Wunused-value` is in `-Wunused`, `-Wmost` and `-Wall`, with
 `-Wunused-comparison` and `-Wunused-result` under it.
+A discarded equality or inequality supplies its assignment suggestion only
+when its original left operand is an lvalue (#2906,
+`check_common_comparison_lvalue`). The comma and ordinary statement emitters
+share that check. Parentheses, static selections and implicit conversions
+preserve the operand's classification; explicit casts and other rvalues do
+not qualify. A repeated vector swizzle is excluded even though Buster stores
+it as an lvalue with a duplicate-component flag. This follows Clang's
+suggestion rule rather than full assignment validation: const objects and
+arrays still receive notes, and a floating or pointer lvalue can still receive
+the inequality's `|=` suggestion. The existing warning emitter retains its
+locations, macro handling, warning group and severity policy.
 A discarded `&&` or `||` (#1390) is quiet where either operand accepts the
 discard: an ordinary direct call, an assignment, an increment, a volatile read,
 or a nested logical operator, comma, conditional, selection or statement

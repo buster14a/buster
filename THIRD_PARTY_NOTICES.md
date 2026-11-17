@@ -17,6 +17,13 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The discarded-comparison suggestion gate in `c_check_common_warnings.c` and
+its original driver fixtures (#2906) use the project default terms. LLVM
+revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaStmt.cpp` was consulted for the left operand's lvalue
+classification and the equality/inequality notes. Clang 23.1.4 is an external
+diagnostic oracle; no upstream implementation or test fixture is imported.
+
 The failed static assertion boolean-conversion recovery in
 `c_check_common_warnings.c` and `c_checker_driver.c`, its driver tests and the
 original `tests/driver/assert_bool_nested*.c` sources (#2409) use the project

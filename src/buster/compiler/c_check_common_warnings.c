@@ -3931,6 +3931,26 @@ static __attribute__((noinline)) void check_common_unused_unevaluated(CheckCommo
     }
 }
 
+// Clang's comparison correction tests the unconverted left operand's lvalue category, not modifiability: const
+// objects and arrays still get the note (#2906). Duplicate vector swizzles are lvalues with a separate flag here,
+// whereas Clang classifies them as rvalues. Only an already selected warning asks; no whole-graph pass is needed.
+static bool check_common_comparison_lvalue(const CheckInput* input, const CheckStream* stream, uint32_t token)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = graph->count;
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const bool comparison = node < count && (graph->ops[node] == CHECK_OP_EQUAL || graph->ops[node] == CHECK_OP_NOT_EQUAL);
+    uint32_t left = comparison ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; left < count && steps < count &&
+         (graph->ops[left] == CHECK_OP_SELECT || graph->ops[left] == CHECK_OP_CONVERT); steps += 1)
+    {
+        left = graph->operand0[left];
+    }
+    const bool result = stream != NULL && left < count && left < stream->count && check_stream_has_values(stream) &&
+                        check_stream_category(stream, left) == CHECK_LVALUE && (check_stream_flags(stream, left) & BUSTER_CHECK_VECTOR_DUPLICATE) == 0;
+    return result;
+}
+
 // The diagnostics for one evaluated comma: every left operand is evaluated for effect only — a discarded
 // comparison reports as a comparison when the operand's own root is the comparison, anything else as the
 // operand's own value (check_common_unused_of), a call's whose result warns included. A chain ending a
@@ -3995,8 +4015,9 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                                              "relational comparison result unused";
             const CheckCommonNote note = { report, parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[left] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
+            const bool suggest = equality && check_common_comparison_lvalue(input, stream, left);
             check_common_report_discarded(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
-                                          note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+                                          suggest ? &note : NULL, suggest ? 1u : 0u, scratch);
         }
         else if (report_role == PARSE_ROLE_CLOSE_CAST)
         {
@@ -5163,11 +5184,12 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                                             "relational comparison result unused";
             const CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
+            const bool suggest = equality && check_common_comparison_lvalue(input, stream, token);
             // (A statement expression's value is the walk's, as the statement expression's discarded value, #1447.)
             if (!check_common_statement_value(parser, parent))
             {
                 check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
-                                              note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+                                              suggest ? &note : NULL, suggest ? 1u : 0u, scratch);
             }
         }
     }
