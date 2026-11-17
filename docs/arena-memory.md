@@ -227,6 +227,97 @@ tracks its own writable prefix. The complete original mapping is unmapped once
 at teardown, rather than passing a parent with stale commitment metadata through
 the arena pool.
 
+## Reservations taken together (#2873)
+
+A compile reserves about 33 arenas, and each reservation, commit, advice and
+release was a system call of its own: a `hello.c` compile made 36 `mmap`, 51
+`mprotect`, 10 `madvise` and 6 `munmap` calls for them, and #2873's census
+gave a unit of musl's compiled by a process of its own 0.58 M kernel cycles
+for these calls, of 3.86 M. A command (`arena_limits_fix`) with an unlimited
+address space now makes about half of them (5, 35, 7 and 2 for `hello.c`):
+
+- **One stretch for the reservations** (`arena_reservation_map`): the first
+  reservation maps 16 TiB, inaccessible, and each one takes its mapping from
+  it, carved from the middle: upwards for the mappings that take huge pages
+  past their base pages, downwards for those mapped base pages throughout
+  (`MAP_STACK`) and the tables'. What a reservation gets is what its own
+  `mmap` gave it: inaccessible bytes, which its commits make writable and its
+  release unmaps or its pool keeps. Carving from the middle keeps a process's
+  arenas in one span, as its own mappings were, which the kernel placed one
+  below the other: four stretches, one for each set of `mmap` flags and each
+  carved from its start, put a small unit's arenas under seven of the
+  kernel's third-level page tables where they had been under three, and every
+  exit and unmap, which scan those, took 24,000 cycles more on the 9700X, a
+  third of what the fewer calls saved.
+- **Both halves are `MAP_NORESERVE`.** Where commit is charged this changes
+  nothing: strict overcommit ignores the flag, and `RLIMIT_DATA` counts
+  writable pages whatever their flags. Elsewhere it spares a commit the
+  kernel's refusal of a single one larger than its memory, as #1521 spared
+  the tables'.
+- **One advice for the huge pages.** The upper half is advised
+  `MADV_HUGEPAGE` whole as it is mapped, where each arena's first commit past
+  its base pages advised its own. An arena's base pages stay base pages there
+  by the layout above ("Page sizes").
+- **Larger commits where none is charged** (`arena_commit`,
+  `arena_limits.commit_unbounded`, read once with the limits): the first
+  commit takes all of the arena's base pages, up to 16 MiB, and later ones
+  four times what is committed, where a commit took 64 KB, then what its push
+  needed, then doubled (six calls for an arena that used 800 KB of its 2.8 MiB
+  of base pages). A core dump walks a written mapping whole, so what is
+  committed stays a small multiple of what is used; that is also why a
+  reservation is not simply mapped writable from the start, which would need
+  no commit at all: 1.1 TiB of reservations, once written anywhere, would be
+  walked page by page at every crash. Where commit is charged, or the limits
+  aren't fixed, commits are as before (#1521's bound: within twice the use).
+  And on a thread with a pool: the pool keeps what its arenas committed, so
+  their commits are few (0.15 a unit of musl's as one command), and its
+  releases discard each arena's pages, which frees the page tables of every
+  whole 2 MB they cover (Linux 6.13). With larger commits each unit built
+  them again: 37,000 kernel cycles a unit, 5.0% of that command's.
+- **A process's first small releases leave their arenas to its exit**
+  (`arena_release_keeps`): a release without a pool unmapped its arena, a
+  call that splits the stretch's mapping twice and frees the arena's pages
+  apart from the exit's. The first 32 releases of a process whose arena was
+  taken from the stretch and pushed no more than 1 MiB leave it mapped
+  instead, 32 MiB at the very most, which the exit frees with everything
+  else. A larger arena's release gives its pages back at once, as before, and
+  so does every release after those, and every release where commit is
+  charged, which returns its charge. With one executable on the 9700X,
+  leaving every such arena mapped took 2.25% of the kernel cycles off
+  musl's units compiled a process each (9 rounds of 9) and nothing off
+  `sqlite3.c`, whose releases are its large arenas' pages.
+- **Where not:** a finite `RLIMIT_AS` (its reservations take shares or grow
+  in slots, above), a thread switched to compact reservations, a sanitizer's
+  build, which lays the address space out itself, a stretch the kernel
+  refuses or a half that is full, and a pool that makes its arenas
+  inaccessible again as it takes them (bounded commit charge: an
+  inaccessible part that was once written would join its neighbours in the
+  stretch, and a core dump walk all of them). Each then maps its own, as
+  before.
+
+On the 9700X, #2885's head against this, from fresh copies of each executable
+after warm-up runs, in ABBA order, every compile on CPU 2 counted as a whole
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/arena-calls-2873-2026-11-16)).
+Medians, and the paired difference's median:
+
+| | kernel cycles | | user cycles | |
+| --- | ---: | ---: | ---: | ---: |
+| `-c sqlite3.c`, 21 rounds | 83.95 → 83.25 M | −0.6%, 14 of 21 | 593.3 → 595.1 M | +0.3%, 5 of 21 lower |
+| musl's 1,336 units, a process each, 5 rounds | 5,429 → 5,185 M | −4.5%, 5 of 5 | 5,073 → 5,066 M | −0.1% |
+| the same units as one command | 994.1 → 997.8 M | +0.8%, 0 of 5 | 2,801 → 2,787 M | −0.5%, 5 of 5 |
+| an empty file's `-fsyntax-only`, 100 runs a count | 204.5 → 197.8 M | −3.4% | 58.6 → 58.4 M | −0.6% |
+| an empty file's `-E -P` | 169.5 → 168.2 M | −0.6% | 46.3 → 46.5 M | +0.8% |
+| `tiny.c`'s `-c` | 247.5 → 238.6 M | −4.8% | 81.2 → 80.6 M | −0.8% |
+| `hello.c`'s `-c` | 372.6 → 362.7 M | −2.8% | 357.7 → 356.9 M | −0.4% |
+
+The objects are the same bytes, and the peaks are too (`-c sqlite3.c` 241,592
+KB against 241,656, an empty file's `-c` 13,864 against 13,780).
+`sqlite3.c`'s instructions are the same; its user cycles read 0.3% more in 16
+of those 21 rounds and 0.3% fewer in 13 of 21 by the compile's own counters:
+the two builds' code is placed differently. Its calls are few beside its
+pages: the gain is a small unit's, 183,000 kernel cycles of its 4.06 M.
+
+
 ## Ownership, reuse and tests
 
 `mapping_bytes` records the actual owned mapping independently of logical
