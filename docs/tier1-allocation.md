@@ -2116,6 +2116,15 @@ and c-testsuite were above #2646's bound of clang -O0's bytes.
   a call's argument would push the loop's addresses and constants out of the
   argument registers they rest in. Where the register is taken, the value takes
   another, as before.
+- **Scalar, and why.** The passes that name the registers have no vector
+  form: the CFG consumer's walks each call's arguments in order, whose places
+  (`tier1_select_argument_place`) count the registers taken before them, and
+  `tier1_cfg_prepare`'s reads each interval's last use through its use offsets,
+  a gather where it would be vectorized (`vpgatherdd` is one every 12.6 cycles
+  on Zen 5). By callgrind on `sqlite3.c`'s `--tier1 --lanes 1 -c` they add
+  about 6.2 M and 5.7 M instructions to its 16,962 M; on the 9700X the whole
+  change leaves that compile's cycles and wall time where they were (−0.007%,
+  −0.004%), so there is no time for a vector form to win.
 
 What stays: a function whose parameters live across its calls in their
 incoming registers, saved around each call, has no argument register free for
