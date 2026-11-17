@@ -10,7 +10,7 @@
 //   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
 //                                       [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--front | --front-first] [--front-lean]
 //                                       [--front-warm] [--front-types] [--front-sweeps] [--front-tests | --front-own-tests] [--front-tests-last] [--passes N]
-//                                       [--front-facts] [--repeat N]] [preprocessor options] file...
+//                                       [--front-facts] [--front-window] [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -3414,6 +3414,26 @@ struct NodeShadow
     uint64_t reader_facts_whys[BUSTER_NODE_FACTS_WHYS];
     uint32_t reader_facts_listed;
     uint32_t reader_facts_skipped_listed;
+    // --front-window (the piece after it): the front writes the kernel's window as it makes each record, and the kernel
+    // reads it there (PPOptions.node_reader's BUSTER_NODE_READER_WINDOW). The expressions its window doesn't give, by
+    // why, and those listed; and the front's own (NodeFrontShadow's): the same lean front without the window on the
+    // same chunks, its ticks and records and the chunks in which the two differed; what the chunks' ends kept, and the
+    // most the calls' arguments' list held at one (more than BUSTER_NODE_FRONT_RECORDS is a failure); and the names'
+    // pass.
+    uint64_t reader_window_whys[BUSTER_NODE_FACTS_WHYS];
+    uint32_t reader_window_listed;
+    uint64_t front_plain_ticks;
+    uint64_t front_plain_records;
+    uint64_t front_plain_differences;
+    uint64_t front_window_kept_values;
+    uint64_t front_window_kept_records;
+    uint64_t front_window_cut_values;
+    uint64_t front_window_arguments_most;
+    uint64_t front_window_name_ticks;
+    uint64_t front_window_names;
+    uint64_t front_window_lines;
+    uint64_t front_window_line_ticks;
+    uint64_t front_window_name_differences;
     // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
     // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
     // an interleaved set: the last pass's, and each file's least over the passes, summed.
@@ -4972,6 +4992,42 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
                shadow->reader_facts_whys[BUSTER_NODE_FACTS_WHY_CUT], shadow->reader_facts_whys[BUSTER_NODE_FACTS_WHY_REACH],
                shadow->reader_facts_whys[BUSTER_NODE_FACTS_WHY_LITERAL], shadow->reader_facts_whys[BUSTER_NODE_FACTS_WHY_CALL]);
     }
+    if ((shadow->reader & BUSTER_NODE_READER_WINDOW) != 0)
+    {
+        // The windows the front wrote, which the kernel reads in place: the expressions whose records are there, how
+        // their inputs compare with both other makings', what the kernel made of them there and how that compares with
+        // T's records; and what the window costs. The kernel's later run in place. The front's rise: its pass with the
+        // window's columns and the chunks' ends that keep rows, over the same pass without them on the same chunks. The
+        // names' pass, less the declarations' lines it made, which are the words' making as before (a line a
+        // declaration, made once, at whichever making meets its first use).
+        const uint64_t window_records = counts[NODE_FACTS_COUNT_WINDOW_RECORDS];
+        const uint64_t rise = shadow->front_ticks > shadow->front_plain_ticks ? shadow->front_ticks - shadow->front_plain_ticks : 0;
+        const uint64_t names = shadow->front_window_name_ticks > shadow->front_window_line_ticks ? shadow->front_window_name_ticks - shadow->front_window_line_ticks : 0;
+        const double kernel = window_records != 0 ? (double)counts[NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS] / (double)window_records : 0.0;
+        const double written = window_records != 0 ? (double)rise / (double)window_records : 0.0;
+        const double named = window_records != 0 ? (double)names / (double)window_records : 0.0;
+        printf("node-shadow: reader-time fact words windows the front wrote: expressions=%" PRIu64 " (%.2f%%) records=%" PRIu64 " (%.2f%%) differences=%" PRIu64
+               " expressions-not-there-in-a-row=%" PRIu64 "\n",
+               counts[NODE_FACTS_COUNT_WINDOW_EXPRESSIONS], node_census_share(counts[NODE_FACTS_COUNT_WINDOW_EXPRESSIONS], counts[NODE_FACTS_COUNT_EXPRESSIONS]), window_records,
+               node_census_share(window_records, records), counts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES], counts[NODE_FACTS_COUNT_WINDOW_SKIPPED]);
+        printf("node-shadow: reader-time fact words the kernel in place: to-make=%" PRIu64 " made=%" PRIu64 " left=%" PRIu64 " differences=%" PRIu64 " ticks=%" PRIu64
+               " (%.2f a record)\n",
+               counts[NODE_FACTS_COUNT_WINDOW_WANTED], counts[NODE_FACTS_COUNT_WINDOW_MADE], counts[NODE_FACTS_COUNT_WINDOW_WANTED] - counts[NODE_FACTS_COUNT_WINDOW_MADE],
+               counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES], counts[NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS], kernel);
+        printf("node-shadow: reader-time fact words the front with the window: ticks=%" PRIu64 " records=%" PRIu64 "; the same front without it, on the same chunks: ticks=%"
+               PRIu64 " records=%" PRIu64 " chunks-that-differ=%" PRIu64 "; the rise=%" PRIu64 " (%.2f ticks a record of the windows)\n",
+               shadow->front_ticks, shadow->front_records, shadow->front_plain_ticks, shadow->front_plain_records, shadow->front_plain_differences, rise, written);
+        printf("node-shadow: reader-time fact words the names' pass: names=%" PRIu64 " ticks=%" PRIu64 ", of which the declarations' lines it made=%" PRIu64 " (%" PRIu64
+               " lines); the rest=%" PRIu64 " (%.2f ticks a record of the windows) leaves-its-scalar-path-gives-otherwise=%" PRIu64 "\n",
+               shadow->front_window_names, shadow->front_window_name_ticks, shadow->front_window_line_ticks, shadow->front_window_lines, names, named,
+               shadow->front_window_name_differences);
+        printf("node-shadow: reader-time fact words chunks' ends: waiting values kept whole=%" PRIu64 " (their records %" PRIu64 ") kept as their place alone, cut=%" PRIu64
+               "; the calls' arguments' list at most=%" PRIu64 " (room %u)\n",
+               shadow->front_window_kept_values, shadow->front_window_kept_records, shadow->front_window_cut_values, shadow->front_window_arguments_most,
+               BUSTER_NODE_FRONT_RECORDS);
+        printf("node-shadow: reader-time fact words ticks a record of the windows: the kernel in place=%.2f + the names' pass=%.2f + the front's rise=%.2f = %.2f\n", kernel,
+               named, written, kernel + named + written);
+    }
 }
 
 static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_ops)
@@ -5461,6 +5517,21 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->front_compact_ticks += front->compact_ticks;
                     shadow->front_identifier_ticks += front->identifier_ticks;
                     shadow->front_literal_ticks += front->literal_ticks;
+                    shadow->front_plain_ticks += front->plain_ticks;
+                    shadow->front_plain_records += front->plain_records;
+                    shadow->front_plain_differences += front->plain_differences;
+                    shadow->front_window_kept_values += front->window_kept_values;
+                    shadow->front_window_kept_records += front->window_kept_records;
+                    shadow->front_window_cut_values += front->window_cut_values;
+                    if (front->window_arguments_most > shadow->front_window_arguments_most)
+                    {
+                        shadow->front_window_arguments_most = front->window_arguments_most;
+                    }
+                    shadow->front_window_name_ticks += front->window_name_ticks;
+                    shadow->front_window_names += front->window_names;
+                    shadow->front_window_lines += front->window_lines;
+                    shadow->front_window_line_ticks += front->window_line_ticks;
+                    shadow->front_window_name_differences += front->window_name_differences;
                     static const char* const fields[] = { "?", "node", "operator", "operand", "leaf", "member", "arguments", "type", "context", "distance", "structure" };
                     for (uint32_t d = 0; d < front->differences && d < BUSTER_NODE_FRONT_LISTED && shadow->front_listed < node_census_list; d += 1)
                     {
@@ -5553,9 +5624,11 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     for (uint32_t why = 0; why < BUSTER_NODE_FACTS_WHYS; why += 1)
                     {
                         shadow->reader_facts_whys[why] += typed->facts_skipped_whys[why];
+                        shadow->reader_window_whys[why] += typed->facts_window_whys[why];
                     }
                     // The differences first, and on a count of their own: the expressions not given are many.
-                    static const char* const facts_kinds[] = { "a record over poison", "a record over decoys", "a window's lists", "a record's inputs from the front's records" };
+                    static const char* const facts_kinds[] = { "a record over poison", "a record over decoys", "a window's lists", "a record's inputs from the front's records",
+                                                               "a record's inputs as the front wrote them", "a record the kernel made of the front's window in place" };
                     for (uint32_t d = 0; d < typed->facts_listed && shadow->reader_facts_listed < node_census_list; d += 1)
                     {
                         const uint32_t token = typed->facts_difference_tokens[d];
@@ -5574,6 +5647,15 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                         shadow->reader_facts_skipped_listed += 1;
                         printf("node-shadow: reader-time fact words not given by the front's records file=%s line=%u token=%u why=\"%s\"\n", file,
                                node_census_line(&source.pp, &source.parser, token), token, why < BUSTER_NODE_FACTS_WHYS ? facts_whys[why] : "?");
+                    }
+                    static const char* const window_whys[BUSTER_NODE_FACTS_WHYS] = { "given", "its records are not in a row", "?", "?", "?" };
+                    for (uint32_t d = 0; d < typed->facts_window_listed && shadow->reader_window_listed < node_census_list; d += 1)
+                    {
+                        const uint32_t token = typed->facts_window_tokens[d];
+                        const uint8_t why = typed->facts_window_reasons[d];
+                        shadow->reader_window_listed += 1;
+                        printf("node-shadow: reader-time fact words not given by the front's window file=%s line=%u token=%u why=\"%s\"\n", file,
+                               node_census_line(&source.pp, &source.parser, token), token, why < BUSTER_NODE_FACTS_WHYS ? window_whys[why] : "?");
                     }
                     for (uint32_t t = 0; t < NODE_TESTS_TRIGGERS; t += 1)
                     {
@@ -5825,11 +5907,12 @@ static int run_node_census(int count, char** arguments)
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
             shadow.reader |= BUSTER_NODE_READER_TESTS | (strcmp(arguments[i], "--front-own-tests") == 0 ? BUSTER_NODE_READER_OWN : 0);
         }
-        else if (strcmp(arguments[i], "--front-facts") == 0)
+        else if (strcmp(arguments[i], "--front-facts") == 0 || strcmp(arguments[i], "--front-window") == 0)
         {
-            // #2850's fact words' kernel at reader time, after T there, on the lean front's expressions.
+            // #2850's fact words' kernel at reader time, after T there, on the lean front's expressions; and with
+            // --front-window the front writes the kernel's window as it makes each record.
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_LEAN | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
-            shadow.reader |= BUSTER_NODE_READER_FACTS;
+            shadow.reader |= BUSTER_NODE_READER_FACTS | (strcmp(arguments[i], "--front-window") == 0 ? BUSTER_NODE_READER_WINDOW : 0);
         }
         else if (strcmp(arguments[i], "--front-tests-last") == 0)
         {
@@ -5917,7 +6000,10 @@ static int run_node_census(int count, char** arguments)
                                           shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0 ||
                                           shadow.own_differences != 0 || shadow.flat_differences != 0 ||
                                           shadow.reader_facts[NODE_FACTS_COUNT_DIFFERENCES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_LIST_DIFFERENCES] != 0 ||
-                                          shadow.reader_facts[NODE_FACTS_COUNT_FAILURES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] != 0);
+                                          shadow.reader_facts[NODE_FACTS_COUNT_FAILURES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] != 0 ||
+                                          shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] != 0 ||
+                                          shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] != 0 || shadow.front_plain_differences != 0 ||
+                                          shadow.front_window_name_differences != 0 || shadow.front_window_arguments_most > BUSTER_NODE_FRONT_RECORDS);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 
