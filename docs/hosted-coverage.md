@@ -28,17 +28,18 @@ additional features in [`host_isa.h`](../src/buster/compiler/host_isa.h), and
 must select `BUSTER_HOST_VECTOR=1`. A candidate's CPU and OS must pass the
 feature probe before it receives an item; no vector emulation is used. The
 four vector shards of a configuration share one verified compiler product.
-`native` builds per shard and can select either path depending on the hosted
-CPU, so it is not deterministic vector or scalar evidence.
+The `native` row draws qualifying CPUs too (#2924) and each of its items builds
+its own compiler there, so it is vector evidence of `-march=native` builds on
+whichever qualifying CPU models the draw found.
 
-Each vector item records its target and predicate, then runs `benchmark-lexer`
+Each drawn item, native or vector, records its target and predicate, then runs `benchmark-lexer`
 over `x86_64_encoder.c`; the entire input must use vector lexer kernels and
 match the scalar twin. This is direct execution evidence for that lexer input,
 not a counter proving that every vector implementation ran. The verdict
 requires a passing qualified execution of every item.
 
-The full suites use the same inventory, sharded by row-specific costs. The
-baseline TSan and MSan rows have seven shards; other configurations have four.
+The full suites use the same inventory, sharded by row-specific costs: four
+items a configuration.
 The following are useful entry points into that inventory, not an exhaustive
 claim about every kernel or input:
 

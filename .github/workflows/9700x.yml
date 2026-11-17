@@ -345,11 +345,6 @@ jobs:
       host_arch: ${{ matrix.host_arch }}
       sanitizer: ${{ matrix.sanitizer }}
       optimization: ${{ matrix.optimization }}
-      # How many shards the row runs as (#2031), by its own costs (tools/ci/costs/, `costs plan`): the native plain row
-      # 4, and the vector row's N is each configuration's items' count (4, BUSTER_VECTOR_ITEMS), which its draws are
-      # sized for. tools/ci/changes.c's self-test checks the number against the row workflow's lookup
-      # (changes_shard_policy).
-      shards: ${{ 4 }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
 

@@ -575,4 +575,35 @@ if verdict; then fail 'a plain run exceeding its request ceiling passed'; fi
 grep -q 'REST request ceiling exceeded: 17 > 16' "$work/log" || fail 'the aggregate request ceiling was not enforced'
 pass
 
+# --- The native row (#2924) ---
+# It draws as the vector row does, under its own prefix, so a vector row's records in the same run are none of its;
+# no item of it builds a product, and every item's evidence is a compiler it built.
+export BUSTER_HOST_ARCH=native BUSTER_VECTOR_CONFIGURATIONS=none GITHUB_RUN_ATTEMPT=1
+vector_prefix=$p
+p=native-O3
+artifacts "$vector_prefix-1-assign-1-n1x4" "$p-1-assign-1-n1x3-n2x5-n3x9-n4x12"
+jobs 1
+take 1 3 qualified || fail "a native row's candidate that takes its item"
+[ "$(setting BUSTER_VECTOR_ITEM)" = n1 ] && [ "$(setting BUSTER_VECTOR_BUILDER)" = 0 ] || fail "a native row's item 1 builds no product"
+take 1 4 qualified || fail "a native candidate the vector row's assignment names"
+[ ! -s "$GITHUB_ENV" ] || fail "the vector row's assignment names a native row's candidate"
+if BUSTER_HOST_ARCH=x86-64 bash "$draw_script" take 1 3 qualified "$work/record" > "$work/log" 2>&1; then fail 'a row the draws have none of'; fi
+rm -rf -- "$records"
+mkdir -p "$records/$p-1-assign-1-n1x3-n2x5-n3x9-n4x12"
+ledger "$p-1-rest-collect-1" assign 1
+for pair in n1:3 n2:5 n3:9 n4:12; do
+    item=${pair%%:*}
+    candidate=${pair#*:}
+    mkdir -p "$records/$p-1-draw-1-$candidate"
+    record 1 "$candidate" "AMD EPYC 9V45" qualified "$records/$p-1-draw-1-$candidate/record"
+    printf 'decision\ttook %s\n' "$item" >> "$records/$p-1-draw-1-$candidate/record"
+    evidence 1 "$item" 1 "$candidate" "took $item" "built $sha"
+done
+verdict || { cat "$work/log"; fail "a native row whose every item built its compiler"; }
+evidence 1 n3 1 9 "took n3" "installed $sha"
+if verdict; then fail "a native item that installed a product passes"; fi
+p=$vector_prefix
+unset BUSTER_HOST_ARCH
+pass
+
 printf 'vector-draw fixture: %s checks passed\n' "$checks"
