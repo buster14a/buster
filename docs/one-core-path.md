@@ -43,8 +43,8 @@ alone: exact, and every input a compile needs is there. The kernel makes a
 record in 16.4 TSC ticks where T takes 49.2 on the same expressions. Making
 its inputs as a copy of the front's records costs 28.4 more, a record at a
 time or by passes, so T by the kernel is 44.8 ticks a record where the
-piece's gate was 35: the window's columns are the front's to write, not a
-stage after it.
+piece's gate was 35. The front holds those values when it makes a record:
+the next piece has it write the window itself.
 Step 4's census counted Tier 0's row: 117 cycles
 and 295 instructions a typed entry in `-c sqlite3.c`, 64.7 cycles a token,
 Tier 0 itself 38 of them and the unwind table, the atoms and the emission's
@@ -1176,11 +1176,12 @@ The passes of `h`, `l` and `m` on `sqlite3.c`, ticks a record:
 - **The inputs' making is a record at a time.** By passes with no branch a
   record it is 33.6 ticks on `sqlite3.c` where the loop with a branch on the
   operator is 30.5, and 38.0 and 53.7 against 29.3 and 35.9 on Lua and musl,
-  whose batches are short. The work is a copy: each record of the window is
-  read through its place in the front's columns and the reader's, a line or
-  two a record, and written to eight columns. Passes read the same lines
-  once a pass. The passes' version is in the record
-  (`patches/facts-m.patch`, what the 9700X built), with its twin's check.
+  whose batches are short. Why the passes lose was not measured beyond
+  their profile: no hot spot, and about 125 instructions a record for a
+  record's nine fields, a table's byte or two and eight stores. No counter
+  was read for misses, so nothing here says the reads bound it. The passes'
+  version is in the record (`patches/facts-m.patch`, what the 9700X built),
+  with its twin's check.
 - **The kernel** is the first piece's, unchanged.
 
 ### What it means
@@ -1194,15 +1195,18 @@ The passes of `h`, `l` and `m` on `sqlite3.c`, ticks a record:
   best, more than the kernel itself, and 46.7 as the expressions come. T by
   the kernel is then 44.8 ticks a record where T again is 49.2, and 77.9
   where T's first run is 101.9: 9% and 24% less, not the half the gate asked.
-- **So the window is not a stage between the front and the kernel.** The
-  front already holds each record's operator, its operands' distances and
-  its leaf's declaration when it makes the record; the kinds, the codes and
-  the tags are a table's bytes by the operator. What this piece paid for is
-  reading them back by place. Step 3's row is where they belong: the front
-  writes the window's columns as it makes each record, and keeps a waiting
-  record whole at a chunk's end, which is also the 2% of the expressions
-  this piece could not give. The classes could be the kernel's own
-  listing's, which reads every record once already: not measured.
+- **So the window should not be a stage between the front and the
+  kernel.** The front already holds each record's operator, its operands'
+  distances and its leaf's declaration when it makes the record, and has
+  already branched on what the record is; the kinds, the codes and the tags
+  are a table's bytes by the operator. This piece made all of it a second
+  time. Step 3's row is where it belongs: the front writes the window's
+  columns as it makes each record, and keeps a waiting record whole at a
+  chunk's end, which is also the 2% of the expressions this piece could not
+  give. That it costs less there is this piece's reading of its own
+  figures, not a measurement: [the next piece's
+  specification](https://github.com/buster14a/buster/issues/2850#issuecomment-6939344308)
+  has its gate and what would refute it.
 - **What a compile has at reader time is enough.** Every input the kernel
   reads comes from the front's records and the reader's columns, exactly,
   for every expression not cut by a chunk's end: no walk's node is needed to

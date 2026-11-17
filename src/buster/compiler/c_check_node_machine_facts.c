@@ -4180,8 +4180,8 @@ static inline __attribute__((always_inline)) uint32_t node_facts_front_integer(N
 // - Its kind and its class are node_facts_append's of the same things.
 //
 // A record at a time, with a branch on its operator: the same by passes over a batch, with no branch a record, measured
-// no faster on the 9700X (docs/one-core-path.md, "Step 2's third piece": the windows are a packed copy of the front's
-// records, and a copy's passes read each record through its place).
+// no faster on the 9700X (docs/one-core-path.md, "Step 2's third piece": the passes spend about 125 instructions a
+// record, with no hot spot).
 static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t base, uint32_t count, uint32_t record, uint32_t operand)
 {
     NodeFacts* facts = &state->facts;
