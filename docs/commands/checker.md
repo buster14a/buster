@@ -308,28 +308,40 @@ unused-warning fixtures also check exact scope-completion tokens.
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
-  `-Wsign-compare` retains the original unsignedness of both operands before narrow integer promotion (#1391).
-  An `unsigned char` or `unsigned short` promoted to `int` cannot become negative. An ordinary conditional's
-  result is also nonnegative when both arms are nonnegative integer constant expressions, unsigned values, boolean results or
-  nested such conditionals (`check_common_conditional_nonnegative`). An integer constant expression's condition
-  selects only its taken arm; a folded assignment or statement expression alone does not. The bounded walk
-  borrows only the emission worklist's unused node slots and preserves every live warning frame; exhausted
-  space or work budget keeps the warning. Explicit signed casts, GNU shared-middle conditionals, arithmetic
-  results and genuine signed operands keep their existing diagnostics. `c_check_sign_compare_driver_test.c`
-  compares independent counts, severity and complete Clang diagnostic lines through default/scalar compilation
-  and a deferred route that requires two admitted reader lanes. Run `test-checker-driver --sign-compare-only`
-  with `--executable build/compiler` under a two-CPU grant; the shared correctness inventory
-  supplies that grant. `tests/driver/sign_compare_conditional.c` covers both operand orientations, every comparison,
-  nested/selected arms, casts, side-effecting conditions, GNU controls, a balanced 128-leaf tree and live sibling
-  diagnostics. A fully folded signed conditional such as `((y = 0) ? -1 : 3) < u` uses its folded result only when
-  evaluating it has no side effects or unevaluable discarded operand; otherwise the two-arm range proof runs.
-  A folded operand's strictly decreasing unary chain exposes a conditional inside a selection, unary `+` or
-  explicit cast. Selections and unary `+` preserve the arm proof; an explicit cast keeps its target type's range.
-  Harmless GNU constant conditions, assignments and commas retain their existing range rules, as do equality
-  with representable unsigned constants and the zero-unsigned relational controls. The fixture checks all six
-  comparisons in both operand orientations, nested and statement-expression conditions, wrappers and quiet controls.
-  General arithmetic and bitfield ranges, assignment/comma result wrappers and folded unsigned-operand shortcuts
-  remain separate; global evaluation facts are unchanged.
+  `-Wsign-compare` retains both operands' source signs and reads the checked comparison conversion, including
+  narrow integers, bit-fields and `_BitInt` promotions (#1391). `c_check_sign_range.c` computes diagnostic ranges
+  as a width and a nonnegative flag: constants, implicit conversions, assignment/comma results, ordinary
+  conditional arms, arithmetic, masks, shifts, division and bit-fields. These follow Clang's approximate warning
+  rules; they are not optimizer facts. Explicit casts retain their target type's range unless the whole cast is
+  evaluable, and GNU shared-middle conditionals remain opaque unless evaluable. A modifying condition's folded
+  payload cannot select its source arm: both possible arms contribute to the range. Assignment conversions are
+  applied before their result's range is used, so narrowing cannot inherit an invalid nonnegative proof.
+  Equality is quiet when the unsigned operand's range is narrower than the comparison type; `UINT_MAX` fills
+  that type and keeps the warning. The unsigned-zero relational exception requires a source integer constant
+  expression. The nonrecursive postorder walk borrows only unused emission frames and preserves every live
+  warning frame. Exhausted space or a repeated-DAG work budget returns the operand's opaque type range.
+  `c_check_sign_compare_driver_test.c` compares independent counts, severity and complete Clang diagnostic lines
+  through default/scalar compilation and a deferred route that requires two admitted reader lanes. Run
+  `test-checker-driver --sign-compare-only --executable build/compiler` under a two-CPU grant; the shared correctness
+  inventory supplies it. `tests/driver/sign_compare_conditional.c` retains both operand orientations, every
+  comparison, nested/selected arms, casts, side-effecting conditions, GNU controls, a balanced 128-leaf tree
+  and live sibling diagnostics. The range fixtures extend those controls across assignment/comma wrappers,
+  narrowing, arithmetic and equality boundaries without changing the shared constant-evaluation facts.
+  `-Wuninitialized`'s graph-order candidates receive a definite-write proof in `c_check_uninitialized_flow.c`
+  (#1391). Up to 64 candidate objects share expression read/write masks over their owning body's graph slice.
+  Commas and conditions sequence writes; short-circuit and conditional alternatives certify only writes that
+  every completion performs. The retained controls supply execution order, including body-to-increment and
+  `continue` edges. A monotone worklist joins possibly uninitialized objects by union across predecessors and
+  resets objects outside their lexical scope, so a previous block lifetime cannot initialize a later one.
+  A reverse expression pass identifies an actual unsafe read, including a post-loop read reached after zero
+  iterations. The existing diagnostic publisher retains its warning family, spelling, notes and policy; the
+  analysis does not add a general `-Wsometimes-uninitialized` diagnostic engine. Missing control coverage,
+  detached statement-expression regions or cleanup chains keep the original warning conservatively.
+  `c_check_uninitialized_driver_test.c` reads the original `tests/driver/uninitialized-for/` fixtures. Quiet and
+  definitely uninitialized cases compare complete Clang lines; unsafe joins independently pin Buster's existing
+  diagnostic to a marked read. Normal driver parts cover default/scalar readers. Run
+  `test-checker-driver --uninitialized-only --executable build/compiler` under a two-CPU grant for the additional
+  admitted deferred-reader checks; it shares the existing two-CPU diagnostic inventory group with sign comparisons.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang

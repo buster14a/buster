@@ -10,49 +10,43 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
         const char* source;
         uint32_t warnings;
         const char* option;
+        const char* file;
     } cases[] =
     {
-        { "reported unsigned char against unsigned long", "typedef unsigned char Byte;int f(Byte b,unsigned long m){return b<=m;}\n", 0, NULL },
-        { "reported unsigned short against unsigned long", "int f(unsigned short b,unsigned long m){return b<m;}\n", 0, NULL },
-        { "unsigned char all operators against unsigned int", "int f(unsigned char b,unsigned m){return (b<m)+(b<=m)+(b>m)+(b>=m)+(b==m)+(b!=m);}\n", 0, NULL },
-        { "unsigned int all operators against unsigned char", "int f(unsigned m,unsigned char b){return (m<b)+(m<=b)+(m>b)+(m>=b)+(m==b)+(m!=b);}\n", 0, NULL },
-        { "unsigned short all operators against unsigned long", "int f(unsigned short b,unsigned long m){return (b<m)+(b<=m)+(b>m)+(b>=m)+(b==m)+(b!=m);}\n", 0, NULL },
-        { "unsigned long all operators against unsigned short", "int f(unsigned long m,unsigned short b){return (m<b)+(m<=b)+(m>b)+(m>=b)+(m==b)+(m!=b);}\n", 0, NULL },
-        { "qualified typedef keeps unsigned range", "typedef unsigned char Byte;int f(const volatile Byte b,unsigned long m){return b<m;}\n", 0, NULL },
-        { "unsigned short member keeps unsigned range", "struct S{unsigned short n;};int f(const struct S*p,unsigned long m){return p->n<m;}\n", 0, NULL },
-        { "unsigned char subscript keeps unsigned range", "int f(const unsigned char*p,unsigned m){return p[0]<m;}\n", 0, NULL },
-        { "unsigned char call result keeps unsigned range", "unsigned char narrow(void);int f(unsigned long m){return narrow()<m;}\n", 0, NULL },
-        { "unsigned plain char keeps unsigned range", "int f(char b,unsigned long m){return b<m;}\n", 0, "-funsigned-char" },
-        { "unsigned narrowing cast keeps unsigned range", "int f(int b,unsigned long m){return (unsigned char)b<m;}\n", 0, NULL },
-        { "unsigned short narrowing cast keeps unsigned range", "int f(int b,unsigned m){return (unsigned short)b<m;}\n", 0, NULL },
-        { "boolean keeps its nonnegative type", "int f(_Bool b,unsigned long m){return b<m;}\n", 0, NULL },
-        { "signed char can be negative", "int f(signed char b,unsigned long m){return b<m;}\n", 1, NULL },
-        { "signed short can be negative", "int f(short b,unsigned m){return b<m;}\n", 1, NULL },
-        { "reported signed int control", "int f(int b,unsigned long m){return b<m;}\n", 1, NULL },
-        { "signed long can be negative", "int f(long b,unsigned long m){return b<m;}\n", 1, NULL },
-        { "unsigned long against signed int still warns", "int f(unsigned long m,int b){return m<b;}\n", 1, NULL },
-        { "signed int all operators still warn", "int f0(int b,unsigned m){return b<m;}\nint f1(int b,unsigned m){return b<=m;}\nint f2(int b,unsigned m){return b>m;}\nint f3(int b,unsigned m){return b>=m;}\nint f4(int b,unsigned m){return b==m;}\nint f5(int b,unsigned m){return b!=m;}\n", 6, NULL },
-        { "explicit signed widening cast keeps signed range", "int f(unsigned char b,unsigned long m){return (int)b<m;}\n", 1, NULL },
-        { "explicit signed narrowing cast keeps signed range", "int f(unsigned char b,unsigned long m){return (signed char)b<m;}\n", 1, NULL },
-        { "unsigned cast beneath signed cast is not enough", "int f(int b,unsigned long m){return (int)(unsigned char)b<m;}\n", 1, NULL },
-        { "negated narrow unsigned can be negative", "int f(unsigned char b,unsigned long m){return -b<m;}\n", 1, NULL },
-        { "complemented narrow unsigned can be negative", "int f(unsigned short b,unsigned m){return ~b<m;}\n", 1, NULL },
-        { "subtraction after explicit signed cast still warns", "int f(unsigned short b,unsigned m){return (int)b-1<m;}\n", 1, NULL },
-        { "nonnegative constant remains quiet", "int f(unsigned long m){return 3<m;}\n", 0, NULL },
-        { "negative constant still warns", "int f(unsigned long m){return -2<m;}\n", 1, NULL },
-        { "wider signed type represents unsigned int", "int f(unsigned b,long m){return b<m;}\n", 0, NULL },
-        { "wide signed and unsigned remain different", "int f(unsigned long b,long m){return b<m;}\n", 1, NULL },
-        { "both narrow operands promote to signed int", "int f(signed char b,unsigned short m){return b<m;}\n", 0, NULL },
-        { "ordinary conditional result ranges", NULL, 43, NULL },
+        { "reported unsigned char against unsigned long", "typedef unsigned char Byte;int f(Byte b,unsigned long m){return b<=m;}\n", 0, NULL, NULL },
+        { "reported unsigned short against unsigned long", "int f(unsigned short b,unsigned long m){return b<m;}\n", 0, NULL, NULL },
+        { "unsigned char all operators against unsigned int", "int f(unsigned char b,unsigned m){return (b<m)+(b<=m)+(b>m)+(b>=m)+(b==m)+(b!=m);}\n", 0, NULL, NULL },
+        { "unsigned int all operators against unsigned char", "int f(unsigned m,unsigned char b){return (m<b)+(m<=b)+(m>b)+(m>=b)+(m==b)+(m!=b);}\n", 0, NULL, NULL },
+        { "unsigned short all operators against unsigned long", "int f(unsigned short b,unsigned long m){return (b<m)+(b<=m)+(b>m)+(b>=m)+(b==m)+(b!=m);}\n", 0, NULL, NULL },
+        { "unsigned long all operators against unsigned short", "int f(unsigned long m,unsigned short b){return (m<b)+(m<=b)+(m>b)+(m>=b)+(m==b)+(m!=b);}\n", 0, NULL, NULL },
+        { "qualified typedef keeps unsigned range", "typedef unsigned char Byte;int f(const volatile Byte b,unsigned long m){return b<m;}\n", 0, NULL, NULL },
+        { "unsigned short member keeps unsigned range", "struct S{unsigned short n;};int f(const struct S*p,unsigned long m){return p->n<m;}\n", 0, NULL, NULL },
+        { "unsigned char subscript keeps unsigned range", "int f(const unsigned char*p,unsigned m){return p[0]<m;}\n", 0, NULL, NULL },
+        { "unsigned char call result keeps unsigned range", "unsigned char narrow(void);int f(unsigned long m){return narrow()<m;}\n", 0, NULL, NULL },
+        { "unsigned plain char keeps unsigned range", "int f(char b,unsigned long m){return b<m;}\n", 0, "-funsigned-char", NULL },
+        { "unsigned narrowing cast keeps unsigned range", "int f(int b,unsigned long m){return (unsigned char)b<m;}\n", 0, NULL, NULL },
+        { "unsigned short narrowing cast keeps unsigned range", "int f(int b,unsigned m){return (unsigned short)b<m;}\n", 0, NULL, NULL },
+        { "boolean keeps its nonnegative type", "int f(_Bool b,unsigned long m){return b<m;}\n", 0, NULL, NULL },
+        { "signed char can be negative", "int f(signed char b,unsigned long m){return b<m;}\n", 1, NULL, NULL },
+        { "signed short can be negative", "int f(short b,unsigned m){return b<m;}\n", 1, NULL, NULL },
+        { "reported signed int control", "int f(int b,unsigned long m){return b<m;}\n", 1, NULL, NULL },
+        { "signed long can be negative", "int f(long b,unsigned long m){return b<m;}\n", 1, NULL, NULL },
+        { "unsigned long against signed int still warns", "int f(unsigned long m,int b){return m<b;}\n", 1, NULL, NULL },
+        { "signed int all operators still warn", "int f0(int b,unsigned m){return b<m;}\nint f1(int b,unsigned m){return b<=m;}\nint f2(int b,unsigned m){return b>m;}\nint f3(int b,unsigned m){return b>=m;}\nint f4(int b,unsigned m){return b==m;}\nint f5(int b,unsigned m){return b!=m;}\n", 6, NULL, NULL },
+        { "explicit signed widening cast keeps signed range", "int f(unsigned char b,unsigned long m){return (int)b<m;}\n", 1, NULL, NULL },
+        { "explicit signed narrowing cast keeps signed range", "int f(unsigned char b,unsigned long m){return (signed char)b<m;}\n", 1, NULL, NULL },
+        { "unsigned cast beneath signed cast is not enough", "int f(int b,unsigned long m){return (int)(unsigned char)b<m;}\n", 1, NULL, NULL },
+        { "negated narrow unsigned can be negative", "int f(unsigned char b,unsigned long m){return -b<m;}\n", 1, NULL, NULL },
+        { "complemented narrow unsigned can be negative", "int f(unsigned short b,unsigned m){return ~b<m;}\n", 1, NULL, NULL },
+        { "subtraction after explicit signed cast still warns", "int f(unsigned short b,unsigned m){return (int)b-1<m;}\n", 1, NULL, NULL },
+        { "nonnegative constant remains quiet", "int f(unsigned long m){return 3<m;}\n", 0, NULL, NULL },
+        { "negative constant still warns", "int f(unsigned long m){return -2<m;}\n", 1, NULL, NULL },
+        { "wider signed type represents unsigned int", "int f(unsigned b,long m){return b<m;}\n", 0, NULL, NULL },
+        { "wide signed and unsigned remain different", "int f(unsigned long b,long m){return b<m;}\n", 1, NULL, NULL },
+        { "both narrow operands promote to signed int", "int f(signed char b,unsigned short m){return b<m;}\n", 0, NULL, NULL },
+        { "ordinary conditional result ranges", NULL, 43, NULL, "tests/driver/sign_compare_conditional.c" },
+        { "arithmetic and converted result ranges", NULL, 36, "-Wno-constant-conversion", "tests/driver/sign_compare_ranges.c" },
     };
-    const int file = open("tests/driver/sign_compare_conditional.c", O_RDONLY | O_CLOEXEC);
-    char* conditional_source = NULL;
-    const bool read = file >= 0 && check_test_driver_read_file(file, &conditional_source);
-    check_test_expect(test, read, "conditional sign-comparison fixture is read (run from the repository root)");
-    if (file >= 0)
-    {
-        close(file);
-    }
     static const char* const policies[] = { NULL, "-Werror=sign-compare", "-Wno-sign-compare", "-w" };
     char source[PATH_MAX];
     char object[PATH_MAX];
@@ -60,6 +54,17 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
     snprintf(object, sizeof(object), "%s/sign-compare.o", directory);
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
+        char* file_source = NULL;
+        if (cases[c].file != NULL)
+        {
+            const int file = open(cases[c].file, O_RDONLY | O_CLOEXEC);
+            const bool read = file >= 0 && check_test_driver_read_file(file, &file_source);
+            check_test_expect(test, read, "sign-comparison fixture is read (run from the repository root)");
+            if (file >= 0)
+            {
+                close(file);
+            }
+        }
         for (uint32_t policy = 0; policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
         {
             if (!check_test_driver_takes())
@@ -68,7 +73,7 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
             }
             // Two independent bodies and -c permit actual deferred admission, unlike one-file -fsyntax-only.
             char unit[16384];
-            const char* fixture = cases[c].source != NULL ? cases[c].source : conditional_source;
+            const char* fixture = cases[c].source != NULL ? cases[c].source : file_source;
             const int length = fixture != NULL ? snprintf(unit, sizeof(unit), "%sint sign_compare_anchor(void){return 0;}\n", fixture) : -1;
             const bool written = length >= 0 && (size_t)length < sizeof(unit) && parse_test_write(source, unit, (size_t)length);
             char description[256];
@@ -136,8 +141,8 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
                 free(text);
             }
         }
+        free(file_source);
     }
     unlink(object);
     unlink(source);
-    free(conditional_source);
 }

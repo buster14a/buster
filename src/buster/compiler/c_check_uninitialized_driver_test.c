@@ -8,6 +8,7 @@ typedef struct CheckDriverUninitializedFixture CheckDriverUninitializedFixture;
 struct CheckDriverUninitializedFixture
 {
     const char* name;
+    // Null means quiet; otherwise one diagnostic and its initialization note, at the fixture's marked read.
     const char* variable;
     bool clang_lines;
 };
@@ -41,39 +42,155 @@ static void check_test_driver_uninitialized(CheckTest* test, const char* clang, 
 {
     static const CheckDriverUninitializedFixture cases[] =
     {
-        { .name = "reported-path", .clang_lines = true },
-        { .name = "reported-components", .clang_lines = true },
-        { .name = "body-write", .clang_lines = true },
-        { .name = "continue-after", .clang_lines = true },
-        { .name = "break-before", .clang_lines = true },
-        { .name = "return-before", .clang_lines = true },
-        { .name = "branch-writes", .clang_lines = true },
-        { .name = "nested", .clang_lines = true },
-        { .name = "shadowed", .clang_lines = true },
-        { .name = "comma-write", .clang_lines = true },
-        { .name = "and-left-write", .clang_lines = true },
-        { .name = "or-left-write", .clang_lines = true },
-        { .name = "conditional-writes", .clang_lines = true },
-        { .name = "goto-write", .clang_lines = true },
-        { .name = "goto-exit", .clang_lines = true },
-        { .name = "switch-writes", .clang_lines = true },
-        { .name = "inner-continue", .clang_lines = true },
-        { .name = "continue-before", .variable = "step" },
-        { .name = "conditional-write", .variable = "step" },
-        { .name = "and-right-write", .variable = "step" },
-        { .name = "or-right-write", .variable = "step" },
-        { .name = "conditional-one-write", .variable = "step" },
-        { .name = "goto-bypass", .variable = "step" },
-        { .name = "switch-continue", .variable = "step" },
-        { .name = "after-loop", .variable = "step" },
-        { .name = "break-after-loop", .variable = "step" },
-        { .name = "body-read", .variable = "step" },
-        { .name = "condition-first", .variable = "step" },
-        { .name = "never-written", .variable = "step", .clang_lines = true },
-        { .name = "shadow-unwritten", .variable = "step", .clang_lines = true },
-        { .name = "known-zero", .variable = "step", .clang_lines = true },
-        { .name = "before-loop", .variable = "step", .clang_lines = true },
-        { .name = "increment-readwrite", .variable = "step", .clang_lines = true },
+        {
+            .name = "reported-path",
+            .clang_lines = true,
+        },
+        {
+            .name = "reported-components",
+            .clang_lines = true,
+        },
+        {
+            .name = "body-write",
+            .clang_lines = true,
+        },
+        {
+            .name = "continue-after",
+            .clang_lines = true,
+        },
+        {
+            .name = "break-before",
+            .clang_lines = true,
+        },
+        {
+            .name = "return-before",
+            .clang_lines = true,
+        },
+        {
+            .name = "branch-writes",
+            .clang_lines = true,
+        },
+        {
+            .name = "nested",
+            .clang_lines = true,
+        },
+        {
+            .name = "shadowed",
+            .clang_lines = true,
+        },
+        {
+            .name = "comma-write",
+            .clang_lines = true,
+        },
+        {
+            .name = "and-left-write",
+            .clang_lines = true,
+        },
+        {
+            .name = "or-left-write",
+            .clang_lines = true,
+        },
+        {
+            .name = "conditional-writes",
+            .clang_lines = true,
+        },
+        {
+            .name = "goto-write",
+            .clang_lines = true,
+        },
+        {
+            .name = "goto-exit",
+            .clang_lines = true,
+        },
+        {
+            .name = "switch-writes",
+            .clang_lines = true,
+        },
+        {
+            .name = "inner-continue",
+            .clang_lines = true,
+        },
+        {
+            .name = "continue-before",
+            .variable = "step",
+        },
+        {
+            .name = "conditional-write",
+            .variable = "step",
+        },
+        {
+            .name = "and-right-write",
+            .variable = "step",
+        },
+        {
+            .name = "or-right-write",
+            .variable = "step",
+        },
+        {
+            .name = "conditional-one-write",
+            .variable = "step",
+        },
+        {
+            .name = "goto-bypass",
+            .variable = "step",
+        },
+        {
+            .name = "switch-continue",
+            .variable = "step",
+        },
+        {
+            .name = "after-loop",
+            .variable = "step",
+        },
+        {
+            .name = "break-after-loop",
+            .variable = "step",
+        },
+        {
+            .name = "body-read",
+            .variable = "step",
+        },
+        {
+            .name = "condition-first",
+            .variable = "step",
+        },
+        {
+            .name = "never-written",
+            .variable = "step",
+            .clang_lines = true,
+        },
+        {
+            .name = "shadow-unwritten",
+            .variable = "step",
+            .clang_lines = true,
+        },
+        {
+            .name = "known-zero",
+            .variable = "step",
+            .clang_lines = true,
+        },
+        {
+            .name = "before-loop",
+            .variable = "step",
+            .clang_lines = true,
+        },
+        {
+            .name = "increment-readwrite",
+            .variable = "step",
+            .clang_lines = true,
+        },
+        {
+            .name = "wide-safe",
+            .clang_lines = true,
+        },
+        {
+            .name = "wide-bit63",
+            .variable = "v63",
+        },
+        {
+            .name = "wide-bit64",
+            .variable = "v64",
+        },
     };
     static const char* const policies[] = { NULL, "-Werror=uninitialized", "-Wno-uninitialized", "-w" };
     char source[PATH_MAX];
@@ -183,8 +300,8 @@ static void check_test_driver_uninitialized(CheckTest* test, const char* clang, 
                 check_test_expect(test, good, description);
                 if (!good)
                 {
-                    fprintf(stderr, "  status %d expected %d; warnings %u expected %u; errors %u expected %u; notes %u expected %u; use %u; deferred %u\nClang lines:\n%s\nActual output:\n%s\n",
-                            status, expected_status, counts.warnings, warnings, counts.errors, errors, counts.notes, expected, located, deferred,
+                    fprintf(stderr, "  %s\n  status %d expected %d; warnings %u expected %u; errors %u expected %u; notes %u expected %u; use %u; deferred %u\nClang lines:\n%s\nActual output:\n%s\n",
+                            description, status, expected_status, counts.warnings, warnings, counts.errors, errors, counts.notes, expected, located, deferred,
                             reference, text != NULL ? text : "(missing)");
                 }
                 free(text);

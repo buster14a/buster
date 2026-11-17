@@ -701,6 +701,17 @@ and copy no function of musl's. No file of this tree holds musl's code.
 
 ## C semantic compatibility references
 
+The initialization-flow and integer-range diagnostic repairs for #1391 in
+`c_check_common_warnings.c`, their private helpers and original driver fixtures
+use the project default terms. They reuse this repository's checked expression
+graph, retained control entries and diagnostic policy. LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaChecking.cpp`, `clang/lib/AST/Expr.cpp` and
+`clang/include/clang/AST/IgnoreExpr.h` supply integer-range diagnostic behavior
+and selected-expression wrapper rules;
+Clang runs externally as the fixture oracle. No upstream implementation,
+test fixture or corpus source is incorporated.
+
 The TLS redeclaration diagnostics and for-initializer unused-warning scope fixes
 for #1784 are original project code and fixtures under the default terms.
 Clang/LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
