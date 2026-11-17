@@ -1546,6 +1546,7 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
         { "src/buster/compiler/c_check_node_machine_reads.c", "main_unit_checker.c", false },
         // Its own front (step 1b) is the reader's, included by the coded walk beside whose chunks it runs.
         { "src/buster/compiler/c_check_node_machine_front.c", source, false },
+        { "src/buster/compiler/c_check_node_machine_flat.c", source, false },
         { "src/buster/compiler/c_check_clock.c", "main.c main_unit_checker.c", false },
         { "src/buster/compiler/c_check_clock_rss.c", "main.c main_unit_checker.c", false },
         { "src/buster/compiler/worker_budget.c", "main.c main_unit_checker.c", false },

@@ -3268,6 +3268,26 @@ struct NodeShadow
     // --list N: the taken expressions the front didn't make, listed up to N.
     uint32_t front_missed_listed;
     uint32_t front_listed;
+    // --front-flat, --front-flat-first: the flat front beside the lean one (c_check_node_machine_flat.c). The files'
+    // reports summed (NodeFrontShadow's flat_ fields): its pass's and its compaction's ticks, the tokens it visited, its
+    // records, the children hopped over, the tokens with a child past the ring's reach and those left; and its
+    // comparison with the lean front: the records both made, those that differ, and those only one made.
+    uint64_t flat_ticks;
+    uint64_t flat_compact_ticks;
+    uint64_t flat_stage_ticks[8];
+    uint64_t flat_tokens;
+    uint64_t flat_records;
+    uint64_t flat_empties;
+    uint64_t flat_far;
+    uint64_t flat_hops;
+    uint64_t flat_beyond;
+    uint64_t flat_left;
+    uint64_t flat_compared;
+    uint64_t flat_differences;
+    uint64_t flat_only;
+    uint64_t flat_lean_only;
+    uint64_t flat_unread;
+    uint32_t flat_listed;
     // --front-types: T run at reader time on the front's expressions (c_check_node_machine_reader.c). The files' reports
     // summed (NodeFrontTypes'): the expressions it ran on, their records, its refusals, its ticks, its state's making and
     // the types its derivations added. And after the pipeline: of the expressions it ran on, those the lowering popped
@@ -4938,6 +4958,24 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
         printf("node-shadow: walk prepare ticks compact=%" PRIu64 " identifiers=%" PRIu64 " literals=%" PRIu64 "\n", shadow->front_compact_ticks,
                shadow->front_identifier_ticks, shadow->front_literal_ticks);
     }
+    if ((shadow->front & BUSTER_NODE_FRONT_FLAT) != 0 && shadow->front_units != 0)
+    {
+        // The flat front: what it visited and made, how it compares with the lean front, and its ticks beside its own
+        // compaction's.
+        printf("node-shadow: flat front %s tokens=%" PRIu64 " (the lean front's less the %" PRIu64 " that pass values on) left=%" PRIu64 " records=%" PRIu64 " empty-places=%" PRIu64
+               " hops=%" PRIu64 " (%.2f a token) past-the-rings'-reach=%" PRIu64 "\n",
+               (shadow->front & BUSTER_NODE_FRONT_FLAT_FIRST) != 0 ? "before-the-walk" : "after-the-walk", shadow->flat_tokens, shadow->front_tokens - shadow->flat_tokens,
+               shadow->flat_left, shadow->flat_records, shadow->flat_empties, shadow->flat_hops,
+               shadow->flat_tokens != 0 ? (double)shadow->flat_hops / (double)shadow->flat_tokens : 0.0, shadow->flat_beyond);
+        printf("node-shadow: flat front against the lean front: compared=%" PRIu64 " differences=%" PRIu64 " only-the-flat-front's=%" PRIu64 " only-the-lean-front's=%" PRIu64
+               " past-the-records'-ring=%" PRIu64 " distances-past-a-byte-by-empty-places=%" PRIu64 "\n",
+               shadow->flat_compared, shadow->flat_differences, shadow->flat_only, shadow->flat_lean_only, shadow->flat_unread, shadow->flat_far);
+        printf("node-shadow: flat front ticks=%" PRIu64 " compact-ticks=%" PRIu64 "\n", shadow->flat_ticks, shadow->flat_compact_ticks);
+        printf("node-shadow: flat front stage ticks classify=%" PRIu64 " leaves=%" PRIu64 " places=%" PRIu64 " records=%" PRIu64 " empties=%" PRIu64 "\n",
+               shadow->flat_stage_ticks[BUSTER_NODE_FLAT_STAGE_CLASSIFY], shadow->flat_stage_ticks[BUSTER_NODE_FLAT_STAGE_LEAVES],
+               shadow->flat_stage_ticks[BUSTER_NODE_FLAT_STAGE_PLACES], shadow->flat_stage_ticks[BUSTER_NODE_FLAT_STAGE_RECORDS],
+               shadow->flat_stage_ticks[BUSTER_NODE_FLAT_STAGE_EMPTIES]);
+    }
     if ((shadow->front & BUSTER_NODE_FRONT_TYPES) != 0 && shadow->front_units != 0)
     {
         // T at reader time: what it ran on and made, then how it compares with the shadow's T after the pipeline.
@@ -5331,6 +5369,33 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                         shadow->front_left[code] += front->left[code];
                     }
                     shadow->front_left_queries += front->left_queries;
+                    shadow->flat_ticks += front->flat_ticks;
+                    shadow->flat_compact_ticks += front->flat_compact_ticks;
+                    shadow->flat_tokens += front->flat_tokens;
+                    shadow->flat_records += front->flat_records;
+                    shadow->flat_empties += front->flat_empties;
+                    shadow->flat_far += front->flat_far;
+                    for (uint32_t stage = 0; stage < BUSTER_ARRAY_LENGTH(shadow->flat_stage_ticks); stage += 1)
+                    {
+                        shadow->flat_stage_ticks[stage] += front->flat_stage_ticks[stage];
+                    }
+                    shadow->flat_hops += front->flat_hops;
+                    shadow->flat_beyond += front->flat_beyond;
+                    shadow->flat_left += front->flat_left;
+                    shadow->flat_compared += front->flat_compared;
+                    shadow->flat_only += front->flat_only;
+                    shadow->flat_lean_only += front->flat_lean_only;
+                    shadow->flat_unread += front->flat_unread;
+                    static const char* const flat_fields[] = { "compaction", "operator", "count", "distance", "root", "consumer", "leaf", "arguments", "operand", "classes" };
+                    for (uint32_t d = 0; d < front->flat_differences && d < BUSTER_NODE_FRONT_LISTED && shadow->flat_listed < node_census_list; d += 1)
+                    {
+                        const uint32_t token = front->flat_difference_tokens[d];
+                        const uint32_t field = front->flat_difference_fields[d] - BUSTER_NODE_FLAT_FIELD_COMPACTION;
+                        shadow->flat_listed += 1;
+                        printf("node-shadow: flat front difference file=%s line=%u token=%u field=%s\n", file, node_census_line(&source.pp, &source.parser, token), token,
+                               field < BUSTER_ARRAY_LENGTH(flat_fields) ? flat_fields[field] : "?");
+                    }
+                    shadow->flat_differences += front->flat_differences;
                 }
                 const NodeFrontTypes* typed = front != NULL ? front->types : NULL;
                 if (typed != NULL)
@@ -5603,6 +5668,13 @@ static int run_node_census(int count, char** arguments)
                                                                                BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS;
             shadow.front = (uint8_t)(shadow.front | flag | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
         }
+        else if (strcmp(arguments[i], "--front-flat") == 0 || strcmp(arguments[i], "--front-flat-first") == 0)
+        {
+            // The flat front beside the lean one, its twin: after the walk as the lean front, or before the walk's
+            // actions (the lean front stays where the other options put it, after the walk unless they say before).
+            const uint8_t flags = (uint8_t)(BUSTER_NODE_FRONT_FLAT | BUSTER_NODE_FRONT_LEAN | (strcmp(arguments[i], "--front-flat-first") == 0 ? BUSTER_NODE_FRONT_FLAT_FIRST : 0));
+            shadow.front = (uint8_t)(shadow.front | flags | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
+        }
         else if (strcmp(arguments[i], "--front-tests") == 0 || strcmp(arguments[i], "--front-own-tests") == 0)
         {
             // The census's tests at reader time, between T and C and X there: by the census's code on the view, or in the
@@ -5694,7 +5766,7 @@ static int run_node_census(int count, char** arguments)
                                           shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0 || shadow.swept_differences != 0 ||
                                           shadow.tested_unsound != 0 || shadow.tested_differences != 0 || shadow.tested_kind_differences != 0 ||
                                           shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0 ||
-                                          shadow.own_differences != 0);
+                                          shadow.own_differences != 0 || shadow.flat_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 

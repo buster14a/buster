@@ -537,11 +537,19 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
                                                                             shadow.swept_differences == 0 && shadow.swept_compared != 0 && shadow.swept_unkept == 0 &&
                                                                                 shadow.swept_expressions == shadow.typed_refused[NODE_MACHINE_TAKEN] &&
                                                                                 shadow.swept_references >= 20 && shadow.swept_call_targets >= 24;
+    // The flat front, where the front asks for it: every record the lean front made is the flat front's, field for
+    // field, neither made a record the other didn't, and the tokens the fixture's fronts leave within an operator's
+    // values kept their places, empty.
+    const bool flat = (front & BUSTER_NODE_FRONT_FLAT) == 0 || !fronts ? shadow.flat_compared == 0 && shadow.flat_records == 0 :
+                                                                         shadow.flat_differences == 0 && shadow.flat_compared == shadow.front_records &&
+                                                                             shadow.flat_records == shadow.front_records && shadow.flat_only == 0 &&
+                                                                             shadow.flat_lean_only == 0 && shadow.flat_unread == 0 && shadow.flat_empties != 0 &&
+                                                                             shadow.flat_beyond == 0;
     const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
                       (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions &&
                       shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_resets == 0 && shadow.front_waiting == 0 &&
                       (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 : shadow.front_units == 0 && shadow.front_records == 0) && typed &&
-                      swept;
+                      swept && flat;
     if (valid && !swept)
     {
         fprintf(stderr, "test-checker: node-shadow%s: C and X at reader time ran on %" PRIu64 " expressions (T took %" PRIu64 "), %" PRIu64 " compared, %" PRIu64
@@ -562,6 +570,9 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
                 shadow.front_resets, shadow.front_waiting, shadow.front_units, fronts ? "expected in the one" : "expected in none: no vector paths in this build",
                 shadow.typed_expressions, shadow.typed_compared, shadow.typed_differences, shadow.typed_skipped, shadow.typed_unrun,
                 shadow.typed_refused[NODE_MACHINE_REFUSED_CALLEE], shadow.typed_object_differences, shadow.typed_library_differences);
+        fprintf(stderr, "test-checker: node-shadow: the flat front's records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " only its own, %" PRIu64
+                " only the lean front's, %" PRIu64 " empty places, %" PRIu64 " tokens past the rings' reach\n",
+                shadow.flat_records, shadow.flat_compared, shadow.flat_differences, shadow.flat_only, shadow.flat_lean_only, shadow.flat_empties, shadow.flat_beyond);
     }
     uint32_t line = 1;
     const char* at = text;
@@ -1298,9 +1309,16 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
     // C and X there too, where asked: the same tapes across the chunks' ends, none left out.
     const bool swept = (front & BUSTER_NODE_FRONT_SWEEPS) == 0 || !fronts ? shadow.swept_expressions == 0 && shadow.swept_compared == 0 :
                                                                             shadow.swept_differences == 0 && shadow.swept_compared != 0 && shadow.swept_unkept == 0;
+    // The flat front, where the front asks for it: at the chunks' ends every record is the lean front's and neither has
+    // one the other lacks; where the lean front's stack is full the flat front, which has none, makes the records the
+    // stack lost (the call astride its end among them), and those both make are equal.
+    const bool flat = (front & BUSTER_NODE_FRONT_FLAT) == 0 || !fronts ? shadow.flat_compared == 0 && shadow.flat_records == 0 :
+                                                                         shadow.flat_differences == 0 && shadow.flat_compared == shadow.front_records &&
+                                                                             shadow.flat_lean_only == 0 && shadow.flat_unread == 0 && shadow.flat_beyond == 0 &&
+                                                                             (shadow.flat_only != 0) == !boundaries;
     const bool same = shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_waiting == 0 &&
                       (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 && (shadow.front_resets != 0) == !boundaries :
-                                shadow.front_units == 0 && shadow.front_records == 0) && typed && swept;
+                                shadow.front_units == 0 && shadow.front_records == 0) && typed && swept && flat;
     if (!valid || !same)
     {
         fprintf(stderr, "test-checker: node-front %s%s: %s: records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
@@ -1309,6 +1327,119 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
                 shadow.front_checked,
                 shadow.front_differences, shadow.front_resets, shadow.front_waiting, shadow.front_units,
                 fronts ? "expected in the one" : "expected in none: no vector paths in this build");
+        fprintf(stderr, "test-checker: node-front: the flat front's records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " only its own, %" PRIu64
+                " only the lean front's, %" PRIu64 " empty places, %" PRIu64 " tokens past the rings' reach\n",
+                shadow.flat_records, shadow.flat_compared, shadow.flat_differences, shadow.flat_only, shadow.flat_lean_only, shadow.flat_empties, shadow.flat_beyond);
+    }
+    free(text);
+    unlink(path);
+    return valid && same;
+}
+
+// The flat front past its rings' reach, and its empty records, on generated text read with `options`:
+//   - a statement that is one value the front leaves, the unit's first: an unknown value is no place, however few
+//     records the unit has;
+//   - a condition whose body is some 13,500 tokens, more than the rings hold (BUSTER_NODE_FLAT_WINDOW positions). The
+//     lean front's stack keeps the condition's value until its closing parenthesis and makes its record; the flat front
+//     can't reach it, and leaves the token;
+//   - a call, an operator and a conditional of a value the front leaves (a sizeof, the walk's own visit);
+//   - a left condition whose body ends in a later chunk: its consumer reads an earlier chunk's empty record;
+//   - four whose bodies are over 255 records, one at least within a chunk: the consumer is found by its place, not by
+//     the byte;
+//   - a sizeof alone, a declaration of two initializers, one of them left (the other's discard is empty with it), a
+//     literal the front leaves under an operator, and a switch;
+//   - two declarations whose `;` the flat front leaves, its first value past the rings' reach, where the lean front
+//     makes the `;`'s discards: a braced initializer of four values, and 9,000 adjacent strings. A value near the `;`
+//     has a consumer in the lean front and none in the flat one, within the byte (the fourth value's, and the
+//     strings') and past it (the third's): no difference, where that consumer is a record only the lean front made.
+// Whether the long body's condition and those two declarations' five discards are the six records the flat front lacks,
+// every other record is equal, and the left values' consumers kept their places, empty.
+static bool node_flat_test_reach(const char* directory, bool first, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/reach.c", directory);
+    const uint32_t capacity = 1u << 17;
+    char* text = malloc(capacity);
+    uint32_t length = 0;
+    bool valid = text != NULL;
+    if (valid)
+    {
+        length += (uint32_t)snprintf(text + length, capacity - length, "int f3(int, int, int);\nint lr(int a, int b)\n{\n    int x = a;\n    '\\n';\n    if (a > b)\n    {\n");
+        for (uint32_t round = 0; round < 450 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, "        x++; x++; x++; x++; x++; x++; x++; x++; x++; x++;\n");
+        }
+        // A sizeof is the walk's own visit: the fronts leave it, and with it the call, the sum and the conditional that
+        // take its value, and the statements that discard them.
+        length += (uint32_t)snprintf(text + length, capacity - length,
+                                     "    }\n    x = f3(a, (int)sizeof(b), b) + 1;\n    x = a ? (int)sizeof(a) + b : b;\n    a = b, x = (int)sizeof(x);\n");
+        // A left condition before a body of 1,200 tokens, which ends in a later chunk.
+        length += (uint32_t)snprintf(text + length, capacity - length, "    if (a > (int)sizeof(b))\n    {\n");
+        for (uint32_t round = 0; round < 40 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, "        x++; x++; x++; x++; x++; x++; x++; x++; x++; x++;\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, "    }\n");
+        // Four left conditions before bodies of 300 records: a consumer over 255 records after its value.
+        for (uint32_t round = 0; round < 4 && length + 2048 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, "    if (b > (int)sizeof(a))\n    {\n");
+            for (uint32_t line = 0; line < 10; line += 1)
+            {
+                length += (uint32_t)snprintf(text + length, capacity - length, "        x++; x++; x++; x++; x++; x++; x++; x++; x++; x++;\n");
+            }
+            length += (uint32_t)snprintf(text + length, capacity - length, "    }\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length,
+                                     "    sizeof(a);\n    int p = a, q = (int)sizeof(a) + b;\n    x += p + q;\n    x = a + '\\n';\n    switch (a)\n    {\n        default:\n"
+                                     "            x++;\n    }\n    return x;\n}\n");
+        // A declaration's `;` whose first value is past the rings' reach and whose last ones are not: the flat front
+        // leaves it, and the lean front, whose stack holds every value, makes its discards. A braced initializer of
+        // four values: the second 4,200 terms long, the third's consumer over 255 records after it, the fourth's four
+        // records after it. And 9,000 adjacent strings, whose one value is the first's.
+        length += (uint32_t)snprintf(text + length, capacity - length, "static const unsigned far_values[] = { 1, 0");
+        for (uint32_t round = 0; round < 420 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, ", 2");
+        for (uint32_t round = 0; round < 6 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, ", 3");
+        for (uint32_t round = 0; round < 14 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, " };\nstatic const char far_strings[] =\n");
+        for (uint32_t round = 0; round < 900 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " \"a\" \"a\" \"a\" \"a\" \"a\" \"a\" \"a\" \"a\" \"a\" \"a\"\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, ";\nunsigned far_use(void) { return far_values[0] + (unsigned)far_strings[0]; }\n");
+    }
+    valid = valid && length + 256 < capacity && parse_test_write(path, text, length);
+    NodeShadow shadow = {
+        .scalar = true,
+        .front = (uint8_t)(BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_FLAT | (first ? BUSTER_NODE_FRONT_FLAT_FIRST : 0)),
+        .passes = 1,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    // In a build without the vector paths the reader's walk is the scalar one, and the fronts must make nothing.
+    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool same = fronts ? shadow.front_differences == 0 && shadow.flat_differences == 0 && shadow.flat_beyond == 3 && shadow.flat_lean_only == 6 &&
+                                   shadow.flat_only == 0 && shadow.flat_unread == 0 && shadow.flat_compared + 6 == shadow.front_records && shadow.flat_empties >= 8 :
+                               shadow.front_units == 0 && shadow.flat_compared == 0 && shadow.flat_records == 0;
+    if (!valid || !same)
+    {
+        fprintf(stderr, "test-checker: node-flat reach%s: %s: the lean front's records %" PRIu64 ", %" PRIu64 " differ; the flat front's %" PRIu64 ", compared %" PRIu64
+                ", %" PRIu64 " differ, %" PRIu64 " only its own, %" PRIu64 " only the lean front's, %" PRIu64 " empty places, %" PRIu64 " tokens past the rings' reach\n",
+                first ? " (before the walk)" : "", valid ? "read" : "NOT READ", shadow.front_records, shadow.front_differences, shadow.flat_records, shadow.flat_compared,
+                shadow.flat_differences, shadow.flat_only, shadow.flat_lean_only, shadow.flat_empties, shadow.flat_beyond);
     }
     free(text);
     unlink(path);
@@ -1427,6 +1558,23 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-front: a full stack makes every waiting value unknown and leaves the call astride its end to the walk");
     check_test_expect(test, ready && node_front_test_limits(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front, lean: a full stack makes every waiting value unknown");
+    // The flat front beside the lean one, its twin: on the shadow's fixture, at the chunks' ends, where the lean front's
+    // stack is full, and past its own rings' reach.
+    const uint8_t flat = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_FLAT;
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, flat, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-flat: the flat front's records are the lean front's on the shadow's fixture, the left tokens' places empty");
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
+                      "node-flat before the walk: the same records");
+    check_test_expect(test, ready && node_front_test_limits(directory, true, flat, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-flat: a value whose consumer is in the next chunk is found there by its position");
+    check_test_expect(test, ready && node_front_test_limits(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-flat before the walk: a value whose consumer is in the next chunk is found there");
+    check_test_expect(test, ready && node_front_test_limits(directory, false, flat, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-flat: where the lean front's stack is full the flat front makes the records it lost");
+    check_test_expect(test, ready && node_flat_test_reach(directory, false, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-flat: a value past the rings' reach leaves its consumer, and the left values' consumers keep their places empty");
+    check_test_expect(test, ready && node_flat_test_reach(directory, true, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-flat before the walk: the same past the rings' reach");
     // Every warning has the census's class (node_census_warning_classes): one added since fails here until it has one.
     uint32_t unclassified = 0;
     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)

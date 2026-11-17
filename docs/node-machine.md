@@ -2462,6 +2462,103 @@ On the 9700X (CPU 2, medians of seven readings in turn, musl's of three):
   instructions a node (0.5%) for the tests of where its callee's facts come
   from.
 
+### The front by passes
+
+The lean front spends 48 cycles, 111 instructions and 0.40 mispredicted
+branches an acting token, a token at a time over a stack of waiting values.
+`measure-node-machine --shadow --front-flat` (`c_check_node_machine_flat.c`)
+makes the same records another way, and was built in two steps, each measured
+on the 9700X against the lean front as its twin: every record both make equal,
+field for field, by token.
+
+**Without the stack.** In postorder a token's children are the runs just
+before it, and the reader has each run's length. A token that takes values
+hops back over its children by those lengths and reads one word a child from
+a ring by position: the place of the record that is the child's value, an
+unknown value's mark, or nothing. No value is pushed or matched and no parent
+is loaded. The tokens that only pass values on (a quarter of `sqlite3.c`'s
+acting tokens, over half of Lua's and musl's) are never visited: the front's
+own compaction writes their step, 1, into a second ring.
+
+**By passes.** How many records a token makes is known from its class and its
+own columns before any operand is read, if a token the front leaves keeps its
+place as an empty record. A chunk is then taken apart by what each step needs:
+the classes and each class's list 16 tokens a step; the leaves a class at a
+time; one pass in order for the places, the words and each record's first
+form; then each class's records in its own loop, with no branch on the class;
+then each empty record's consumers made empty in turn.
+
+Before the walk acts at a chunk, where the machine would run, ms (CPU 2, the
+lock, Release, medians of seven readings, musl's of three; each front with the
+compaction it reads):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the lean front, and the walk's compaction | 4.41 + 0.46 | 1.42 + 0.30 | 13.47 + 1.82 |
+| no stack, a token at a time | 3.90 + 0.27 | 1.19 + 0.22 | 9.43 + 1.86 |
+| by passes | 3.01 + 0.33 | 1.29 + 0.23 | 11.08 + 1.93 |
+| by passes against the lean front | 1.46 times | 1.13 | 1.18 |
+
+By passes on `sqlite3.c`, by stage, before the walk and after it (its columns
+warm): the classes 0.16 and 0.16 ms, the leaves 0.50 and 0.37, the places 0.88
+and 0.84, the records 1.44 and 1.11, the empty records 0.03.
+
+- **Exact.** No record differs on the three corpora. On `sqlite3.c` the lean
+  front makes four records the flat one doesn't: values further back than the
+  rings' 8,192 positions (a condition before a very long body). The flat front
+  leaves 4,656, 2,255 and 95,511 places empty.
+- **On the compiler's own source too, once the comparison knew the reach's
+  other face.** A declaration's `;` takes every value of its initializer.
+  Where the first is past the rings' reach the flat front leaves the `;`, and
+  the lean front, whose stack holds a value however far its consumer is,
+  makes its discards. A value near that `;` then has a consumer in the lean
+  front and none in the flat one. `main.c` has two: the 808 KB string of
+  `c_unicode_names.inc`, and `branch_sizing.c`'s table of sixteen long
+  constant expressions. The comparison read each as a difference; it now
+  takes a consumer only the lean front made as it took one only the flat
+  front made. On `main.c` the lean front makes 18 records the flat one
+  doesn't, 17 of them those two declarations' discards, and the flat front
+  35,340 the lean one doesn't: discards of tables with more values than the
+  lean front's stack holds.
+- **The stack was not the cost.** Without it the front is 14% faster on
+  `sqlite3.c` (its pass 52.9 cycles, 113 instructions and 0.48 mispredicted
+  branches a token it visits). Making the hops' positions independent of the
+  pass's own stores, and moving the two rings off a 4 KB multiple apart,
+  changed nothing.
+- **The dispatch was a part of it.** By passes a token's class is no branch,
+  and `sqlite3.c` is 20% faster again. Lua is 8% slower and musl 15% slower
+  than a token at a time: most of their tokens are declarations', which make
+  nothing, and each pays every pass.
+- **What is left is each class's loads and a hundred instructions a record.**
+  Before the walk a condition, a return and a cast cost 100 to 140 cycles
+  each (over three builds' profiles): each reads a column of the reader's by
+  token (the condition's keyword, the return's type, the cast's type), a unit
+  long and not in the cache. An identifier's three loads are 19 cycles a
+  leaf, 14 after the walk. A binary operator is about 30 cycles and 120
+  instructions: two hops, its record, and the two bytes it writes into each
+  operand's record. The places' pass is 14 cycles a token it visits, 0.18 of
+  a mispredicted branch: the branch on a statement's terminator, whose
+  discards are made there.
+- **Against the line this was claimed with:** 15 cycles an acting token on
+  `sqlite3.c`. By passes it is 36, and 4 for the compaction (the lean front 52
+  and 5): not met.
+- **A compile is unchanged** (-0.09% twice from fresh copies). It retires
+  344,000 more instructions of 1,363 M: the Release build's parts fall
+  elsewhere with the new file, and the coded walk's function is 41 bytes
+  longer. No hook is in its loop.
+
+What would take it further is outside a front that reads the reader's columns
+after the fact: an identifier's three loads as one word a token; a discard as
+a byte on its operand's record, as [#2850's
+follow-up](https://github.com/buster14a/buster/issues/2850#issuecomment-6900715849)
+measures it, so that every token's count is its class's and the places are a
+prefix sum 16 tokens a step; and the consumer's two bytes left to the sweep
+that reads them. Of 24 faults put into the flat front one at a time, the tests
+show 21. The other three show on no input here: an identifier with no
+declared type that the walk acts at, a member operator without its name, and
+the hops' loop ending a child early, which the general loop behind it then
+answers.
+
 ### C and X where they sit
 
 "T where it sits" left the other two sweeps after the pipeline.
@@ -2897,8 +2994,10 @@ that. What would move it:
 
 - **The front's walk:** over a hundred instructions an acting token for a
   stack walk, lean or not. The structure it derives (counts, distances,
-  places) is the tree's, which the parser's columns hold: making it from them
-  by blocks, not a token at a time, is #2850's step 3.
+  places) is the tree's, which the parser's columns hold: "The front by
+  passes" makes it from them without the stack, 1.1 to 1.5 times faster, and
+  what is left there is the reader's columns' loads. Writing these bytes in
+  the parse itself is #2850's step 3.
 - **The sweeps on these records where they run:** #2850's step 2. T on the
   front's records as the shadow's scalar T would read them was this step's
   plan before #2850's step 0, and is dropped.

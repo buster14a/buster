@@ -353,7 +353,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-sweeps] [--front-tests|--front-own-tests] [--front-tests-last] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests|--front-own-tests] [--front-tests-last] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -681,6 +681,51 @@ takes its entries.
     expressions whose nodes the front made without a root for them (an
     initializer beside a variable-length array's bound). `--list N` lists the
     first differences. A difference fails the command.
+- `--front-flat` runs **the flat front** beside the lean one, its twin
+  (`c_check_node_machine_flat.c`, `PPOptions.node_front`'s bit 32): the lean
+  front's records made by passes over a chunk, with no stack and no walk a
+  token at a time. `--front-flat-first` (bit 64) runs it before the walk acts
+  at the chunk, where the machine would run; the lean front stays where the
+  other options put it. [The design](../node-machine.md#the-front-by-passes)
+  has what it measured.
+  - **Operands by the tree's shape.** A token that takes values hops back
+    over its children by their lengths (`CheckInputReader.subtree_sizes`) and
+    reads one word a child from a ring by position: the place of the record
+    that is the child's value, an unknown value's mark, or nothing. The hop
+    over a child is in a second ring, the steps, which the front's own
+    compaction writes: the child's length, or 1 for a token that only passes
+    values on (a list, a separator, a group's closing), which is never
+    visited.
+  - **The passes** (`node_front_chunk_flat`): the compaction
+    (`node_flat_compact`, 16 positions a step); the classes
+    (`node_flat_classify`, 16 tokens a step: each token's class, its byte,
+    its record's first form and its class's list); the leaves
+    (`node_flat_leaves`, a class at a time); the places (`node_flat_places`:
+    a running sum of the records each token makes, each token's word, and a
+    terminator's discards); the records, a class's tokens together
+    (`node_flat_unaries`, `node_flat_binaries`, `node_flat_ternaries`,
+    `node_flat_calls`); and the empty records (`node_flat_empties`).
+  - **An empty record.** A token the front leaves keeps its place, with
+    `BUSTER_NODE_FLAT_EMPTY` for its operator, where the lean front makes no
+    record: a chunk's places are then known before any operand is read. Its
+    consumers are made empty in turn, a statement's discards together.
+  - **The comparison** (`node_flat_compare`), after both fronts made a chunk:
+    the compaction and the classes against their scalar twins, then every
+    record both fronts made, by token, field for field, an empty record being
+    none and the distances less the empty records between. The lean front's
+    records are compared with the walk's nodes in the same run.
+  - **The report:** `node-shadow: flat front after-the-walk tokens=N (the
+    lean front's less the N that pass values on) left=N records=N
+    empty-places=N hops=N (x a token) past-the-rings'-reach=N`, `flat front
+    against the lean front: compared=N differences=0 only-the-flat-front's=N
+    only-the-lean-front's=N past-the-records'-ring=N
+    distances-past-a-byte-by-empty-places=N`, `flat front ticks=N
+    compact-ticks=N` and `flat front stage ticks classify=N leaves=N places=N
+    records=N empties=N`. `only-the-lean-front's` are values past the rings'
+    reach (`BUSTER_NODE_FLAT_WINDOW` positions: a condition before a very long
+    body); `only-the-flat-front's` are records the lean front's full stack
+    lost. `--list N` lists the first differences by field. A difference fails
+    the command.
 - `--front-sweeps` runs **C and X where they sit** too
   (`PPOptions.node_front`'s bit 128, with `--front-types`' bit): after T types
   an expression at reader time and takes it, C and X run on the same records.
@@ -814,7 +859,21 @@ objects' columns and the library calls' answers the program's, T run on every
 expression the front made, and the fixture's six callees refused there (four
 of them calls the census refuses before the shadow's T, which no comparison
 reads). The chunk-boundary text ends with the address of an array no
-declaration points to, whose pointer type T makes itself. C and X run at
+declaration points to, whose pointer type T makes itself. The flat front runs
+beside the lean one on the fixture, after the walk and before it, and on the
+two generated texts: every record the lean front's, the places of the tokens
+the fronts leave empty, and, where the lean front's stack is full, the records
+the stack lost made by the flat front alone. A third text takes it past its
+rings' reach (`node_flat_test_reach`): a condition whose body is 13,500
+tokens, whose record the flat front alone lacks, then a call, a sum and a
+conditional of a `sizeof`, whose consumers keep their places empty; and two
+declarations whose `;` the flat front leaves because its first value is past
+the reach, a braced initializer of four values (one's consumer over 255
+records after it, one's four records after it) and 9,000 adjacent strings.
+Their near values have a consumer in the lean front alone, which the
+comparison takes for no difference where that consumer is a record only the
+lean front made.
+C and X run at
 reader time too (`BUSTER_NODE_FRONT_SWEEPS`) in the `--scalar` and the
 `-funsigned-char` runs, in a fourth run of the fixture without warnings (where
 the census takes a `for` statement's clauses, whose condition's wrapper has a
