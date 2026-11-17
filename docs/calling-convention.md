@@ -119,7 +119,7 @@ for a type's classes and use them:
   (`BUSTER_ABI_IN_MEMORY`);
 - a member of no size can also be at 16, the end of a 16-byte aggregate,
   where it has its classes at 0 (the row is read modulo 16), unless it is
-  `END_MEMORY` (see "Records and arrays: the twin").
+  `END_MEMORY` (see "Records and arrays: the scalar classification").
 
 A record's or an array's row is then a merge of its members' rows, each
 shifted by its member's offset: n members cost n merges of a row whatever the
@@ -268,8 +268,8 @@ members' own:
 clang stores a struct's bit-fields in access units
 (`CGRecordLowering::accumulateBitFields`, with x86-64's cheap unaligned
 accesses), which `abi_bit_field_unit` works out the same way, one unit at a
-time: the twin's `abi_storage`, `abi_layout` and `abi_wide_alignment` and the
-vector path's `abi_member_part` call it at a unit's first bit-field and keep
+time: the scalar classification's `abi_storage`, `abi_layout` and
+`abi_wide_alignment` and the vector path's `abi_member_part` call it at a unit's first bit-field and keep
 the unit for the bit-fields after it. The checker's lowering reads and writes a
 bit-field through the same unit (#1372, `check_lower_bit_units`), as
 clang's code does ([the checker's guide](c-checker.md)'s "Bit-fields").
@@ -434,9 +434,11 @@ type; the row has the named classes. `abi_simple_entry` gives a simple type's
 classes at one offset, and `abi_simple_row` all 16 at once with byte compares
 and blends.
 
-### Records and arrays: the twin
+### Records and arrays: the scalar classification
 
-The scalar classification, the vector fold's twin and the tests' reference,
+The scalar classification, which `abi_classify` falls back to when the vector
+fold has no scratch room (until it is vectorized: #2924 removed it as the
+fold's twin, and the tests check it on its own, never against the fold),
 takes a record or an array an offset at a time (`abi_record_entry` and
 `abi_array_entry`, from the members' rows, which are classified first). A
 record at byte offset o:
@@ -511,8 +513,8 @@ type's 16 offsets:
    for the member alone. The layout word holds, as `layout` has them, the
    scalars it puts at the even offsets (a member's type's where it is; a
    bit-field's access unit's integer at the unit's offset, the unit the pass
-   keeps along a struct's members, from `abi_bit_field_unit` as the twin has
-   it) and its data bytes, and in a struct the bytes its storage covers.
+   keeps along a struct's members, from `abi_bit_field_unit` as the scalar
+   classification has it) and its data bytes, and in a struct the bytes its storage covers.
    The storage word holds, in a struct, a bit for its storage's alignment
    (bit 32 plus the log2), whether it is off that alignment
    (`determinePacked`) and the i128 of the first member at offset 0 with
@@ -550,7 +552,7 @@ type's 16 offsets:
    larger than 16 bytes, whose `storage` takes no loop (a record has none, an
    array its element's), and a union of 16 bytes or less with more members
    than its keys' 22 bits of steps count, which `abi_finish` reduces with the
-   twin's loops.
+   scalar classification's loops.
 
 Records and arrays whose rows need no fold get them directly: a record larger
 than 64 bytes, with a flexible array member, or larger than 16 bytes and than
@@ -559,14 +561,13 @@ one larger than 16 bytes that isn't a passable vector `NOTHING` at 0 and
 MEMORY elsewhere; one of some elements of no size its element's row where it
 is aligned (the merge of n copies of one row is that row). Simple types get
 `abi_simple_row`. If the scratch arena can't hold the fold, `abi_classify`
-classifies the whole level with the twin, `abi_classify_scalar`, which gives
-the same table; a type classified already is classified again to the same
-result.
+classifies the whole level with the scalar classification,
+`abi_classify_scalar`, which gives the same table; a type classified already
+is classified again to the same result.
 
 ### Levels
 
-`abi_classify_all` (and its twin `abi_classify_all_scalar`) schedules complete
-object types and `void` in vector frontiers. Shallow graphs retain the measured
+`abi_classify_all` schedules complete object types and `void` in vector frontiers. Shallow graphs retain the measured
 scan path for at most 16 levels, including the early-classification shortcut
 for wide records whose rows need no member data when no `LARGER` root exists.
 Forcing every wide record to wait lost that batching and regressed the general
@@ -605,8 +606,8 @@ for #613 are tracked in [buster-performance#30](https://github.com/buster14a/bus
 
 ### Finishing a type
 
-`abi_finish` derives the rest from a type's row[0] and what it is, the twin's
-way for every type (the vector path's for the types it doesn't reduce parts
+`abi_finish` derives the rest from a type's row[0] and what it is, the scalar
+classification's way for every type (the vector path's for the types it doesn't reduce parts
 for):
 
 - **`storage` and `layout`** (see "clang's LLVM types"), from its members',
@@ -727,8 +728,8 @@ own. The two counts differ wherever clang counts otherwise than LLVM assigns:
   8 bytes of the stack (a `GROWN` one too, whose copy would take more); one
   of no size is an `i0`, which takes none (`EMPTY`).
 
-So the twin, `abi_assign_call` (one call; `abi_assign_scalar` runs it over
-every call), keeps both counts: clang's free registers, 6 and 8 (5 general
+So the per-call assignment, `abi_assign_call` (one call; `abi_assign_scalar`
+runs it over every call), the vector path's fallback, keeps both counts: clang's free registers, 6 and 8 (5 general
 with a hidden pointer that isn't `DEMOTED`), and LLVM's used ones. For each
 argument in order:
 
@@ -817,7 +818,7 @@ the last argument, a `START` ends it.
 5. **The stack:** the slots of the arguments on the stack in another
    segmented scan, whose exclusive sums are their offsets, and an OR scan of
    their alignments, whose highest bit is the call's, with bit 0 (below every
-   slot's alignment, 8 or more) set by a lane the twin must assign.
+   slot's alignment, 8 or more) set by a lane `abi_assign_call` must assign.
 6. **Stores:** each lane's 8-byte location (its offset, and a word of its
    registers, kind and flags), interleaved with `vpermt2d` and stored with two
    masked 64-bit stores of 8; and at the lanes that end a call, the three
@@ -827,23 +828,22 @@ the last argument, a `START` ends it.
 A last pass over the calls reads each call's totals at its last argument (a
 call without arguments keeps its starting ones): the registers used, clamped
 to 6 and 8, the stack bytes and the largest alignment. The calls with bit 0
-set go to the twin. The setup's marks and the totals' columns replace a loop
+set go to `abi_assign_call`. The setup's marks and the totals' columns replace a loop
 over each call's arguments, whose random lengths mispredicted at their exits,
 and a loop per vector over the calls that end in it.
 
-Where nothing makes clang's and LLVM's counts differ, the twin's two counts
-are complements, so one sum serves both; an argument that spills adds its
+Where nothing makes clang's and LLVM's counts differ, `abi_assign_call`'s two
+counts are complements, so one sum serves both; an argument that spills adds its
 needs to the sums, but only past a class's limit, where no argument after it
 finds a register of that class anyway; and with every slot a multiple of 8
-and every offset its alignment divides, the twin's padding is zero, so the
-slots' sums are its placements. That is exactly the twin's assignment unless
-a lane:
+and every offset its alignment divides, its padding is zero, so the slots'
+sums are its placements. That is exactly its assignment unless a lane:
 
 - doesn't fit while a register it needs is still free (a two-eightbyte one
   with one free, or one of both classes with one class full), which the sums
   count as used though it stays free for the arguments after;
-- is on the stack at an offset its alignment doesn't divide, where the twin
-  would pad, or aligned to 2^32 or more, which a 32-bit lane can't hold;
+- is on the stack at an offset its alignment doesn't divide, where
+  `abi_assign_call` would pad, or aligned to 2^32 or more, which a 32-bit lane can't hold;
 - makes the counts differ: it is `UNCOUNTED` or `LOW_GENERAL`, a named
   `WIDE` vector in a variadic call, or the first of a call whose result is
   `DEMOTED`;
@@ -854,11 +854,12 @@ a lane:
   more, 65,535 in all, and past that the general registers' sum would carry
   into the vector ones'.
 
-A call with such a lane carries bit 0 in its totals, and after the loop the
-twin assigns it again, over what the vector path wrote: 1.7% of the
-benchmark's calls, which hold 5.2% of its arguments (see "Measurements on the
-9700X"). Without scratch memory for the setup's columns, `abi_assign` runs the
-twin on every call.
+A call with such a lane carries bit 0 in its totals, and after the loop
+`abi_assign_call` assigns it again, over what the vector path wrote: 1.7% of
+the benchmark's calls, which hold 5.2% of its arguments (see "Measurements on
+the 9700X"). Without scratch memory for the setup's columns, `abi_assign` runs
+`abi_assign_call` on every call. Both stay as the vector path's fallbacks
+until they are vectorized (#2924's phase D).
 
 ## va_arg
 
@@ -1352,11 +1353,11 @@ files. The counts below are the defaults'
   at each supported width and both char modes, including zero and partial
   builtin prefixes, reserved holes, small/requested capacities and refusals,
   poisoned padding and tails, and the first derived type's ordinary scheduling.
-- **Fixtures** (3,596 checks): types whose classes, pass bits and
+- **Fixtures** (3,656 checks): types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
-  the twin: every scalar, `_BitInt` and complex type, `__fp16`, `nullptr_t`
+  its fallback, the scalar classification, each on its own: every scalar, `_BitInt` and complex type, `__fp16`, `nullptr_t`
   and `_Atomic` ones, small and wide vectors, vectors of one element, and
   records with bit-fields, padding, packing, alignment, flexible and `_Atomic`
   members, x87 members in unions, wide vectors in records and unions, nesting,
@@ -1479,9 +1480,8 @@ files. The counts below are the defaults'
   unions of two members of the one before, 2^64 paths, under a 60-second alarm
   (a walk per path wouldn't end), where by each path every type must be
   classified, and an `_Atomic` of a struct of no size that an array of none of
-  the last aligns be a `LARGER` copy of 16 bytes. - **Worlds and the oracle**
-  (104,651 offsets compared, 159,632 checks): random - **Worlds and the
-  oracle** (102,270 offsets compared, 157,816 checks): random
+  the last aligns be a `LARGER` copy of 16 bytes.
+- **Worlds and the oracle** (206,110 offsets compared, 275,180 checks): random
   worlds of types (scalars, vectors, complex types, `_BitInt`s, `_Atomic` and
   aligned types, structs of arrays of no size and `_Atomic`s of them, the
   vectors LLVM breaks up or packs in clang's worlds: of bools, of `_BitInt`s
@@ -1492,31 +1492,38 @@ files. The counts below are the defaults'
   and in clang's worlds now and then an array of no elements of any type, a
   large record's among them), one at each vector width, one shaped for GCC and
   a rootless one at 32 bytes, without `_Atomic`s of types of no size,
-  classified by the vector path into one table and by the twin into another,
-  which must be identical, column by column (rows, pass bits, stack bytes,
-  alignments, `storage`, `layout` and results). Each classified type at each
-  offset it can be at must then have the oracle's classes: clang's `classify`
-  transcribed as clang has it, its recursion over members and elements a stack
-  of frames, from the type table alone (no rows); and as an unnamed argument
-  too. Then the twin classifies every type again, all at once with everything
-  they read classified, and its table must not change: the paths share the
-  levels, so only this shows a type classified before what it reads, and only
-  in the rootless world: in the others an `_Atomic` of a type of no size makes
+  classified by the vector path into one table and by its fallback, the
+  scalar classification as `abi_classify_all`'s scan drives it, into another,
+  each checked on its own, never against the other: every classifiable type
+  classified, and each classified type at each offset it can be at with the
+  oracle's classes: clang's `classify` transcribed as clang has it, its
+  recursion over members and elements a stack of frames, from the type table
+  alone (no rows); and as an unnamed argument too. At seed 1 and the default
+  count each table, column by column (rows, pass bits, stack bytes,
+  alignments, `storage`, `layout` and results), must match a digest frozen
+  from main, where the vector path and the twin #2924 removed agreed. Then
+  every type is classified again, all at once with everything it reads
+  classified, and neither table may change: only this shows a type the levels
+  took before what it reads, and only in the rootless world: in the others an `_Atomic` of a type of no size makes
   every record wait for its members (see "Levels"). Without the zero-length
   array's wait, the rootless world fails at 9 of seeds 1 to 20, and the
   fixtures' levels at every seed; only the levels catch the flexible array
   member's.
-- **Assignment** (33,329 arguments of random calls, 236,084 checks): random
+- **Assignment** (33,417 arguments of random calls, 473,942 checks): random
   calls over a world's types, at each vector width, named and variadic, short
   and past the registers, with results in memory and in registers, assigned by
-  the vector path and by the twin, which must give the same locations and
-  totals; calls around the vector path's most arguments, which both paths must
-  assign alike: 65,542 `long`s (the last six of which would take rdi to r9
+  the vector path and by its fallback (`abi_assign` with every scratch arena
+  exhausted, which assigns each call by `abi_assign_call`), each on its own:
+  at seed 1, locations and totals against digests frozen from main; at any
+  seed, every call within the registers there are, its stack arguments
+  aligned, in order and within its stack bytes, and a call assigned again
+  alone as in its batch; calls around the vector path's most arguments, which
+  each route must assign as the frozen digest says: 65,542 `long`s (the last six of which would take rdi to r9
   again if the vector path kept them), 32,767 `__int128`s after a hidden
   pointer (65,535 general registers in its sum) and 32,768 without one, and
   the same of `_Complex double`; and the vector path on every prefix of up to
   40 arguments, with the argument and location columns ending at a `PROT_NONE`
-  page.
+  page, as on the same calls in ordinary memory.
 
 ### The cross-check
 
@@ -1820,8 +1827,20 @@ one of Tier 0 that doesn't extend a narrow argument each fail them.
 
 ## Measurements on the 9700X
 
-`benchmark-calling-convention` (AGENTS.md has its options) on the Ryzen 7
-9700X, pinned to CPU 2, with clang 23.1.1's `-O3 -march=native` build of this
+Until #2924 the benchmark timed each vector path beside its scalar twin, with
+`--path` to time one alone and `--after-scalar MS` to run the twin before each
+vector sample; the tables and profiles below are from then. #2924's gate
+measured the twins once more before they went (buster-performance's
+[`c-calling-convention-gate`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-calling-convention-gate)):
+the vector paths took 0.54 to 0.68 of the twins' time per type and 0.32 to
+0.36 per argument, and on real compiles, with the checker's three calls sent
+to one or the other in one executable, the same objects for sqlite3.c, Lua and
+musl (1,371 of them) in 0.9991, 0.9938 and 0.9978 of the user cycles. Since
+then `benchmark-calling-convention` times the vector paths alone, with the
+checks its guide gives.
+
+`benchmark-calling-convention` ([its guide](commands/calling-convention.md)
+has its options) on the Ryzen 7 9700X, pinned to CPU 2, with clang 23.1.1's `-O3 -march=native` build of this
 module as it is now, each process run under the host's lock on its own. A
 process gives the medians of 21 passes that take turns going first, per type
 for the classification and per argument for the assignment. The table has the
@@ -2092,7 +2111,7 @@ are implemented; source-to-function construction is still an integration.
 | --- | --- |
 | Completed TypeTable rows → `abi_classify` / `abi_classify_all` | Type-indexed 16-byte class rows plus pass/storage/layout/result metadata. Member/element dependencies must be classified first; level discovery is part of the cost. |
 | Classified member rows → aggregate fold → `abi_finish` | Reuses shifted rows instead of recursive reclassification. LLVM-shape/storage exceptional rules still inspect member/type data; psABI classes alone are insufficient. |
-| Signature ranges/types → `abi_assign` → argument locations and `AbiCall` | Contiguous arguments and per-call boundaries, named/variadic counts and result metadata. Register demand is a segmented scan; a call that exceeds vector limits goes whole to the exact twin. |
+| Signature ranges/types → `abi_assign` → argument locations and `AbiCall` | Contiguous arguments and per-call boundaries, named/variadic counts and result metadata. Register demand is a segmented scan; a call that exceeds vector limits goes whole to the per-call fallback, `abi_assign_call`. |
 | ABI metadata → Tier 0 generated-function inputs / frame planner / `abi_va_arg` | Consumers use locations, hidden result, outgoing bytes/alignment, variadic state and copy/storage rules; they must not reclassify from size alone. Cross-link tests are real machine-code consumers. |
 
 The ABI table is caller-owned arena storage tied to the same live TypeTable;
