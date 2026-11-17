@@ -695,8 +695,9 @@ The vector path is selected explicitly, without host dispatch:
    the public validating encoder call. Final resolved records are validated
    separately as before. Encoder rows remain the encoding authority. This
    helper is the bounded shared slice of #221, not its IR semantics/effects work.
-4. Instruction-only layouts use the existing vector/scalar branch sizer after
-   proving its index-based contract. Mixed assembly partitions fragments by
+4. Instruction-only layouts use the existing branch sizer after proving its
+   index-based contract (its vector path alone since #2924: `--scalar` no
+   longer selects a scalar sizer). Mixed assembly partitions fragments by
    section and prefix-scans 16 sizes between alignment operations. The exact
    path sums them individually. Scalar column loads/stores avoid Zen 5 gathers.
 5. Encoding batches up to 256 contiguous instructions through the existing
