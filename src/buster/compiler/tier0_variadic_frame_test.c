@@ -543,8 +543,7 @@ static bool tier0_vf_image(Tier0VfTally* tally, const Tier0Code* code, uint32_t 
     if (ready)
     {
         memcpy(records, code->records, (uint64_t)code->count * sizeof(*records));
-        const BranchSizing sized = encoder == 0 ? size_branches_scalar(records, code->count, code->branches, code->targets, code->branch_count, offsets)
-                                                : size_branches(records, code->count, code->branches, code->targets, code->branch_count, offsets);
+        const BranchSizing sized = size_branches(records, code->count, code->branches, code->targets, code->branch_count, offsets);
         uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
         const bool sized_valid = sized.error == BRANCH_SIZING_OK && x86_target_validate(allowed, records, code->count) == code->count;
         const int64_t length = !sized_valid ? -1 : encoder == 0 ? x86_encode_scalar(records, code->count, image->bytes, capacity, NULL, ends)

@@ -778,16 +778,27 @@ jobs:
                   done
               done
               before="$ab_dir/before/src/buster/compiler"
-              new='branch_sizing_lengths(records, count, offsets, vector)'
-              old='branch_sizing_lengths(records, count, offsets, columns.encoded, vector)'
-              interface='branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets, bool vector)'
-              test "$(grep -Fo "$new" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
-              if grep -Fq "$old" "$before/branch_sizing.c"; then
-                  sed -i "s/$new/$old/" "$before/branch_sizing_benchmark.c"
-                  test "$(grep -Fo "$old" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
-                  echo 'Baseline harness adaptation: old lengths scratch argument only'
-              # Since the host-ISA adapter, the call reads BUSTER_VECTOR_PATH(vector), so check the definition instead.
-              elif ! grep -Fq "$interface" "$before/branch_sizing.c"; then
+              # The harness is this revision's. A base from before #2924 removed branch sizing's scalar path still
+              # takes the path as a `vector` argument in four internal functions: the harness's calls there get the
+              # vector path's `true`. Each call is the text, its sed replacement and the result, exactly once.
+              if grep -Fq 'uint32_t* offsets, bool vector, uint32_t round_limit)' "$before/branch_sizing.c"; then
+                  harness="$before/branch_sizing_benchmark.c"
+                  adapt()
+                  {
+                      test "$(grep -Fo "$1" "$harness" | wc -l)" -eq 1
+                      sed -i "s|$1|$2|" "$harness"
+                      test "$(grep -Fo "$3" "$harness" | wc -l)" -eq 1
+                  }
+                  adapt 'branch_sizing_allocate(scratch.arena, count, branch_count)' 'branch_sizing_allocate(scratch.arena, count, branch_count, true)' \
+                      'branch_sizing_allocate(scratch.arena, count, branch_count, true)'
+                  adapt 'branch_sizing_lengths(records, count, offsets)' 'branch_sizing_lengths(records, count, offsets, true)' \
+                      'branch_sizing_lengths(records, count, offsets, true)'
+                  adapt 'branch_sizing_worklist(branch_count, &columns, current)' 'branch_sizing_worklist(branch_count, \&columns, current, true)' \
+                      'branch_sizing_worklist(branch_count, &columns, current, true)'
+                  adapt 'result.offsets, round_limit)' 'result.offsets, true, round_limit)' 'result.offsets, true, round_limit)'
+                  adapt 'pool->offsets, measurement.round_limit)' 'pool->offsets, true, measurement.round_limit)' 'pool->offsets, true, measurement.round_limit)'
+                  echo 'Baseline harness adaptation: the vector path argument of a base before #2924'
+              elif ! grep -Fq 'branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets)' "$before/branch_sizing.c"; then
                   echo 'Unsupported baseline branch_sizing_lengths interface' >&2
                   exit 1
               fi

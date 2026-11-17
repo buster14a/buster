@@ -196,8 +196,7 @@ static bool cbuiltin_misc_lower_test_program(CBuiltinMiscLowerTestTally* tally, 
             result = cbuiltin_misc_lower_test_expect(tally, programs[path].bytes != MAP_FAILED && offsets != 0, "native allocation", item);
             if (result)
             {
-                const BranchSizing sized = path == 0 ? size_branches_scalar(codes[path].records, codes[path].count, codes[path].branches, codes[path].targets, codes[path].branch_count, offsets)
-                                                    : size_branches(codes[path].records, codes[path].count, codes[path].branches, codes[path].targets, codes[path].branch_count, offsets);
+                const BranchSizing sized = size_branches(codes[path].records, codes[path].count, codes[path].branches, codes[path].targets, codes[path].branch_count, offsets);
                 const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 : path == 0 ? x86_encode_scalar(codes[path].records, codes[path].count, programs[path].bytes, capacity, 0, 0)
                                                                                       : x86_encode(codes[path].records, codes[path].count, programs[path].bytes, capacity, 0, 0);
                 result = cbuiltin_misc_lower_test_expect(tally, encoded > 0 && mprotect(programs[path].bytes, pages, PROT_READ | PROT_EXEC) == 0 &&

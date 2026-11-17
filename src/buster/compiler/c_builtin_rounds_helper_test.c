@@ -72,8 +72,7 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
             X86Instruction records[BUSTER_ARRAY_LENGTH(cbuiltin_rounds_helper_records)];
             uint32_t offsets[BUSTER_ARRAY_LENGTH(records)];
             memcpy(records, helper->code.records, sizeof(records));
-            const BranchSizing sized = path == 0 ? size_branches_scalar(records, helper->code.count, NULL, NULL, 0, offsets) :
-                                                  size_branches(records, helper->code.count, NULL, NULL, 0, offsets);
+            const BranchSizing sized = size_branches(records, helper->code.count, NULL, NULL, 0, offsets);
             Tier0Code sized_code = helper->code;
             sized_code.records = records;
             UnwindFunction published = { 0 };

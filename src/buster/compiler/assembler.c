@@ -4144,7 +4144,7 @@ static bool asm_layout_records(AsmParser* parser)
             }
             else
             {
-                const BranchSizing layout = BUSTER_VECTOR_PATH(parser->options.vectorized) ? size_branches(records, parser->instruction_count, branches, targets, count, offsets) : size_branches_scalar(records, parser->instruction_count, branches, targets, count, offsets);
+                const BranchSizing layout = size_branches(records, parser->instruction_count, branches, targets, count, offsets);
                 if (layout.error != BRANCH_SIZING_OK || layout.length > BUSTER_ASM_MAX_SECTION)
                 {
                     asm_fail(parser, 0, "instruction layout failed or exceeds section limit");
