@@ -13,8 +13,8 @@ draws and qualification rules are in [CI](ci.md#the-vector-row).
 | Run | Scalar host | Vector host | Other coverage |
 | --- | --- | --- | --- |
 | Code-changing pull request | `x86-64`, plain | `vector`, plain | No sanitizer rows or libFuzzer campaigns |
-| Merge-queue candidate and full daily/dispatched runs | `x86-64`, plain, ASan/UBSan, TSan and MSan | `vector`, plain, ASan/UBSan, TSan and MSan | `native` plain; frontend and ELF libFuzzer campaigns and a crash/replay proof |
-| Plain-scope nightly runs | `x86-64`, plain | No guaranteed vector row | `native` plain |
+| Merge-queue candidate and full daily/dispatched runs | `x86-64`, plain, ASan/UBSan, TSan and MSan | `vector`, plain, ASan/UBSan, TSan and MSan | Frontend and ELF libFuzzer campaigns and a crash/replay proof |
+| Plain-scope nightly runs | `x86-64`, plain | `vector`, plain | No sanitizer rows or libFuzzer campaigns |
 
 The table describes runs that execute hosted tests; a nightly dispatch may
 reuse qualifying earlier plain-row evidence. The selector may exempt a pull
@@ -26,14 +26,17 @@ additional features in [`host_isa.h`](../src/buster/compiler/host_isa.h), and
 must select `BUSTER_HOST_VECTOR=1`. A candidate's CPU and OS must pass the
 feature probe before it receives an item; no vector emulation is used. The
 four vector shards of a configuration share one verified compiler product.
-`native` builds per shard and can select either path depending on the hosted
-CPU, so it is not deterministic vector or scalar evidence.
+The former hosted `native` rows are retired (#2032): they built per shard and
+could select either path depending on the hosted CPU. Every retained
+configuration shares a compatible verified product.
 
 Each vector item records its target and predicate, then runs `benchmark-lexer`
 over `x86_64_encoder.c`; the entire input must use vector lexer kernels and
 match the scalar twin. This is direct execution evidence for that lexer input,
 not a counter proving that every vector implementation ran. The verdict
-requires a passing qualified execution of every item. The baseline plain row's
+requires a passing qualified execution of every item. The same validation also
+provides an independent plain verdict, so nightly plain credit requires every
+plain item while a sanitizer failure still fails full coverage. The baseline plain row's
 first shard additionally preprocesses, compiles, assembles and runs a small
 fixture under QEMU `qemu64`; that is a baseline smoke test, not vector coverage.
 

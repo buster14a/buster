@@ -63,11 +63,11 @@
 // The hosted correctness row that 9700x.yml's test job calls: its shards, and the build of a portable row's compiler.
 #define BUSTER_CHANGES_ROW_WORKFLOW ".github/workflows/hosted-correctness.yml"
 #define BUSTER_CHANGES_ROW_WORKFLOW_USES "./" BUSTER_CHANGES_ROW_WORKFLOW
-// The test job's rows: both host architectures, `native` everywhere but on pull requests (#2033), and the vector row,
-// one call whose sanitizer lists its configurations: a pull request's plain one in place of `native`, and the plain and
-// sanitizer configurations as one pool of items wherever the sanitizer rows run (not in the `plain` scope elsewhere).
-#define BUSTER_CHANGES_HOST_ARCHES "        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"x86-64\"]' || '[\"x86-64\", \"native\"]') }}"
-#define BUSTER_CHANGES_VECTOR_ROWS "        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{\"host_arch\":\"vector\",\"sanitizer\":\"none\",\"optimization\":3}]' || needs.evidence.outputs.scope == 'plain' && '[]' || '[{\"host_arch\":\"vector\",\"sanitizer\":\"none address thread memory\",\"optimization\":3}]') }}"
+// The test job's rows: the portable baseline configurations and the explicit vector target, both sharing verified
+// products (#2032). One vector call lists its configurations: plain for pull requests and every plain scope, and the
+// plain and sanitizer configurations as one pool wherever the baseline sanitizer rows run. No hosted native row remains.
+#define BUSTER_CHANGES_HOST_ARCHES "        host_arch: [x86-64]"
+#define BUSTER_CHANGES_VECTOR_ROWS "        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[{\"host_arch\":\"vector\",\"sanitizer\":\"none\",\"optimization\":3}]' || '[{\"host_arch\":\"vector\",\"sanitizer\":\"none address thread memory\",\"optimization\":3}]') }}"
 // The host predicate, the build's explicit vector target and the vector row's probe of it (changes_vector_policy).
 #define BUSTER_CHANGES_HOST_ISA "src/buster/compiler/host_isa.h"
 #define BUSTER_CHANGES_SETTINGS "cmake/BusterSettings.cmake"
@@ -3118,11 +3118,11 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
         const char* after;
     } mutants[] = {
         { "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES, "    uses: ./.github/workflows/absent.yml" },
-        { "'[\"x86-64\", \"native\"]'", "'[\"native\"]'" },
-        { "'[\"x86-64\", \"native\"]'", "'[\"x86-64\"]'" },
-        { "github.event_name == 'pull_request' && '[\"x86-64\"]'", "github.event_name == 'pull_request' && '[]'" },
-        { "github.event_name == 'pull_request' && '[\"x86-64\"]'", "github.event_name != 'push' && '[\"x86-64\"]'" },
+        { BUSTER_CHANGES_HOST_ARCHES, "        host_arch: []" },
+        { BUSTER_CHANGES_HOST_ARCHES, "        host_arch: [native]" },
+        { BUSTER_CHANGES_HOST_ARCHES, "        host_arch: [x86-64, native]" },
         { "'[{\"host_arch\":\"vector\",\"sanitizer\":\"none\",\"optimization\":3}]'", "'[]'" },
+        { "        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain')", "        include: ${{ fromJSON((github.event_name == 'pull_request')" },
         { "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none\"" },
         { "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none address memory\"" },
         { "    needs: [changes, evidence, test, fuzz]", "    needs: changes" },
@@ -3258,6 +3258,9 @@ static bool changes_main_policy(Text workflow)
     uint32_t queues = 0;
     uint32_t queue_types = 0;
     uint32_t queue_branches = 0;
+    uint32_t matrices = 0;
+    uint32_t matrix_fields = 0;
+    bool matrix = false;
     uint32_t section = 0;
     uint32_t job = 3;
     size_t offset = 0;
@@ -3299,9 +3302,28 @@ static bool changes_main_policy(Text workflow)
                 job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : text_equal_c(line, "  changes:") ? 5 : text_equal_c(line, "  qualification:") ? 6 : text_starts_with(line, "  auxiliary-") ? 7 : 3;
             }
             const uint32_t current = section == 2 ? 0 : section == 3 ? job : 3;
+            if (current == 1 && indent == 6)
+            {
+                matrix = text_equal_c(line, "      matrix:");
+                matrices += matrix;
+            }
+            else if (current != 1 || indent < 6)
+            {
+                matrix = false;
+            }
+            bool required_line = false;
             for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
             {
-                seen[i] |= current == required[i].job && text_equal_c(line, required[i].line);
+                const bool match = current == required[i].job && text_equal_c(line, required[i].line);
+                seen[i] |= match;
+                required_line |= match;
+            }
+            if (matrix && indent > 6)
+            {
+                // Exactly the four pinned fields: extra axes, duplicate keys or exclusions can otherwise restore
+                // a native build or silently remove a retained configuration while every required line still exists.
+                valid = valid && indent == 8 && required_line;
+                matrix_fields += 1;
             }
         }
     }
@@ -3309,7 +3331,7 @@ static bool changes_main_policy(Text workflow)
     {
         valid = valid && seen[i];
     }
-    return valid && pushes == 0 && queues == 1 && queue_types == 1 && queue_branches == 1;
+    return valid && pushes == 0 && queues == 1 && queue_types == 1 && queue_branches == 1 && matrices == 1 && matrix_fields == 4;
 }
 
 // The hotfix entry (.github/workflows/hotfix.yml, #1430): a pull request labeled `hotfix` gets the required aggregate's
@@ -3455,11 +3477,19 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  test:", " || github.event_name == 'merge_group' }}", " }}", "a candidate's rows don't fail fast" },
         { "  test:", "((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success')", "(github.event_name != 'pull_request' || needs.policy.result == 'success')", "a candidate's tests don't wait for the policy job" },
         { "  prepare-hosted-tools:", "((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success')", "(github.event_name != 'pull_request' || needs.policy.result == 'success')", "a candidate's fuzzing doesn't wait for the policy job" },
-        { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"native\"]'", "missing baseline architecture" },
-        { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"x86-64\", \"vector\"]'", "main's native row replaced before its qualification" },
+        { "  test:", BUSTER_CHANGES_HOST_ARCHES, "        host_arch: []", "missing baseline architecture" },
+        { "  test:", BUSTER_CHANGES_HOST_ARCHES, "        host_arch: [native]", "native replaces the baseline architecture" },
+        { "  test:", BUSTER_CHANGES_HOST_ARCHES, "        host_arch: [x86-64, native]", "the native rows return" },
+        { "  test:", BUSTER_CHANGES_HOST_ARCHES, BUSTER_CHANGES_HOST_ARCHES "\n        host_arch: [x86-64, native]", "a duplicate key restores the native rows" },
+        { "  test:", "        optimization: [3]", "        optimization: [3]\n        exclude:\n          - host_arch: x86-64\n            sanitizer: memory", "an exclusion drops a retained configuration" },
+        { "  test:", "'[{\"host_arch\":\"vector\",\"sanitizer\":\"none\",\"optimization\":3}]'", "'[]'", "the plain scope lacks vector coverage" },
+        { "  test:", "        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain')", "        include: ${{ fromJSON((github.event_name == 'pull_request')", "plain dispatches no longer select vector plain alone" },
         { "  test:", "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none\"", "the vector sanitizer configurations dropped" },
+        { "  test:", "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"address thread memory\"", "the full scope lacks vector plain coverage" },
+        { "  test:", "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none thread memory\"", "the vector address configuration dropped" },
+        { "  test:", "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none address memory\"", "the vector thread configuration dropped" },
         { "  test:", "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none address thread\"", "the vector memory configuration dropped" },
-        { "  test:", " || needs.evidence.outputs.scope == 'plain' && '[]' || '[{", " || '[]' || '[{", "the vector sanitizer configurations never run" },
+        { "  test:", "        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain')", "        include: ${{ fromJSON((true)", "the vector sanitizer configurations never run" },
         { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"thread\", \"memory\"]') }}", "missing address sanitizer" },
         { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"memory\"]') }}", "missing thread sanitizer" },
         { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\"]') }}", "missing memory sanitizer" },
@@ -3872,6 +3902,8 @@ static Text changes_feature_name(Text macro)
 // collector assigns (tools/ci/vector-draw.sh take), which one job publishes once (assign); the draws run the shards' own
 // steps (`*row-steps`) and each of the 4 draws has its collector; an item's configuration is checked after the take
 // set it; and the verdict waits for every draw and collector, even after a failure, and reads every attempt's records.
+// That verifier publishes the plain configuration's checked outcome; a separate job turns it into nightly plain
+// evidence even if a sanitizer failed, while integration still requires the full verdict. Missing output fails.
 // Polling steps run inside the runtime action (#2309), builders publish their terminal marker after the product step,
 // and every candidate and collector publishes its REST ledger even after a failure. Artifact polling never falls
 // back to the repository REST API.
@@ -3939,6 +3971,21 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
         "\n      - name: Record the vector collector's REST requests\n        if: always()\n",
         "\n          name: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
         "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" verdict \"$RUNNER_TEMP/vector-records\"\n",
+        "\n      - name: Require one passing qualified execution of each vector item\n        id: verdict\n        env:\n",
+        "\n    outputs:\n      plain: ${{ steps.verdict.outputs.plain }}\n",
+        "\n  plain-verdict:\n"
+        "    name: Vector plain verdict (Clang 23, O${{ inputs.optimization }})\n"
+        "    needs: verdict\n"
+        "    if: ${{ !cancelled() && inputs.host_arch == 'vector' && contains(format(' {0} ', inputs.sanitizer), ' none ') }}\n"
+        "    runs-on: ubuntu-26.04\n"
+        "    timeout-minutes: 2\n"
+        "    permissions: {}\n"
+        "    steps:\n"
+        "      - name: Require the verified plain configuration\n"
+        "        shell: bash\n"
+        "        env:\n"
+        "          PLAIN_RESULT: ${{ needs.verdict.outputs.plain }}\n"
+        "        run: test \"$PLAIN_RESULT\" = success\n",
         "\n          pattern: vector-O${{ inputs.optimization }}-*\n",
         "\n    steps: &row-steps\n",
         "\n    steps: &collect-steps\n",
@@ -3962,6 +4009,11 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
     const char* product_upload = strstr(text, "\n      - name: Publish the product to the configuration's other items\n");
     const char* kernels = strstr(text, "\n      - name: Confirm the vector kernels run on this CPU\n");
     valid = valid && product_upload != NULL && builder_marker != NULL && kernels != NULL && product_upload < builder_marker && builder_marker < kernels;
+    const char* verdict = strstr(text, "\n  verdict:\n");
+    const char* plain_verdict = strstr(text, "\n  plain-verdict:\n");
+    const char* ignored = verdict != NULL ? strstr(verdict, "continue-on-error:") : NULL;
+    // Exposing a plain output from a failed verifier must not turn its full integration result into a success.
+    valid = valid && verdict != NULL && plain_verdict != NULL && verdict < plain_verdict && (ignored == NULL || ignored > plain_verdict);
     // Each draw runs the shards' steps, and each collector the first's; every vector record refuses to overwrite one.
     uint32_t draws = 0;
     for (const char* step = strstr(text, "\n    steps: *row-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *row-steps\n"))
@@ -4037,6 +4089,18 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
         { 0, "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: *row-steps\n", "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: []\n", "a draw without the shards' steps" },
         { 0, "      BUSTER_DRAW_NEXT: '5'\n    steps: *collect-steps\n", "      BUSTER_DRAW_NEXT: '5'\n    steps: []\n", "a collector without the first's steps" },
         { 0, "    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]", "    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4]", "a verdict before the last draw's assignment" },
+        { 0, "      plain: ${{ steps.verdict.outputs.plain }}", "      plain: success", "plain evidence published without verification" },
+        { 0, "        id: verdict\n", "        id: unrelated\n", "the verifier's plain output disconnected" },
+        { 0, "        id: verdict\n", "        id: verdict\n        continue-on-error: true\n", "the full verdict failure is ignored" },
+        { 0, "    name: Vector plain verdict (Clang 23, O${{ inputs.optimization }})", "    name: Vector plain verdict (Clang 23, O1)", "plain evidence names another optimization" },
+        { 0, "    needs: verdict\n", "    needs: draw-1\n", "plain evidence before verification finishes" },
+        { 0, "    needs: verdict\n    if: ${{ !cancelled() && inputs.host_arch == 'vector' && contains(format(' {0} ', inputs.sanitizer), ' none ') }}", "    needs: verdict\n    if: ${{ success() && inputs.host_arch == 'vector' && contains(format(' {0} ', inputs.sanitizer), ' none ') }}", "sanitizer failure suppresses plain evidence" },
+        { 0, " && contains(format(' {0} ', inputs.sanitizer), ' none ')", "", "a sanitizer-only invocation requires plain evidence" },
+        { 0, "contains(format(' {0} ', inputs.sanitizer), ' none ')", "inputs.sanitizer == 'none'", "the full pool's plain evidence is skipped" },
+        { 0, "contains(format(' {0} ', inputs.sanitizer), ' none ')", "contains(inputs.sanitizer, 'none')", "a configuration substring counts as plain" },
+        { 0, "          PLAIN_RESULT: ${{ needs.verdict.outputs.plain }}", "          PLAIN_RESULT: ${{ needs.verdict.result }}", "plain evidence uses the full result" },
+        { 0, "        run: test \"$PLAIN_RESULT\" = success", "        run: test \"$PLAIN_RESULT\" != failure", "missing plain evidence qualifies" },
+        { 0, "        run: test \"$PLAIN_RESULT\" = success", "        run: test \"$PLAIN_RESULT\" = success || true", "failed plain evidence is ignored" },
         { 0, "    if: ${{ !cancelled() && inputs.host_arch == 'vector' }}\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "    if: inputs.host_arch == 'vector'\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "a verdict skipped after a failure" },
         { 0, "          pattern: vector-O${{ inputs.optimization }}-*", "          pattern: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-*", "a verdict blind to the attempt a rerun keeps" },
         { 0, "          if [ \"$BUSTER_HOST_ARCH\" = vector ] && [ \"$path\" != vector ]; then", "          if false; then", "a scalar vector row" },

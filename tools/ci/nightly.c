@@ -7,6 +7,7 @@
 //   nightly window --now EPOCH --bound SECONDS [--override REASON]   02:00-08:00 Europe/Madrid admission
 //   nightly window-times --now EPOCH                                  the cycle's date, window start and deadline
 //   nightly worker-window < SOURCE                                   immutable worker's declared window, or unknown
+//   nightly worker-hosted < WORKFLOW                                 immutable worker's hosted contract, or unknown
 //   nightly hosted --commit SHA [--exclude RUN] < FACTS               reusable plain-row hosted qualification
 //   nightly coverage --run RUN --auxiliary LIST < FACTS               a merge-queue candidate's full coverage, job by job
 //   nightly stale --run RUN < CANDIDATES                              the invalidated merge-queue candidates' runs to cancel
@@ -24,8 +25,8 @@
 // kind (hexadecimal object names, decimal ids, closed enumerations, bounded tokens), and a line or record that fails is
 // rejected whole, never half-read. Nothing here executes or interpolates what it reads.
 //
-// Policy (docs/ci.md, "Nightly main measurements"): a main state's measurement needs the plain hosted rows (both host
-// architectures, every shard: the gate a pull request needs before the 9700X) of that exact commit, and native
+// Policy (docs/ci.md, "Nightly main measurements"): a main state's measurement needs its exact commit's plain hosted
+// contract (baseline shards and qualified vector items; both ordinary architectures for proven historical workers), and native
 // correctness on the 9700X in the same job as its measurements. A pull request's 9700X job measures without native
 // correctness (#1272), so main's pushes and the scheduled runs and their dispatched workers carry it all. A state whose first-parent change is documentation alone
 // needs none. Coverage is targeted (the selector's choice against the state's first parent), plain (every benchmark's
@@ -569,6 +570,74 @@ static bool nightly_worker_source(NightlyText text, uint32_t* start, uint32_t* e
     return valid;
 }
 
+typedef enum NightlyWorkerHosted NightlyWorkerHosted;
+enum NightlyWorkerHosted
+{
+    NIGHTLY_WORKER_HOSTED_UNKNOWN,
+    NIGHTLY_WORKER_HOSTED_NATIVE,
+    NIGHTLY_WORKER_HOSTED_VECTOR,
+    NIGHTLY_WORKER_HOSTED_COUNT,
+};
+
+static const char* const nightly_worker_hosted_names[] = { "-", "native", "vector" };
+
+// The immutable worker's hosted contract from its workflow, read as data. Only the known jobs/test/strategy/matrix
+// host_arch declarations qualify, each nesting key exactly once. In particular, the native architecture in fuzz or
+// auxiliary jobs cannot grant legacy credit, and absent, duplicate or unfamiliar source never defaults to native.
+static NightlyWorkerHosted nightly_worker_hosted(NightlyText text)
+{
+    static const char* const keys[] = { "jobs:", "  test:", "    strategy:", "      matrix:" };
+    static const char* const native_axes[] = {
+        "        host_arch: [x86-64, native]",
+        "        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"x86-64\", \"vector\"]' || '[\"x86-64\", \"native\"]') }}",
+        "        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"x86-64\"]' || '[\"x86-64\", \"native\"]') }}",
+    };
+    uint32_t seen[5] = { 0 };
+    bool inside[4] = { false };
+    NightlyWorkerHosted contract = NIGHTLY_WORKER_HOSTED_UNKNOWN;
+    size_t offset = 0;
+    char line[BUSTER_NIGHTLY_LINE];
+    bool valid = true;
+    bool line_valid = true;
+    while (valid && nightly_next_line(text, &offset, line, &line_valid))
+    {
+        valid = line_valid;
+        uint32_t indent = 0;
+        while (line[indent] == ' ')
+        {
+            indent += 1;
+        }
+        if (!valid || line[indent] == 0 || line[indent] == '#')
+        {
+            continue;
+        }
+        for (uint32_t level = 0; level < 4; level += 1)
+        {
+            if (indent <= level * 2)
+            {
+                const bool named = indent == level * 2 && (level == 0 || inside[level - 1]) && strncmp(line, keys[level], strlen(keys[level])) == 0;
+                inside[level] = named && strcmp(line, keys[level]) == 0;
+                seen[level] += named ? 1 : 0;
+                valid = valid && (!named || inside[level]);
+            }
+        }
+        if (inside[3] && indent == 8 && strncmp(line, "        host_arch:", 18) == 0)
+        {
+            seen[4] += 1;
+            contract = strcmp(line, "        host_arch: [x86-64]") == 0 ? NIGHTLY_WORKER_HOSTED_VECTOR : NIGHTLY_WORKER_HOSTED_UNKNOWN;
+            for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(native_axes); i += 1)
+            {
+                contract = strcmp(line, native_axes[i]) == 0 ? NIGHTLY_WORKER_HOSTED_NATIVE : contract;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(seen); i += 1)
+    {
+        valid = valid && seen[i] == 1;
+    }
+    return valid ? contract : NIGHTLY_WORKER_HOSTED_UNKNOWN;
+}
+
 // The civil date of a day count since 1970-01-01 (H. Hinnant's algorithm), for the self-test's independent rule.
 static void nightly_civil(int64_t days, int* year, int* month, int* day)
 {
@@ -845,6 +914,7 @@ static const char* nightly_job_own_name(const char* name)
 // its sanitizer's.
 static const char* const nightly_sanitizer_names[] = { "none", "address", "thread", "memory" };
 #define BUSTER_NIGHTLY_SANITIZERS 4u
+#define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
 
 // A hosted test row's job name, `Tests on ... (Clang V, ARCH, SANITIZER, OLEVEL[, shard K of N])`, its own name whatever
 // its caller's: its architecture (0 x86-64, 1 native), its row (the architecture's and the sanitizer's index, or
@@ -910,14 +980,64 @@ static bool nightly_test_job(const char* full, uint32_t* architecture, uint32_t*
     return nightly_test_row(full, architecture, &row, shard, shards, plain);
 }
 
-// The run's plain hosted rows: ok when every shard 1..N of both architectures succeeded (one N throughout), failed
-// when any failed or timed out (a genuine failure: fail-fast's cancellations beside it don't hide it), and none
-// otherwise (none ran, or one was cancelled or skipped, or the shards disagree). Sanitizer rows don't count: the
-// nightly policy measures behind the plain rows, which are the pull request's own gate (docs/ci.md).
-static NightlyPlain nightly_plain_verdict(const NightlyFacts* facts, uint64_t run)
+typedef enum NightlyVector NightlyVector;
+enum NightlyVector
+{
+    NIGHTLY_VECTOR_NONE,
+    NIGHTLY_VECTOR_PLAIN_ROW,
+    NIGHTLY_VECTOR_FULL_ROW,
+    NIGHTLY_VECTOR_PLAIN_VERDICT,
+    NIGHTLY_VECTOR_COUNT,
+};
+
+// The vector row's qualified-execution verdicts. Draw candidates are not shards: only their verdict proves that
+// each item had exactly one passing qualified holder. A skipped reusable job's unexpanded name and any other
+// configuration or optimization prove no contract. The independent plain verdict isolates none's items in a pool.
+static NightlyVector nightly_vector_job(const char* full)
+{
+    const char* name = nightly_job_own_name(full);
+    static const char row[] = "Vector row verdict (Clang ";
+    static const char plain[] = "Vector plain verdict (Clang ";
+    const bool independent = strncmp(name, plain, sizeof(plain) - 1) == 0;
+    NightlyVector kind = NIGHTLY_VECTOR_NONE;
+    if (independent || strncmp(name, row, sizeof(row) - 1) == 0)
+    {
+        const char* version = name + (independent ? sizeof(plain) : sizeof(row)) - 1;
+        const char* suffix = version;
+        while (*suffix >= '0' && *suffix <= '9')
+        {
+            suffix += 1;
+        }
+        if (suffix != version)
+        {
+            if (independent)
+            {
+                kind = strcmp(suffix, ", O3)") == 0 ? NIGHTLY_VECTOR_PLAIN_VERDICT : NIGHTLY_VECTOR_NONE;
+            }
+            else
+            {
+                kind = strcmp(suffix, ", none, O3)") == 0 ? NIGHTLY_VECTOR_PLAIN_ROW : strcmp(suffix, ", " BUSTER_NIGHTLY_VECTOR_POOL ", O3)") == 0 ? NIGHTLY_VECTOR_FULL_ROW : NIGHTLY_VECTOR_NONE;
+            }
+        }
+    }
+    return kind;
+}
+
+// The run's plain hosted contract: every x86-64 shard 1..N and exactly one vector verdict succeeded. A full-pool
+// success also proves its plain configuration in a historical run without the independent plain verdict; its failure
+// alone cannot say which configuration failed. Never fall back past a present independent verdict, whatever it
+// concludes. Failed/timed-out plain work is a genuine failure (fail-fast's cancellations don't hide it); missing,
+// skipped, cancelled, duplicate or inconsistent evidence is inconclusive. Retired native rows and sanitizer results
+// don't count. Vector verdicts retain their feature, product and per-item evidence checks (docs/ci.md).
+// Only the coordinator's harvest may select `legacy`, from the exact first-parent state's immutable workflow.
+// Its old worker still runs both native and baseline shards. New runs and unknown source always require vector proof.
+static NightlyPlain nightly_plain_verdict_contract(const NightlyFacts* facts, uint64_t run, bool legacy)
 {
     uint64_t succeeded[2] = { 0 };
     uint32_t shards = 0;
+    uint32_t vectors[NIGHTLY_VECTOR_COUNT] = { 0 };
+    bool vector_success[NIGHTLY_VECTOR_COUNT] = { false };
+    bool vector_failure[NIGHTLY_VECTOR_COUNT] = { false };
     bool consistent = true;
     bool failed = false;
     bool inconclusive = false;
@@ -928,19 +1048,41 @@ static NightlyPlain nightly_plain_verdict(const NightlyFacts* facts, uint64_t ru
         uint32_t shard = 0;
         uint32_t count = 0;
         bool plain = false;
-        if (job->run == run && nightly_test_job(job->name, &architecture, &shard, &count, &plain) && plain)
+        const bool ordinary = nightly_test_job(job->name, &architecture, &shard, &count, &plain) && (legacy || architecture == 0) && plain;
+        const NightlyVector vector = legacy ? NIGHTLY_VECTOR_NONE : nightly_vector_job(job->name);
+        if (job->run == run && (ordinary || vector != NIGHTLY_VECTOR_NONE))
         {
-            consistent = consistent && (shards == 0 || shards == count);
-            shards = count;
             const bool success = job->completed && job->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
-            failed = failed || (job->completed && (job->conclusion == NIGHTLY_CONCLUSION_FAILURE || job->conclusion == NIGHTLY_CONCLUSION_TIMED_OUT));
-            inconclusive = inconclusive || !success;
-            succeeded[architecture] |= success ? (uint64_t)1 << (shard - 1) : 0;
+            const bool failure = job->completed && (job->conclusion == NIGHTLY_CONCLUSION_FAILURE || job->conclusion == NIGHTLY_CONCLUSION_TIMED_OUT);
+            if (ordinary)
+            {
+                failed = failed || failure;
+                inconclusive = inconclusive || !success;
+                consistent = consistent && (shards == 0 || shards == count);
+                shards = count;
+                succeeded[architecture] |= success ? (uint64_t)1 << (shard - 1) : 0;
+            }
+            else
+            {
+                vectors[vector] += 1;
+                vector_success[vector] = success;
+                vector_failure[vector] = failure;
+            }
         }
     }
+    const bool independent = vectors[NIGHTLY_VECTOR_PLAIN_VERDICT] != 0;
+    const uint32_t verdicts = independent ? vectors[NIGHTLY_VECTOR_PLAIN_VERDICT] : vectors[NIGHTLY_VECTOR_PLAIN_ROW] + vectors[NIGHTLY_VECTOR_FULL_ROW];
+    const bool qualified = independent ? vector_success[NIGHTLY_VECTOR_PLAIN_VERDICT] : vector_success[NIGHTLY_VECTOR_PLAIN_ROW] || vector_success[NIGHTLY_VECTOR_FULL_ROW];
+    failed = failed || (independent ? vector_failure[NIGHTLY_VECTOR_PLAIN_VERDICT] : vector_failure[NIGHTLY_VECTOR_PLAIN_ROW]);
     const uint64_t every = shards == 64 ? UINT64_MAX : ((uint64_t)1 << shards) - 1;
-    const bool complete = consistent && shards != 0 && succeeded[0] == every && succeeded[1] == every && !inconclusive;
+    consistent = consistent && verdicts <= 1;
+    const bool complete = consistent && shards != 0 && succeeded[0] == every && (legacy ? succeeded[1] == every : verdicts == 1 && qualified) && !inconclusive;
     return failed && consistent ? NIGHTLY_PLAIN_FAILED : complete ? NIGHTLY_PLAIN_OK : NIGHTLY_PLAIN_NONE;
+}
+
+static NightlyPlain nightly_plain_verdict(const NightlyFacts* facts, uint64_t run)
+{
+    return nightly_plain_verdict_contract(facts, run, false);
 }
 
 typedef struct NightlyHosted NightlyHosted;
@@ -977,15 +1119,13 @@ static NightlyHosted nightly_hosted(const NightlyFacts* facts, const char* commi
 // The fuzz campaigns (9700x.yml's fuzz matrix) and the vector pool's configurations (the test job's one call of the
 // row workflow for the vector row, where the sanitizer rows run).
 static const char* const nightly_fuzz_entries[] = { "frontend", "elf-override", "crash-replay-proof" };
-#define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
 #define BUSTER_NIGHTLY_ROWS_FULL (2u * BUSTER_NIGHTLY_SANITIZERS)
 
-// The rows a full run's contract has (#2032): every x86-64 row, and the native plain row alone. The vector row's
-// sanitizer configurations replaced the native sanitizer rows, which built their compiler on every shard (35% of a
-// merged candidate's runner time, #2703); a native sanitizer row that runs anyway counts for nothing either way.
+// The ordinary rows a full run's contract has (#2032): every x86-64 row. The explicit vector pool replaced all hosted
+// native rows, which built their compiler on every shard; any retired native row counts for nothing either way.
 static bool nightly_row_required(uint32_t row)
 {
-    return row <= BUSTER_NIGHTLY_SANITIZERS;
+    return row < BUSTER_NIGHTLY_SANITIZERS;
 }
 
 // The auxiliary workflows a candidate calls where its change touches their pull_request paths (tools/ci/changes.c's
@@ -1021,8 +1161,8 @@ static bool nightly_auxiliary_list(const char* list, bool* called)
 }
 
 // The run's full hosted contract from its own jobs, which a test job's result alone can't show (a skipped shard or row
-// leaves it green): every shard 1..N of each row nightly_row_required names (x86-64's with each sanitizer, and native's
-// plain row, -O3; one N per row), the vector
+// leaves it green): every shard 1..N of each row nightly_row_required names (x86-64's with each sanitizer, -O3; one N
+// per row), the vector
 // pool's verdict and each fuzz campaign, every one completed and successful, and no shard of a row that didn't succeed
 // (one beyond N, say, or a second attempt's). Each auxiliary workflow AUXILIARY names (the selector's list) must have
 // run a job and every job successful; one it doesn't name must have run none. Writes a line per row, the vector verdict,
@@ -1059,9 +1199,7 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
             unsuccessful[row] = unsuccessful[row] || !success;
             succeeded[row] |= success ? (uint64_t)1 << (shard - 1) : 0;
         }
-        const size_t own_length = strlen(own);
-        const char suffix[] = ", " BUSTER_NIGHTLY_VECTOR_POOL ", O3)";
-        if (job->run == run && strncmp(own, "Vector row verdict (Clang ", 26) == 0 && own_length > sizeof(suffix) - 1 && strcmp(own + own_length - (sizeof(suffix) - 1), suffix) == 0)
+        if (job->run == run && nightly_vector_job(job->name) == NIGHTLY_VECTOR_FULL_ROW)
         {
             verdicts += 1;
             verdict = success;
@@ -1851,7 +1989,7 @@ static NightlyRow nightly_harvest_row(const NightlyFacts* facts, const NightlyRu
 // main was fast-forwarded to: a pull request's run tests a merge commit, not a state) that the ledger doesn't have, as
 // rows. A candidate whose commit main doesn't have is no state's, so nothing credits it. The record of run R is DIRECTORY/R.tsv where the glue
 // found the run's coverage-record artifact for its attempt; an unreadable or invalid one counts as none.
-static uint32_t nightly_harvest(const NightlyLedger* ledger, const NightlyFacts* facts, const char* directory, const char* const* states, uint32_t state_count, bool list, FILE* output)
+static uint32_t nightly_harvest(const NightlyLedger* ledger, const NightlyFacts* facts, const char* directory, const char* const* states, const NightlyWorkerHosted* contracts, uint32_t state_count, bool list, FILE* output)
 {
     uint32_t added = 0;
     NightlyRecord* record = nightly_allocate(1, sizeof(NightlyRecord));
@@ -1859,9 +1997,11 @@ static uint32_t nightly_harvest(const NightlyLedger* ledger, const NightlyFacts*
     {
         const NightlyRun* run = &facts->runs[i];
         bool state = false;
+        bool legacy = false;
         for (uint32_t j = 0; j < state_count && !state; j += 1)
         {
             state = strcmp(states[j], run->head) == 0;
+            legacy = state && contracts[j] == NIGHTLY_WORKER_HOSTED_NATIVE;
         }
         const bool eligible = state && run->workflow && run->completed && run->event != NIGHTLY_EVENT_PR && run->event != NIGHTLY_EVENT_OTHER;
         if (eligible && !nightly_has_row(ledger, run->id, run->attempt) && list)
@@ -1887,7 +2027,11 @@ static uint32_t nightly_harvest(const NightlyLedger* ledger, const NightlyFacts*
                     fprintf(stderr, "nightly: run %llu's record is invalid; its row has the API's facts alone\n", (unsigned long long)run->id);
                 }
             }
-            const NightlyRow row = nightly_harvest_row(facts, run, recorded ? record : NULL);
+            NightlyRow row = nightly_harvest_row(facts, run, recorded ? record : NULL);
+            if (legacy)
+            {
+                row.plain = nightly_plain_verdict_contract(facts, run->id, true);
+            }
             nightly_row_write(output, &row);
             added += 1;
         }
@@ -1926,6 +2070,8 @@ struct NightlyState
     bool worker_window_recorded;
     uint32_t worker_start_hour;
     uint32_t worker_end_hour;
+    bool worker_hosted_recorded;
+    NightlyWorkerHosted worker_hosted;
     // Resolved anew for the cycle, including Madrid's clock changes.
     bool worker_window_valid;
     int64_t worker_start;
@@ -1972,7 +2118,9 @@ struct NightlyStates
 };
 
 // `state SHA PARENT EPOCH` lines, oldest first, each followed by `worker-window START END` (hours, or - - for unknown)
-// and its first-parent change's `path PATH` lines. Older input without the window remains readable, but can't admit.
+// and `worker-hosted native|vector|-` from its immutable workflow, then its first-parent change's `path PATH` lines.
+// Older input without the window remains readable, but can't admit; without the hosted contract it gets no legacy
+// native credit, requiring vector evidence instead.
 static bool nightly_states_parse(NightlyStates* states, NightlyText text)
 {
     size_t offset = 0;
@@ -2014,6 +2162,16 @@ static bool nightly_states_parse(NightlyStates* states, NightlyText text)
                 state->worker_window_recorded = true;
                 state->worker_start_hour = (uint32_t)start;
                 state->worker_end_hour = (uint32_t)end;
+            }
+        }
+        else if (valid && strcmp(fields[0], "worker-hosted") == 0)
+        {
+            const size_t contract = count == 2 ? nightly_find(fields[1], nightly_worker_hosted_names, NIGHTLY_WORKER_HOSTED_COUNT) : NIGHTLY_WORKER_HOSTED_COUNT;
+            valid = count == 2 && states->count != 0 && contract < NIGHTLY_WORKER_HOSTED_COUNT && !states->items[states->count - 1].worker_hosted_recorded;
+            if (valid)
+            {
+                states->items[states->count - 1].worker_hosted_recorded = true;
+                states->items[states->count - 1].worker_hosted = (NightlyWorkerHosted)contract;
             }
         }
         else if (valid && strcmp(fields[0], "path") == 0)
@@ -2946,6 +3104,37 @@ static int64_t nightly_test_madrid(int year, int month, int day, int hour, int m
     return instant + minute * 60;
 }
 
+static void nightly_test_worker_hosted(NightlyTest* test)
+{
+    static const struct
+    {
+        const char* source;
+        NightlyWorkerHosted expected;
+    } cases[] = {
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\n", NIGHTLY_WORKER_HOSTED_NATIVE },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"x86-64\", \"vector\"]' || '[\"x86-64\", \"native\"]') }}\n", NIGHTLY_WORKER_HOSTED_NATIVE },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"x86-64\"]' || '[\"x86-64\", \"native\"]') }}\n", NIGHTLY_WORKER_HOSTED_NATIVE },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64]\n  fuzz:\n    strategy:\n      matrix:\n        host_arch: [native]\n", NIGHTLY_WORKER_HOSTED_VECTOR },
+        { "", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  fuzz:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\n        host_arch: [x86-64, native]\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64]\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\njobs: {}\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\n  test: {}\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\n    strategy: {}\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\n      matrix: {}\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        include:\n          host_arch: [x86-64, native]\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: *native\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    matrix:\n        host_arch: [x86-64, native]\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+        { "jobs:\n  test:\n    strategy:\n      matrix:\n        # host_arch: [x86-64, native]\n", NIGHTLY_WORKER_HOSTED_UNKNOWN },
+    };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(cases); i += 1)
+    {
+        nightly_expect(test, nightly_worker_hosted(nightly_test_text(cases[i].source)) == cases[i].expected, "only a known exact worker matrix grants its hosted contract");
+    }
+}
+
 static void nightly_test_window(NightlyTest* test)
 {
     uint32_t worker_start = 0;
@@ -3047,32 +3236,33 @@ static NightlyText nightly_buffer_text(NightlyBuffer* buffer)
     return text;
 }
 
-// A run's plain rows, `shards` shards of each architecture, all succeeding but where `odd` names a job (architecture
-// times 64 plus shard, from 1) to conclude otherwise; and one failing sanitizer row and the vector row's jobs, which
-// never count.
+// A run's plain contract: `shards` baseline shards and its independent vector plain verdict, all succeeding but where
+// `odd` names a shard (1..64) or the vector verdict (65) to conclude otherwise. Sanitizer and retired native failures
+// don't count, nor do the pool's draw candidates: its independent verdict proves the plain items despite those.
 static void nightly_test_plain(NightlyBuffer* buffer, uint64_t run, uint32_t shards, uint32_t odd, const char* conclusion, bool odd_missing)
 {
-    static const char* const architectures[] = { "x86-64", "native" };
-    for (uint32_t a = 0; a < 2; a += 1)
+    for (uint32_t k = 1; k <= shards; k += 1)
     {
-        for (uint32_t k = 1; k <= shards; k += 1)
+        const bool is_odd = odd == k;
+        if (is_odd && odd_missing)
         {
-            const bool is_odd = odd == a * 64 + k;
-            if (is_odd && odd_missing)
-            {
-                continue;
-            }
-            const char* status = is_odd && strcmp(conclusion, "-") == 0 ? "in_progress" : "completed";
-            nightly_append(buffer, "job\t%llu\t%s\t%s\tTests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %u of %u)\n", (unsigned long long)run, status, is_odd ? conclusion : "success", architectures[a], k, shards);
+            continue;
         }
-        nightly_append(buffer, "job\t%llu\tcompleted\tfailure\tTests on Ubuntu 26.04 (Clang 23, %s, thread, O3, shard 1 of %u)\n", (unsigned long long)run, architectures[a], shards);
+        const char* status = is_odd && strcmp(conclusion, "-") == 0 ? "in_progress" : "completed";
+        nightly_append(buffer, "job\t%llu\t%s\t%s\tTests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard %u of %u)\n", (unsigned long long)run, status, is_odd ? conclusion : "success", k, shards);
     }
-    // The vector row's jobs (#2033), one pool of the plain and sanitizer configurations' items, which a full run has
-    // beside its `native` rows: no plain row's shard, whatever they conclude.
+    nightly_append(buffer, "job\t%llu\tcompleted\tfailure\tTests on Ubuntu 26.04 (Clang 23, x86-64, thread, O3, shard 1 of %u)\n", (unsigned long long)run, shards);
+    nightly_append(buffer, "job\t%llu\tcompleted\tfailure\tTests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of %u)\n", (unsigned long long)run, shards);
+    nightly_append(buffer, "job\t%llu\tcompleted\tskipped\tTests on Ubuntu 26.04 (x86-64, none, O3) / Vector plain verdict (Clang 23, O${{ inputs.optimization }})\n", (unsigned long long)run);
     static const char vector[] = "Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / ";
     nightly_append(buffer, "job\t%llu\tcompleted\tfailure\t%sVector draw 1, candidate 3 (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, vector);
     nightly_append(buffer, "job\t%llu\tcompleted\tsuccess\t%sVector draw 1, candidate 4 (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, vector);
     nightly_append(buffer, "job\t%llu\tcompleted\tfailure\t%sVector row verdict (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, vector);
+    if (odd != 65 || !odd_missing)
+    {
+        const char* status = odd == 65 && strcmp(conclusion, "-") == 0 ? "in_progress" : "completed";
+        nightly_append(buffer, "job\t%llu\t%s\t%s\t%sVector plain verdict (Clang 23, O3)\n", (unsigned long long)run, status, odd == 65 ? conclusion : "success", vector);
+    }
 }
 
 static void nightly_test_run(NightlyBuffer* buffer, uint64_t id, const char* event, const char* status, const char* conclusion, const char* head, int64_t created, int64_t updated, const char* title)
@@ -3097,11 +3287,11 @@ static NightlyPlain nightly_test_verdict(uint32_t shards, uint32_t odd, const ch
 static void nightly_test_facts(NightlyTest* test)
 {
     nightly_expect(test, nightly_test_verdict(4, 0, "success", false) == NIGHTLY_PLAIN_OK, "every plain shard succeeded: ok, whatever the sanitizer rows did");
-    nightly_expect(test, nightly_test_verdict(1, 0, "success", false) == NIGHTLY_PLAIN_OK, "one shard each");
+    nightly_expect(test, nightly_test_verdict(1, 0, "success", false) == NIGHTLY_PLAIN_OK, "one baseline shard and the vector verdict");
     nightly_expect(test, nightly_test_verdict(4, 3, "success", true) == NIGHTLY_PLAIN_NONE, "a missing x86-64 shard: none");
-    nightly_expect(test, nightly_test_verdict(4, 64 + 4, "success", true) == NIGHTLY_PLAIN_NONE, "a missing native shard: none");
+    nightly_expect(test, nightly_test_verdict(4, 65, "success", true) == NIGHTLY_PLAIN_NONE, "a missing vector plain verdict: none");
     nightly_expect(test, nightly_test_verdict(4, 2, "failure", false) == NIGHTLY_PLAIN_FAILED, "a failed shard: failed");
-    nightly_expect(test, nightly_test_verdict(4, 66, "timed_out", false) == NIGHTLY_PLAIN_FAILED, "a timed-out shard: failed");
+    nightly_expect(test, nightly_test_verdict(4, 65, "timed_out", false) == NIGHTLY_PLAIN_FAILED, "a timed-out vector plain verdict: failed");
     nightly_expect(test, nightly_test_verdict(4, 2, "cancelled", false) == NIGHTLY_PLAIN_NONE, "a cancelled shard: none, not a failure");
     nightly_expect(test, nightly_test_verdict(4, 2, "skipped", false) == NIGHTLY_PLAIN_NONE, "a skipped shard: none");
     nightly_expect(test, nightly_test_verdict(4, 2, "-", false) == NIGHTLY_PLAIN_NONE, "a shard in progress: none");
@@ -3115,11 +3305,10 @@ static void nightly_test_facts(NightlyTest* test)
     nightly_test_run(buffer, 8, "push", "completed", "success", sha, 1, 2, "x");
     nightly_append(buffer, "job\t8\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 2)\n");
     nightly_append(buffer, "job\t8\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 3)\n");
-    nightly_append(buffer, "job\t8\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 2)\n");
-    nightly_append(buffer, "job\t8\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 2 of 2)\n");
+    nightly_append(buffer, "job\t8\tcompleted\tsuccess\tVector plain verdict (Clang 23, O3)\n");
     nightly_test_run(buffer, 9, "push", "completed", "success", other, 1, 2, "x");
     nightly_append(buffer, "job\t9\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, x86-64, none, O3)\n");
-    nightly_append(buffer, "job\t9\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, native, none, O3)\n");
+    nightly_append(buffer, "job\t9\tcompleted\tsuccess\tVector plain verdict (Clang 23, O3)\n");
     NightlyFacts facts = nightly_facts_new();
     nightly_expect(test, nightly_facts_parse(&facts, nightly_buffer_text(buffer)), "facts parse");
     nightly_expect(test, nightly_plain_verdict(&facts, 8) == NIGHTLY_PLAIN_NONE, "shards that disagree on N: none");
@@ -3135,22 +3324,51 @@ static void nightly_test_facts(NightlyTest* test)
         const bool built = variant % 2 != 0;
         buffer->length = 0;
         nightly_test_run(buffer, 16, "push", "completed", built ? "success" : "failure", sha, 1, 2, "x");
-        for (uint32_t a = 0; a < 2; a += 1)
+        const char* build = built ? "success" : "failure";
+        const char* caller = named ? "Tests on Ubuntu 26.04" : "test";
+        nightly_append(buffer, "job\t16\tcompleted\t%s\t%s (x86-64, none, 3) / Build the compiler once for the row's shards\n", build, caller);
+        for (uint32_t k = 1; k <= 4; k += 1)
         {
-            const char* architecture = a == 0 ? "x86-64" : "native";
-            const char* build = a == 0 ? (built ? "success" : "failure") : "skipped";
-            const char* caller = named ? "Tests on Ubuntu 26.04" : "test";
-            nightly_append(buffer, "job\t16\tcompleted\t%s\t%s (%s, none, 3) / Build the compiler once for the row's shards\n", build, caller, architecture);
-            for (uint32_t k = 1; k <= 4; k += 1)
-            {
-                const char* shard = a == 0 && !built ? "failure" : "success";
-                nightly_append(buffer, "job\t16\tcompleted\t%s\t%s (%s, none, 3) / Tests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %u of 4)\n", shard, caller, architecture, architecture, k);
-            }
+            nightly_append(buffer, "job\t16\tcompleted\t%s\t%s (x86-64, none, 3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard %u of 4)\n", build, caller, k);
         }
+        nightly_append(buffer, "job\t16\tcompleted\tsuccess\t%s (vector, none, 3) / Vector plain verdict (Clang 23, O3)\n", caller);
         facts = nightly_facts_new();
         nightly_expect(test, nightly_facts_parse(&facts, nightly_buffer_text(buffer)), "a called row's facts parse");
         const NightlyPlain verdict = nightly_plain_verdict(&facts, 16);
         nightly_expect(test, built ? verdict == NIGHTLY_PLAIN_OK : verdict == NIGHTLY_PLAIN_FAILED, built ? "a called row's shards: ok, its build no shard" : "a called row whose build failed: failed, by its shards");
+        nightly_facts_free(&facts);
+    }
+
+    // The independent plain proof decides even beside a successful/failed full pool. Historical row verdicts count
+    // only without it: a full success proves none too, but a full failure cannot say which configuration failed.
+    static const struct
+    {
+        const char* jobs;
+        NightlyPlain verdict;
+        const char* what;
+    } vector_cases[] = {
+        { "job\t7\tcompleted\tfailure\tVector plain verdict (Clang 23, O3)\njob\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none address thread memory, O3)\n", NIGHTLY_PLAIN_FAILED, "a failed independent plain verdict cannot fall back to a full pass" },
+        { "job\t7\tcompleted\tskipped\tVector plain verdict (Clang 23, O3)\njob\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none address thread memory, O3)\n", NIGHTLY_PLAIN_NONE, "a skipped independent plain verdict cannot fall back" },
+        { "job\t7\tin_progress\t-\tVector plain verdict (Clang 23, O3)\njob\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none address thread memory, O3)\n", NIGHTLY_PLAIN_NONE, "an unfinished independent plain verdict cannot fall back" },
+        { "job\t7\tcompleted\tcancelled\tVector plain verdict (Clang 23, O3)\njob\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none address thread memory, O3)\n", NIGHTLY_PLAIN_NONE, "a cancelled independent plain verdict cannot fall back" },
+        { "job\t7\tcompleted\tsuccess\tVector plain verdict (Clang 23, O3)\njob\t7\tcompleted\tsuccess\tVector plain verdict (Clang 24, O3)\n", NIGHTLY_PLAIN_NONE, "two independent plain verdicts are no proof" },
+        { "job\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none, O3)\n", NIGHTLY_PLAIN_OK, "a historical plain vector row proves its configuration" },
+        { "job\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none address thread memory, O3)\n", NIGHTLY_PLAIN_OK, "a historical full vector pool success proves plain too" },
+        { "job\t7\tcompleted\tfailure\tVector row verdict (Clang 23, none address thread memory, O3)\n", NIGHTLY_PLAIN_NONE, "a historical full pool failure is not attributed to plain" },
+        { "job\t7\tcompleted\tfailure\tVector row verdict (Clang 23, none, O3)\n", NIGHTLY_PLAIN_FAILED, "a historical plain vector row failure is conclusive" },
+        { "job\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none address, O3)\n", NIGHTLY_PLAIN_NONE, "an unfamiliar vector pool is not the contract" },
+        { "job\t7\tcompleted\tsuccess\tVector plain verdict (Clang 23, O1)\n", NIGHTLY_PLAIN_NONE, "another optimization cannot qualify plain" },
+        { "job\t7\tcompleted\tsuccess\tVector plain verdict (Clang , O3)\n", NIGHTLY_PLAIN_NONE, "a malformed vector verdict is no proof" },
+        { "job\t8\tcompleted\tsuccess\tVector plain verdict (Clang 23, O3)\n", NIGHTLY_PLAIN_NONE, "another run's vector proof does not count" },
+        { "job\t7\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, native, none, O3)\n", NIGHTLY_PLAIN_NONE, "native cannot replace current vector proof" },
+        { "job\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none, O3)\njob\t7\tcompleted\tsuccess\tVector row verdict (Clang 23, none address thread memory, O3)\n", NIGHTLY_PLAIN_NONE, "two historical vector verdicts are ambiguous" },
+    };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(vector_cases); i += 1)
+    {
+        buffer->length = 0;
+        nightly_append(buffer, "job\t7\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, x86-64, none, O3)\n%s", vector_cases[i].jobs);
+        facts = nightly_facts_new();
+        nightly_expect(test, nightly_facts_parse(&facts, nightly_buffer_text(buffer)) && nightly_plain_verdict(&facts, 7) == vector_cases[i].verdict, vector_cases[i].what);
         nightly_facts_free(&facts);
     }
 
@@ -3584,8 +3802,8 @@ static void nightly_test_states(NightlyTest* test)
     nightly_test_sha(2, b);
     nightly_test_sha(3, c);
     NightlyBuffer* buffer = nightly_allocate(1, sizeof(NightlyBuffer));
-    nightly_append(buffer, "state\t%s\t-\t1\nworker-window\t4\t7\npath\tsrc/buster/compiler/main.c\n", a);
-    nightly_append(buffer, "state\t%s\t%s\t2\nworker-window\t2\t8\npath\tdocs/ci.md\npath\tREADME.md\npath\tdocs/performance/schema.json\n", b, a);
+    nightly_append(buffer, "state\t%s\t-\t1\nworker-window\t4\t7\nworker-hosted\tnative\npath\tsrc/buster/compiler/main.c\n", a);
+    nightly_append(buffer, "state\t%s\t%s\t2\nworker-window\t2\t8\nworker-hosted\tvector\npath\tdocs/ci.md\npath\tREADME.md\npath\tdocs/performance/schema.json\n", b, a);
     nightly_append(buffer, "state\t%s\t%s\t3\n", c, b);
     NightlyStates states = {
         .items = nightly_allocate(BUSTER_NIGHTLY_STATES, sizeof(NightlyState)),
@@ -3593,6 +3811,7 @@ static void nightly_test_states(NightlyTest* test)
     nightly_expect(test, nightly_states_parse(&states, nightly_buffer_text(buffer)) && states.count == 3, "states parse");
     nightly_expect(test, states.items[0].code && !states.items[1].code && !states.items[2].code, "documentation alone (as push's paths-ignore) and an empty change need no measurement");
     nightly_expect(test, states.items[0].worker_start_hour == 4 && states.items[0].worker_end_hour == 7 && states.items[1].worker_start_hour == 2 && states.items[1].worker_end_hour == 8 && !states.items[2].worker_window_recorded, "state windows remain distinct; an omitted window stays unknown");
+    nightly_expect(test, states.items[0].worker_hosted == NIGHTLY_WORKER_HOSTED_NATIVE && states.items[1].worker_hosted == NIGHTLY_WORKER_HOSTED_VECTOR && !states.items[2].worker_hosted_recorded && states.items[2].worker_hosted == NIGHTLY_WORKER_HOSTED_UNKNOWN, "worker contracts stay bound to their exact states, with no legacy default");
     states.count = 0;
     nightly_expect(test, !nightly_states_parse(&states, nightly_test_text("path\tsrc/x.c\n")), "a path before any state is refused");
     states.count = 0;
@@ -3613,6 +3832,16 @@ static void nightly_test_states(NightlyTest* test)
     nightly_expect(test, nightly_states_parse(&states, nightly_buffer_text(buffer)) && states.items[0].worker_window_recorded && states.items[0].worker_end_hour == 0, "an explicitly unknown window is retained as unknown");
     states.count = 0;
     nightly_expect(test, !nightly_states_parse(&states, nightly_test_text("worker-window\t2\t8\n")), "window metadata before a state is refused");
+    static const char* const invalid_hosted[] = { "worker-hosted\tnative\nworker-hosted\tvector\n", "worker-hosted\tother\n", "worker-hosted\tnative\textra\n" };
+    for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(invalid_hosted); i += 1)
+    {
+        states.count = 0;
+        buffer->length = 0;
+        nightly_append(buffer, "state\t%s\t-\t1\n%s", a, invalid_hosted[i]);
+        nightly_expect(test, !nightly_states_parse(&states, nightly_buffer_text(buffer)), "invalid worker contract metadata is refused");
+    }
+    states.count = 0;
+    nightly_expect(test, !nightly_states_parse(&states, nightly_test_text("worker-hosted\tnative\n")), "worker contract metadata before a state is refused");
     free(states.items);
     free(buffer);
 }
@@ -4288,13 +4517,13 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
 // (ROW SHARD, `vector` or `fuzz ENTRY`) names a job to leave out or, with `conclusion`, to conclude otherwise.
 static void nightly_test_candidate(NightlyBuffer* buffer, uint64_t run, const char* odd, const char* conclusion)
 {
-    static const char* const architectures[] = { "x86-64", "native" };
-    for (uint32_t row = 0; row <= BUSTER_NIGHTLY_SANITIZERS; row += 1)
+    for (uint32_t row = 0; row < BUSTER_NIGHTLY_SANITIZERS; row += 1)
     {
-        const char* architecture = architectures[row / BUSTER_NIGHTLY_SANITIZERS];
-        const char* sanitizer = nightly_sanitizer_names[row % BUSTER_NIGHTLY_SANITIZERS];
+        const char* architecture = "x86-64";
+        const char* sanitizer = nightly_sanitizer_names[row];
         const uint32_t shards = row == 2 || row == 3 ? 6 : 4;
         nightly_append(buffer, "job\t%llu\tcompleted\tskipped\tTests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})\n", (unsigned long long)run, architecture, sanitizer);
+        nightly_append(buffer, "job\t%llu\tcompleted\tskipped\tTests on Ubuntu 26.04 (%s, %s, O3) / Vector plain verdict (Clang 23, O${{ inputs.optimization }})\n", (unsigned long long)run, architecture, sanitizer);
         for (uint32_t k = 1; k <= shards; k += 1)
         {
             char name[64];
@@ -4312,6 +4541,10 @@ static void nightly_test_candidate(NightlyBuffer* buffer, uint64_t run, const ch
     if (strcmp(odd, "vector") != 0 || conclusion != NULL)
     {
         nightly_append(buffer, "job\t%llu\tcompleted\t%s\t%sVector row verdict (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, strcmp(odd, "vector") == 0 ? conclusion : "success", vector);
+    }
+    if (strcmp(odd, "vector plain") != 0 || conclusion != NULL)
+    {
+        nightly_append(buffer, "job\t%llu\tcompleted\t%s\t%sVector plain verdict (Clang 23, O3)\n", (unsigned long long)run, strcmp(odd, "vector plain") == 0 ? conclusion : "success", vector);
     }
     for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
     {
@@ -4456,7 +4689,7 @@ static void nightly_test_queue(NightlyTest* test)
         { "x86-64 address 2", "failure", "a failed shard" },
         { "x86-64 thread 6", "cancelled", "a cancelled shard" },
         { "x86-64 thread 3", "skipped", "a skipped shard" },
-        { "native none 4", "timed_out", "a timed-out shard" },
+        { "x86-64 none 4", "timed_out", "a timed-out shard" },
         { "x86-64 memory 1", "-", "a shard still in progress" },
         { "vector", NULL, "the vector verdict missing" },
         { "vector", "failure", "the vector verdict failed" },
@@ -4471,7 +4704,9 @@ static void nightly_test_queue(NightlyTest* test)
     nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 5 of 5)"), "a row whose shards disagree");
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, address, O1) / Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 1 of 4)"), "a row at another optimization isn't the contract's, and doesn't count");
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, memory, O3) / Tests on Ubuntu 26.04 (Clang 23, native, memory, O3, shard 1 of 5)"), "a retired native sanitizer row (#2032) isn't the contract's, and doesn't count");
+    nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 4)"), "the retired native plain row (#2032) isn't the contract's either");
     nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 24, none address thread memory, O3)"), "two vector verdicts");
+    nightly_expect(test, !nightly_test_coverage("vector", NULL, "job\t60\tcompleted\tsuccess\tVector row verdict (Clang 23, none, O3)"), "a plain vector row cannot replace full sanitizer coverage");
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t61\tcompleted\tfailure\tlibFuzzer (ASan + UBSan + leaks, frontend)"), "another run's jobs don't count");
 
     char a[41];
@@ -4598,6 +4833,7 @@ static int nightly_self_test(const char* root)
     NightlyTest test = { 0 };
     nightly_quiet = true;
     nightly_test_window(&test);
+    nightly_test_worker_hosted(&test);
     nightly_test_facts(&test);
     nightly_test_records(&test);
     nightly_test_ledger(&test);
@@ -4849,6 +5085,13 @@ int main(int argc, char** argv)
         free(source.data);
         status = 0;
     }
+    else if (strcmp(command, "worker-hosted") == 0)
+    {
+        NightlyText source = nightly_read("-");
+        printf("worker-hosted\t%s\n", nightly_worker_hosted_names[nightly_worker_hosted(source)]);
+        free(source.data);
+        status = 0;
+    }
     else if (strcmp(command, "hosted") == 0)
     {
         const char* commit = nightly_required(argc, argv, "--commit");
@@ -4906,9 +5149,11 @@ int main(int argc, char** argv)
         NightlyFacts facts = nightly_load_facts(nightly_required(argc, argv, "--facts"));
         NightlyStates states = nightly_load_states(nightly_required(argc, argv, "--states"));
         const char** shas = nightly_allocate(states.count, sizeof(char*));
+        NightlyWorkerHosted* contracts = nightly_allocate(states.count, sizeof(NightlyWorkerHosted));
         for (uint32_t i = 0; i < states.count; i += 1)
         {
             shas[i] = states.items[i].sha;
+            contracts[i] = states.items[i].worker_hosted;
         }
         const char* records = nightly_option(argc, argv, "--records");
         const bool list = argc >= 3 && strcmp(argv[argc - 1], "--list") == 0;
@@ -4916,7 +5161,8 @@ int main(int argc, char** argv)
         {
             nightly_fatal("harvest needs --records DIR, or --list", NULL);
         }
-        nightly_harvest(&ledger, &facts, records != NULL ? records : "", shas, states.count, list, stdout);
+        nightly_harvest(&ledger, &facts, records != NULL ? records : "", shas, contracts, states.count, list, stdout);
+        free(contracts);
         free(shas);
         free(states.items);
         nightly_facts_free(&facts);
@@ -4929,7 +5175,7 @@ int main(int argc, char** argv)
     }
     else
     {
-        fputs("usage: nightly --self-test [--root DIR] | window | window-times | worker-window | hosted | coverage | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
+        fputs("usage: nightly --self-test [--root DIR] | window | window-times | worker-window | worker-hosted | hosted | coverage | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
     }
     return status;
 }

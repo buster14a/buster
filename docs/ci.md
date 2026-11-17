@@ -3,10 +3,9 @@
 Every change reaches `main` through the merge queue (#1430). The queue's
 candidate for it runs the complete hosted contract on its exact commit before
 it merges: the portable `x86-64` architecture with all four O3 build modes
-(plain and three sanitizer configurations) and the `native` plain row, across
-each row's shards, the vector pool (whose sanitizer configurations replaced the
-`native` sanitizer rows, #2032), the
-three fuzz campaigns, and each auxiliary workflow its change touches (see "The
+(plain and three sanitizer configurations), across each row's shards, the
+explicit vector pool with those same configurations, the three fuzz campaigns,
+and each auxiliary workflow its change touches (see "The
 merge queue"). Documentation-only changes run it too. Main's ruleset requires
 the queue, with no bypass, and main is fast-forwarded to the commit the queue
 tested. A push to `main` runs no checks (the owner's decision on 2026-11-10);
@@ -32,16 +31,17 @@ with an all-skipped suite: only pre-merge PRs can use the no-code exemption.
 
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
-with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`; on a pull request,
-the second row is the vector row, `BUSTER_HOST_ARCH=vector` (see "The vector
-row", #2033), which the runs that run the sanitizer rows have too, beside
-`native`, with its sanitizer configurations. All use the current
+with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=vector` (see "The vector
+row", #2033). Pull requests and plain-scope nightly runs use their plain
+configurations; full runs also use their sanitizer configurations. The remaining
+hosted `native` plain row is retired with #2032. All use the current
 official stable LLVM 23.1.4 release, including its matching C++ pragma oracle,
 LLVM object/DWARF tools and lld. Each row also builds the clang server that
 the semantic driver's checks send the oracle clang's runs to (#2071), from the
 release's static clang and LLVM archives: an `x86-64` row's build job, once for
-its shards (see "Shared row products"), and each shard of a `native` row. The
-native plain row's `--differential` compares every served run with a child's.
+its shards (see "Shared row products"), and each vector configuration's first
+item. The vector plain configuration's `--differential` compares every served
+run with a child's.
 The installer runs only on disposable hosted runners. GCC remains the `cc`
 oracle for fixtures that require GNU C extensions.
 
@@ -55,15 +55,13 @@ configured default (`BUSTER_HOST_SSP_DEFAULT`). The build's post-link step
 checks each linked executable for a `__stack_chk_fail` reference and fails if
 the policy did not take effect.
 
-The baseline build runs on x86-64 without AVX-512. Native builds select the
-existing scalar twins when the compiler's host target lacks the full SIMD
-feature set. Intrinsic-only shared helpers have scalar definitions for that
-build. Generated-code ISA and ABI remain controlled by the existing target
-options. Both hosted variants log their CPU, target features and selected path.
-The baseline leg must report `scalar`; the native leg uses vector kernels when
-the full predicate in `host_isa.h` holds, and scalar kernels otherwise. A hosted
-CPU without AVX-512 therefore still runs the complete correctness suite. The
-vector row must report `vector`, on CPUs its probe qualified.
+The baseline build runs on x86-64 without AVX-512, using the existing scalar
+twins and scalar definitions of intrinsic-only shared helpers. Generated-code
+ISA and ABI remain controlled by the existing target options. Both hosted
+variants log their CPU, target features and selected path. The baseline leg
+must report `scalar`, so a hosted CPU without AVX-512 still runs the complete
+correctness suite. The vector row must report `vector`, on CPUs its probe
+qualified against the full predicate in `host_isa.h`.
 
 Each matrix row is a call of `.github/workflows/hosted-correctness.yml`, which
 runs the row's inventory as the row's own number of shards (`matrix.shard`, its
@@ -78,13 +76,15 @@ has the tables and the plans). Unsharded, a plain row's test step took 14.6
 minutes of its 18-minute job on one 4-CPU runner, and the MSan rows took up to
 98 minutes. A portable `x86-64` row builds its compiler once, in a job of its
 own, and its shards run that verified product (see "Shared row products"
-below). The `native` plain row's shards each build the compiler themselves,
-since a native build must run on the CPU model it was built for, which hosted
-runners don't share. That was why the `native` sanitizer rows went (#2032, the
-owner's go-ahead on 2026-11-14): their 13 shards each built an instrumented
+below). Each vector configuration likewise shares one product. Hosted `native`
+rows required a build on every shard, since their product must run on the CPU
+model it was built for, which hosted runners don't share. The sanitizer rows
+were retired first (#2032, the owner's go-ahead on 2026-11-14): their 13 shards each built an instrumented
 compiler, 5 to 11 minutes, and on 160 merge-queue candidates the `native`
 shards took 316 of a merged candidate's 912 runner-minutes, its MSan or TSan
-row finishing last in 18 of 43 (#2703). The vector row's sanitizer
+row finishing last in 18 of 43 (#2703). Retiring the remaining native plain row
+removes four more test jobs and their four compiler/oracle builds from each
+full run. The vector row's sanitizer
 configurations test the vector path under each detector, and the `x86-64`
 rows the scalar one. A row's once-only steps (the baseline fallback checks, the QEMU
 smoke test, the constrained arenas, the parser smoke test, the performance
@@ -341,7 +341,7 @@ shards. The job then builds and packs the product in four steps, three of them
 
 - `build`: the pragma oracle, the clang server and
   `./build.sh --config Release --jobs "$(nproc)"`, with the build step's checks
-  of `build/compiler`. A native row's shards run this same command. The
+  of `build/compiler`. A vector configuration's first item runs this same command. The
   server's build exits 77 where a toolchain can't give it one copy of LLVM (a
   distribution's shared LLVM without clang's archives). With another clang that
   is a notice and no server, and the driver's checks run the oracle clang as
@@ -464,17 +464,17 @@ that runs the vector path.
 **Scope.** The row's configurations are its sanitizers, each with 4 items,
 its shards, which one pool of draws holds:
 
-- A pull request: the plain configuration alone (`none`, 4 items), its second
-  row, in place of `native`.
+- A pull request or a plain-scope nightly run (backlog and admitted snapshot):
+  the plain configuration alone (`none`, 4 items), beside the baseline plain
+  row.
 - The runs that run the sanitizer rows (merge-queue candidates, full
   dispatches, the nightly snapshot's deferred run; before the queue, pushes
   before the nightly mode): the plain and the three sanitizer configurations
-  (`none address thread memory`, 16 items), beside the `native` plain row,
-  which alone of the `native` rows stays (#2032).
-- Elsewhere (nightly backlog runs and admitted snapshot runs, the `plain`
-  scope; before the queue, pushes in the nightly mode): no vector row. Their `native` rows stay,
-  and `tools/ci/nightly.c` counts the plain rows' shards by their names, which
-  the vector row's jobs don't have, so its jobs never count.
+  (`none address thread memory`, 16 items), beside the four baseline rows.
+
+Every retained configuration reuses a verified product (#2032). The former
+`native` rows are absent from the hosted correctness matrix; native compilation
+in other workflows and native 9700X qualification keep their own contracts.
 
 The test job's matrix adds the row with `include`: one call of the row
 workflow, whose `sanitizer` lists the configurations
@@ -823,8 +823,7 @@ A candidate's run is the only per-merge correctness run (the owner's decision
 on 2026-11-10). It works like this:
 
 - **Scope.** The full hosted contract runs on the candidate's exact commit:
-  - `x86-64` with its plain, ASan, TSan and MSan O3 builds, and the `native`
-    plain row (#2032), every row's shards;
+  - `x86-64` with its plain, ASan, TSan and MSan O3 builds, every row's shards;
   - the vector pool's 16 items;
   - the three fuzz campaigns.
 
@@ -890,8 +889,8 @@ on 2026-11-10). It works like this:
     run's own jobs, because a test job's result alone stays green when a shard
     or a row is skipped.
   - It requires every shard 1..N of every row of the contract (one N per
-    row): `x86-64`'s four and `native`'s plain one. A `native` sanitizer row
-    counts for nothing either way (#2032). It also requires the vector pool's
+    row): `x86-64`'s four. Retired hosted `native` rows count for nothing
+    either way (#2032). It also requires the full vector pool's
     verdict and each fuzz campaign to have completed successfully.
   - Each auxiliary workflow the selector named must have run at least one job,
     and every job it ran must have succeeded. One the selector didn't name must
@@ -973,12 +972,35 @@ The cycle's snapshot also needs **full** coverage, which adds every benchmark,
 the isolated samples and the oracle-cache audit. Plain coverage, every plain
 run as pushes measured before the nightly mode, satisfies neither.
 
-A state is measured behind its own plain hosted rows (both architectures,
-every shard), the gate a pull request needs: its merge-queue candidate's run,
+A state is measured behind its own plain hosted rows (the baseline shards and
+the vector plain verdict), the gate a pull request needs: its merge-queue candidate's run,
 whose sanitizer and fuzz results are the state's too. Before the queue they
 came from the snapshot's daily run and, before the nightly mode, its pushes. They are
 reported, but they don't block measurement, which was the owner's choice on
 2026-11-03.
+
+The vector pool validates its assigned items once and publishes a separate
+plain verdict from the same checked evidence (#2032). All four plain items
+must have exactly one passing qualified execution and verified product
+provenance. A sanitizer item's failure leaves the full verdict failed but
+does not erase passing plain evidence. Missing, skipped, failed or ambiguous
+plain evidence cannot qualify the state. This adds no artifact download,
+REST lookup or compiler build; the small plain-verdict job checks the existing
+verifier's output. Full merge-queue coverage still requires the entire pool.
+For older runs without the independent plain job, a successful exact plain-only
+or full-pool O3 vector verdict also proves plain coverage. A present independent
+verdict takes precedence, including when it is missing a result, skipped,
+failed or duplicated; a failed full-pool verdict alone cannot identify a plain
+failure.
+
+Older first-parent states still execute their own immutable workflows. The
+coordinator reads each state's exact workflow with `nightly worker-hosted`,
+cached by Git blob, before harvesting its evidence. Only a recognized
+historical native matrix allows that state's original baseline-plus-native
+plain proof. A current vector contract, unknown workflow or missing source
+cannot use native rows as a substitute. This keeps old backlog states
+measurable without weakening the new contract or changing existing ledger
+records.
 
 ### Evidence and reuse (`tools/ci/nightly.c`)
 
@@ -1269,7 +1291,7 @@ diagnostic builds. The hosted matrix runs at `-O3` throughout, without separate
 `-O1` sanitizer rows. Its sanitizer rows and the fuzz campaigns run on
 merge-queue candidates and on the daily and dispatched runs, not on pull
 requests, whose
-hosted jobs are the plain builds of both architectures.
+hosted jobs are the baseline and explicit vector plain builds.
 The sanitizer rows' job limit is 360 minutes and each command's is 7200 seconds:
 the driver's in-process checks run the whole compiler per fixture and take tens
 of minutes each with a detector, while the plain rows have a 120-minute job

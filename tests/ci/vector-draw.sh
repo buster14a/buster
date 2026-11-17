@@ -8,7 +8,8 @@
 # ranked out, one that doesn't qualify; a rerun of the failed jobs, whose holder retakes its item or fails on a CPU that
 # doesn't qualify; an item that waits for its configuration's product, from the attempt its builder last ran in, and
 # fails when the builder ended without one, when no candidate can build it, or on two; and the verdict's passes, its
-# incomplete and failed items, its products and its reruns. The REST fake charges each page and emits quota headers;
+# incomplete and failed items, its products and its reruns; and its independent plain result, which cannot credit
+# missing or malformed plain evidence but survives a sanitizer item's failure. The REST fake charges each page and emits quota headers;
 # artifact polling must never reach REST. Request bounds, reserve handling and complete snapshots cover #2309. No network.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -327,7 +328,7 @@ ledger()
         printf '%s\t200\t%s\t4102444800\trepos/buster14a/buster/actions/runs/7/attempts/1\n' "$i" "$((900 - i))" >> "$directory/$command.tsv"
     done
 }
-verdict() { reset_calls; bash "$draw_script" verdict "$records" > "$work/log" 2>&1; }
+verdict() { reset_calls; : > "$GITHUB_OUTPUT"; bash "$draw_script" verdict "$records" > "$work/log" 2>&1; }
 debug() { cat "$work/log" >&2; }
 rm -rf -- "$records"
 mkdir -p "$records/$p-1-assign-1-n1x3-n2x5-n3x9" "$records/$p-1-draw-1-3"
@@ -338,11 +339,13 @@ printf 'decision\ttook n1\n' >> "$records/$p-1-draw-1-3/record"
 export GITHUB_RUN_ATTEMPT=1
 evidence 1 n1 1 3; evidence 1 n2 1 5; evidence 1 n3 1 9
 if verdict; then fail 'an item without a holder passes'; fi
+[ "$(output plain)" = failure ] || fail 'an unheld plain item qualifies for nightly measurements'
 grep -q 'incomplete: no qualifying CPU drawn for item(s) n4' "$work/log" || { debug; fail 'an unheld item is incomplete'; }
 mkdir -p "$records/$p-1-assign-2-n4x2"
 ledger "$p-1-rest-collect-2" assign 0
 evidence 1 n4 2 2
 verdict || fail "every item's holder passing fails: $(cat "$work/log")"
+[ "$(output plain)" = success ] || fail 'complete plain coverage lacks its independent result'
 grep -q "| n4 | none | 4 | 2 | 2 | 1 | Intel Xeon 8370C | installed ${sha:0:12} | passed |" "$work/log" || { debug; fail "the verdict's table"; }
 grep -q '| 1 | 1 | 3 | AMD EPYC 9V45 | qualified | took n1 |' "$work/log" || fail "the verdict's draws"
 grep -Fq 'Counted **2 REST requests**' "$work/log" || fail 'the verdict includes its own quota sample in the request count'
@@ -351,16 +354,19 @@ pass
 
 rm -- "$records/$p-1-rest-collect-2/assign.tsv"
 if verdict; then fail 'an assignment without its REST ledger passes'; fi
+[ ! -s "$GITHUB_OUTPUT" ] || fail 'an earlier verification error publishes plain success'
 grep -q 'REST accounting is incomplete' "$work/log" || fail 'missing request evidence is not reported'
 ledger "$p-1-rest-collect-2" assign 0
 pass
 
 rm -- "$records/$p-1-rest-draw-1-5/product.tsv"
 if verdict; then fail 'a passing product consumer without its request ledger passes'; fi
+[ ! -s "$GITHUB_OUTPUT" ] || fail 'missing product request evidence publishes a plain result'
 grep -q 'REST accounting is incomplete' "$work/log" || fail 'missing product request evidence is not reported'
 ledger "$p-1-rest-draw-1-5" product 0
 : > "$records/$p-1-rest-collect-2/assign.tsv"
 if verdict; then fail 'an empty ledger passes as zero requests'; fi
+[ ! -s "$GITHUB_OUTPUT" ] || fail 'a malformed ledger publishes a plain result'
 grep -q 'invalid REST ledger' "$work/log" || fail 'an empty ledger was not rejected'
 ledger "$p-1-rest-collect-2" assign 0
 pass
@@ -368,15 +374,18 @@ pass
 # Evidence by another candidate than the holder, incomplete evidence, or an item 1 that didn't build, doesn't count.
 evidence 1 n2 1 6
 if verdict; then fail "another candidate's evidence passes"; fi
+[ "$(output plain)" = failure ] || fail "another candidate's evidence qualifies the plain row"
 grep -q "Item(s) n2 have no single passing" "$work/log" || fail "another candidate's evidence fails the item"
 evidence 1 n2 1 5
 sed -i '/^kernels/d' "$records/$p-1-evidence-n2/record"
 if verdict; then fail 'evidence without the kernels passes'; fi
+[ "$(output plain)" = failure ] || fail 'missing kernel proof qualifies the plain row'
 evidence 1 n2 1 5
 evidence 1 n1 1 3 'took n1' "installed $sha"
 if verdict; then fail "an item 1 that installed its product passes"; fi
 evidence 1 n1 1 3 'took n1' 'built'
 if verdict; then fail "a product without its digest passes"; fi
+[ "$(output plain)" = failure ] || fail 'a missing product digest qualifies the plain row'
 evidence 1 n1 1 3
 evidence 1 n2 1 5 'took n2' "built $sha"
 if verdict; then fail "an item that built its own product passes"; fi
@@ -388,16 +397,20 @@ pass
 rm -rf -- "$records/$p-1-evidence-n3"
 export GITHUB_RUN_ATTEMPT=2
 if verdict; then fail 'a failed item passes'; fi
+[ "$(output plain)" = failure ] || fail 'a failed plain item qualifies for nightly measurements'
 evidence 2 n3 1 9 'took n3 again (assigned in attempt 1)'
 verdict || fail "a rerun holder's pass fails: $(cat "$work/log")"
+[ "$(output plain)" = success ] || fail 'a valid failed-job rerun lacks plain credit'
 grep -q '| n3 | none | 3 | 1 | 9 | 2 | Intel Xeon 8370C |' "$work/log" || fail "the rerun's row"
 # Rerunning every job: attempt 3's assignments replace the earlier ones, and the earlier passes don't count.
 export GITHUB_RUN_ATTEMPT=3
 mkdir -p "$records/$p-3-assign-1-n1x1-n2x2-n3x3-n4x4"
 ledger "$p-3-rest-collect-1" assign 1
 if verdict; then fail "a full rerun passes on an earlier attempt's executions"; fi
+[ "$(output plain)" = failure ] || fail 'a full rerun credits stale plain executions'
 evidence 3 n1 1 1; evidence 3 n2 1 2; evidence 3 n3 1 3; evidence 3 n4 1 4
 verdict || fail "a full rerun's executions fail: $(cat "$work/log")"
+[ "$(output plain)" = success ] || fail 'a full rerun lacks current plain credit'
 pass
 
 # A pool's verdict: every configuration's items, each evidence of its own configuration.
@@ -409,9 +422,43 @@ for item in t1 t2 t3 t4 n1 n2 n3 n4; do
     BUSTER_VECTOR_CONFIGURATIONS=$([ "${item:0:1}" = t ] && echo thread || echo none) evidence 1 "$item" 1 "$(( $(printf '%s\n' t1 t2 t3 t4 n1 n2 n3 n4 | grep -nx "$item" | cut -d : -f 1) ))"
 done
 verdict || fail "a pool's executions fail: $(cat "$work/log")"
+[ "$(output plain)" = success ] || fail 'a full pool lacks independent plain credit'
 grep -q '| t3 | thread | 3 | 1 | 3 | 1 |' "$work/log" || { debug; fail "a pool's table"; }
 BUSTER_VECTOR_CONFIGURATIONS=none evidence 1 t3 1 3
 if verdict; then fail "an item's evidence of another configuration passes"; fi
+[ "$(output plain)" = success ] || fail 'a sanitizer item failure blocks verified plain coverage'
+BUSTER_VECTOR_CONFIGURATIONS=thread evidence 1 t3 1 3
+rm -- "$records/$p-1-evidence-t3/record"
+if verdict; then fail 'a missing sanitizer execution passes the full verdict'; fi
+[ "$(output plain)" = success ] || fail 'a missing sanitizer execution blocks verified plain coverage'
+BUSTER_VECTOR_CONFIGURATIONS=thread evidence 1 t3 1 3
+mv -- "$records/$p-1-assign-1-t1x1-t2x2-t3x3-t4x4-n1x5-n2x6-n3x7-n4x8" "$records/$p-1-assign-1-t1x1-t2x2-t4x4-n1x5-n2x6-n3x7-n4x8"
+if verdict; then fail 'an unheld sanitizer item passes the full verdict'; fi
+[ "$(output plain)" = success ] || fail 'an unheld sanitizer item blocks verified plain coverage'
+mv -- "$records/$p-1-assign-1-t1x1-t2x2-t4x4-n1x5-n2x6-n3x7-n4x8" "$records/$p-1-assign-1-t1x1-t2x2-t3x3-t4x4-n1x5-n2x6-n3x7-n4x8"
+pass
+
+# The independent result uses the same plain proofs and rerun uniqueness; it cannot turn sanitizer-only evidence
+# into a vacuous pass, or survive a shared accounting error even when every plain item has passed.
+rm -- "$records/$p-1-evidence-n3/record"
+if verdict; then fail 'a missing plain execution passes the pool'; fi
+[ "$(output plain)" = failure ] || fail 'a missing plain execution qualifies the pool'
+BUSTER_VECTOR_CONFIGURATIONS=none evidence 1 n3 1 7
+export GITHUB_RUN_ATTEMPT=2
+BUSTER_VECTOR_CONFIGURATIONS=none evidence 2 n2 1 6
+if verdict; then fail 'duplicate passing plain executions pass the pool'; fi
+[ "$(output plain)" = failure ] || fail 'duplicate plain executions qualify for nightly measurements'
+rm -rf -- "$records/$p-2-evidence-n2" "$records/$p-2-rest-draw-1-6"
+export GITHUB_RUN_ATTEMPT=1
+BUSTER_VECTOR_CONFIGURATIONS=thread verdict || fail 'complete sanitizer-only evidence fails'
+[ "$(output plain)" = failure ] || fail 'sanitizer-only evidence gives vacuous plain credit'
+rm -- "$records/$p-1-rest-draw-1-6/product.tsv"
+if verdict; then fail 'a pool with missing request evidence passes'; fi
+[ ! -s "$GITHUB_OUTPUT" ] || fail 'a shared verification failure leaves a plain result'
+ledger "$p-1-rest-draw-1-6" product 0
+verdict || fail 'restored pool evidence fails'
+[ "$(output plain)" = success ] || fail 'restored pool evidence lacks plain credit'
+pass
 
 # A failing Results listing doubles the pause to the cap. The fourth listing succeeds but is empty, resetting the
 # pause; the fifth supplies the assignment's inputs. Failures depend on artifact calls, never REST request ordering.
@@ -572,6 +619,7 @@ verdict || { cat "$work/log"; fail 'a complete plain run at its request ceiling'
 grep -Fq 'Counted **16 REST requests**' "$work/log" && grep -Fq 'Hard first-attempt ceiling: **16** (480 at 30 runs/hour).' "$work/log" || fail 'the complete run lost its counted budget or thirty-run bound'
 ledger "$p-1-rest-draw-1-5" product 3
 if verdict; then fail 'a plain run exceeding its request ceiling passed'; fi
+[ ! -s "$GITHUB_OUTPUT" ] || fail 'a request ceiling failure publishes plain credit'
 grep -q 'REST request ceiling exceeded: 17 > 16' "$work/log" || fail 'the aggregate request ceiling was not enforced'
 pass
 

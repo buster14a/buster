@@ -414,7 +414,8 @@ load_ledger()
 }
 
 # main's first-parent states from the epoch (the first-parent commit that added tools/ci/nightly.c, or NIGHTLY_EPOCH),
-# oldest first, each with its worker's declared window and first-parent change's paths; main_head is main's head.
+# oldest first, each with its worker's declared window, hosted contract and first-parent change's paths;
+# main_head is main's head.
 main_head=''
 earlier_states=0
 load_states()
@@ -433,8 +434,8 @@ load_states()
     : > "$states"
     # Historical workers execute their own policy. Read its literal hour declarations as data, cached once per source
     # blob, never by compiling or running historical code. Rebuilt at each job: no handoff can lose this constraint.
-    local workers="$work/worker-windows"
-    mkdir -p "$workers"
+    local workers="$work/worker-windows" contracts="$work/worker-hosted"
+    mkdir -p "$workers" "$contracts"
     local commit parent committed blob started=false
     while read -r commit parent committed; do
         if [ "$commit" = "$epoch" ]; then
@@ -451,6 +452,24 @@ load_states()
                 cat "$workers/$blob.tsv" >> "$states"
             else
                 printf 'worker-window\t-\t-\n' >> "$states"
+            fi
+            # A pre-retirement worker's immutable workflow still runs the native plain row. Only its own known
+            # matrix permits that historical evidence; absent vector jobs never imply the legacy contract. The C
+            # reader recognizes the exact test matrix's host axis, and an unreadable or unknown source grants none.
+            blob=$(git -C "$history" rev-parse "$commit:.github/workflows/9700x.yml" 2> /dev/null) || blob=''
+            if sha "$blob"; then
+                if [ ! -f "$contracts/$blob.tsv" ]; then
+                    if git -C "$history" cat-file blob "$blob" > "$contracts/source.yml" &&
+                        "$tool" worker-hosted < "$contracts/source.yml" > "$contracts/$blob.tsv.part"; then
+                        mv -- "$contracts/$blob.tsv.part" "$contracts/$blob.tsv"
+                    else
+                        rm -f -- "$contracts/$blob.tsv.part"
+                        printf 'worker-hosted\t-\n' > "$contracts/$blob.tsv"
+                    fi
+                fi
+                cat "$contracts/$blob.tsv" >> "$states"
+            else
+                printf 'worker-hosted\t-\n' >> "$states"
             fi
             if [ "$parent" != - ]; then
                 git -C "$history" diff --no-renames --name-only "$parent" "$commit" | sed 's/^/path\t/' >> "$states"

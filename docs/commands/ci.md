@@ -31,8 +31,8 @@ nothing, since the queue tested it before it landed.
 
 - **What a candidate runs.** The full hosted contract on its exact commit,
   documentation alone included:
-  - every `x86-64` row and sanitizer, and the `native` plain row (#2032);
-  - the vector pool;
+  - every `x86-64` row and sanitizer;
+  - the explicit vector pool with the same configurations (#2032);
   - the three fuzz campaigns.
 
   It takes its own run-id concurrency group. Like a pull request's run, it
@@ -64,9 +64,8 @@ nothing, since the queue tested it before it landed.
 - **Aggregate.** The required aggregate passes a candidate only through its
   coverage step, `bash tools/ci/nightly.sh coverage DIR`. That step reads the
   run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
-  - every shard 1..N of every row of the contract (`x86-64`'s four, `native`'s
-    plain one);
-  - the vector verdict;
+  - every shard 1..N of the four `x86-64` rows;
+  - the full vector verdict;
   - each fuzz campaign;
   - every job of each auxiliary workflow the selector named
     (`--auxiliary "$AUXILIARY"`), and none of the others;
@@ -98,16 +97,15 @@ settings.
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
-Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
-builds on CPUs without the complete vector feature set use the scalar fallback.
-On a pull request the native row is the vector row instead (#2033): the
-explicit vector target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
+Clang/LLVM 23.1.4 release, in baseline x86-64 and explicit vector host builds
+(#2032, #2033). The baseline selects the scalar path. The vector row uses the
+explicit target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
 whose plain configuration's 4 shards are items that each draw's collector
 assigns, by rank, to the hosted runners whose probe found their CPU qualifies
 (`tools/ci/vector-draw.sh`, tested by `bash tests/ci/vector-draw.sh`), drawn in
 up to 4 levels, with no emulation; an item no qualifying CPU held fails it as
 incomplete ([The vector row](../ci.md#the-vector-row)). Where the sanitizer rows
-run, the vector row runs beside `native` with the plain and the three sanitizer
+run, the vector row uses the plain and the three sanitizer
 configurations, 16 items in one pool of draws, the costliest first. Each
 configuration's item 1 builds its compiler and publishes it; its other items
 install that product (`tools/ci/hosted-product.sh`, #2032). Its race fixture is
@@ -128,9 +126,8 @@ each command once ([Shard costs](#shard-costs)). A portable `x86-64` row
 builds its compiler once, and its shards verify and run that product
 (`tools/ci/hosted-product.sh`; [Shared row
 products](../ci.md#shared-row-products), #2032), and so does each vector
-configuration, on a qualifying CPU; the `native` plain row's shards each
-build their own (a native build must run on the CPU it was built for), which is
-why the `native` sanitizer rows went (#2032). Run
+configuration, on a qualifying CPU. The hosted `native` rows are retired:
+their per-shard builds could not be shared across different CPUs (#2032). Run
 `bash tests/ci/hosted-product.sh` after changing the product's packing, identity
 or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
 4 shards take about 4 to 6. The steps a row needs once (the baseline fallback,
@@ -143,8 +140,7 @@ On merge-queue candidates and the daily and dispatched runs, the nightly
 snapshot's daily run among them (not on pull requests, which they would hold up
 for over an hour; before the queue, on pushes before the nightly mode), the
 `x86-64` row and the vector row's configurations also run the
-inventory under `BUSTER_SANITIZER=address|thread|memory` (the `native`
-sanitizer rows went in #2032; `native` keeps its plain row), but the
+inventory under `BUSTER_SANITIZER=address|thread|memory`, but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
@@ -347,8 +343,9 @@ failure handling and recovery: [Offline inputs](../hosted-toolchain.md#offline-i
 ## Shard costs
 
 Each hosted row deals its inventory to its shards by a table of its own,
-`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `x86-64`, `native` and
-`vector` rows (#2033), each sanitizer. Each table is
+`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `x86-64` and `vector`
+rows (#2033), each sanitizer, plus retained historical `native` measurements.
+Each table is
 `tools/ci/costs.c`'s output alone, never edited by hand. Its first line says
 so, and `costs --self-test --root .`, which the selector's job runs on every
 pull request, fails a table that differs in any byte from what `costs refresh`
@@ -464,7 +461,7 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 
 | Row | Shards | Why |
 | --- | ---: | --- |
-| plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
+| `x86-64` plain | 4 | the baseline plain inventory's deal; nightly credit checks every shard and the separate vector plain verdict |
 | `x86-64` TSan, MSan | 7 | a portable row's extra shard costs a minute of setup; 7 reach the rows' longest commands (#2703: with #2712's finer parts, `costs plan` gives MSan 975 s as 6 and 841 s as 7, TSan 909 and 872 s, at the same runner-minutes) |
 | `vector`, each configuration | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the take gives the run step its configuration's count |
 | others | 4 | already shorter than the run's longest row |
@@ -504,8 +501,9 @@ never ones that failed, so green keeps meaning the tests passed.
   - stopped in a step that fails because a setup failure stopped another job.
     "Require this row's compiler product" counts when the row's build job
     ("Build the compiler once for the row's shards") stopped in setup itself.
-    The vector row's verdict ("Require one passing qualified execution of each
-    vector item") counts when a job of its row did, and the required aggregate
+    The vector row's full and plain verdicts ("Require one passing qualified
+    execution of each vector item" and "Require the verified plain
+    configuration") count when a job of their row did, and the required aggregate
     ("Require hosted and native correctness before successful qualification")
     when any job did;
   - was cancelled by fail-fast after another job failed, wherever it was, by
@@ -590,6 +588,10 @@ the policy. In short:
   takes the lock, right after the host's OS and CPU-model check. That is
   before the host identity's package queries and hashing, and before any
   setup.
+- New plain hosted credit requires every baseline plain shard and the vector
+  plain verdict. The vector verifier derives it from the same validated item
+  evidence as its full verdict, so sanitizer failures do not erase passing
+  plain coverage. The full merge-queue gate still requires every configuration.
 - Every run's `record` job writes the `coverage-record-ATTEMPT` artifact. The
   coordinator, `.github/workflows/nightly-backfill.yml`, harvests those
   records into its ledger. It pins the cycle's snapshot, prepares hosted
@@ -609,6 +611,12 @@ the policy. In short:
   waiting snapshot's own deadline. Unknown declarations are reported and stay
   pending. Every admission must fit both the worker and current windows; the
   worker's own lock-time check still applies.
+- The coordinator also reads each state's immutable `9700x.yml` with
+  `nightly worker-hosted`, cached by workflow blob. Only a recognized historical
+  native matrix permits its old baseline-plus-native proof during harvest.
+  Missing, ambiguous or unreadable source cannot enable that fallback, and
+  current vector-contract states require vector evidence. Existing ledger
+  records remain exact-commit records; no migration is needed.
 - The planner's optional `--pending FILE` is the coordinator's ephemeral
   dispatch handoff, not a dispatch history. After validating every input and
   option, `plan` atomically compacts it to requests not yet visible in the run

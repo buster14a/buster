@@ -2940,16 +2940,17 @@ static void costs_test_root(CostsTest* test, const char* root, uint32_t* problem
         free(table.data);
     }
     costs_expect(test, *problems == 0, "every row's table covers the inventory as `costs refresh` writes it (run it, or `costs collect` over a run's logs)");
-    // The rows are 9700x.yml's test matrix, and the row workflow deals by its row's table.
+    // The retained rows are 9700x.yml's test matrix, and the row workflow deals by its row's table. Native tables
+    // remain readable for historical runs, but no longer select a correctness row (#2032).
     static const struct
     {
         const char* file;
         const char* text;
     } anchors[] = {
-        { ".github/workflows/9700x.yml", "'[\"x86-64\"]' || '[\"x86-64\", \"native\"]'" },
+        { ".github/workflows/9700x.yml", "        host_arch: [x86-64]\n" },
         { ".github/workflows/hosted-correctness.yml", "description: BUSTER_HOST_ARCH, x86-64, native or vector\n" },
         { ".github/workflows/9700x.yml", "'[\"none\", \"address\", \"thread\", \"memory\"]'" },
-        // The vector row's configurations: a pull request's plain one, and the four as one pool (#2033).
+        // The vector row's configurations: a plain scope's one, and the four as one pool (#2033).
         { ".github/workflows/9700x.yml", "'[{\"host_arch\":\"vector\",\"sanitizer\":\"none\",\"optimization\":3}]'" },
         { ".github/workflows/9700x.yml", "'[{\"host_arch\":\"vector\",\"sanitizer\":\"none address thread memory\",\"optimization\":3}]'" },
         { ".github/workflows/9700x.yml", "        optimization: [3]\n" },

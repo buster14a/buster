@@ -24,6 +24,10 @@ for binary in "$work/nightly" "$work/nightly-sanitize"; do
     expect_line "$work/worker-current.tsv" $'worker-window\t2\t8' 'the source reader recognizes the actual current worker'
     printf 'unknown historical source\n' | "$binary" worker-window > "$work/worker-unknown.tsv"
     expect_line "$work/worker-unknown.tsv" $'worker-window\t-\t-' 'unrecognized historical source stays unknown'
+    "$binary" worker-hosted < .github/workflows/9700x.yml > "$work/worker-hosted.tsv"
+    expect_line "$work/worker-hosted.tsv" $'worker-hosted\tvector' 'the current worker requires vector evidence'
+    printf 'unknown historical workflow\n' | "$binary" worker-hosted > "$work/worker-hosted-unknown.tsv"
+    expect_line "$work/worker-hosted-unknown.tsv" $'worker-hosted\t-' 'an unknown workflow never gets native credit'
 done
 
 # The fake `gh`: each endpoint answers from $FIXTURES, or with nothing found; every call is logged.
@@ -180,11 +184,12 @@ commit_at()
     shift
     GIT_AUTHOR_DATE="@$when +0000" GIT_COMMITTER_DATE="@$when +0000" git -C "$history" -c user.name=t -c user.email=t@example.com "$@"
 }
-mkdir -p "$history/tools/ci" "$history/src" "$history/docs"
+mkdir -p "$history/tools/ci" "$history/src" "$history/docs" "$history/.github/workflows"
 echo root > "$history/README.md"
 git -C "$history" add -A
 commit_at 1793700000 commit -q -m root
 printf '#define BUSTER_NIGHTLY_WINDOW_START_HOUR 4\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 7\n' > "$history/tools/ci/nightly.c"
+printf 'jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64, native]\n' > "$history/.github/workflows/9700x.yml"
 git -C "$history" add -A
 commit_at 1793700100 commit -q -m epoch
 epoch=$(git -C "$history" rev-parse HEAD)
@@ -206,6 +211,7 @@ docs=$(git -C "$history" rev-parse HEAD)
 echo code > "$history/src/c.c"
 # The later state has the widened window; old commits keep their own worker declarations.
 printf '#define BUSTER_NIGHTLY_WINDOW_START_HOUR 2\n#define BUSTER_NIGHTLY_WINDOW_END_HOUR 8\n' > "$history/tools/ci/nightly.c"
+printf 'jobs:\n  test:\n    strategy:\n      matrix:\n        host_arch: [x86-64]\n' > "$history/.github/workflows/9700x.yml"
 git -C "$history" add -A
 commit_at 1793700600 commit -q -m code
 head=$(git -C "$history" rev-parse HEAD)
@@ -323,6 +329,8 @@ JSON
             printf '{"name":"Tests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %s of 4)","status":"completed","conclusion":"success"},' "$arch" "$shard"
         done
     done
+    printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 23, none address thread memory, O3)","status":"completed","conclusion":"failure"},'
+    printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector plain verdict (Clang 23, O3)","status":"completed","conclusion":"success"},'
     printf '{"name":"Tests on Ubuntu 26.04 (Clang 23, native, thread, O3, shard 2 of 4)","status":"completed","conclusion":"failure"}]}\n'
 } > "$fixtures/jobs-800.json"
 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
@@ -333,6 +341,17 @@ expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a backlog run is in the plain scope'
 expect_line "$GITHUB_OUTPUT" "window_start=$(madrid '2026-11-04 02:00')" 'the cycle'"'"'s window opens at 02:00 Madrid'
 expect_line "$GITHUB_OUTPUT" "window_deadline=$(madrid '2026-11-04 08:00')" 'and closes at 08:00'
 expect_line "$GITHUB_OUTPUT" 'window_override=false' 'without an override'
+# Current evidence must read the independent vector proof, even beside green native rows or a green full pool.
+cp "$fixtures/jobs-800.json" "$work/plain-jobs.json"
+jq '(.jobs[] | select(.name | contains("Vector plain verdict")) | .conclusion) = "failure" |
+    (.jobs[] | select(.name | contains("Vector row verdict")) | .conclusion) = "success"' "$work/plain-jobs.json" > "$fixtures/jobs-800.json"
+NIGHTLY_NOW=$(madrid '2026-11-04 04:10') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'hosted=run' 'a failed vector plain proof is not replaced by the successful full pool'
+expect_line "$GITHUB_OUTPUT" 'hosted_source=' 'failed proof credits no source run'
+jq '.jobs |= map(select(.name | contains("Vector") | not))' "$work/plain-jobs.json" > "$fixtures/jobs-800.json"
+NIGHTLY_NOW=$(madrid '2026-11-04 04:10') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
+expect_line "$GITHUB_OUTPUT" 'hosted=run' 'native alone cannot replace current vector evidence'
+cp "$work/plain-jobs.json" "$fixtures/jobs-800.json"
 NIGHTLY_NOW=$(madrid '2026-11-04 07:40') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$merge EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'too late to finish by 08:00, it is not'
 expect_line "$GITHUB_OUTPUT" 'hardware_reason=window' 'and says why'
@@ -362,6 +381,8 @@ JSON
             printf '{"name":"Tests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %s of 4)","status":"completed","conclusion":"success"},' "$arch" "$shard"
         done
     done
+    printf '{"name":"Tests on Ubuntu 26.04 (vector, none, O3) / Vector row verdict (Clang 23, none, O3)","status":"completed","conclusion":"success"},'
+    printf '{"name":"Tests on Ubuntu 26.04 (vector, none, O3) / Vector plain verdict (Clang 23, O3)","status":"completed","conclusion":"success"},'
     printf '{"name":"Build and execute on Ryzen 7 9700X","status":"completed","conclusion":"success"}]}\n'
 } > "$fixtures/jobs-810.json"
 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$docs EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
@@ -377,14 +398,13 @@ full_jobs()
 {
     local odd=${1:-} conclusion=${2:-success} arch sanitizer shards shard name
     printf '{"jobs":['
-    for arch in x86-64 native; do
+    for arch in x86-64; do
         for sanitizer in none address thread memory; do
-            # The native architecture keeps its plain row alone (#2032).
-            if [ "$arch" = native ] && [ "$sanitizer" != none ]; then continue; fi
             shards=4
             if [ "$arch" = x86-64 ] && { [ "$sanitizer" = thread ] || [ "$sanitizer" = memory ]; }; then shards=6; fi
             printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Build the compiler once for the row'"'"'s shards","status":"completed","conclusion":"success"},' "$arch" "$sanitizer"
             printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})","status":"completed","conclusion":"skipped"},' "$arch" "$sanitizer"
+            printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Vector plain verdict (Clang 23, O${{ inputs.optimization }})","status":"completed","conclusion":"skipped"},' "$arch" "$sanitizer"
             for shard in $(seq 1 "$shards"); do
                 name="Tests on Ubuntu 26.04 ($arch, $sanitizer, O3) / Tests on Ubuntu 26.04 (Clang 23, $arch, $sanitizer, O3, shard $shard of $shards)"
                 if [ "$odd" = "$arch $sanitizer $shard" ]; then
@@ -401,6 +421,7 @@ full_jobs()
     if [ "$odd" != vector ]; then
         printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 23, none address thread memory, O3)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = vector-failed ] && echo failure || echo success )"
     fi
+    printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector plain verdict (Clang 23, O3)","status":"completed","conclusion":"success"},'
     for entry in frontend elf-override crash-replay-proof; do
         if [ "$odd" != "fuzz $entry" ]; then
             printf '{"name":"libFuzzer (ASan + UBSan + leaks, %s)","status":"completed","conclusion":"success"},' "$entry"
@@ -427,14 +448,14 @@ full_jobs > "$fixtures/jobs-9100.json"
 coverage_case 9100 0
 expect_line "$work/coverage.log" $'coverage\tcomplete' 'a full candidate'"'"'s coverage is complete'
 expect_line "$work/coverage.log" $'row\tx86-64 memory\tok\t6' 'each row by its own shard count'
-expect_line "$work/coverage.log" $'row\tnative none\tok\t4' 'the native plain row'
-! grep -q $'^row\tnative memory' "$work/coverage.log" || fail 'a retired native sanitizer row is no row of the contract'
+expect_line "$work/coverage.log" $'vector\tnone address thread memory\tok' 'the explicit vector pool supplies its plain and sanitizer configurations'
+! grep -q $'^row\tnative ' "$work/coverage.log" || fail 'no retired native row is part of the current contract'
 expect_line "$work/coverage.log" $'auxiliary\tselfhost\tcalled\tok\t3' 'a called auxiliary workflow, every job of it'
 expect_line "$work/coverage.log" $'auxiliary\tbuild\tnot called\tok\t0' 'and one not called, which ran nothing'
 expect_match "$GITHUB_STEP_SUMMARY" 'Merge-queue coverage' 'and the summary says so'
 test "$(grep -c 'actions/runs/9100/jobs' "$fixtures/calls.log")" -eq 1 || fail 'a complete set is read once'
 # Each way a candidate's coverage falls short fails it, after asking again.
-for odd in 'x86-64 address 3:missing' 'x86-64 memory 5:missing' 'x86-64 thread 2:cancelled' 'native none 1:skipped' 'x86-64 memory 6:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
+for odd in 'x86-64 address 3:missing' 'x86-64 memory 5:missing' 'x86-64 thread 2:cancelled' 'x86-64 none 1:skipped' 'x86-64 memory 6:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
     full_jobs "${odd%%:*}" "${odd#*:}" > "$fixtures/jobs-9101.json"
     coverage_case 9101 1
     expect_line "$work/coverage.log" $'coverage\tincomplete' "a candidate with $odd is incomplete"
@@ -783,6 +804,9 @@ expect_line "$work/dry/states.tsv" "state	$epoch	$(git -C "$history" rev-parse "
 expect_line "$work/dry/states.tsv" $'worker-window\t4\t7' 'historical workers retain their 04:00-07:00 declaration'
 expect_line "$work/dry/states.tsv" $'worker-window\t2\t8' 'later workers declare the expanded window'
 test "$(find "$work/dry/worker-windows" -name '*.tsv' | wc -l)" -eq 2 || fail 'worker metadata is cached once per source blob'
+expect_line "$work/dry/states.tsv" $'worker-hosted\tnative' 'old states retain their immutable native contract'
+expect_line "$work/dry/states.tsv" $'worker-hosted\tvector' 'new states require the vector contract'
+test "$(find "$work/dry/worker-hosted" -name '*.tsv' | wc -l)" -eq 2 || fail 'hosted contracts are cached once per workflow blob'
 expect_no_match "$work/dry/states.tsv" "$inside" 'a merged branch'"'"'s own commits are not states'
 expect_match "$work/dry/report.md" '\| not-required \| 1 \|' 'the documentation change needs nothing'
 expect_match "$work/dry/plan.tsv" "^would-dispatch	snapshot	defer	$head	20261104\.9100\.1\.defer	$head$" 'the dry run would prepare the snapshot'
@@ -792,6 +816,40 @@ expect_no_match "$fixtures/calls.log" '^workflow run|-X POST|-X DELETE' 'a dry r
 expect_line "$GITHUB_OUTPUT" 'window=closed' 'a dry run never waits for the window'
 expect_line "$GITHUB_OUTPUT" "snapshot=$head" 'the cycle pins main'"'"'s head'
 expect_line "$GITHUB_OUTPUT" "pending=$none_pending" 'and hands over a valid empty list of pending dispatches'
+
+# The same native-only facts qualify a proven old worker, never a current or unknown one. This uses the states read
+# from each real commit's workflow above, and carries the harvested verdict into the planner unchanged.
+mkdir "$work/contract-records"
+{
+    for pair in "9810:$merge" "9811:$head"; do
+        contract_run=${pair%%:*}
+        contract_sha=${pair#*:}
+        printf 'run\t%s\t1\tpush\tcompleted\tsuccess\t%s\t.github/workflows/9700x.yml\tmain\t1793700700\t1793700800\t1421805693\tfixture\n' "$contract_run" "$contract_sha"
+        for contract_arch in x86-64 native; do
+            for contract_shard in 1 2 3 4; do
+                printf 'job\t%s\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %s of 4)\n' "$contract_run" "$contract_arch" "$contract_shard"
+            done
+        done
+    done
+} > "$work/contract-facts.tsv"
+printf '# buster-nightly-ledger 1\n' > "$work/contract-ledger.tsv"
+"$work/nightly" harvest --ledger "$work/contract-ledger.tsv" --facts "$work/contract-facts.tsv" --states "$work/dry/states.tsv" --records "$work/contract-records" > "$work/contract-rows.tsv"
+awk -F '\t' '$1 == "run" { print $2 "\t" $10 }' "$work/contract-rows.tsv" > "$work/contract-plain.tsv"
+expect_line "$work/contract-plain.tsv" $'9810\tok' 'an exact historical native contract qualifies its complete native and baseline shards'
+expect_line "$work/contract-plain.tsv" $'9811\tnone' 'a current contract cannot qualify from identical native-only evidence'
+cat "$work/contract-rows.tsv" >> "$work/contract-ledger.tsv"
+"$work/nightly" plan --states "$work/dry/states.tsv" --ledger "$work/contract-ledger.tsv" --facts /dev/null \
+    --now "$(madrid '2026-11-03 22:10')" --main "$head" --mode dry-run --coordinator 9812 --report "$work/contract-report.md" > "$work/contract-plan.tsv"
+expect_match "$work/contract-report.md" '\| ready \| 1 \|' 'the planner retains the historical qualification after harvest'
+expect_no_match "$work/contract-plan.tsv" "^would-dispatch\tbacklog\tdefer\t$merge\t" 'a qualified historical worker does not loop through hosted preparation'
+sed '/^worker-hosted\t/d' "$work/dry/states.tsv" > "$work/contract-unknown.tsv"
+"$work/nightly" harvest --ledger /dev/null --facts "$work/contract-facts.tsv" --states "$work/contract-unknown.tsv" --records "$work/contract-records" > "$work/contract-unknown-rows.tsv"
+awk -F '\t' '$1 == "run" { print $2 "\t" $10 }' "$work/contract-unknown-rows.tsv" > "$work/contract-unknown-plain.tsv"
+expect_line "$work/contract-unknown-plain.tsv" $'9810\tnone' 'missing immutable source metadata never grants legacy native credit'
+printf 'job\t9811\tcompleted\tsuccess\tVector plain verdict (Clang 23, O3)\n' >> "$work/contract-facts.tsv"
+"$work/nightly" harvest --ledger /dev/null --facts "$work/contract-facts.tsv" --states "$work/dry/states.tsv" --records "$work/contract-records" > "$work/contract-vector-rows.tsv"
+awk -F '\t' '$1 == "run" { print $2 "\t" $10 }' "$work/contract-vector-rows.tsv" > "$work/contract-vector-plain.tsv"
+expect_line "$work/contract-vector-plain.tsv" $'9811\tok' 'current baseline shards plus independent vector evidence qualify normally'
 
 # The ledger's publication to buster-performance: it creates the nightly-ledger branch with the ledger and the
 # cycle's report; and when the push is refused (a token GitHub rejects, say), the step still succeeds and hands over

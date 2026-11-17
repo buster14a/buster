@@ -2,8 +2,8 @@ name: Hosted correctness row
 
 # One row of 9700x.yml's hosted correctness matrix (its `test` job calls this once per host architecture and sanitizer):
 # the row's inventory as its `shards` shards, a runner each, and, for a row whose compiler can run on any runner, the job that
-# builds that compiler once for them (#2032; docs/ci.md, "Shared row products"). A native row's shards build their own:
-# a `-march=native` build is the CPU's it was built on, and hosted runners' CPUs differ. The vector row (#2033; docs/ci.md,
+# builds that compiler once for them (#2032; docs/ci.md, "Shared row products"). The regular matrix no longer calls
+# native rows; this reusable workflow retains their same-runner builds, since hosted CPUs differ. The vector row (#2033; docs/ci.md,
 # "The vector row") builds the explicit vector target, which only some hosted CPUs run: its configurations' shards are
 # items of one pool that each draw's collector assigns to the runners whose CPU qualifies, drawn until each item has one
 # (the jobs below), and each configuration's item 1 builds the compiler that its other items install (#2032).
@@ -49,7 +49,7 @@ env:
   # Nothing here reads the executable's debug information, which takes a fifth of the build's time; the inventory's own
   # build.sh calls (check-call-graph) configure and build in the checkout's tree.
   BUSTER_DEBUG_INFO: '0'
-  # The vector row's configurations (#2033): its sanitizers, `none` on a pull request and all four on the runs that run
+  # The vector row's configurations (#2033): its sanitizers, `none` on a pull request or plain scope and all four on the runs that run
   # the sanitizer rows, whose shards are one pool of items (tools/ci/vector-draw.sh). An item is a configuration's
   # initial and its shard: `m2` is memory's shard 2 of its 4. They are listed the costliest first, the order in which the
   # collectors assign them, by `costs plan` over each configuration's table (tools/ci/costs/vector-*-O3.costs) and its
@@ -188,7 +188,7 @@ jobs:
         shell: bash
     env:
       BUSTER_ORACLE_CACHE: check
-      # The native plain row, and the vector row that replaces it on pull requests (#2033), also run each of the semantic
+      # The vector plain configuration (and a manually called native plain row) also runs each of the semantic
       # driver's in-process and served runs, and the parser's and the preprocessor's served clang oracle runs, as a child
       # and fail on a difference (--differential, #2071); the other rows run them in-process and served alone.
       BUSTER_DRIVER_DIFFERENTIAL: ${{ inputs.host_arch != 'x86-64' && inputs.sanitizer == 'none' && '1' || '' }}
@@ -1189,6 +1189,8 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      plain: ${{ steps.verdict.outputs.plain }}
     defaults:
       run:
         shell: bash
@@ -1213,9 +1215,27 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Require one passing qualified execution of each vector item
+        id: verdict
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
           rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           bash "$RUNNER_TEMP/vector-draw.sh" verdict "$RUNNER_TEMP/vector-records"
+
+  # The same checked evidence, without another download or REST read: plain hosted coverage gates the nightly's
+  # measurements independently of sanitizer failures. A missing output (including an earlier verifier failure) fails.
+  # The full verdict above still gates integration with all configurations, and this job runs even when it failed.
+  plain-verdict:
+    name: Vector plain verdict (Clang 23, O${{ inputs.optimization }})
+    needs: verdict
+    if: ${{ !cancelled() && inputs.host_arch == 'vector' && contains(format(' {0} ', inputs.sanitizer), ' none ') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Require the verified plain configuration
+        shell: bash
+        env:
+          PLAIN_RESULT: ${{ needs.verdict.outputs.plain }}
+        run: test "$PLAIN_RESULT" = success

@@ -47,7 +47,9 @@
 #       The row's verdict over the downloaded artifacts (a directory per artifact): exactly one passing qualified
 #       execution of each item, by the candidate its latest assignment names, the configuration's item 1 with the
 #       product it built and the others with one they installed. An item no candidate held fails it as incomplete,
-#       which no test caused.
+#       which no test caused. After all checks, writes `plain=success|failure` to GITHUB_OUTPUT: success requires
+#       every `none` item to pass the same checks, independently of sanitizer items. An earlier fatal error publishes
+#       no plain success. The full verdict's exit status still requires every configuration to pass.
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -650,6 +652,7 @@ rest_report()
 verdict()
 {
     local records=$1 latest at name names level holder holders evidence passing item report product built configuration incomplete=() failed=()
+    local plain_items=0 plain_passes=0 plain=failure
     test -d "$records" || die "verdict: no directory $records"
     rest_get "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt" > /dev/null || true
     names=$(find "$records" -mindepth 1 -maxdepth 1 -printf '%f\n')
@@ -683,6 +686,7 @@ verdict()
     } >> "$report"
     for item in "${items[@]}"; do
         configuration=$(item_configuration "$item")
+        [ "$configuration" != none ] || plain_items=$((plain_items + 1))
         holder=$(awk -v item="$item" '$1 == item { print $3, $2 }' <<< "$holders")
         if [ -z "$holder" ]; then
             incomplete+=("$item")
@@ -713,6 +717,7 @@ verdict()
             fi
         done
         if [ "$passing" -eq 1 ]; then
+            [ "$configuration" != none ] || plain_passes=$((plain_passes + 1))
             product=$(field product "$evidence")
             printf '| %s | %s | %s | %s | %s | %s | %s | %s %.12s | passed |\n' "$item" "$configuration" "${item:1}" "${holder% *}" "${holder#* }" \
                 "$(evidence_attempt "$evidence")" "$(field cpu "$evidence")" "${product%% *}" "${product#* }" >> "$report"
@@ -730,6 +735,15 @@ verdict()
     fi
     if [ "${#incomplete[@]}" -ne 0 ]; then
         printf '::error title=Vector row incomplete::incomplete: no qualifying CPU drawn for item(s) %s. No test failed: re-run all jobs to draw again.\n' "${incomplete[*]}"
+    fi
+    # Nightly measurements need the plain configuration, independently of sanitizer results. Publish only after the
+    # shared request accounting and every item's evidence have been checked; missing, duplicate or invalid plain
+    # executions cannot qualify, and an earlier fatal error leaves the output absent. The full verdict still fails.
+    if [ "$plain_items" -gt 0 ] && [ "$plain_passes" -eq "$plain_items" ]; then
+        plain=success
+    fi
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        printf 'plain=%s\n' "$plain" >> "$GITHUB_OUTPUT"
     fi
     [ "${#failed[@]}" -eq 0 ] && [ "${#incomplete[@]}" -eq 0 ]
 }

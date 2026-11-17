@@ -54,7 +54,7 @@ enum StepKind
     STEP_SETUP,
     // "Require this row's compiler product": fails a shard whose row's build didn't publish one.
     STEP_PRODUCT,
-    // The vector row's verdict: fails when an item has no passing execution, as when its candidates stopped.
+    // The vector row's full and plain verdicts: fail without passing execution evidence, as when candidates stopped.
     STEP_ROW,
     // The required aggregate: fails when a job it needs didn't pass.
     STEP_RUN,
@@ -156,6 +156,10 @@ static const SetupStep rerun_steps[] = {
     },
     {
         .name = "Require one passing qualified execution of each vector item",
+        .kind = STEP_ROW,
+    },
+    {
+        .name = "Require the verified plain configuration",
         .kind = STEP_ROW,
     },
     {
@@ -1783,6 +1787,24 @@ static const Case rerun_cases[] = {
         .json = BUSTER_RERUN_PAGE(3, BUSTER_RERUN_JOB(1, BUSTER_RERUN_OTHER_ROW "shard 1", "\"failure\"", BUSTER_RERUN_STEP("Install official Clang 23.1.4 and test tools", "\"failure\"")) "," BUSTER_RERUN_JOB(2, BUSTER_RERUN_ROW "Vector row verdict", "\"failure\"", BUSTER_RERUN_STEP("Require one passing qualified execution of each vector item", "\"failure\"")) "," BUSTER_RERUN_JOB(3, "Build and execute on Ryzen 7 9700X", "\"failure\"", BUSTER_RERUN_STEP("Require hosted and native correctness before successful qualification", "\"failure\""))),
         .decision = "keep",
         .verdicts = "setup/setup-step keep/row-not-setup follows-setup/run-setup",
+    },
+    {
+        .what = "both vector verdicts follow their candidate's setup failure",
+        .json = BUSTER_RERUN_PAGE(3, BUSTER_RERUN_JOB(1, BUSTER_RERUN_ROW "Vector draw 1, candidate 2", "\"failure\"", BUSTER_RERUN_STEP("Check out triggering commit", "\"failure\"")) "," BUSTER_RERUN_JOB(2, BUSTER_RERUN_ROW "Vector row verdict", "\"failure\"", BUSTER_RERUN_STEP("Require one passing qualified execution of each vector item", "\"failure\"")) "," BUSTER_RERUN_JOB(3, BUSTER_RERUN_ROW "Vector plain verdict", "\"failure\"", BUSTER_RERUN_STEP("Require the verified plain configuration", "\"failure\""))),
+        .decision = "rerun",
+        .verdicts = "setup/setup-step follows-setup/row-setup follows-setup/row-setup",
+    },
+    {
+        .what = "a missing plain verdict is not retried for another row's setup failure",
+        .json = BUSTER_RERUN_PAGE(2, BUSTER_RERUN_JOB(1, BUSTER_RERUN_OTHER_ROW "shard 1", "\"failure\"", BUSTER_RERUN_STEP("Install official Clang 23.1.4 and test tools", "\"failure\"")) "," BUSTER_RERUN_JOB(2, BUSTER_RERUN_ROW "Vector plain verdict", "\"failure\"", BUSTER_RERUN_STEP("Require the verified plain configuration", "\"failure\""))),
+        .decision = "keep",
+        .verdicts = "setup/setup-step keep/row-not-setup",
+    },
+    {
+        .what = "a failed plain vector test and its verdict are never retried as setup",
+        .json = BUSTER_RERUN_PAGE(2, BUSTER_RERUN_JOB(1, BUSTER_RERUN_ROW "Vector draw 1, candidate 2", "\"failure\"", BUSTER_RERUN_STEP(BUSTER_RERUN_TEST_STEP, "\"failure\"")) "," BUSTER_RERUN_JOB(2, BUSTER_RERUN_ROW "Vector plain verdict", "\"failure\"", BUSTER_RERUN_STEP("Require the verified plain configuration", "\"failure\""))),
+        .decision = "keep",
+        .verdicts = "keep/outside-setup keep/row-not-setup",
     },
     {
         .what = "the aggregate alone",
