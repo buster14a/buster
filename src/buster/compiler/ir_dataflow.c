@@ -46,6 +46,9 @@ struct IrDataflow
 
 // Up to sixteen IDs, NONE inactive. Group updates to the SAME 64-bit word before storing, with no hardware scatter,
 // no aliasing through uint32_t*, and no lost updates when IDs repeat. The row needs only the words containing its IDs.
+// Each pass takes the first active ID's word, ORs every active ID's bit in that word (one reduction of both halves),
+// and retires them: no conflict detection, whose cost the few IDs of a block's phi inputs never repaid, and nothing at
+// all when no ID is active (#2950).
 static void ir_dataflow_set(uint64_t* row, const uint32_t* ids, uint32_t count, bool vector)
 {
     (void)vector;
@@ -53,23 +56,27 @@ static void ir_dataflow_set(uint64_t* row, const uint32_t* ids, uint32_t count, 
     {
         const __mmask16 tail = (__mmask16)((1u << count) - 1);
         const __m512i values = _mm512_maskz_loadu_epi32(tail, ids);
-        const __mmask16 active = tail & _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1));
-        const __m512i words = _mm512_srli_epi32(values, 6);
-        const __m512i previous = _mm512_and_si512(_mm512_conflict_epi32(words), _mm512_set1_epi32(active));
-        uint32_t leaders = active & _mm512_cmpeq_epi32_mask(previous, _mm512_setzero_si512());
-        const __m512i shifts = _mm512_and_si512(values, _mm512_set1_epi32(63));
-        const __m512i low = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu32_epi64(_mm512_castsi512_si256(shifts)));
-        const __m512i high = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(shifts, 1)));
-        uint32_t word_ids[16];
-        _mm512_storeu_si512(word_ids, words);
-        while (leaders != 0)
+        uint32_t active = tail & _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1));
+        if (active != 0)
         {
-            const uint32_t lane = (uint32_t)__builtin_ctz(leaders);
-            const uint32_t word = word_ids[lane];
-            const __mmask16 group = active & _mm512_cmpeq_epi32_mask(words, _mm512_set1_epi32((int)word));
-            row[word] |= (uint64_t)_mm512_mask_reduce_or_epi64((__mmask8)group, low) |
-                         (uint64_t)_mm512_mask_reduce_or_epi64((__mmask8)(group >> 8), high);
-            leaders &= leaders - 1;
+            const __m512i words = _mm512_srli_epi32(values, 6);
+            const __m512i shifts = _mm512_and_si512(values, _mm512_set1_epi32(63));
+            const __m512i low = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu32_epi64(_mm512_castsi512_si256(shifts)));
+            __m512i high = _mm512_setzero_si512();
+            if (count > 8)
+            {
+                high = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(shifts, 1)));
+            }
+            uint32_t word_ids[16];
+            _mm512_storeu_si512(word_ids, words);
+            while (active != 0)
+            {
+                const uint32_t word = word_ids[__builtin_ctz(active)];
+                const __mmask16 group = (__mmask16)active & _mm512_cmpeq_epi32_mask(words, _mm512_set1_epi32((int)word));
+                const __m512i bits = _mm512_or_si512(_mm512_maskz_mov_epi64((__mmask8)group, low), _mm512_maskz_mov_epi64((__mmask8)(group >> 8), high));
+                row[word] |= (uint64_t)_mm512_reduce_or_epi64(bits);
+                active &= ~(uint32_t)group;
+            }
         }
     }
     else
@@ -87,24 +94,35 @@ static void ir_dataflow_set(uint64_t* row, const uint32_t* ids, uint32_t count, 
 
 // The selected ordinary operands of one block, either marking the original IDs that cross blocks (flow == NULL),
 // or adding their dense IDs to use. Inactive columns can contain metadata, NONE, or values outside the function:
-// they NEVER participate in a gather. Logical tails need no readable padding.
+// they NEVER participate in a gather. Logical tails need no readable padding. A block's instructions are the range
+// block_offsets gives it, so an operand is local exactly when it falls in that range: two compares, where gathering
+// each operand's block cost the smallest functions' preparation more than the scalar twin's lookups (#2950).
 static void ir_dataflow_operands(const uint32_t* values, uint32_t count, uint32_t selected, uint32_t block,
-                                 const IrCfg* cfg, uint64_t* cross, IrDataflow* flow, bool vector)
+                                 const uint32_t* block_offsets, const IrCfg* cfg, uint64_t* cross, IrDataflow* flow, bool vector)
 {
     (void)vector;
-    uint32_t picked[16];
+    uint64_t* row = flow == NULL ? cross : flow->flow.use + (uint64_t)block * flow->flow.row_words;
     if (BUSTER_VECTOR_PATH(vector))
     {
         const __mmask16 active = (__mmask16)selected;
         const __m512i operands = _mm512_maskz_loadu_epi32(active, values);
-        const __m512i definitions = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, operands, cfg->instruction_blocks, 4);
-        const __mmask16 nonlocal = active & _mm512_cmpneq_epi32_mask(definitions, _mm512_set1_epi32((int)block));
-        const __m512i ids = flow == NULL ? operands :
-            _mm512_mask_i32gather_epi32(_mm512_set1_epi32(-1), nonlocal, operands, flow->ids, 4);
-        _mm512_storeu_si512(picked, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), nonlocal, ids));
+        const __m512i begin = _mm512_set1_epi32((int)block_offsets[block]);
+        const __m512i end = _mm512_set1_epi32((int)block_offsets[block + 1]);
+        const __mmask16 nonlocal = _mm512_mask_cmplt_epu32_mask(active, operands, begin) | _mm512_mask_cmpge_epu32_mask(active, operands, end);
+        // Only a batch with an operand from another block gathers dense IDs or sets a bit: a zmm gather is 64 uops
+        // whatever its mask, and most batches of most functions have none (#2950).
+        if (nonlocal != 0)
+        {
+            const __m512i ids = flow == NULL ? operands :
+                _mm512_mask_i32gather_epi32(_mm512_set1_epi32(-1), nonlocal, operands, flow->ids, 4);
+            uint32_t picked[16];
+            _mm512_storeu_si512(picked, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), nonlocal, ids));
+            ir_dataflow_set(row, picked, count, true);
+        }
     }
     else
     {
+        uint32_t picked[16];
         for (uint32_t i = 0; i < count; i += 1)
         {
             picked[i] = BUSTER_IR_NONE;
@@ -113,9 +131,8 @@ static void ir_dataflow_operands(const uint32_t* values, uint32_t count, uint32_
                 picked[i] = flow == NULL ? values[i] : flow->ids[values[i]];
             }
         }
+        ir_dataflow_set(row, picked, count, false);
     }
-    uint64_t* row = flow == NULL ? cross : flow->flow.use + (uint64_t)block * flow->flow.row_words;
-    ir_dataflow_set(row, picked, count, BUSTER_VECTOR_PATH(vector));
 }
 
 // Fixed operands from sixteen instruction columns at a time. The IR's required/optional value masks exclude
@@ -150,7 +167,7 @@ static void ir_dataflow_ordinary(const IrFunction* function, const IrCfg* cfg, u
                     const __m512i values = _mm512_maskz_loadu_epi32(tail, columns[field] + first);
                     const __mmask16 present = _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1));
                     const __mmask16 selected = tail & (_mm512_test_epi32_mask(required, bit) | (_mm512_test_epi32_mask(optional, bit) & present));
-                    ir_dataflow_operands(columns[field] + first, count, selected, block, cfg, cross, flow, true);
+                    ir_dataflow_operands(columns[field] + first, count, selected, block, function->block_offsets, cfg, cross, flow, true);
                 }
                 uint32_t calls = tail & (_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_CALL)) |
                                          _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_CALL_INDIRECT)));
@@ -162,7 +179,7 @@ static void ir_dataflow_ordinary(const IrFunction* function, const IrCfg* cfg, u
                     {
                         const uint32_t length = call.argument_count - argument < 16 ? call.argument_count - argument : 16;
                         ir_dataflow_operands(function->extra + call.argument_first + argument, length, (1u << length) - 1,
-                                             block, cfg, cross, flow, true);
+                                             block, function->block_offsets, cfg, cross, flow, true);
                         argument += length;
                     }
                     calls &= calls - 1;
@@ -175,7 +192,7 @@ static void ir_dataflow_ordinary(const IrFunction* function, const IrCfg* cfg, u
                 while (ternaries != 0)
                 {
                     const uint32_t node = first + (uint32_t)__builtin_ctz(ternaries);
-                    ir_dataflow_operands(function->extra + ir_intrinsic_extra(function->c[node]), 1, 1, block, cfg, cross, flow, true);
+                    ir_dataflow_operands(function->extra + ir_intrinsic_extra(function->c[node]), 1, 1, block, function->block_offsets, cfg, cross, flow, true);
                     ternaries &= ternaries - 1;
                 }
                 first += count;
@@ -423,16 +440,28 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
                     const uint32_t count = candidate.phi_offsets[block + 1] - first < 16 ? candidate.phi_offsets[block + 1] - first : 16;
                     uint32_t* values = candidate.phi_values + first;
                     // Still original IDs here. Add only the inputs not defined in this predecessor to use.
-                    ir_dataflow_operands(values, count, (1u << count) - 1, block, &cfg, NULL, &candidate, BUSTER_VECTOR_PATH(vector));
                     if (BUSTER_VECTOR_PATH(vector))
                     {
+                        // Every phi input crosses blocks, so one gather gives every lane's dense ID: the inputs from
+                        // other blocks join use, and all replace their original IDs. A second gather, of the operands'
+                        // for use, cost the preparation of functions with phis more than the scalar twin (#2950).
                         const __mmask16 tail = (__mmask16)((1u << count) - 1);
                         const __m512i original = _mm512_maskz_loadu_epi32(tail, values);
                         const __m512i ids = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), tail, original, candidate.ids, 4);
+                        const __m512i begin = _mm512_set1_epi32((int)function->block_offsets[block]);
+                        const __m512i end = _mm512_set1_epi32((int)function->block_offsets[block + 1]);
+                        const __mmask16 nonlocal = _mm512_mask_cmplt_epu32_mask(tail, original, begin) | _mm512_mask_cmpge_epu32_mask(tail, original, end);
+                        if (nonlocal != 0)
+                        {
+                            uint32_t picked[16];
+                            _mm512_storeu_si512(picked, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), nonlocal, ids));
+                            ir_dataflow_set(candidate.flow.use + (uint64_t)block * candidate.flow.row_words, picked, count, true);
+                        }
                         _mm512_mask_storeu_epi32(values, tail, ids);
                     }
                     else
                     {
+                        ir_dataflow_operands(values, count, (1u << count) - 1, block, function->block_offsets, &cfg, NULL, &candidate, false);
                         for (uint32_t i = 0; i < count; i += 1)
                         {
                             values[i] = candidate.ids[values[i]];
