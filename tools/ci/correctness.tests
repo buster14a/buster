@@ -3,6 +3,10 @@
 # BUSTER_COMPILER, its own executable's path, so that the commands test the configuration that runs them; run one by
 # hand with BUSTER_COMPILER set to a build's executable, such as build/compiler.
 
+== Test the early driver feedback corpus
+# Small deterministic driver/frontend/checking/object/link/execute/diagnostic cases, also the shared build's first result.
+bash tools/ci/feedback.sh smoke
+
 == Check unity fixture ownership without rebuilding
 # The existing compiler's dependency graph keeps private fixtures, arbitrary nested includes and test headers in
 # one main unit. Exact shared exceptions and shared-root structure may not grow silently; stale/incomplete records

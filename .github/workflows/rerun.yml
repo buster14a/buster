@@ -13,7 +13,7 @@ name: Re-run hosted setup failures
 # left as they are.
 on:
   workflow_run:
-    workflows: ["Tests and Zen 5 benchmarks"]
+    workflows: ["Tests and Zen 5 benchmarks", "Hosted reproduction (not qualification)"]
     types: [completed]
 
 permissions:

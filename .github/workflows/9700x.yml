@@ -190,6 +190,14 @@ jobs:
                   --base-workflow "$RUNNER_TEMP/base.yml" --workflow "$workflow" --output "$GITHUB_OUTPUT"
           fi
 
+      - name: Publish conservative affected-test groups (advisory)
+        shell: bash
+        run: |
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/feedback.c -o "$RUNNER_TEMP/feedback"
+          "$RUNNER_TEMP/feedback" --profile affected --files "$RUNNER_TEMP/files" \
+            --inventory tools/ci/correctness.tests --report "$RUNNER_TEMP/feedback-plan.md" > "$RUNNER_TEMP/feedback-affected.tests"
+          cat "$RUNNER_TEMP/feedback-plan.md" >> "$GITHUB_STEP_SUMMARY"
+
   # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
   # "Nightly main measurements"). A pull request, draft or ready: never admitted (#2055); its plain hosted rows
   # qualify it, and its merged first-parent state gets native correctness and measurements in the nightly window. A
@@ -274,6 +282,7 @@ jobs:
           bash tests/ci/vector-draw.sh
           node tests/ci/vector-runtime.cjs
           bash tests/ci/rerun.sh
+          bash tests/ci/feedback.sh
 
   # One verified release-input acquisition before any hosted shard starts.
   prepare-hosted-tools:
@@ -348,6 +357,7 @@ jobs:
       # the row workflow's lookup (changes_shard_policy).
       shards: ${{ matrix.host_arch == 'x86-64' && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && 7 || 4 }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
+      feedback-profile: full
       performance: ${{ needs.changes.outputs.performance }}
 
   fuzz:

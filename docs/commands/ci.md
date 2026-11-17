@@ -22,6 +22,84 @@ push trigger among them. `tests/ci/nightly.sh` checks the candidates' evidence
 and coverage. Before the queue, every push ran its own hosted rows (#1271):
 the plain rows in the nightly mode (#2057), and the full matrix before it.
 
+## Early hosted feedback and reproductions (#1427)
+
+The portable row's existing shared build runs **Early hosted feedback (not
+qualification)** before publishing its compiler. It adds no compiler build.
+Its four inventory headings cover the fixed driver corpus
+(`tests/ci/feedback/`), the C lexer, link representation and deterministic
+diagnostics. The driver corpus preprocesses, parses, checks, emits matching
+selected/scalar objects, links two units with Clang, executes them and checks
+an undeclared-identifier diagnostic. It uses no random seed. A failure prevents
+publication and downstream shards. All existing PR shards, vector items,
+merge-group cases and sanitizer configurations remain full qualification.
+Drafts follow the same path. The existing PR-only supersession groups and the
+independent merge-group concurrency are unchanged.
+
+The `changes` job also reports an **advisory** affected-test plan. Its dependency
+map is `feedback_rules` in `tools/ci/feedback.c`; heading ownership is
+`feedback_heading`. Frontend edits select all downstream consumers; checker
+edits include emission, execution and diagnostics. Headers, unknown paths,
+build/toolchain/CI/selector changes expand to all groups. An unclassified
+heading always runs. Documentation has explicit exemptions, with CI/toolchain
+policy exceptions. Multiple paths union coverage; an empty change list expands
+all groups. An unreadable or malformed plan fails before publishing executable
+commands. Every heading's run/skip decision has a reason. This plan never
+reduces the required run.
+
+Authors can request the **Hosted reproduction (not qualification)** workflow
+on their branch (Actions → Run workflow), with `smoke`, `affected`, a named
+group (`frontend`, `checker`, `object`, `link`, `diagnostics`) or `full`, and
+one of `none`, `address` (ASan/UBSan), `thread` or `memory`. `affected` accepts
+newline-separated changed paths; empty expands to full. For example:
+
+```sh
+gh workflow run reproduce.yml --ref YOUR_BRANCH -f profile=checker -f sanitizer=address
+gh workflow run reproduce.yml --ref YOUR_BRANCH -f profile=full -f sanitizer=memory
+```
+
+These author-requested runs reuse the exact row workflow, pinned tools,
+fixtures, optimization and fatal detector proofs/audit. Partial profiles run
+on one hosted shard; full uses four. They have independent run-id concurrency,
+no hardware work and no qualification context. The ordinary caller explicitly
+passes `full`; a partial profile on a PR/merge-group event fails. TSan/MSan's
+separate large `main.c` compile and SQLite's full Tcl suite run only for full
+profiles. Offering these profiles starts no sanitizer build on ordinary edits.
+
+`feedback-*` artifacts retain build/suite logs, the exact selected inventory
+and quoted runner arguments, revision, configuration, actual CPU, host flags
+and selected scalar/vector path, tool pins, fixed/generated case and seed
+output, retained smoke failures and shared-product provenance. Existing
+specialized failure artifacts remain. `result.tsv` distinguishes product
+failure, infrastructure failure and incomplete execution; cancellations and
+all-skipped smoke runs never become passes. The parallel runner still reports
+the first failing heading immediately and stops PR/merge-group work as before.
+
+Download a feedback artifact, check out its `revision`, and run
+`bash /path/to/artifact/reproduce.sh` from that clean checkout on Ubuntu 26.04.
+It uses the revision's acquisition/setup scripts, rebuilds once and executes
+the recorded command without reconstructing a log. It verifies the selected
+host path; `native` failures additionally need the recorded CPU/ISA, named in
+`cpu.txt`. Image identity and the original apt manifest are retained. Pinned
+release and fixture inputs are immutable; Ubuntu packages still depend on the
+available runner image. Replaying on a different image is an environment
+difference, not evidence that an original failure disappeared.
+
+`CI latency report` reports PR first-result p50/p95 from run creation
+(queue and setup included) to the first early-feedback pass or actionable
+failure. It also reports actual total runner-minutes, p50/p95 cost and sample
+counts, including setup, redraws, failed/cancelled allocated jobs and every
+attempt. Missing timestamps/incomplete results are omitted, never zero.
+Raw API data remains in its artifacts. These are observed costs, not billing
+rounding; a three-minute first-result target is not an achieved-latency claim.
+
+```sh
+bash tests/ci/feedback.sh
+# Also prove the real corpus detects regressions in each promised area:
+bash tests/ci/feedback.sh --compiler build/compiler
+bash tests/ci/timings.sh
+```
+
 ## The merge queue
 
 `9700x.yml` runs on `merge_group` (`checks_requested`, main, no path filter),
