@@ -7258,6 +7258,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
     options->dependencies.include_system = (dependency_modes & 3u) != 0 ? (dependency_modes & 2u) == 0 : (dependency_modes & 8u) == 0;
     options->suppress_warnings |= (dependency_modes & 3u) != 0;
     options->negative_conversion_error = warning_errors;
+    result = result && pp_warning_options_supported(options);
     result = result && (error_limit == 0 || pp_parse_error_limit(error_limit, &options->error_limit));
     // -ansi is -std=c89 in C.
     const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;

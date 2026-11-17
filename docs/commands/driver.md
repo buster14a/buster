@@ -300,8 +300,7 @@ discarded: unknown names and unsupported spellings of known groups still warn.
 Option operands and filenames after `--` are not warning options.
 
 Recognizing a warning name does not implement its consumer or its parameter
-semantics; known but unimplemented warnings remain #1365's work. `-Wa,`,
-`-Wp,` and `-Wl,` are classified as driver transports and do not become warning
+semantics. `-Wa,`, `-Wp,` and `-Wl,` are classified as driver transports and do not become warning
 names. This change adds no assembler or preprocessor forwarding. Optional
 spelling suggestions are omitted because the existing catalog does not record
 which Clang groups have diagnostics, which its suggestion search requires.
@@ -320,6 +319,46 @@ errors. The behavioral references are LLVM revision
 [`Options.td`](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/include/clang/Options/Options.td)
 and `CompilerInvocation.cpp`'s `addDiagnosticArgs`; no upstream implementation
 or fixture is imported.
+
+## Warning capabilities (#1365)
+
+The explicit capability inventory in `c_preprocessor_warning_options.c` refuses
+effective positive requests for these families until their consumers are complete:
+
+| Warning options | Capability |
+| --- | --- |
+| `-Wconversion` | Partial: implemented constant/enum diagnostics do not cover the requested narrowing, sign and floating conversions. |
+| `-Wshadow`, `-Wsign-conversion`, `-Wunused-macros` | Recognized; the requested warning analysis is unavailable. |
+| `-Wmissing-prototypes`, `-Wmissing-variable-declarations`, `-Wstrict-prototypes`, `-Wnested-externs`, `-Wredundant-decls` | Recognized; the requested warning analysis is unavailable. |
+| `-Wundef`, `-Wcast-qual`, `-Wpointer-arith`, `-Wswitch-enum`, `-Wvla`, `-Wimplicit-fallthrough`, `-Wcomma`, `-Wfloat-equal` | Recognized; the requested warning analysis is unavailable. |
+
+For example, `-Wshadow` and `-Werror=shadow` fail with an error naming the
+original option and missing family. This is a Buster capability refusal,
+independent of source contents, warning promotion, error limits and `-w`.
+It applies before source processing in preprocessing/dependency-only,
+syntax-only and object commands, preserving existing outputs and dependencies.
+A source diagnostic pragma cannot satisfy a missing command-line capability.
+
+Disabling and demotion controls (`-Wno-shadow`, `-Wno-error=shadow`) remain
+accepted. Demotion does not cancel an enabling request. A later disable of the
+whole family or an ancestor cancels it: `-Wsign-conversion -Wno-conversion`
+succeeds, whereas `-Wconversion -Wno-sign-conversion` still requests the rest
+of the incomplete family and fails. `-Wno-everything` cancels preceding family
+requests; a subsequent explicit request enables them again.
+
+Broad positive groups retain Buster's documented delivered subset, including
+`-Wall`, `-Wextra` and `-Weverything`. `__has_warning` retains its existing
+recognition contract. This inventory covers the families named in #1365;
+recognition of other names or valued options is still separate from a promise
+of complete diagnostic coverage. Implemented subgroups such as
+`-Wconstant-conversion` and `-Wenum-conversion` remain available independently.
+
+`test-checker-driver` checks the refusal contract with independent family names,
+enables, disables, promotion/demotion and ancestor ordering on both kernels in
+`-E`, `-fsyntax-only` and `-c` modes. It also checks dependency-only commands,
+stdin, deferred multi-lane requests, option operands, post-`--` filenames,
+feature queries, source pragmas, preserved outputs and absence of new artifacts.
+These fixtures assert Buster's refusal rather than claiming Clang emits it.
 
 ## Numeric driver options
 
