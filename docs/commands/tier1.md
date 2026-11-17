@@ -363,8 +363,12 @@ In #2745's objects that a 64-byte vector's value initializes whole (a struct's,
 a union's, a compound literal's, and a union's other member read back), no
 store of a zero immediate may be left; a volatile object and a union whose
 designator moves to another member after the vector's keep their eight. In
-#2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
-into the memory the instruction before loaded it from:
+#2922's selects of floating `==` and `!=` (one of each, a loop's sum of them
+and a running last match), a `cmov` of the parity flag and no `setcc` must be
+left, and in a conditional count by `==`, whose accumulator recurs through the
+select's values by an addition, the truth value's `setcc`s and no parity
+`cmov`. In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
+stored back into the memory the instruction before loaded it from:
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"

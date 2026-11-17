@@ -136,7 +136,9 @@ condition and the value too, or #2676's `cmp` and `cmovCC` where the condition
 is a comparison only the select reads ([the selection guide](tier1-selection.md)).
 A test of a floating comparison, which no integer comparison can take the place
 of, becomes its `i1` copy, which Tier 1's selects and branches read through to
-an ordered comparison's `ucomis` and `cmovCC` or `jcc` (#2791). The
+an ordered comparison's `ucomis` and `cmovCC` or `jcc` (#2791), and a select
+of `==` or `!=` to `ucomis`, `cmovne` and `cmovp` where its values don't recur
+through it (#2922). The
 earlier truth pass, before threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
