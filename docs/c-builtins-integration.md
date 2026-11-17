@@ -1956,23 +1956,43 @@ object p points to, as clang's `PaddingClearer` does.
 
   `check_lower_padding_entries` (`c_check_program_padding.c`) walks the
   element's type with an explicit stack before the function lanes run, once a
-  call, each held piece an interval of bits; an inner array's first element is
-  walked and its intervals copied for the others, or merged into one where the
-  element has no padding (#1842). The intervals are sorted and merged.
+  call, each held piece an interval of bits. The intervals are sorted and
+  merged.
+  - **Arrays inside the element** (#1842). Outside any union, an inner array is
+    held whole where it is, and its elements' padding is a task of its own,
+    walked after its parent's. That task's entries carry the array's
+    dimensions, after its parent's, as repeats. So the plan grows with the
+    type's description, not its layout.
+  - **A union's arrays.** A union's members' bits overlap, so an array inside
+    one has its first element walked and its intervals copied for the others,
+    or merged into one where the element has no padding.
 - **Stores.** A byte with no bit held is a zero, in runs stored 8, 4, 2 and 1
   bytes at a time. A byte with some is its load ANDed with their mask. An
   array's elements, through arrays of arrays, are cleared in a loop by their
   element's stores. A variable length array is left as it is, as clang's code
-  leaves it. Where an element's stores would pass about 460 of a builtin's
-  entries (some 40 runs), its entries (offset, bytes and mask, 8 bytes each)
-  are a read-only pool of the unit's, which the recipe's loop reads
-  (`cbuiltin_misc_lower_padding_table`): the same bytes cleared, by a few
-  dozen typed entries whatever the element's size (#1842).
-- **Limits.** An element past 4 GiB, whose entries keep 32-bit offsets, or
-  of more than 1,048,576 intervals or entries is refused by name. The walk's
-  stack grows with the type's nesting, which no limit of its own bounds
-  (#1842; before, a type nested past 64 levels was refused, and its frame
-  written past the stack).
+  leaves it.
+- **The table** (#1842). Where an element's stores, its repeats' instances
+  each, would pass about 460 of a builtin's entries (some 40 runs), they are a
+  read-only pool of the unit's, which the recipe's loop reads. Below that, a
+  small inner array's repeats are unrolled into entries of their own, sorted
+  by offset, and the call's recipe makes their stores in place
+  (`check_lower_padding_unroll`). The pool's layout, which
+  `cbuiltin_misc_lower_padding_table` reads (`CBuiltinMiscLowerCall.padding`):
+  - a header, the repeat of an entry that doesn't repeat;
+  - each entry's 64-bit offset and its bytes and mask, 16 bytes;
+  - a repeated entry's six more words: its innermost repeat's count and
+    stride, its outer repeats' combinations, and where their pairs (a count
+    and a stride each) are.
+
+  The loop takes each combination's address from its index's digits, then
+  each instance of the innermost repeat: the same bytes cleared, by about 150
+  typed entries whatever the element's size.
+- **Limits.** None of the element's size or its runs' count: an element past
+  4 GiB, and one of millions of runs, have their tables (before, both were
+  refused). A union's arrays' copied intervals, the arena's alone, and a
+  table past 4 GiB are refused by name. The walk's stack grows with the
+  type's nesting, which no limit of its own bounds (before, a type nested past
+  64 levels was refused, and its frame written past the stack).
 - **Sugared arrays** (#1842's 1b). Clang's walk doesn't look through an
   array type's sugar (`dyn_cast<ConstantArrayType>` of the sugared type). So
   it treats as one scalar, and clears nothing inside:
@@ -1986,8 +2006,14 @@ object p points to, as clang's `PaddingClearer` does.
   A complex typedef's padding and an array of a typedef's struct are
   cleared. The plan does the same with the declarations' sugar.
   - **The argument** (`check_lower_padding_argument`): the call's argument is
-    followed through implicit conversions, `&`, `*` and subscripts to the
-    declaration it points into, at the level of that declaration's type.
+    followed through implicit conversions, `&`, `*` and subscripts to what it
+    points into, at that level of its type:
+    - a declaration's, or a member's (through `.` and `->`), declarator's
+      sugar;
+    - a cast's type name, or a call's result: an array that a pointer there
+      points to is always written with sugar (a declarator's parentheses, a
+      typedef or `typeof`), so clang keeps it; an element subscripted out of
+      it, it clears.
   - **The sugar** (`check_lower_padding_sugared`):
     - a group's `PAREN` node, which the reader makes over an array in a unit
       that names the builtin (`docs/c-types.md`'s "Type sugar");
@@ -1998,8 +2024,9 @@ object p points to, as clang's `PaddingClearer` does.
   - **The walk:** a frame's `opaque` count makes the array it reaches all
     occupied (`check_lower_padding_entries`).
 
-  **Still cleared:** an array that a cast's type name, a member access, or a
-  call's result points to, which clang keeps.
+  **Still cleared:** an array of a typedef's arrays subscripted out of a cast's
+  pointer (`(R (*)[2])p` with `typedef struct S R[3]`, `&(*q)[1]`), whose
+  typedef no type name's sugar records here.
 
 `__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
 clang's Sema builds it.

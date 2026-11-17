@@ -30,6 +30,13 @@
 #define BUSTER_C_BUILTIN_MISC_LOWER_INCLUDED
 
 #define BUSTER_CBUILTIN_MISC_SMALL_BYTES 32u
+// A __builtin_clear_padding table's (CBuiltinMiscLowerCall.padding) layout: a header of a repeat's words that repeats
+// nothing (counts of 1, no pairs), which an entry that doesn't repeat reads as its own; a plain entry's words, and a
+// repeated one's, whose first word carries BUSTER_CBUILTIN_PADDING_REPEATED.
+#define BUSTER_CBUILTIN_PADDING_HEADER 6u
+#define BUSTER_CBUILTIN_PADDING_PLAIN 2u
+#define BUSTER_CBUILTIN_PADDING_WORDS 8u
+#define BUSTER_CBUILTIN_PADDING_REPEATED (UINT64_C(1) << 63)
 
 #include "c_builtin_bits_lower.c"
 
@@ -48,13 +55,19 @@ struct CBuiltinMiscLowerCall
     uint32_t result_object;
     // Optional primitive machine rows for a bit recipe, selected by the producer from this function's target.
     CBuiltinBitsRows bit_rows;
-    // __builtin_clear_padding's stores (c_check_program_padding.c's check_lower_padding_entries): each a byte offset << 32, its
-    // bytes << 8 and the mask of the bits it keeps (0 for a run of zeros, else one byte's AND).
+    // __builtin_clear_padding's stores (c_check_program_padding.c's check_lower_padding_entries): a table of
+    // BUSTER_CBUILTIN_PADDING_HEADER words, then `padding_count` entries in `padding_words` words, then their repeats'
+    // pairs. An entry's words are its first byte's offset in the element (BUSTER_CBUILTIN_PADDING_REPEATED where it repeats)
+    // and its bytes << 8 and the mask of the bits it keeps (0 for a run of zeros, else one byte's AND); a repeated entry's
+    // six more its repeat's: its innermost repeat's count and stride in bytes, the count of its outer repeats'
+    // combinations, the table's word its outer repeats' pairs start at (each a count and a stride in bytes, outermost
+    // first), how many there are, and a zero. The header is the repeat of an entry that doesn't repeat.
     const uint64_t* padding;
     uint32_t padding_count;
+    uint64_t padding_words;
     // Its elements, through arrays of arrays, each of padding_stride bytes, which a loop clears in turn (none for a variable
-    // length array's), or 1. With a second argument, the address of a table of the entries' 8 bytes each, which a loop reads
-    // (cbuiltin_misc_lower_padding_table) in place of the stores made one by one.
+    // length array's), or 1. With a second argument, the address of a table of the entries and their repeats' pairs, which
+    // a loop reads (cbuiltin_misc_lower_padding_table) in place of the stores made one by one: only that loop repeats.
     uint64_t padding_elements;
     uint64_t padding_stride;
 };
@@ -291,7 +304,7 @@ static void cbuiltin_misc_lower_copy_single(CBuiltinLowerRecipe* recipe, const C
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, class, 0);
 }
 
-static void cbuiltin_misc_lower_offset(CBuiltinLowerRecipe* recipe, uint32_t pointer, uint32_t offset)
+static void cbuiltin_misc_lower_offset(CBuiltinLowerRecipe* recipe, uint32_t pointer, uint64_t offset)
 {
     cbuiltin_lower_local(recipe, pointer);
     if (offset != 0)
@@ -579,15 +592,15 @@ static void cbuiltin_misc_lower_length(CBuiltinLowerRecipe* recipe, const CBuilt
 
 // __builtin_clear_padding's stores (#148), as clang's PaddingClearer makes them, in byte order: a run of zeros as stores of
 // 8, 4, 2 and 1 bytes, and a byte that keeps some of its bits as its load ANDed with their mask, each at the pointer's
-// argument plus its offset (CBuiltinMiscLowerCall.padding).
+// argument plus its offset (CBuiltinMiscLowerCall.padding, whose entries here don't repeat, each a plain one's words).
 static void cbuiltin_misc_lower_padding_stores(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call, uint32_t base)
 {
     for (uint32_t i = 0; i < call->padding_count; i += 1)
     {
-        const uint64_t entry = call->padding[i];
-        const uint32_t offset = (uint32_t)(entry >> 32);
-        const uint32_t bytes = (uint32_t)(entry >> 8) & 0xffffffu;
-        const uint32_t keep = (uint32_t)entry & 0xffu;
+        const uint64_t* entry = call->padding + BUSTER_CBUILTIN_PADDING_HEADER + (uint64_t)i * BUSTER_CBUILTIN_PADDING_PLAIN;
+        const uint64_t offset = entry[0];
+        const uint64_t bytes = entry[1] >> 8;
+        const uint32_t keep = (uint32_t)entry[1] & 0xffu;
         if (keep != 0)
         {
             cbuiltin_misc_lower_offset(recipe, base, offset);
@@ -599,9 +612,9 @@ static void cbuiltin_misc_lower_padding_stores(CBuiltinLowerRecipe* recipe, cons
             cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
             cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U8, 0);
         }
-        for (uint32_t at = 0; keep == 0 && at < bytes;)
+        for (uint64_t at = 0; keep == 0 && at < bytes;)
         {
-            const uint32_t left = bytes - at;
+            const uint64_t left = bytes - at;
             const uint32_t width = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
             const uint32_t class = width == 8 ? BUSTER_TYPED_CLASS_U64 : width == 4 ? BUSTER_TYPED_CLASS_U32 : width == 2 ? BUSTER_TYPED_CLASS_U16 : BUSTER_TYPED_CLASS_U8;
             cbuiltin_misc_lower_offset(recipe, base, offset + at);
@@ -616,31 +629,112 @@ static void cbuiltin_misc_lower_padding_stores(CBuiltinLowerRecipe* recipe, cons
     }
 }
 
-// An element's stores at `base`, from the table of its entries at the second argument (the entries' encoding, in 8
-// bytes each): for each, a byte's load ANDed with its mask, or a run of zeros stored 8 bytes, then 1, at a time.
+// `slot` = the 64-bit word `word` of the entry at `entry`.
+static void cbuiltin_misc_lower_padding_word(CBuiltinLowerRecipe* recipe, uint32_t slot, uint32_t entry, uint32_t word)
+{
+    cbuiltin_misc_lower_offset(recipe, entry, (uint64_t)word * 8);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+    cbuiltin_lower_set(recipe, slot);
+}
+
+// An element's stores at `base`, from the table at the second argument (CBuiltinMiscLowerCall.padding's): for each entry,
+// each combination of its outer repeats (its index's digits by their counts, innermost first, each times its stride), then
+// its innermost repeat's instances, each a byte's load ANDed with its mask, or a run of zeros stored 8 bytes, then 1, at a
+// time. An entry that doesn't repeat is one instance of one combination, by the header's repeat.
 static void cbuiltin_misc_lower_padding_table(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call, uint32_t base, uint32_t first)
 {
     const uint32_t entry = cbuiltin_lower_temporary(recipe);
     const uint32_t end = cbuiltin_lower_temporary(recipe);
+    const uint32_t combination = cbuiltin_lower_temporary(recipe);
+    const uint32_t start = cbuiltin_lower_temporary(recipe);
+    const uint32_t rest = cbuiltin_lower_temporary(recipe);
+    const uint32_t pairs = cbuiltin_lower_temporary(recipe);
+    const uint32_t pair = cbuiltin_lower_temporary(recipe);
+    const uint32_t count = cbuiltin_lower_temporary(recipe);
+    const uint32_t instances = cbuiltin_lower_temporary(recipe);
     const uint32_t value = cbuiltin_lower_temporary(recipe);
     const uint32_t address = cbuiltin_lower_temporary(recipe);
     const uint32_t bytes = cbuiltin_lower_temporary(recipe);
-    cbuiltin_lower_local(recipe, call->arguments[1]);
-    cbuiltin_lower_set(recipe, entry);
-    cbuiltin_lower_immediate(recipe, end, BUSTER_TYPED_ADD, call->arguments[1], (uint64_t)call->padding_count * 8);
+    const uint32_t repeat = cbuiltin_lower_temporary(recipe);
+    cbuiltin_lower_immediate(recipe, entry, BUSTER_TYPED_ADD, call->arguments[1], BUSTER_CBUILTIN_PADDING_HEADER * 8);
+    cbuiltin_lower_immediate(recipe, end, BUSTER_TYPED_ADD, entry, call->padding_words * 8);
+    // Each entry, and its repeat's words: its own past its first two where it repeats, else the header's,
+    // table + repeated * (entry + 16 - table).
     const uint32_t head = first + recipe->count;
     cbuiltin_lower_local(recipe, entry);
     cbuiltin_lower_local(recipe, end);
     cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
     const uint32_t done = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+    cbuiltin_misc_lower_padding_word(recipe, repeat, entry, 0);
+    cbuiltin_lower_immediate(recipe, repeat, BUSTER_TYPED_SHR, repeat, 63);
+    cbuiltin_lower_local(recipe, call->arguments[1]);
     cbuiltin_lower_local(recipe, entry);
+    cbuiltin_lower_constant(recipe, 16);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
+    cbuiltin_lower_local(recipe, call->arguments[1]);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
+    cbuiltin_lower_local(recipe, repeat);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_MUL);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
+    cbuiltin_lower_set(recipe, repeat);
+    cbuiltin_lower_constant(recipe, 0);
+    cbuiltin_lower_set(recipe, combination);
+    // Each combination of its outer repeats: its first instance's address.
+    const uint32_t outer = first + recipe->count;
+    cbuiltin_misc_lower_padding_word(recipe, count, repeat, 2);
+    cbuiltin_lower_local(recipe, combination);
+    cbuiltin_lower_local(recipe, count);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
+    const uint32_t entered = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+    cbuiltin_misc_lower_padding_word(recipe, start, entry, 0);
+    cbuiltin_lower_immediate(recipe, start, BUSTER_TYPED_AND, start, ~BUSTER_CBUILTIN_PADDING_REPEATED);
+    cbuiltin_misc_lower_address(recipe, base, start);
+    cbuiltin_lower_set(recipe, start);
+    cbuiltin_lower_local(recipe, combination);
+    cbuiltin_lower_set(recipe, rest);
+    // Its pairs, innermost first: from the table's word in its repeat's fourth, as many as its fifth says.
+    cbuiltin_misc_lower_padding_word(recipe, pairs, repeat, 3);
+    cbuiltin_lower_immediate(recipe, pairs, BUSTER_TYPED_SHL, pairs, 3);
+    cbuiltin_misc_lower_address(recipe, call->arguments[1], pairs);
+    cbuiltin_lower_set(recipe, pairs);
+    cbuiltin_misc_lower_padding_word(recipe, pair, repeat, 4);
+    cbuiltin_lower_immediate(recipe, pair, BUSTER_TYPED_SHL, pair, 4);
+    cbuiltin_misc_lower_address(recipe, pairs, pair);
+    cbuiltin_lower_set(recipe, pair);
+    const uint32_t digits = first + recipe->count;
+    cbuiltin_lower_local(recipe, pairs);
+    cbuiltin_lower_local(recipe, pair);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
+    const uint32_t placed = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+    cbuiltin_lower_immediate(recipe, pair, BUSTER_TYPED_SUB, pair, 16);
+    cbuiltin_misc_lower_padding_word(recipe, count, pair, 0);
+    // start += (rest % count) * stride; rest /= count.
+    cbuiltin_lower_local(recipe, start);
+    cbuiltin_lower_local(recipe, rest);
+    cbuiltin_lower_local(recipe, count);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_MOD);
+    cbuiltin_misc_lower_offset(recipe, pair, 8);
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
-    cbuiltin_lower_set(recipe, value);
-    cbuiltin_lower_immediate(recipe, address, BUSTER_TYPED_SHR, value, 32);
-    cbuiltin_misc_lower_address(recipe, base, address);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_MUL);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
+    cbuiltin_lower_set(recipe, start);
+    cbuiltin_lower_local(recipe, rest);
+    cbuiltin_lower_local(recipe, count);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_DIV);
+    cbuiltin_lower_set(recipe, rest);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, digits);
+    cbuiltin_misc_lower_patch(recipe, placed, first);
+    // Its innermost repeat's instances.
+    cbuiltin_misc_lower_padding_word(recipe, instances, repeat, 0);
+    const uint32_t inner = first + recipe->count;
+    cbuiltin_lower_local(recipe, instances);
+    cbuiltin_lower_constant(recipe, 0);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_NE);
+    const uint32_t combined = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+    cbuiltin_lower_local(recipe, start);
     cbuiltin_lower_set(recipe, address);
+    cbuiltin_misc_lower_padding_word(recipe, value, entry, 1);
     cbuiltin_lower_immediate(recipe, bytes, BUSTER_TYPED_SHR, value, 8);
-    cbuiltin_lower_immediate(recipe, bytes, BUSTER_TYPED_AND, bytes, 0xffffff);
     cbuiltin_lower_immediate(recipe, value, BUSTER_TYPED_AND, value, 0xff);
     cbuiltin_lower_local(recipe, value);
     cbuiltin_lower_constant(recipe, 0);
@@ -672,7 +766,7 @@ static void cbuiltin_misc_lower_padding_table(CBuiltinLowerRecipe* recipe, const
     cbuiltin_lower_local(recipe, bytes);
     cbuiltin_lower_constant(recipe, 0);
     cbuiltin_lower_operation(recipe, BUSTER_TYPED_NE);
-    const uint32_t next = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+    const uint32_t stored = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
     cbuiltin_lower_local(recipe, address);
     cbuiltin_lower_constant(recipe, 0);
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
@@ -680,9 +774,25 @@ static void cbuiltin_misc_lower_padding_table(CBuiltinLowerRecipe* recipe, const
     cbuiltin_lower_immediate(recipe, address, BUSTER_TYPED_ADD, address, 1);
     cbuiltin_lower_immediate(recipe, bytes, BUSTER_TYPED_SUB, bytes, 1);
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, singles);
-    cbuiltin_misc_lower_patch(recipe, next, first);
+    cbuiltin_misc_lower_patch(recipe, stored, first);
     cbuiltin_misc_lower_patch(recipe, masked, first);
-    cbuiltin_lower_immediate(recipe, entry, BUSTER_TYPED_ADD, entry, 8);
+    // The next instance, by the innermost repeat's stride.
+    cbuiltin_misc_lower_padding_word(recipe, value, repeat, 1);
+    cbuiltin_misc_lower_address(recipe, start, value);
+    cbuiltin_lower_set(recipe, start);
+    cbuiltin_lower_immediate(recipe, instances, BUSTER_TYPED_SUB, instances, 1);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, inner);
+    cbuiltin_misc_lower_patch(recipe, combined, first);
+    cbuiltin_lower_immediate(recipe, combination, BUSTER_TYPED_ADD, combination, 1);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, outer);
+    cbuiltin_misc_lower_patch(recipe, entered, first);
+    // The next entry: past a plain one's words, or a repeated one's.
+    cbuiltin_misc_lower_padding_word(recipe, value, entry, 0);
+    cbuiltin_lower_immediate(recipe, value, BUSTER_TYPED_SHR, value, 63);
+    cbuiltin_lower_immediate(recipe, value, BUSTER_TYPED_MUL, value, (BUSTER_CBUILTIN_PADDING_WORDS - BUSTER_CBUILTIN_PADDING_PLAIN) * 8);
+    cbuiltin_lower_immediate(recipe, value, BUSTER_TYPED_ADD, value, BUSTER_CBUILTIN_PADDING_PLAIN * 8);
+    cbuiltin_misc_lower_address(recipe, entry, value);
+    cbuiltin_lower_set(recipe, entry);
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, head);
     cbuiltin_misc_lower_patch(recipe, done, first);
 }
