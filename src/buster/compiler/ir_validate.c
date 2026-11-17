@@ -7,10 +7,7 @@
 // ir_verify_complete allocates its graph and work through scratch, then lends an exactly pushed tree-output slice
 // to the dominator consumer. Temporary work still pushes through the parent, so its lazily committed prefix grows
 // normally. The caller's length and prefix are preserved on every outcome; no hidden arena is reserved.
-// Input columns must not overlap scratch's unused remainder. Tree-only analysis caps matrix work at 16 MiB and
-// falls back to the existing scalar algorithm; the scalar entry path requests that algorithm directly.
-
-#define BUSTER_IR_VALIDATE_MATRIX_BYTES (16ull << 20)
+// Input columns must not overlap scratch's unused remainder. The tree-only analysis takes no bitset matrix.
 
 static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cfg, const Dominators* tree, bool vector)
 {
@@ -106,15 +103,10 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
                     .predecessor_offsets = cfg.predecessor_offsets,
                     .predecessors = cfg.predecessors,
                 };
-                // The analyzer's per-block scratch ahead of any matrix (DFS frames and five u32 columns) and both
-                // possible 64-byte alignment gaps stay reserved, so a matrix the budget admits fits.
-                const uint64_t retained = (uint64_t)cfg.block_count * (sizeof(DominatorFrame) + 5 * sizeof(uint32_t)) + 126;
-                const uint64_t available = scratch->capacity - scratch->length;
-                const uint64_t budget = available > retained ? available - retained : 0;
+                // The tree alone needs no bitset matrix.
                 const DominatorOptions options = {
-                    .path = BUSTER_VECTOR_PATH(vector) ? DOMINATOR_AUTO : DOMINATOR_SCALAR,
                     .outputs = 0,
-                    .max_matrix_bytes = budget < BUSTER_IR_VALIDATE_MATRIX_BYTES ? budget : BUSTER_IR_VALIDATE_MATRIX_BYTES,
+                    .max_matrix_bytes = 0,
                 };
                 Dominators tree = { 0 };
                 const DominatorStatus status = dominators_analyze(&columns, scratch, &graph, options, &tree);

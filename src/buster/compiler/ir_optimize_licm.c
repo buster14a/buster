@@ -642,7 +642,6 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
         };
         DominatorOptions dom = dominators_options();
         dom.outputs = BUSTER_DOMINATOR_LOOPS;
-        dom.path = BUSTER_SCALAR_PATH(options.scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, dom, &work.loops);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
     }

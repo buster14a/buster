@@ -451,9 +451,8 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
                 dominators_valid = dominators_valid && qualified;
                 if (!qualified)
                 {
-                    printf("ir-source: file=%s function=%s form=%s dominators_failed=\"%s\" cfg_error=%u scalar=%u vector=%u auto=%u\n",
-                           name, source->name, form_names[form], dominance.reason, (unsigned)dominance.cfg_error,
-                           (unsigned)dominance.status[0], (unsigned)dominance.status[1], (unsigned)dominance.status[2]);
+                    printf("ir-source: file=%s function=%s form=%s dominators_failed=\"%s\" cfg_error=%u status=%u\n",
+                           name, source->name, form_names[form], dominance.reason, (unsigned)dominance.cfg_error, (unsigned)dominance.status);
                 }
             }
         }

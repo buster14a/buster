@@ -123,7 +123,7 @@ static bool tier1_terminal_fixture(Tier1EmitTest* test, Tier1TerminalShape shape
     return ready;
 }
 
-static bool tier1_terminal_dominance(Tier1EmitTest* test, const IrFunction* function, bool vector, IrDominance* dominance)
+static bool tier1_terminal_dominance(Tier1EmitTest* test, const IrFunction* function, IrDominance* dominance)
 {
     IrCfg cfg;
     bool ready = ir_build_cfg(function, &test->output, &test->scratch, &cfg) == IR_OK;
@@ -139,7 +139,6 @@ static bool tier1_terminal_dominance(Tier1EmitTest* test, const IrFunction* func
             .predecessors = cfg.predecessors,
         };
         DominatorOptions options = dominators_options();
-        options.path = vector ? DOMINATOR_VECTOR : DOMINATOR_SCALAR;
         options.outputs = 0;
         Dominators result;
         ready = dominators_analyze(&test->output, &test->scratch, &graph, options, &result) == DOMINATOR_OK;
@@ -446,7 +445,7 @@ static void tier1_terminal_supported(Tier1EmitTest* test)
             for (uint32_t frame = 0; frame < 2; frame += 1)
             {
                 IrDominance dominance;
-                const bool derived = tier1_terminal_dominance(test, &function, vector != 0, &dominance);
+                const bool derived = tier1_terminal_dominance(test, &function, &dominance);
                 tier1_emit_test_expect(test, derived, "terminal fixture derives its real CFG and dominance before cross-block selection");
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
@@ -557,7 +556,7 @@ static void tier1_terminal_general(Tier1EmitTest* test)
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             IrDominance dominance;
-            const bool derived = tier1_terminal_dominance(test, &function, vector != 0, &dominance);
+            const bool derived = tier1_terminal_dominance(test, &function, &dominance);
             tier1_emit_test_expect(test, derived, "a general terminal shape derives real dominance before selection");
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;

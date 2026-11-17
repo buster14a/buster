@@ -296,7 +296,6 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
             .predecessors = cfg.predecessors,
         };
         DominatorOptions options = dominators_options();
-        options.path = test->vector ? DOMINATOR_VECTOR : DOMINATOR_SCALAR;
         options.outputs = 0;
         Dominators result;
         ok = tier1_pipeline_expect(test, dominators_analyze(&test->arenas[TIER1_PIPELINE_DERIVED], scratch, &graph, options, &result) == DOMINATOR_OK, "boundary dominance rebuilds");

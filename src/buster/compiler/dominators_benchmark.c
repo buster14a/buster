@@ -94,7 +94,7 @@ static __attribute__((noinline, aligned(64))) bool dominator_benchmark_run(Arena
     }
     if (success)
     {
-        uint64_t sum = analysis.reachable_count + analysis.loop_count + analysis.iterations;
+        uint64_t sum = analysis.reachable_count + analysis.loop_count;
         // Ordinary consumers ask dominance and read the innermost loop of each block; no output is dead.
         for (uint32_t block = 0; block < analysis.block_count; block += 1)
         {
@@ -167,7 +167,6 @@ static double dominator_benchmark_middle(const DominatorBenchmarkSample* samples
 // alone and all together. A set's sample analyzes each of its CFGs once per repetition, in file order, with the
 // same per-call work as the synthetic analysis phase; its time is divided by the set's blocks.
 #define BUSTER_DOMINATOR_BENCHMARK_LARGEST 8
-#define BUSTER_DOMINATOR_BENCHMARK_PATHS 3
 
 typedef struct DominatorBenchmarkSet DominatorBenchmarkSet;
 struct DominatorBenchmarkSet
@@ -176,18 +175,6 @@ struct DominatorBenchmarkSet
     uint32_t count;
     uint64_t blocks;
     uint64_t edges;
-};
-
-static const DominatorPath dominator_benchmark_paths[BUSTER_DOMINATOR_BENCHMARK_PATHS] = {
-    DOMINATOR_SCALAR,
-    DOMINATOR_VECTOR,
-    DOMINATOR_AUTO,
-};
-
-static const char* const dominator_benchmark_path_names[BUSTER_DOMINATOR_BENCHMARK_PATHS] = {
-    "scalar",
-    "vector",
-    "auto",
 };
 
 static bool dominator_benchmark_set_sample(Arena* inputs, Arena* output, Arena* scratch, const DominatorExport* export, const DominatorBenchmarkSet* set, DominatorOptions options, uint32_t repetitions, int fd, uint64_t* checksum, DominatorBenchmarkSample* result)
@@ -230,42 +217,20 @@ static void dominator_benchmark_print_name(const uint8_t* name, uint32_t length)
     }
 }
 
-// Measures one set in one output mode on the selected paths, 11 samples in rotating path order, and prints a line
-// per path and the ratios of their median times.
-static bool dominator_benchmark_set(Arena* inputs, Arena* output, Arena* scratch, const DominatorExport* export, const DominatorBenchmarkSet* set, const char* label, uint32_t outputs, const char* output_name, uint32_t only, uint64_t after_scalar, int fd, uint64_t* checksum)
+// Measures one set in one output mode, 11 samples, and prints their median and range.
+static bool dominator_benchmark_set(Arena* inputs, Arena* output, Arena* scratch, const DominatorExport* export, const DominatorBenchmarkSet* set, const char* label, uint32_t outputs, const char* output_name, int fd, uint64_t* checksum)
 {
     DominatorOptions options = dominators_options();
     options.outputs = outputs;
-    bool success = true;
-    // What AUTO chose for the set's members, from complete analyses outside the timing.
-    uint32_t auto_vector = 0;
-    uint32_t auto_loop_vector = 0;
-    for (uint32_t member = 0; success && member < set->count; member += 1)
-    {
-        const uint64_t output_start = output->length;
-        Dominators analysis;
-        options.path = DOMINATOR_AUTO;
-        success = dominators_analyze(output, scratch, &export->graphs[set->members[member]].cfg, options, &analysis) == DOMINATOR_OK;
-        auto_vector += success && analysis.path == DOMINATOR_VECTOR;
-        auto_loop_vector += success && analysis.loop_count != 0 && analysis.loop_path == DOMINATOR_VECTOR;
-        arena_pop_to(output, output_start);
-    }
-    DominatorBenchmarkSample samples[BUSTER_DOMINATOR_BENCHMARK_PATHS][BUSTER_DOMINATOR_BENCHMARK_SAMPLES];
+    DominatorBenchmarkSample samples[BUSTER_DOMINATOR_BENCHMARK_SAMPLES];
     uint32_t repetitions = 1;
+    bool success = true;
     bool calibrated = false;
     while (success && !calibrated)
     {
-        calibrated = true;
-        for (uint32_t path = 0; success && path < BUSTER_DOMINATOR_BENCHMARK_PATHS; path += 1)
-        {
-            if (only == BUSTER_DOMINATOR_BENCHMARK_PATHS || only == path)
-            {
-                DominatorBenchmarkSample probe;
-                options.path = dominator_benchmark_paths[path];
-                success = dominator_benchmark_set_sample(inputs, output, scratch, export, set, options, repetitions, fd, checksum, &probe);
-                calibrated = calibrated && probe.ns * repetitions >= BUSTER_DOMINATOR_BENCHMARK_MIN_NS;
-            }
-        }
+        DominatorBenchmarkSample probe;
+        success = dominator_benchmark_set_sample(inputs, output, scratch, export, set, options, repetitions, fd, checksum, &probe);
+        calibrated = probe.ns * repetitions >= BUSTER_DOMINATOR_BENCHMARK_MIN_NS;
         if (!calibrated && repetitions < (1u << 20))
         {
             repetitions *= 2;
@@ -277,60 +242,31 @@ static bool dominator_benchmark_set(Arena* inputs, Arena* output, Arena* scratch
     }
     for (uint32_t sample = 0; success && sample < BUSTER_DOMINATOR_BENCHMARK_SAMPLES; sample += 1)
     {
-        for (uint32_t turn = 0; success && turn < BUSTER_DOMINATOR_BENCHMARK_PATHS; turn += 1)
-        {
-            const uint32_t path = (turn + sample) % BUSTER_DOMINATOR_BENCHMARK_PATHS;
-            if (only == BUSTER_DOMINATOR_BENCHMARK_PATHS || only == path)
-            {
-                if (path != 0 && after_scalar != 0)
-                {
-                    options.path = DOMINATOR_SCALAR;
-                    const uint64_t warm_until = dominator_benchmark_clock() + after_scalar * UINT64_C(1000000);
-                    do
-                    {
-                        DominatorBenchmarkSample warm;
-                        success = dominator_benchmark_set_sample(inputs, output, scratch, export, set, options, 1, -1, checksum, &warm);
-                    } while (success && dominator_benchmark_clock() < warm_until);
-                }
-                options.path = dominator_benchmark_paths[path];
-                if (success)
-                {
-                    success = dominator_benchmark_set_sample(inputs, output, scratch, export, set, options, repetitions, fd, checksum, &samples[path][sample]);
-                }
-            }
-        }
+        success = dominator_benchmark_set_sample(inputs, output, scratch, export, set, options, repetitions, fd, checksum, &samples[sample]);
     }
-    double medians[BUSTER_DOMINATOR_BENCHMARK_PATHS] = { 0 };
-    for (uint32_t path = 0; success && path < BUSTER_DOMINATOR_BENCHMARK_PATHS; path += 1)
+    if (success)
     {
-        if (only == BUSTER_DOMINATOR_BENCHMARK_PATHS || only == path)
+        double low;
+        double high;
+        const double median = dominator_benchmark_middle(samples, false, &low, &high);
+        double cycle_low;
+        double cycle_high;
+        const double cycles = dominator_benchmark_middle(samples, true, &cycle_low, &cycle_high);
+        printf("%s cfgs=%u blocks=%" PRIu64 " edges=%" PRIu64 " %s: %.3f ns/block [%.3f, %.3f], ", label, set->count, set->blocks, set->edges, output_name, median / set->blocks, low / set->blocks, high / set->blocks);
+        if (cycle_low >= 0)
         {
-            double low;
-            double high;
-            medians[path] = dominator_benchmark_middle(samples[path], false, &low, &high);
-            double cycle_low;
-            double cycle_high;
-            const double cycles = dominator_benchmark_middle(samples[path], true, &cycle_low, &cycle_high);
-            printf("%s cfgs=%u blocks=%" PRIu64 " edges=%" PRIu64 " %s %s: %.3f ns/block [%.3f, %.3f], ", label, set->count, set->blocks, set->edges, output_name, dominator_benchmark_path_names[path], medians[path] / set->blocks, low / set->blocks, high / set->blocks);
-            if (cycle_low >= 0)
-            {
-                printf("%.3f cycles/block [%.3f, %.3f], ", cycles / set->blocks, cycle_low / set->blocks, cycle_high / set->blocks);
-            }
-            else
-            {
-                printf("cycles unavailable, ");
-            }
-            printf("repetitions=%u\n", repetitions);
+            printf("%.3f cycles/block [%.3f, %.3f], ", cycles / set->blocks, cycle_low / set->blocks, cycle_high / set->blocks);
         }
-    }
-    if (success && only == BUSTER_DOMINATOR_BENCHMARK_PATHS)
-    {
-        printf("%s %s: vector/scalar=%.3f auto/scalar=%.3f; auto chose the vector solver for %u of %u, vector loops for %u\n", label, output_name, medians[1] / medians[0], medians[2] / medians[0], auto_vector, set->count, auto_loop_vector);
+        else
+        {
+            printf("cycles unavailable, ");
+        }
+        printf("repetitions=%u\n", repetitions);
     }
     return success;
 }
 
-static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t only, uint32_t outputs_only, uint64_t after_scalar)
+static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t outputs_only)
 {
     Arena inputs = arena_reserve(BUSTER_DOMINATOR_TEST_BYTES);
     Arena output = arena_reserve(BUSTER_DOMINATOR_TEST_BYTES);
@@ -413,7 +349,7 @@ static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t onl
         {
             printf(" of form %" PRIu64, form);
         }
-        printf("; %u samples, after-scalar=%" PRIu64 " ms; cycles=%s\n", BUSTER_DOMINATOR_BENCHMARK_SAMPLES, after_scalar, fd >= 0 ? "perf (nonmultiplexed samples only)" : "unavailable");
+        printf("; %u samples; cycles=%s\n", BUSTER_DOMINATOR_BENCHMARK_SAMPLES, fd >= 0 ? "perf (nonmultiplexed samples only)" : "unavailable");
     }
     const uint32_t outputs[] = {
         0,
@@ -425,30 +361,6 @@ static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t onl
         "loops",
         "all",
     };
-    // Every selected CFG's complete scalar, vector and AUTO analyses must agree before anything is timed.
-    uint64_t compared = 0;
-    for (uint32_t mode = 0; success && mode < 3; mode += 1)
-    {
-        DominatorOptions options = dominators_options();
-        options.outputs = outputs[mode];
-        for (uint32_t i = 0; success && i < selected; i += 1)
-        {
-            const DominatorCfg* cfg = &export.graphs[members[export.count + i]].cfg;
-            Dominators analyses[BUSTER_DOMINATOR_BENCHMARK_PATHS];
-            for (uint32_t path = 0; success && path < BUSTER_DOMINATOR_BENCHMARK_PATHS; path += 1)
-            {
-                options.path = dominator_benchmark_paths[path];
-                success = dominators_analyze(&output, &scratch, cfg, options, &analyses[path]) == DOMINATOR_OK;
-            }
-            success = success && dominator_test_equal(&analyses[0], &analyses[1]) && dominator_test_equal(&analyses[0], &analyses[2]);
-            compared += success;
-            arena_pop_to(&output, 0);
-        }
-    }
-    if (success)
-    {
-        printf("dominators CFG benchmark: scalar, vector and AUTO agree on all %" PRIu64 " analyses\n", compared);
-    }
     char label[256];
     for (uint32_t mode = 0; success && mode < 3; mode += 1)
     {
@@ -468,7 +380,7 @@ static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t onl
                 if (set.count != 0)
                 {
                     snprintf(label, sizeof(label), "set=blocks[%" PRIu64 ",%" PRIu64 ")", UINT64_C(1) << bucket, UINT64_C(1) << (bucket + 1));
-                    success = dominator_benchmark_set(&inputs, &output, &scratch, &export, &set, label, outputs[mode], output_names[mode], only, after_scalar, fd, &checksum);
+                    success = dominator_benchmark_set(&inputs, &output, &scratch, &export, &set, label, outputs[mode], output_names[mode], fd, &checksum);
                 }
             }
             for (uint32_t rank = 0; success && rank < largest_count; rank += 1)
@@ -484,7 +396,7 @@ static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t onl
                 dominator_benchmark_print_name(graph->name, graph->name_length);
                 printf("\n");
                 snprintf(label, sizeof(label), "set=largest-%u", rank + 1);
-                success = dominator_benchmark_set(&inputs, &output, &scratch, &export, &set, label, outputs[mode], output_names[mode], only, after_scalar, fd, &checksum);
+                success = dominator_benchmark_set(&inputs, &output, &scratch, &export, &set, label, outputs[mode], output_names[mode], fd, &checksum);
             }
             DominatorBenchmarkSet all = {
                 .members = members + export.count,
@@ -495,7 +407,7 @@ static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t onl
                 all.blocks += export.graphs[all.members[i]].cfg.block_count;
                 all.edges += export.graphs[all.members[i]].cfg.edge_count;
             }
-            success = success && dominator_benchmark_set(&inputs, &output, &scratch, &export, &all, "set=all", outputs[mode], output_names[mode], only, after_scalar, fd, &checksum);
+            success = success && dominator_benchmark_set(&inputs, &output, &scratch, &export, &all, "set=all", outputs[mode], output_names[mode], fd, &checksum);
         }
     }
     printf("dominators CFG benchmark: %s; checksum=%" PRIu64 "\n", success ? "passed" : "FAILED", checksum);
@@ -511,13 +423,10 @@ static int dominator_benchmark_cfg(const char* name, uint64_t form, uint32_t onl
 
 int run_dominator_benchmark(int argc, char** argv)
 {
-    uint64_t seed = 174;
-    uint64_t after_scalar = 0;
-    uint32_t only = 2;
+    uint64_t seed = BUSTER_DOMINATOR_TEST_SEED;
     uint32_t phase = 2;
     const char* cfg_name = 0;
     uint64_t form = UINT64_MAX;
-    uint32_t cfg_only = BUSTER_DOMINATOR_BENCHMARK_PATHS;
     uint32_t outputs_only = 3;
     bool synthetic_option = false;
     bool valid = true;
@@ -545,18 +454,6 @@ int run_dominator_benchmark(int argc, char** argv)
             valid = strcmp(argv[i], "tree") == 0 || strcmp(argv[i], "loops") == 0 || strcmp(argv[i], "all") == 0;
             outputs_only = strcmp(argv[i], "tree") == 0 ? 0 : strcmp(argv[i], "loops") == 0 ? 1 : 2;
         }
-        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            valid = dominator_test_parse(argv[i], &after_scalar) && after_scalar <= 1000;
-        }
-        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            valid = strcmp(argv[i], "scalar") == 0 || strcmp(argv[i], "vector") == 0 || strcmp(argv[i], "auto") == 0;
-            only = strcmp(argv[i], "scalar") == 0 ? 0 : 1;
-            cfg_only = strcmp(argv[i], "scalar") == 0 ? 0 : strcmp(argv[i], "vector") == 0 ? 1 : 2;
-        }
         else if (strcmp(argv[i], "--phase") == 0 && i + 1 < argc)
         {
             i += 1;
@@ -569,17 +466,17 @@ int run_dominator_benchmark(int argc, char** argv)
             valid = false;
         }
     }
-    // --form, --outputs and --only auto only measure an export; --seed and --phase only the synthetic shapes.
-    valid = valid && (cfg_name != 0 ? !synthetic_option : form == UINT64_MAX && outputs_only == 3 && cfg_only != 2);
+    // --form and --outputs only measure an export; --seed and --phase only the synthetic shapes.
+    valid = valid && (cfg_name != 0 ? !synthetic_option : form == UINT64_MAX && outputs_only == 3);
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-dominators [--seed N] [--only scalar|vector] [--phase analysis|pipeline] [--after-scalar MS]\n"
-                        "       benchmark-dominators --cfg EXPORT [--form N] [--outputs tree|loops|all] [--only scalar|vector|auto] [--after-scalar MS]\n");
+        fprintf(stderr, "usage: benchmark-dominators [--seed N] [--phase analysis|pipeline]\n"
+                        "       benchmark-dominators --cfg EXPORT [--form N] [--outputs tree|loops|all]\n");
     }
     else if (cfg_name != 0)
     {
-        result = dominator_benchmark_cfg(cfg_name, form, cfg_only, outputs_only, after_scalar);
+        result = dominator_benchmark_cfg(cfg_name, form, outputs_only);
     }
     else
     {
@@ -636,7 +533,7 @@ int run_dominator_benchmark(int argc, char** argv)
         bool success = inputs.base != 0 && output.base != 0 && scratch.base != 0;
         const int fd = dominator_benchmark_counter();
         uint64_t checksum = 0;
-        printf("dominators synthetic CSR benchmark; seed=%" PRIu64 ", %u samples, after-scalar=%" PRIu64 " ms; cycles=%s\n", seed, BUSTER_DOMINATOR_BENCHMARK_SAMPLES, after_scalar, fd >= 0 ? "perf (nonmultiplexed samples only)" : "unavailable");
+        printf("dominators synthetic CSR benchmark; seed=%" PRIu64 ", %u samples; cycles=%s\n", seed, BUSTER_DOMINATOR_BENCHMARK_SAMPLES, fd >= 0 ? "perf (nonmultiplexed samples only)" : "unavailable");
         for (uint32_t case_index = 0; success && case_index < sizeof(cases) / sizeof(cases[0]); case_index += 1)
         {
             const DominatorBenchmarkCase workload = cases[case_index];
@@ -646,37 +543,22 @@ int run_dominator_benchmark(int argc, char** argv)
             {
                 DominatorOptions options = dominators_options();
                 options.outputs = outputs[mode];
-                Dominators oracle[2];
-                for (uint32_t path = 0; success && path < 2; path += 1)
-                {
-                    options.path = path == 0 ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-                    success = dominators_analyze(&output, &scratch, &cfg, options, &oracle[path]) == DOMINATOR_OK;
-                }
-                if (success)
-                {
-                    success = dominator_test_equal(&oracle[0], &oracle[1]);
-                }
+                // The reported sizes come from one analysis outside the timing.
+                Dominators analysis;
+                success = dominators_analyze(&output, &scratch, &cfg, options, &analysis) == DOMINATOR_OK;
                 for (uint32_t boundary = 0; success && boundary < 2; boundary += 1)
                 {
                     if (phase == 2 || phase == boundary)
                     {
                         const bool pipeline = boundary != 0;
-                        DominatorBenchmarkSample samples[2][BUSTER_DOMINATOR_BENCHMARK_SAMPLES];
+                        DominatorBenchmarkSample samples[BUSTER_DOMINATOR_BENCHMARK_SAMPLES];
                         uint32_t repetitions = 1;
                         bool calibrated = false;
                         while (success && !calibrated)
                         {
-                            calibrated = true;
-                            for (uint32_t path = 0; success && path < 2; path += 1)
-                            {
-                                if (only == 2 || only == path)
-                                {
-                                    DominatorBenchmarkSample probe;
-                                    options.path = path == 0 ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-                                    success = dominator_benchmark_sample(&inputs, &output, &scratch, &cfg, workload, seed, options, pipeline, repetitions, fd, &checksum, &probe);
-                                    calibrated = calibrated && probe.ns * repetitions >= BUSTER_DOMINATOR_BENCHMARK_MIN_NS;
-                                }
-                            }
+                            DominatorBenchmarkSample probe;
+                            success = dominator_benchmark_sample(&inputs, &output, &scratch, &cfg, workload, seed, options, pipeline, repetitions, fd, &checksum, &probe);
+                            calibrated = probe.ns * repetitions >= BUSTER_DOMINATOR_BENCHMARK_MIN_NS;
                             if (!calibrated && repetitions < (1u << 20))
                             {
                                 repetitions *= 2;
@@ -688,49 +570,26 @@ int run_dominator_benchmark(int argc, char** argv)
                         }
                         for (uint32_t sample = 0; success && sample < BUSTER_DOMINATOR_BENCHMARK_SAMPLES; sample += 1)
                         {
-                            for (uint32_t turn = 0; success && turn < 2; turn += 1)
-                            {
-                                const uint32_t path = (turn + sample) % 2;
-                                if (only == 2 || only == path)
-                                {
-                                    if (path == 1 && after_scalar != 0)
-                                    {
-                                        options.path = DOMINATOR_SCALAR;
-                                        const uint64_t warm_until = dominator_benchmark_clock() + after_scalar * UINT64_C(1000000);
-                                        do
-                                        {
-                                            success = dominator_benchmark_run(&inputs, &output, &scratch, &cfg, workload, seed, options, pipeline, &checksum);
-                                        } while (success && dominator_benchmark_clock() < warm_until);
-                                    }
-                                    options.path = path == 0 ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-                                    if (success)
-                                    {
-                                        success = dominator_benchmark_sample(&inputs, &output, &scratch, &cfg, workload, seed, options, pipeline, repetitions, fd, &checksum, &samples[path][sample]);
-                                    }
-                                }
-                            }
+                            success = dominator_benchmark_sample(&inputs, &output, &scratch, &cfg, workload, seed, options, pipeline, repetitions, fd, &checksum, &samples[sample]);
                         }
-                        for (uint32_t path = 0; success && path < 2; path += 1)
+                        if (success)
                         {
-                            if (only == 2 || only == path)
+                            double low;
+                            double high;
+                            const double ns = dominator_benchmark_middle(samples, false, &low, &high);
+                            double cycle_low;
+                            double cycle_high;
+                            const double cycles = dominator_benchmark_middle(samples, true, &cycle_low, &cycle_high);
+                            printf("%s blocks=%u edges=%u %s %s: %.3f ns/block [%.3f, %.3f], %.3f Mblocks/s, ", workload.name, workload.blocks, cfg.edge_count, pipeline ? "pipeline" : "analysis", output_names[mode], ns / workload.blocks, low / workload.blocks, high / workload.blocks, workload.blocks * 1000.0 / ns);
+                            if (cycle_low >= 0)
                             {
-                                double low;
-                                double high;
-                                const double ns = dominator_benchmark_middle(samples[path], false, &low, &high);
-                                double cycle_low;
-                                double cycle_high;
-                                const double cycles = dominator_benchmark_middle(samples[path], true, &cycle_low, &cycle_high);
-                                printf("%s blocks=%u edges=%u %s %s %s: %.3f ns/block [%.3f, %.3f], %.3f Mblocks/s, ", workload.name, workload.blocks, cfg.edge_count, pipeline ? "pipeline" : "analysis", output_names[mode], path == 0 ? "scalar" : "vector", ns / workload.blocks, low / workload.blocks, high / workload.blocks, workload.blocks * 1000.0 / ns);
-                                if (cycle_low >= 0)
-                                {
-                                    printf("%.3f cycles/block, ", cycles / workload.blocks);
-                                }
-                                else
-                                {
-                                    printf("cycles unavailable, ");
-                                }
-                                printf("output=%" PRIu64 " scratch-peak=%" PRIu64 " matrix-peak=%" PRIu64 " bytes, reachable=%u loops=%u sweeps=%" PRIu64 " repetitions=%u\n", oracle[path].output_bytes, oracle[path].scratch_peak_bytes, oracle[path].matrix_peak_bytes, oracle[path].reachable_count, oracle[path].loop_count, oracle[path].iterations, repetitions);
+                                printf("%.3f cycles/block, ", cycles / workload.blocks);
                             }
+                            else
+                            {
+                                printf("cycles unavailable, ");
+                            }
+                            printf("output=%" PRIu64 " scratch-peak=%" PRIu64 " matrix-peak=%" PRIu64 " bytes, reachable=%u loops=%u repetitions=%u\n", analysis.output_bytes, analysis.scratch_peak_bytes, analysis.matrix_peak_bytes, analysis.reachable_count, analysis.loop_count, repetitions);
                         }
                     }
                 }

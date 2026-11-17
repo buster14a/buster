@@ -1613,7 +1613,6 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
         };
         DominatorOptions options = dominators_options();
         options.outputs = 0;
-        options.path = BUSTER_SCALAR_PATH(verify_scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, options, &work->dominators);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
     }
@@ -2264,7 +2263,6 @@ static IrCheck ir_optimize_verify_twins(const IrFunction* function, Arena* outpu
         };
         DominatorOptions options = dominators_options();
         options.outputs = 0;
-        options.path = BUSTER_SCALAR_PATH(verify_scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &graph, options, &dominators);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
     }

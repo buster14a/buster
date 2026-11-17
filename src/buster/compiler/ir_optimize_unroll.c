@@ -1603,7 +1603,6 @@ static __attribute__((unused)) IrCheck ir_optimize_unroll(const IrFunction* func
         };
         DominatorOptions dom = dominators_options();
         dom.outputs = BUSTER_DOMINATOR_LOOPS;
-        dom.path = scalar ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, dom, &work.loops);
         // A function past the analysis' limits is left as it is.
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_UNSUPPORTED;

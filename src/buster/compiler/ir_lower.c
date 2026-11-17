@@ -2110,7 +2110,6 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
             .predecessors = predecessors,
         };
         DominatorOptions options = dominators_options();
-        options.path = vector ? DOMINATOR_AUTO : DOMINATOR_SCALAR;
         options.outputs = cyclic ? BUSTER_DOMINATOR_LOOPS : 0;
         analyzed = dominators_analyze(output, scratch, &graph, options, &dominators);
         ok = analyzed != DOMINATOR_NO_MEMORY;
