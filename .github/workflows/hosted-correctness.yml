@@ -138,6 +138,10 @@ jobs:
         if: inputs.sanitizer == 'none'
         run: bash tools/ci/feedback.sh run "$RUNNER_TEMP/feedback-early" smoke --jobs "$(nproc)" --timeout 120 --fail-fast
 
+      - name: Prove the early corpus detects a regression in each promised area
+        if: inputs.sanitizer == 'none'
+        run: bash tests/ci/feedback.sh --compiler "$BUSTER_COMPILER"
+
       - name: Preserve exact build and early-feedback reproductions
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

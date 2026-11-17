@@ -28,7 +28,8 @@ The portable row's existing shared build runs **Early hosted feedback (not
 qualification)** before publishing its compiler. It adds no compiler build.
 Its four inventory headings cover the fixed driver corpus
 (`tests/ci/feedback/`), the C lexer, link representation and deterministic
-diagnostics. The driver corpus preprocesses, parses, checks, emits matching
+diagnostics. After that first result, the build also proves that the corpus
+detects an injected regression in each promised area. The driver corpus preprocesses, parses, checks, emits matching
 selected/scalar objects, links two units with Clang, executes them and checks
 an undeclared-identifier diagnostic. It uses no random seed. A failure prevents
 publication and downstream shards. All existing PR shards, vector items,

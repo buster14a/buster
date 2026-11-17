@@ -57,7 +57,9 @@ mutant 'a re-run of every attempt' rerun.yml '/run_attempt == 1/d'
 mutant 'a re-run of a success' rerun.yml "s/conclusion == 'failure'/conclusion != 'success'/"
 mutant 'a re-run of forks' rerun.yml '/head_repository.full_name/d'
 mutant 'a trigger on requests' rerun.yml 's/types: \[completed\]/types: [requested, completed]/'
-mutant 'a watched workflow without rows' rerun.yml 's/workflows: \["Tests and Zen 5 benchmarks"\]/workflows: ["Tests and Zen 5 benchmarks", "Build"]/'
+mutant 'a watched workflow without rows' rerun.yml 's/workflows: \[/workflows: ["Build", /'
+mutant 'a renamed reproduction caller' reproduce.yml '1s/^name: .*/name: Renamed reproduction/'
+mutant 'an unwatched reproduction caller' rerun.yml 's/, "Hosted reproduction (not qualification)"//'
 
 # The recorded runs: each decision as cases.tsv says, and the report and Markdown as recorded.
 listed=0
