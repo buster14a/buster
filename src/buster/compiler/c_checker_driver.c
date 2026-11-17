@@ -6524,8 +6524,14 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool object = kind == CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS;
                             const char* candidate = object ? check_warning_text(scratch, "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name),
                                                                                 intern_bytes(pp->table, name)) : "candidate function";
-                            const uint32_t second = object && report->value < count ? parser->tokens.sources[report->value] : (uint32_t)report->value;
-                            const uint32_t first = object && report->detail != 0 ? report->detail - 1 : previous < count ? parser->tokens.sources[previous] : 0;
+                            const uint32_t later = object && report->value < count ? parser->tokens.sources[report->value] : (uint32_t)report->value;
+                            const uint32_t earlier = object && report->detail != 0 ? report->detail - 1 : previous < count ? parser->tokens.sources[previous] : 0;
+                            // An object's lookup set lists its candidates newest first. Two equally viable functions are
+                            // clang's overload candidates instead, whose notes are sorted by location: a declaration
+                            // written after the pragma, before TARGET's declaration creates the clone, follows the pragma.
+                            const bool swapped = kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS && later < earlier;
+                            const uint32_t first = swapped ? later : earlier;
+                            const uint32_t second = swapped ? earlier : later;
                             const PPOutputDiagnosticNote notes[2] = {
                                 { .token = first, .message = kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? candidate : "previous definition is here" },
                                 { .token = second, .message = candidate },
@@ -9162,7 +9168,7 @@ static bool check_driver_alias_warnings(const CheckProgram* program, const Parse
 // Publish one code-generation alias error at its original preprocessing coordinate. A pragma's implicit attribute
 // lives in the retained directive, not at the real declaration whose object carries its alias metadata.
 static bool check_driver_alias_error(const CheckProgram* program, const Parser* parser, Preprocessor* pp, const CheckProgramAlias* alias,
-                                      CheckProgramAliasError error, uint32_t source, Arena* scratch)
+                                      CheckProgramAliasError error, uint32_t source, bool scalar, Arena* scratch)
 {
     bool valid = true;
     const bool ifunc = alias->kind == CHECK_PROGRAM_IFUNC;
@@ -9203,7 +9209,7 @@ static bool check_driver_alias_error(const CheckProgram* program, const Parser* 
         const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
         if (declaration < parser->tokens.count && parser->tokens.names[declaration] == spelled)
         {
-            const String8 label = check_program_alias_label(program->input, declaration);
+            const String8 label = check_program_object_label(program, program->symbol_objects[s], scalar);
             const String8 mangled = label.length == 0 ? check_driver_overload_name(program, parser, pp->table, program->symbol_objects[s], scratch) : (String8){ 0 };
             const String8 name = label.length != 0   ? label :
                                  mangled.length != 0 ? mangled :
@@ -9354,7 +9360,7 @@ static bool check_driver_pragma_aliases(const CheckProgram* program, const Parse
         {
             const CheckProgramAliasError error = alias->error != CHECK_PROGRAM_ALIAS_OK ? (CheckProgramAliasError)alias->error : CHECK_PROGRAM_ALIAS_UNDEFINED;
             *errors += 1;
-            valid = check_driver_alias_error(program, parser, pp, alias, error, record->source + 3, scratch);
+            valid = check_driver_alias_error(program, parser, pp, alias, error, record->source + 3, scalar, scratch);
         }
         else if (!duplicate && alias->error != CHECK_PROGRAM_ALIAS_THREAD_LOCAL)
         {
@@ -9434,7 +9440,7 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
                                              alias->error != CHECK_PROGRAM_ALIAS_OK ? (CheckProgramAliasError)alias->error : CHECK_PROGRAM_ALIAS_UNDEFINED;
         const uint32_t at = alias->attribute < parser->tokens.count ? alias->attribute : 0;
         const CheckInputSymbolPragma* pragma = check_driver_alias_pragma(program, alias);
-        valid = check_driver_alias_error(program, parser, pp, alias, error, pragma != NULL ? pragma->source + 3 : parser->tokens.sources[at], scratch);
+        valid = check_driver_alias_error(program, parser, pp, alias, error, pragma != NULL ? pragma->source + 3 : parser->tokens.sources[at], scalar, scratch);
     }
     valid = valid && (itself != BUSTER_CHECK_NONE || check_driver_pragma_aliases(program, parser, pp, scalar, scratch, &errors));
     if (!valid)

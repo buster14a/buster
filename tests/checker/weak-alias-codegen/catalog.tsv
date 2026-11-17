@@ -11,6 +11,7 @@ undefined-delayed-order	undefined-delayed-order.c	rejected	code-generation error
 missing-target	missing-target.c	-	a never-declared target remains a warning without emitting a clone
 defined-later	defined-later.c	-	a target defined later supplies both declared and implicit weak aliases
 undefined-renamed	undefined-renamed.c	rejected	a renamed target suggests its emitted symbol name
+undefined-renamed-attribute	undefined-renamed-attribute.c	rejected	an ordinary alias suggests the label of the target's earlier declaration
 undefined-duplicate	undefined-duplicate.c	rejected	identical pragma clones report one undefined-target error
 undefined-duplicate-other	undefined-duplicate-other.c	rejected	the first clone keeps its undefined target when a later clone has a definition
 defined-duplicate	defined-duplicate.c	-	a later undefined clone cannot replace an already defined alias

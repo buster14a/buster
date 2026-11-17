@@ -113,6 +113,28 @@ static String8 check_program_alias_label(const CheckInput* input, uint32_t token
     return label;
 }
 
+// An object's asm label, from whichever of its declarations has one, as the emission names its symbol (#2449); an empty
+// one where none has a label. The program keeps an object's last declaration, which need not be the labelled one (a
+// definition after `int f(void) __asm__("g");`). A diagnostic's rare path: one scan of the tokens with attributes, in a
+// unit with an asm keyword alone.
+static String8 check_program_object_label(const CheckProgram* program, uint32_t object, bool scalar)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    String8 label = { 0 };
+    for (uint32_t first = object != 0 && input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count, scalar) : count;
+         label.length == 0 && first < count; first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
+    {
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count, scalar);
+        for (uint32_t selected = lanes; label.length == 0 && selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            label = input->objects[token] == object && input->declarations[token] == token ? check_program_alias_label(input, token) : label;
+        }
+    }
+    return label;
+}
+
 // Whether a declaration's name may be one an alias's, ifunc's or weakref's names: a declaring token of a static object
 // with linkage (at file scope, or declaring the file-scope entity), neither a register variable's nor a compound
 // literal's, whose object isn't a weakref's.

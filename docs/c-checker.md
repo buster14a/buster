@@ -4462,8 +4462,10 @@ What the lowering covers past scalars (#145's programs):
   order clang emits the aliases): "alias must point to a defined variable or
   function" and "ifunc must point to a defined function" with clang's notes
   (that the name must be the mangled one, and the name clang gives each
-  emitted, referenced or defined declaration of that identifier, an
-  overloadable function's mangled one: `check_driver_overload_name`), "alias (or
+  emitted, referenced or defined declaration of that identifier: an asm label
+  any of its declarations has, as `int f(void) __asm__("g");` before `f`'s
+  definition gives `g` (`check_program_object_label`), or an overloadable
+  function's mangled one: `check_driver_overload_name`), "alias (or
   ifunc) definition is part of a cycle", "cannot alias a variable with a
   function" and "cannot alias a function with a variable" with the aliasee's
   definition noted, and "ifunc resolver function must return a pointer".
@@ -11750,15 +11752,25 @@ mixed object/function and internal-linkage declarations. Two functions use the
 ordinary overload selection for calls and typed addresses, with the selected
 return type retained in expressions and constant evaluation. Equal viable
 signatures remain ambiguous. A function clone's candidate note names the
-pragma; an object clone's names TARGET's declaration. References before a later
+pragma, and two functions' notes are sorted by location as clang's overload
+candidates are, so a declaration written between the pragma and a later TARGET
+follows the pragma's note; an object clone's names TARGET's declaration and
+precedes the earlier declaration's. References before a later
 TARGET declaration keep their earlier lookup. Local parameters and block/loop
 declarations shadow the outer lookup set normally. Later declarations diagnose
 conflicting kind, type, definition or linkage against the clone and retain
-later independent errors, including repeated invalid redeclarations. These
+later independent errors, including repeated invalid redeclarations. A
+`static` object redeclaring an object clone gives its error before the clone's
+"weak declaration cannot have internal linkage" at the pragma, as clang checks
+the merged weak attribute after the redeclaration. These
 paths share the existing declaration-recovery and overload machinery.
 
 Compatible declarations carry the weak alias through
-`check_input_symbol_alias`; other emitted clones retain TARGET in
+`check_input_symbol_alias`, which `check_input_symbol_finish` runs in the order
+clang creates the clones (where each TARGET becomes visible, then by
+directive): a declared ALIAS carries the first-created clone, as code
+generation emits that one and ignores later clones of the name, even when a
+later directive created it. Other emitted clones retain TARGET in
 `CheckInputSymbolPragma.alias_target`. Selection keeps the target's definition
 as a base, and `check_program_define_pragma_aliases` adds ALIAS's weak symbol
 with its type and size in the unit containing that definition. Repeated clones

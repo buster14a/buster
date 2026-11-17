@@ -640,6 +640,15 @@ static void check_input_symbol_redeclaration(CheckInputReader* reader, const Che
     }
 }
 
+// The declaration of `#pragma weak A = T`'s T that clang's clone copies (#1849): the latest at the pragma, or else the
+// first later one with external linkage (ProcessPragmaWeak's), or BUSTER_CHECK_NONE for none.
+static uint32_t check_input_symbol_alias_selected(const CheckInputReader* reader, const CheckInputSymbolPragma* record, const uint64_t* ordered, uint32_t count)
+{
+    const CheckInputSymbolNamed target = check_input_symbol_named(reader, ordered, count, record->target, record->token);
+    const uint32_t later = target.next != BUSTER_CHECK_NONE && check_input_linkage(reader->output->declaration_bits, target.next) == 2 ? target.next : BUSTER_CHECK_NONE;
+    return target.previous != BUSTER_CHECK_NONE ? target.previous : later;
+}
+
 // `#pragma weak A = T` (#1849): clang's Sema looks T up at the pragma (or at its first later external declaration) and
 // declares A a weak alias of it, a clone of T's declaration, unless T already has an alias attribute; "weak identifier
 // 'T' never declared" at A otherwise. The shapes whose A the unit declares, with external linkage, of T's kind and type,
@@ -653,9 +662,7 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
 {
     CheckInput* input = reader->output;
     const CBindings* bindings = &reader->bindings;
-    const CheckInputSymbolNamed target = check_input_symbol_named(reader, ordered, count, record->target, record->token);
-    const uint32_t later = target.next != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, target.next) == 2 ? target.next : BUSTER_CHECK_NONE;
-    const uint32_t selected = target.previous != BUSTER_CHECK_NONE ? target.previous : later;
+    const uint32_t selected = check_input_symbol_alias_selected(reader, record, ordered, count);
     const uint8_t kind = selected != BUSTER_CHECK_NONE ? input->declaration_kinds[selected] : C_BINDING_KINDS;
     bool valid = true;
     bool refused = false;
@@ -778,6 +785,9 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                             input->reports[before].pragma = record->pragma + 1;
                             input->reports[before].attribute = record->source + 3;
                             input->reports[before].repeated = true;
+                            // Located at the pragma, but clang's checkAttributesAfterMerging gives it once the static
+                            // redeclaration has merged the clone's weak attribute: after that declaration's error.
+                            input->reports[before].sort = token;
                             (void)check_input_recover_reports(reader, before);
                         }
                     }
@@ -903,6 +913,12 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
         }
     }
     const uint64_t* ordered = valid && count > 1 ? c_bindings_sort(keys, keys + bindings->count, count, !scalar, UINT32_MAX) : keys;
+    // The alias directives, by where each one's clone appears (T's selected declaration, or the directive where T is
+    // already declared), then by directive: clang creates its clones in that order, so the first created is the one a
+    // declaration of A carries and code generation emits, a later one of the same A then being ignored (#2449).
+    uint64_t* clones = valid && present ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)history->count * 2) : NULL;
+    valid = valid && (!present || clones != NULL);
+    uint32_t clone_count = 0;
     for (uint32_t i = 0; valid && present && i < history->count; i += 1)
     {
         CheckInputSymbolPragma* record = history->records + i;
@@ -971,7 +987,9 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
             }
             else if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS)
             {
-                valid = check_input_symbol_alias(reader, record, i, ordered, count, complete);
+                const uint32_t selected_target = check_input_symbol_alias_selected(reader, record, ordered, count);
+                const uint32_t clone_point = selected_target != BUSTER_CHECK_NONE && selected_target > record->token ? selected_target : record->token;
+                clones[clone_count++] = (uint64_t)clone_point << 32 | i;
             }
             else if (record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE && entity)
             {
@@ -995,6 +1013,12 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
                 }
             }
         }
+    }
+    const uint64_t* created = valid && clone_count > 1 ? c_bindings_sort(clones, clones + history->count, clone_count, !scalar, UINT32_MAX) : clones;
+    for (uint32_t c = 0; valid && c < clone_count; c += 1)
+    {
+        const uint32_t i = (uint32_t)created[c];
+        valid = check_input_symbol_alias(reader, history->records + i, i, ordered, count, complete);
     }
     input->warning_events = check_warning_view(&reader->warning_events);
     input->resource |= !valid;
