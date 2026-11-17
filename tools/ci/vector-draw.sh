@@ -16,7 +16,9 @@
 #                                                  and publishes, packed by tools/ci/hosted-product.sh, with the
 #                                                  archive's SHA-256; the configuration's other items install it
 #
-# PREFIX is vector-OOPTIMIZATION. The row is one pool of items across its configurations (its sanitizers,
+# PREFIX is ROW-OOPTIMIZATION, ROW the row's host architecture (BUSTER_HOST_ARCH): `vector`, the explicit vector target,
+# or `native`, the native plain row, which draws AVX-512 CPUs too (#2924) and whose every item builds its own compiler
+# for the CPU it drew, so it has no product. The row is one pool of items across its configurations (its sanitizers,
 # BUSTER_VECTOR_CONFIGURATIONS, whose initials differ): an item is a configuration's initial and one of its shards, `m2`
 # for memory's shard 2 of its items' count. BUSTER_VECTOR_ITEMS lists every item the costliest first, and the row's
 # items are those of its configurations, in that order. Artifact names are not claims: of 16 jobs that upload one name
@@ -52,7 +54,9 @@ set -euo pipefail
 shopt -s inherit_errexit
 
 optimization=${BUSTER_SANITIZER_OPTIMIZATION:?}
-prefix="vector-O$optimization"
+row_arch=${BUSTER_HOST_ARCH:-vector}
+case "$row_arch" in vector | native) ;; *) printf 'vector-draw: BUSTER_HOST_ARCH=%s draws no row\n' "$row_arch" >&2; exit 1 ;; esac
+prefix="$row_arch-O$optimization"
 product_prefix="vector-product-O$optimization"
 attempt=${GITHUB_RUN_ATTEMPT:?}
 read -r -a configurations <<< "${BUSTER_VECTOR_CONFIGURATIONS:?}"
@@ -487,7 +491,8 @@ take()
             printf 'BUSTER_SANITIZER=%s\n' "$configuration"
             printf 'BUSTER_SHARD=%s\n' "$shard"
             printf 'BUSTER_VECTOR_SHARDS=%s\n' "$shards"
-            printf 'BUSTER_VECTOR_BUILDER=%s\n' "$([ "$shard" -eq 1 ] && echo 1 || echo 0)"
+            # A vector configuration's item 1 builds its product; a native item builds its own and shares none.
+            printf 'BUSTER_VECTOR_BUILDER=%s\n' "$([ "$shard" -eq 1 ] && [ "$row_arch" = vector ] && echo 1 || echo 0)"
         } >> "${GITHUB_ENV:?}"
         # The line tools/ci/costs.c reads for the row of the candidate's log.
         printf 'Vector item %s: %s, shard %s of %s\n' "$item" "$configuration" "$shard" "$shards"
@@ -695,9 +700,9 @@ verdict()
             continue
         fi
         # The holder's passing executions in the assignments' attempt and the reruns after it: item 1 of a configuration
-        # with the product it built, the others with one they installed.
+        # with the product it built, the others with one they installed; every native item with the compiler it built.
         built=installed
-        [ "${item:1}" != 1 ] || built=built
+        [ "${item:1}" != 1 ] && [ "$row_arch" = vector ] || built=built
         passing=0
         evidence=''
         for ((at = latest; at <= attempt; at += 1)); do

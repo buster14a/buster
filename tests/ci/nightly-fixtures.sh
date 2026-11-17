@@ -377,22 +377,13 @@ full_jobs()
 {
     local odd=${1:-} conclusion=${2:-success} arch sanitizer shards shard name
     printf '{"jobs":['
-    # The native plain row, the contract's one (#2032; the x86-64 rows are gone with the scalar host, #2924).
-    for arch in native; do
-        for sanitizer in none; do
-            shards=4
-            printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})","status":"completed","conclusion":"skipped"},' "$arch" "$sanitizer"
-            for shard in $(seq 1 "$shards"); do
-                name="Tests on Ubuntu 26.04 ($arch, $sanitizer, O3) / Tests on Ubuntu 26.04 (Clang 23, $arch, $sanitizer, O3, shard $shard of $shards)"
-                if [ "$odd" = "$arch $sanitizer $shard" ]; then
-                    if [ "$conclusion" = missing ]; then continue; fi
-                    printf '{"name":"%s","status":"completed","conclusion":"%s"},' "$name" "$conclusion"
-                else
-                    printf '{"name":"%s","status":"completed","conclusion":"success"},' "$name"
-                fi
-            done
-        done
-    done
+    # The native plain row, drawn since #2924: a candidate and its verdict, the contract's.
+    printf '{"name":"Tests on Ubuntu 26.04 (native, none, O3) / Vector draw 1, candidate 2 (Clang 23, none, O3)","status":"completed","conclusion":"success"},'
+    case "$odd" in
+        native) ;;
+        native-failed) printf '{"name":"Tests on Ubuntu 26.04 (native, none, O3) / Vector row verdict (Clang 23, none, O3)","status":"completed","conclusion":"failure"},' ;;
+        *) printf '{"name":"Tests on Ubuntu 26.04 (native, none, O3) / Vector row verdict (Clang 23, none, O3)","status":"completed","conclusion":"success"},' ;;
+    esac
     printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Tests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})","status":"completed","conclusion":"skipped"},'
     printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector draw 1, candidate 3 (Clang 23, none address thread memory, O3)","status":"completed","conclusion":"success"},'
     if [ "$odd" != vector ]; then
@@ -423,15 +414,15 @@ coverage_case()
 full_jobs > "$fixtures/jobs-9100.json"
 coverage_case 9100 0
 expect_line "$work/coverage.log" $'coverage\tcomplete' 'a full candidate'"'"'s coverage is complete'
-expect_line "$work/coverage.log" $'row\tnative none\tok\t4' 'the native plain row, by its own shard count'
-! grep -q $'^row\tx86-64' "$work/coverage.log" || fail 'a retired x86-64 row is no row of the contract'
+expect_line "$work/coverage.log" $'native\tnone\tok' 'the native plain row, by its verdict'
+! grep -q $'^row\t' "$work/coverage.log" || fail 'no sharded row is the contract'"'"'s since #2924'
 ! grep -q $'^row\tnative memory' "$work/coverage.log" || fail 'a retired native sanitizer row is no row of the contract'
 expect_line "$work/coverage.log" $'auxiliary\tselfhost\tcalled\tok\t3' 'a called auxiliary workflow, every job of it'
 expect_line "$work/coverage.log" $'auxiliary\tbuild\tnot called\tok\t0' 'and one not called, which ran nothing'
 expect_match "$GITHUB_STEP_SUMMARY" 'Merge-queue coverage' 'and the summary says so'
 test "$(grep -c 'actions/runs/9100/jobs' "$fixtures/calls.log")" -eq 1 || fail 'a complete set is read once'
 # Each way a candidate's coverage falls short fails it, after asking again.
-for odd in 'native none 3:missing' 'native none 4:missing' 'native none 2:cancelled' 'native none 1:skipped' 'native none 4:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
+for odd in 'native:' 'native-failed:' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
     full_jobs "${odd%%:*}" "${odd#*:}" > "$fixtures/jobs-9101.json"
     coverage_case 9101 1
     expect_line "$work/coverage.log" $'coverage\tincomplete' "a candidate with $odd is incomplete"
@@ -448,9 +439,9 @@ expect_line "$work/coverage.log" $'auxiliary\tselfhost\tnot called\tran although
 coverage_case 9101 1 ''
 expect_line "$work/coverage.log" $'auxiliary\t\tnot the selector\'s list' 'no selector list'
 # A shard beyond the row's count, or a row whose shards disagree.
-full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (native, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 5 of 5)","status":"completed","conclusion":"success"},&/' > "$fixtures/jobs-9101.json"
+full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (native, none, O3) \/ Vector row verdict (Clang 24, none, O3)","status":"completed","conclusion":"success"},&/' > "$fixtures/jobs-9101.json"
 coverage_case 9101 1
-expect_line "$work/coverage.log" $'row\tnative none\tshard counts disagree\t5' 'shard counts that disagree are no coverage'
+expect_line "$work/coverage.log" $'native\tnone\tmore than one verdict' 'two native verdicts are no coverage'
 # A run without the x86-64 rows (#2924) and an x86-64 shard that fails beside it: no row of the contract, no gap.
 full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)","status":"completed","conclusion":"failure"},&/' > "$fixtures/jobs-9103.json"
 coverage_case 9103 0

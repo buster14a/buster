@@ -65,7 +65,7 @@ nothing, since the queue tested it before it landed.
 - **Aggregate.** The required aggregate passes a candidate only through its
   coverage step, `bash tools/ci/nightly.sh coverage DIR`. That step reads the
   run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
-  - every shard 1..N of the contract's row, `native`'s plain one;
+  - the native plain row's verdict (drawn since #2924);
   - the vector verdict;
   - each fuzz campaign;
   - every job of each auxiliary workflow the selector named
@@ -128,9 +128,10 @@ the row's hosted costs, the same deal on every shard's runner, so the shards run
 each command once ([Shard costs](#shard-costs)). Each vector configuration
 builds its compiler once, on a qualifying CPU, and its items verify and run that
 product (`tools/ci/hosted-product.sh`; [Shared row
-products](../ci.md#shared-row-products), #2032); the `native` plain row's shards each
-build their own (a native build must run on the CPU it was built for), which is
-why the `native` sanitizer rows went (#2032). Run
+products](../ci.md#shared-row-products), #2032); the `native` plain row's items,
+drawn on qualifying CPUs as the vector row's are (#2924), each build their own
+(a native build must run on the CPU it was built for), which is why the
+`native` sanitizer rows went (#2032). Run
 `bash tests/ci/hosted-product.sh` after changing the product's packing, identity
 or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
 4 shards take about 4 to 6. The steps a row needs once (the baseline fallback
@@ -464,7 +465,7 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 
 | Row | Shards | Why |
 | --- | ---: | --- |
-| `native` plain | 4 | more native shards each rebuild the compiler for under a minute less |
+| `native` plain | 4 | its items, drawn as the vector row's (#2924); more items each rebuild the compiler for under a minute less |
 | `vector`, each configuration | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the take gives the run step its configuration's count |
 | others | 4 | already shorter than the run's longest row |
 

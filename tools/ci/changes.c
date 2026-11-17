@@ -3003,7 +3003,7 @@ static void changes_test_split(ChangesTest* test)
 // and skip fuzzing only in the plain scope, as a pull request does. A pull request's 9700X job skips the native
 // correctness step (#1272); every other run's runs it before the measurements. Nightly backlog runs reuse the oracle cache, as
 // pull requests do; the snapshot's comprehensive run checks it, as the daily run did. The hosted rows are the row
-// workflow's jobs (`row`), which the test job calls for each row: its shards check the oracle cache, and they check out
+// workflow's jobs (`row`), which the test job calls for each row: its draws (every row's, #2924) check the oracle cache, and they check out
 // the triggering revision, in every checkout of this repository there
 // (a `ref` that doesn't follow a `repository`), such as the shards' sparse checkout of the vector draw's script and runtime (#2309).
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
@@ -3057,7 +3057,7 @@ static bool changes_oracle_policy(Text workflow, Text row)
     {
         if (line.length > 2 && line.data[0] == ' ' && line.data[1] == ' ' && line.data[2] != ' ' && line.data[2] != '#')
         {
-            job = text_equal_c(line, "  shards:") ? 2 : 0;
+            job = text_equal_c(line, "  draw-1:") ? 2 : 0;
         }
         else if (line.length > 0 && line.data[0] != ' ' && line.data[0] != '#')
         {
@@ -3102,7 +3102,7 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
         const char* after;
     } row_mutants[] = {
         { "      BUSTER_ORACLE_CACHE: check", "      BUSTER_ORACLE_CACHE: use" },
-        { "\n  shards:\n", "\n  tests:\n" },
+        { "\n  draw-1:\n", "\n  tests:\n" },
     };
     for (uint32_t i = 0; i < sizeof(row_mutants) / sizeof(row_mutants[0]); i += 1)
     {
@@ -3169,7 +3169,7 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
         bool row;
         const char* job;
     } jobs[] = {
-        { true, "\n  shards:\n" },
+        { true, "\n  draw-1:\n" },
         { true, "\n      - name: Check out triggering commit\n        if: env.BUSTER_SHARD != ''\n" },
         { false, "\n  benchmarks:\n" },
     };
@@ -3509,7 +3509,7 @@ static bool changes_row_policy(Text row)
         { 0, "  BUSTER_HOST_ARCH: ${{ inputs.host_arch }}" },
         { 0, "  BUSTER_SANITIZER: ${{ inputs.sanitizer }}" },
         { 0, "  BUSTER_SANITIZER_OPTIMIZATION: ${{ inputs.optimization }}" },
-        { 2, "    if: ${{ !cancelled() && inputs.host_arch != 'vector' }}" },
+        { 2, "    if: ${{ !cancelled() }}" },
         { 2, "      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}" },
         { 2, "          ref: ${{ github.sha }}" },
         { 2, "          artifact-name: ${{ inputs.hosted-tools }}" },
@@ -3527,7 +3527,7 @@ static bool changes_row_policy(Text row)
         { 2, "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}-${{ steps.pack.outputs.digest }}" },
     };
     bool seen[sizeof(required) / sizeof(required[0])] = { false };
-    // 0 outside `jobs:`; in it, 2 the shards, 3 any other.
+    // 0 outside `jobs:`; in it, 2 the first draw, which holds every row's steps (#2924), 3 any other.
     bool jobs = false;
     uint32_t job = 0;
     size_t offset = 0;
@@ -3541,7 +3541,7 @@ static bool changes_row_policy(Text row)
         }
         else if (jobs && line.length > 2 && line.data[0] == ' ' && line.data[1] == ' ' && line.data[2] != ' ' && line.data[2] != '#')
         {
-            job = text_equal_c(line, "  shards:") ? 2 : 3;
+            job = text_equal_c(line, "  draw-1:") ? 2 : 3;
         }
         for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
         {
@@ -3568,18 +3568,18 @@ static void changes_test_row_policy(ChangesTest* test, Text row)
         const char* after;
         const char* name;
     } mutants[] = {
-        { "  shards:", "    if: ${{ !cancelled() && inputs.host_arch != 'vector' }}", "    if: ${{ always() && inputs.host_arch != 'vector' }}", "shards after a cancellation" },
-        { "  shards:", "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')", "        if: false", "native rows unbuilt" },
-        { "  shards:", "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')", "        if: env.BUSTER_SHARD != '' && inputs.host_arch != 'x86-64'", "every vector item builds its own" },
-        { "  shards:", "          script: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"", "          script: 'true'", "a vector item that doesn't wait for its product" },
-        { "  shards:", "        uses: ./.github/actions/vector-runtime", "        uses: ./unrelated-action", "a vector product wait without the artifact runtime" },
-        { "  shards:", "          DIGEST: ${{ steps.product.outputs.digest }}", "          DIGEST: ''", "an unchecked vector digest" },
-        { "  shards:", "          name: ${{ steps.product.outputs.name }}", "          name: ${{ steps.product.outputs.name }}\n          run-id: 1", "another run's vector product" },
-        { "  shards:", "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}-${{ steps.pack.outputs.digest }}", "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}", "a vector product named without its SHA-256" },
-        { "  shards:", "        run: bash tools/ci/hosted-product.sh pack \"$RUNNER_TEMP/vector-product\"", "        run: 'true'", "an unpacked vector product" },
-        { "  shards:", "        run: bash tools/ci/hosted-product.sh ownership", "        run: 'true'", "no ownership check on the vector build's tree" },
+        { "  draw-1:", "    if: ${{ !cancelled() }}", "    if: ${{ always() }}", "draws after a cancellation" },
+        { "  draw-1:", "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')", "        if: false", "native rows unbuilt" },
+        { "  draw-1:", "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')", "        if: env.BUSTER_SHARD != '' && inputs.host_arch != 'x86-64'", "every vector item builds its own" },
+        { "  draw-1:", "          script: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"", "          script: 'true'", "a vector item that doesn't wait for its product" },
+        { "  draw-1:", "        uses: ./.github/actions/vector-runtime", "        uses: ./unrelated-action", "a vector product wait without the artifact runtime" },
+        { "  draw-1:", "          DIGEST: ${{ steps.product.outputs.digest }}", "          DIGEST: ''", "an unchecked vector digest" },
+        { "  draw-1:", "          name: ${{ steps.product.outputs.name }}", "          name: ${{ steps.product.outputs.name }}\n          run-id: 1", "another run's vector product" },
+        { "  draw-1:", "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}-${{ steps.pack.outputs.digest }}", "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}", "a vector product named without its SHA-256" },
+        { "  draw-1:", "        run: bash tools/ci/hosted-product.sh pack \"$RUNNER_TEMP/vector-product\"", "        run: 'true'", "an unpacked vector product" },
+        { "  draw-1:", "        run: bash tools/ci/hosted-product.sh ownership", "        run: 'true'", "no ownership check on the vector build's tree" },
         { "env:", "  BUSTER_SANITIZER: ${{ inputs.sanitizer }}", "  BUSTER_SANITIZER: none", "a row's settings not the workflow's" },
-        { "jobs:", "  shards:", "  shards:\n    steps:\n      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4", "a cached product" },
+        { "jobs:", "  draw-1:", "  draw-1:\n    steps:\n      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4", "a cached product" },
     };
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {
@@ -3589,19 +3589,10 @@ static void changes_test_row_policy(ChangesTest* test, Text row)
     }
 }
 
-// The hosted rows' shards (docs/ci.md, #2031): each row runs as many shards as its caller's `shards` input says. The row
-// workflow declares the input (a number, required); its shards job's matrix takes the list 1 to N from a lookup,
-// `shard: ${{ fromJSON('[[], [1], [1, 2], ...]')[inputs.shards] }}`, whose element k must be exactly 1 to k; the job's
-// name (`shard ${{ matrix.shard }} of ${{ inputs.shards }})`) takes the same N, and so does the run step, which the
-// vector row's draws share: `--shard "$BUSTER_SHARD/$shards"`, `shards` the input, or in the vector row its item's
-// configuration's count of items (BUSTER_VECTOR_SHARDS). The shard is the matrix's (`BUSTER_SHARD: ${{ matrix.shard }}`)
-// or, in the vector row's draws, the item its collector assigned a candidate. The test job in 9700x.yml must pass
-// `shards:` an expression whose every number (outside its quoted strings) is one the lookup has. `parallel --shard K/N`
-// deals the inventory to N shards, so disagreeing values would leave commands unrun (or run some twice) with every job
-// green. The vector row's items (BUSTER_VECTOR_ITEMS, #2033) are each configuration's (none, address, thread and memory,
-// by their initials) shards 1 to N, each once, N one the lookup has; its first draw starts 3 candidates per item: a pull
-// request's row, `none` alone, 3 per plain item, and the four configurations' pool 3 per item, in the candidates' list
-// and in its collector's count alike.
+// The drawn rows' items (BUSTER_VECTOR_ITEMS, #2033): each configuration's (none, address, thread and memory, by their
+// initials) shards 1 to N, each once, N at most `elements`; the first draw starts 3 candidates per item: a single
+// configuration's row, `none` alone (a pull request's vector row, the native row), 3 per plain item, and the four
+// configurations' pool 3 per item, in the candidates' list and in its collector's count alike.
 static bool changes_vector_items(const char* text, uint32_t elements)
 {
     static const char items[] = "\n  BUSTER_VECTOR_ITEMS: '";
@@ -3662,93 +3653,36 @@ static bool changes_vector_items(const char* text, uint32_t elements)
     return valid && candidates != NULL && collector != NULL && candidates < collector && counted != NULL && next != NULL && counted < next;
 }
 
+// The hosted rows' shards (docs/ci.md, #2031): every row is drawn since #2924, and a row's shards are its configuration's
+// items, BUSTER_VECTOR_ITEMS', each configuration's 1 to its count (changes_vector_items, at most 8). The run step, which
+// every draw shares, deals the inventory by `--shard "$BUSTER_SHARD/$shards"`, its shard the item the draw's collector
+// assigned and its N the item's configuration's count (`shards=$BUSTER_VECTOR_SHARDS`, which the take sets). Neither the
+// row workflow nor its caller may bring back a `shards` count of their own: `parallel --shard K/N` deals the inventory
+// to N shards, so a second N that disagreed would leave commands unrun (or run some twice) with every job green.
 static bool changes_shard_policy(Text workflow, Text row)
 {
     const char* text = text_terminated(row);
-    static const char declared[] = "\n      shards:\n        description: ";
-    static const char typed[] = "\n        type: number\n        required: true\n";
-    const char* input = strstr(text, declared);
-    const char* input_end = input != NULL ? strchr(input + sizeof(declared) - 1, '\n') : NULL;
-    bool valid = input_end != NULL && strncmp(input_end, typed, sizeof(typed) - 1) == 0;
-    const char* job = strstr(text, "\n  shards:\n");
-    static const char lookup[] = "\n        shard: ${{ fromJSON('[";
-    const char* found = valid && job != NULL ? strstr(job, lookup) : NULL;
-    const char* at = found != NULL ? found + sizeof(lookup) - 1 : NULL;
-    // The lookup's elements: the first empty, each next one more, `[1, ..., k]`, separated by ", " and closed by "]".
-    uint32_t elements = 0;
-    valid = at != NULL && strncmp(at, "[]", 2) == 0;
-    at = valid ? at + 2 : at;
-    while (valid && strncmp(at, ", [", 3) == 0)
-    {
-        at += 3;
-        elements += 1;
-        for (uint32_t k = 1; valid && k <= elements; k += 1)
-        {
-            char* end = NULL;
-            const unsigned long value = *at >= '0' && *at <= '9' ? strtoul(at, &end, 10) : 0;
-            const char* separator = k < elements ? ", " : "]";
-            valid = value == k && end != NULL && strncmp(end, separator, strlen(separator)) == 0;
-            at = valid ? end + strlen(separator) : at;
-        }
-    }
-    static const char indexed[] = "]')[inputs.shards] }}\n";
-    valid = valid && elements != 0 && strncmp(at, indexed, sizeof(indexed) - 1) == 0;
-    const size_t length = job != NULL ? strlen(job) : 0;
-    static const char name[] = "shard ${{ matrix.shard }} of ${{ inputs.shards }})";
-    static const char count[] = "\n          shards=${{ inputs.shards }}\n"
-                                "          if [ \"$BUSTER_HOST_ARCH\" = vector ]; then\n"
-                                "              shards=$BUSTER_VECTOR_SHARDS\n"
-                                "          fi\n";
-    static const char command[] = "--shard \"$BUSTER_SHARD/$shards\"";
-    static const char shard[] = "\n      BUSTER_SHARD: ${{ matrix.shard }}\n";
-    valid = valid && memmem(job, length, name, sizeof(name) - 1) != NULL && memmem(job, length, count, sizeof(count) - 1) != NULL;
-    valid = valid && memmem(job, length, command, sizeof(command) - 1) != NULL && memmem(job, length, shard, sizeof(shard) - 1) != NULL;
-    // The vector row's items: each configuration's 1 to its count, which the lookup must have too.
-    valid = valid && changes_vector_items(text, elements);
-    // The caller's `shards:`, in the `with:` of the job that uses the row workflow: each number one the lookup has.
     const char* caller = strstr(text_terminated(workflow), "\n    uses: ./.github/workflows/hosted-correctness.yml\n    with:\n");
     const char* with_end = caller != NULL ? strstr(caller + 1, "\n\n") : NULL;
-    static const char passed[] = "\n      shards: ${{ ";
-    const char* given = caller != NULL ? strstr(caller, passed) : NULL;
-    valid = valid && given != NULL && (with_end == NULL || given < with_end);
-    const char* value = valid ? given + sizeof(passed) - 1 : NULL;
-    uint32_t numbers = 0;
-    bool quoted = false;
-    while (valid && *value != '\n' && *value != 0)
-    {
-        quoted = *value == '\'' ? !quoted : quoted;
-        char* end = NULL;
-        const unsigned long number = !quoted && *value >= '0' && *value <= '9' ? strtoul(value, &end, 10) : 0;
-        valid = end == NULL || (number >= 1 && number <= elements);
-        numbers += end != NULL;
-        value = end != NULL ? end : value + 1;
-    }
-    return valid && numbers != 0 && !quoted;
+    const char* passed = caller != NULL ? strstr(caller, "\n      shards: ") : NULL;
+    bool valid = caller != NULL && (passed == NULL || (with_end != NULL && passed > with_end));
+    valid = valid && strstr(text, "\n      shards:\n        description: ") == NULL && strstr(text, "inputs.shards") == NULL && strstr(text, "matrix.shard") == NULL;
+    valid = valid && strstr(text, "\n          shards=$BUSTER_VECTOR_SHARDS\n") != NULL && strstr(text, "--shard \"$BUSTER_SHARD/$shards\"") != NULL;
+    return valid && changes_vector_items(text, 8);
 }
 
 static void changes_test_shard_policy(ChangesTest* test, Text workflow, Text row)
 {
-    changes_expect(test, changes_shard_policy(workflow, row), "shard policy: the row's shard lookup, job name, command, vector items and its caller's counts agree", (Text){ 0 });
+    changes_expect(test, changes_shard_policy(workflow, row), "shard policy: every row's N its configuration's items, the run step's N the take's", (Text){ 0 });
     static const struct
     {
         bool caller;
         const char* before;
         const char* after;
     } mutants[] = {
-        { false, "[1, 2, 3, 4], ", "[1, 2, 4, 3], " },
-        { false, "[1, 2, 3, 4], ", "[1, 2, 3], " },
-        { false, "[1, 2, 3], ", "" },
-        { false, "fromJSON('[[], [1], ", "fromJSON('[[1], [1], " },
-        { false, "fromJSON('[[], [1], ", "fromJSON('[[], [0], " },
-        { false, "[1, 2, 3, 4, 5, 6, 7, 8]]')", "[1, 2, 3, 4, 5, 6, 7, 8, 8]]')" },
-        { false, "]')[inputs.shards] }}", "]')[inputs.optimization] }}" },
-        { false, "of ${{ inputs.shards }})", "of 4)" },
         { false, "--shard \"$BUSTER_SHARD/$shards\"", "--shard \"$BUSTER_SHARD/4\"" },
-        { false, "          shards=${{ inputs.shards }}\n", "          shards=4\n" },
-        { false, "              shards=$BUSTER_VECTOR_SHARDS\n", "              shards=4\n" },
-        { false, "        type: number\n        required: true\n      hosted-tools:", "        type: number\n        required: false\n      hosted-tools:" },
-        { false, "\n      shards:\n        description: ", "\n      shard-count:\n        description: " },
-        { false, "      BUSTER_SHARD: ${{ matrix.shard }}", "      BUSTER_SHARD: 1" },
+        { false, "          shards=$BUSTER_VECTOR_SHARDS\n", "          shards=4\n" },
+        { false, "      hosted-tools:\n", "      shards:\n        description: How many shards\n        type: number\n        required: true\n      hosted-tools:\n" },
         { false, " n1 n2 n3 n4'", " n1 n2 n3'" },
         { false, " n1 n2 n3 n4'", " n1 n2 n3 n3'" },
         { false, " n1 n2 n3 n4'", " n1 n2 n3 n4 n5'" },
@@ -3762,16 +3696,14 @@ static void changes_test_shard_policy(ChangesTest* test, Text workflow, Text row
         { false, ", 46, 47, 48]'", ", 46, 47]'" },
         { false, "      BUSTER_DRAW_CANDIDATES: ${{ inputs.sanitizer == 'none' && '12' || '48' }}", "      BUSTER_DRAW_CANDIDATES: ${{ inputs.sanitizer == 'none' && '12' || '36' }}" },
         { false, "      BUSTER_DRAW_CANDIDATES: ${{ inputs.sanitizer == 'none' && '12' || '48' }}", "      BUSTER_DRAW_CANDIDATES: '12'" },
-        { true, "      shards: ${{ ", "      shards: ${{ 0 && 1 || " },
-        { true, "      shards: ${{ ", "      shards: ${{ 9 && 1 || " },
-        { true, "      shards: ${{ ", "      shard_count: ${{ " },
+        { true, "    with:\n      host_arch: ${{ matrix.host_arch }}\n", "    with:\n      shards: ${{ 4 }}\n      host_arch: ${{ matrix.host_arch }}\n" },
     };
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {
         bool found = false;
         const Text changed = changes_mutant(mutants[i].caller ? workflow : row, NULL, mutants[i].before, mutants[i].after, &found);
         const bool rejected = mutants[i].caller ? !changes_shard_policy(changed, row) : !changes_shard_policy(workflow, changed);
-        changes_expect(test, found && rejected, "shard policy rejects a shard lookup, N, vector items or caller's count that disagree", text_c(mutants[i].after));
+        changes_expect(test, found && rejected, "shard policy rejects a row's N, items or a caller's count that disagree", text_c(mutants[i].after));
     }
 }
 
@@ -3887,12 +3819,12 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
         valid = strstr(text, build) != NULL;
     }
     static const char* const required[] = {
-        "\n          printf 'prefix=vector-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"\n",
+        "\n          printf 'prefix=%s-O%s-%s\\n' \"$BUSTER_HOST_ARCH\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"\n",
         "\n          printf 'product=vector-product-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"\n",
         "\n          case \" $BUSTER_VECTOR_CONFIGURATIONS \" in\n              *\" $BUSTER_SANITIZER \"*) ;;\n",
         "\n          test \"${BUSTER_VECTOR_ITEM:0:1}\" = \"${BUSTER_SANITIZER:0:1}\"\n          test \"${BUSTER_VECTOR_ITEM:1}\" = \"$BUSTER_SHARD\"\n",
         "\n          name: ${{ steps.probe.outputs.prefix }}-probe-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}\n",
-        "\n      - name: Take the vector item the draw assigns, or end as a redraw\n        if: inputs.host_arch == 'vector'\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
+        "\n      - name: Take the vector item the draw assigns, or end as a redraw\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
         "\n            bash \"$RUNNER_TEMP/vector-draw.sh\" take \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\" \"$VERDICT\" \"$RUNNER_TEMP/vector-draw/record\"\n",
         "\n      - name: Assign the draw's vector items to its qualifying candidates by rank\n        id: assign\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
         "\n            bash \"$RUNNER_TEMP/vector-draw.sh\" assign \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATES\" \"$BUSTER_DRAW_NEXT\"\n",
@@ -3901,16 +3833,16 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
         "\n          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false\n",
         "\n      - name: Record that the vector builder has finished publishing\n        if: ${{ always() && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER == '1' }}\n",
         "\n          name: ${{ steps.probe.outputs.prefix }}-builder-${{ env.BUSTER_SANITIZER }}-ended\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: false\n",
-        "\n      - name: Record the vector candidate's REST requests\n        if: ${{ always() && inputs.host_arch == 'vector' }}\n",
-        "\n          name: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
+        "\n      - name: Record the vector candidate's REST requests\n        if: ${{ always() }}\n",
+        "\n          name: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
         "\n      - name: Record the vector collector's REST requests\n        if: always()\n",
-        "\n          name: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
+        "\n          name: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
         "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" verdict \"$RUNNER_TEMP/vector-records\"\n",
-        "\n          pattern: vector-O${{ inputs.optimization }}-*\n",
+        "\n          pattern: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-*\n",
         "\n    steps: &row-steps\n",
         "\n    steps: &collect-steps\n",
-        "\n    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]\n    if: ${{ !cancelled() && inputs.host_arch == 'vector' }}\n",
-        "\n          if [ \"$BUSTER_HOST_ARCH\" = vector ] && [ \"$path\" != vector ]; then\n",
+        "\n    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]\n    if: ${{ !cancelled() }}\n",
+        "\n          if [ \"$path\" != vector ]; then\n",
     };
     for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
     {
@@ -3929,8 +3861,9 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
     const char* product_upload = strstr(text, "\n      - name: Publish the product to the configuration's other items\n");
     const char* kernels = strstr(text, "\n      - name: Confirm the vector kernels run on this CPU\n");
     valid = valid && product_upload != NULL && builder_marker != NULL && kernels != NULL && product_upload < builder_marker && builder_marker < kernels;
-    // Each draw runs the shards' steps, and each collector the first's; every vector record refuses to overwrite one.
-    uint32_t draws = 0;
+    // The first draw holds every row's steps (#2924: no row has shards), the other three reuse them, and each collector
+    // the first's; every vector record refuses to overwrite one.
+    uint32_t draws = strstr(text, "\n  draw-1:\n") != NULL && strstr(text, "\n  shards:\n") == NULL ? 1 : 0;
     for (const char* step = strstr(text, "\n    steps: *row-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *row-steps\n"))
     {
         draws += 1;
@@ -3979,7 +3912,8 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
         { 2, "-mavx512bitalg -mavx512vnni)", "-mavx512bitalg -mavx512vnni -mavx512ifma)", "build flags the probe isn't built with" },
         { 0, "-mavx512bitalg -mavx512vnni \"$draw/probe.c\"", "-mavx512bitalg \"$draw/probe.c\"", "a probe built without a flag of the build's" },
         { 2, "set(host_flags -march=x86-64-v4 ", "set(host_flags -march=znver5 ", "a vector target of one CPU model" },
-        { 0, "'prefix=vector-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'prefix=vector-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" 1", "records shared between attempts" },
+        { 0, "'prefix=%s-O%s-%s\\n' \"$BUSTER_HOST_ARCH\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'prefix=%s-O%s-%s\\n' \"$BUSTER_HOST_ARCH\" \"$BUSTER_SANITIZER_OPTIMIZATION\" 1", "records shared between attempts" },
+        { 0, "'prefix=%s-O%s-%s\\n' \"$BUSTER_HOST_ARCH\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'prefix=vector-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "rows sharing their records" },
         { 0, "'product=vector-product-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'product=vector-product-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" 1", "products shared between attempts" },
         { 0, "-${{ steps.pack.outputs.digest }}\n          path: ${{ runner.temp }}/vector-product/product.tar.zst\n          compression-level: 0\n          overwrite: false", "-${{ steps.pack.outputs.digest }}\n          path: ${{ runner.temp }}/vector-product/product.tar.zst\n          compression-level: 0\n          overwrite: true", "a product that overwrites another" },
         { 0, "          test \"${BUSTER_VECTOR_ITEM:1}\" = \"$BUSTER_SHARD\"\n", "", "an item's shard unchecked" },
@@ -3994,7 +3928,7 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
         { 0, "            cat \"$RUNNER_TEMP/vector-assignment\"", "            gh api repos/owner/repo/actions/runs/1/artifacts?per_page=100\n            cat \"$RUNNER_TEMP/vector-assignment\"", "REST artifact polling restored in the collector" },
         { 0, "        if: ${{ always() && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER == '1' }}", "        if: env.BUSTER_VECTOR_BUILDER == '1'", "a builder failure without its terminal marker" },
         { 0, "-builder-${{ env.BUSTER_SANITIZER }}-ended", "-builder-ended", "a terminal marker without its configuration" },
-        { 0, "      - name: Record the vector candidate's REST requests\n        if: ${{ always() && inputs.host_arch == 'vector' }}", "      - name: Record the vector candidate's REST requests\n        if: inputs.host_arch == 'vector'", "a failed candidate's REST requests unreported" },
+        { 0, "      - name: Record the vector candidate's REST requests\n        if: ${{ always() }}", "      - name: Record the vector candidate's REST requests\n        if: success()", "a failed candidate's REST requests unreported" },
         { 0, "      - name: Record the vector collector's REST requests\n        if: always()", "      - name: Record the vector collector's REST requests\n        if: success()", "a failed collector's REST requests unreported" },
         { 0, "-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}", "-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}", "candidate REST ledgers with colliding names" },
         { 0, "-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}", "-rest-collect", "collector REST ledgers with colliding names" },
@@ -4004,9 +3938,9 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
         { 0, "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: *row-steps\n", "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: []\n", "a draw without the shards' steps" },
         { 0, "      BUSTER_DRAW_NEXT: '5'\n    steps: *collect-steps\n", "      BUSTER_DRAW_NEXT: '5'\n    steps: []\n", "a collector without the first's steps" },
         { 0, "    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]", "    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4]", "a verdict before the last draw's assignment" },
-        { 0, "    if: ${{ !cancelled() && inputs.host_arch == 'vector' }}\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "    if: inputs.host_arch == 'vector'\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "a verdict skipped after a failure" },
-        { 0, "          pattern: vector-O${{ inputs.optimization }}-*", "          pattern: vector-O${{ inputs.optimization }}-${{ github.run_attempt }}-*", "a verdict blind to the attempt a rerun keeps" },
-        { 0, "          if [ \"$BUSTER_HOST_ARCH\" = vector ] && [ \"$path\" != vector ]; then", "          if false; then", "a scalar vector row" },
+        { 0, "    if: ${{ !cancelled() }}\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "    if: success()\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "a verdict skipped after a failure" },
+        { 0, "          pattern: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-*", "          pattern: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-*", "a verdict blind to the attempt a rerun keeps" },
+        { 0, "          if [ \"$path\" != vector ]; then", "          if false; then", "a drawn row on the scalar path" },
     };
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {

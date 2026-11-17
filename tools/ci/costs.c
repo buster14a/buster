@@ -500,6 +500,8 @@ struct CostsLog
     uint32_t configurations;
     bool itemized;
     uint32_t item_row;
+    // A draw's row's architecture (costs_architectures): the vector row's, or the native row's since #2924.
+    uint32_t draw_architecture;
     uint32_t item_shard;
     uint32_t item_shards;
     uint32_t row;
@@ -742,13 +744,19 @@ static void costs_log_name(CostsLog* log, CostsSlice name)
     }
     else if (costs_starts(own, "Vector draw "))
     {
-        // `Vector draw L, candidate C (Clang V, CONFIGURATIONS, O3)`, its caller's `(vector, CONFIGURATIONS, O3)`: the
-        // row's sanitizers, separated by spaces. Its row is the one sanitizer's, or else its item line's.
+        // `Vector draw L, candidate C (Clang V, CONFIGURATIONS, O3)`, its caller's `(ARCH, CONFIGURATIONS, O3)`, ARCH
+        // `vector` or, since #2924, `native`: the row's sanitizers, separated by spaces. Its row is the one sanitizer's,
+        // or else its item line's.
         log->draw = true;
         const uint32_t count = costs_name_fields(caller, fields, 6);
-        const bool vector = count == 3 && costs_equal(fields[0], BUSTER_COSTS_SLICE("vector")) && costs_equal(fields[2], BUSTER_COSTS_SLICE(BUSTER_COSTS_OPTIMIZATION));
+        uint32_t architecture = BUSTER_COSTS_ARCHITECTURES;
+        for (uint32_t i = 0; count == 3 && i < BUSTER_COSTS_ARCHITECTURES; i += 1)
+        {
+            architecture = costs_equal(fields[0], (CostsSlice){ costs_architectures[i], strlen(costs_architectures[i]) }) ? i : architecture;
+        }
+        log->draw_architecture = architecture;
         uint32_t single = BUSTER_COSTS_SANITIZERS;
-        bool valid = vector && fields[1].length != 0;
+        bool valid = architecture < BUSTER_COSTS_ARCHITECTURES && costs_equal(fields[2], BUSTER_COSTS_SLICE(BUSTER_COSTS_OPTIMIZATION)) && fields[1].length != 0;
         size_t start = 0;
         for (size_t i = 0; valid && i <= fields[1].length; i += 1)
         {
@@ -761,8 +769,8 @@ static void costs_log_name(CostsLog* log, CostsSlice name)
                 start = i + 1;
             }
         }
-        log->row = valid && single < BUSTER_COSTS_SANITIZERS ? BUSTER_COSTS_VECTOR * BUSTER_COSTS_SANITIZERS + single : BUSTER_COSTS_ROWS;
-        log->error = valid ? NULL : "a vector draw whose caller isn't the vector row";
+        log->row = valid && single < BUSTER_COSTS_SANITIZERS ? architecture * BUSTER_COSTS_SANITIZERS + single : BUSTER_COSTS_ROWS;
+        log->error = valid ? NULL : "a draw whose caller isn't a drawn row";
     }
     else
     {
@@ -835,7 +843,7 @@ static bool costs_log_item(CostsLog* log, CostsSlice rest)
     valid = valid && k != 0 && costs_starts(costs_after(numbers, 8 + k), " of ");
     valid = valid && costs_whole_number(costs_after(numbers, 12 + k), BUSTER_COSTS_SHARDS, &shards);
     valid = valid && shard == item_shard && shard >= 1 && shard <= shards;
-    log->item_row = BUSTER_COSTS_VECTOR * BUSTER_COSTS_SANITIZERS + sanitizer;
+    log->item_row = log->draw_architecture * BUSTER_COSTS_SANITIZERS + sanitizer;
     log->item_shard = (uint32_t)shard;
     log->item_shards = (uint32_t)shards;
     return valid;
@@ -2382,9 +2390,15 @@ static void costs_test_logs(CostsTest* test, const CostsList* list)
     costs_expect(test, draw.error == NULL && draw.draw && draw.row == BUSTER_COSTS_VECTOR * BUSTER_COSTS_SANITIZERS && draw.shard == 3 && draw.shards == 4 && draw.sample_count == 1, "a vector draw's row from its caller, its shard from its report");
     free(draw.samples);
     free(drawn.data);
-    CostsText stray = costs_test_log("Tests on Ubuntu 26.04 (native, none, O3) / Vector draw 1, candidate 1 (Clang 23, none, O3)", "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_A, "1 of 4, 1 of 5 commands", "Gamma [2 CPUs]: passed in 3.0 s, 6.0 s of CPU\n", "20");
+    CostsText stray = costs_test_log("Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 1, candidate 1 (Clang 23, none, O3)", "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_A, "1 of 4, 1 of 5 commands", "Gamma [2 CPUs]: passed in 3.0 s, 6.0 s of CPU\n", "20");
     CostsLog strayed = costs_log_parse(list, stray);
-    costs_expect(test, strayed.error != NULL && strcmp(strayed.error, "a vector draw whose caller isn't the vector row") == 0, "a draw outside the vector row is rejected");
+    costs_expect(test, strayed.error != NULL && strcmp(strayed.error, "a draw whose caller isn't a drawn row") == 0, "a draw outside the drawn rows is rejected");
+    // The native row's draws (#2924): their row is the native plain row's.
+    CostsText native_drawn = costs_test_log("Tests on Ubuntu 26.04 (native, none, O3) / Vector draw 1, candidate 4 (Clang 23, none, O3)", "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_A, "2 of 4, 1 of 5 commands", "Gamma [2 CPUs]: passed in 3.0 s, 6.0 s of CPU\n", "20");
+    CostsLog native_draw = costs_log_parse(list, native_drawn);
+    costs_expect(test, native_draw.error == NULL && native_draw.draw && native_draw.row == 0 * BUSTER_COSTS_SANITIZERS && native_draw.shard == 2 && native_draw.shards == 4, "a native draw's row is the native plain row's");
+    free(native_draw.samples);
+    free(native_drawn.data);
     free(strayed.samples);
     free(stray.data);
     // A pool's draw (the plain and sanitizer configurations as one row of items): its row is its item line's, which
@@ -2406,8 +2420,8 @@ static void costs_test_logs(CostsTest* test, const CostsList* list)
         { "none thread", "Vector item t2: thread, shard 3 of 4", "3 of 4", 0, "a vector item that isn't one of its draw's items" },
         { "none thread", "Vector item t2: thread, shard 2 of 4", "3 of 4", 0, "a vector item that isn't the draw's row or the report's shard" },
         { "none thread", "Vector item t2: thread, shard 2 of 4, more", "2 of 4", 0, "a vector item that isn't one of its draw's items" },
-        { "none none", "Vector item n2: none, shard 2 of 4", "2 of 4", 0, "a vector draw whose caller isn't the vector row" },
-        { "none undefined", "Vector item n2: none, shard 2 of 4", "2 of 4", 0, "a vector draw whose caller isn't the vector row" },
+        { "none none", "Vector item n2: none, shard 2 of 4", "2 of 4", 0, "a draw whose caller isn't a drawn row" },
+        { "none undefined", "Vector item n2: none, shard 2 of 4", "2 of 4", 0, "a draw whose caller isn't a drawn row" },
     };
     for (uint32_t i = 0; i < sizeof(pools) / sizeof(pools[0]); i += 1)
     {
