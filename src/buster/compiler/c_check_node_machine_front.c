@@ -631,7 +631,7 @@ struct NodeFront
 // And what begins them for a unit (whether the front writes the window, the operators' kinds and codes, the front run
 // beside it); the names' pass over a chunk's records, after the front's own, which gives each name's leaf its
 // declaration's line; and a record kept at a chunk's end, at `to` from `from`, whose literal's line and whose call's
-// arguments (`arguments`: the kept calls' so far) go with it.
+// arguments (`arguments`: the kept calls' so far) go with it. Each call of one is under this guard too: the other units have the front without the window.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 static inline __attribute__((always_inline)) void node_facts_window_leaf(NodeFront* front, CheckInputReader* reader, uint32_t record, uint32_t token, uint32_t category,
                                                                          uint32_t declaration, const CheckLiteral* decoded);
@@ -1163,10 +1163,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                             {
                                 front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_IDENTIFIER;
                                 front->leaf_integers[record] = declaration;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                                 if (window)
                                 {
                                     node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_IDENTIFIER, declaration, NULL);
                                 }
+#endif
                             }
                         }
                         break;
@@ -1209,10 +1211,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                             front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_LITERAL;
                             front->leaf_types[record] = decoded.type;
                             front->leaf_integers[record] = decoded.integer;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                             if (window)
                             {
                                 node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_LITERAL, 0, &decoded);
                             }
+#endif
                         }
                     }
                     else if (!left)
@@ -1235,10 +1239,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                             front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_STRING;
                             front->leaf_types[record] = string->type;
                             front->leaf_integers[record] = string->object;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                             if (window)
                             {
                                 node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_STRING, 0, NULL);
                             }
+#endif
                         }
                     }
                     else if (value)
@@ -1324,11 +1330,13 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                         {
                             front->members[record] = member;
                         }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                         if (record != BUSTER_NODE_FRONT_UNKNOWN && window)
                         {
                             // A member's name, and a cast's type, its token's query's.
                             node_facts_window_operator(front, reader, record, op, token, values[0], b, c, code == CHECK_INPUT_CODE_CAST ? reader->query_types[token] : member);
                         }
+#endif
                     }
                     break;
                 }
@@ -1367,10 +1375,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                                     front->argument_count += 1;
                                 }
                             }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                             if (window)
                             {
                                 node_facts_window_call(front, reader, record, token, values, count);
                             }
+#endif
                         }
                     }
                     break;
@@ -1401,12 +1411,16 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                             const CheckOp op = condition ? CHECK_OP_CONDITION : CHECK_OP_CAST;
                             const uint32_t root = node_front_add(front, op, token, values[k], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_DISCARD,
                                                                  BUSTER_TYPE_VOID, lean);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                             if (root != BUSTER_NODE_FRONT_UNKNOWN && window)
                             {
                                 // A statement's discard is a cast to void.
                                 node_facts_window_operator(front, reader, root, op, token, values[k], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
                                                            condition ? 0 : BUSTER_TYPE_VOID);
                             }
+#else
+                            (void)root;
+#endif
                         }
                     }
                     break;
@@ -1425,10 +1439,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                         if (record != BUSTER_NODE_FRONT_UNKNOWN)
                         {
                             front->roots[record] = 1;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                             if (window)
                             {
                                 node_facts_window_operator(front, reader, record, op, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, 0);
                             }
+#endif
                         }
                     }
                     break;
@@ -1445,11 +1461,13 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                         if (record != BUSTER_NODE_FRONT_UNKNOWN)
                         {
                             front->roots[record] = 1;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                             if (window)
                             {
                                 // Its conversion's type is the function's.
                                 node_facts_window_operator(front, reader, record, CHECK_OP_CONVERT, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, type);
                             }
+#endif
                         }
                     }
                     break;
@@ -1470,12 +1488,14 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                         {
                             record = node_front_add(front, CHECK_OP_INITIALIZE, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_INITIALIZER,
                                                     reader->query_types[token], lean);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                             if (record != BUSTER_NODE_FRONT_UNKNOWN && window)
                             {
                                 // No window holds an initialization's own record: its expression is its value's.
                                 node_facts_window_operator(front, reader, record, CHECK_OP_INITIALIZE, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
                                                            reader->query_types[token]);
                             }
+#endif
                         }
                     }
                     break;
