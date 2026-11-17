@@ -35,10 +35,16 @@ struct CheckInputSymbolPragma
     uint32_t diagnostic_source;
     uint32_t diagnostic_location;
     uint32_t declaration;
+    // TARGET's declaration captured when clang creates its clone. It also locates a clone carried by a real ALIAS
+    // declaration; code-generation diagnostics must not use that declaration's own attributes or source location.
+    uint32_t alias_declaration;
     // `#pragma weak A = T` whose A the unit never declares (#1849): T's declaration, whose definition the emission gives
     // a weak symbol A of its own (check_program_define_pragma_aliases), as clang's clone of T's declaration is; else
     // BUSTER_CHECK_NONE.
     uint32_t alias_target;
+    // A function clone's immutable overload chain. Uses before its creation retain their ordinary heads.
+    uint32_t overload_head;
+    uint32_t overload_declaration;
     uint8_t kind;
     uint8_t warning;
     bool supported;
@@ -50,6 +56,17 @@ struct CheckInputSymbolPragmas
     CheckInputSymbolPragma* records;
     uint32_t count;
 };
+
+static uint32_t check_input_symbol_alias_count(const CheckInputSymbolPragmas* history)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; history != NULL && i < history->count; i += 1)
+    {
+        count += history->records[i].supported && history->records[i].kind == CHECK_SYMBOL_PRAGMA_ALIAS &&
+                 history->records[i].warning == CHECK_SYMBOL_WARNING_NONE;
+    }
+    return count;
+}
 
 static const CheckInputSymbolPragma* check_input_symbol_warning(const CheckInput* input, const CheckWarningEvent* event)
 {
@@ -83,7 +100,9 @@ static bool check_input_symbol_record(CheckInputReader* reader, uint32_t pragma,
     if (matched)
     {
         *record = (CheckInputSymbolPragma){ .pragma = pragma, .source = source, .end = end, .token = token,
-                                           .declaration = BUSTER_CHECK_NONE, .alias_target = BUSTER_CHECK_NONE, .kind = rename ? CHECK_SYMBOL_PRAGMA_REDEFINE : CHECK_SYMBOL_PRAGMA_WEAK,
+                                           .declaration = BUSTER_CHECK_NONE, .alias_declaration = BUSTER_CHECK_NONE, .alias_target = BUSTER_CHECK_NONE,
+                                           .overload_declaration = BUSTER_CHECK_NONE,
+                                           .kind = rename ? CHECK_SYMBOL_PRAGMA_REDEFINE : CHECK_SYMBOL_PRAGMA_WEAK,
                                            .supported = true };
         uint32_t at = source + 3;
         if (!check_input_symbol_identifier(reader, at, end))
@@ -333,6 +352,294 @@ static CheckInputSymbolNamed check_input_symbol_named(const CheckInputReader* re
     return result;
 }
 
+typedef struct CheckInputSymbolClone CheckInputSymbolClone;
+struct CheckInputSymbolClone
+{
+    uint32_t target;
+    uint32_t previous;
+    uint32_t position;
+};
+
+// TARGET is looked up at the directive, or at its first later external declaration. The clone enters lookup at
+// that point. These snapshots are cached only after the source walk reaches it; a later use need not scan bindings.
+static CheckInputSymbolClone check_input_symbol_clone(const CheckInputReader* reader, const CheckInputSymbolPragma* record, uint32_t limit)
+{
+    const CheckInput* input = reader->output;
+    const CBindings* bindings = &reader->bindings;
+    CheckInputSymbolClone clone = { .target = record->alias_declaration, .previous = record->overload_declaration, .position = record->token };
+    uint32_t before = BUSTER_CHECK_NONE;
+    for (uint32_t e = 0; clone.target == BUSTER_CHECK_NONE && e < bindings->count; e += 1)
+    {
+        if (bindings->operation[e] == C_BINDING_DECLARE && bindings->depth[e] == 0 && bindings->key[e] == record->target &&
+            bindings->point[e] <= limit)
+        {
+            const uint32_t declaration = bindings->declaration[e];
+            if (bindings->point[e] <= record->token)
+            {
+                before = declaration;
+            }
+            else if (before == BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 2)
+            {
+                clone.target = declaration;
+            }
+        }
+    }
+    clone.target = clone.target == BUSTER_CHECK_NONE ? before : clone.target;
+    clone.position = clone.target != BUSTER_CHECK_NONE && clone.target > record->token ? clone.target : record->token;
+    if (clone.previous == BUSTER_CHECK_NONE && clone.target < input->token_count)
+    {
+        for (uint32_t e = 0; e < bindings->count; e += 1)
+        {
+            if (bindings->operation[e] == C_BINDING_DECLARE && bindings->depth[e] == 0 && bindings->key[e] == record->name &&
+                bindings->point[e] <= clone.position)
+            {
+                clone.previous = bindings->declaration[e];
+            }
+        }
+    }
+    return clone;
+}
+
+static bool check_input_symbol_function_clone(const CheckInput* input, CheckInputSymbolClone clone)
+{
+    const bool functions = clone.target < input->token_count && clone.previous < input->token_count &&
+                           input->declaration_kinds[clone.target] == C_BINDING_FUNCTION && input->declaration_kinds[clone.previous] == C_BINDING_FUNCTION &&
+                           check_input_attribute_of(check_input_attributes_at(input, clone.target), CHECK_ATTRIBUTE_ALIAS) == NULL;
+    return functions;
+}
+
+// Deferred lanes share the immutable top level. Only an actual function lookup set requiring selection needs the
+// overload reader's source-order fallback; weak object aliases keep their ordinary deferred reading schedule.
+static bool check_input_symbol_overload_needed(CheckInputReader* reader)
+{
+    CheckInput* input = reader->output;
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    bool needed = false;
+    for (uint32_t i = 0; !needed && history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const bool eligible = record->supported && record->warning == CHECK_SYMBOL_WARNING_NONE && record->kind == CHECK_SYMBOL_PRAGMA_ALIAS;
+        const CheckInputSymbolClone clone = eligible ? check_input_symbol_clone(reader, record, input->token_count) :
+                                            (CheckInputSymbolClone){ .target = BUSTER_CHECK_NONE, .previous = BUSTER_CHECK_NONE };
+        const TypeAnswer compatible = check_input_symbol_function_clone(input, clone) ?
+            type_compatible(reader->types, input->declared_types[clone.previous], input->declared_types[clone.target]) : TYPE_ANSWER_YES;
+        input->resource |= compatible == TYPE_ANSWER_FULL;
+        needed = compatible == TYPE_ANSWER_NO;
+    }
+    return needed;
+}
+
+// A lazy overload table may be created by a sizeof/typeof constant query, whose scratch allocation is temporary.
+// Keep that index in the output arena. Earlier ordinary declarations need just their original candidate; the
+// lexical index continues to contain real declarations, never the unchecked pragma clones.
+static uint32_t check_input_symbol_overload_original(CheckInputReader* reader, uint32_t declaration)
+{
+    CheckInput* input = reader->output;
+    if (input->overload_heads == NULL)
+    {
+        (void)check_input_overload_initialize(reader, true, reader->overload_capacity, reader->overload_call_capacity, reader->arena);
+    }
+    uint32_t head = !input->resource ? input->overload_heads[declaration] : 0;
+    if (!input->resource && head == 0)
+    {
+        const uint32_t at = input->graph.overload_candidate_count;
+        input->resource |= at >= reader->overload_capacity;
+        if (!input->resource)
+        {
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
+            const uint32_t object = input->objects[declaration];
+            reader->overload_candidates[at] = (CheckOverloadCandidate){
+                .type = input->declared_types[declaration],
+                .declaration = declaration,
+                .canonical = object != 0 ? object - 1 : declaration,
+                .object = object,
+                .previous = BUSTER_CHECK_NONE,
+                .scope = 0,
+                .position = declaration,
+                .flags = check_input_overload_flags(attributes) |
+                         (check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_CHECK_OVERLOAD_DEFINED : 0),
+                .library_call = check_input_library_declaration(reader, declaration),
+                .object_sizes = attributes != NULL ? attributes->object_sizes : NULL,
+                .object_size_count = attributes != NULL ? attributes->object_size_count : 0,
+            };
+            reader->overload_index.lexical_next[at] = BUSTER_CHECK_NONE;
+            reader->overload_index.linked_next[at] = BUSTER_CHECK_NONE;
+            reader->overload_index.checked[at] = false;
+            reader->overload_index.unmarked[at] = reader->overload_candidates[at].canonical;
+            input->graph.overload_candidate_count += 1;
+            head = at + 1;
+            input->overload_heads[declaration] = head;
+        }
+    }
+    return head;
+}
+
+// Clang inserts a function clone without checking the previous function declaration. Different signatures can
+// consequently form an overload set without overloadable attributes. Capture its head while the source scope is
+// live, so sizeof/typeof and initializer constants see the same selection as the final graph. Independent clones
+// retain distinct identities and form one immutable chain; all name the ordinary ELF symbol A. A block declaration
+// shadows the translation-unit lookup set even if it shares that symbol's linkage identity.
+static void check_input_symbol_overload_use(CheckInputReader* reader, uint32_t token, uint32_t visible)
+{
+    CheckInput* input = reader->output;
+    CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const uint32_t name = reader->parser->tokens.names[token];
+    const bool global = visible < input->token_count && input->declaration_kinds[visible] == C_BINDING_FUNCTION &&
+                        check_sparse_get(input->declaration_bodies, visible) == BUSTER_CHECK_NONE;
+    bool active = false;
+    for (uint32_t i = 0; global && history != NULL && i < history->count && !input->resource; i += 1)
+    {
+        CheckInputSymbolPragma* record = history->records + i;
+        if (record->supported && record->warning == CHECK_SYMBOL_WARNING_NONE && record->kind == CHECK_SYMBOL_PRAGMA_ALIAS &&
+            record->name == name && record->token <= token)
+        {
+            const CheckInputSymbolClone clone = check_input_symbol_clone(reader, record, token);
+            if (clone.position < token && check_input_symbol_function_clone(input, clone) && input->objects[visible] == input->objects[clone.previous])
+            {
+                record->alias_declaration = clone.target;
+                record->overload_declaration = clone.previous;
+                const TypeAnswer compatible = record->overload_head != 0 ? TYPE_ANSWER_NO :
+                    type_compatible(reader->types, input->declared_types[clone.previous], input->declared_types[clone.target]);
+                input->resource |= compatible == TYPE_ANSWER_FULL;
+                active |= compatible == TYPE_ANSWER_NO;
+            }
+        }
+    }
+    bool remaining = active;
+    while (remaining && !input->resource)
+    {
+        uint32_t selected = BUSTER_CHECK_NONE;
+        uint32_t position = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; i < history->count; i += 1)
+        {
+            const CheckInputSymbolPragma* record = history->records + i;
+            const uint32_t clone = record->alias_declaration > record->token ? record->alias_declaration : record->token;
+            if (record->name == name && record->overload_head == 0 && record->overload_declaration < input->token_count &&
+                input->objects[record->overload_declaration] == input->objects[visible] && clone < token && clone < position)
+            {
+                selected = i;
+                position = clone;
+            }
+        }
+        remaining = selected != BUSTER_CHECK_NONE;
+        if (remaining)
+        {
+            CheckInputSymbolPragma* record = history->records + selected;
+            const uint32_t target = record->alias_declaration;
+            uint32_t head = check_input_symbol_overload_original(reader, record->overload_declaration);
+            for (uint32_t i = 0; !input->resource && i < history->count; i += 1)
+            {
+                const CheckInputSymbolPragma* prior = history->records + i;
+                if (prior->name == name && prior->overload_head != 0)
+                {
+                    const CheckOverloadCandidate* candidate = reader->overload_candidates + prior->overload_head - 1;
+                    if (candidate->object == input->objects[visible] && candidate->position <= position)
+                    {
+                        head = prior->overload_head > head ? prior->overload_head : head;
+                        // Identical pending WeakInfo entries are deduplicated before a later TARGET appears.
+                        if (prior->target == record->target && target > prior->token && target > record->token)
+                        {
+                            record->overload_head = prior->overload_head;
+                        }
+                    }
+                }
+            }
+            if (!input->resource && record->overload_head == 0)
+            {
+                const uint32_t at = input->graph.overload_candidate_count;
+                input->resource |= head == 0 || at >= reader->overload_capacity || selected >= UINT32_MAX - input->token_count;
+                if (!input->resource)
+                {
+                    reader->overload_candidates[at] = (CheckOverloadCandidate){
+                        .type = input->declared_types[target],
+                        .declaration = target,
+                        .canonical = input->token_count + selected,
+                        .object = input->objects[visible],
+                        .previous = head - 1,
+                        .scope = 0,
+                        .position = position,
+                        .flags = BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA,
+                    };
+                    input->graph.overload_candidate_count += 1;
+                    record->overload_head = at + 1;
+                }
+            }
+        }
+    }
+    uint32_t head = 0;
+    for (uint32_t i = 0; active && !input->resource && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        if (record->name == name && record->overload_head > head)
+        {
+            const CheckOverloadCandidate* candidate = reader->overload_candidates + record->overload_head - 1;
+            head = candidate->object == input->objects[visible] && candidate->position < token ? record->overload_head : head;
+        }
+    }
+    if (head != 0 && !input->resource)
+    {
+        input->overload_heads[token] = head;
+    }
+}
+
+// A clone has no declarator token of its own. Its candidate uses TARGET's type, but diagnostics use the pragma's
+// ALIAS spelling and its fake, unnamed parameters, never TARGET's parameter names or declaration location.
+static uint32_t check_input_symbol_overload_source(const CheckInput* input, const CheckOverloadCandidate* candidate)
+{
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    uint32_t source = BUSTER_CHECK_NONE;
+    const bool clone = (candidate->flags & BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA) != 0;
+    for (uint32_t i = 0; clone && history != NULL && source == BUSTER_CHECK_NONE && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const uint32_t at = record->overload_head - 1;
+        if (at < input->graph.overload_candidate_count && input->graph.overload_candidates + at == candidate)
+        {
+            source = record->source + 3;
+        }
+    }
+    return source;
+}
+
+// A later declaration is checked against the pragma's clone, which the ordinary bindings do not contain. Replace
+// only its ordinary declaration-conflict reports; unrelated attributes, its initializer and following declarations
+// keep their own recovery. No producer retains indices into recovered_reports after the source walk has completed.
+static void check_input_symbol_redeclaration(CheckInputReader* reader, const CheckInputSymbolPragma* record, uint32_t token,
+                                             uint32_t previous, CheckRedeclarationKind detail, bool clone_note)
+{
+    CheckInput* input = reader->output;
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < input->recovered_count; i += 1)
+    {
+        const CheckInputReport report = input->recovered_reports[i];
+        const bool replaced = report.token == token && (report.message == CHECK_INPUT_REDECLARATION || report.message == CHECK_INPUT_CONFLICTING_TYPES);
+        if (!replaced)
+        {
+            input->recovered_reports[kept++] = report;
+        }
+    }
+    input->recovered_count = kept;
+    const uint32_t before = input->report_count;
+    check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+    if (input->report_count > before && !input->resource)
+    {
+        CheckInputReport* report = input->reports + before;
+        report->subject = previous + 1;
+        report->detail = detail;
+        report->type = input->declared_types[token];
+        report->type_spelling = check_input_typedef_spelling(input, reader->parser, token);
+        report->value = input->declared_types[previous];
+        report->note_token = previous;
+        const bool definition = clone_note || detail == CHECK_REDECLARATION_KIND || detail == CHECK_REDECLARATION_DEFINITION ||
+                                input->declaration_kinds[previous] == C_BINDING_OBJECT;
+        report->note_kind = clone_note && input->declaration_kinds[previous] == C_BINDING_FUNCTION ?
+                            (definition ? CHECK_INPUT_NOTE_PRAGMA_DEFINITION : CHECK_INPUT_NOTE_PRAGMA_DECLARATION) :
+                            definition ? CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+        report->attribute = clone_note ? record->source + 3 : 0;
+        (void)check_input_recover_reports(reader, before);
+    }
+}
+
 // `#pragma weak A = T` (#1849): clang's Sema looks T up at the pragma (or at its first later external declaration) and
 // declares A a weak alias of it, a clone of T's declaration, unless T already has an alias attribute; "weak identifier
 // 'T' never declared" at A otherwise. The shapes whose A the unit declares, with external linkage, of T's kind and type,
@@ -361,9 +668,11 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
             valid = check_input_symbol_warning_append(reader, index, &reader->warning_events, record->token, CHECK_WARNING_COMPLETE_TU_END, BUSTER_CHECK_NONE);
         }
     }
-    else if (!target.aliased)
+    else if (check_input_attribute_of(check_input_attributes_at(input, selected), CHECK_ATTRIBUTE_ALIAS) == NULL)
     {
-        const CheckInputSymbolNamed alias = check_input_symbol_named(reader, ordered, count, record->name, record->token);
+        record->alias_declaration = selected;
+        const uint32_t clone = selected > record->token ? selected : record->token;
+        const CheckInputSymbolNamed alias = check_input_symbol_named(reader, ordered, count, record->name, clone);
         const uint32_t declaration = alias.previous != BUSTER_CHECK_NONE ? alias.previous : alias.next;
         // Whether C names A after the pragma, and anywhere at all.
         bool named_after = false;
@@ -371,17 +680,17 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         for (uint32_t event = 0; declaration != BUSTER_CHECK_NONE && event < bindings->count; event += 1)
         {
             const bool use = bindings->operation[event] == C_BINDING_USE && bindings->key[event] == record->name;
-            named |= use;
             const uint32_t token = bindings->declaration[event];
-            const uint32_t clone = selected > record->token ? selected : record->token;
             const uint32_t resolved = token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+            const bool same_object = use && resolved < input->token_count && input->objects[resolved] == input->objects[declaration] &&
+                                     check_sparse_get(input->declaration_bodies, resolved) == BUSTER_CHECK_NONE;
+            named |= same_object;
             named_after |= use && alias.previous != BUSTER_CHECK_NONE && resolved < input->token_count &&
                            input->objects[resolved] == input->objects[alias.previous] && bindings->point[event] > clone;
         }
         const TypeId declared = declaration != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
         const TypeAnswer same = declared != 0 ? type_compatible(reader->types, declared, input->declared_types[selected]) : TYPE_ANSWER_NO;
         reader->output->resource |= same == TYPE_ANSWER_FULL;
-        const bool defined = target.defined_before || target.defined_after;
         // A defined before the pragma is clang's no-op, and so is one that is an alias already: clang keeps its own alias.
         const bool no_op = alias.previous != BUSTER_CHECK_NONE && (alias.defined_before || alias.aliased);
         const bool mismatched = declaration != BUSTER_CHECK_NONE &&
@@ -392,21 +701,22 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         // ambiguous; a local shadow still resolves to its own declaration. A later variable definition conflicts with
         // the clone. Keep these diagnostics recoverable so subsequent declarations remain visible.
         bool diagnosed = false;
-        const uint32_t clone = selected > record->token ? selected : record->token;
         const uint8_t alias_kind = alias.previous != BUSTER_CHECK_NONE ? input->declaration_kinds[alias.previous] : C_BINDING_KINDS;
         const bool functions = kind == C_BINDING_FUNCTION && alias_kind == C_BINDING_FUNCTION;
         // An object in the lookup set makes every reference ambiguous, even when its kind or type differs from the
         // clone's. Two functions with different parameter types can instead form a valid overload set in clang; those
         // still need overload selection and keep the existing refusal.
-        const bool ambiguous = !mismatched || (!functions && (alias_kind == C_BINDING_FUNCTION || alias_kind == C_BINDING_OBJECT));
-        if (ambiguous && defined && alias.previous != BUSTER_CHECK_NONE && (kind == C_BINDING_FUNCTION || kind == C_BINDING_OBJECT))
+        const bool overloaded = record->overload_head != 0;
+        const bool ambiguous = !overloaded && (!mismatched || (!functions && (alias_kind == C_BINDING_FUNCTION || alias_kind == C_BINDING_OBJECT)));
+        if (ambiguous && alias.previous != BUSTER_CHECK_NONE && (kind == C_BINDING_FUNCTION || kind == C_BINDING_OBJECT))
         {
             for (uint32_t event = 0; event < bindings->count; event += 1)
             {
                 const uint32_t token = bindings->declaration[event];
                 const uint32_t resolved = token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
                 if (bindings->operation[event] == C_BINDING_USE && bindings->key[event] == record->name && token < input->token_count &&
-                    bindings->point[event] > clone && resolved < input->token_count && input->objects[resolved] == input->objects[alias.previous])
+                    bindings->point[event] > clone && resolved < input->token_count && input->objects[resolved] == input->objects[alias.previous] &&
+                    check_sparse_get(input->declaration_bodies, resolved) == BUSTER_CHECK_NONE)
                 {
                     const uint32_t before = input->report_count;
                     check_input_report(reader, token, functions ? CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS : CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS);
@@ -421,24 +731,58 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                 }
             }
         }
-        if (!no_op && !mismatched && defined && alias.previous != BUSTER_CHECK_NONE && kind == C_BINDING_OBJECT)
+        uint32_t conflicts = 0;
+        for (uint32_t token = clone; token < input->token_count; token += 1)
         {
-            uint32_t conflicts = 0;
-            for (uint32_t at = check_input_symbol_lower(ordered, count, record->name);
-                 at < count && (uint32_t)(ordered[at] >> 32) == record->name; at += 1)
+            const uint8_t declared_kind = input->declaration_kinds[token];
+            const bool declaring = reader->parser->tokens.names[token] == record->name && input->declarations[token] == token &&
+                                   input->declared_types[token] != 0 &&
+                                   (declared_kind == C_BINDING_OBJECT || declared_kind == C_BINDING_FUNCTION || declared_kind == C_BINDING_TYPEDEF) &&
+                                   (declared_kind == C_BINDING_TYPEDEF || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC)) &&
+                                   (check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE ||
+                                    check_input_linkage(input->declaration_bits, token) == 2);
+            if (declaring)
             {
-                const uint32_t event = (uint32_t)ordered[at];
-                const uint32_t token = bindings->declaration[event];
-                if (bindings->point[event] > clone)
+                const TypeAnswer compatible = declared_kind == kind ? type_compatible(reader->types, input->declared_types[token], input->declared_types[selected]) : TYPE_ANSWER_NO;
+                input->resource |= compatible == TYPE_ANSWER_FULL;
+                const uint32_t linkage = check_input_linkage(input->declaration_bits, token);
+                // Function clones have no storage-class specifier. Variable clones keep TARGET's storage class,
+                // but Clang's DeclClonePragmaWeak does not copy its thread-local storage-class specifier.
+                const uint32_t clone_linkage = kind == C_BINDING_FUNCTION ? 2u : check_input_linkage(input->declaration_bits, selected);
+                const bool prior_set = alias.previous != BUSTER_CHECK_NONE;
+                const bool object_set = prior_set && (kind == C_BINDING_OBJECT || declared_kind == C_BINDING_OBJECT || alias_kind == C_BINDING_OBJECT);
+                const bool definition = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+                CheckRedeclarationKind detail = declared_kind != kind || object_set ? CHECK_REDECLARATION_KIND :
+                    compatible == TYPE_ANSWER_NO ? (kind == C_BINDING_FUNCTION ? CHECK_REDECLARATION_FUNCTION_TYPE :
+                                                   check_input_redeclaration_extern(reader->parser, token) ? CHECK_REDECLARATION_OBJECT_TYPE_EXTERN : CHECK_REDECLARATION_OBJECT_TYPE) :
+                    linkage == 1 && clone_linkage == 2 ? CHECK_REDECLARATION_STATIC :
+                    linkage == 2 && clone_linkage == 1 ? CHECK_REDECLARATION_NON_STATIC :
+                    kind == C_BINDING_OBJECT && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) ? CHECK_REDECLARATION_THREAD_LOCAL :
+                    definition ? CHECK_REDECLARATION_DEFINITION : CHECK_REDECLARATION_GENERIC;
+                // A later function declaration can merge one signature of an unchecked function lookup set. Its
+                // ordinary redeclaration check already owns conflicts with that real declaration.
+                if (prior_set && !object_set && declared_kind == C_BINDING_FUNCTION && kind == C_BINDING_FUNCTION && !definition)
                 {
-                    const uint32_t before = input->report_count;
-                    check_input_report(reader, token, CHECK_INPUT_WEAK_ALIAS_REDEFINITION);
-                    if (input->report_count > before)
+                    detail = CHECK_REDECLARATION_GENERIC;
+                }
+                if (detail != CHECK_REDECLARATION_GENERIC)
+                {
+                    const uint32_t previous = object_set && conflicts != 0 ? alias.previous : selected;
+                    check_input_symbol_redeclaration(reader, record, token, previous, detail, previous == selected);
+                    if (detail == CHECK_REDECLARATION_STATIC && kind == C_BINDING_OBJECT)
                     {
-                        input->reports[before].note_token = conflicts == 0 ? selected : alias.previous;
-                        diagnosed |= check_input_recover_reports(reader, before);
-                        conflicts += 1;
+                        const uint32_t before = input->report_count;
+                        check_input_report(reader, token, CHECK_INPUT_WEAK_LINKAGE);
+                        if (input->report_count > before)
+                        {
+                            input->reports[before].pragma = record->pragma + 1;
+                            input->reports[before].attribute = record->source + 3;
+                            input->reports[before].repeated = true;
+                            (void)check_input_recover_reports(reader, before);
+                        }
                     }
+                    diagnosed = true;
+                    conflicts += 1;
                 }
             }
         }
@@ -447,16 +791,16 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         // type and size, whatever A's own declaration says (its kind, type, thread-local storage or section), which no C
         // reference names.
         const bool unnamed = declaration == BUSTER_CHECK_NONE ||
-                             (alias.next == BUSTER_CHECK_NONE && !named && !alias.defined_before && !alias.aliased && mismatched &&
-                              check_input_linkage(input->declaration_bits, declaration) == 2);
-        const bool undeclared = !no_op && defined && unnamed;
+                             (alias.next == BUSTER_CHECK_NONE && !named && !alias.defined_before && !alias.aliased &&
+                              (mismatched || check_input_linkage(input->declaration_bits, declaration) != 2));
+        const bool undeclared = !no_op && unnamed;
         record->alias_target = undeclared ? selected : BUSTER_CHECK_NONE;
         // Refused by name, where clang's Sema errors: A declared before the pragma and named after it ("reference to 'A' is
         // ambiguous"), declared after it with another kind or type ("redefinition of 'A' as different kind of symbol",
         // "redeclaration of 'A' with a different type") or defined after it ("redefinition of 'A'"), and T not defined
         // ("alias must point to a defined variable or function"); and A of internal linkage.
-        refused = !diagnosed && !no_op && !undeclared && (declaration == BUSTER_CHECK_NONE || alias.defined_after || named_after || alias.aliased || !defined ||
-                                            mismatched || check_input_linkage(input->declaration_bits, declaration) != 2);
+        refused = !diagnosed && !no_op && !undeclared && !overloaded && (declaration == BUSTER_CHECK_NONE || named_after || alias.aliased ||
+                                            (mismatched && alias.previous != BUSTER_CHECK_NONE) || check_input_linkage(input->declaration_bits, declaration) != 2);
         if (!no_op && !refused && !undeclared && !diagnosed)
         {
             valid = check_input_symbol_attribute(reader, record, declaration);

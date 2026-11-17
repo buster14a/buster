@@ -18,6 +18,7 @@
 #define BUSTER_CHECK_OVERLOAD_UNAVAILABLE 0x02u
 #define BUSTER_CHECK_OVERLOAD_DEFINED 0x04u
 #define BUSTER_CHECK_OVERLOAD_TARGET 0x08u
+#define BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA 0x10u
 
 typedef struct CheckOverloadCandidate CheckOverloadCandidate;
 struct CheckOverloadCandidate
@@ -145,7 +146,8 @@ static bool check_overload_candidate_valid(const TypeTable* table, const CheckOv
     const uint32_t fold = library & ~BUSTER_CHECK_LIBRARY_CALL;
     bool valid = type_is_valid(table, type) && check_action_kind(table, type) == BUSTER_TYPE_KIND_FUNCTION &&
                  candidate->declaration != UINT32_MAX && candidate->canonical != UINT32_MAX &&
-                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED | BUSTER_CHECK_OVERLOAD_TARGET)) == 0;
+                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED | BUSTER_CHECK_OVERLOAD_TARGET |
+                            BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA)) == 0;
     if (valid && library != 0)
     {
         valid = (library & BUSTER_CHECK_LIBRARY_CALL) != 0 && fold < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&

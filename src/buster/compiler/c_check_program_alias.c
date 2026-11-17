@@ -123,7 +123,12 @@ static bool check_program_alias_named(const CheckProgram* program, const CheckPr
     const uint32_t entry = input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && check_input_linkage(input->declaration_bits, token) != 0 && !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) &&
                            !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) && object != 0 && object < program->object_count ? check_program_alias_of(aliases, count, object) :
                                                                                                                 UINT32_MAX;
-    return entry == 0 || (entry != UINT32_MAX && aliases[entry - 1].kind != CHECK_PROGRAM_WEAKREF);
+    // A diagnostic-only set of pragma clones borrows the already-built program. Its own records have no weakrefs,
+    // but a weakref in the program still contributes no symbol under its C identifier.
+    const uint32_t existing = entry == 0 && aliases != program->aliases && program->alias_count != 0 ?
+                              check_program_alias_of(program->aliases, program->alias_count, object) : 0;
+    return (entry == 0 && (existing == 0 || program->aliases[existing - 1].kind != CHECK_PROGRAM_WEAKREF)) ||
+           (entry != 0 && entry != UINT32_MAX && aliases[entry - 1].kind != CHECK_PROGRAM_WEAKREF);
 }
 
 // The entries' names' objects (CheckProgramAlias.target_object), with their definitions: one per distinct name, a
@@ -132,7 +137,7 @@ static bool check_program_alias_named(const CheckProgram* program, const CheckPr
 // by its mangled name where it has no label, never by its identifier. The first scan finds the labels and the
 // identifiers' matches, the second the groups' objects' definitions: a function's body, or a variable's definition,
 // else its first tentative one.
-static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* aliases, uint32_t count, const InternTable* identifiers, bool scalar,
+static bool check_program_alias_names(const CheckProgram* program, CheckProgramAlias* aliases, uint32_t count, const InternTable* identifiers, bool scalar,
                                       Arena* scratch)
 {
     const CheckInput* input = program->input;

@@ -160,7 +160,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   catalogue from `c_check_unused_result_driver_test.c`, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
-  "Semantic error recovery", #1447. The initializer suite also preserves the separately frozen
+  "Semantic error recovery", #1447. The weak-alias catalogues also compare GNU17/GNU23,
+  warning policies, error limits and one/three requested deferred lanes, with separate
+  syntax and object oracles for emission-only undefined-target errors (#2449).
+  They retain macro columns and notes while normalizing scratch-space line numbers,
+  preserve rejected outputs, and require ELF output for accepted controls. The full
+  weak-alias section additionally checks common-target refusal and defined alias
+  symbols under `-fcommon`/`-fno-common`, plus linked programs on both readers and
+  requested deferred lanes. The initializer suite also preserves the separately frozen
   compound-literal dependency boundary, which does not claim Clang parity. Its runtime `suppress_label_order.c`
   cases compare parser errors before label-subject errors under both language
   modes, warning policies and a one-error limit, with macros, split lists,

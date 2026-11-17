@@ -701,6 +701,15 @@ and copy no function of musl's. No file of this tree holds musl's code.
 
 ## C semantic compatibility references
 
+The weak-pragma declaration, lookup and emission repairs for #2449 and their
+original `tests/checker/weak-alias*` runtime catalogues use the project default
+terms. LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaDeclAttr.cpp`, `clang/lib/Sema/SemaDecl.cpp`,
+`clang/lib/Parse/ParseAST.cpp` and `clang/lib/CodeGen/CodeGenModule.cpp`
+were consulted for declaration-clone, redeclaration, lookup and code-generation
+diagnostic behavior. Clang 23.1.4 runs externally as the diagnostic and ELF
+oracle; no upstream implementation or test fixture is incorporated.
+
 The TLS redeclaration diagnostics and for-initializer unused-warning scope fixes
 for #1784 are original project code and fixtures under the default terms.
 Clang/LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s

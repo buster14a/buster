@@ -8,6 +8,8 @@ defined-variable-reference	defined-variable-reference.c	rejected	reference remai
 variable-repeated	variable-repeated.c	rejected	repeated declarations after a weak alias retain both errors
 combined	combined.c	rejected	weak alias errors preserve the rest of the translation unit
 before-target	before-target.c	-	a weak alias clone is not visible before its target declaration
+declaration-before-target	declaration-before-target.c	rejected	a declaration between pragma and target is earlier than the created clone
+object-before-target	object-before-target.c	rejected	an object clone becomes ambiguous only after its late target is declared
 local-shadow	local-shadow.c	-	local shadows do not name the weak alias
 defined-alias	defined-alias.c	rejected	a call is ambiguous even when the alias was already defined
 missing-target	missing-target.c	-	a genuinely missing weak alias target still warns
@@ -34,7 +36,7 @@ later-object-repeated	later-object-repeated.c	rejected	repeated incompatible dec
 later-static-object	later-static-object.c	rejected	a static object cannot redeclare an external pragma clone
 later-static-function	later-static-function.c	rejected	a static function cannot redeclare an external pragma clone
 later-qualifiers	later-qualifiers.c	rejected	later object qualifiers retain their conflicting-type diagnostic
-later-thread-local	later-thread-local.c	rejected	a later declaration retains the clone's thread-local conflict
+later-thread-local	later-thread-local.c	rejected	the clone drops target TLS storage while an independent later error remains
 local-shadow-mixed	local-shadow-mixed.c	-	parameter block and for-init shadows do not reference a mismatched file alias
 local-shadow-static	local-shadow-static.c	-	a local shadow does not name an internal mismatched alias
 local-shadow-ended	local-shadow-ended.c	rejected	an expired local shadow does not hide subsequent clone ambiguity
@@ -42,5 +44,6 @@ local-extern	local-extern.c	rejected	a local extern cannot redeclare an ambiguou
 overload-calls	overload-calls.c	-	function calls choose the original or pragma clone by argument type
 overload-unviable	overload-unviable.c	rejected	a function lookup with no viable candidate keeps its candidate notes
 overload-address	overload-address.c	-	a typed function pointer selects the matching function candidate
+overload-address-mismatch	overload-address-mismatch.c	rejected	a typed address with no matching function retains candidate notes
 overload-type	overload-type.c	-	unevaluated calls retain the selected candidate's result type
 overload-same-parameters	overload-same-parameters.c	rejected	return types alone cannot disambiguate identical function parameters
