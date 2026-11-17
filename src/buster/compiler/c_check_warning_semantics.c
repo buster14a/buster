@@ -46,7 +46,7 @@ static bool check_warning_ordered_event(TypeTable* types, const CheckAction* act
 
 // Construction-time logical diagnostics use the right operand's independently evaluable integer value. Runtime
 // reachability does not suppress them. The adapter owns bare-enumerator and macro-operator spelling exclusions.
-static bool check_warning_constant_logical_event(TypeTable* types, const CheckAction* action, const CheckActionResult* checked,
+static __attribute__((unused)) bool check_warning_constant_logical_event(TypeTable* types, const CheckAction* action, const CheckActionResult* checked,
                                                   uint32_t token, uint32_t completion, CheckWarningEvent* event)
 {
     bool result = false;
