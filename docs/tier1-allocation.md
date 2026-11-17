@@ -2105,14 +2105,14 @@ and c-testsuite were above #2646's bound of clang -O0's bytes.
   interval a value, gives the same register to each interval that ends at a
   call reading it in a register, the first argument's for a value passed
   twice; it then allocates with hints where before only a tie made it.
-- **Its rank.** `tier1_allocation_value_hint` returns it only where no value
+- **Its rank.** `tier1_allocation_value_hint_registered` returns it only where no value
   hint names a register (a named interval's opening or closing, the value's own
   place, its hint value's): a range that enters a block keeps its value's
   register, a phi its operand's, a tie its operand's, and the edges and ties
   move nothing for it. Both the coloring path and the scan read it there, at a
   start and at a reload.
 - **It evicts nothing.** A value hint takes its register from a recipe no use
-  requires there (#2618); a register hint alone doesn't (`tier1_allocation_register_hinted`):
+  requires there (#2618); a register hint alone doesn't (the hint functions' `registered`):
   a call's argument would push the loop's addresses and constants out of the
   argument registers they rest in. Where the register is taken, the value takes
   another, as before.
