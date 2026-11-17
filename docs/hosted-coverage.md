@@ -69,8 +69,9 @@ compiler. Those options alone do not establish host-vector execution.
   own run; the inventory does include preprocessor fuzz tests. The merge-queue
   candidate runs the full contract on its own revision. The full-scope frontend
   libFuzzer campaign, the ELF override campaign and the crash/replay proof use
-  `native`, whose path depends on its runner (the last two used `x86-64` before
-  #2924); none is a guaranteed vector-target fuzz campaign.
+  `native` on a drawn AVX-512 runner (`drawn.yml`'s `fuzz` row, #2924), so each
+  runs the vector host path compiled for its runner's CPU (the last two used
+  `x86-64` before #2924); none is a vector-target (`x86-64-v4`) campaign.
 - ASan combines address, undefined-behavior, bounds, leak and stack-lifetime
   checks; standalone UBSan is manual. TSan and MSan omit the whole-compiler
   `main.c` checking comparison, although separate `-c` compiles and their

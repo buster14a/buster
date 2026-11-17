@@ -606,4 +606,126 @@ p=$vector_prefix
 unset BUSTER_HOST_ARCH
 pass
 
+# --- The probe ---
+# Built with the explicit vector target's flags from the source beside the script; whatever this CPU answers, the record
+# and the step's outputs agree with it and name this attempt's records, a row's or a job's.
+probe_run()
+{
+    : > "$GITHUB_OUTPUT"
+    : > "$GITHUB_ENV"
+    bash "$draw_script" probe 2 5 > "$work/log" 2>&1
+}
+printf 'processor\t: 0\nmodel name\t: Fixture CPU 9000\nmodel name\t: Fixture CPU 9001\n' > "$work/cpuinfo"
+export VECTOR_DRAW_CPUINFO="$work/cpuinfo" GITHUB_RUN_ATTEMPT=2 BUSTER_VECTOR_CONFIGURATIONS=none
+probe_run || { cat "$work/log"; fail 'the probe'; }
+answer=$(output verdict)
+[ "$answer" = qualified ] || [ "$answer" = unqualified ] || fail "the probe's verdict: $answer"
+[ "$(sed -n 's/^probe\t//p' "$RUNNER_TEMP/vector-draw/record" | cut -d ' ' -f 1)" = "$answer" ] || fail "the record's verdict isn't the output's"
+[ "$answer" != qualified ] || grep -qx "$(printf 'missing\tnone')" "$RUNNER_TEMP/vector-draw/record" || fail 'a qualified CPU that misses a feature'
+grep -qx "$(printf 'level\t2')" "$RUNNER_TEMP/vector-draw/record" && grep -qx "$(printf 'candidate\t5')" "$RUNNER_TEMP/vector-draw/record" || fail "the probe's draw and candidate"
+grep -qx "$(printf 'cpu\tFixture CPU 9000')" "$RUNNER_TEMP/vector-draw/record" && ! grep -q 9001 "$RUNNER_TEMP/vector-draw/record" || fail "the probe's CPU, the first model name"
+[ "$(output prefix)" = vector-O3-2 ] && [ "$(output product)" = vector-product-O3-2 ] || fail "a row's probe names its attempt's records"
+[ -x "$(setting BUSTER_VECTOR_PROBE)" ] || fail 'the probe a product install runs again'
+[ "$answer" != qualified ] || grep -qx "$(printf 'avx512vbmi2\tyes')" "$RUNNER_TEMP/vector-draw/features" || fail "a qualified probe's answers"
+[ ! -e "$RUNNER_TEMP/vector-rest/probe.tsv" ] || fail 'the probe keeps a REST ledger'
+BUSTER_DRAW_ROW=fuzz probe_run || fail "a job's probe"
+[ "$(output prefix)" = fuzz-2 ] || fail "a job's probe names its own records: $(output prefix)"
+if BUSTER_DRAW_ROW=x86-64 probe_run; then fail 'a job the table has none of'; fi
+pass
+# Whatever the CPU this fixture runs on, a stub cc builds a probe that answers as each case says: every feature, a
+# feature its OS masks (a clean `no` and status 1), or a stop before any answer (an instruction the CPU lacks).
+mkdir -p "$work/stub-cc"
+cat > "$work/stub-cc/cc" <<'CC'
+#!/usr/bin/env bash
+set -euo pipefail
+output=''
+while [ $# -gt 0 ]; do
+    if [ "$1" = -o ]; then output=$2; shift; fi
+    shift
+done
+printf '#!/usr/bin/env bash\n%s\n' "$FIXTURE_PROBE" > "$output"
+chmod +x "$output"
+CC
+chmod +x "$work/stub-cc/cc"
+stub_probe() { FIXTURE_PROBE=$1 PATH="$work/stub-cc:$PATH" probe_run; }
+field_of() { sed -n "s/^$1\t//p" "$RUNNER_TEMP/vector-draw/record"; }
+stub_probe "printf 'x86-64-v4\tyes\navx512f\tyes\n'" || fail 'a stub probe that qualifies'
+[ "$(output verdict)" = qualified ] && [ "$(field_of probe)" = qualified ] && [ "$(field_of missing)" = none ] || fail 'a CPU with every feature qualifies'
+stub_probe "printf 'x86-64-v4\tyes\navx512vbmi\tno\nxsave\tno\n'; exit 1" || fail 'a stub probe that finds features missing'
+[ "$(output verdict)" = unqualified ] && [ "$(field_of probe)" = 'unqualified (status 1)' ] && [ "$(field_of missing)" = 'avx512vbmi xsave' ] || fail 'a CPU whose OS masks features'
+stub_probe 'kill -ILL $$' || fail 'a stub probe that stops'
+[ "$(output verdict)" = unqualified ] && [ "$(field_of probe)" = 'unqualified (status 132)' ] && [ "$(field_of missing)" = 'unknown: the probe stopped' ] || fail "a CPU that can't run the probe: $(field_of probe), $(field_of missing)"
+unset VECTOR_DRAW_CPUINFO
+pass
+
+# --- A job's draws (#2924) ---
+# The fuzz campaigns, one pool of 3 items, the costliest first: its records and its jobs' names are its own, so the
+# rows' beside it in the run (native-O3, vector-O3, with their own candidates' numbers) are none of its; its items set
+# no sanitizer (the job's steps do), build no product and pass on their steps alone.
+export BUSTER_DRAW_ROW=fuzz GITHUB_RUN_ATTEMPT=1
+saved_prefix=$p
+p=fuzz
+fuzz_draw() { printf 'libFuzzer (ASan + UBSan + leaks) / Vector draw %s, candidate %s (fuzz)|%s|%s|%s' "$1" "$2" "$3" "$4" "${5:-}"; }
+fuzz_collector() { printf "libFuzzer (ASan + UBSan + leaks) / Vector draw %s's assignment (fuzz)|%s|%s" "$1" "$2" "$3"; }
+: > "$GITHUB_OUTPUT"
+artifacts "$p-1-probe-1-2-yes" "$p-1-probe-1-5-yes" "$p-1-probe-1-7-yes" "$p-1-probe-1-1-no" "native-O3-1-probe-1-3-yes" "vector-O3-1-probe-1-4-yes"
+jobs 1
+bash "$draw_script" assign 1 9 4 > "$work/log" 2>&1 || { cat "$work/log"; fail "a job's collector"; }
+[ "$(output name)" = "$p-1-assign-1-f1x2-f2x5-f3x7" ] || fail "a job's assignment, by rank, of its own candidates: $(output name)"
+if bash "$draw_script" assign 1 3 4 > "$work/log" 2>&1; then fail "a first draw of a 3-item job with 3 candidates"; fi
+# Two of its candidates qualified, six didn't, and the ninth ended without a verdict; the other rows' candidates 9,
+# which ended too, are none of its. Only its own ends the wait at once.
+: > "$GITHUB_OUTPUT"
+artifacts "$p-1-probe-1-1-no" "$p-1-probe-1-2-yes" "$p-1-probe-1-3-no" "$p-1-probe-1-4-no" "$p-1-probe-1-5-yes" "$p-1-probe-1-6-no" "$p-1-probe-1-7-no" "$p-1-probe-1-8-no"
+jobs 1 "$(draw 1 9 completed 1 success)" "Tests on Ubuntu 26.04 (native, none, O3) / Vector draw 1, candidate 9 (Clang 23, none, O3)|completed|1|success"
+bash "$draw_script" assign 1 9 4 > "$work/log" 2>&1 || fail "a job's late collector"
+grep -q '::warning' "$work/log" || fail "other rows' ended candidates decided a job's draw"
+[ "$(output name)" = "$p-1-assign-1-f1x2-f2x5" ] && [ "$(output count)" = 4 ] || fail "a job's partial assignment: $(output name), $(output count)"
+: > "$GITHUB_OUTPUT"
+jobs 1 "$(fuzz_draw 1 9 completed 1 failure)" "Tests on Ubuntu 26.04 (native, none, O3) / Vector draw 1, candidate 9 (Clang 23, none, O3)|completed|1|success"
+bash "$draw_script" assign 1 9 4 > "$work/log" 2>&1 || fail "a job's collector whose candidates all decided"
+! grep -q '::warning' "$work/log" && [ "$(output name)" = "$p-1-assign-1-f1x2-f2x5" ] || fail "a job's own ended candidate decides its draw"
+pass
+artifacts "$p-1-assign-1-f1x2-f2x5" "native-O3-1-assign-1-n1x5"
+take 1 5 qualified || fail "a job's candidate that takes its item"
+[ "$(setting BUSTER_VECTOR_ITEM)" = f2 ] && [ "$(setting BUSTER_SHARD)" = 2 ] && [ "$(setting BUSTER_VECTOR_SHARDS)" = 3 ] || fail "a job's item"
+[ "$(setting BUSTER_VECTOR_BUILDER)" = 0 ] && ! grep -q '^BUSTER_SANITIZER=' "$GITHUB_ENV" || fail "a job's item sets a sanitizer or builds a product"
+[ "$(setting BUSTER_DRAW_CONFIGURATION)" = fuzz ] || fail "a job's item's configuration, which its evidence names"
+grep -qx 'Vector item f2: fuzz, shard 2 of 3' "$work/log" || fail "a job's item line"
+# A rerun of the failed jobs: its own collector didn't rerun, though another row's, of the same draw, did.
+export GITHUB_RUN_ATTEMPT=2
+jobs 2 "$(fuzz_collector 1 completed 1)" "Tests on Ubuntu 26.04 (native, none, O3) / Vector draw 1's assignment (Clang 23, none, O3)|completed|2"
+take 1 5 qualified || { cat "$work/log"; fail "a job's holder that reruns"; }
+[ "$(setting BUSTER_VECTOR_ITEM)" = f2 ] && grep -q "$(printf 'decision\ttook f2 again (assigned in attempt 1)')" "$work/record" || fail "a job's holder retakes its item in a rerun"
+export GITHUB_RUN_ATTEMPT=1
+pass
+rm -rf -- "$records"
+mkdir -p "$records/$p-1-assign-1-f1x2-f2x5"
+ledger "$p-1-rest-collect-1" assign 1
+job_evidence()
+{
+    local item=$1 level=$2 candidate=$3 suite=${4:-passed}
+    mkdir -p "$records/$p-1-evidence-$item" "$records/$p-1-draw-$level-$candidate"
+    record "$level" "$candidate" "AMD EPYC 9V45" qualified "$records/$p-1-draw-$level-$candidate/record"
+    printf 'decision\ttook %s\n' "$item" >> "$records/$p-1-draw-$level-$candidate/record"
+    cp -- "$records/$p-1-draw-$level-$candidate/record" "$records/$p-1-evidence-$item/record"
+    printf 'item\t%s\nconfiguration\tfuzz\nshard\t%s\nsuite\t%s\n' "$item" "${item:1}" "$suite" >> "$records/$p-1-evidence-$item/record"
+    ledger "$p-1-rest-draw-$level-$candidate" take 0
+}
+job_evidence f1 1 2; job_evidence f2 1 5
+# A row's records in the same directory: none of the job's.
+mkdir -p "$records/native-O3-1-assign-1-n1x3"
+if verdict; then fail "a job's verdict without its item 3"; fi
+grep -q 'incomplete: no qualifying CPU drawn for item(s) f3' "$work/log" || { debug; fail "a job's item without a holder"; }
+mkdir -p "$records/$p-1-assign-2-f3x1"
+ledger "$p-1-rest-collect-2" assign 0
+job_evidence f3 2 1
+verdict || { debug; fail "a job whose every item passed on its holder's CPU"; }
+grep -q '^## Vector row (fuzz), attempt 1' "$work/log" && grep -q '| f3 | fuzz | 3 | 2 | 1 | 1 | AMD EPYC 9V45 | none - | passed |' "$work/log" || { debug; fail "a job's verdict table"; }
+job_evidence f2 1 5 failed
+if verdict; then fail "a job's item whose steps failed passes"; fi
+unset BUSTER_DRAW_ROW
+p=$saved_prefix
+pass
+
 printf 'vector-draw fixture: %s checks passed\n' "$checks"

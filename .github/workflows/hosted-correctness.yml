@@ -59,54 +59,21 @@ jobs:
   # SQLite's whole Tcl test suite (#146): every script of its `full` permutation, through testfixture built by clang -O0,
   # Tier 0 and --tier1 from the compiler it builds (test-sqlite-testfixture; docs/commands/c-testsuite.md). Every
   # row, pull requests' too, runs the inventory's pinned subset; this job runs on the nightly and dispatched runs alone,
-  # beside the native plain row's shards, with its runner's 4 CPUs to itself (beside the x86-64 plain row's, on its
-  # shared compiler, before #2924). Main's pushes skip it (#2334): it took
-  # 27 to 41 of a push run's 96 to 112 runner-minutes, at 25 to 37 pushes an hour. Merge-queue candidates (#1430), which
-  # replace those pushes' runs, skip it for the same reason; the nightly snapshot's daily run keeps it. Its name must not
-  # end like a shard's (tools/ci/nightly.c).
+  # beside the native plain row's items, with its runner's 4 CPUs to itself. It builds the compiler for its runner's CPU,
+  # so it draws an AVX-512 runner as the row's items do (drawn.yml's `sqlite-full` row, which holds its steps; #2924).
+  # Main's pushes skip it (#2334): it took 27 to 41 of a push run's 96 to 112 runner-minutes, at 25 to 37 pushes an
+  # hour. Merge-queue candidates (#1430), which replace those pushes' runs, skip it for the same reason; the nightly
+  # snapshot's daily run keeps it. Its name must not end like a shard's (tools/ci/nightly.c).
   sqlite-full:
     name: SQLite's full Tcl suite by both tiers against clang's (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }})
     if: ${{ !cancelled() && inputs.host_arch == 'native' && inputs.sanitizer == 'none' && github.event_name != 'pull_request' && github.event_name != 'push' && github.event_name != 'merge_group' }}
-    runs-on: ubuntu-26.04
-    # About 9 minutes a build on a 4-CPU runner, three builds, and the compiler's own build.
-    timeout-minutes: 140
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Check out triggering commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Restore verified hosted release inputs
-        uses: ./.github/actions/hosted-tools
-        with:
-          artifact-name: ${{ inputs.hosted-tools }}
-
-      - name: Install official Clang 23.1.4 and test tools
-        run: bash tools/ci/setup-hosted.sh
-
-      - name: Fetch and verify frozen corpus inputs
-        run: |
-          corpus="$RUNNER_TEMP/preprocessor-391e729af658"
-          bash tools/ci/fetch-corpus.sh "$corpus"
-          printf 'BUSTER_CORPUS=%s\n' "$corpus" >> "$GITHUB_ENV"
-
-      - name: Build the external Clang pragma oracle, the clang server and the compiler
-        # For this runner's CPU, as a native row's shard builds its own.
-        run: bash tools/ci/hosted-product.sh build
-
-      - name: Fetch SQLite's sources at their pinned commit
-        run: bash tools/ci/fetch-sqlite.sh build/sqlite
-
-      - name: Run SQLite's full Tcl suite by both tiers against clang's
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          tcl=$(bash tools/ci/tcl-config.sh)
-          "$BUSTER_COMPILER" test-sqlite-testfixture --clang clang --tree build/sqlite --tcl "$tcl" --amalgamation "$BUSTER_CORPUS/sqlite/sqlite3.c" \
-            --jobs "$(nproc)" --timeout 5400 --directory build
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/drawn.yml
+    with:
+      row: sqlite-full
+      hosted-tools: ${{ inputs.hosted-tools }}
 
   # The vector row (#2033; docs/ci.md, "The vector row"): the explicit vector target's build, which only CPUs with
   # every feature of host_isa.h's predicate run, and whose configurations' shards (4 each) are one pool of items rather
@@ -142,95 +109,28 @@ jobs:
     # Every row's steps (draw-2 to draw-4 reuse them), each of which runs only with an item.
     steps: &row-steps
       # The vector row's draw (#2033; docs/ci.md, "The vector row"). A hosted VM belongs to the job it runs, so the
-      # candidate that probes is the one that works. Before the checkout, a probe built with the explicit vector
-      # target's flags (cmake/BusterSettings.cmake's, by the image's cc: the hosted toolchain isn't installed yet) asks
-      # this CPU and its OS for x86-64-v4's level and every feature host_isa.h's predicate names. __builtin_cpu_supports
-      # reads what the OS enables too, so a VM that masks AVX-512 fails it, whatever its model. The probe's #if is the
-      # predicate itself, so flags that don't select the vector path don't compile it. tools/ci/changes.c's self-test
-      # keeps the predicate, the probe's lists and the build's flags in step. A runner that doesn't qualify publishes
-      # its verdict and ends, successfully, as a redraw: a rerun of the failed jobs reruns only real failures.
+      # candidate that probes is the one that works. First the draw's script and probe, from this commit through git, not
+      # the REST API: the API's hourly limit is the whole repository's, and fetching the script in every candidate,
+      # collector and verdict helped exhaust it (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: |
+            tools/ci/vector-draw.sh
+            tools/ci/vector-probe.c
+            .github/actions/vector-runtime
+          sparse-checkout-cone-mode: false
+
+      # Before the checkout, the probe (tools/ci/vector-probe.c, built by tools/ci/vector-draw.sh with the explicit vector
+      # target's flags) asks this CPU and its OS for x86-64-v4's level and every feature host_isa.h's predicate names. A
+      # runner that doesn't qualify publishes its verdict and ends, successfully, as a redraw: a rerun of the failed jobs
+      # reruns only real failures.
       - name: Probe this runner's CPU for the explicit vector target
         id: probe
-        run: |
-          draw="$RUNNER_TEMP/vector-draw"
-          mkdir -p "$draw"
-          cat > "$draw/probe.c" << 'PROBE'
-          // The vector row's probe (#2033): whether this CPU and its OS enable everything the explicit vector target uses.
-          #include <stdio.h>
-
-          #if !(defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512CD__) && \
-              defined(__AVX512VBMI__) && defined(__AVX512VBMI2__) && defined(__AVX512VPOPCNTDQ__) && defined(__AVX512BITALG__) && \
-              defined(__AVX512VNNI__) && defined(__GFNI__) && defined(__VAES__) && defined(__AES__) && defined(__BMI__) && \
-              defined(__BMI2__) && defined(__LZCNT__) && defined(__POPCNT__) && defined(__AVX2__) && defined(__SSSE3__) && \
-              defined(__SSE4_1__) && defined(__XSAVE__))
-          #error "the vector target's flags don't select host_isa.h's vector path"
-          #endif
-
-          // Prints the feature's line, and returns whether this CPU and its OS enable it.
-          static int probe_feature(const char* name, int enabled)
-          {
-              printf("%s\t%s\n", name, enabled ? "yes" : "no");
-              return enabled != 0;
-          }
-
-          int main(void)
-          {
-              __builtin_cpu_init();
-              int qualified = 1;
-              qualified &= probe_feature("x86-64-v4", __builtin_cpu_supports("x86-64-v4"));
-              qualified &= probe_feature("avx512f", __builtin_cpu_supports("avx512f"));
-              qualified &= probe_feature("avx512bw", __builtin_cpu_supports("avx512bw"));
-              qualified &= probe_feature("avx512vl", __builtin_cpu_supports("avx512vl"));
-              qualified &= probe_feature("avx512dq", __builtin_cpu_supports("avx512dq"));
-              qualified &= probe_feature("avx512cd", __builtin_cpu_supports("avx512cd"));
-              qualified &= probe_feature("avx512vbmi", __builtin_cpu_supports("avx512vbmi"));
-              qualified &= probe_feature("avx512vbmi2", __builtin_cpu_supports("avx512vbmi2"));
-              qualified &= probe_feature("avx512vpopcntdq", __builtin_cpu_supports("avx512vpopcntdq"));
-              qualified &= probe_feature("avx512bitalg", __builtin_cpu_supports("avx512bitalg"));
-              qualified &= probe_feature("avx512vnni", __builtin_cpu_supports("avx512vnni"));
-              qualified &= probe_feature("gfni", __builtin_cpu_supports("gfni"));
-              qualified &= probe_feature("vaes", __builtin_cpu_supports("vaes"));
-              qualified &= probe_feature("aes", __builtin_cpu_supports("aes"));
-              qualified &= probe_feature("bmi", __builtin_cpu_supports("bmi"));
-              qualified &= probe_feature("bmi2", __builtin_cpu_supports("bmi2"));
-              qualified &= probe_feature("lzcnt", __builtin_cpu_supports("lzcnt"));
-              qualified &= probe_feature("popcnt", __builtin_cpu_supports("popcnt"));
-              qualified &= probe_feature("avx2", __builtin_cpu_supports("avx2"));
-              qualified &= probe_feature("ssse3", __builtin_cpu_supports("ssse3"));
-              qualified &= probe_feature("sse4.1", __builtin_cpu_supports("sse4.1"));
-              qualified &= probe_feature("xsave", __builtin_cpu_supports("xsave"));
-              return qualified ? 0 : 1;
-          }
-          PROBE
-          cc -std=c17 -O2 -Wall -Wextra -Werror -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni "$draw/probe.c" -o "$draw/probe"
-          # Any failure to run is a CPU that doesn't qualify: one without x86-64-v4 may stop at an instruction the flags let
-          # the probe itself use.
-          status=0
-          "$draw/probe" > "$draw/features" 2>&1 || status=$?
-          cat "$draw/features"
-          verdict=qualified
-          missing=$(awk -F '\t' 'NF == 2 && $2 == "no" { printf "%s%s", separator, $1; separator = " " }' "$draw/features")
-          if [ "$status" -ne 0 ]; then
-              verdict="unqualified (status $status)"
-              missing=${missing:-unknown: the probe stopped}
-          fi
-          cpu=$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)
-          {
-              printf 'level\t%s\n' "$BUSTER_DRAW_LEVEL"
-              printf 'candidate\t%s\n' "$BUSTER_DRAW_CANDIDATE"
-              printf 'runner\t%s\n' "$RUNNER_NAME"
-              printf 'cpu\t%s\n' "$cpu"
-              printf 'cpus\t%s\n' "$(nproc)"
-              printf 'probe\t%s\n' "$verdict"
-              printf 'missing\t%s\n' "${missing:-none}"
-          } > "$draw/record"
-          printf 'Draw %s, candidate %s: %s, %s\n' "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE" "$cpu" "$verdict"
-          printf 'verdict=%s\n' "${verdict%% *}" >> "$GITHUB_OUTPUT"
-          # The pool's records, and its configurations' products, this attempt's (tools/ci/vector-draw.sh).
-          printf 'prefix=%s-O%s-%s\n' "$BUSTER_HOST_ARCH" "$BUSTER_SANITIZER_OPTIMIZATION" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          printf 'product=vector-product-O%s-%s\n' "$BUSTER_SANITIZER_OPTIMIZATION" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          # A shared product's install runs the probe again on its runner (tools/ci/hosted-product.sh).
-          printf 'BUSTER_VECTOR_PROBE=%s\n' "$draw/probe" >> "$GITHUB_ENV"
+        run: bash .vector-draw-script/tools/ci/vector-draw.sh probe "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE"
 
       # The verdict's artifact, which the draw's collector counts: an artifact's name is no claim (when several jobs
       # upload one name at once, every upload succeeds: .github/workflows/vector-claim-race.yml's control), so the
@@ -243,19 +143,6 @@ jobs:
           overwrite: false
           if-no-files-found: error
           retention-days: 14
-
-      # The draw's script, from this commit through git, not the REST API: the API's hourly limit is the whole
-      # repository's, and fetching the script in every candidate, collector and verdict helped exhaust it (#2309).
-      - name: Fetch the vector draw's script from this commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          path: .vector-draw-script
-          persist-credentials: false
-          sparse-checkout: |
-            tools/ci/vector-draw.sh
-            .github/actions/vector-runtime
-          sparse-checkout-cone-mode: false
 
       # The item the draw's collector assigned this candidate gives its configuration (BUSTER_SANITIZER) and its shard
       # (BUSTER_SHARD), which the steps below run; without one, it ends here, successfully, as a redraw. In a rerun of

@@ -1007,9 +1007,10 @@ static NightlyHosted nightly_hosted(const NightlyFacts* facts, const char* commi
 
 // --- A merge-queue candidate's coverage, job by job (#1430) ---
 
-// The fuzz campaigns (9700x.yml's fuzz matrix) and the vector pool's configurations (the test job's one call of the
-// row workflow for the vector row, where the sanitizer rows run).
-static const char* const nightly_fuzz_entries[] = { "frontend", "elf-override", "crash-replay-proof" };
+// The fuzz campaigns' verdict (9700x.yml's fuzz job, a call of drawn.yml whose items the campaigns are, since #2924) and
+// the vector pool's configurations (the test job's one call of the row workflow for the vector row, where the sanitizer
+// rows run).
+#define BUSTER_NIGHTLY_FUZZ_VERDICT "libFuzzer (ASan + UBSan + leaks) / Vector row verdict (fuzz)"
 #define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
 #define BUSTER_NIGHTLY_ROWS_FULL (2u * BUSTER_NIGHTLY_SANITIZERS)
 
@@ -1026,6 +1027,10 @@ static bool nightly_row_required(uint32_t row)
 // changes_auxiliary, the same names in its order), each by 9700x.yml's job `Auxiliary (NAME.yml)`, whose called jobs
 // the API names `Auxiliary (NAME.yml) / JOB`.
 static const char* const nightly_auxiliary_names[] = { "build", "build-pgo", "selfhost", "tier1-problem" };
+// Each one's job that draws an AVX-512 runner (drawn.yml, #2924), by its row: its verdict, `... / Vector row verdict
+// (ROW)`, credits it, and its draws' jobs (`Vector draw ...`) may be skipped, the later draws' when an earlier one held
+// every item. NULL for a workflow without draws, whose every job must succeed.
+static const char* const nightly_auxiliary_rows[] = { "regressions", NULL, "bootstrap", "tier1-problem" };
 
 // The selector's auxiliary output: `,` or `,NAME,NAME,` of nightly_auxiliary_names, each at most once, in their
 // order. Sets each one's flag; false for anything else, an empty list (no selector) included.
@@ -1057,10 +1062,11 @@ static bool nightly_auxiliary_list(const char* list, bool* called)
 // The run's full hosted contract from its own jobs, which a test job's result alone can't show (a skipped shard or row
 // leaves it green): every shard 1..N of each row nightly_row_required names (none since #2924), the native plain row's
 // verdict, the vector
-// pool's verdict and each fuzz campaign, every one completed and successful, and no shard of a row that didn't succeed
-// (one beyond N, say, or a second attempt's). Each auxiliary workflow AUXILIARY names (the selector's list) must have
-// run a job and every job successful; one it doesn't name must have run none. Writes a line per row, the vector verdict,
-// each campaign and each auxiliary workflow, then `coverage complete` or `coverage incomplete`. Job names are their own,
+// pool's verdict and the fuzz campaigns' verdict, every one completed and successful, and no shard of a row that didn't
+// succeed (one beyond N, say, or a second attempt's). Each auxiliary workflow AUXILIARY names (the selector's list) must
+// have run a job and every job successful, but its draws' skipped ones, and its drawn job's one verdict; one it doesn't
+// name must have run none. Writes a line per row, the vector verdict, the campaigns and each auxiliary workflow, then
+// `coverage complete` or `coverage incomplete`. Job names are their own,
 // whatever their callers' (each row is a call of the row workflow); a skipped job's name keeps its unexpanded
 // expressions, which no row's pattern matches.
 static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char* auxiliary, FILE* output)
@@ -1069,6 +1075,8 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
     const bool listed = nightly_auxiliary_list(auxiliary, called);
     uint32_t auxiliary_jobs[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { 0 };
     uint32_t auxiliary_succeeded[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { 0 };
+    uint32_t auxiliary_verdicts[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { 0 };
+    bool auxiliary_verdict[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { false };
     uint64_t succeeded[BUSTER_NIGHTLY_ROWS_FULL] = { 0 };
     uint32_t counts[BUSTER_NIGHTLY_ROWS_FULL] = { 0 };
     bool inconsistent[BUSTER_NIGHTLY_ROWS_FULL] = { false };
@@ -1077,7 +1085,8 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
     bool verdict = false;
     uint32_t natives = 0;
     bool native = false;
-    bool fuzz[BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries)] = { false };
+    uint32_t fuzzes = 0;
+    bool fuzz = false;
     for (uint32_t i = 0; i < facts->job_count; i += 1)
     {
         const NightlyJob* job = &facts->jobs[i];
@@ -1107,19 +1116,28 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
             verdicts += 1;
             verdict = success;
         }
-        for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
+        if (job->run == run && strcmp(job->name, BUSTER_NIGHTLY_FUZZ_VERDICT) == 0)
         {
-            char name[BUSTER_NIGHTLY_NAME];
-            snprintf(name, sizeof(name), "libFuzzer (ASan + UBSan + leaks, %s)", nightly_fuzz_entries[j]);
-            fuzz[j] = fuzz[j] || (success && strcmp(own, name) == 0);
+            fuzzes += 1;
+            fuzz = success;
         }
+        const bool skipped = job->run == run && job->completed && job->conclusion == NIGHTLY_CONCLUSION_SKIPPED;
         for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names); j += 1)
         {
             char prefix[BUSTER_NIGHTLY_NAME];
             const int length = snprintf(prefix, sizeof(prefix), "Auxiliary (%s.yml) / ", nightly_auxiliary_names[j]);
             const bool mine = job->run == run && strncmp(job->name, prefix, (size_t)length) == 0;
+            const char* drawn = nightly_auxiliary_rows[j];
+            const bool draw = drawn != NULL && strncmp(own, "Vector draw ", 12) == 0;
             auxiliary_jobs[j] += mine ? 1 : 0;
-            auxiliary_succeeded[j] += mine && success ? 1 : 0;
+            auxiliary_succeeded[j] += mine && (success || (draw && skipped)) ? 1 : 0;
+            char verdict_name[BUSTER_NIGHTLY_NAME];
+            snprintf(verdict_name, sizeof(verdict_name), "Vector row verdict (%s)", drawn != NULL ? drawn : "");
+            if (mine && drawn != NULL && strcmp(own, verdict_name) == 0)
+            {
+                auxiliary_verdicts[j] += 1;
+                auxiliary_verdict[j] = success;
+            }
         }
     }
     bool complete = true;
@@ -1142,11 +1160,9 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
     const bool vector = verdicts == 1 && verdict;
     complete = complete && vector;
     fprintf(output, "vector\t%s\t%s\n", BUSTER_NIGHTLY_VECTOR_POOL, verdicts == 0 ? "missing" : verdicts != 1 ? "more than one verdict" : verdict ? "ok" : "did not succeed");
-    for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
-    {
-        complete = complete && fuzz[j];
-        fprintf(output, "fuzz\t%s\t%s\n", nightly_fuzz_entries[j], fuzz[j] ? "ok" : "missing or did not succeed");
-    }
+    const bool fuzzed = fuzzes == 1 && fuzz;
+    complete = complete && fuzzed;
+    fprintf(output, "fuzz\tfrontend elf-override crash-replay-proof\t%s\n", fuzzes == 0 ? "missing" : fuzzes != 1 ? "more than one verdict" : fuzz ? "ok" : "did not succeed");
     complete = complete && listed;
     if (!listed)
     {
@@ -1155,9 +1171,10 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
     for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names) && listed; j += 1)
     {
         const uint32_t jobs = auxiliary_jobs[j];
-        const bool ok = called[j] ? jobs != 0 && auxiliary_succeeded[j] == jobs : jobs == 0;
+        const bool verdict_ok = nightly_auxiliary_rows[j] == NULL || (auxiliary_verdicts[j] == 1 && auxiliary_verdict[j]);
+        const bool ok = called[j] ? jobs != 0 && auxiliary_succeeded[j] == jobs && verdict_ok : jobs == 0;
         complete = complete && ok;
-        const char* why = ok ? "ok" : !called[j] ? "ran although it doesn't apply" : jobs == 0 ? "missing" : "a job did not succeed";
+        const char* why = ok ? "ok" : !called[j] ? "ran although it doesn't apply" : jobs == 0 ? "missing" : auxiliary_succeeded[j] != jobs ? "a job did not succeed" : "its drawn job has no single successful verdict";
         fprintf(output, "auxiliary\t%s\t%s\t%s\t%u\n", nightly_auxiliary_names[j], called[j] ? "called" : "not called", why, jobs);
     }
     fprintf(output, "coverage\t%s\n", complete ? "complete" : "incomplete");
@@ -4388,15 +4405,12 @@ static void nightly_test_candidate(NightlyBuffer* buffer, uint64_t run, const ch
     {
         nightly_append(buffer, "job\t%llu\tcompleted\t%s\t%sVector row verdict (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, strcmp(odd, "vector") == 0 ? conclusion : "success", vector);
     }
-    for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
+    // The fuzz campaigns' draws (#2924): a candidate, a later draw skipped, and their verdict.
+    nightly_append(buffer, "job\t%llu\tcompleted\tsuccess\tlibFuzzer (ASan + UBSan + leaks) / Vector draw 1, candidate 4 (fuzz)\n", (unsigned long long)run);
+    nightly_append(buffer, "job\t%llu\tcompleted\tskipped\tlibFuzzer (ASan + UBSan + leaks) / Vector draw 2, candidate ${{ matrix.candidate }} (${{ inputs.row }})\n", (unsigned long long)run);
+    if (strcmp(odd, "fuzz") != 0 || conclusion != NULL)
     {
-        char name[64];
-        snprintf(name, sizeof(name), "fuzz %s", nightly_fuzz_entries[j]);
-        const bool is_odd = strcmp(name, odd) == 0;
-        if (!is_odd || conclusion != NULL)
-        {
-            nightly_append(buffer, "job\t%llu\tcompleted\t%s\tlibFuzzer (ASan + UBSan + leaks, %s)\n", (unsigned long long)run, is_odd ? conclusion : "success", nightly_fuzz_entries[j]);
-        }
+        nightly_append(buffer, "job\t%llu\tcompleted\t%s\t" BUSTER_NIGHTLY_FUZZ_VERDICT "\n", (unsigned long long)run, strcmp(odd, "fuzz") == 0 ? conclusion : "success");
     }
     nightly_append(buffer, "job\t%llu\tcompleted\tskipped\t%s\n", (unsigned long long)run, BUSTER_NIGHTLY_HARDWARE_JOB);
 }
@@ -4426,12 +4440,20 @@ static bool nightly_test_coverage(const char* odd, const char* conclusion, const
 // A candidate's auxiliary workflows: those the selector named ran a job each, all successful; the others ran none.
 static void nightly_test_auxiliary(NightlyTest* test)
 {
-    const char* build = "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native)\n"
+    // The build's regressions and the self-host bootstrap draw AVX-512 runners (drawn.yml, #2924): a candidate, its
+    // collector, a later draw and its collector skipped (their names unexpanded), and the verdict.
+    const char* build = "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector draw 1, candidate 2 (regressions)\n"
+                        "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector draw 1's assignment (regressions)\n"
+                        "job\t60\tcompleted\tskipped\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector draw 2, candidate ${{ matrix.candidate }} (${{ inputs.row }})\n"
+                        "job\t60\tcompleted\tskipped\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector draw 2's assignment (${{ inputs.row }})\n"
+                        "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector row verdict (regressions)\n"
                         "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / build.sh's now() under decimal points other than a period";
     const char* selfhost = "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host harness regression tests\n"
                            "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / prepare-hosted-tools / Prepare verified hosted release inputs\n"
-                           "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native)";
-    char both[1024];
+                           "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 1, candidate 3 (bootstrap)\n"
+                           "job\t60\tcompleted\tskipped\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 4, candidate ${{ matrix.candidate }} (${{ inputs.row }})\n"
+                           "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector row verdict (bootstrap)";
+    char both[4096];
     snprintf(both, sizeof(both), "%s\n%s", build, selfhost);
     nightly_expect(test, nightly_test_coverage_called("", NULL, build, ",build,"), "a called auxiliary workflow whose jobs succeeded");
     nightly_expect(test, nightly_test_coverage_called("", NULL, both, ",build,selfhost,"), "two called auxiliary workflows, nested calls included");
@@ -4444,7 +4466,11 @@ static void nightly_test_auxiliary(NightlyTest* test)
     } short_of[] = {
         { NULL, ",build,", "a called auxiliary workflow that ran nothing" },
         { "job\t60\tcompleted\tskipped\tAuxiliary (build.yml)", ",build,", "a called auxiliary workflow skipped" },
-        { "job\t60\tcompleted\tfailure\tAuxiliary (tier1-problem.yml) / correctness (native)", ",tier1-problem,", "a failed auxiliary job" },
+        { "job\t60\tcompleted\tfailure\tAuxiliary (tier1-problem.yml) / correctness (native) / Vector row verdict (tier1-problem)", ",tier1-problem,", "a failed auxiliary job" },
+        { "job\t60\tcompleted\tsuccess\tAuxiliary (tier1-problem.yml) / correctness (native) / Vector draw 1, candidate 1 (tier1-problem)", ",tier1-problem,", "a drawn auxiliary job without its verdict" },
+        { "job\t60\tcompleted\tskipped\tAuxiliary (tier1-problem.yml) / correctness (native) / Vector row verdict (tier1-problem)", ",tier1-problem,", "a drawn auxiliary job whose verdict was skipped" },
+        { "job\t60\tcompleted\tsuccess\tAuxiliary (tier1-problem.yml) / correctness (native) / Vector row verdict (bootstrap)", ",tier1-problem,", "another drawn job's verdict" },
+        { "job\t60\tcompleted\tskipped\tAuxiliary (build-pgo.yml) / build.sh refuses BUSTER_PGO's unsupported builds before compiling", ",build-pgo,", "a skipped job of an auxiliary workflow without draws" },
         { "job\t60\tcompleted\tcancelled\tAuxiliary (build-pgo.yml) / build.sh refuses BUSTER_PGO's unsupported builds before compiling", ",build-pgo,", "a cancelled auxiliary job" },
         { "job\t60\tin_progress\t-\tAuxiliary (build-pgo.yml) / build.sh refuses BUSTER_PGO's unsupported builds before compiling", ",build-pgo,", "an auxiliary job still running" },
         { "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host harness regression tests", ",", "an auxiliary workflow that ran though the selector didn't name it" },
@@ -4459,11 +4485,15 @@ static void nightly_test_auxiliary(NightlyTest* test)
     {
         nightly_expect(test, !nightly_test_coverage_called("", NULL, short_of[i].extra, short_of[i].auxiliary), short_of[i].what);
     }
-    char failed[1024];
-    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tfailure\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (x86-64)", selfhost);
+    char failed[4096];
+    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tfailure\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 1, candidate 2 (bootstrap)", selfhost);
     nightly_expect(test, !nightly_test_coverage_called("", NULL, failed, ",selfhost,"), "one failed job among an auxiliary workflow's successful ones");
+    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tskipped\tAuxiliary (selfhost.yml) / Self-host harness regression tests", selfhost);
+    nightly_expect(test, !nightly_test_coverage_called("", NULL, failed, ",selfhost,"), "a skipped job of an auxiliary workflow that isn't a draw's");
+    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector row verdict (bootstrap)", selfhost);
+    nightly_expect(test, !nightly_test_coverage_called("", NULL, failed, ",selfhost,"), "two verdicts of an auxiliary workflow's drawn job");
     nightly_expect(test, !nightly_test_coverage_called("native", NULL, build, ",build,"), "a called auxiliary workflow doesn't make up for a missing verdict");
-    nightly_expect(test, nightly_test_coverage_called("", NULL, "job\t61\tcompleted\tfailure\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native)", ","), "another run's auxiliary jobs don't count");
+    nightly_expect(test, nightly_test_coverage_called("", NULL, "job\t61\tcompleted\tfailure\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector row verdict (regressions)", ","), "another run's auxiliary jobs don't count");
 }
 
 static bool nightly_test_stale(const char* input, uint64_t own, const char* expected)
@@ -4535,8 +4565,9 @@ static void nightly_test_queue(NightlyTest* test)
         { "vector", NULL, "the vector verdict missing" },
         { "vector", "failure", "the vector verdict failed" },
         { "vector", "skipped", "the vector verdict skipped" },
-        { "fuzz frontend", NULL, "a fuzz campaign missing" },
-        { "fuzz crash-replay-proof", "cancelled", "a fuzz campaign cancelled" },
+        { "fuzz", NULL, "the fuzz campaigns' verdict missing" },
+        { "fuzz", "cancelled", "the fuzz campaigns' verdict cancelled" },
+        { "fuzz", "failure", "the fuzz campaigns' verdict failed" },
     };
     for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(short_of); i += 1)
     {
@@ -4549,7 +4580,9 @@ static void nightly_test_queue(NightlyTest* test)
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, address, O1) / Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 1 of 4)"), "a row at another optimization isn't the contract's, and doesn't count");
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, memory, O3) / Tests on Ubuntu 26.04 (Clang 23, native, memory, O3, shard 1 of 5)"), "a retired native sanitizer row (#2032) isn't the contract's, and doesn't count");
     nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 24, none address thread memory, O3)"), "two vector verdicts");
-    nightly_expect(test, nightly_test_coverage("", NULL, "job\t61\tcompleted\tfailure\tlibFuzzer (ASan + UBSan + leaks, frontend)"), "another run's jobs don't count");
+    nightly_expect(test, nightly_test_coverage("", NULL, "job\t61\tcompleted\tfailure\t" BUSTER_NIGHTLY_FUZZ_VERDICT), "another run's jobs don't count");
+    nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\t" BUSTER_NIGHTLY_FUZZ_VERDICT), "two fuzz verdicts");
+    nightly_expect(test, !nightly_test_coverage("fuzz", NULL, "job\t60\tcompleted\tsuccess\tlibFuzzer (ASan + UBSan + leaks) / Vector row verdict (regressions)"), "another drawn job's verdict doesn't stand for the fuzz campaigns'");
 
     char a[41];
     char b[41];

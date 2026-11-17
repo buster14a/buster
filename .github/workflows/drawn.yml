@@ -1,0 +1,667 @@
+name: Drawn AVX-512 job
+
+# A job that builds the compiler for its runner's CPU, or runs code built for it, on a GitHub-hosted runner: since the
+# compiler's host is AVX-512 alone (#2924), only some hosted CPUs run it (41 to 59%), so the job draws its runner as the
+# hosted correctness rows do (docs/ci.md, "The vector row"; tools/ci/vector-draw.sh). Each candidate of a draw probes
+# its own CPU first (tools/ci/vector-probe.c) and publishes its verdict; the draw's collector, one job, assigns the
+# job's items to the qualifying candidates by rank; a candidate runs the item it was assigned, and the others end within
+# seconds, successfully, as redraws. 3 candidates per item in the first draw, then 4, 5 and 5 per item still missing; 4
+# draws are unrolled here, each with its collector, and the verdict requires one passing qualified execution of each
+# item: an item without a holder after the last fails it as incomplete, not as a test failure.
+#
+# The job is its caller's `row` input, a row of tools/ci/vector-draw.sh's table, whose name is its records' and its
+# jobs': `regressions` (build.yml's), `bootstrap` (selfhost.yml's), `tier1-problem` (tier1-problem.yml's), `fuzz`
+# (9700x.yml's three campaigns, one item each) and `sqlite-full` (hosted-correctness.yml's native plain row's). Each
+# job's steps below run on its own row alone, as they ran in its own workflow before; its settings are set once the item
+# is taken. A caller grants `actions: read`, which the draws' job reads need.
+on:
+  workflow_call:
+    inputs:
+      row:
+        description: The job, a row of tools/ci/vector-draw.sh's table (regressions, bootstrap, tier1-problem, fuzz or sqlite-full)
+        type: string
+        required: true
+      hosted-tools:
+        description: The prepare-hosted-tools job's verified handoff (its artifact-name output); empty for a job that acquires its own
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  BUSTER_DRAW_ROW: ${{ inputs.row }}
+
+jobs:
+  draw-1:
+    name: Vector draw 1, candidate ${{ matrix.candidate }} (${{ inputs.row }})
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    # Each job's own budget, as its workflow gave it, and 5 minutes for its draw.
+    timeout-minutes: ${{ fromJSON('{"regressions":50,"bootstrap":125,"tier1-problem":20,"fuzz":50,"sqlite-full":145}')[inputs.row] }}
+    # The runtime artifact service carries assignments. Bounded REST reads resolve rerun job identities.
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+      matrix:
+        # 3 candidates per item: 9 for the fuzz campaigns' 3, 3 for every other job's 1. The collector refuses fewer.
+        candidate: ${{ fromJSON(inputs.row == 'fuzz' && '[1, 2, 3, 4, 5, 6, 7, 8, 9]' || '[1, 2, 3]') }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '1'
+      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
+    # Every job's steps (draw-2 to draw-4 reuse them), each of which runs only with an item.
+    steps: &job-steps
+      # The draw's script and probe, from this commit through git, not the REST API: the API's hourly limit is the
+      # whole repository's (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: |
+            tools/ci/vector-draw.sh
+            tools/ci/vector-probe.c
+            .github/actions/vector-runtime
+          sparse-checkout-cone-mode: false
+
+      # Before the checkout, the probe asks this CPU and its OS for x86-64-v4's level and every feature host_isa.h's
+      # predicate names. A runner that doesn't qualify publishes its verdict and ends, successfully, as a redraw.
+      - name: Probe this runner's CPU for the explicit vector target
+        id: probe
+        run: bash .vector-draw-script/tools/ci/vector-draw.sh probe "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE"
+
+      # The verdict's artifact, which the draw's collector counts: an artifact's name is no claim, so the candidates
+      # publish their verdicts and the collector, one job, assigns the items.
+      - name: Publish the probe's verdict
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.probe.outputs.prefix }}-probe-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}
+          path: ${{ runner.temp }}/vector-draw/record
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 14
+
+      # The item the draw's collector assigned this candidate (BUSTER_VECTOR_ITEM, its shard BUSTER_SHARD), which the
+      # steps below run; without one, it ends here, successfully, as a redraw. In a rerun of the failed jobs, a candidate
+      # that held an item takes it again.
+      - name: Take the vector item the draw assigns, or end as a redraw
+        uses: ./.vector-draw-script/.github/actions/vector-runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERDICT: ${{ steps.probe.outputs.verdict }}
+        with:
+          script: |
+            cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+            bash "$RUNNER_TEMP/vector-draw.sh" take "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE" "$VERDICT" "$RUNNER_TEMP/vector-draw/record"
+            cat "$RUNNER_TEMP/vector-draw/record"
+
+      # Every candidate's record, which the verdict reports: its CPU, the probe's verdict and its decision.
+      - name: Record the draw
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.probe.outputs.prefix }}-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}
+          path: ${{ runner.temp }}/vector-draw/record
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 14
+
+      # The settings each job's own workflow gave it, now its item's. A fuzz campaign is its item's shard: 1 the
+      # frontend, 2 the ELF import's override, 3 the crash-replay proof.
+      - name: Set the drawn job's settings
+        if: env.BUSTER_SHARD != ''
+        run: |
+          test "$BUSTER_DRAW_CONFIGURATION" = "$(case "$BUSTER_DRAW_ROW" in regressions) echo regressions ;; bootstrap) echo bootstrap ;;
+              tier1-problem) echo problem ;; fuzz) echo fuzz ;; sqlite-full) echo sqlite ;; esac)"
+          settings=()
+          case "$BUSTER_DRAW_ROW" in
+              bootstrap)
+                  settings=(BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 BUSTER_FUZZ_ENTRY= BUSTER_BUILD_DEFINES= BUSTER_HOST_RUNTIME=)
+                  ;;
+              fuzz)
+                  entries=(frontend elf-override crash-replay-proof)
+                  sources=(src/buster/compiler/fuzz.c tests/fuzz/entry_override.c tests/fuzz/entry_probe.c)
+                  settings=(BUSTER_HOST_ARCH=native BUSTER_SANITIZER=address BUSTER_FUZZ_AVAILABLE=1 "BUSTER_FUZZ_ENTRY=${sources[BUSTER_SHARD - 1]}"
+                      BUSTER_LINKER=lld "BUSTER_FUZZ_CAMPAIGN=${entries[BUSTER_SHARD - 1]}")
+                  ;;
+              sqlite-full)
+                  settings=(BUSTER_HOST_ARCH=native BUSTER_SANITIZER=none BUSTER_SANITIZER_OPTIMIZATION=3 BUSTER_LINKER=auto BUSTER_DEBUG_INFO=0)
+                  ;;
+          esac
+          if [ "${#settings[@]}" -gt 0 ]; then
+              printf '%s\n' "${settings[@]}" | tee -a "$GITHUB_ENV"
+          fi
+
+      - name: Check out triggering commit
+        if: env.BUSTER_SHARD != ''
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # The build's regressions' job is its workflow's only acquisition: verified cache, then the pinned mirror, then
+      # upstream. Tier 1's problem interchange builds with the image's clang.
+      - name: Restore verified hosted release inputs
+        if: env.BUSTER_SHARD != '' && inputs.row != 'tier1-problem'
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ${{ inputs.hosted-tools }}
+
+      - name: Install official Clang 23.1.4 and test tools
+        if: env.BUSTER_SHARD != '' && inputs.row != 'tier1-problem'
+        run: bash tools/ci/setup-hosted.sh
+
+      # --- The build's regressions (build.yml) ---
+      - name: Check the build's regressions
+        if: env.BUSTER_SHARD != '' && inputs.row == 'regressions'
+        run: |
+          set -euo pipefail
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/build-regression" tools/ci/build_regression.c
+          TMPDIR="$RUNNER_TEMP" "$RUNNER_TEMP/build-regression"
+
+      # --- The self-host bootstrap (selfhost.yml) ---
+      # The drawn CPU has the complete host vector path; the official Clang's must select it (no bootstrap is skipped).
+      - name: Record the host and verify the staged official Clang's host path
+        if: env.BUSTER_SHARD != '' && inputs.row == 'bootstrap'
+        run: |
+          set -euo pipefail
+          artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$artifacts"
+          test -n "${BUSTER_CLANG_RESOURCE_DIR:-}"
+          llvm_root="${BUSTER_CLANG_RESOURCE_DIR%/lib/clang/*}"
+          test -x "$llvm_root/bin/clang"
+          {
+              printf 'revision=%s\n' "$GITHUB_SHA"
+              printf 'event=%s\n' "$GITHUB_EVENT_NAME"
+              printf 'host_arch=%s\n' "$BUSTER_HOST_ARCH"
+              uname -a
+              grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
+              printf 'available_cpus=%s\n' "$(nproc)"
+              printf 'official_toolchain:\n'
+              "$llvm_root/bin/clang" --version
+          } > "$artifacts/metadata.txt"
+          defines=$("$llvm_root/bin/clang" -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
+          if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
+              printf '%s\n' '::error::The staged official Clang does not select the complete host vector path on the CPU the draw qualified.'
+              exit 1
+          fi
+          printf 'host_path=vector\n' >> "$artifacts/metadata.txt"
+
+      - name: Build stage 1 and qualify the self-host
+        if: env.BUSTER_SHARD != '' && inputs.row == 'bootstrap'
+        run: |
+          set -euo pipefail
+          unset CPATH C_INCLUDE_PATH
+          llvm_root="${BUSTER_CLANG_RESOURCE_DIR%/lib/clang/*}"
+          export PATH="$llvm_root/bin:$PATH"
+          test "$(clang -dumpversion)" = "23.1.4"
+          artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          # Redirect before consuming; process substitution would hide an exporter failure.
+          ./build.sh print-sources > "$artifacts/sources.argv"
+          ./build.sh print-compile-flags --config Release > "$artifacts/flags.argv"
+          ./build.sh --config Release 2>&1 | tee "$artifacts/build.log"
+          # The Release configuration's own executable, which build/compiler is too.
+          compiler=$(./build.sh print-output --config Release)
+          test build/compiler -ef "$compiler"
+          sha256sum "$compiler" tools/ci/selfhost.c >> "$artifacts/metadata.txt"
+          clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/selfhost.c -o "$artifacts/qualify"
+          "$artifacts/qualify" "$compiler" "$artifacts/sources.argv" "$artifacts/flags.argv" "$artifacts/result" 900 2>&1 | tee "$artifacts/qualification.log"
+          test -s "$artifacts/result/PASS"
+
+      - name: Publish the qualification summary
+        if: always() && env.BUSTER_SHARD != '' && inputs.row == 'bootstrap'
+        run: |
+          artifacts="$RUNNER_TEMP/selfhost-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [ -s "$artifacts/result/PASS" ]; then
+              cat "$artifacts/result/summary.md" >> "$GITHUB_STEP_SUMMARY"
+              printf '\nHost path: `BUSTER_HOST_ARCH=%s`.\n' "$BUSTER_HOST_ARCH" >> "$GITHUB_STEP_SUMMARY"
+          else
+              printf '## Self-host qualification (%s)\n\nFAILED or interrupted before completion. See command logs and partial timings in the artifact.\n' "$BUSTER_HOST_ARCH" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Preserve inputs, timings and both sides of every probe comparison
+        if: always() && env.BUSTER_SHARD != '' && inputs.row == 'bootstrap'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: selfhost-native-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/metadata.txt
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/*.argv
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/*.log
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/timings.tsv
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/summary.md
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/PASS
+            ${{ runner.temp }}/selfhost-${{ github.run_id }}-${{ github.run_attempt }}/result/probe-*
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            LICENSES/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # --- Tier 1's machine-problem interchange (tier1-problem.yml): correctness only, no Zen 5 performance claims ---
+      - name: Report the hosted compiler
+        if: env.BUSTER_SHARD != '' && inputs.row == 'tier1-problem'
+        run: clang --version
+
+      - name: Round trips, refusals and the real allocator
+        if: env.BUSTER_SHARD != '' && inputs.row == 'tier1-problem'
+        run: |
+          clang -std=c17 -O2 -g -march=native -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION tests/tier1-problem/test.c -o "$RUNNER_TEMP/tier1-problem"
+          "$RUNNER_TEMP/tier1-problem"
+
+      - name: Address and undefined-behavior sanitizers
+        if: env.BUSTER_SHARD != '' && inputs.row == 'tier1-problem'
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          clang -std=c17 -O1 -g -march=native -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION -fsanitize=address,undefined -fno-sanitize-recover=all tests/tier1-problem/test.c -o "$RUNNER_TEMP/tier1-problem-sanitize"
+          "$RUNNER_TEMP/tier1-problem-sanitize"
+
+      - name: Report buster's certified allocations of the seed imports
+        if: env.BUSTER_SHARD != '' && inputs.row == 'tier1-problem'
+        run: |
+          clang -std=c17 -O2 -Wall -Wextra -Werror -Wno-unused-function tests/tier1-problem/seed.c -o "$RUNNER_TEMP/tier1-problem-seed"
+          mkdir "$RUNNER_TEMP/problem-corpus"
+          for kind in straight cfg form; do "$RUNNER_TEMP/tier1-problem-seed" "$kind" > "$RUNNER_TEMP/problem-corpus/$kind"; done
+          clang -std=c17 -O2 -g -march=native -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread tests/tier1-problem/report.c -o "$RUNNER_TEMP/tier1-problem-report"
+          # The straight-line seed's allocations, both paths', are reported past their certificates; the others' refusals by reason.
+          "$RUNNER_TEMP/tier1-problem-report" "$RUNNER_TEMP/problem-corpus/straight" "$RUNNER_TEMP/problem-corpus/cfg" "$RUNNER_TEMP/problem-corpus/form" | tee "$RUNNER_TEMP/problem-report.txt"
+          grep -q $'\tok\t.*\tcertified=2$' "$RUNNER_TEMP/problem-report.txt"
+          grep -q $'^tier1-problem-report: functions=3\taccepted=1\trejected=2\tphi=1\tform=1$' "$RUNNER_TEMP/problem-report.txt"
+
+      - name: Seeded bounded wire-format fuzzing, every allocation certified
+        if: env.BUSTER_SHARD != '' && inputs.row == 'tier1-problem'
+        run: |
+          clang -std=c17 -O1 -g -march=native -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all tests/tier1-problem/fuzz.c -o "$RUNNER_TEMP/tier1-problem-fuzz"
+          "$RUNNER_TEMP/tier1-problem-fuzz" -seed=938 -runs=100000 -max_len=8192 "$RUNNER_TEMP/problem-corpus"
+
+      # --- The fuzz campaigns (9700x.yml): libFuzzer with ASan, UBSan and leaks, one campaign an item ---
+      # Before the build, as in the sanitizer rows (#2060). It never fails the job.
+      - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
+        if: env.BUSTER_SHARD != '' && inputs.row == 'fuzz'
+        continue-on-error: true
+        run: bash tools/ci/sanitizers.sh host
+
+      - name: Set fatal sanitizer policy and verify detectors
+        if: env.BUSTER_SHARD != '' && inputs.row == 'fuzz'
+        run: |
+          bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
+          bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
+
+      - name: Build the selected coverage-instrumented entry and check ordinary dispatch
+        if: env.BUSTER_SHARD != '' && inputs.row == 'fuzz'
+        run: |
+          ./build.sh --config Release
+          compiler=$(./build.sh print-output --config Release)
+          test build/compiler -ef "$compiler"
+          printf 'BUSTER_COMPILER=%s\n' "$compiler" >> "$GITHUB_ENV"
+          "$compiler" -fsyntax-only tests/fuzz/corpus/basic.c
+
+      - name: Fuzz the compiler with retained seeds and deterministic mutation seed
+        if: env.BUSTER_SHARD != '' && inputs.row == 'fuzz' && env.BUSTER_FUZZ_CAMPAIGN != 'crash-replay-proof'
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts"
+          cp tests/fuzz/corpus/* "$RUNNER_TEMP/fuzz-corpus/"
+          clang -c -march=x86-64 tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/object.elf"
+          clang -shared -fPIC tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/shared.elf"
+          runs=10000
+          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then runs=100000; fi
+          "$BUSTER_COMPILER" --fuzz -seed=133 -runs="$runs" -max_len=4096 -timeout=10 -rss_limit_mb=4096 \
+            -dict=tests/fuzz/c.dict -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
+            "$RUNNER_TEMP/fuzz-corpus" 2>&1 | tee "$RUNNER_TEMP/fuzzer.log"
+          if [ "$BUSTER_FUZZ_CAMPAIGN" = elf-override ]; then
+            grep -Fq 'Buster fuzz entry: ELF import' "$RUNNER_TEMP/fuzzer.log"
+          fi
+
+      - name: Prove entry override, crash preservation and exact-input replay
+        if: env.BUSTER_SHARD != '' && inputs.row == 'fuzz' && env.BUSTER_FUZZ_CAMPAIGN == 'crash-replay-proof'
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts" "$RUNNER_TEMP/fuzz-replay" "$RUNNER_TEMP/fuzz-planted"
+          printf %s BUSTER_FUZZ_ENTRY_PROBE > "$RUNNER_TEMP/fuzz-corpus/trigger"
+          # The planted abort's stack traces go to reports of their own, each of which must be the probe's; the
+          # audit below still rejects any other diagnostic. configure writes log_path last, and the combined runtime
+          # takes it from whichever of these options it parses last.
+          planted() { env "ASAN_OPTIONS=${ASAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
+              "UBSAN_OPTIONS=${UBSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
+              "LSAN_OPTIONS=${LSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" "$@"; }
+          status=0
+          planted "$BUSTER_COMPILER" --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
+            "$RUNNER_TEMP/fuzz-corpus" > "$RUNNER_TEMP/fuzzer.log" 2>&1 || status=$?
+          test "$status" -eq 77
+          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer.log"
+          artifacts=("$RUNNER_TEMP/fuzz-artifacts/"crash-*)
+          test "${#artifacts[@]}" -eq 1
+          cmp "$RUNNER_TEMP/fuzz-corpus/trigger" "${artifacts[0]}"
+          status=0
+          planted "$BUSTER_COMPILER" --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
+            "${artifacts[0]}" > "$RUNNER_TEMP/fuzzer-replay.log" 2>&1 || status=$?
+          test "$status" -eq 77
+          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer-replay.log"
+          reports=("$RUNNER_TEMP/fuzz-planted/"report.*)
+          test "${#reports[@]}" -eq 2
+          for report in "${reports[@]}"; do
+              grep -Fq 'in buster_fuzz_test_input' "$report"
+              grep -Fq 'tests/fuzz/entry_probe.c:' "$report"
+          done
+
+      - name: Reject every unexpected sanitizer diagnostic
+        if: ${{ !cancelled() && env.BUSTER_SHARD != '' && inputs.row == 'fuzz' }}
+        run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
+
+      - name: Preserve corpus, crash inputs, reports and the matching executable
+        if: always() && env.BUSTER_SHARD != '' && inputs.row == 'fuzz'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: libfuzzer-${{ env.BUSTER_FUZZ_CAMPAIGN }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fuzz-corpus
+            ${{ runner.temp }}/fuzz-artifacts
+            ${{ runner.temp }}/fuzz-replay
+            ${{ runner.temp }}/fuzz-planted
+            ${{ runner.temp }}/fuzzer*.log
+            ${{ runner.temp }}/sanitizer-reports
+            ${{ runner.temp }}/sanitizer-probes
+            build/compiler
+            build/compile_commands.json
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            LICENSES/
+          if-no-files-found: error
+          retention-days: 14
+
+      # --- SQLite's whole Tcl test suite (#146; hosted-correctness.yml's native plain row) ---
+      - name: Fetch and verify frozen corpus inputs
+        if: env.BUSTER_SHARD != '' && inputs.row == 'sqlite-full'
+        run: |
+          corpus="$RUNNER_TEMP/preprocessor-391e729af658"
+          bash tools/ci/fetch-corpus.sh "$corpus"
+          printf 'BUSTER_CORPUS=%s\n' "$corpus" >> "$GITHUB_ENV"
+
+      - name: Build the external Clang pragma oracle, the clang server and the compiler
+        # For this runner's CPU, as a native row's item builds its own.
+        if: env.BUSTER_SHARD != '' && inputs.row == 'sqlite-full'
+        run: bash tools/ci/hosted-product.sh build
+
+      - name: Fetch SQLite's sources at their pinned commit
+        if: env.BUSTER_SHARD != '' && inputs.row == 'sqlite-full'
+        run: bash tools/ci/fetch-sqlite.sh build/sqlite
+
+      - name: Run SQLite's full Tcl suite by both tiers against clang's
+        if: env.BUSTER_SHARD != '' && inputs.row == 'sqlite-full'
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          tcl=$(bash tools/ci/tcl-config.sh)
+          "$BUSTER_COMPILER" test-sqlite-testfixture --clang clang --tree build/sqlite --tcl "$tcl" --amalgamation "$BUSTER_CORPUS/sqlite/sqlite3.c" \
+            --jobs "$(nproc)" --timeout 5400 --directory build
+
+      # The item's evidence, which the verdict requires once per item: the probe's verdict and the CPU it ran on, and
+      # its steps' pass. Only an item whose every step passed records one.
+      - name: Write the vector item's evidence
+        if: ${{ success() && env.BUSTER_SHARD != '' }}
+        run: |
+          {
+              printf 'item\t%s\nconfiguration\t%s\nshard\t%s\n' "$BUSTER_VECTOR_ITEM" "$BUSTER_DRAW_CONFIGURATION" "$BUSTER_SHARD"
+              printf 'suite\tpassed\n'
+          } >> "$RUNNER_TEMP/vector-draw/record"
+          cat "$RUNNER_TEMP/vector-draw/record"
+
+      - name: Record the vector item's qualified execution
+        if: ${{ success() && env.BUSTER_SHARD != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.probe.outputs.prefix }}-evidence-${{ env.BUSTER_VECTOR_ITEM }}
+          path: ${{ runner.temp }}/vector-draw/record
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record the vector candidate's REST requests
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.row }}-${{ github.run_attempt }}-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}
+          path: ${{ runner.temp }}/vector-rest/*.tsv
+          overwrite: false
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Each collector starts with its draw and polls the runtime artifacts (the candidates' verdicts), until as many
+  # candidates qualified as items are missing, or every candidate published its verdict or ended; then it assigns, by
+  # rank, and publishes the assignment as an artifact whose name holds it. Its outputs size the next draw. A collector's
+  # job name is what tools/ci/vector-draw.sh looks for in a rerun.
+  collect-1:
+    name: Vector draw 1's assignment (${{ inputs.row }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      count: ${{ steps.assign.outputs.count }}
+      candidates: ${{ steps.assign.outputs.candidates }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '1'
+      BUSTER_DRAW_CANDIDATES: ${{ inputs.row == 'fuzz' && '9' || '3' }}
+      BUSTER_DRAW_NEXT: '4'
+    steps: &collect-steps
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: |
+            tools/ci/vector-draw.sh
+            .github/actions/vector-runtime
+          sparse-checkout-cone-mode: false
+
+      - name: Assign the draw's vector items to its qualifying candidates by rank
+        id: assign
+        uses: ./.vector-draw-script/.github/actions/vector-runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+            bash "$RUNNER_TEMP/vector-draw.sh" assign "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATES" "$BUSTER_DRAW_NEXT"
+            cat "$RUNNER_TEMP/vector-assignment"
+
+      # One upload, by the one job that decides: its name is the assignment.
+      - name: Publish the assignment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.assign.outputs.name }}
+          path: ${{ runner.temp }}/vector-assignment
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record the vector collector's REST requests
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.row }}-${{ github.run_attempt }}-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}
+          path: ${{ runner.temp }}/vector-rest/*.tsv
+          overwrite: false
+          if-no-files-found: ignore
+          retention-days: 14
+
+  draw-2:
+    name: Vector draw 2, candidate ${{ matrix.candidate }} (${{ inputs.row }})
+    needs: [collect-1]
+    if: ${{ !cancelled() && needs.collect-1.result == 'success' && needs.collect-1.outputs.count != '0' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: ${{ fromJSON('{"regressions":50,"bootstrap":125,"tier1-problem":20,"fuzz":50,"sqlite-full":145}')[inputs.row] }}
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+      matrix:
+        candidate: ${{ fromJSON(needs.collect-1.outputs.candidates) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '2'
+      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
+    steps: *job-steps
+
+  collect-2:
+    name: Vector draw 2's assignment (${{ inputs.row }})
+    needs: collect-1
+    if: needs.collect-1.outputs.count != '0'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      count: ${{ steps.assign.outputs.count }}
+      candidates: ${{ steps.assign.outputs.candidates }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '2'
+      BUSTER_DRAW_CANDIDATES: ${{ needs.collect-1.outputs.count }}
+      BUSTER_DRAW_NEXT: '5'
+    steps: *collect-steps
+
+  draw-3:
+    name: Vector draw 3, candidate ${{ matrix.candidate }} (${{ inputs.row }})
+    needs: [collect-2]
+    if: ${{ !cancelled() && needs.collect-2.result == 'success' && needs.collect-2.outputs.count != '0' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: ${{ fromJSON('{"regressions":50,"bootstrap":125,"tier1-problem":20,"fuzz":50,"sqlite-full":145}')[inputs.row] }}
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+      matrix:
+        candidate: ${{ fromJSON(needs.collect-2.outputs.candidates) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '3'
+      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
+    steps: *job-steps
+
+  collect-3:
+    name: Vector draw 3's assignment (${{ inputs.row }})
+    needs: collect-2
+    if: needs.collect-2.outputs.count != '0'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      count: ${{ steps.assign.outputs.count }}
+      candidates: ${{ steps.assign.outputs.candidates }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '3'
+      BUSTER_DRAW_CANDIDATES: ${{ needs.collect-2.outputs.count }}
+      BUSTER_DRAW_NEXT: '5'
+    steps: *collect-steps
+
+  draw-4:
+    name: Vector draw 4, candidate ${{ matrix.candidate }} (${{ inputs.row }})
+    needs: [collect-3]
+    if: ${{ !cancelled() && needs.collect-3.result == 'success' && needs.collect-3.outputs.count != '0' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: ${{ fromJSON('{"regressions":50,"bootstrap":125,"tier1-problem":20,"fuzz":50,"sqlite-full":145}')[inputs.row] }}
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+      matrix:
+        candidate: ${{ fromJSON(needs.collect-3.outputs.candidates) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '4'
+      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
+    steps: *job-steps
+
+  # The last draw's collector: what it doesn't assign stays without a holder (BUSTER_DRAW_NEXT 0).
+  collect-4:
+    name: Vector draw 4's assignment (${{ inputs.row }})
+    needs: collect-3
+    if: needs.collect-3.outputs.count != '0'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      count: ${{ steps.assign.outputs.count }}
+      candidates: ${{ steps.assign.outputs.candidates }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '4'
+      BUSTER_DRAW_CANDIDATES: ${{ needs.collect-3.outputs.count }}
+      BUSTER_DRAW_NEXT: '0'
+    steps: *collect-steps
+
+  # The job's result: exactly one passing qualified execution of each item, by the candidate its assignment names, in
+  # the assignments' attempt or a rerun of the failed jobs after it. An item without a holder fails it as incomplete (no
+  # qualifying CPU was drawn: rerun all jobs to draw again). Its summary lists every candidate's CPU and decision. The
+  # merge queue's coverage (tools/ci/nightly.c) credits a drawn job by this job alone.
+  verdict:
+    name: Vector row verdict (${{ inputs.row }})
+    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Every attempt's: a rerun of the failed jobs keeps its earlier attempt's assignments.
+      - name: Download the vector row's draws, assignments and evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ${{ inputs.row }}-*
+          path: ${{ runner.temp }}/vector-records
+
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Require one passing qualified execution of each vector item
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
+          bash "$RUNNER_TEMP/vector-draw.sh" verdict "$RUNNER_TEMP/vector-records"

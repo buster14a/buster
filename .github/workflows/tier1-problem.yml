@@ -11,6 +11,10 @@ on:
       - 'src/buster/compiler/host_isa.h'
       - 'tests/tier1-problem/**'
       - '.github/workflows/tier1-problem.yml'
+      - '.github/workflows/drawn.yml'
+      - 'tools/ci/vector-draw.sh'
+      - 'tools/ci/vector-probe.c'
+      - '.github/actions/vector-runtime/**'
   workflow_dispatch:
   # A merge-queue candidate calls this workflow whole where its change touches a path the pull_request trigger above
   # lists (9700x.yml's auxiliary-tier1-problem job, which tools/ci/changes.c decides from that list; #1430). A push to main runs
@@ -25,44 +29,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Correctness only: these hosted runs make no Zen 5 performance claims. The tests build the compiler's sources for the
+  # runner's CPU and run them, so they draw an AVX-512 runner (drawn.yml's `tier1-problem` row, which holds the steps;
+  # #2924). The x86-64 (baseline host) entry is gone with the scalar host.
   correctness:
-    # Correctness only: these hosted runs make no Zen 5 performance claims.
-    runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    strategy:
-      # On a pull request or a merge-queue candidate, the first failure cancels the rest; dispatched runs report them
-      # all. The x86-64 (baseline host) entry is gone with the scalar host (#2924).
-      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
-      matrix:
-        arch: [native]
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - name: Report the hosted compiler
-        run: clang --version
-      - name: Round trips, refusals and the real allocator
-        run: |
-          clang -std=c17 -O2 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION tests/tier1-problem/test.c -o "$RUNNER_TEMP/tier1-problem"
-          "$RUNNER_TEMP/tier1-problem"
-      - name: Address and undefined-behavior sanitizers
-        env:
-          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: |
-          clang -std=c17 -O1 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION -fsanitize=address,undefined -fno-sanitize-recover=all tests/tier1-problem/test.c -o "$RUNNER_TEMP/tier1-problem-sanitize"
-          "$RUNNER_TEMP/tier1-problem-sanitize"
-      - name: Report buster's certified allocations of the seed imports
-        run: |
-          clang -std=c17 -O2 -Wall -Wextra -Werror -Wno-unused-function tests/tier1-problem/seed.c -o "$RUNNER_TEMP/tier1-problem-seed"
-          mkdir "$RUNNER_TEMP/problem-corpus"
-          for kind in straight cfg form; do "$RUNNER_TEMP/tier1-problem-seed" "$kind" > "$RUNNER_TEMP/problem-corpus/$kind"; done
-          clang -std=c17 -O2 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread tests/tier1-problem/report.c -o "$RUNNER_TEMP/tier1-problem-report"
-          # The straight-line seed's allocations, both paths', are reported past their certificates; the others' refusals by reason.
-          "$RUNNER_TEMP/tier1-problem-report" "$RUNNER_TEMP/problem-corpus/straight" "$RUNNER_TEMP/problem-corpus/cfg" "$RUNNER_TEMP/problem-corpus/form" | tee "$RUNNER_TEMP/problem-report.txt"
-          grep -q $'\tok\t.*\tcertified=2$' "$RUNNER_TEMP/problem-report.txt"
-          grep -q $'^tier1-problem-report: functions=3\taccepted=1\trejected=2\tphi=1\tform=1$' "$RUNNER_TEMP/problem-report.txt"
-      - name: Seeded bounded wire-format fuzzing, every allocation certified
-        run: |
-          clang -std=c17 -O1 -g -march=${{ matrix.arch }} -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all tests/tier1-problem/fuzz.c -o "$RUNNER_TEMP/tier1-problem-fuzz"
-          "$RUNNER_TEMP/tier1-problem-fuzz" -seed=938 -runs=100000 -max_len=8192 "$RUNNER_TEMP/problem-corpus"
+    name: correctness (native)
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/drawn.yml
+    with:
+      row: tier1-problem

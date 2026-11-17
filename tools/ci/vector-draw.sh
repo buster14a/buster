@@ -18,7 +18,10 @@
 #
 # PREFIX is ROW-OOPTIMIZATION, ROW the row's host architecture (BUSTER_HOST_ARCH): `vector`, the explicit vector target,
 # or `native`, the native plain row, which draws AVX-512 CPUs too (#2924) and whose every item builds its own compiler
-# for the CPU it drew, so it has no product. The row is one pool of items across its configurations (its sanitizers,
+# for the CPU it drew, so it has no product. A job that needs an AVX-512 CPU and isn't a row (the build's regressions,
+# the self-host bootstrap, Tier 1's problem interchange, the fuzz campaigns, SQLite's full suite; #2924) draws the
+# same way, through .github/workflows/drawn.yml: its PREFIX is BUSTER_DRAW_ROW, the job's name in the table below, and
+# its items are the job's (each fuzz campaign is one), which run its own steps. The row is one pool of items across its configurations (its sanitizers,
 # BUSTER_VECTOR_CONFIGURATIONS, whose initials differ): an item is a configuration's initial and one of its shards, `m2`
 # for memory's shard 2 of its items' count. BUSTER_VECTOR_ITEMS lists every item the costliest first, and the row's
 # items are those of its configurations, in that order. Artifact names are not claims: of 16 jobs that upload one name
@@ -26,6 +29,9 @@
 # collector, one job, decides. Run with the row's settings in the environment (BUSTER_VECTOR_CONFIGURATIONS,
 # BUSTER_VECTOR_ITEMS, BUSTER_SANITIZER_OPTIMIZATION) and the job's GITHUB_* variables, GH_TOKEN with `actions: read`:
 #
+#   vector-draw.sh probe LEVEL CANDIDATE
+#       Candidate CANDIDATE of draw LEVEL, first: whether its CPU and OS enable everything the explicit vector target
+#       uses (tools/ci/vector-probe.c), its record and the step's outputs (`verdict`, `prefix`, `product`).
 #   vector-draw.sh assign LEVEL CANDIDATES NEXT
 #       The collector of draw LEVEL, whose CANDIDATES candidates it waits for: until as many have qualified as items
 #       are missing, or every candidate has published its verdict or ended, at most 25 minutes. The qualifying
@@ -36,8 +42,9 @@
 #   vector-draw.sh take LEVEL CANDIDATE VERDICT RECORD
 #       A candidate, after its probe (VERDICT `qualified` or not) and its verdict's artifact: the item its draw's
 #       collector assigned it, or nothing (a redraw). The item's settings go to GITHUB_ENV: BUSTER_VECTOR_ITEM, its
-#       configuration as BUSTER_SANITIZER, its shard as BUSTER_SHARD of BUSTER_VECTOR_SHARDS, and whether it builds
-#       the configuration's product (BUSTER_VECTOR_BUILDER, 1 for shard 1). Appends its decision to RECORD.
+#       configuration as BUSTER_SANITIZER (a job's as BUSTER_DRAW_CONFIGURATION), its shard as BUSTER_SHARD of
+#       BUSTER_VECTOR_SHARDS, and whether it builds the configuration's product (BUSTER_VECTOR_BUILDER, 1 for a vector
+#       row's shard 1). Appends its decision to RECORD.
 #       In a rerun of failed jobs, whose collectors don't run again, a candidate that held an item retakes it, and
 #       fails, as no test does, if its new runner doesn't qualify: rerunning the failed jobs draws again.
 #   vector-draw.sh product CONFIGURATION
@@ -53,15 +60,34 @@
 set -euo pipefail
 shopt -s inherit_errexit
 
-optimization=${BUSTER_SANITIZER_OPTIMIZATION:?}
-row_arch=${BUSTER_HOST_ARCH:-vector}
-case "$row_arch" in vector | native) ;; *) printf 'vector-draw: BUSTER_HOST_ARCH=%s draws no row\n' "$row_arch" >&2; exit 1 ;; esac
-prefix="$row_arch-O$optimization"
-product_prefix="vector-product-O$optimization"
 attempt=${GITHUB_RUN_ATTEMPT:?}
-read -r -a configurations <<< "${BUSTER_VECTOR_CONFIGURATIONS:?}"
-read -r -a every_item <<< "${BUSTER_VECTOR_ITEMS:?}"
-row="(Clang 23, ${configurations[*]}, O$optimization)"
+# The row: a hosted correctness row's, or a job's that draws AVX-512 runners as they do (BUSTER_DRAW_ROW; #2924,
+# .github/workflows/drawn.yml), whose configuration and items this table names, its items the costliest first. A job
+# row's prefix and name are the job's, distinct from every other row's that can run beside it: the collectors and
+# candidates find their own jobs by the name's row. Its item's settings are its job's own, not a sanitizer's.
+draw_row=${BUSTER_DRAW_ROW:-}
+if [ -n "$draw_row" ]; then
+    case "$draw_row" in
+        regressions) configurations=(regressions) every_item=(r1) ;;
+        bootstrap) configurations=(bootstrap) every_item=(b1) ;;
+        tier1-problem) configurations=(problem) every_item=(p1) ;;
+        fuzz) configurations=(fuzz) every_item=(f1 f2 f3) ;;
+        sqlite-full) configurations=(sqlite) every_item=(s1) ;;
+        *) printf 'vector-draw: BUSTER_DRAW_ROW=%s is no drawn job\n' "$draw_row" >&2; exit 1 ;;
+    esac
+    row_arch=job
+    prefix=$draw_row
+    row="($draw_row)"
+else
+    optimization=${BUSTER_SANITIZER_OPTIMIZATION:?}
+    row_arch=${BUSTER_HOST_ARCH:-vector}
+    case "$row_arch" in vector | native) ;; *) printf 'vector-draw: BUSTER_HOST_ARCH=%s draws no row\n' "$row_arch" >&2; exit 1 ;; esac
+    prefix="$row_arch-O$optimization"
+    read -r -a configurations <<< "${BUSTER_VECTOR_CONFIGURATIONS:?}"
+    read -r -a every_item <<< "${BUSTER_VECTOR_ITEMS:?}"
+    row="(Clang 23, ${configurations[*]}, O$optimization)"
+fi
+product_prefix="vector-product-O${optimization:-}"
 # The interval between polls, and how long a collector waits for its candidates, a candidate for its collector and an
 # item for its configuration's product. The draws the row unrolls (draw-1 to draw-4).
 # Artifact polling uses the same-run Results service, as upload/download-artifact do, not the repository REST quota
@@ -120,8 +146,11 @@ if [ "$attempt" -gt 1 ]; then rest_budget=6; fi
 if [ "$rest_command" = take ] && [ "$attempt" -eq 1 ]; then rest_budget=0; fi
 if [ "$rest_command" = assign ] && [ "${2:-}" = 1 ]; then rest_budget=$((rest_budget + 1)); fi
 if [ "$rest_command" = verdict ]; then rest_budget=1; fi
-printf 'request\tstatus\tremaining\treset\tendpoint\n' > "$rest_ledger"
-printf '0 -1 0\n' > "$rest_state"
+# The probe makes no request and keeps no ledger: it runs before the candidate has anything to account for.
+if [ "$rest_command" != probe ]; then
+    printf 'request\tstatus\tremaining\treset\tendpoint\n' > "$rest_ledger"
+    printf '0 -1 0\n' > "$rest_state"
+fi
 rest_reserve=100
 
 # One charged REST request. No --paginate or implicit retry: callers charge pages separately, discard partial
@@ -167,7 +196,9 @@ rest_summary()
     read -r count remaining reset < "$rest_state"
     summary "REST $rest_command: $count/$rest_budget requests; last shared remaining=$remaining, reset=$reset"
 }
-trap 'rest_summary >&2' EXIT
+if [ "$rest_command" != probe ]; then
+    trap 'rest_summary >&2' EXIT
+fi
 
 # A full jobs snapshot or nothing. A list exceeding this invocation's remaining page allowance is optional on an
 # initial draw, but cannot establish rerun identity. A changing or malformed total likewise cannot prove absence.
@@ -488,7 +519,12 @@ take()
         [ -n "$configuration" ] && [ "$shard" -le "$shards" ] || die "item $item is none of the row's: ${items[*]}"
         {
             printf 'BUSTER_VECTOR_ITEM=%s\n' "$item"
-            printf 'BUSTER_SANITIZER=%s\n' "$configuration"
+            # A row's configuration is a sanitizer, the build's; a job's settings are its own (its draw's workflow).
+            if [ "$row_arch" != job ]; then
+                printf 'BUSTER_SANITIZER=%s\n' "$configuration"
+            else
+                printf 'BUSTER_DRAW_CONFIGURATION=%s\n' "$configuration"
+            fi
             printf 'BUSTER_SHARD=%s\n' "$shard"
             printf 'BUSTER_VECTOR_SHARDS=%s\n' "$shards"
             # A vector configuration's item 1 builds its product; a native item builds its own and shares none.
@@ -498,6 +534,47 @@ take()
         printf 'Vector item %s: %s, shard %s of %s\n' "$item" "$configuration" "$shard" "$shards"
     fi
     summary "draw $level, candidate $candidate: $decision"
+}
+
+# A candidate's first step, before any checkout but its draw's own (the script and the probe): builds
+# tools/ci/vector-probe.c, beside this script, with the explicit vector target's flags (cmake/BusterSettings.cmake's,
+# which tools/ci/changes.c's self-test keeps in step) by the image's cc, the hosted toolchain not yet installed, and runs
+# it. Any failure to run is a CPU that doesn't qualify: one without x86-64-v4 may stop at an instruction the flags let
+# the probe itself use. Writes the candidate's record (RUNNER_TEMP/vector-draw/record), the step's outputs (`verdict`,
+# the verdict's first word; `prefix`, this attempt's records'; `product`, a vector configuration's products') and
+# BUSTER_VECTOR_PROBE, which a shared product's install runs again (tools/ci/hosted-product.sh).
+probe()
+{
+    local level=$1 candidate=$2 draw="${RUNNER_TEMP:?}/vector-draw" source status=0 verdict=qualified missing cpu
+    [[ "$level" =~ ^[1-9]$ && "$candidate" =~ ^[1-9][0-9]*$ ]] || die "probe: bad arguments: $*"
+    : "${GITHUB_OUTPUT:?}" "${GITHUB_ENV:?}"
+    source="$(dirname -- "${BASH_SOURCE[0]}")/vector-probe.c"
+    mkdir -p "$draw"
+    cc -std=c17 -O2 -Wall -Wextra -Werror -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni "$source" -o "$draw/probe"
+    "$draw/probe" > "$draw/features" 2>&1 || status=$?
+    cat "$draw/features"
+    missing=$(awk -F '\t' 'NF == 2 && $2 == "no" { printf "%s%s", separator, $1; separator = " " }' "$draw/features")
+    if [ "$status" -ne 0 ]; then
+        verdict="unqualified (status $status)"
+        missing=${missing:-unknown: the probe stopped}
+    fi
+    cpu=$(sed -n '/^model name[[:space:]]*:[[:space:]]*/{s///p;q}' "${VECTOR_DRAW_CPUINFO:-/proc/cpuinfo}")
+    {
+        printf 'level\t%s\n' "$level"
+        printf 'candidate\t%s\n' "$candidate"
+        printf 'runner\t%s\n' "${RUNNER_NAME:-}"
+        printf 'cpu\t%s\n' "$cpu"
+        printf 'cpus\t%s\n' "$(nproc)"
+        printf 'probe\t%s\n' "$verdict"
+        printf 'missing\t%s\n' "${missing:-none}"
+    } > "$draw/record"
+    summary "draw $level, candidate $candidate: $cpu, $verdict"
+    {
+        printf 'verdict=%s\n' "${verdict%% *}"
+        printf 'prefix=%s-%s\n' "$prefix" "$attempt"
+        printf 'product=%s-%s\n' "$product_prefix" "$attempt"
+    } >> "$GITHUB_OUTPUT"
+    printf 'BUSTER_VECTOR_PROBE=%s\n' "$draw/probe" >> "$GITHUB_ENV"
 }
 
 product()
@@ -668,7 +745,7 @@ verdict()
     fi
     report="${RUNNER_TEMP:-/tmp}/vector-verdict.md"
     {
-        printf '## Vector row (%s, O%s), attempt %s\n\n' "${configurations[*]}" "$optimization" "$attempt"
+        printf '## Vector row %s, attempt %s\n\n' "$row" "$attempt"
         printf 'Assignments from attempt %s.\n\n' "$latest"
         printf '| Attempt | Draw | Candidate | CPU | Probe | Decision |\n| ---: | ---: | ---: | --- | --- | --- |\n'
         for name in "$records"/"$prefix"-*-draw-*/record; do
@@ -701,6 +778,7 @@ verdict()
         fi
         # The holder's passing executions in the assignments' attempt and the reruns after it: item 1 of a configuration
         # with the product it built, the others with one they installed; every native item with the compiler it built.
+        # A job's item has neither product nor kernels: its steps passed, on the CPU its probe qualified.
         built=installed
         [ "${item:1}" != 1 ] && [ "$row_arch" = vector ] || built=built
         passing=0
@@ -708,10 +786,10 @@ verdict()
         for ((at = latest; at <= attempt; at += 1)); do
             name="$records/$prefix-$at-evidence-$item/record"
             if [ -e "$name" ] && [ "$(field level "$name") $(field candidate "$name")" = "$holder" ] &&
-                [ "$(field probe "$name")" = qualified ] && [ "$(field host-vector "$name")" = 1 ] &&
-                [ -n "$(field kernels "$name")" ] && [ "$(field suite "$name")" = passed ] && [ "$(field item "$name")" = "$item" ] &&
+                [ "$(field probe "$name")" = qualified ] && [ "$(field suite "$name")" = passed ] && [ "$(field item "$name")" = "$item" ] &&
                 [ "$(field configuration "$name")" = "$configuration" ] && [ "$(field shard "$name")" = "${item:1}" ] &&
-                [[ "$(field product "$name")" =~ ^$built\ [0-9a-f]{64}$ ]] &&
+                { [ "$row_arch" = job ] || { [ "$(field host-vector "$name")" = 1 ] && [ -n "$(field kernels "$name")" ] &&
+                    [[ "$(field product "$name")" =~ ^$built\ [0-9a-f]{64}$ ]]; }; } &&
                 [[ "$(field decision "$name")" == "took $item"* ]]; then
                 passing=$((passing + 1))
                 evidence=$name
@@ -719,6 +797,7 @@ verdict()
         done
         if [ "$passing" -eq 1 ]; then
             product=$(field product "$evidence")
+            product=${product:-none -}
             printf '| %s | %s | %s | %s | %s | %s | %s | %s %.12s | passed |\n' "$item" "$configuration" "${item:1}" "${holder% *}" "${holder#* }" \
                 "$(evidence_attempt "$evidence")" "$(field cpu "$evidence")" "${product%% *}" "${product#* }" >> "$report"
         else
@@ -754,6 +833,10 @@ evidence_attempt()
 }
 
 case "${1:-}" in
+    probe)
+        [ $# -eq 3 ] || { echo 'usage: vector-draw.sh probe LEVEL CANDIDATE' >&2; exit 2; }
+        probe "$2" "$3"
+        ;;
     assign)
         [ $# -eq 4 ] || { echo 'usage: vector-draw.sh assign LEVEL CANDIDATES NEXT' >&2; exit 2; }
         assign "$2" "$3" "$4"
@@ -771,7 +854,7 @@ case "${1:-}" in
         verdict "$2"
         ;;
     *)
-        echo 'usage: vector-draw.sh assign LEVEL CANDIDATES NEXT | take LEVEL CANDIDATE VERDICT RECORD | product CONFIGURATION | verdict RECORDS' >&2
+        echo 'usage: vector-draw.sh probe LEVEL CANDIDATE | assign LEVEL CANDIDATES NEXT | take LEVEL CANDIDATE VERDICT RECORD | product CONFIGURATION | verdict RECORDS' >&2
         exit 2
         ;;
 esac

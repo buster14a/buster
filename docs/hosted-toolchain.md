@@ -8,12 +8,14 @@ absent or damaged inputs, in this order:
 
 **exact verified Actions cache → digest-pinned GHCR mirror → original upstream URL.**
 
-The test/fuzz matrix (`9700x.yml`, whose rows' jobs, a portable row's compiler
-build among them, are `hosted-correctness.yml`'s) and both self-host bootstrap
-rows (`selfhost.yml`) depend on successful preparation; they never independently
-fall back to a remote source. `build.yml`'s single job is its workflow's only
-consumer, so the `hosted-tools` action, given an empty `artifact-name`, runs the
-same preparation inside that job. `build-pgo.yml` and the 9700X need only CMake
+The test rows and fuzz campaigns (`9700x.yml`, whose rows' jobs are
+`hosted-correctness.yml`'s and whose campaigns are `drawn.yml`'s) and the
+self-host bootstrap (`selfhost.yml`, through `drawn.yml`) depend on successful
+preparation; they never independently fall back to a remote source.
+`build.yml`'s regressions, the one drawn job that holds them (`drawn.yml`'s
+`regressions` row), are their workflow's only consumer, so the `hosted-tools`
+action, given an empty `artifact-name`, runs the same preparation inside that
+job. `build-pgo.yml` and the 9700X need only CMake
 and Ninja: `setup-build-tools.sh` without `BUSTER_HOSTED_RELEASES` acquires each
 from the mirror, then upstream, with the same checks.
 
