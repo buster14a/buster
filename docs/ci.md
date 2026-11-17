@@ -735,64 +735,198 @@ product's install on a qualifying runner and its refusals.
 
 ## CI latency baseline
 
-`.github/workflows/ci-timings.yml` runs entirely on hosted runners, at 08:37
-Europe/Madrid or on manual dispatch. It reads at most the latest 100 runs of
-`9700x.yml`, fully paginates each run's latest-attempt jobs, and reports the
-median and nearest-rank 95th percentile of successful hardware jobs' queue,
-execution, runner-hook, lock-wait, lock-hold, setup/build, native-test,
-benchmark-step and host-occupation durations. Host occupation runs from the
-job's first step, after the runner hook took the lock, to the job's end. Four
-classes stay
-separate:
+The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid and
+on manual dispatch. Its collector, `tools/ci/timings.sh`, reads Actions
+metadata; `tools/ci/timings.c --accounting` owns phase classification, interval
+accounting and statistics. It covers the integration workflow's PR, queue,
+historical main-push, scheduled and dispatched runs, plus the build,
+self-host, preparation, nightly coordinator and reporting workflows. Reusable
+workflow jobs, including hosted setup, correctness, fuzz and vector draws,
+are included through their calling run's jobs.
 
-- PR;
-- main push (before the merge queue; merge-queue candidates have their own
-  section, `timings --queue`);
-- nightly targeted: backlog dispatches, recognized by their run name;
-- full: the daily run, full dispatches and the nightly snapshot's run.
+### Samples, attempts and missing evidence
 
-The classes say how a run was started, not what it covered: the coverage
-records do that. The raw API responses,
-normalized observations and summary are retained as 14-day workflow artifacts.
-This adds no benchmark work and changes no hardware scheduling or merge gate.
+The default is the latest 10 runs per workflow/event. The primary workflow is
+queried separately by event so a nightly backlog burst cannot hide PR and
+queue samples. An optional UTC split queries both before and after windows;
+the cohort follows the run's original creation time, including on retries.
+Every sample's filters, counts and limits are recorded. These bounded samples
+are not an exhaustive account utilization window or an arrival-rate survey.
 
-Missing or inconsistent timestamps contribute no sample; a job or step that
-failed/skipped is not a successful timing observation. No observations means
-unknown, not zero. `runner-hook` is the job-started hook's step, from the
-API's whole-second step times: hook overhead and any waiting.
+The collector includes every conclusion and unfinished runs. It reads
+attempt metadata and completely paginates each collected attempt's jobs;
+stable IDs prevent a repeated page from adding resource use twice. The
+default bounds are 16 attempts per run, 600 API requests, 600 seconds of
+collection and 24 selected CPU/lock log reads. Each API request has a
+30-second timeout and at most two tries. An unavailable response or exhausted
+budget leaves explicit missing evidence and available observations in the
+report. The workflow publishes any available summary even if collection
+fails.
 
-The shared lock's times come from the 9700X's runner hooks themselves, which
-log every acquisition and release in the job's log. The job-started hook
-(`/usr/local/libexec/buster-9700x/job-started.sh`) prints
-`buster-9700x: waiting for the machine, held by: …` while another holder has
-it, then `buster-9700x: this job has the machine`. The job-completed hook prints
-`buster-9700x: gave the machine back`. The collector reads those lines and
-their sub-second runner timestamps from each successful hardware job's log,
-read as data and not kept, and reports two metrics:
+API reads span the collection period. The recorded snapshot bounds unfinished
+intervals; it is not an atomic snapshot of every run and account setting.
 
-- `lock-wait`, from the job-started hook's start to `this job has the
-  machine`;
-- `lock-hold`, from there to `gave the machine back`, the host's time under
-  this job's lock.
+Raw API JSON, filtered CPU/lock evidence, `facts.tsv`, `run-links.tsv`,
+request receipts, collection settings and the summary are retained as
+14-day artifacts. Full job logs are not retained by this collector.
+Unknown observations remain distinct from measured zero; a failed API read
+does not imply an empty run, no work, or a deleted branch. A malformed,
+duplicate or over-capacity facts stream fails the C reader rather than
+silently changing its sample.
 
-Both are rounded to whole seconds. The lines bracket the lock operations, so
-each metric also includes the hook's own work around them. In the job below
-that was 14 ms from the hook's start to its `waiting` line, and 4 ms from the
-job-completed hook's start to its release line: tens of milliseconds, below
-the rounding, but not zero. A log that can't be read, or that lacks one of the
-lines, gives that metric no sample. On 2026-11-03, PR run 41664434811's
-job waited 8.0 s behind an agent session's differential test and held the
-lock for 151.6 s.
+### Phase accounting
 
-The collector (`tools/ci/timings.sh`) uses read-only Actions access on the
-hosted runner. `tools/ci/timings.c` validates bounded tab-separated observations,
-rejects duplicates/invalid numbers and computes statistics. The PR path tests
-both without API credentials or network calls:
+Every allocated job's observed execution interval is partitioned once.
+Durations of failed and cancelled steps still count. Skipped steps and
+unallocated jobs do not consume reported execution, even when GitHub supplies
+placeholder timestamps.
+
+| Phase | Evidence |
+| --- | --- |
+| Setup/build | Recorded checkout, input acquisition, installation, product handoff and build steps. No native-test endpoint is required. |
+| Correctness | Test, verification, sanitizer and fuzz steps identified by the current step-name catalogue. |
+| Measurement | `Benchmark`, `Measure`, `Attribute`, `Compare`, `Time`, `Profile`, `Gauge` and the Zen 5 reproduction steps, irrespective of success. |
+| Uploads/reporting | Artifact publication, preserved diagnostics and evidence/report steps. |
+| Other overhead | Recognized runner setup/cleanup, orchestration and coordination steps. |
+| Lock wait | The runner hook's own start-to-acquisition markers, clipped to the job interval. |
+| Unclassified | Unrecognized step names, gaps and missing step timestamps. |
+| Overlap | Simultaneous recorded step spans, counted once in a separate bucket. |
+
+Classification has step-level precision. A mixed build-and-qualification step
+stays in one bucket; it does not expose internal build/test boundaries.
+
+The phase sum reconciles to job execution; concurrent jobs add runner-seconds
+because they occupy different runners. For a run's wall-time view, the tool
+also forms the union of its allocated job intervals across attempts.
+Completion-proxy wall time equals that union plus time outside execution
+when all required intervals are known. That remainder can contain dependency
+waits, admission and retry gaps; it is not all runner queueing.
+
+A running job contributes elapsed occupation only through the recorded
+snapshot, explicitly as a lower bound. Missing endpoints can leave only
+the union of known step spans, also a lower bound. Available totals reconcile
+without making the missing part disappear: incomplete jobs, step lists,
+step intervals and attempts retain separate counts.
+
+The self-hosted runner hooks emit `job-started.sh`, `this job has the
+machine` and `gave the machine back` markers. Their timestamps produce
+lock wait and lock hold. Hold overlaps the setup, test and measurement phases
+and is never added to their sum. An absent acquisition/release is unknown.
+Whole-second normalization and the hooks' own small overhead limit their
+precision.
+
+### Feedback, completion and demand
+
+The report keeps workflow, event and before/after cohort separate, and shows
+latest outcomes alongside available-duration p50/p95 and known/total sample
+counts. It does not present successful-run percentiles as all-run latency.
+
+First useful feedback means the first observed completed correctness or
+measurement step, or an actionable failure. Successful checkout/setup alone
+does not qualify. Completion uses the last allocated job's completion in a
+fully observed terminal latest attempt: this is a **job-completion proxy**,
+not GitHub's mutable `updated_at`. A missing endpoint remains unknown.
+Job queue wait is creation-to-start for an allocated job; it excludes
+dependencies before job creation and time waiting to enter the merge queue.
+
+The longest observed job and last completing job are linked separately as
+critical-path indicators. Neither alone reconstructs the workflow's causal
+dependency path. All collected attempts contribute runner-minutes; retries
+are a separately reported subset, not an extra addition. Per-head-SHA and
+per-observed-merge ratios retain their sampled denominators. Different source
+revisions, workflow changes, CPU mixes and missing-data rates can confound a
+before/after comparison; the report itself does not establish a speedup.
+
+Runner labels and explicit CPU-model log lines form separate report
+dimensions. An Ubuntu label does not identify a processor. An absent or
+unread CPU probe remains unknown, as does an unobserved runner class.
+
+### Queue fate and finite capacity
+
+A candidate is `merged` when its exact SHA is on main. It is `invalidated`
+only when that SHA is observed not on main and its queue branch was deleted
+or moved; a matching branch remains `live`. Failed reads leave `unknown`.
+Test outcome and fate are independent. Discarded candidate work, failed
+validation and retries remain visible without asserting that every unmerged
+success was rebuilt after a failure. A cancelled older PR with a newer
+same-PR/workflow observation is possible supersession, not proof of the
+cancellation's cause.
+
+The account-wide configured hosted concurrency is an explicit input with a
+dated administrative source. It defaults to **unknown**. Published plan
+defaults, this repository's observed peak and the older approximately 360-slot
+estimate do not establish the account's actual limit. An administrator can
+read the maximum in Settings → Actions → Runners → GitHub-hosted runners →
+All jobs usage ([GitHub's guide](https://docs.github.com/en/actions/how-tos/manage-runners/github-hosted-runners/view-current-jobs)).
+Class-specific limits and other repositories' demand also matter
+([Actions limits](https://docs.github.com/en/actions/reference/limits)).
+
+For available eligible slots `C`, mean hosted runner-minutes per candidate
+`W`, mean candidate completion minutes `T`, and at most `K` candidates in
+flight, a necessary throughput ceiling is
+`min(60*C/W, 60*K/T)` candidates/hour. The report supplies measured
+coefficients only from complete observations. This ceiling needs headroom
+for bursts and other demand; failed, invalidated and repeated work also
+reduce useful merges per hour. The all-queue-work/observed-merges ratio
+exposes that cost without inventing a failure rate.
+
+Keep the existing integration limit bounded while the actual capacity or
+representative cohorts remain unknown. Choose shard fan-out jointly with
+account headroom and feedback latency; admit optional preparations only
+within the residual budget using existing controls. A workflow's
+`max-parallel` does not reserve account capacity. The report does not change
+admission, coverage, cancellation, coalescing or the merge-queue ruleset.
+
+Main backlog age comes from the latest dated
+[existing nightly ledger report](https://github.com/buster14a/buster-performance/tree/nightly-ledger/nightly/reports),
+owned by [#1439](https://github.com/buster14a/buster/issues/1439).
+The collector preserves its reported carried-over/oldest-age and capacity
+lines with that report's date and source, or explicitly says they are
+unavailable. It does not create another ledger or advance an old report's
+age as though it were a fresh observation.
+
+### Running, comparing and replaying
+
+Run the network-free C and API-boundary regressions with:
 
 ```sh
 bash tests/ci/timings.sh
-cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o /tmp/qualification && /tmp/qualification --self-test
 ```
+
+The dispatch form accepts `split_at`, `run_limit`, `hosted_capacity`
+and `capacity_source`. Scheduled reports can take the last two from
+repository variables `CI_TIMINGS_HOSTED_CAPACITY` and
+`CI_TIMINGS_CAPACITY_SOURCE`; both remain unset until an administrator
+supplies the evidence. These are reporting inputs, not scheduling controls.
+
+```sh
+GITHUB_REPOSITORY=buster14a/buster \
+CI_TIMINGS_SPLIT_AT=2026-11-17T00:00:00Z \
+CI_TIMINGS_SINCE=2026-11-15T00:00:00Z \
+CI_TIMINGS_UNTIL=2026-11-18T00:00:00Z \
+bash tools/ci/timings.sh build/ci-accounting
+
+GITHUB_REPOSITORY=buster14a/buster \
+CI_TIMINGS_REPLAY=build/ci-accounting \
+bash tools/ci/timings.sh build/ci-accounting-replay
+```
+
+Replay uses saved JSON and filtered log evidence without network calls;
+its source and output directories must differ. Collection settings are
+inherited unless explicitly overridden. Other bounded controls are
+`CI_TIMINGS_LOG_LIMIT`, `CI_TIMINGS_MAX_REQUESTS`,
+`CI_TIMINGS_MAX_SECONDS`, `CI_TIMINGS_ATTEMPT_LIMIT` and the allowlisted
+`CI_TIMINGS_WORKFLOWS`. `CI_TIMINGS_NOW` pins the snapshot for fixtures.
+Changing a bound can expose missing saved responses during replay; those
+remain unknown. Preserve raw live evidence in `buster-performance`, not
+this repository's retired `docs/measurements` path.
+
+The [2026-11-17 reconciliation capture](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/2026-11-17-ci-accounting-2034)
+preserves the original API responses, derived replay inputs and an independent
+interval audit for 12 selected runs. Its 483 allocated jobs account for
+176,823 execution seconds without a phase gap or double count. The small,
+purposive before/after cohorts demonstrate the report and its denominators;
+they do not establish a speedup, an arrival rate or the account's capacity.
 
 ## The merge queue
 
@@ -809,15 +943,16 @@ requires them and the queue, with no bypass actors:
 - at most 4 candidates build at once;
 - a 180-minute limit for the required checks to report.
 
-The build limit comes from the drill's measured demand. A passing candidate
-runs 100 jobs and 912 runner-minutes over a 37-minute critical path, peaks at
-72 concurrent jobs during the vector draw, and holds about 45 until minute 21.
-So four builds hold about 180 of the account's roughly 360 concurrent jobs,
-which leaves the rest for pull requests, and merge about 6.5 candidates an hour
-(156 a day). That covers the peak day of 135 merges, though not a burst like
-11 November's, when 102 merged in four and a half hours. Then the queue grows,
-and each entry waits its turn. Merge limits don't combine builds, so raising
-the batch size saves nothing.
+The initial four-candidate limit used the drill's measured demand: 100 jobs
+and 912 runner-minutes over 37 minutes, with a peak of 72 concurrent jobs and
+about 45 held until minute 21. Four candidates at that duration imply a
+latency-only ceiling of about 6.5 candidates/hour, before shared-capacity
+pressure, failures and rebuilds. The accompanying roughly 360-slot account
+estimate was not an administrator-confirmed limit; it does not establish
+spare capacity or a guaranteed merge rate. The [capacity report](#ci-latency-baseline)
+records that distinction and measures current cohorts before recommending
+changes. The existing four-candidate setting remains unchanged. Merge limits
+do not combine builds, so raising the batch size alone saves no validation work.
 
 A candidate's run is the only per-merge correctness run (the owner's decision
 on 2026-11-10). It works like this:
@@ -911,18 +1046,14 @@ on 2026-11-10). It works like this:
   - `blocked-hosted` when a hosted job failed;
   - `interrupted` otherwise.
 - **Accounting.** `ci-timings.yml`'s daily report (`timings.sh`,
-  `timings --queue`) covers the latest 100 completed candidate runs of
-  main's queue (another branch's, such as the drill's, never lands on main). It
-  splits each one by what became of its candidate: merged (its commit is on
-  main), passed but invalidated, failed, or cancelled. For each it gives the
-  candidates and the runner-minutes (the sum of the jobs' own times), the
-  share spent on candidates that didn't merge (failures and rebuild waste),
-  and the merged candidates' median and p95 wall time. Queue delay is apart
-  from the run (#2031): each hosted job's wait for a runner, from its creation
-  to its start, of the jobs a runner took (not skipped ones, nor the 9700X's,
-  which waits for its own machine, not the hosted pool). The report gives the median and
-  p95 of each candidate's longest wait and the mean of every job's. It doesn't
-  see the time an entry waits in the queue before its candidate's run starts.
+  `timings --accounting`, #2034) samples queue runs separately from other
+  events, including unfinished runs and every collected attempt. It reports
+  outcomes separately from merged/live/confirmed-invalidated/unknown fate,
+  runner-minutes including retries, discarded validation, first feedback and
+  completion-proxy quantiles with known/total denominators. Failed reads never
+  prove invalidation. Hosted job waits run from job creation to start; the
+  report does not observe time waiting to enter the merge queue before a
+  candidate run exists. [Metric definitions and bounds](#ci-latency-baseline).
 - **Nightly credit.** The drill (12–13 November, #1430) showed that main is
   fast-forwarded to the exact commit the queue tested, with the same SHA and
   tree. So that run is the state's own:
