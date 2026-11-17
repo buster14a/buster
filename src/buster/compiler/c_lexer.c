@@ -301,7 +301,8 @@
 // lexes `$` as punctuation, as `-fno-dollars-in-identifiers` and `-x assembler-with-cpp` have it.
 //
 // Differences from the raw lexer's output, by design:
-//   - Whitespace and comments aren't tokens. An unterminated block comment is a `C_TOKEN_UNKNOWN` token, as in clang.
+//   - Whitespace and comments aren't tokens (but with C_TOKENIZER_KEEP_COMMENTS). An unterminated block comment is a
+//     `C_TOKEN_UNKNOWN` token, as in clang.
 //   - A token's start is its first character after any line splices (clang starts it at the first splice).
 //   - Digraphs have the kind of the punctuator they stand for (`<:` is `C_TOKEN_L_SQUARE`), like clang.
 //   - Header names aren't recognized: after `#include`, re-lex the `<...>` form from the source starting at the `<`.
@@ -426,6 +427,11 @@ typedef enum CTokenizerFlags
     // Lex without `//` comments, as clang's `-E` does in `-std=c89` and `-std=iso9899:199409`: `//` is two `/`, and what
     // follows them on the line is lexed (`a //* c */ b` is `a`, `/` and `b`).
     C_TOKENIZER_NO_LINE_COMMENTS = 64,
+    // Comments are tokens, as clang's lexer returns them for -C and -CC (#1380): a `C_TOKEN_UNKNOWN` token of each, from its
+    // '/' to past its "*/", or to the newline that ends a `//` one. One that starts its logical line takes the start of
+    // line bit, so a `#` after it on the line starts no directive. The scalar lexer's alone, as C_TOKENIZER_NO_DOLLARS is:
+    // c_tokenize gives such a source to it.
+    C_TOKENIZER_KEEP_COMMENTS = 256,
 } CTokenizerFlags;
 
 typedef enum CTokenizerError
@@ -922,6 +928,7 @@ struct ScalarLexer
     bool no_digraphs; // C_TOKENIZER_NO_DIGRAPHS
     bool no_line_comments; // C_TOKENIZER_NO_LINE_COMMENTS
     bool no_digit_separators; // C_TOKENIZER_NO_DIGIT_SEPARATORS
+    bool keep_comments; // C_TOKENIZER_KEEP_COMMENTS
 };
 
 typedef struct TokenOutput TokenOutput;
@@ -1696,6 +1703,7 @@ BUSTER_LEXER_ENTRY uint64_t c_tokenize_scalar_range(const uint8_t* source, uint6
         .no_digraphs = (flags & C_TOKENIZER_NO_DIGRAPHS) != 0,
         .no_line_comments = (flags & C_TOKENIZER_NO_LINE_COMMENTS) != 0,
         .no_digit_separators = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) != 0,
+        .keep_comments = (flags & C_TOKENIZER_KEEP_COMMENTS) != 0,
     };
     const ScalarLexer* lexer = &lexer_value;
     TokenOutput output = { .kinds = kinds, .starts = starts, .ends = ends, .count = count, .start_of_line = start_of_line };
@@ -1733,12 +1741,20 @@ BUSTER_LEXER_ENTRY uint64_t c_tokenize_scalar_range(const uint8_t* source, uint6
                 if (c2 == '/' && !lexer->no_line_comments)
                 {
                     p = skip_line_comment(lexer, p + size2);
+                    if (lexer->keep_comments)
+                    {
+                        emit(&output, C_TOKEN_UNKNOWN, start, p);
+                    }
                     continue;
                 }
                 if (c2 == '*')
                 {
                     if (skip_block_comment(lexer, p + size2, &p))
                     {
+                        if (lexer->keep_comments)
+                        {
+                            emit(&output, C_TOKEN_UNKNOWN, start, p);
+                        }
                         continue;
                     }
                     p = length;
@@ -3676,13 +3692,13 @@ static int64_t tokenize_with_flags(uint32_t flags, const uint8_t* source, uint64
     return result;
 }
 
-// Does a source take the scalar lexer whole with `flags`? With trigraphs, if it has one; with C_TOKENIZER_NO_DOLLARS,
-// which only the scalar lexer has; and in C++ without digraphs or "//" comments, which no chunk loop lexes (C++ has
+// Does a source take the scalar lexer whole with `flags`? With trigraphs, if it has one; with C_TOKENIZER_NO_DOLLARS or
+// C_TOKENIZER_KEEP_COMMENTS, which only the scalar lexer has; and in C++ without digraphs or "//" comments, which no chunk loop lexes (C++ has
 // both, and buster takes no option that removes them).
 static bool c_tokenize_scalar_only(const uint8_t* source, uint64_t length, uint32_t flags)
 {
     const bool cplusplus_mode = (flags & C_TOKENIZER_CPLUSPLUS) != 0 && (flags & (C_TOKENIZER_NO_DIGRAPHS | C_TOKENIZER_NO_LINE_COMMENTS)) != 0;
-    return cplusplus_mode || (flags & C_TOKENIZER_NO_DOLLARS) != 0 || ((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length));
+    return cplusplus_mode || (flags & (C_TOKENIZER_NO_DOLLARS | C_TOKENIZER_KEEP_COMMENTS)) != 0 || ((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length));
 }
 
 BUSTER_LEXER_ENTRY int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)

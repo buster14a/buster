@@ -264,10 +264,11 @@ typedef enum PPWarningOptionSeverity
     PP_WARNING_OPTION_AS_FATAL,
 } PPWarningOptionSeverity;
 
-// Unknown-option diagnostics are default warnings. The global promotion switches and explicit group mappings are
-// independent: -Wno-error=NAME survives a later global -Werror, but an explicit -Werror=NAME still sets an error.
-// -w and dependency-only preprocessing suppress this default-warning diagnostic even after explicit promotion.
-static PPWarningOptionSeverity pp_warning_option_severity(const PPOptions* options)
+// The command line's own diagnostics of group `group` (unknown-warning-option, unused-command-line-argument), default
+// warnings. The global promotion switches and explicit group mappings are independent: -Wno-error=NAME survives a later
+// global -Werror, but an explicit -Werror=NAME still sets an error. -w and dependency-only preprocessing suppress these
+// default-warning diagnostics even after explicit promotion.
+static PPWarningOptionSeverity pp_warning_option_severity(const PPOptions* options, const char* group)
 {
     PPWarningOptionSeverity mapped = PP_WARNING_OPTION_WARNING;
     bool errors = false;
@@ -281,7 +282,7 @@ static PPWarningOptionSeverity pp_warning_option_severity(const PPOptions* optio
     {
         const char* argument = arguments[i];
         const PPWarningOption option = pp_warning_option(argument);
-        const bool matches = strcmp(option.name, "unknown-warning-option") == 0;
+        const bool matches = strcmp(option.name, group) == 0;
         quiet |= strcmp(argument, "-w") == 0;
         if (option.kind == PP_WARNING_OPTION_ERROR && option.name[0] == 0)
         {
@@ -338,7 +339,7 @@ static PPWarningOptionSeverity pp_warning_option_severity(const PPOptions* optio
 // emitted: __has_warning's catalog also includes empty groups, which Clang deliberately excludes from suggestions.
 static void pp_warning_options_diagnose(Preprocessor* pp)
 {
-    const PPWarningOptionSeverity mapped = pp_warning_option_severity(&pp->options);
+    const PPWarningOptionSeverity mapped = pp_warning_option_severity(&pp->options, "unknown-warning-option");
     const uint32_t count = pp->options.semantic_warning_option_count;
     const char* const* arguments = pp->options.semantic_warning_options;
     const PPSeverity severity = mapped == PP_WARNING_OPTION_AS_FATAL ? PP_SEVERITY_MAPPED_FATAL :
@@ -358,5 +359,19 @@ static void pp_warning_options_diagnose(Preprocessor* pp)
                 pp_diagnose(pp, severity, 0, "unknown warning option '%s%s'", option.prefix, option.name);
             }
         }
+    }
+}
+
+// The options clang's driver takes but has no use for, as it reports them (-Wunused-command-line-argument): -dN, which
+// clang's -E ignores (#1380), each where the command line has it, after the unknown warning options and with their
+// policy and gate.
+static void pp_unused_arguments_diagnose(Preprocessor* pp)
+{
+    const PPWarningOptionSeverity mapped = pp->options.unused_dn_count != 0 ? pp_warning_option_severity(&pp->options, "unused-command-line-argument") : PP_WARNING_OPTION_IGNORED;
+    const PPSeverity severity = mapped == PP_WARNING_OPTION_AS_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                mapped == PP_WARNING_OPTION_AS_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING_ALWAYS;
+    for (uint32_t i = 0; mapped != PP_WARNING_OPTION_IGNORED && !pp->fatal && i < pp->options.unused_dn_count; i += 1)
+    {
+        pp_diagnose(pp, severity, 0, "argument unused during compilation: '-dN'");
     }
 }
