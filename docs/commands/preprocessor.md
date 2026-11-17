@@ -45,7 +45,7 @@ requirements. [Command index](README.md).
   "`-E`'s output modes").
   Comments are tokens under `-C` (`C_TOKENIZER_KEEP_COMMENTS`, the scalar
   lexer's; `pp_drop_directive_comments`), and the directives `PPOutputEvent`
-  records, which the scalar printer prints (`pp_print_events`).
+  records, which both printers print (`pp_print_events`).
   Unknown command-line warning names are diagnosed before the prelude, with
   the complete command's ordered suppression and promotion policy and the
   ordinary diagnostic counters/replay. Driver aliases and valued spellings

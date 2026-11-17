@@ -1646,10 +1646,13 @@ predefines' and the command line's definitions print under `<built-in>` and
 history replay records none: the run's records are the printer's.
 
 **Which printer.** `-C` prints by either printer, as a comment is an unknown
-token, which both take; `test-preprocessor` compares their bytes. `-dD`'s and
-`-dI`'s directives and `-CC`'s converted comments are the scalar printer's
-alone (`pp_print_vector` hands such a unit to `pp_print_scalar`): these modes'
-output is no compile's, and the events are as rare as directives.
+token, which both take, and so do `-dD`'s and `-dI`'s directives: the vector
+printer's batches stop at a chunk that holds one, as at an include exit, and
+`pp_print_events` prints it through stdio before the token it precedes.
+`test-preprocessor` compares the two printers' bytes. `-CC`'s output is the
+scalar printer's alone (`pp_print_vector` hands such a unit to
+`pp_print_scalar`), which turns a replacement list's `//` comment into a block
+comment and starts a line after any other: the rarest of these modes.
 
 **Where clang's output differs.** Line markers differ in form, as `-E`'s do.
 The predefines under `<built-in>` are buster's, in its order. After each `-dI`

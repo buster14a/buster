@@ -15364,9 +15364,9 @@ static __attribute__((noinline)) bool pp_print_include_exits(Preprocessor* pp, P
 // include exits recorded before it: on a line of its own, at its line (`location`'s, placed as a token that starts a
 // line is: pp_print_place), as clang's printer moves to it (MoveToLine) and prints it, and the next token starts a line
 // after it (EmittedDirectiveOnThisLine). A #define as -dM prints it (pp_print_macro_definition), an #undef with its
-// name, and an include as `#include "name" /* clang -E -dI */`, its directive's name and the name it gives. Only the
-// scalar printer prints them (pp_print), as these modes' output is no compile's. Returns false if the stream or memory
-// fails.
+// name, and an include as `#include "name" /* clang -E -dI */`, its directive's name and the name it gives. Both
+// printers call it, the vector printer's batches stopping at a chunk that holds one, as at an include exit. Returns false
+// if the stream or memory fails.
 static __attribute__((noinline, cold)) bool pp_print_events(Preprocessor* pp, PPMarkers* markers, uint32_t token, bool with_markers, bool* line_start, Arena* arena,
                                                              FILE* stream)
 {
@@ -16377,7 +16377,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
             const PPMarkers entry_marked = marked;
             const PPPrintLines entry_lines = lines;
             const uint64_t ahead = valid & ~_bzhi_u64(~0ull, from);
-            const bool batchable = result && pragma_ends == 0 && embeds == 0 &&
+            const bool batchable = result && pragma_ends == 0 && embeds == 0 && !(marked.output_event != 0 && marked.output_event->token < c + available) &&
                                    (!markers || ((unknowns | (line_spaces & ~line_starts)) == 0 && !(marked.include_exit != 0 && marked.include_exit->token < c + available) &&
                                                  !(silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token < c + available)));
             const uint64_t stops = longs & ahead;
@@ -16473,6 +16473,17 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
             {
                 const uint32_t i = c + k;
                 const uint32_t length = lengths[k];
+                // -dD's and -dI's directives before the token (pp_print_events), through stdio as the include exits.
+                const bool evented = BUSTER_UNLIKELY(marked.output_event != 0 && marked.output_event->token <= i);
+                if (evented)
+                {
+                    result = result && fwrite(buffer, 1, used, stream) == used && pp_print_events(pp, &marked, i, markers, &line_start, scratch.arena, stream);
+                    used = 0;
+                    if (!result)
+                    {
+                        break;
+                    }
+                }
                 const bool exited = markers && BUSTER_UNLIKELY(marked.include_exit != 0 && marked.include_exit->token <= i);
                 if (exited)
                 {
@@ -16500,7 +16511,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                                            ? pp_print_moves(pp, &marked, i, &silent)
                                            : BUSTER_PP_NONE;
                 const bool moves = moved != BUSTER_PP_NONE;
-                const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves | (uint32_t)exited;
+                const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves | (uint32_t)exited | (uint32_t)evented;
                 // A line start's break after something on the line; with markers, as many as pp_print_place puts.
                 uint32_t breaks = starts_line & (uint32_t)!line_start;
                 if (markers && starts_line)
@@ -16545,7 +16556,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                 line_start = line_start || starts_line;
                 force_line = false;
                 buffer[used] = ' ';
-                used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves & (uint32_t)!exited;
+                used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves & (uint32_t)!exited & (uint32_t)!evented;
                 // The spelling: one masked 64-byte copy, or more for a longer one (written straight out past the
                 // buffer's room), or an #embed's text in pieces.
                 const uint8_t* spelling = spellings[k];
@@ -16586,6 +16597,11 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
         }
         arena_pop_to(scratch.arena, spare_mark);
     }
+    if (result && marked.output_event != 0)
+    {
+        result = fwrite(buffer, 1, used, stream) == used && pp_print_events(pp, &marked, count, markers, &line_start, scratch.arena, stream);
+        used = 0;
+    }
     if (result && markers && marked.include_exit != 0)
     {
         result = fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, count, UINT32_MAX, &line_start, stream);
@@ -16601,14 +16617,14 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
     return result && ferror(stream) == 0;
 }
 
-// -dD's and -dI's directives and -CC's comments are the scalar printer's alone (pp_print_events, pp_print_scalar): -E's
-// opt-in output, which no compile reads.
+// -CC's comments are the scalar printer's alone (pp_print_scalar converts a replacement list's `//` one and starts a line
+// after any other): -E's rarest opt-in output, which no compile reads.
 static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
 {
 #if !BUSTER_HOST_VECTOR
     return pp_print_scalar(pp, stream, markers);
 #else
-    const bool scalar = pp->output_events != 0 || pp->options.keep_macro_comments;
+    const bool scalar = pp->options.keep_macro_comments;
     return scalar ? pp_print_scalar(pp, stream, markers) : markers ? pp_print_vector_mode(pp, stream, true) : pp_print_vector_mode(pp, stream, false);
 #endif
 }
