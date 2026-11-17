@@ -543,6 +543,36 @@ static bool ir_dataflow_test_diamond(Arena* memory, IrFunction* f)
     return created;
 }
 
+// A loop whose body (block 1) is numbered before its header (block 2), so the header's first instruction, a phi, is
+// where the body's instruction range ends. In mode 0 the body uses that phi; in mode 1 the second phi takes it from
+// the latch, an edge use from the predecessor whose range it ends. Each alone, since either use sets the body's use
+// bit: an off-by-one at the end of a block's range takes the value for a local one (#2924's mutation check of the
+// range test). The entry reaches the header first, which dominates the body.
+static bool ir_dataflow_test_backward(Arena* memory, IrFunction* f, uint32_t mode)
+{
+    const IrSizes sizes = { .instruction_count = 9, .block_count = 4, .extra_count = 8, .constant_count = 1 };
+    const bool created = ir_create(memory, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->result_type = IR_I64;
+        f->constants[0].low = 7;
+        const uint32_t offsets[] = { 0, 2, 4, 8, 9 };
+        const uint32_t extra[] = { 0, 0, 1, 2, 0, 0, 1, mode == 0 ? 2 : 4 };
+        memcpy(f->block_offsets, offsets, sizeof(offsets));
+        memcpy(f->extra, extra, sizeof(extra));
+        ir_dataflow_test_node(f, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 1, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 2, IR_ADD, IR_I64, mode == 0 ? 4 : 0, 0, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 3, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 4, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 5, IR_PHI, IR_I64, 4, 2, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 6, IR_UNDEF, IR_I1, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 7, IR_CBR, IR_VOID, 6, 1, 3);
+        ir_dataflow_test_node(f, 8, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    return created;
+}
+
 static bool ir_dataflow_test_swap(Arena* memory, IrFunction* f)
 {
     const IrSizes sizes = { .instruction_count = 9, .block_count = 3, .extra_count = 8, .constant_count = 2 };
@@ -886,6 +916,17 @@ static bool ir_dataflow_tests(Arena* memory, Arena* output, Arena* scratch)
         ir_dataflow_test_failures(&f, output, scratch, &tests);
     }
     arena_pop_to(memory, mark);
+    for (uint32_t mode = 0; mode < 2; mode += 1)
+    {
+        created = ir_dataflow_test_backward(memory, &f, mode);
+        ir_dataflow_expect(&tests, created, "backward-numbered loop fixture allocation failed");
+        if (created)
+        {
+            ir_dataflow_test_function(&f, output, scratch, true, &tests);
+            ir_dataflow_test_guarded(&f, output, scratch, &tests);
+        }
+        arena_pop_to(memory, mark);
+    }
     created = ir_dataflow_test_swap(memory, &f);
     ir_dataflow_expect(&tests, created, "parallel-phi fixture allocation failed");
     if (created)
