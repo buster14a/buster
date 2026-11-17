@@ -301,8 +301,12 @@ struct ForeignLibrary
     uint32_t object;
     ImportLibrary library;
     // With ForeignCommand.library_versions: what its file says beside its import, its DT_NEEDED names, its references'
-    // versions, its exports at other versions than their names' defaults and its version needs (foreign_read_library).
+    // versions, its exports at other versions than their names' defaults and its version needs (foreign_read_library),
+    // with an index of those exports by their names' hashes; and once followed, its first strong versioned reference
+    // that no library exports at its version, plus 1, or 0 for none (foreign_retain_providers).
     RuntimeLibraryVersions versions;
+    ImportNameIndex hidden;
+    uint32_t open;
 };
 
 // A loaded object: a command-line object, or an archive's member the link loads. Its position (see "Positions"), its
@@ -1454,13 +1458,16 @@ static void foreign_read_library(Foreign* foreign, uint32_t l, ForeignLane* lane
     // With ForeignCommand.library_versions, what the import leaves out of the library's versions, read as the direct
     // path reads its -l libraries' (runtime_library_dependencies and runtime_library_versions, a walk of the section
     // headers, the few DT_NEEDED entries and version needs, and the references' and hidden exports' columns, shared by
-    // both paths): version needs that don't read, or a reference's index that names nothing, are malformed, as the
-    // direct path refuses them. The library's version indices are its own, moved past nothing.
+    // both paths), and the hidden exports indexed by hash, as the exports are (import_library_index): version needs that
+    // don't read, or a reference's index that names nothing, are malformed, as the direct path refuses them. The
+    // library's version indices are its own, moved past nothing.
     if (read.error == IMPORT_ERROR_NONE && foreign->command->library_versions)
     {
         ImportResult versions = import_fail(IMPORT_ERROR_BOUNDS, 0);
         RuntimeError error = runtime_library_dependencies(input->bytes, &lane->arena, &library->versions);
         error = error == RUNTIME_ERROR_NONE ? runtime_library_versions(&library->library, input->bytes, 0, &lane->arena, &library->versions, &versions) : error;
+        const RuntimeHiddenExports* hidden = &library->versions.hidden;
+        error = error == RUNTIME_ERROR_NONE && !import_index_build(&library->hidden, hidden->hash, hidden->count, &lane->arena) ? RUNTIME_ERROR_MEMORY : error;
         read = error == RUNTIME_ERROR_NONE ? read : error == RUNTIME_ERROR_MEMORY ? import_fail(IMPORT_ERROR_MEMORY, 0) : versions;
     }
     if (read.error != IMPORT_ERROR_NONE)
@@ -3328,29 +3335,37 @@ static void foreign_resolve(Foreign* foreign, uint32_t index, ForeignLane* lane)
 //     (FOREIGN_ERROR_LIBRARY_VERSION). A file the link doesn't have is left unchecked.
 // The resolution's names stay unversioned: an unversioned reference of a library resolves as before, which keeps no
 // library for it (foreign_decide counts only a regular object's references), and loads the archive members that
-// define its name, as a versioned one's still does. Both passes are scalar, on lane 0, shared by both paths, as bind.c's
-// rounds are: they read only the needed libraries' versioned references and the loaded libraries' needs.
+// define its name, as a versioned one's still does (#2911). Both passes are scalar, on lane 0, shared by both paths, as
+// bind.c's rounds are: each needed library's versioned references are looked up once, each lookup two probes of an
+// index per library before its provider, and the loaded libraries' needs once. A C program's mixed link with -lm
+// follows libc.so.6's 21 references and libm.so.6's 26 (on the 9700X's Arch Linux) and checks their 9 needs.
+
+// Whether `version` is the name of `library`'s version definition at `index`.
+static bool foreign_library_version_is(const ImportLibrary* library, uint16_t index, String8 version)
+{
+    const String8 at = runtime_library_version_name(library, index);
+    return at.length != 0 && at.length == version.length && memcmp(at.pointer, version.pointer, version.length) == 0;
+}
 
 // Whether `library` exports the name at `version`: its name's default export at that version, or an export at it that
-// isn't its name's default (ImportLibrary.hidden, with RuntimeLibraryVersions.hidden's lengths and hashes), as
-// runtime_libraries_export_at finds one.
+// isn't its name's default (ImportLibrary.hidden, by ForeignLibrary.hidden's index of their names' hashes), as
+// runtime_libraries_export_at finds one. Two probes of an index, and a version's name compared only for an export of
+// the name: on a C program's mixed link, a lookup scanned libc.so.6's version definitions and 537 hidden exports, and
+// the lookups were most of the 307,000 instructions the checks first added to it.
 static bool foreign_library_exports_at(const ForeignLibrary* library, const uint8_t* name, uint32_t length, uint64_t hash, String8 version)
 {
     const ImportLibrary* imported = &library->library;
     const uint32_t found = import_library_find(imported, name, length, hash);
-    const String8 at = found != 0 ? runtime_library_version_name(imported, imported->exports.version[found - 1]) : (String8){ 0 };
-    bool exported = at.length != 0 && at.length == version.length && memcmp(at.pointer, version.pointer, version.length) == 0;
-    uint16_t index = 0;
-    for (uint32_t v = 0; !exported && index == 0 && v < imported->version_count; v += 1)
-    {
-        const ImportVersion* definition = &imported->versions[v];
-        const bool same = !definition->base && definition->name.length == version.length && memcmp(definition->name.pointer, version.pointer, version.length) == 0;
-        index = same ? definition->index : 0;
-    }
+    bool exported = found != 0 && foreign_library_version_is(imported, imported->exports.version[found - 1], version);
     const RuntimeHiddenExports* others = &library->versions.hidden;
-    for (uint32_t h = 0; !exported && index != 0 && h < others->count; h += 1)
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    import_index_bucket(&library->hidden, hash, &begin, &end);
+    for (uint32_t place = begin; !exported && place < end; place += 1)
     {
-        exported = others->version[h] == index && others->hash[h] == hash && others->length[h] == length && memcmp(others->name[h], name, length) == 0;
+        const uint32_t h = library->hidden.order[place];
+        const bool same = library->hidden.hash[place] == hash && others->length[h] == length && memcmp(others->name[h], name, length) == 0;
+        exported = same && foreign_library_version_is(imported, others->version[h], version);
     }
     return exported;
 }
@@ -3415,7 +3430,9 @@ static bool foreign_library_lists(const ForeignLibrary* library, String8 name)
 // Lane 0, each round: the versioned strong references of the libraries needed before the round or made needed by it
 // (`needed`, a byte each), each library's once, followed to the first library that exports them at their versions
 // (foreign_library_export_at); a library under --as-needed that isn't needed yet is made needed in `needed`, unless the
-// referring library's own DT_NEEDED names it, and its references are followed in turn.
+// referring library's own DT_NEEDED names it, and its references are followed in turn. The first that no library
+// exports is the library's `open`, which foreign_check_versions reads after the last round: every needed library is
+// followed by then, in the round that made it needed.
 static void foreign_retain_providers(Foreign* foreign, uint8_t* needed)
 {
     bool more = true;
@@ -3440,6 +3457,8 @@ static void foreign_retain_providers(Foreign* foreign, uint8_t* needed)
                     needed[m] = 1;
                     more = true;
                 }
+                const bool open = references->weak[r] == 0 && version.length != 0 && m == UINT32_MAX;
+                library->open = library->open == 0 && open ? r + 1 : library->open;
             }
             library->followed = library->followed || follow;
         }
@@ -3485,23 +3504,16 @@ static void foreign_check_versions(Foreign* foreign, ForeignLane* lane)
     {
         const ForeignLibrary* library = &foreign->libraries[l];
         const RuntimeLibraryVersions* versions = &library->versions;
-        bool known = library->needed;
+        bool known = library->needed && library->open != 0;
         for (uint32_t d = 0; known && d < versions->dependency_count; d += 1)
         {
             known = foreign_library_named(foreign, versions->dependencies[d]) != UINT32_MAX;
         }
-        const ImportReferences* references = &library->library.references;
-        for (uint32_t r = 0; known && failure.error == FOREIGN_ERROR_NONE && r < references->count; r += 1)
+        if (known)
         {
-            const String8 version = versions->reference_versions[r];
-            const bool open = references->weak[r] == 0 && version.length != 0 &&
-                              foreign_library_export_at(foreign, references->name[r], references->length[r], references->hash[r], version) == UINT32_MAX;
-            if (open)
-            {
-                failure = foreign_failure(FOREIGN_ERROR_LIBRARY_UNDEFINED, foreign_position(library->input, 0), library->input, 0);
-                failure.library = l;
-                failure.reference = r;
-            }
+            failure = foreign_failure(FOREIGN_ERROR_LIBRARY_UNDEFINED, foreign_position(library->input, 0), library->input, 0);
+            failure.library = l;
+            failure.reference = library->open - 1;
         }
     }
     for (uint32_t l = 0; loaded != 0 && failure.error == FOREIGN_ERROR_NONE && l < foreign->library_count; l += 1)
