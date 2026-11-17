@@ -290,8 +290,10 @@ static void tier1_select_test_float_select_plan(Tier1SelectTest* test, uint32_t 
         {
             const bool operands = pattern->values[0] == (swapped ? 1u : 0u) && pattern->values[1] == (swapped ? 0u : 1u);
             const bool values = pattern->values[2] == chosen && pattern->values[3] == chosen + 1;
+            // Its candidate costs what the grammar's pattern does (tier1_burs_patterns: a select of an FCOND at 3, of an ECOND
+            // at 4), the cost the plan records for it.
             tier1_select_test_expect(test, pattern->rule == TIER1_RULE_FLOAT_SELECT_COMPARE && pattern->condition == condition && pattern->width == width &&
-                                               pattern->source_width == source_width && operands && values && covered && uses == 4,
+                                               pattern->source_width == source_width && operands && values && covered && uses == 4 && pattern->intrinsic_cost == (equality ? 4 : 3),
                                      "a floating comparison's select is its ucomis and cmov, through its copy and its truth values");
         }
         else
