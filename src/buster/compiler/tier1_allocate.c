@@ -299,7 +299,14 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, 
     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
     // after its body takes the register the body gave its phi, not its operand's.
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
-    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED;
+    // An interval hinted to its own value that names another value's recipe (tier1_cfg_body_hints, #2834) takes the
+    // recipe's register only: a recipe without one there was recomputed, not stored, and its place says nothing of this
+    // value's slot. A phi of sqlite3RunParser's loop, named to the constant that enters it, rested in its slot through
+    // the loop and its back edge stored it there on every token.
+    const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+    const bool borrowed = named != UINT32_MAX && value == columns->values[interval] && columns->values[earlier] != value;
+    const bool recomputed = borrowed && opening >= 32 && tier1_allocation_spill_kind(columns, earlier) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED && !recomputed;
     return named_place ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
 }
 
