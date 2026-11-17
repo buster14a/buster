@@ -199,7 +199,7 @@ static CheckCommonSignRange check_common_sign_range(const CheckCommonEmission* e
             }
             else if (typed && (value.flags & BUSTER_CHECK_BIT_FIELD) != 0 && value.bit_width != 0)
             {
-                result.width = value.bit_width;
+                result.width = value.bit_width < width ? value.bit_width : width;
             }
             if (phases[frame] == BUSTER_CHECK_SIGN_ENTER)
             {
@@ -221,8 +221,13 @@ static CheckCommonSignRange check_common_sign_range(const CheckCommonEmission* e
                 const uint32_t first_child = op == CHECK_OP_CONDITIONAL ? graph->operand1[node] : left;
                 const uint32_t conversion_cap = op == CHECK_OP_CONDITIONAL ? cap : width;
                 CheckCommonSignRange first_range = { .width = packed / 2u, .nonnegative = (packed & 1u) != 0 };
-                first_range = check_common_sign_convert(emission, first_child, type, conversion_cap, first_range);
-                result = check_common_sign_convert(emission, right, type, conversion_cap, result);
+                // &= computes with its original operands' promoted types. Its result type is the stored LHS's,
+                // so converting the RHS to that type here would turn a positive mask such as 255 into -1 for char.
+                if (op != CHECK_OP_BIT_AND_ASSIGN)
+                {
+                    first_range = check_common_sign_convert(emission, first_child, type, conversion_cap, first_range);
+                    result = check_common_sign_convert(emission, right, type, conversion_cap, result);
+                }
                 const uint32_t first_bits = first_range.width - (first_range.nonnegative ? 0u : 1u);
                 const uint32_t last_bits = result.width - (result.nonnegative ? 0u : 1u);
                 if (op == CHECK_OP_BIT_AND || op == CHECK_OP_BIT_AND_ASSIGN)
@@ -297,8 +302,10 @@ static CheckCommonSignRange check_common_sign_range(const CheckCommonEmission* e
             }
             top -= 1u;
         }
-        if (child != BUSTER_CHECK_NONE)
+        const bool descending = phase == BUSTER_CHECK_SIGN_LEFT || (phase == BUSTER_CHECK_SIGN_ENTER && phases[frame] != BUSTER_CHECK_SIGN_ENTER);
+        if (descending)
         {
+            // Missing and forward edges both reject the proof, including a binary operator's second operand.
             exhausted |= child >= node || top == capacity;
             if (!exhausted)
             {
@@ -306,11 +313,6 @@ static CheckCommonSignRange check_common_sign_range(const CheckCommonEmission* e
                 phases[top] = BUSTER_CHECK_SIGN_ENTER;
                 saved[top++] = child_cap << BUSTER_CHECK_SIGN_CAP_SHIFT;
             }
-        }
-        else if (top != first && phases[frame] != BUSTER_CHECK_SIGN_ENTER && phase == BUSTER_CHECK_SIGN_ENTER)
-        {
-            // A malformed dependency is not a proof. Ordinary source graphs have every operand before its owner.
-            exhausted = true;
         }
     }
     result = exhausted ? opaque : result;

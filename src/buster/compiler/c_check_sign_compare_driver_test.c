@@ -44,6 +44,11 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
         { "wider signed type represents unsigned int", "int f(unsigned b,long m){return b<m;}\n", 0, NULL, NULL },
         { "wide signed and unsigned remain different", "int f(unsigned long b,long m){return b<m;}\n", 1, NULL, NULL },
         { "both narrow operands promote to signed int", "int f(signed char b,unsigned short m){return b<m;}\n", 0, NULL, NULL },
+        { "compound positive mask retains its computation range", "int f(signed char x,unsigned n){return (x&=255)<n;}\n", 0, NULL, NULL },
+        { "compound zero mask retains its computation range", "int f(signed char x,unsigned n){return (x&=256)<n;}\n", 0, NULL, NULL },
+        { "compound unsigned mask retains its computation range", "int f(signed char x,unsigned mask,unsigned n){return (x&=mask)<n;}\n", 0, NULL, NULL },
+        { "compound negative mask can remain negative", "int f(signed char x,unsigned n){return (x&=-1)<n;}\n", 1, NULL, NULL },
+        { "compound right shift preserves signed range", "int f(signed char x,unsigned n){return (x>>=1)<n;}\n", 1, NULL, NULL },
         { "ordinary conditional result ranges", NULL, 43, NULL, "tests/driver/sign_compare_conditional.c" },
         { "arithmetic and converted result ranges", NULL, 36, "-Wno-constant-conversion", "tests/driver/sign_compare_ranges.c" },
     };
