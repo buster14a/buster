@@ -24,3 +24,23 @@ mixed-aliased	mixed-aliased.c	rejected	a prior alias attribute still participate
 mixed-static	mixed-static.c	rejected	an internal object declaration still participates in ambiguous lookup
 mixed-unused	mixed-unused.c	-	unused mixed-kind and incompatible object declarations retain their emitted clones
 mixed-warning-order	mixed-warning-order.c	rejected	mixed lookup errors preserve adjacent warnings and independent errors
+later-object-type	later-object-type.c	rejected	a later object declaration conflicts with the clone's type
+later-object-function	later-object-function.c	rejected	a later function declaration conflicts with an object clone
+later-function-object	later-function-object.c	rejected	a later object declaration conflicts with a function clone
+later-function-type	later-function-type.c	rejected	a later function declaration conflicts with the clone's return type
+later-object-definition	later-object-definition.c	rejected	a later initialized object conflicts with the alias definition
+later-function-definition	later-function-definition.c	rejected	a later function body conflicts with the alias definition
+later-object-repeated	later-object-repeated.c	rejected	repeated incompatible declarations retain the previous-declaration chain
+later-static-object	later-static-object.c	rejected	a static object cannot redeclare an external pragma clone
+later-static-function	later-static-function.c	rejected	a static function cannot redeclare an external pragma clone
+later-qualifiers	later-qualifiers.c	rejected	later object qualifiers retain their conflicting-type diagnostic
+later-thread-local	later-thread-local.c	rejected	a later declaration retains the clone's thread-local conflict
+local-shadow-mixed	local-shadow-mixed.c	-	parameter block and for-init shadows do not reference a mismatched file alias
+local-shadow-static	local-shadow-static.c	-	a local shadow does not name an internal mismatched alias
+local-shadow-ended	local-shadow-ended.c	rejected	an expired local shadow does not hide subsequent clone ambiguity
+local-extern	local-extern.c	rejected	a local extern cannot redeclare an ambiguous object lookup set
+overload-calls	overload-calls.c	-	function calls choose the original or pragma clone by argument type
+overload-unviable	overload-unviable.c	rejected	a function lookup with no viable candidate keeps its candidate notes
+overload-address	overload-address.c	-	a typed function pointer selects the matching function candidate
+overload-type	overload-type.c	-	unevaluated calls retain the selected candidate's result type
+overload-same-parameters	overload-same-parameters.c	rejected	return types alone cannot disambiguate identical function parameters
