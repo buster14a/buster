@@ -36,7 +36,8 @@ while IFS=$'\t' read -r run event kind; do
             ($runs[0].workflow_runs[] | select(.id == $run) | .created_at | epoch) as $created |
             [.[].jobs[]?] as $jobs |
             if ($jobs | map(.id) | unique | length) != ($jobs | length) then error("duplicate job in feedback costs") else
-            ([$jobs[].steps[]? | select((.name == "Early hosted feedback (not qualification)" and .conclusion == "success") or .conclusion == "failure")
+            ([$jobs[] | select(.name != "Integration qualification" and .name != "Coverage record") | .steps[]?
+                | select((.name == "Early hosted feedback (not qualification)" and .conclusion == "success") or .conclusion == "failure")
                 | (.completed_at | epoch) | select(. != null and $created != null and . >= $created)] | min) as $first |
             ([$jobs[] | select((.runner_id // 0) > 0) | (.started_at | epoch) as $a | (.completed_at | epoch) as $b |
                 if $a != null and $b != null and $b >= $a then $b - $a else null end]) as $durations |

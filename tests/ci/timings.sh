@@ -103,7 +103,7 @@ JSON
         echo '{"jobs":[{"id":171,"runner_id":1,"started_at":"2026-11-17T09:00:20Z","completed_at":"2026-11-17T09:01:20Z","steps":[{"name":"Build compiler","conclusion":"failure","completed_at":"2026-11-17T09:01:10Z"}]}]}'
         echo '{"jobs":[{"id":172,"runner_id":2,"started_at":"2026-11-17T09:03:00Z","completed_at":"2026-11-17T09:05:00Z","steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"success","completed_at":"2026-11-17T09:04:00Z"}]},{"id":173,"runner_id":3,"started_at":"2026-11-17T09:00:00Z","completed_at":"2026-11-17T09:00:30Z"},{"id":174,"runner_id":0,"conclusion":"cancelled"}]}' ;;
     *runs/18/jobs\?per_page=100\&filter=all)
-        echo '{"jobs":[{"id":181,"runner_id":4,"started_at":"2026-11-17T09:03:00Z","completed_at":null,"steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"cancelled","completed_at":"2026-11-17T09:04:00Z"}]}]}' ;;
+        echo '{"jobs":[{"id":181,"runner_id":4,"started_at":"2026-11-17T09:03:00Z","completed_at":null,"steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"cancelled","completed_at":"2026-11-17T09:04:00Z"}]},{"id":182,"name":"Integration qualification","runner_id":0,"steps":[{"name":"Require hosted and native correctness before successful qualification","conclusion":"failure","completed_at":"2026-11-17T09:04:10Z"}]}]}' ;;
     *runs/19/jobs\?per_page=100\&filter=all)
         echo '{"jobs":[{"id":191,"runner_id":5,"started_at":"2026-11-17T09:02:00Z","completed_at":"2026-11-17T09:03:00Z","steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"success","completed_at":"2026-11-17T09:03:00Z"}]}]}' ;;
     *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
