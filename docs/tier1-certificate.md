@@ -688,6 +688,22 @@ The decoding:
   one from decoded records; a row-owner claim alone proves nothing. Missing,
   stale, overwritten or wrong-owner rows fail closed. The fact/location
   capacities include every added row; no fixed per-value home limit is assumed.
+- **Slots a run carries in (#2870).** The emitter leaves out a store into a
+  value's slot that a transition stored it into or reloaded it from earlier in
+  the same run of blocks, each the only predecessor of the next in layout
+  (#2784's slot stamps, `tier1_emit_phase`). The allocation's facts give such a
+  value only its register at the run's later blocks' entries, so the slot's
+  bytes were known in the block that stamped them and lost at the next block's
+  start: SQLite's `pagerWriteLargeSector` reloads a loop's bound at the loop's
+  head and evicts it two blocks later with no store, and its code was refused
+  (`TIER1_CERT_EDGE` into the blocks that wait for the bound in its slot), as
+  `--tier1 --verify` and `--tier1 -g` of the frozen `sqlite3.c` were. With
+  `certify` (or `sources`), `Tier1EmitResult.entry_slots` lists, per block, the
+  values held in a register at its entry whose stamp the run carries in, and
+  the decoding asserts each one's slot as one more fact at the value's width.
+  Like the entry rows, these are untrusted: the edge from the run's previous
+  block must prove each from its records. `tests/driver/tier1_patterns.c`'s
+  `patterns_sector` is the shape.
 - **The frame protocol.** The prologue and each epilogue are decoded record by
   record by rsp's offset from its value at entry, each record exactly its form's
   (`push`, the frame pointer's `mov`, `sub`; `add`, the reset from rbp, `pop`),

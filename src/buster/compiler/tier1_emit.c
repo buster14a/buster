@@ -363,6 +363,12 @@ struct Tier1EmitResult
     // for an unknown row. Null without call-save rows or certification. These are untrusted entry assertions, not
     // proof: the code certificate checks each row's bytes on every incoming edge, alongside the allocated locations.
     uint32_t* entry_rows;
+    // Under certify, each block's values whose slots hold them at its start besides the registers their intervals put
+    // them in (#2870): block b's are entry_slots[entry_slot_offsets[b] .. entry_slot_offsets[b + 1]), the values (the CFG
+    // problem's) whose slot stamps a run of blocks carries into b (tier1_emit_phase), where a store into the slot is then
+    // left out. Untrusted entry assertions too, each proved on b's incoming edge from the predecessor's records.
+    uint32_t* entry_slots;
+    uint32_t* entry_slot_offsets;
     // Each node whose definition the consumer left out (tier1_emit_cfg_dead_definition), 1, else 0.
     uint8_t* dropped;
     // Each machine row's placement as the consumer claims it (#1284, tier1_emit_cfg_row), by node, in a function with rows;
