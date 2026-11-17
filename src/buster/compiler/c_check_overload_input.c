@@ -35,6 +35,7 @@ static bool check_input_overload_initialize(CheckInputReader* reader, bool prese
     {
         CheckInput* input = reader->output;
         reader->overload_capacity = capacity;
+        reader->name_hooks = true;
         reader->overload_candidates = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckOverloadCandidate, (uint64_t)capacity + 1);
         input->overload_heads = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)parser->tokens.count + 1);
         valid = check_overload_index_initialize(&reader->overload_index, index_arena, capacity, reader->pp->table->count);

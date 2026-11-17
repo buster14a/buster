@@ -209,6 +209,7 @@ static bool check_input_symbol_pragmas(CheckInputReader* reader, uint8_t* handle
             }
         }
         reader->output->symbol_pragmas = history;
+        reader->name_hooks |= check_input_symbol_alias_count(history) != 0;
     }
     if (!valid)
     {

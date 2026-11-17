@@ -2045,6 +2045,10 @@ struct CheckInputReader
     // multiversioning's calls grow theirs from.
     uint32_t overload_planned_capacity;
     uint32_t overload_call_capacity;
+    // Whether resolving a name has work past its builtin (check_input_resolve_name): the tables of overloads exist, or
+    // the unit has a `#pragma weak A = T`, whose function clone may make them (#2449). One flag keeps a common unit's
+    // test of each name one load.
+    bool name_hooks;
     CheckOverloadIndex overload_index;
     bool declarator_overloadable;
     uint16_t* builtins;
@@ -13983,7 +13987,7 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
 {
     const Parser* parser = reader->parser;
     const uint32_t identifier = parser->tokens.names[i];
-    if (__builtin_expect(reader->output->overload_heads != 0 || reader->output->symbol_pragmas != NULL, 0))
+    if (__builtin_expect(reader->name_hooks, 0))
     {
         const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
         if (reader->output->overload_heads != 0)

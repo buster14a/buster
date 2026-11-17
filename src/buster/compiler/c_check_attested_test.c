@@ -996,6 +996,7 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "overload_capacity", CHECK_ATTESTED_FIELD_NAME },
     { "overload_planned_capacity", CHECK_ATTESTED_FIELD_NAME },
     { "overload_call_capacity", CHECK_ATTESTED_FIELD_NAME },
+    { "name_hooks", CHECK_ATTESTED_FIELD_AMBIENT },
     { "overload_index", CHECK_ATTESTED_FIELD_NAME },
     { "declarator_overloadable", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "builtins", CHECK_ATTESTED_FIELD_OWN },
