@@ -62,7 +62,8 @@ gh workflow run reproduce.yml --ref YOUR_BRANCH -f profile=full -f sanitizer=mem
 
 These author-requested runs reuse the exact row workflow, pinned tools,
 fixtures, optimization and fatal detector proofs/audit. Partial profiles run
-on one hosted shard; full uses four. They have independent run-id concurrency,
+on one hosted shard with the full row's measured peak-memory admission; full
+uses four. They have independent run-id concurrency,
 no hardware work and no qualification context. The ordinary caller explicitly
 passes `full`; a partial profile on a PR/merge-group event fails. TSan/MSan's
 separate large `main.c` compile and SQLite's full Tcl suite run only for full

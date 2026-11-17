@@ -793,7 +793,9 @@ jobs:
           fi
           printf '%s' "$FEEDBACK_FILES" > "$RUNNER_TEMP/feedback-files"
           export BUSTER_FEEDBACK_FILES="$RUNNER_TEMP/feedback-files"
-          deal=()
+          # A partial inventory is still shard 1/1 of its selected headings. The existing costs reader ignores
+          # unselected headings and retains the row's measured peak-memory admission, especially for sanitizers.
+          deal=(--shard 1/1 --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs")
           if [ "$FEEDBACK_PROFILE" = full ]; then
               deal=(--shard "$BUSTER_SHARD/$shards" --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs")
           fi

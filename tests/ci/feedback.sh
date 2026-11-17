@@ -195,6 +195,11 @@ git -C "$checkout" rev-parse HEAD > "$work/passed/revision"
 pass
 if [ "${1:-}" = --compiler ]; then
     real=$(realpath "${2:?real compiler}")
+    # A partial reproduction keeps the full row's memory/cost table. Unselected costs are ignored, no test is lost.
+    printf '== Test the link representation [8 CPUs]\ntrue\n== Test deterministic diagnostic ordering\ntrue\n' > "$work/partial.tests"
+    "$real" parallel --jobs 1 --shard 1/1 --costs tools/ci/costs/x86-64-memory-O3.costs < "$work/partial.tests" > "$work/partial.log"
+    grep -q '2 passed, 0 failed, 0 skipped, 0 not started' "$work/partial.log" || fail 'partial profile lost a heading under full-row costs'
+    pass
     BUSTER_COMPILER="$real" bash tools/ci/feedback.sh smoke > "$work/real.log" 2>&1
     pass
     cat > "$work/broken-compiler" <<'MUTANT'
