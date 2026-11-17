@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --query-bool-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -144,6 +144,22 @@ unused-warning fixtures also check exact scope-completion tokens.
   complete diagnostics and exit status under warning promotion/suppression,
   error limits, source policy, C17/C23, both reader choices and lane requests,
   and verifies existing object-output preservation for rejected input.
+  `--query-bool-only` runs the original `tests/driver/query_bool_*.c` sources for
+  boolean conversions in erased query/type expressions and successful selections
+  (#2899). Complete Clang diagnostics cover integer and floating conditions,
+  nested construction order, GNU omitted-middle and explicit-cast controls,
+  logical unevaluated suppression, source pragmas and macro expansion notes.
+  Both GNU17 and C23 run the shared warning-policy, reader, lane and output
+  preservation matrix; linked execution controls ensure erased operands and
+  unselected associations retain their lack of side effects.
+  The two original failed-type-query sources also expose an existing assertion
+  requirement-spelling gap. Their five exact primary error texts are checked
+  against frozen Buster spellings; all locations, warnings, notes, ordering,
+  counts and other text remain complete Clang comparisons. This does not claim
+  canonical assertion requirement spelling or normalize arbitrary diagnostic text.
+  Repaired declaration views and missing-label recovery retain the warning facts.
+  A stray `case` outside a switch still triggers the existing whole-body rejection
+  before expression checking; recovery of that body's later queries is separate.
   `--record-extensions-only` runs the existing GNU empty-record checks plus the runtime
   `tests/driver/record-extensions/` catalogue for zero-size-record C++ compatibility and
   zero-length-array warnings (#2409). Complete GNU17/C23 diagnostics cover explicit and

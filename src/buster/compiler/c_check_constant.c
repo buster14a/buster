@@ -383,6 +383,210 @@ static uint32_t check_constant_enum_leaf(const CheckConstantInput* input, uint32
     return at;
 }
 
+// The completed operand roots of one parsed expression. An enclosing operation can already have linked a child's
+// last value to its next operand, so stop at each child's retained last value instead of following that outer link.
+static uint32_t check_constant_bool_children(const CheckConstantInput* input, uint32_t root, uint32_t nodes[3])
+{
+    const CheckInputReader* reader = input->reader;
+    const uint32_t begin = input->first;
+    const uint32_t end = input->end;
+    uint32_t count = 0;
+    for (uint32_t child = reader->first_child[root]; child != BUSTER_CHECK_NONE && count <= 3; child = reader->next_child[child])
+    {
+        if (child >= begin && child < end)
+        {
+            const uint32_t last = input->last_value[child - begin];
+            uint32_t value = input->first_value[child - begin];
+            while (value >= begin && value < end && count <= 3)
+            {
+                if (count < 3)
+                {
+                    nodes[count] = value;
+                }
+                count += 1;
+                value = value == last ? BUSTER_CHECK_NONE : input->next_value[value - begin];
+            }
+        }
+    }
+    return count;
+}
+
+// Ignore parentheses, extensions and a static selection's chosen expression, as the graph's transparent nodes do.
+// An explicit cast and GNU's saved omitted-middle value stay opaque to the boolean-conversion diagnostic.
+static uint32_t check_constant_bool_expression(const CheckConstantInput* input, uint32_t root)
+{
+    const CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const uint32_t begin = input->first;
+    const uint32_t end = input->end;
+    for (uint32_t steps = 0; root >= begin && root < end && steps < end - begin; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[root];
+        const uint8_t kind = parser->tokens.kinds[root];
+        const uint32_t chosen = reader->selected_tokens != NULL ? reader->selected_tokens[root] : BUSTER_CHECK_NONE;
+        const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
+        if (chosen != BUSTER_CHECK_NONE && selected >= begin && selected < end && selected != root)
+        {
+            root = selected;
+        }
+        else if (role == PARSE_ROLE_CLOSE_GROUP || (role == PARSE_ROLE_PREFIX && kind == PARSE_KIND_EXTENSION))
+        {
+            uint32_t children[3];
+            const uint32_t count = check_constant_bool_children(input, root, children);
+            root = count == 1 && children[0] != root ? children[0] : BUSTER_CHECK_NONE;
+        }
+        else
+        {
+            break;
+        }
+    }
+    return root;
+}
+
+// DiagnoseIntInBoolContext's integer literal: no grouping or cast, and at most one unary minus. The magnitude is
+// the literal's, not the signed expression's; Clang treats the written 0/1 arms as its boolean idiom either sign.
+static bool check_constant_bool_literal(const CheckConstantInput* input, uint32_t root, unsigned __int128* magnitude)
+{
+    const Parser* parser = input->reader->parser;
+    const uint32_t begin = input->first;
+    const uint32_t end = input->end;
+    uint32_t literal = root;
+    if (root >= begin && root < end && parser->tree.roles[root] == PARSE_ROLE_PREFIX && parser->tokens.kinds[root] == PARSE_KIND_MINUS)
+    {
+        uint32_t children[3];
+        literal = check_constant_bool_children(input, root, children) == 1 ? children[0] : BUSTER_CHECK_NONE;
+    }
+    const bool valid = literal >= begin && literal < end && parser->tree.roles[literal] == PARSE_ROLE_OPERAND &&
+                       parser->tokens.kinds[literal] == PARSE_KIND_NUMBER && input->values[literal - begin].constant_kind == CHECK_CONSTANT_INTEGER;
+    *magnitude = valid ? input->values[literal - begin].integer : 0;
+    return valid;
+}
+
+// Clang's integer evaluation for this warning survives an undefined shift: clamp the magnitude to width - 1,
+// and make a negative count a right shift. No changed value is published to the semantic expression itself.
+static bool check_constant_bool_shift(const TypeTable* types, TypeId type, const CheckValue* left, const CheckValue* right)
+{
+    uint32_t width = 0;
+    uint32_t right_width = 0;
+    bool is_signed = false;
+    bool right_signed = false;
+    const bool valid = check_action_integer_type(types, type, &width, &is_signed) &&
+                       check_action_integer_type(types, right->type, &right_width, &right_signed);
+    const unsigned __int128 mask = check_action_mask(width);
+    const unsigned __int128 right_mask = check_action_mask(right_width);
+    const unsigned __int128 left_bits = left->integer & mask;
+    const unsigned __int128 right_bits = right->integer & right_mask;
+    const __int128 value = (__int128)(valid && is_signed && (left_bits >> (width - 1)) != 0 ? left_bits | ~mask : left_bits);
+    const __int128 count = (__int128)(valid && right_signed && (right_bits >> (right_width - 1)) != 0 ? right_bits | ~right_mask : right_bits);
+    const unsigned __int128 limit = valid ? width - 1 : 0;
+    const unsigned __int128 magnitude = count < 0 ? 0 - (unsigned __int128)count : (unsigned __int128)count;
+    const uint32_t amount = (uint32_t)(magnitude < limit ? magnitude : limit);
+    const unsigned __int128 shifted = count < 0 ? (unsigned __int128)(value >> amount) : (unsigned __int128)value << amount;
+    return valid && (shifted & mask) != 0;
+}
+
+// Full conditional conditions are diagnosed during construction, even in sizeof/typeof, type bounds and unselected
+// associations. Capture only a possible warning while its typed source facts survive. Logical conversions have a
+// different unevaluated policy and remain the ordinary expression walk's; omitted-middle conditionals convert an
+// opaque saved value. The sparse source key suppresses repeat type queries without allocating a token-wide column.
+static __attribute__((noinline)) void check_constant_bool_conversion(CheckConstantInput* input, const CheckAction* action, uint32_t first)
+{
+    CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t root = check_constant_bool_expression(input, first);
+    const bool inside = root >= input->first && root < input->end;
+    const uint8_t role = inside ? parser->tree.roles[root] : PARSE_ROLE_NONE;
+    const uint8_t kind = inside ? parser->tokens.kinds[root] : PARSE_KIND_UNKNOWN;
+    const TypeId source_type = inside ? input->values[root - input->first].type : 0;
+    const uint8_t constant_kind = inside ? input->values[root - input->first].constant_kind : CHECK_CONSTANT_NONE;
+    uint32_t fact = 0;
+    uint32_t location = root;
+    uint32_t literal = BUSTER_CHECK_NONE;
+    if (role == PARSE_ROLE_SHIFT && kind == PARSE_KIND_LESSLESS)
+    {
+        uint32_t children[3];
+        const uint32_t count = check_constant_bool_children(input, root, children);
+        unsigned __int128 left = 0;
+        unsigned __int128 right = 0;
+        const bool left_literal = count == 2 && check_constant_bool_literal(input, children[0], &left);
+        const bool right_literal = count == 2 && check_constant_bool_literal(input, children[1], &right);
+        uint32_t width = 0;
+        bool is_signed = false;
+        if (left_literal && left == 0)
+        {
+            fact = BUSTER_CHECK_BOOL_SHIFT_FALSE;
+        }
+        else if (left_literal && right_literal)
+        {
+            const bool truth = check_constant_bool_shift(types, source_type, input->values + (children[0] - input->first), input->values + (children[1] - input->first));
+            fact = truth ? BUSTER_CHECK_BOOL_SHIFT_TRUE : BUSTER_CHECK_BOOL_SHIFT_FALSE;
+        }
+        else if (check_action_integer_type(types, source_type, &width, &is_signed) && is_signed)
+        {
+            fact = BUSTER_CHECK_BOOL_SHIFT_SIGNED;
+        }
+    }
+    else if (role == PARSE_ROLE_CLOSE_TERNARY)
+    {
+        uint32_t children[3];
+        const uint32_t count = check_constant_bool_children(input, root, children);
+        const TypeId type = type_unqualified(type_strip_aligned(types, source_type));
+        bool literals = count == 3;
+        bool zero = false;
+        bool idiom = true;
+        for (uint32_t i = 1; literals && i < 3; i += 1)
+        {
+            unsigned __int128 magnitude = 0;
+            literals = check_constant_bool_literal(input, children[i], &magnitude) &&
+                       type_unqualified(type_strip_aligned(types, input->values[children[i] - input->first].type)) == type;
+            zero |= magnitude == 0;
+            idiom &= magnitude <= 1;
+        }
+        if (literals && !idiom && !zero)
+        {
+            fact = BUSTER_CHECK_BOOL_CONDITIONAL_TRUE;
+            location = input->warning_begin[children[0] - input->first];
+        }
+    }
+    else if (constant_kind == CHECK_CONSTANT_FLOATING)
+    {
+        const bool sign = role == PARSE_ROLE_PREFIX && (kind == PARSE_KIND_PLUS || kind == PARSE_KIND_MINUS);
+        uint32_t children[3];
+        const uint32_t child = sign && check_constant_bool_children(input, root, children) == 1 ? children[0] : root;
+        literal = check_constant_bool_expression(input, child);
+        if (literal >= input->first && literal < input->end && parser->tree.roles[literal] == PARSE_ROLE_OPERAND &&
+            parser->tokens.kinds[literal] == PARSE_KIND_NUMBER && input->values[literal - input->first].constant_kind == CHECK_CONSTANT_FLOATING)
+        {
+            fact = sign && kind == PARSE_KIND_MINUS ? BUSTER_CHECK_BOOL_FLOAT_NEGATIVE : BUSTER_CHECK_BOOL_FLOAT_POSITIVE;
+        }
+    }
+    if (fact != 0)
+    {
+        const bool floating = fact == BUSTER_CHECK_BOOL_FLOAT_POSITIVE || fact == BUSTER_CHECK_BOOL_FLOAT_NEGATIVE;
+        const uint32_t id = floating ? CHECK_WARNING_ID_LITERAL_CONVERSION : fact == BUSTER_CHECK_BOOL_SHIFT_SIGNED ?
+                            CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT : CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE;
+        const CheckWarningEvent event =
+        {
+            .id = id,
+            .kind = CHECK_WARNING_EVENT_BOOL_CONVERSION,
+            .token = action->node,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = fact == BUSTER_CHECK_BOOL_SHIFT_SIGNED ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = action->context.source_position,
+            .payload =
+            {
+                .first_type = floating ? source_type : 0,
+                .name = floating ? literal : 0,
+                .token = location,
+                .data = fact,
+            },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 // The enumerator a leaf `at` names (its declaration), or BUSTER_CHECK_NONE.
 static uint32_t check_constant_enumerator(const CheckConstantInput* input, uint32_t at)
 {
@@ -3634,6 +3838,10 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 if (checked.diagnostic == CHECK_DIAG_NONE && op == CHECK_OP_SHIFT_LEFT && count == 2)
                 {
                     check_constant_shift_sign(input, &action, &checked.value, first, token);
+                }
+                if (checked.diagnostic == CHECK_DIAG_NONE && op == CHECK_OP_CONDITIONAL && count == 3)
+                {
+                    check_constant_bool_conversion(input, &action, first);
                 }
                 if (checked.diagnostic == CHECK_DIAG_NONE && action.op == CHECK_OP_ASSIGN && first >= input->first && first < input->end)
                 {

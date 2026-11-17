@@ -4,6 +4,13 @@
 // Include after the checker driver's spawn, count and file-comparison helpers. Initializer-only families have
 // separate fixtures. These cases compare complete no-caret diagnostics through both kernels and lane requests.
 
+typedef struct CheckDriverWarningSpelling CheckDriverWarningSpelling;
+struct CheckDriverWarningSpelling
+{
+    const char* clang;
+    const char* baseline;
+};
+
 typedef struct CheckDriverDefaultWarningFixture CheckDriverDefaultWarningFixture;
 struct CheckDriverDefaultWarningFixture
 {
@@ -16,6 +23,9 @@ struct CheckDriverDefaultWarningFixture
     bool c23;
     bool compare_warning_text;
     bool syntax_only;
+    // An opt-in, NULL-terminated list of exact primary diagnostic spellings retained by a separate existing gap.
+    // Every location, warning, note and diagnostic order still compares byte for byte. No ordinary fixture uses it.
+    const CheckDriverWarningSpelling* baseline_spellings;
 };
 
 static const char check_driver_format_plain_source[] =
@@ -2996,6 +3006,39 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     },
 };
 
+// Exact output comparison with a fixture's explicitly frozen primary error spellings. A map includes the complete
+// ": error: ..." primary text through its unique assertion message, so no source spelling or note is normalized.
+static bool check_test_driver_warning_text_matches(const char* actual, const char* expected, const CheckDriverWarningSpelling* spellings)
+{
+    bool match = actual != NULL && expected != NULL && (spellings != NULL || strcmp(actual, expected) == 0);
+    while (spellings != NULL && match && (*actual != 0 || *expected != 0))
+    {
+        bool replaced = false;
+        for (uint32_t i = 0; spellings != NULL && spellings[i].clang != NULL && !replaced; i += 1)
+        {
+            const size_t length = strlen(spellings[i].clang);
+            if (length != 0 && strncmp(expected, spellings[i].clang, length) == 0)
+            {
+                const size_t baseline_length = strlen(spellings[i].baseline);
+                match = strncmp(actual, spellings[i].baseline, baseline_length) == 0;
+                if (match)
+                {
+                    actual += baseline_length;
+                    expected += length;
+                }
+                replaced = true;
+            }
+        }
+        if (!replaced)
+        {
+            match = *actual == *expected;
+            actual += match;
+            expected += match;
+        }
+    }
+    return match;
+}
+
 // A warning sweep of `fixtures`. With `deal`, it is a long sweep (test-checker-driver --part, check_test_driver_takes):
 // each fixture is a unit of its own, which the caller doesn't deal; without it, the sweep is its caller's unit.
 static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char* clang, const char* executable, const char* directory,
@@ -3082,8 +3125,9 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                         expected_text = fixture->compare_warning_text && expected_text == NULL ? strstr(expected, "error: ") : expected_text;
                         const char* actual_text = fixture->compare_warning_text && expected_text != NULL ?
                                                   strstr(actual != NULL ? actual : "", policy == 1 ? "error: " : "warning: ") : NULL;
-                        const bool diagnostics_match = expected_text != NULL ? actual_text != NULL && strcmp(actual_text, expected_text) == 0 :
-                                                       actual != NULL && strcmp(actual, expected) == 0;
+                        const bool diagnostics_match = check_test_driver_warning_text_matches(expected_text != NULL ? actual_text : actual,
+                                                                                               expected_text != NULL ? expected_text : expected,
+                                                                                               fixture->baseline_spellings);
                         const bool same = status == oracle && diagnostics_match;
                         check_test_expect(test, same, description);
                         if (!same && !mismatch_printed)

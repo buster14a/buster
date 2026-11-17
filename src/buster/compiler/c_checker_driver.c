@@ -4633,11 +4633,12 @@ static bool check_driver_jump_kept(const Parser* parser, const CheckInput* input
 
 // `from`: the first token whose reports, warnings, pragmas' diagnostics and packed members' warnings it publishes, 0 for
 // all of them (check_driver_rejected_common's second reading publishes those past where the first one stopped).
+// `construction`: the first reading owns all typed conditional conversions; a reread uses its original-owner filter.
 static bool check_driver_reports_from(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
                                       const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                       const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                       const uint32_t* excess_tokens, uint32_t excess_count, bool quiet,
-                                      CheckCommonShiftWarnings* shifts, uint32_t from, Arena* scratch)
+                                      CheckCommonShiftWarnings* shifts, bool construction, uint32_t from, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const bool scalar = parser->options.scalar;
@@ -4676,6 +4677,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     bool shifts_ready = true;
     if (ready)
     {
+        if (show_warnings && construction)
+        {
+            check_common_conditional_conversions(parser, pp, input, stream, types, &spell, repair, from, scratch);
+        }
         for (uint32_t i = 0; i < completion_count; i += 1)
         {
             completion_keys[i] = (uint64_t)input->warning_events.events[i].token << 32 | i;
@@ -6710,7 +6715,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                   CheckCommonShiftWarnings* shifts, Arena* scratch)
 {
     return check_driver_reports_from(parser, original, pp, publication_end, input, stream, types, repair, original_pragmas, extra, extra_count, excess_tokens,
-                                     excess_count, quiet, shifts, 0, scratch);
+                                     excess_count, quiet, shifts, true, 0, scratch);
 }
 
 // The fate of each original token in a rejected unit's private view (#1447, check_driver_rejected_view). A left out run
@@ -8005,6 +8010,81 @@ static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_c
     return known;
 }
 
+// The first reading's warning events, sorted by source token. Its few kinds at one token retain their original order.
+static bool check_driver_rejected_event_known(const uint64_t* events, uint32_t count, uint64_t key)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool below = events[middle] >> 32 < key >> 32;
+        low = below ? middle + 1 : low;
+        high = below ? high : middle;
+    }
+    bool known = false;
+    for (uint32_t at = low; !known && at < count && events[at] >> 32 == key >> 32; at += 1)
+    {
+        known = events[at] == key;
+    }
+    return known;
+}
+
+// A conditional's original owner: the first reading's retained operator or its declaration-time receipt. Its warning
+// policy and any invalid operand were settled there, including when no diagnostic was published (#2899).
+static bool check_driver_rejected_conditional_known(const CheckInput* first, const uint64_t* events, uint32_t count, uint32_t token)
+{
+    const uint32_t node = first->token_nodes != NULL && token < first->token_count ? first->token_nodes[token] : BUSTER_CHECK_NONE;
+    const bool retained = node < first->graph.count && first->graph.tokens[node] == token && first->graph.ops[node] == CHECK_OP_CONDITIONAL;
+    const uint64_t key = (uint64_t)token << 32 | CHECK_WARNING_EVENT_BOOL_CONVERSION;
+    return retained || check_driver_rejected_event_known(events, count, key);
+}
+
+// A successful reread's newly constructed conditionals (#2899). They may precede the reader's stopping token, or
+// belong to a repaired body's complete original statement. Source ownership, not that suffix boundary, decides
+// which are new. Original graph operators and receipts remain owned even under ignored or promoted warning policy.
+static void check_driver_rejected_conditionals(const Parser* unit, const Parser* parser, Preprocessor* pp, const CheckInput* first,
+                                               const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                               const uint32_t* to_original, const uint64_t* known, uint32_t known_count, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const bool enabled = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE, false) ||
+                         check_common_enabled(pp, input, CHECK_WARNING_ID_LITERAL_CONVERSION, false) ||
+                         check_common_enabled(pp, input, CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT, true);
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const CheckOp ops[] = { CHECK_OP_CONDITIONAL };
+    const CheckCommonOps set = check_common_ops(ops, BUSTER_ARRAY_LENGTH(ops));
+    CheckCommonScan scan = { 0 };
+    CheckWarningSpelling spell = { 0 };
+    for (uint32_t node = enabled ? check_common_next_op(graph, &set, &scan, vector) : graph->count;
+         node < graph->count && !pp->fatal; node = check_common_next_op(graph, &set, &scan, vector))
+    {
+        const uint32_t token = graph->tokens[node];
+        const uint32_t at = token < parser->tokens.count && to_original != NULL ? to_original[token] : token;
+        if (graph->ops[node] == CHECK_OP_CONDITIONAL && node < stream->count && stream->diagnostics[node] == CHECK_DIAG_NONE && token < parser->tokens.count &&
+            at < unit->tokens.count && !check_driver_rejected_conditional_known(first, known, known_count, at) && check_common_view_keeps(parser, token))
+        {
+            check_common_conditional_bool(parser, pp, input, stream, types, &spell, node, scratch);
+        }
+    }
+    for (uint32_t i = 0; enabled && i < input->warning_events.count && !pp->fatal; i += 1)
+    {
+        const CheckWarningEvent* event = input->warning_events.events + i;
+        const uint32_t token = event->token;
+        const uint32_t at = token < parser->tokens.count && to_original != NULL ? to_original[token] : token;
+        if (event->kind == CHECK_WARNING_EVENT_BOOL_CONVERSION && token < parser->tokens.count && at < unit->tokens.count &&
+            !check_driver_rejected_conditional_known(first, known, known_count, at) && check_common_view_keeps(parser, token))
+        {
+            const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+            const bool retained = node < graph->count && node < stream->count && graph->tokens[node] == token && graph->ops[node] == CHECK_OP_CONDITIONAL;
+            if (!retained)
+            {
+                check_common_conditional_receipt(parser, pp, input, types, &spell, event, scratch);
+            }
+        }
+    }
+}
+
 // A rejected unit's second reading (check_driver_rejected_common): with `edits`, through the view that leaves out what they
 // mark, the mask's bodies left out besides; without, the unit itself with the mask's bodies left out. Where its reading is
 // valid, its warnings are published. Where it finds errors of its own, which the first reading didn't reach (past a reader's
@@ -8239,7 +8319,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         if (valid && *found_count != 0)
         {
             check_driver_reports_from(parser, original, pp, publication_end, &published, &published_stream, &types, NULL, NULL, extra, extra_count, NULL, 0, true,
-                                      NULL, 0, scratch);
+                                      NULL, false, 0, scratch);
         }
         round = valid && *found_count != 0 ? CHECK_DRIVER_ROUND_ERRORS : CHECK_DRIVER_ROUND_FAILED;
         valid = false;
@@ -8261,6 +8341,11 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         }
         sorted = c_bindings_sort(known, sorting, known_count, !scalar, UINT32_MAX);
     }
+    if (valid && (known_count == 0 || sorted != NULL))
+    {
+        check_driver_rejected_conditionals(unit, parser, pp, first_input, &input, &stream, &types,
+                                           edited ? view.to_original : NULL, sorted, known_count, scratch);
+    }
     const CheckWarningEvents* readings[] = { &input.warning_events, &stream.warning_events };
     for (uint32_t r = 0; valid && (known_count == 0 || sorted != NULL) && r < BUSTER_ARRAY_LENGTH(readings); r += 1)
     {
@@ -8272,21 +8357,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const uint32_t event_token = events->events[i].token;
             const uint32_t at = edited && event_token < view_count ? view.to_original[event_token] : event_token;
             const uint64_t key = (uint64_t)at << 32 | events->events[i].kind;
-            uint32_t low = 0;
-            uint32_t high = known_count;
-            // (The sort orders the tokens alone: a token's few events are scanned for the kind.)
-            while (low < high)
-            {
-                const uint32_t middle = low + (high - low) / 2;
-                const bool below = sorted[middle] >> 32 < key >> 32;
-                low = below ? middle + 1 : low;
-                high = below ? high : middle;
-            }
-            bool known_event = false;
-            for (uint32_t at = low; !known_event && at < known_count && sorted[at] >> 32 == key >> 32; at += 1)
-            {
-                known_event = sorted[at] == key;
-            }
+            const bool known_event = check_driver_rejected_event_known(sorted, known_count, key);
             // A parameter's unused warning, where its function holds an error, as clang's (ActOnFinishFunctionBody gives
             // them whatever the body's errors): unless what the reading left out of its body names it, which clang's
             // reading of that part takes for a use, as it does an erroneous expression's operands; a member's name doesn't.
@@ -8371,7 +8442,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     // tokens': check_repair_input_report.)
     if (valid && stop < view_count && unit_view.complete == NULL)
     {
-        check_driver_reports_from(parser, original, pp, publication_end, &input, &stream, &types, NULL, NULL, NULL, 0, NULL, 0, false, NULL, stop, scratch);
+        check_driver_reports_from(parser, original, pp, publication_end, &input, &stream, &types, NULL, NULL, NULL, 0, NULL, 0, false, NULL, false, stop, scratch);
     }
     if (valid)
     {
