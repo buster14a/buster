@@ -19,8 +19,11 @@
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
-// - and #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
-//   it from, as a range that waits in its slot (#2768) and is evicted after its reload did.
+// - #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
+//   it from, as a range that waits in its slot (#2768) and is evicted after its reload did;
+// - and #2843's conditional sums whose arm is a load's extension to 64 bits while the comparison reads the load (#2838's
+//   arms: an int's sign extension, an unsigned int's and an unsigned short's zero extension): the select reads the
+//   load's register, which holds the extension, so no register is copied into another.
 
 #if defined(BUSTER_TIER1_PATTERNS_SUBJECT)
 
@@ -342,6 +345,36 @@ __attribute__((noinline)) long patterns_mixed(int a, int b, long x, long y)
     return a < b ? x : y;
 }
 
+__attribute__((noinline)) long patterns_arms_signed(const int* p, long n)
+{
+    long s = 0;
+    for (long i = 0; i < n; i += 1)
+    {
+        s += p[i] > 0 ? p[i] : 1;
+    }
+    return s;
+}
+
+__attribute__((noinline)) unsigned long patterns_arms_unsigned(const unsigned* p, long n)
+{
+    unsigned long s = 0;
+    for (long i = 0; i < n; i += 1)
+    {
+        s += p[i] > 7u ? p[i] : 1u;
+    }
+    return s;
+}
+
+__attribute__((noinline)) long patterns_arms_half(const unsigned short* p, long n)
+{
+    long s = 0;
+    for (long i = 0; i < n; i += 1)
+    {
+        s += p[i] > 300 ? p[i] : 2;
+    }
+    return s;
+}
+
 __attribute__((noinline)) unsigned patterns_unsigned(unsigned a, unsigned b, unsigned x)
 {
     return a >= b ? x : 0;
@@ -431,6 +464,9 @@ int patterns_loaded(const int* p, int x, int y);
 int patterns_loaded_other(const int* p, int q, int x, int y);
 long patterns_mixed(int a, int b, long x, long y);
 unsigned patterns_unsigned(unsigned a, unsigned b, unsigned x);
+long patterns_arms_signed(const int* p, long n);
+unsigned long patterns_arms_unsigned(const unsigned* p, long n);
+long patterns_arms_half(const unsigned short* p, long n);
 struct patterns_state
 {
     long* base;
@@ -748,6 +784,28 @@ int main(void)
         valid = patterns_clamp(x) == (x < 0 ? 0 : x > 255 ? 255 : x) && valid;
         valid = patterns_loaded(&x, x * 3, x - 1) == (x == 7 ? x * 3 : x - 1) && valid;
     }
+    // #2843's arms, on every prefix of words around each comparison's bound and each type's sign.
+    const int armed[] = { 0, 1, -1, 7, 8, 300, 301, -2147483647 - 1, 2147483647, -300, 65535, 65536 };
+    for (long n = 0; n <= (long)(sizeof(armed) / sizeof(armed[0])); n += 1)
+    {
+        long signed_sum = 0;
+        unsigned long unsigned_sum = 0;
+        long half_sum = 0;
+        unsigned unsigned_words[sizeof(armed) / sizeof(armed[0])];
+        unsigned short half_words[sizeof(armed) / sizeof(armed[0])];
+        for (long i = 0; i < (long)(sizeof(armed) / sizeof(armed[0])); i += 1)
+        {
+            unsigned_words[i] = (unsigned)armed[i];
+            half_words[i] = (unsigned short)armed[i];
+        }
+        for (long i = 0; i < n; i += 1)
+        {
+            signed_sum += armed[i] > 0 ? armed[i] : 1;
+            unsigned_sum += unsigned_words[i] > 7u ? unsigned_words[i] : 1u;
+            half_sum += half_words[i] > 300 ? half_words[i] : 2;
+        }
+        valid = patterns_arms_signed(armed, n) == signed_sum && patterns_arms_unsigned(unsigned_words, n) == unsigned_sum && patterns_arms_half(half_words, n) == half_sum && valid;
+    }
     const int summed[] = { 0, 128, 129, 255, -129, 300, 7, 129 };
     long sum = 0;
     for (int n = 0; n <= 8; n += 1)
@@ -899,6 +957,7 @@ typedef enum PatternsKind
     PATTERNS_WHOLE,
     PATTERNS_CLEARED,
     PATTERNS_GSUB,
+    PATTERNS_ARMS,
 } PatternsKind;
 
 typedef struct PatternsFunction PatternsFunction;
@@ -934,6 +993,9 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_whole_override", PATTERNS_CLEARED },
     { "patterns_whole_volatile", PATTERNS_CLEARED },
     { "patterns_gsub", PATTERNS_GSUB },
+    { "patterns_arms_signed", PATTERNS_ARMS },
+    { "patterns_arms_unsigned", PATTERNS_ARMS },
+    { "patterns_arms_half", PATTERNS_ARMS },
 };
 
 #define BUSTER_PATTERNS_COUNT (sizeof(patterns_functions) / sizeof(patterns_functions[0]))
@@ -983,6 +1045,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     unsigned stored_back = 0;
     // Stores of a zero immediate to memory: an object's clear's (#2745).
     unsigned zeros = 0;
+    // Moves of a register into another (#2843).
+    unsigned copies = 0;
     for (unsigned i = 0; i < body->count; i += 1)
     {
         const PatternsInstruction* instruction = &body->instructions[i];
@@ -1003,6 +1067,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         increments += strncmp(operation, "add", 3) == 0 && strncmp(operands, "$0x4,%", 6) == 0;
         const PatternsInstruction* before = i != 0 ? &body->instructions[i - 1] : NULL;
         const bool moved = before != NULL && strcmp(before->operation, "mov") == 0 && before->operands[0] == '%' && !patterns_memory(before->operands);
+        copies += strcmp(operation, "mov") == 0 && operands[0] == '%' && !patterns_memory(operands);
         clean += jump && operands[0] == '*' && !moved;
         const char* loaded_comma = before != NULL ? strrchr(before->operands, ',') : NULL;
         loaded += jump && operands[0] == '*' && loaded_comma != NULL && strcmp(before->operation, "mov") == 0 && patterns_memory(before->operands) && strcmp(loaded_comma + 1, operands + 1) == 0;
@@ -1055,11 +1120,14 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_GSUB:
         valid = valid && stored_back == 0;
         break;
+    case PATTERNS_ARMS:
+        valid = valid && moves >= 1 && copies == 0;
+        break;
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u\n",
-                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u register-copies=%u\n",
+                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back, copies);
     }
     return valid;
 }
