@@ -82,9 +82,11 @@ It uses the revision's acquisition/setup scripts, rebuilds once and executes
 the recorded command without reconstructing a log. It verifies the selected
 host path; `native` failures additionally need the recorded CPU/ISA, named in
 `cpu.txt`. Image identity and the original apt manifest are retained. Pinned
-release and fixture inputs are immutable; Ubuntu packages still depend on the
-available runner image. Replaying on a different image is an environment
-difference, not evidence that an original failure disappeared.
+release and fixture inputs are immutable. Replay prefers the original run's
+prepared offline artifact through `gh`, while retained; otherwise it reacquires
+inputs and rejects any difference from the recorded apt closure. Replaying on a
+different image is an environment difference, not evidence that an original
+failure disappeared.
 
 `CI latency report` reports PR first-result p50/p95 from run creation
 (queue and setup included) to the first early-feedback pass or actionable

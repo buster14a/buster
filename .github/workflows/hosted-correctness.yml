@@ -59,6 +59,8 @@ env:
   # Nothing here reads the executable's debug information, which takes a fifth of the build's time; the inventory's own
   # build.sh calls (check-call-graph) configure and build in the checkout's tree.
   BUSTER_DEBUG_INFO: '0'
+  # The exact successful preparation attempt's offline handoff, for replay while its artifact is retained.
+  BUSTER_FEEDBACK_HOSTED_TOOLS: ${{ inputs.hosted-tools }}
   # The vector row's configurations (#2033): its sanitizers, `none` on a pull request and all four on the runs that run
   # the sanitizer rows, whose shards are one pool of items (tools/ci/vector-draw.sh). An item is a configuration's
   # initial and its shard: `m2` is memory's shard 2 of its 4. They are listed the costliest first, the order in which the

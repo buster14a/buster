@@ -101,7 +101,8 @@ COMPILER
 chmod +x "$work/compiler"
 for state in passed product incomplete skip no-summary timeout start-error; do
     status=0
-    FIXTURE_RESULT=$state BUSTER_HOST_ARCH=x86-64 BUSTER_SANITIZER=none BUSTER_SANITIZER_OPTIMIZATION=3 \
+    FIXTURE_RESULT=$state BUSTER_HOSTED_OFFLINE= BUSTER_FEEDBACK_HOSTED_TOOLS= BUSTER_PRODUCT= \
+        BUSTER_HOST_ARCH=x86-64 BUSTER_SANITIZER=none BUSTER_SANITIZER_OPTIMIZATION=3 \
         BUSTER_COMPILER="$work/compiler" bash tools/ci/feedback.sh run "$work/$state" smoke --jobs 1 --timeout 120 > "$work/record.log" 2>&1 || status=$?
     case "$state" in
         passed) test "$status" = 0; expected=passed ;;
@@ -116,7 +117,8 @@ for state in passed product incomplete skip no-summary timeout start-error; do
     pass
 done
 status=0
-BUSTER_COMPILER=/missing/compiler BUSTER_HOST_ARCH=x86-64 bash tools/ci/feedback.sh run "$work/infra" smoke --jobs 1 > /dev/null 2>&1 || status=$?
+BUSTER_HOSTED_OFFLINE= BUSTER_FEEDBACK_HOSTED_TOOLS= BUSTER_PRODUCT= BUSTER_COMPILER=/missing/compiler BUSTER_HOST_ARCH=x86-64 \
+    bash tools/ci/feedback.sh run "$work/infra" smoke --jobs 1 > /dev/null 2>&1 || status=$?
 test "$status" != 0 && grep -Fq $'result\tinfrastructure-failure' "$work/infra/result.tsv" || fail 'missing executable not infrastructure'
 pass
 # Workflow boundaries: full remains the qualifying caller's explicit profile, and partial feedback has its own name,
@@ -151,6 +153,18 @@ set -euo pipefail
 echo build >> "$FEEDBACK_REPLAY_TRACE"
 printf 'BUSTER_COMPILER=%s/compiler\n' "$PWD" >> "$GITHUB_ENV"
 BUILD
+mkdir "$checkout/bin"
+cat > "$checkout/bin/gh" <<'DOWNLOAD'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1 $2 $3" == 'run download 7' ]]
+printf 'download %s\n' "$*" >> "$FEEDBACK_REPLAY_TRACE"
+if [ "${FIXTURE_DOWNLOAD:-success}" = fail ]; then exit 1; fi
+directory=${*: -1}
+mkdir -p "$directory/apt"
+printf 'fixture apt bytes\n' > "$directory/apt/MANIFEST"
+DOWNLOAD
+chmod +x "$checkout/bin/gh"
 git -C "$checkout" -c init.defaultBranch=main init -q --template=
 git -C "$checkout" add .
 git -C "$checkout" -c user.name=Fixture -c user.email=fixture@example.invalid -c core.hooksPath=/dev/null commit -qm fixture
@@ -161,6 +175,16 @@ git -C "$checkout" rev-parse HEAD > "$work/passed/revision"
     bash "$work/passed/reproduce.sh" > "$work/replay.log" 2>&1
     grep -Fq 'hosted-offline verify' "$FEEDBACK_REPLAY_TRACE"
     grep -xq build "$FEEDBACK_REPLAY_TRACE"
+    export PATH="$checkout/bin:$PATH"
+    printf 'buster14a/buster\t7\thosted-inputs-7-1\n' > "$work/passed/hosted-inputs.tsv"
+    printf 'fixture apt bytes\n' > "$work/passed/apt-manifest"
+    : > "$FEEDBACK_REPLAY_TRACE"
+    bash "$work/passed/reproduce.sh" > "$work/replay-download.log" 2>&1
+    grep -Fq -- '--name hosted-inputs-7-1-offline' "$FEEDBACK_REPLAY_TRACE"
+    if grep -Fq 'hosted-offline prepare' "$FEEDBACK_REPLAY_TRACE"; then fail 'replay resolved packages despite its original handoff'; fi
+    if FIXTURE_DOWNLOAD=fail bash "$work/passed/reproduce.sh" > "$work/replay-missing.log" 2>&1; then fail 'replay accepted changed apt inputs after an expired handoff'; fi
+    grep -Fq 'apt inputs differ' "$work/replay-missing.log"
+    rm "$work/passed/apt-manifest"
     cp "$work/passed/host-path" "$work/host-path"
     echo '#define BUSTER_HOST_VECTOR 1' > "$work/passed/host-path"
     if bash "$work/passed/reproduce.sh" > /dev/null 2>&1; then fail 'replay accepted a different host path'; fi

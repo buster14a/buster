@@ -78,7 +78,21 @@ replay()
     : > "$GITHUB_PATH"
     export BUSTER_HOSTED_RELEASES="$RUNNER_TEMP/releases" BUSTER_HOSTED_OFFLINE="$RUNNER_TEMP/offline"
     bash tools/ci/hosted-release.sh prepare "$BUSTER_HOSTED_RELEASES"
-    bash tools/ci/hosted-offline.sh prepare "$BUSTER_HOSTED_OFFLINE"
+    # Prefer the original apt closure and frozen-input mirrors to resolving packages again. Its name is the
+    # successful preparation attempt's, not necessarily this failed consumer's attempt. Verify every byte below.
+    local restored=false repository run handoff
+    if [ -s "$record/hosted-inputs.tsv" ] && command -v gh > /dev/null; then
+        IFS=$'\t' read -r repository run handoff < "$record/hosted-inputs.tsv"
+        [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$run" =~ ^[1-9][0-9]*$ && "$handoff" =~ ^hosted-inputs-[0-9]+-[0-9]+$ ]] ||
+            { echo 'feedback: invalid prepared-input identity' >&2; return 1; }
+        if gh run download "$run" --repo "$repository" --name "$handoff-offline" --dir "$BUSTER_HOSTED_OFFLINE"; then
+            restored=true
+        else
+            rm -rf -- "$BUSTER_HOSTED_OFFLINE"
+            echo 'feedback: original handoff unavailable; reacquiring and comparing pinned inputs' >&2
+        fi
+    fi
+    if [ "$restored" != true ]; then bash tools/ci/hosted-offline.sh prepare "$BUSTER_HOSTED_OFFLINE"; fi
     bash tools/ci/hosted-offline.sh verify "$BUSTER_HOSTED_OFFLINE"
     if [ -f "$record/apt-manifest" ]; then
         # Image labels may differ, package bytes may not. Never silently call a changed toolchain an exact replay.
@@ -153,6 +167,9 @@ record()
     git rev-parse HEAD > "$directory/revision"
     git status --porcelain > "$directory/working-tree.txt"
     cp tools/ci/hosted-tools.lock "$directory/hosted-tools.lock"
+    if [ -n "${BUSTER_FEEDBACK_HOSTED_TOOLS:-}" ]; then
+        printf '%s\t%s\t%s\n' "${GITHUB_REPOSITORY:?recorded repository}" "${GITHUB_RUN_ID:?recorded run}" "$BUSTER_FEEDBACK_HOSTED_TOOLS" > "$directory/hosted-inputs.tsv"
+    fi
     cp /etc/os-release "$directory/os-release"
     if [ -f "${BUSTER_HOSTED_OFFLINE:-}/apt/MANIFEST" ]; then
         cp "$BUSTER_HOSTED_OFFLINE/apt/MANIFEST" "$directory/apt-manifest"
