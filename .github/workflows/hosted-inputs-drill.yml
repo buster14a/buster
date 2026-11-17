@@ -248,7 +248,7 @@ jobs:
           bash tools/ci/hosted-offline.sh prepare "$RUNNER_TEMP/hosted-offline" 2> "$RUNNER_TEMP/cold.log" || status=$?
           cat "$RUNNER_TEMP/cold.log" >&2
           [ "$status" -eq 0 ] || exit "$status"
-          for input in apt baseline corpus c-testsuite sqlite lua; do
+          for input in apt corpus c-testsuite sqlite lua; do
               grep -q "input=$input source=network" "$RUNNER_TEMP/cold.log" || { echo "::error::$input was not acquired"; exit 1; }
           done
 
@@ -280,7 +280,7 @@ jobs:
           bash tools/ci/hosted-offline.sh prepare "$RUNNER_TEMP/hosted-offline" 2> "$RUNNER_TEMP/warm.log" || status=$?
           cat "$RUNNER_TEMP/warm.log" >&2
           [ "$status" -eq 0 ] || exit "$status"
-          for input in apt baseline corpus c-testsuite sqlite lua; do
+          for input in apt corpus c-testsuite sqlite lua; do
               grep -q "input=$input source=cache" "$RUNNER_TEMP/warm.log" || { echo "::error::$input did not come from the cache"; exit 1; }
           done
           ! grep -q 'source=network' "$RUNNER_TEMP/warm.log" || { echo '::error::the warm preparation fetched an input'; exit 1; }

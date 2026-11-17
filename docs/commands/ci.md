@@ -136,8 +136,8 @@ drawn on qualifying CPUs as the vector row's are (#2924), each build their own
 `native` sanitizer rows went (#2032). Run
 `bash tests/ci/hosted-product.sh` after changing the product's packing, identity
 or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
-4 shards take about 4 to 6. The steps a row needs once (the baseline fallback
-check, the native row's arena checks, the parser smoke test, the performance
+4 shards take about 4 to 6. The steps a row needs once (the native row's arena
+checks, the parser smoke test, the performance
 readers and the TSan/MSan `main.c` compiles) run in its shard 1.
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
