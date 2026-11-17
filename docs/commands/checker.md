@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --constant-logical-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -144,6 +144,34 @@ unused-warning fixtures also check exact scope-completion tokens.
   complete diagnostics and exit status under warning promotion/suppression,
   error limits, source policy, C17/C23, both reader choices and lane requests,
   and verifies existing object-output preservation for rejected input.
+  `--constant-logical-only` runs the original `constant_logical_*.c` sources for
+  `-Wconstant-logical-operand` (#2900). The standalone group is on by default.
+  Integer logical operators warn for independently constant right operands other
+  than zero or one; boolean/atomic/noninteger left operands, bare enumerators on
+  either side and operators originating in macros stay quiet. Parentheses around
+  an enumerator remove that bare-reference exemption. `&&` has the bitwise and
+  remove-constant notes; `||` has only the bitwise note.
+  Both the constant/type-query reader and the checked graph retain sparse events,
+  deduplicated by operator token, before pruning or failed-assertion recovery.
+  Their construction boundaries retain diagnostic order in unevaluated operands,
+  unselected arms, failed assertions and malformed-unit recovery. Runtime const
+  expressions use the existing checked actions with a private, lazy dependency
+  cache; the original graph and stream remain unchanged. Reached statement-prefix
+  effects and undefined arithmetic prevent a warning proof, even when GNU
+  required-constant folding supplies a payload. A completed const-object read
+  starts a new evaluation; C23 additionally withholds a static object's receipt
+  if any live initializer required undefined folding. The source reader retains
+  integer bit-cast and complex-component proofs in erased query operands too.
+  A completed top-level brace clears stale inner-statement repair cuts, so later
+  completed assertions and initializers stay in the checked prefix.
+  The suite compares full
+  Clang diagnostics and status, source/command-line policy, GNU17/C23, both readers,
+  lane requests and syntax/object modes, including rejected-output preservation.
+  The C23 invalid-static-receipt row is syntax-only because pinned Clang's backend
+  rejects that initializer; its GNU17 row retains object coverage. Existing
+  arithmetic diagnostics on newly folded const reads are isolated in that row;
+  direct invalid arithmetic and its diagnostic order have a separate full-output
+  fixture.
   `--record-extensions-only` runs the existing GNU empty-record checks plus the runtime
   `tests/driver/record-extensions/` catalogue for zero-size-record C++ compatibility and
   zero-length-array warnings (#2409). Complete GNU17/C23 diagnostics cover explicit and

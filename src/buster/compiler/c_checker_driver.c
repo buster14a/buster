@@ -13091,8 +13091,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     if (program_checked)
                     {
-                        // A repaired view's warnings, at its complete original statements alone (CheckCommonView, #2406).
-                        check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
+                        // A repaired view keeps complete original statements alone; a prefix keeps its original
+                        // lookahead for warnings deferred to its final body's end (CheckCommonView, #2406).
+                        check_common_view = repairing ? check_driver_common_view(&repair, recovered) :
+                                            (CheckCommonView){ .original = recovered, .count = tokens };
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         check_driver_return_reports(checking, recovered, pp, &program, baseline, quiet);
@@ -13194,8 +13196,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         if (error_tokens != NULL)
                         {
-                            // A repaired view's, at its complete original statements alone (CheckCommonView, #2431).
-                            check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
+                            // Retain a prefix's original lookahead through the rejected readings; a repair also
+                            // keeps its complete original statements alone (CheckCommonView, #2431).
+                            check_common_view = repairing ? check_driver_common_view(&repair, recovered) :
+                                                (CheckCommonView){ .original = recovered, .count = tokens };
                             check_driver_rejected_common(checking, recovered, pp, &input, &types, additional, additional_count,
                                                          error_tokens, error_count, sites, site_count, nonconstant, scalar,
                                                          return_warning, baseline,
