@@ -370,6 +370,10 @@ static void tier1_float_select_loops(Tier1EmitTest* test, uint32_t* fused_loops)
                         const uint8_t rule = planned ? plan.patterns[root].rule : TIER1_RULE_NONE;
                         tier1_emit_test_expect(test, rule == (fused ? TIER1_RULE_FLOAT_SELECT_COMPARE : TIER1_RULE_SELECT),
                                                "a loop's select of a floating == or != fuses only where its values don't recur through it");
+                        // Maximal munch's independent cover makes the same choice: its candidates ask the same walk.
+                        Tier1SelectPlan reference;
+                        const bool munched = planned && tier1_select_test_plan_munch(&function, &dominance, &test->output, &test->scratch, &reference, &node) == TIER1_SELECT_OK;
+                        tier1_emit_test_expect(test, munched && reference.patterns[root].rule == rule, "maximal munch's cover of a floating select's loop chooses its select's rule");
                         *fused_loops += rule == TIER1_RULE_FLOAT_SELECT_COMPARE;
                         const Tier1EmitOptions options = {
                             .register_mask = narrow ? few : tier1_liveness_register_mask(),

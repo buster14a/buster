@@ -363,6 +363,9 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
         }
     }
     tier1_select_test_expect(test, files != 0 && check.mismatches == 0 && check.uncovered == 0, "the IR fixtures' classes, states and rules are the twins' alike, every covered class with a candidate");
+    // Every covered node's rule names a candidate the walks made, so that a class the grammar gives and the candidates'
+    // own conditions agree (a floating == or !='s, #2922, both asking the same select's recurrence): no munch's fallback.
+    tier1_select_test_expect(test, check.fallbacks == 0, "the IR fixtures' rules name candidates the walks made, with no munch's fallback");
     // As the selection's own summary: on standard error where standard output carries the manifest (--manifest).
     fprintf(test->manifest ? stderr : stdout, "tier1 bottom-up rewrite: %u states, %u rules, at most %u representers in a position, a pool of %u entries; the IR fixtures: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64
            " mismatches, %" PRIu64 " uncovered\n",
