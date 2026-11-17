@@ -3,15 +3,15 @@
 //
 // #2791: selects of floating comparisons, included by tier1_select_test.c.
 //
-// - TIER1_RULE_FLOAT_SELECT_COMPARE's records run natively for each condition (the branch's UGT, UGE, ULE and ULT, and
-//   == and !=), both precisions and both select widths, with the comparison's operands in two registers or one, and the
-//   destination in a register of its own, the chosen value's, the other value's, or one register for both values,
-//   against C's comparisons of the operands' values: NaNs of either sign, a signaling one, zeros of both signs,
-//   infinities, a subnormal and the largest finite value among them.
+// - TIER1_RULE_FLOAT_SELECT_COMPARE's records run natively for each condition (the branch's UGT, UGE, ULE and ULT), both
+//   precisions and both select widths, with the comparison's operands in two registers or one, and the destination in a
+//   register of its own, the chosen value's, the other value's, or one register for both values, against C's
+//   comparisons of the operands' values: NaNs of either sign, a signaling one, zeros of both signs, infinities, a
+//   subnormal and the largest finite value among them.
 // - The plans of a comparison by each predicate whose select reads it directly, through its I1 copy right after it
 //   (if-conversion's truth simplification's), through a copy past another node, or through one or two of C's truth
 //   values' links, by both paths, must fold exactly the shapes the grammar takes: every one of an ordered predicate but
-//   the distant copy, and == and != directly or through their copy.
+//   the distant copy, and none of == and !=, whose selects test their truth values.
 
 // Whether a floating select's `condition` holds for `left` and `right`, the operands' bits at `width` bytes (a float's in
 // the low half), by C's own comparisons of their values.
@@ -48,12 +48,6 @@ static bool tier1_select_test_float_holds(uint32_t condition, uint32_t width, ui
     case IR_ULT:
         holds = !(l >= r);
         break;
-    case IR_EQ:
-        holds = l == r;
-        break;
-    case IR_NE:
-        holds = l != r;
-        break;
     default:
         break;
     }
@@ -62,7 +56,7 @@ static bool tier1_select_test_float_holds(uint32_t condition, uint32_t width, ui
 
 static void tier1_select_test_float_select_holes(Tier1SelectTest* test)
 {
-    static const uint8_t conditions[] = { IR_UGT, IR_UGE, IR_ULE, IR_ULT, IR_EQ, IR_NE };
+    static const uint8_t conditions[] = { IR_UGT, IR_UGE, IR_ULE, IR_ULT };
     static const uint64_t doubles[] =
     {
         0,
@@ -123,7 +117,6 @@ static void tier1_select_test_float_select_holes(Tier1SelectTest* test)
             for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(conditions); k += 1)
             {
                 const uint32_t condition = conditions[k];
-                const bool equality = condition == IR_EQ || condition == IR_NE;
                 for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
                 {
                     for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(registers); v += 1)
@@ -142,7 +135,7 @@ static void tier1_select_test_float_select_holes(Tier1SelectTest* test)
                             .condition = (uint8_t)condition,
                         };
                         const Tier1SelectRecords selected = tier1_select_test_expand(test, &holes);
-                        tier1_select_test_expect(test, selected.count <= (equality ? 4u : 3u), "a floating select is its ucomis, a move and its cmovs");
+                        tier1_select_test_expect(test, selected.count <= 3, "a floating select is its ucomis, a move and its cmov");
                         uint32_t others = 0;
                         for (uint32_t r = 1; r < selected.count; r += 1)
                         {
@@ -150,7 +143,7 @@ static void tier1_select_test_float_select_holes(Tier1SelectTest* test)
                             others += operation != X86_OPERATION_MOV && operation != X86_OPERATION_CMOVCC;
                         }
                         tier1_select_test_expect(test, selected.count != 0 && selected.records[0].form == tier1_select_float_forms(source_width)->compare && others == 0,
-                                                 "a floating select's ucomis comes first and only moves and cmovs, which write no flags, follow it");
+                                                 "a floating select's ucomis comes first and only a move and a cmov, which write no flags, follow it");
                         // The values first, rcx's where the comparison holds and r8's where it doesn't, then the operands'
                         // bits from rdi and rsi.
                         const bool shared = registers[v][0] == registers[v][1];
@@ -266,12 +259,10 @@ static void tier1_select_test_float_select_plan(Tier1SelectTest* test, uint32_t 
     }
     if (created && tier1_select_test_walk_plans(test, &function, 0, root, output, scratch, plans, "a floating select's fixture selects") == 2)
     {
-        const bool equality = predicate == IR_EQ || predicate == IR_NE;
-        const bool fused = shape != 2 && (!equality || shape <= 1);
+        const bool fused = shape != 2 && predicate >= IR_LT;
         const bool odd = (__builtin_popcount(link_negations[shape]) & 1) != 0;
         const bool swapped = predicate == IR_LT || predicate == IR_LE;
-        const uint8_t ordered = predicate == IR_LT || predicate == IR_GT ? IR_UGT : IR_UGE;
-        const uint8_t unnegated = equality ? (uint8_t)predicate : ordered;
+        const uint8_t unnegated = predicate == IR_LT || predicate == IR_GT ? IR_UGT : IR_UGE;
         const uint8_t condition = odd ? tier1_select_negations[unnegated] : unnegated;
         const uint32_t chosen = apart ? chain_end : 2;
         const Tier1SelectPattern* pattern = &plans[0].patterns[root];

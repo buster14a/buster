@@ -6,24 +6,26 @@
 // the floating values by one of C's six predicates, selects one of the others by the comparison directly, through its I1
 // copy (if-conversion's truth simplification's) or through one of C's truth values' links, `ne` or `eq`, and returns it.
 // With `summed`, the function returns the select plus one instead, so that the select's result takes a tie to a value's
-// register (tier1_select_ties) as the return's doesn't. By both paths, with every general register and with the
-// parameters' alone, and with and without a kept frame pointer, the select must be TIER1_RULE_FLOAT_SELECT_COMPARE where
-// the grammar takes it (an ordered predicate's every shape, == and != directly and through their copy) and test the
-// comparison's truth value elsewhere, its code must certify and set no flag into a register where it fuses, a summed one
-// with every register must take the register of the value it keeps (no move of its own, none through the scratch
-// register), and its native result must be C's for NaN, signed zero, infinite and finite operands.
+// register (tier1_select_ties) as the return's doesn't. With `branch`, it branches on the condition instead, to blocks
+// that return each value: a branch reaches its comparison through the copy too, which the truth walk passes for both. By
+// both paths, with every general register and with the parameters' alone, and with and without a kept frame pointer, the
+// select must be TIER1_RULE_FLOAT_SELECT_COMPARE and the branch TIER1_RULE_FLOAT_BRANCH_COMPARE for an ordered predicate
+// in every shape, and test the comparison's truth value for == and !=; the code must certify and set no flag into a
+// register where it fuses, a summed select with every register must take the register of the value it keeps (no move of
+// its own), and the native result must be C's for NaN, signed zero, infinite and finite operands.
 
 #define BUSTER_TIER1_FLOAT_SELECT_SHAPES 4u
 
 // `shape`: the comparison itself (0), its copy (1), a link `icmp ne (zext c), 0` (2) or `icmp eq (zext c), 0` (3).
-static bool tier1_float_select_function(Tier1EmitTest* test, uint32_t source_width, uint32_t width, uint32_t predicate, uint32_t shape, bool summed, IrFunction* function, uint32_t* root)
+static bool tier1_float_select_function(Tier1EmitTest* test, uint32_t source_width, uint32_t width, uint32_t predicate, uint32_t shape, bool summed, bool branch, IrFunction* function,
+                                        uint32_t* root)
 {
     const uint8_t type = width == 4 ? IR_I32 : IR_I64;
     const uint8_t float_type = source_width == 4 ? IR_F32 : IR_F64;
     const IrSizes sizes =
     {
         .instruction_count = 16,
-        .block_count = 1,
+        .block_count = branch ? 3 : 1,
         .constant_count = 2,
         .parameter_count = 4,
     };
@@ -59,16 +61,27 @@ static bool tier1_float_select_function(Tier1EmitTest* test, uint32_t source_wid
             const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             condition = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, extended, zero, shape == 2 ? IR_NE : IR_EQ);
         }
-        *root = tier1_select_test_append(function, &next, IR_SELECT, type, condition, 2, 3);
-        uint32_t result = *root;
-        if (summed)
+        if (branch)
         {
-            const uint32_t one = tier1_select_test_append(function, &next, IR_CONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            result = tier1_select_test_append(function, &next, IR_ADD, type, *root, one, BUSTER_IR_NONE);
+            *root = tier1_select_test_append(function, &next, IR_CBR, IR_VOID, condition, 1, 2);
+            function->block_offsets[1] = next;
+            tier1_select_test_append(function, &next, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function->block_offsets[2] = next;
+            tier1_select_test_append(function, &next, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
-        tier1_select_test_append(function, &next, IR_RET, IR_VOID, result, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        else
+        {
+            *root = tier1_select_test_append(function, &next, IR_SELECT, type, condition, 2, 3);
+            uint32_t result = *root;
+            if (summed)
+            {
+                const uint32_t one = tier1_select_test_append(function, &next, IR_CONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                result = tier1_select_test_append(function, &next, IR_ADD, type, *root, one, BUSTER_IR_NONE);
+            }
+            tier1_select_test_append(function, &next, IR_RET, IR_VOID, result, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
         function->instruction_count = next;
-        function->block_offsets[1] = next;
+        function->block_offsets[function->block_count] = next;
     }
     return ready;
 }
@@ -186,7 +199,8 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
     test->selects = true;
     // Every register the CFG consumer's values take, and the parameters' and the result's alone.
     const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RCX);
-    uint32_t fused_count = 0;
+    uint32_t fused_selects = 0;
+    uint32_t fused_branches = 0;
     for (uint32_t source_width = 4; source_width <= 8; source_width += 4)
     {
         for (uint32_t width = 4; width <= 8; width += 4)
@@ -195,16 +209,19 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
             {
                 for (uint32_t shape = 0; shape < BUSTER_TIER1_FLOAT_SELECT_SHAPES; shape += 1)
                 {
-                    const bool fused = (predicate != IR_EQ && predicate != IR_NE) || shape <= 1;
-                    for (uint32_t variant = 0; variant < 16; variant += 1)
+                    const bool ordered = predicate != IR_EQ && predicate != IR_NE;
+                    // 8 options each of a select, a summed select and a branch.
+                    for (uint32_t variant = 0; variant < 24; variant += 1)
                     {
                         const bool vector = (variant & 1) != 0;
                         const bool narrow = (variant & 2) != 0;
                         const bool pointer = (variant & 4) != 0;
-                        const bool summed = (variant & 8) != 0;
+                        const bool summed = variant >> 3 == 1;
+                        const bool branch = variant >> 3 == 2;
+                        const bool fused = ordered;
                         IrFunction function;
                         uint32_t root = BUSTER_IR_NONE;
-                        const bool created = tier1_float_select_function(test, source_width, width, predicate, shape, summed, &function, &root);
+                        const bool created = tier1_float_select_function(test, source_width, width, predicate, shape, summed, branch, &function, &root);
                         const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
                         tier1_emit_test_expect(test, valid, "a floating select's fixture is valid IR");
                         IrDominance dominance;
@@ -214,8 +231,11 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
                         const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
                         tier1_emit_test_expect(test, planned, "a floating select's fixture selects by both paths");
                         const uint8_t rule = planned ? plan.patterns[root].rule : TIER1_RULE_NONE;
-                        tier1_emit_test_expect(test, rule == (fused ? TIER1_RULE_FLOAT_SELECT_COMPARE : TIER1_RULE_SELECT), "a floating select fuses exactly where the grammar takes its comparison");
-                        fused_count += rule == TIER1_RULE_FLOAT_SELECT_COMPARE;
+                        const uint8_t fused_rule = branch ? TIER1_RULE_FLOAT_BRANCH_COMPARE : TIER1_RULE_FLOAT_SELECT_COMPARE;
+                        const uint8_t plain_rule = branch ? TIER1_RULE_BRANCH : TIER1_RULE_SELECT;
+                        tier1_emit_test_expect(test, rule == (fused ? fused_rule : plain_rule), "a floating select or branch fuses exactly where the grammar takes its comparison");
+                        fused_selects += rule == TIER1_RULE_FLOAT_SELECT_COMPARE;
+                        fused_branches += rule == TIER1_RULE_FLOAT_BRANCH_COMPARE;
                         const Tier1EmitOptions options = {
                             .register_mask = narrow ? few : tier1_liveness_register_mask(),
                             .vector = vector,
@@ -253,5 +273,6 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
             }
         }
     }
-    tier1_emit_test_expect(test, fused_count == 2 * 2 * (4 * BUSTER_TIER1_FLOAT_SELECT_SHAPES + 2 * 2) * 16, "every shape the grammar takes fuses");
+    tier1_emit_test_expect(test, fused_selects == 2 * 2 * 4 * BUSTER_TIER1_FLOAT_SELECT_SHAPES * 16 && fused_branches == 2 * 2 * 4 * BUSTER_TIER1_FLOAT_SELECT_SHAPES * 8,
+                           "every shape the grammar takes fuses");
 }
