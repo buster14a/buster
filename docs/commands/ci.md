@@ -29,7 +29,8 @@ qualification)** before publishing its compiler. It adds no compiler build.
 Its four inventory headings cover the fixed driver corpus
 (`tests/ci/feedback/`), the C lexer, link representation and deterministic
 diagnostics. After that first result, the build also proves that the corpus
-detects an injected regression in each promised area. The driver corpus preprocesses, parses, checks, emits matching
+detects an injected regression in each promised area. The driver corpus
+preprocesses, parses, checks, emits matching
 selected/scalar objects, links two units with Clang, executes them and checks
 an undeclared-identifier diagnostic. It uses no random seed. A failure prevents
 publication and downstream shards. All existing PR shards, vector items,
@@ -560,14 +561,16 @@ late.
 
 ## Setup failures re-run once
 
-A run of `9700x.yml` ("Tests and Zen 5 benchmarks", the only workflow that
-calls `hosted-correctness.yml`) whose first attempt failed only because jobs
+A run of `9700x.yml` ("Tests and Zen 5 benchmarks") whose first attempt failed
+only because jobs
 stopped in setup, before any test ran, has its failed jobs re-run once,
 automatically (#2276). `.github/workflows/rerun.yml` runs when the run
 completes (`workflow_run`). `tools/ci/rerun.sh` fetches the attempt's jobs and
 steps and its cancelled jobs' annotations, `tools/ci/rerun.c` decides, and the
 script asks for `rerun-failed-jobs`. The re-run runs tests that never ran,
-never ones that failed, so green keeps meaning the tests passed.
+never ones that failed, so green keeps meaning the tests passed. The manual
+reproduction caller is watched too, to validate the shared allowlist, but its
+dispatch events do not qualify for automatic re-runs.
 
 - **Which runs.** A failed first attempt (`run_attempt == 1`) of a push or a
   pull request from this repository, checked again just before the request.
