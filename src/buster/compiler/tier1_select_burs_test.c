@@ -27,6 +27,8 @@ struct Tier1BursCheck
     // Nodes of a class the grammar covers whose goal rule names a candidate the walks made, and those that took munch's.
     uint64_t matched;
     uint64_t fallbacks;
+    // Matched nodes whose rule names its candidate by kind and whose candidate's intrinsic cost isn't the rule's.
+    uint64_t costs;
 };
 
 // The plan's prerequisites, built here apart from it: each node's block, uses, last user, barriers, canonical answer and
@@ -184,7 +186,15 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         {
             const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node);
             bool munched = false;
-            tier1_burs_pick(&candidates, columns[1][3][node], &munched);
+            const uint32_t chosen = tier1_burs_pick(&candidates, columns[1][3][node], &munched);
+            const uint32_t rule_index = columns[1][3][node];
+            const Tier1BursRule* rule = &tier1_burs_rules[rule_index < tier1_burs_rule_count ? rule_index : 0];
+            const bool costed = !munched && chosen < candidates.count && rule->action == TIER1_BURS_ACTION_KIND;
+            if (costed && candidates.patterns[chosen].intrinsic_cost != rule->cost && check->costs < 8)
+            {
+                fprintf(stderr, "  burs rule %u (kind %u) costs %u, its candidate at node %u (%s) %u\n", rule_index, rule->kind, rule->cost, node, ir_op_names[function->op[node]], candidates.patterns[chosen].intrinsic_cost);
+            }
+            check->costs += costed && candidates.patterns[chosen].intrinsic_cost != rule->cost;
             if (candidates.count == 0 && check->uncovered < 8)
             {
                 fprintf(stderr, "  burs class %u without a candidate at node %u (%s, type %u, a %u, b %u, uses %u)\n", columns[1][0][node], node, ir_op_names[function->op[node]], function->type[node],
@@ -366,6 +376,8 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
     // Every covered node's rule names a candidate the walks made, so that a class the grammar gives and the candidates'
     // own conditions agree (a floating == or !='s, #2922, both asking the same select's recurrence): no munch's fallback.
     tier1_select_test_expect(test, check.fallbacks == 0, "the IR fixtures' rules name candidates the walks made, with no munch's fallback");
+    // And each such candidate's intrinsic cost is its pattern's, as the grammar's costs are defined (tier1_burs_patterns).
+    tier1_select_test_expect(test, check.costs == 0, "the IR fixtures' candidates cost what their grammar's patterns do");
     // As the selection's own summary: on standard error where standard output carries the manifest (--manifest).
     fprintf(test->manifest ? stderr : stdout, "tier1 bottom-up rewrite: %u states, %u rules, at most %u representers in a position, a pool of %u entries; the IR fixtures: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64
            " mismatches, %" PRIu64 " uncovered\n",
