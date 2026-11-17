@@ -1068,11 +1068,18 @@ and has a fixture:
   do. Tier 0 loads a payload no register is as wide as, 24, 40, 48 or 56
   bytes, in pieces that don't read past the record (a broadcast of its last 8
   or 16 bytes, then inserts of the lanes before them: `tier0_payload_load`)
-  and stores it in pieces that don't write past it (`tier0_payload_store`);
-  Tier 1 leaves the functions that pass or return one, or a `PAYLOAD` slot, to
-  Tier 0 (#2798). `tests/calling-convention/short-sse.c` and `wide-sse.c` cross clang
-  in both directions, and clang's cross-check worlds pass such records of 20
-  to 63 bytes (`abi_test_world_sse_records`).
+  and stores it in pieces that don't write past it (`tier0_payload_store`).
+  Tier 1 takes them too (#2798), each payload a part of its register's width
+  (`tier1_select_part_width`): a call's argument waits in that many staging
+  slots, or a zmm one's in zmm16 and on, loaded there in those pieces; a
+  call's result is stored in them; a parameter's copy is as wide as its
+  register and takes it whole; the function's own result is loaded in them
+  from its address; and a `PAYLOAD` slot is a part of the payload's bytes
+  alone, which a call copies into it and a parameter's copy takes from it
+  whole, through the vector scratch register. `tests/calling-convention/short-sse.c`
+  and `wide-sse.c` cross clang in both directions, with strict Tier 1, and
+  clang's cross-check worlds pass such records of 20 to 63 bytes
+  (`abi_test_world_sse_records`).
 - **`i128` storage.** An `i128` at a record's offset 0 makes the record one
   `i128` value (`PAIR`), which LLVM never splits, in a stack slot aligned to
   16 whatever the record's alignment. With a NO_CLASS high eightbyte too, as
