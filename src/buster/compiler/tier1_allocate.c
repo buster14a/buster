@@ -81,7 +81,8 @@ struct Tier1AllocationInput
     // every successor of a dispatch loop's join does from the first, which no value's last register says. With
     // BUSTER_TIER1_ALLOCATE_HINT_EXIT, the named interval ends at or before this one starts, and its register at its end
     // is the one (#2553): a block's entry takes its values' places at the exit of a block that dominates it, and a phi
-    // its operand's at a predecessor's.
+    // its operand's at a predecessor's. An interval hinted to its own value that names another value's recipe takes only
+    // a register there: a recipe without one was recomputed, and the interval follows its own value instead (#2834).
     const uint32_t* hint_intervals;
     // Optional, with hint_intervals: per interval, an interval of its class starting before it, whose register at its
     // start the interval takes at its own start before its other hints, where that interval's value still holds it last

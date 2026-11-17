@@ -2068,7 +2068,7 @@ places to chance: `tests/driver/tier1_patterns.c`'s `patterns_gsub`, whose
 latch, holding its join's ranges, is laid out between the body and the header,
 still swaps `n` and `lastmatch` on its path for a character. Hinting a phi's
 range to an operand's exit before it fixes that and gains 7.7 M on Lua, but
-loses 13.3 M in `sqlite3VdbeExec`: #2834.
+loses 13.3 M in `sqlite3VdbeExec`: #2834, below.
 
 `tier1_cfg_test.c`'s fixture is `str_gsub`'s loop in small: its character path
 moves nothing, where without the body hints the edge into the body moved the
@@ -2077,6 +2077,94 @@ its own value hinted to another value's range in that value's slot, which now
 takes a free register at its start. `tests/driver/tier1_patterns.c`'s
 `patterns_gsub` stores nothing back where the instruction before loaded it, as
 main's does once.
+
+### Loop bodies whose chain reaches no range before them (#2834)
+
+#2784's body hints follow a header phi's hint chain back to a range of another
+value laid out before the body. `tests/driver/tier1_patterns.c`'s
+`patterns_gsub` has none to reach. The latch that joins `n` and `lastmatch`
+from the loop's two paths is laid out between the body and the header, and its
+phis' chosen predecessor is the body's block for a plain character, so the
+chain led back to the body's own ranges of the header's phis. Those were their
+values' first in layout, with no hint, and took the lowest free registers,
+crossed against the ones the loop's entry and header gave the two values: the
+function ran 124 instructions, 6 of them naming `r11`, and its paths for a
+character and for a failed match swapped `n` and `lastmatch` through it.
+
+- **The entry's place.** A phi's first range in layout, before its
+  definition, that the chain leaves without a hint takes an operand's register
+  at the exit of a predecessor of the phi's block, the nearest in layout that
+  ends before the range (`tier1_cfg_body_hints`): the loop's entry, where the
+  value comes in. `patterns_gsub` runs 105 instructions, none naming `r11`.
+- **The first range only.** A later range keeps its value's own last place,
+  the register or the slot the body's earlier blocks left it in. Hinting every
+  such range to the entry, as #2834's prototype did, gave the phis of
+  `sqlite3VdbeExec`'s opcode loop that had rested in their slots through the
+  handlers their entry's registers in each handler. Short of a register for
+  the jump table's address, the dispatch then evicted the step counter and
+  stored it on every opcode: 5.9 M stores, +17.7 M instructions in the
+  function.
+- **A recipe's place.** An interval hinted to its own value that names
+  another value's recipe takes the recipe's register only
+  (`tier1_allocation_value_hint`): a recipe without a register there was
+  recomputed, not stored, and its place says nothing of the value's slot. A
+  phi of `sqlite3RunParser`'s token loop and one of Lua's `str_format`, each
+  named to the constant that enters its loop, which was recomputed by then,
+  rested in their slots, and the loops stored them there on every iteration
+  (+2.68 M and +1.36 M). The rule changes no function by 0.05 M on its own:
+  #2784's chains name no recipe without a register where it matters. On every
+  hint that names another value's recipe, a phi's to its operand's among them,
+  it cost `sqlite3VdbeExec` 24.5 M.
+
+By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed) at main
+`d876a5e0`:
+
+| Variant | speedtest1 | Lua's five scripts |
+| --- | ---: | ---: |
+| main | 2,529.77 M | 4,595.8 M |
+| every unhinted range, blocks of at most 4 predecessors (the prototype) | 2,536.16 M | 4,588.2 M |
+| the first range only, blocks of at most 4 predecessors | 2,518.11 M | 4,587.9 M |
+| the first range only | 2,518.09 M | 4,587.9 M |
+| and an own value's named range of another value its register only | 2,519.57 M | 4,586.9 M |
+| and a named recipe its register only (this) | 2,517.04 M (−0.50%) | 4,586.6 M (−0.20%) |
+| a named recipe its register only, alone | 2,529.77 M | 4,595.8 M |
+
+- **By function.** `luaD_precall` runs −3.66 M, `luaD_pretailcall` −1.40 M,
+  `luaV_finishset` −1.30 M, `luaO_ceillog2` −1.20 M and `str_gsub` −0.69 M;
+  no Lua function runs 0.05 M more. speedtest1's `sqlite3ColumnIndex` runs
+  −4.60 M, `sqlite3VdbeExec` −2.36 M and `sqlite3VdbeRecordCompareWithSkip`
+  −1.70 M; its losses are `pageFindSlot` +0.22 M, `pageInsertArray` +0.12 M
+  and `rebuildPage` +0.07 M.
+- **Statically** (`--tier1-report`), speedtest1's unit has 381,556 records
+  instead of 382,540, 24,119 edge moves instead of 25,056, and 10,273 spill
+  stores and 11,085 loads instead of 10,229 and 11,076. `lstrlib.c` has 424
+  edge moves instead of 434, `ldo.c` 27 instead of 39, `lvm.c` 641 instead of
+  644.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/c03beee4f59512deb3ae487012719690a5a08b2f/docs/measurements/tier1-latch-chains-2834-2026-11-17),
+#2784's method), main `d876a5e0` against the change: speedtest1 runs 0.41%
+fewer user cycles over 8 layouts (95% interval −0.81% to −0.01%, slower at 1
+of them) for 0.51% fewer instructions, and Lua's five scripts 0.18% more
+(−0.27% to +0.62%, slower at 18 of 33 link orders) for 0.20% fewer. Every
+instruction Lua's scripts lose is a register move, which Zen 5 eliminates at
+rename; speedtest1's are stack loads and stores (`sqlite3ColumnIndex` runs
+1.48 M and 1.61 M instead of 4.32 M and 4.45 M). `sqlite3.c`'s `--tier1 -c`
+takes 0.09% more cycles, `lvm.c`'s 0.24%.
+
+The prototype's limit of 4 predecessors changes nothing with the first range
+alone: no function differs by 0.05 M from no limit. The pass is a loop over
+each block's phis and predecessors, with a binary search for each operand's
+range at its predecessor's exit, beside the scalar interval construction above.
+
+`tier1_cfg_test.c`'s latch fixture is `patterns_gsub`'s loop in small: the
+edge into it swapped the header's two phis through the scratch register, and
+now neither moves on any edge; their ranges in the failed match's path, laid
+out before the latch with neither an anchor nor a sibling, keep their own
+places rather than name the entry's.
+`tier1_allocate_hints_test.c`'s borrowed-recipe traces name a recipe evicted
+for recomputation, whose named range takes a free register, and a stored value
+in the same place, whose named range rests in its own slot as before.
+`tests/driver/tier1_patterns.c`'s `patterns_gsub` names `r11` nowhere.
 
 ## Rematerialization
 

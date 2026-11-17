@@ -29,7 +29,8 @@
 //    every such value is live out at once; each phi to its operand's at the exit of a chosen predecessor; and a value
 //    that a phi takes, to the first register of the phi, or of the next phi along, that has one before it. A range of a
 //    loop's body laid out before its header, with no anchor, takes the hint of its phi's at the header, back to the first
-//    range of another value before it (tier1_cfg_body_hints, #2784). Each value then stays where control from its
+//    range of another value before it (tier1_cfg_body_hints, #2784), and a phi's first range there that the chain leaves
+//    unhinted takes an operand's register at the loop's entry (#2834). Each value then stays where control from its
 //    definition brings it, and an edge moves what its own source block changed. A range live out of its block names the
 //    range whose opening is the value's place at its first successor's entry, where that one comes first (#2774): a
 //    value whose place there is its slot is the first the allocator evicts.
