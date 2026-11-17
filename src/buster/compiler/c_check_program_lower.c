@@ -19702,14 +19702,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                       abi_initialize_types(&shared->table, scratch, types, check_lower_vector_register_bytes(program->target.features), types->types.count));
     if (valid && program->body_count != 0)
     {
-        if (BUSTER_SCALAR_PATH(scalar))
-        {
-            abi_classify_all_scalar(&shared->table, types);
-        }
-        else
-        {
-            abi_classify_all(&shared->table, types);
-        }
+        abi_classify_all(&shared->table, types);
         valid = check_lower_bit_units(types, &shared->table, scratch, &shared->bit_units);
         lowered->status = valid ? lowered->status : CHECK_PROGRAM_RESOURCE;
         lowered->reason = valid ? lowered->reason : "lowering bit-field units";
@@ -20525,7 +20518,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     .count = 1,
                     .arguments = abi->arguments + abi->first[shared->signatures[b]],
                 };
-                abi_assign_scalar(table, signature, named, &own);
+                abi_assign(table, signature, named, &own);
             }
             arena_pop_to(scratch, mark);
             // A variadic interrupt service routine's named parameters (#1447, LLVM's CC_X86_64_Intr) take no register: its
@@ -21019,14 +21012,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             .count = abi->count,
             .arguments = abi->arguments,
         };
-        if (BUSTER_SCALAR_PATH(shared->scalar))
-        {
-            abi_assign_scalar(table, signature, locations, calls);
-        }
-        else
-        {
-            abi_assign(table, signature, locations, calls);
-        }
+        abi_assign(table, signature, locations, calls);
         if (abi->chains != 0)
         {
             check_lower_chain_location(abi, locations);
