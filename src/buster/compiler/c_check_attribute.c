@@ -321,6 +321,9 @@ struct CheckInputAttribute
     bool subject_ignored;
     // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
     bool keyword;
+    // A counted_by family's top-level `,` (#1842), where clang's parser expects the argument's `)`, or 0: the argument ends
+    // there, and the member's check gives the "expected ')'" (check_input_counted_by_member).
+    uint32_t counted_paren;
     // A calling convention's wrong count of arguments (BUSTER_CHECK_COUNT_* and its bound), clang's error where the
     // convention meets a function (check_input_attribute_conventions) or a tag; on another subject, its warning alone.
     uint8_t convention_count;
@@ -2645,8 +2648,9 @@ static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputA
 
 // The counted_by family's argument as clang's parser reads it (#148, ParseBoundsAttribute): one expression in
 // parentheses. Without them, its count's error ("takes at least 1 argument"), at the name; with nothing in them, "argument
-// required after attribute" at the `)`; with a second argument, "expected ')'" at the `,` (a note at the `(`). The
-// expression itself the member's declaration checks (check_input_counted_by_member).
+// required after attribute" at the `)`. With a second argument, the first is the argument, as clang's parser keeps it, and
+// the `,` is where it expects the `)` (#1842, CheckInputAttribute.counted_paren). The expression itself the member's
+// declaration checks (check_input_counted_by_member).
 static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
 {
     const Parser* parser = reader->parser;
@@ -2659,7 +2663,7 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
     {
         comma = parser->tokens.kinds[i] == PARSE_KIND_COMMA ? i : BUSTER_CHECK_NONE;
     }
-    const bool valid = parenthesized && first < end && comma == BUSTER_CHECK_NONE;
+    const bool valid = parenthesized && first < end && comma != first;
     const uint32_t reported = reader->output->report_count;
     if (!parenthesized)
     {
@@ -2669,8 +2673,9 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
     {
         check_input_report(reader, end, CHECK_INPUT_COUNTED_REQUIRED);
     }
-    else if (comma != BUSTER_CHECK_NONE)
+    else if (comma == first)
     {
+        // An empty first argument: clang's parser expects an expression.
         const uint32_t before = reader->output->report_count;
         check_input_report(reader, comma, CHECK_INPUT_COUNTED_PAREN);
         if (reader->output->report_count > before)
@@ -2678,6 +2683,11 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
             reader->output->reports[before].note_token = first - 1;
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
         }
+    }
+    else if (comma != BUSTER_CHECK_NONE)
+    {
+        attribute->counted_paren = comma;
+        attribute->argument_end = comma;
     }
     if (!valid && reader->output->report_count > reported)
     {

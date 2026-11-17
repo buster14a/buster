@@ -1272,6 +1272,8 @@ static void parse_scalar_misplaced_brackets(ParseScalar* parser, uint32_t i)
     }
 }
 
+static uint32_t parse_scalar_counted_attribute(const ParseScalar* parser, const ParseFrame* frame);
+
 // The error for token `i`, which can't continue what the frame holds: clang's "expected" of the item or the group, after
 // the token before for a missing `;` (and the other punctuators clang expects at the end of something), at the token
 // for a group's closer.
@@ -1375,7 +1377,9 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
     }
     else if (parse_scalar_gnu_attribute_group(parser, frame))
     {
-        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_PAREN, BUSTER_PARSE_AFTER_PREVIOUS);
+        // A counted_by family's argument is one expression, whose `)` clang's ParseBoundsAttribute expects at the token that
+        // follows it, "to match this '('" noted at the group's (#1842).
+        parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_R_PAREN, parse_scalar_counted_attribute(parser, frame) != 0 ? BUSTER_PARSE_AT_TOKEN : BUSTER_PARSE_AFTER_PREVIOUS);
     }
     else if (parse_scalar_keyword_parameter(parser, i, frame))
     {
@@ -3643,6 +3647,11 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
                                                    PARSE_MESSAGE_SIZED_BY_OR_NULL_INTEGER };
                 parser->error_follow_token = first && counted != 0 ? group + 1 : parser->error_follow_token;
                 parser->error_follow_message = first && counted != 0 ? follows[counted - 1] : parser->error_follow_message;
+                // An operand right after the type name, where clang's parser, the expression read, expects the `)`.
+                const uint8_t next = i + 1 < parser->count ? parser->kinds[i + 1] : PARSE_KIND_END;
+                const bool juxtaposed = next == PARSE_KIND_IDENTIFIER || next == PARSE_KIND_NUMBER || next == PARSE_KIND_CHARACTER || next == PARSE_KIND_STRING;
+                parser->error_follow_paren = first && counted != 0 && juxtaposed ? i + 1 : parser->error_follow_paren;
+                parser->error_follow_open = first && counted != 0 && juxtaposed ? group : parser->error_follow_open;
             }
         }
         else
@@ -4886,6 +4895,7 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->kept_count = 0;
     parser->error_token = BUSTER_PARSE_NONE;
     parser->error_follow_token = BUSTER_PARSE_NONE;
+    parser->error_follow_paren = BUSTER_PARSE_NONE;
     parser->error_resumed = false;
     parser->error_resume_delete = false;
     parser->error_resume_end = 0;
@@ -4971,11 +4981,24 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
         parser->diagnostic_count += 1;
     }
     parser->errors += 1;
+    if (parser->error_follow_token != BUSTER_PARSE_NONE && parser->error_follow_paren != BUSTER_PARSE_NONE && parser->diagnostic_count < parser->diagnostic_capacity)
+    {
+        parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
+            .token = parser->error_follow_paren,
+            .argument = BUSTER_PARSE_NONE,
+            .message = PARSE_MESSAGE_EXPECTED_R_PAREN,
+            .place = BUSTER_PARSE_AT_TOKEN,
+            .error = true,
+            .note = parser->error_follow_open,
+        };
+        parser->diagnostic_count += 1;
+        parser->errors += 1;
+    }
     if (parser->error_follow_token != BUSTER_PARSE_NONE && parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
             .token = parser->error_follow_token,
-            .publication = parser->error_token,
+            .publication = parser->error_follow_paren != BUSTER_PARSE_NONE ? parser->error_follow_paren : parser->error_token,
             .argument = BUSTER_PARSE_NONE,
             .message = parser->error_follow_message,
             .place = BUSTER_PARSE_AT_TOKEN,
@@ -5042,6 +5065,7 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
         .error_token = BUSTER_PARSE_NONE,
         .error_argument = BUSTER_PARSE_NONE,
         .error_follow_token = BUSTER_PARSE_NONE,
+        .error_follow_paren = BUSTER_PARSE_NONE,
         .error_message = PARSE_MESSAGE_NONE,
         .error_place = BUSTER_PARSE_AT_TOKEN,
         .diagnostics = diagnostics,

@@ -10386,7 +10386,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         {
                             const uint32_t counted_reports = reader->output->report_count;
                             const bool counted = check_input_counted_by_member(reader, frames, depth, members, member_count, attributes, counted_begin, &member);
-                            valid = counted || (reader->output->report_count > counted_reports && check_input_recover_reports(reader, counted_reports));
+                            // (An attribute kept past its "expected ')'" reports too, #1842: the reading goes on past it.)
+                            valid = reader->output->report_count > counted_reports ? check_input_recover_reports(reader, counted_reports) : counted;
                         }
                         bool flexible = false;
                         // clang's CheckFieldDecl (#1447): a member whose type, or its array's element, has an address space.
