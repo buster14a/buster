@@ -377,13 +377,10 @@ full_jobs()
 {
     local odd=${1:-} conclusion=${2:-success} arch sanitizer shards shard name
     printf '{"jobs":['
-    for arch in x86-64 native; do
-        for sanitizer in none address thread memory; do
-            # The native architecture keeps its plain row alone (#2032).
-            if [ "$arch" = native ] && [ "$sanitizer" != none ]; then continue; fi
+    # The native plain row, the contract's one (#2032; the x86-64 rows are gone with the scalar host, #2924).
+    for arch in native; do
+        for sanitizer in none; do
             shards=4
-            if [ "$arch" = x86-64 ] && { [ "$sanitizer" = thread ] || [ "$sanitizer" = memory ]; }; then shards=6; fi
-            printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Build the compiler once for the row'"'"'s shards","status":"completed","conclusion":"success"},' "$arch" "$sanitizer"
             printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})","status":"completed","conclusion":"skipped"},' "$arch" "$sanitizer"
             for shard in $(seq 1 "$shards"); do
                 name="Tests on Ubuntu 26.04 ($arch, $sanitizer, O3) / Tests on Ubuntu 26.04 (Clang 23, $arch, $sanitizer, O3, shard $shard of $shards)"
@@ -426,15 +423,15 @@ coverage_case()
 full_jobs > "$fixtures/jobs-9100.json"
 coverage_case 9100 0
 expect_line "$work/coverage.log" $'coverage\tcomplete' 'a full candidate'"'"'s coverage is complete'
-expect_line "$work/coverage.log" $'row\tx86-64 memory\tok\t6' 'each row by its own shard count'
-expect_line "$work/coverage.log" $'row\tnative none\tok\t4' 'the native plain row'
+expect_line "$work/coverage.log" $'row\tnative none\tok\t4' 'the native plain row, by its own shard count'
+! grep -q $'^row\tx86-64' "$work/coverage.log" || fail 'a retired x86-64 row is no row of the contract'
 ! grep -q $'^row\tnative memory' "$work/coverage.log" || fail 'a retired native sanitizer row is no row of the contract'
 expect_line "$work/coverage.log" $'auxiliary\tselfhost\tcalled\tok\t3' 'a called auxiliary workflow, every job of it'
 expect_line "$work/coverage.log" $'auxiliary\tbuild\tnot called\tok\t0' 'and one not called, which ran nothing'
 expect_match "$GITHUB_STEP_SUMMARY" 'Merge-queue coverage' 'and the summary says so'
 test "$(grep -c 'actions/runs/9100/jobs' "$fixtures/calls.log")" -eq 1 || fail 'a complete set is read once'
 # Each way a candidate's coverage falls short fails it, after asking again.
-for odd in 'x86-64 address 3:missing' 'x86-64 memory 5:missing' 'x86-64 thread 2:cancelled' 'native none 1:skipped' 'x86-64 memory 6:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
+for odd in 'native none 3:missing' 'native none 4:missing' 'native none 2:cancelled' 'native none 1:skipped' 'native none 4:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
     full_jobs "${odd%%:*}" "${odd#*:}" > "$fixtures/jobs-9101.json"
     coverage_case 9101 1
     expect_line "$work/coverage.log" $'coverage\tincomplete' "a candidate with $odd is incomplete"
@@ -451,9 +448,13 @@ expect_line "$work/coverage.log" $'auxiliary\tselfhost\tnot called\tran although
 coverage_case 9101 1 ''
 expect_line "$work/coverage.log" $'auxiliary\t\tnot the selector\'s list' 'no selector list'
 # A shard beyond the row's count, or a row whose shards disagree.
-full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 5 of 5)","status":"completed","conclusion":"success"},&/' > "$fixtures/jobs-9101.json"
+full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (native, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 5 of 5)","status":"completed","conclusion":"success"},&/' > "$fixtures/jobs-9101.json"
 coverage_case 9101 1
-expect_line "$work/coverage.log" $'row\tx86-64 none\tshard counts disagree\t5' 'shard counts that disagree are no coverage'
+expect_line "$work/coverage.log" $'row\tnative none\tshard counts disagree\t5' 'shard counts that disagree are no coverage'
+# A run without the x86-64 rows (#2924) and an x86-64 shard that fails beside it: no row of the contract, no gap.
+full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)","status":"completed","conclusion":"failure"},&/' > "$fixtures/jobs-9103.json"
+coverage_case 9103 0
+expect_line "$work/coverage.log" $'coverage\tcomplete' 'a retired x86-64 row counts for nothing'
 # A failed API call, then the full set: the second read passes it.
 full_jobs > "$fixtures/jobs-9102.json"
 touch "$fixtures/jobs-9102.json.1.fail"

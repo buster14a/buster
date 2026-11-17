@@ -272,6 +272,9 @@ jobs:
           bash tests/ci/caches.sh
           bash tests/ci/build-benchmarks.sh
           bash tests/ci/vector-draw.sh
+          # The products' packing and refusals (tools/ci/hosted-product.sh), which the x86-64 rows' build job ran
+          # before #2924; a fake checkout, toolchain and build, no network.
+          bash tests/ci/hosted-product.sh
           node tests/ci/vector-runtime.cjs
           bash tests/ci/rerun.sh
 
@@ -307,7 +310,10 @@ jobs:
       # one detector's failure must not hide what the others find.
       fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
-        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64"]' || '["x86-64", "native"]') }}
+        # The x86-64 rows, the scalar host's, are gone (#2924, the owner's decision on 2026-11-17): a pull request's
+        # rows are the vector row alone, every other run's the `native` plain row and, where the sanitizer rows run, the
+        # vector pool.
+        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["vector"]' || '["native"]') }}
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
         # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
         # in the nightly mode (#2057, until the merge queue carries the full suite). Merge-queue candidates (#1430),
@@ -317,11 +323,11 @@ jobs:
         # available for diagnosis but does not repeat the entire hosted suite.
         sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
         optimization: [3]
-        # The vector row, one pool of its configurations' items: `none` on a pull request; the four where the sanitizer
-        # rows run; none in the `plain` scope elsewhere, whose `native` rows stay until the vector row replaces them.
-        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"host_arch":"vector","sanitizer":"none","optimization":3}]' || needs.evidence.outputs.scope == 'plain' && '[]' || '[{"host_arch":"vector","sanitizer":"none address thread memory","optimization":3}]') }}
+        # The vector row, one pool of its configurations' items, where the sanitizer rows run (on a pull request it is
+        # the matrix's own row, `none`); none in the `plain` scope, whose `native` row is its plain row.
+        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{"host_arch":"vector","sanitizer":"none address thread memory","optimization":3}]') }}
         # The `native` architecture keeps its plain row alone (#2032): tools/ci/nightly.c's plain verdict, the nightly
-        # window's credit from a candidate's run, reads both architectures' plain rows.
+        # window's credit from a candidate's run, reads it.
         exclude:
           - host_arch: native
             sanitizer: address
@@ -339,14 +345,11 @@ jobs:
       host_arch: ${{ matrix.host_arch }}
       sanitizer: ${{ matrix.sanitizer }}
       optimization: ${{ matrix.optimization }}
-      # How many shards the row runs as (#2031), by its own costs (tools/ci/costs/, `costs plan`): the plain rows 4, both
-      # host architectures alike (tools/ci/nightly.c counts their shards as one N). A portable row's shards share its one
-      # build and a shard costs it about a minute of setup, so its TSan and MSan rows run as 7, at their longest
-      # commands (#2703: the x86-64 MSan row finished last in every candidate after #2708, and `costs plan` gives its
-      # longest shard 975 s as 6 and 841 s as 7, TSan's 909 and 872 s, the same runner-minutes); its ASan row runs as 4. The vector row's N is each configuration's items' count (4,
-      # BUSTER_VECTOR_ITEMS), which its draws are sized for. tools/ci/changes.c's self-test checks each number against
-      # the row workflow's lookup (changes_shard_policy).
-      shards: ${{ matrix.host_arch == 'x86-64' && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && 7 || 4 }}
+      # How many shards the row runs as (#2031), by its own costs (tools/ci/costs/, `costs plan`): the native plain row
+      # 4, and the vector row's N is each configuration's items' count (4, BUSTER_VECTOR_ITEMS), which its draws are
+      # sized for. tools/ci/changes.c's self-test checks the number against the row workflow's lookup
+      # (changes_shard_policy).
+      shards: ${{ 4 }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
 
@@ -367,10 +370,10 @@ jobs:
             host_arch: native
             source: src/buster/compiler/fuzz.c
           - entry: elf-override
-            host_arch: x86-64
+            host_arch: native
             source: tests/fuzz/entry_override.c
           - entry: crash-replay-proof
-            host_arch: x86-64
+            host_arch: native
             source: tests/fuzz/entry_probe.c
     defaults:
       run:
@@ -2143,7 +2146,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       # A merge-queue candidate's expected coverage, from this run's own jobs (tools/ci/nightly.c's `coverage`): every
-      # shard 1..N of every row (x86-64 and native, each sanitizer, one N per row), the vector pool's verdict, each
+      # shard 1..N of the native plain row, the vector pool's verdict (its plain and sanitizer configurations), each
       # fuzz campaign and every job of each auxiliary workflow the selector named, all completed and successful, and no
       # job of an auxiliary workflow it didn't name. A job missing, skipped, cancelled, failed or timed out, or a row
       # whose shards disagree, fails it; so does an API failure. The predicate below reads its outcome, so that a test

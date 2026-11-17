@@ -31,7 +31,8 @@ nothing, since the queue tested it before it landed.
 
 - **What a candidate runs.** The full hosted contract on its exact commit,
   documentation alone included:
-  - every `x86-64` row and sanitizer, and the `native` plain row (#2032);
+  - the `native` plain row (#2032; the `x86-64` rows are gone with the scalar
+    host, #2924);
   - the vector pool;
   - the three fuzz campaigns.
 
@@ -64,8 +65,7 @@ nothing, since the queue tested it before it landed.
 - **Aggregate.** The required aggregate passes a candidate only through its
   coverage step, `bash tools/ci/nightly.sh coverage DIR`. That step reads the
   run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
-  - every shard 1..N of every row of the contract (`x86-64`'s four, `native`'s
-    plain one);
+  - every shard 1..N of the contract's row, `native`'s plain one;
   - the vector verdict;
   - each fuzz campaign;
   - every job of each auxiliary workflow the selector named
@@ -98,8 +98,9 @@ settings.
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
-Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
-builds on CPUs without the complete vector feature set use the scalar fallback.
+Clang/LLVM 23.1.4 release, in native host builds (the baseline `x86-64` rows
+are gone, #2924). Native builds on CPUs without the complete vector feature set
+use the scalar fallback.
 On a pull request the native row is the vector row instead (#2033): the
 explicit vector target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
 whose plain configuration's 4 shards are items that each draw's collector
@@ -124,27 +125,26 @@ Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as its own number of shards, a runner each:
 `parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by
 the row's hosted costs, the same deal on every shard's runner, so the shards run
-each command once ([Shard costs](#shard-costs)). A portable `x86-64` row
-builds its compiler once, and its shards verify and run that product
-(`tools/ci/hosted-product.sh`; [Shared row
-products](../ci.md#shared-row-products), #2032), and so does each vector
-configuration, on a qualifying CPU; the `native` plain row's shards each
+each command once ([Shard costs](#shard-costs)). Each vector configuration
+builds its compiler once, on a qualifying CPU, and its items verify and run that
+product (`tools/ci/hosted-product.sh`; [Shared row
+products](../ci.md#shared-row-products), #2032); the `native` plain row's shards each
 build their own (a native build must run on the CPU it was built for), which is
 why the `native` sanitizer rows went (#2032). Run
 `bash tests/ci/hosted-product.sh` after changing the product's packing, identity
 or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
-4 shards take about 4 to 6. The steps a row needs once (the baseline fallback,
-QEMU and arena checks, the parser smoke test, the performance readers and the
-TSan/MSan `main.c` compiles) run in its shard 1.
+4 shards take about 4 to 6. The steps a row needs once (the baseline fallback
+check, the native row's arena checks, the parser smoke test, the performance
+readers and the TSan/MSan `main.c` compiles) run in its shard 1.
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
 On merge-queue candidates and the daily and dispatched runs, the nightly
 snapshot's daily run among them (not on pull requests, which they would hold up
 for over an hour; before the queue, on pushes before the nightly mode), the
-`x86-64` row and the vector row's configurations also run the
-inventory under `BUSTER_SANITIZER=address|thread|memory` (the `native`
-sanitizer rows went in #2032; `native` keeps its plain row), but the
+vector row's configurations also run the inventory under
+`BUSTER_SANITIZER=address|thread|memory` (the `native` sanitizer rows went in
+#2032 and the `x86-64` rows in #2924; `native` keeps its plain row), but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
@@ -347,8 +347,8 @@ failure handling and recovery: [Offline inputs](../hosted-toolchain.md#offline-i
 ## Shard costs
 
 Each hosted row deals its inventory to its shards by a table of its own,
-`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `x86-64`, `native` and
-`vector` rows (#2033), each sanitizer. Each table is
+`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `native` and `vector`
+rows (#2033), each sanitizer (the `x86-64` rows' tables went with them, #2924). Each table is
 `tools/ci/costs.c`'s output alone, never edited by hand. Its first line says
 so, and `costs --self-test --root .`, which the selector's job runs on every
 pull request, fails a table that differs in any byte from what `costs refresh`
@@ -464,8 +464,7 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 
 | Row | Shards | Why |
 | --- | ---: | --- |
-| plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
-| `x86-64` TSan, MSan | 7 | a portable row's extra shard costs a minute of setup; 7 reach the rows' longest commands (#2703: with #2712's finer parts, `costs plan` gives MSan 975 s as 6 and 841 s as 7, TSan 909 and 872 s, at the same runner-minutes) |
+| `native` plain | 4 | more native shards each rebuild the compiler for under a minute less |
 | `vector`, each configuration | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the take gives the run step its configuration's count |
 | others | 4 | already shorter than the run's longest row |
 

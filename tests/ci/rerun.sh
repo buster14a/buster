@@ -47,9 +47,10 @@ mutant()
     fi
 }
 mutant 'a renamed setup step' hosted-correctness.yml 's/name: Install official Clang 23.1.4 and test tools$/name: Install official Clang 23.1.4 and the test tools/'
-mutant 'a renamed fetch' hosted-correctness.yml 's/name: Fetch generic baseline startup objects and runtime for emulation$/name: Fetch the baseline runtime/'
+mutant 'a renamed fetch' hosted-correctness.yml 's/name: Fetch and verify frozen corpus inputs$/name: Fetch the corpus/'
 mutant 'a renamed preparation' prepare-hosted-tools.yml 's/name: Acquire missing inputs once and verify the complete set$/name: Acquire the inputs/'
-mutant 'a renamed row build' hosted-correctness.yml "s/name: Build the compiler once for the row's shards$/name: Build the row's compiler/"
+# The x86-64 rows' shared build job is historical (#2924): a row workflow that has it again is refused.
+mutant 'a shared row build again' hosted-correctness.yml "s/^  shards:$/  compiler:\n    name: Build the compiler once for the row's shards\n    runs-on: ubuntu-26.04\n    steps:\n      - run: 'true'\n  shards:/"
 mutant 'a renamed test step' hosted-correctness.yml 's/name: Run correctness tests within the hosted CPU budget$/name: Run the correctness tests/'
 mutant 'a renamed caller' 9700x.yml '1s/^name: .*/name: Tests and benchmarks/'
 mutant 'another caller' build.yml '0,/^jobs:$/s//jobs:\n  rows:\n    uses: .\/.github\/workflows\/hosted-correctness.yml/'

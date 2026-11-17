@@ -12,21 +12,14 @@ backstop for compiler changes that never touch the gate itself.
 
 ## Hosted hardware and the two host paths
 
-The bootstrap job runs twice, as a matrix of `BUSTER_HOST_ARCH`:
+The bootstrap job runs with `BUSTER_HOST_ARCH=native`, which qualifies the
+vector host path and needs the complete `host_isa.h` host vector feature set.
+Hosted CPU models vary, so the workflow checks the export `BUSTER_HOST_VECTOR`
+before building. A hosted runner without that path skips this bootstrap with a
+job warning and a **SKIPPED** entry in the step summary. The `x86-64` bootstrap
+of the baseline scalar host path (#1193) is gone with the scalar host (#2924).
 
-- **`native`** qualifies the vector host path and needs the complete
-  `host_isa.h` host vector feature set. Hosted CPU models vary, so the workflow
-  checks the export `BUSTER_HOST_VECTOR` before building. A hosted runner
-  without that path skips this bootstrap with a job warning and a **SKIPPED**
-  entry in the step summary.
-- **`x86-64`** qualifies the baseline scalar host path (#1193): stage 1 is
-  `build.sh`'s `x86-64` build, and every unit compiles at `-march=x86-64`, with
-  vectors of 32 and 64 bytes returned split across XMM registers and their
-  operators split into SSE2 pieces, as clang's code does. It runs on every
-  hosted runner. Its staged Clang must select the scalar path there; a runner
-  whose compiler selects the vector path at `-march=x86-64` fails the job.
-
-The inexpensive harness job runs regardless. Each bootstrap uploads its own
+The inexpensive harness job runs regardless. The bootstrap uploads its own
 artifact, named by its `BUSTER_HOST_ARCH`.
 
 ## What must pass
