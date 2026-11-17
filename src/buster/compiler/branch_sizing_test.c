@@ -75,6 +75,8 @@
 #define BUSTER_BRANCH_SIZING_TEST_REPORTED 3
 // Random functions by default, and the most records one has.
 #define BUSTER_BRANCH_SIZING_TEST_FUNCTIONS 1500
+// The worklist's evaluations over the default seed's random functions (branch_sizing_test_random).
+#define BUSTER_BRANCH_SIZING_TEST_FROZEN_EVALUATIONS 85984
 #define BUSTER_BRANCH_SIZING_TEST_MAX_RECORDS 100000
 // The test's own arena: the functions, their outcomes and the reference's buffers.
 #define BUSTER_BRANCH_SIZING_TEST_ARENA_BYTES (16ull << 30)
@@ -705,6 +707,7 @@ static bool branch_sizing_test_random(Arena* arena, uint64_t seed, uint64_t func
     // The functions that settled in 1, 2, 3 and more rounds (with the default limit).
     uint64_t rounds[5] = { 0 };
     uint64_t listed = 0;
+    uint64_t evaluations = 0;
     for (uint64_t i = 0; i < functions; i += 1)
     {
         const uint64_t mark = arena->length;
@@ -728,12 +731,21 @@ static bool branch_sizing_test_random(Arena* arena, uint64_t seed, uint64_t func
         long_branches += outcome.result.long_branches;
         rounds[outcome.result.rounds < 4 ? outcome.result.rounds : 4] += 1;
         listed += outcome.result.evaluations != 0;
+        evaluations += outcome.result.evaluations;
         arena_pop_to(arena, mark);
     }
+    // The counts no oracle above checks (the rounds past what the records show, and the worklist's evaluations), frozen
+    // for the default seed and count from main's run before #2924, where the scalar twin's counts matched them.
+    if (seed == 1 && functions == BUSTER_BRANCH_SIZING_TEST_FUNCTIONS)
+    {
+        const bool frozen = rounds[1] == 507 && rounds[2] == 414 && rounds[3] == 359 && rounds[4] == 220 && listed == 68 &&
+                            evaluations == BUSTER_BRANCH_SIZING_TEST_FROZEN_EVALUATIONS;
+        branch_sizing_test_expect(&tally, frozen, "the default functions' rounds and the worklist's evaluations are the frozen ones", evaluations);
+    }
     printf("random functions: %llu functions, %llu records, %llu branches, %llu long; %llu settled in 1 round, %llu in 2, %llu in 3 and %llu in more (%llu "
-           "with the worklist)\n",
+           "with the worklist, %llu evaluations)\n",
            (unsigned long long)functions, (unsigned long long)records, (unsigned long long)branches, (unsigned long long)long_branches, (unsigned long long)rounds[1],
-           (unsigned long long)rounds[2], (unsigned long long)rounds[3], (unsigned long long)rounds[4], (unsigned long long)listed);
+           (unsigned long long)rounds[2], (unsigned long long)rounds[3], (unsigned long long)rounds[4], (unsigned long long)listed, (unsigned long long)evaluations);
     return branch_sizing_test_report(&tally);
 }
 
@@ -899,7 +911,9 @@ static bool branch_sizing_test_chains(Arena* arena, uint64_t seed)
             const uint32_t rounds = (links < BUSTER_BRANCH_SIZING_ROUNDS ? links : BUSTER_BRANCH_SIZING_ROUNDS) + 1;
             branch_sizing_test_expect(&tally, outcome.result.long_branches == links, "every link grows", links);
             branch_sizing_test_expect(&tally, outcome.result.rounds == rounds, "a round per link, up to the limit, and one more", links);
-            branch_sizing_test_expect(&tally, (outcome.result.evaluations != 0) == (links > BUSTER_BRANCH_SIZING_ROUNDS), "the worklist past the limit", links);
+            // Past the limit, each growth puts only the next link out of range: the worklist evaluates each link left once.
+            branch_sizing_test_expect(&tally, outcome.result.evaluations == (links > BUSTER_BRANCH_SIZING_ROUNDS ? links - BUSTER_BRANCH_SIZING_ROUNDS : 0),
+                                      "the worklist past the limit, an evaluation a link left", links);
             const BranchSizingTestOutcome unlimited = branch_sizing_test_size(arena, &function, UINT32_MAX);
             branch_sizing_test_expect(&tally, unlimited.result.rounds == links + 1 && branch_sizing_test_same(&outcome, &unlimited, function.count, false),
                                       "without the worklist, a round per link and the same result", links);

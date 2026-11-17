@@ -60,7 +60,9 @@ record, and be long exactly where a rel8 can't reach:
   a branch every 1 to 12, at uniform and compiler-like distances, with
   `branch_sizing_generate.c`'s filler or random instructions of every form;
   also with the worklist from rounds 1, 2 and 3 and with no round limit,
-  which must give the same records and offsets;
+  which must give the same records and offsets; with the default seed and
+  count, the rounds' histogram and the worklist's evaluations (85,984) are
+  frozen, from main's run before #2924 that the scalar twin matched;
 - columns: 4,000 random functions of up to 1,200 records broken 0 to 3 times
   at random (an index, a target, a branch's form, or a record `x86_validate`
   rejects): the columns' check and `branch_sizing_validate` must give the
@@ -69,7 +71,8 @@ record, and be long exactly where a rel8 can't reach:
   the columns' check take the function where only `x86_validate` refuses it;
 - chains (`branch_sizing_chain`) of 1 to 1,000 links, forward and backward,
   which take a round per link: up to `BUSTER_BRANCH_SIZING_ROUNDS`, then the
-  worklist;
+  worklist, which evaluates each link left once (each growth puts only the
+  next link out of range);
 - page edges: the records, the branch columns and the offsets each ending at a
   `PROT_NONE` page, for every count up to 70 records at every branch density
   and every branch count up to 40, checked by the columns' check and sized,
