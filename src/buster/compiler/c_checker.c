@@ -3869,7 +3869,9 @@ static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, C
 // The uses of counted_by and counted_by_or_null pointer members whose pointee type is incomplete where they are read or
 // assigned (#1842's 3d, CHECK_DIAG_COUNTED_INCOMPLETE): a `.` or `->` of such a member, unless it is `&`'s operand, reports
 // at itself, and an assignment to one at the assignment, as clang's errors are; added to the sorted reports in token
-// order, past the node's own. Only where some member counts a pointer at all, which few units have.
+// order, past the node's own. The expressions built on such a use report nothing else (#1842's 3d: `b->p + 1`'s pointer
+// arithmetic on an incomplete type), as clang's are invalid. Only where some member counts a pointer at all, which few
+// units have.
 static void check_graph_counted_uses(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, Arena* scratch)
 {
     bool counted = false;
@@ -3895,6 +3897,7 @@ static void check_graph_counted_uses(const TypeTable* types, const CheckGraph* g
             consumers[operand] = node;
         }
     }
+    uint32_t added = 0;
     for (uint32_t node = 0; consumers != NULL && node < graph->count && stream->report_count < graph->count; node += 1)
     {
         const CheckOp op = graph->ops[node];
@@ -3925,7 +3928,50 @@ static void check_graph_counted_uses(const TypeTable* types, const CheckGraph* g
             }
             stream->reports[place] = (CheckReport){ .node = at, .token = token, .message = CHECK_MESSAGE_ACTION, .diagnostic = CHECK_DIAG_COUNTED_INCOMPLETE };
             stream->report_count += 1;
+            added += 1;
         }
+    }
+    // The use is invalid then, as clang's ExprError, and so is every expression built on it, which reports nothing more:
+    // the nodes that read such a use, through their operands and arguments (each before its reader).
+    uint8_t* invalid = added != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    if (invalid != NULL)
+    {
+        memset(invalid, 0, graph->count);
+        for (uint32_t r = 0; r < stream->report_count; r += 1)
+        {
+            const CheckReport* report = stream->reports + r;
+            if (report->diagnostic == CHECK_DIAG_COUNTED_INCOMPLETE && report->node < graph->count)
+            {
+                invalid[report->node] = 1;
+            }
+        }
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            const uint32_t operands[3] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            uint8_t reads = invalid[node];
+            for (uint32_t i = 0; i < 3; i += 1)
+            {
+                reads |= operands[i] < node ? invalid[operands[i]] : 0;
+            }
+            const bool arguments = check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL && graph->argument_offsets != NULL;
+            const uint32_t first = arguments ? graph->argument_offsets[node] : 0;
+            const uint32_t count = arguments ? graph->argument_counts[node] : 0;
+            for (uint32_t i = 0; i < count && first + i < graph->argument_count; i += 1)
+            {
+                const uint32_t argument = graph->argument_nodes[first + i];
+                reads |= argument < node ? invalid[argument] : 0;
+            }
+            invalid[node] = reads;
+        }
+        uint32_t kept = 0;
+        for (uint32_t r = 0; r < stream->report_count; r += 1)
+        {
+            const CheckReport* report = stream->reports + r;
+            const bool dropped = report->diagnostic != CHECK_DIAG_COUNTED_INCOMPLETE && report->node < graph->count && invalid[report->node] != 0;
+            stream->reports[kept] = *report;
+            kept += !dropped;
+        }
+        stream->report_count = kept;
     }
     arena_pop_to(scratch, mark);
 }

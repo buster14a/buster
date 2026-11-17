@@ -8221,8 +8221,10 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
     uint32_t spelling = argument_node < graph->count && argument_type == check_stream_type(stream, argument_node) ?
                         check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
     const TypeId type = check_common_format_value(parser, input, types, argument_type, &spelling);
-    const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
-                                                  spelling);
+    // A counted_by family member's argument keeps its sugar (#1842's 3c).
+    const String8 counted = !width && argument_node < graph->count ? check_driver_counted_operand_type(parser, pp, input, stream, types, spell, scratch, type, argument_node) :
+                            (String8){ 0 };
+    const String8 actual = counted.length != 0 ? counted : check_common_type_text(parser, pp, input, types, spell, scratch, type, spelling);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
     if (actual.length != 0)
     {
@@ -8250,8 +8252,9 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
     uint32_t spelling = argument_node < graph->count && argument_type == check_stream_type(stream, argument_node) ?
                         check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
     const TypeId type = check_common_format_value(parser, input, types, argument_type, &spelling);
-    const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
-                                                  spelling);
+    const String8 counted = argument_node < graph->count ? check_driver_counted_operand_type(parser, pp, input, stream, types, spell, scratch, type, argument_node) :
+                            (String8){ 0 };
+    const String8 actual = counted.length != 0 ? counted : check_common_type_text(parser, pp, input, types, spell, scratch, type, spelling);
     if (actual.length != 0)
     {
         const char* message = check_warning_text(scratch, "field %s should have type 'int', but argument has type %.*s",
