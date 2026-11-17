@@ -2078,6 +2078,66 @@ takes a free register at its start. `tests/driver/tier1_patterns.c`'s
 `patterns_gsub` stores nothing back where the instruction before loaded it, as
 main's does once.
 
+
+### Call arguments in their registers (#2646)
+
+A value whose last use is a call's register argument takes, where nothing else
+names a register for it, the register the call reads it in. Before, it took the
+lowest free register and the call's parallel move put it in place:
+`mov $0x81,%eax ... mov %rax,%rdx` for a constant third argument, `lea
+str(%rip),%rax; ...; mov %rax,%rdi` for a string's address, a load into `ecx`
+moved to `esi`. Tier 1's objects of `sqlite3.c` held 27,479 register moves into
+an argument register within a few instructions of a call, 82,048 bytes, where
+clang -O0 loads each argument into its register; they were most of the 40,142
+register-to-register moves against clang's 6,813, and the reason `sqlite3.c`
+and c-testsuite were above #2646's bound of clang -O0's bytes.
+
+- **Where it comes from.** The CFG consumer gives each use the register it reads
+  its value in (`Tier1CfgInput.use_registers`): a register argument's, by its
+  place (`tier1_select_parameter_registers`, or xmm n for a floating one), an
+  indirect callee's `r10` or `rax`, `UINT8_MAX` for any other use
+  (`tier1_emit_cfg_problem`). `tier1_cfg_prepare` gives an interval the register
+  of its last use where that use ends it (`Tier1AllocationInput.register_hints`):
+  a value that lives past the call doesn't take it, as the call would clobber it
+  there; one that lives across an earlier call takes callee-saved registers
+  alone in the preferred problem, where the hint isn't allowed and is ignored.
+- **Its rank.** `tier1_allocation_value_hint` returns it only where no value
+  hint names a register (a named interval's opening or closing, the value's own
+  place, its hint value's): a range that enters a block keeps its value's
+  register, a phi its operand's, a tie its operand's, and the edges and ties
+  move nothing for it. Both the coloring path and the scan read it there, at a
+  start and at a reload.
+- **It evicts nothing.** A value hint takes its register from a recipe no use
+  requires there (#2618); a register hint alone doesn't (`tier1_allocation_register_hinted`):
+  a call's argument would push the loop's addresses and constants out of the
+  argument registers they rest in. Where the register is taken, the value takes
+  another, as before.
+
+What stays: a function whose parameters live across its calls in their
+incoming registers, saved around each call, has no argument register free for
+its calls' other arguments (`sqlite3DeleteFrom`'s five, saved and reloaded at
+every call), and a two-address result tied to its operand's register goes where
+the operand was (#2823's swaps). 21,497 moves into argument registers remain in
+`sqlite3.c`'s object.
+
+| Objects' Tier 1 function bytes (`--tier1-no-inline`), against clang -O0 | main `d876a5e0` | this | clang -O0 |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 904,862 | 885,508 | 913,339 |
+| Lua's 34 sources | 205,026 | 197,343 | 248,990 |
+| c-testsuite's 220 programs | 48,365 | 45,394 | 47,293 |
+| `sqlite3.c`'s register-to-register moves | 40,142 | 33,518 | 6,813 |
+
+(The x86-64 host path's objects and the AVX-512 host path's are the same bytes.)
+
+**Tests.** `tier1_cfg_test.c`'s use-registers fixture allocates, by both paths
+and on both the coloring path and the scan, a call's argument in the register
+it is read in where the lowest free one is another; a second argument whose
+register a recipe holds, which it doesn't take; a value read by the call that
+lives on, which takes no hint; and a range that enters a block in its value's
+register though a call there reads it in another. `tier1_call_test.c` checks
+that the CFG consumer names each register argument's register at its call. A
+mutation of each rule fails its check.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,

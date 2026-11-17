@@ -46,6 +46,9 @@ struct Tier1CfgTestBuilder
     uint8_t use_required[BUSTER_TIER1_CFG_TEST_USES];
     // 1 for the definition's own use, at its value's definition position: a required one asks for a register there.
     uint8_t use_definition[BUSTER_TIER1_CFG_TEST_USES];
+    // The register a use reads its value in (#2646), UINT8_MAX for none, given to the input where use_registers asks.
+    uint8_t use_register[BUSTER_TIER1_CFG_TEST_USES];
+    bool use_registers;
     uint32_t phi_count;
     uint32_t phi_value[BUSTER_TIER1_CFG_TEST_PHIS];
     // A phi's operand for each of its block's predecessors, in the order the edges list them.
@@ -196,6 +199,7 @@ static void tier1_cfg_test_use(Tier1CfgTestBuilder* builder, uint32_t value, uin
     builder->use_instruction[u] = instruction;
     builder->use_required[u] = required;
     builder->use_definition[u] = 0;
+    builder->use_register[u] = UINT8_MAX;
     builder->use_count += 1;
 }
 
@@ -248,6 +252,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* use_offsets = arena_push_array(arena, builder->value_count + 1, sizeof(uint32_t), 4);
     uint32_t* use_positions = arena_push_array(arena, builder->use_count + 1, sizeof(uint32_t), 4);
     uint8_t* use_required = arena_push(arena, builder->use_count + 1, 1);
+    uint8_t* use_registers = builder->use_registers ? arena_push(arena, builder->use_count + 1, 1) : 0;
     uint32_t* phi_offsets = arena_push_array(arena, blocks + 1, sizeof(uint32_t), 4);
     uint32_t* phi_values = arena_push_array(arena, builder->phi_count + 1, sizeof(uint32_t), 4);
     uint32_t* phi_operand_offsets = arena_push_array(arena, builder->phi_count + 1, sizeof(uint32_t), 4);
@@ -262,7 +267,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* sequence_readers = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
     uint32_t* sequence_operands = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
     uint32_t* sequence_results = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
-    const bool built = (!builder->share_slots || slot_widths != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && sequence_operands != 0 && sequence_results != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
+    const bool built = (!builder->share_slots || slot_widths != 0) && (!builder->use_registers || use_registers != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && sequence_operands != 0 && sequence_results != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
     if (built)
     {
         block_starts[0] = 0;
@@ -315,10 +320,18 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
                     {
                         use_positions[at] = use_positions[at - 1];
                         use_required[at] = use_required[at - 1];
+                        if (use_registers != 0)
+                        {
+                            use_registers[at] = use_registers[at - 1];
+                        }
                         at -= 1;
                     }
                     use_positions[at] = position;
                     use_required[at] = builder->use_required[u];
+                    if (use_registers != 0)
+                    {
+                        use_registers[at] = builder->use_register[u];
+                    }
                     use += 1;
                 }
             }
@@ -374,6 +387,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             .use_offsets = use_offsets,
             .use_positions = use_positions,
             .use_required = use_required,
+            .use_registers = use_registers,
             .phi_offsets = phi_offsets,
             .phi_values = phi_values,
             .phi_operand_offsets = phi_operand_offsets,
@@ -2325,6 +2339,97 @@ static void tier1_cfg_test_body_hints(Tier1CfgTestTally* tally, Arena* output, A
     arena_pop_to(output, saved);
 }
 
+// The registers a call reads its arguments in (#2646, Tier1CfgInput.use_registers). Block 0 defines p (a recipe), w and,
+// with `held`, q, then a, b and v; a call at its instruction 3 reads a in r4, b in r0, which p holds until its use at
+// instruction 5, and w in r4, though w lives on into block 1; block 1, whose phi of p keeps it from continuing block 0's
+// ranges, reads v in r3 at a call. a takes r4, where the lowest free register is r2. b doesn't take r0 from p, which the
+// scan would evict for a value hint (#2618): a register hint evicts nothing. w, which lives past the call, takes no hint
+// from it: the lowest free register at its definition, r1. v enters block 1 in the register it had in block 0, which its
+// value hint names, rather than its register hint's r3. With `held`, q holds r3 through block 0 (its only allowed
+// register), so that v's block 0 register isn't r3 and the classes' masks aren't full, which the scan allocates; without
+// it, the coloring path does.
+static void tier1_cfg_test_use_registers(Tier1CfgTestTally* tally, Arena* output, Arena* scratch, bool held)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 2;
+    builder.instructions[0] = 6;
+    builder.instructions[1] = 3;
+    builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x001f;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    builder.use_registers = true;
+    tier1_cfg_test_edge(&builder, 0, 1);
+    const uint32_t all = builder.registers[BUSTER_TIER1_ALLOCATE_GPR];
+    const uint32_t p = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, all);
+    builder.remat[p] = 1;
+    const uint32_t q = held ? tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1u << 3) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t w = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t a = tier1_cfg_test_value(&builder, 0, 1, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t b = tier1_cfg_test_value(&builder, 0, 2, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t v = tier1_cfg_test_value(&builder, 0, 4, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t phi_operands[] = {
+        p,
+    };
+    const uint32_t phi = tier1_cfg_test_phi(&builder, 1, BUSTER_TIER1_ALLOCATE_GPR, phi_operands);
+    tier1_cfg_test_definition_use(&builder, p);
+    if (held)
+    {
+        tier1_cfg_test_definition_use(&builder, q);
+        tier1_cfg_test_use(&builder, q, 0, 5, true);
+    }
+    tier1_cfg_test_definition_use(&builder, w);
+    tier1_cfg_test_definition_use(&builder, a);
+    tier1_cfg_test_definition_use(&builder, b);
+    tier1_cfg_test_definition_use(&builder, v);
+    tier1_cfg_test_use(&builder, a, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 4;
+    tier1_cfg_test_use(&builder, b, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 0;
+    tier1_cfg_test_use(&builder, w, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 4;
+    tier1_cfg_test_use(&builder, p, 0, 5, true);
+    tier1_cfg_test_use(&builder, phi, 1, 0, true);
+    tier1_cfg_test_use(&builder, v, 1, 1, true);
+    builder.use_register[builder.use_count - 1] = 3;
+    tier1_cfg_test_use(&builder, w, 1, 2, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input = { 0 };
+    const bool built = tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "use registers: built");
+    for (uint32_t path = 0; built && path < 2; path += 1)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "use registers: allocated");
+        const uint32_t call = input.block_starts[0] + 2 * 3;
+        uint32_t locations[6] = { 0 };
+        uint8_t kinds[6] = { 0 };
+        const bool found = allocated && tier1_cfg_location(&result, a, call, &locations[0], &kinds[0]) && tier1_cfg_location(&result, b, call, &locations[1], &kinds[1]) &&
+                           tier1_cfg_location(&result, p, input.block_starts[0] + 2 * 5, &locations[2], &kinds[2]) &&
+                           tier1_cfg_location(&result, v, input.block_starts[1] - 1, &locations[3], &kinds[3]) &&
+                           tier1_cfg_location(&result, v, input.block_starts[1] + 2 * 1, &locations[4], &kinds[4]) && tier1_cfg_location(&result, w, call, &locations[5], &kinds[5]);
+        bool registers = found;
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            registers &= kinds[k] == BUSTER_TIER1_ALLOCATE_REGISTER;
+        }
+        tier1_cfg_test_expect(tally, registers && locations[0] == 4, "use registers: a call's argument takes the register the call reads it in");
+        tier1_cfg_test_expect(tally, registers && locations[1] != 0 && locations[2] == 0, "use registers: a register hint evicts nothing");
+        tier1_cfg_test_expect(tally, registers && locations[3] == locations[4] && (!held || locations[4] != 3), "use registers: a value hint outranks a register hint");
+        tier1_cfg_test_expect(tally, registers && locations[5] == 1, "use registers: a value that lives past the call takes no hint from it");
+        tier1_cfg_test_expect(tally, allocated && tier1_cfg_test_edge_moves(&input, &result, 0, 1) == 0, "use registers: the edge moves nothing");
+        arena_pop_to(output, mark);
+    }
+    if (built)
+    {
+        tier1_cfg_test_case(tally, &input, output, scratch, held ? "use registers, held" : "use registers", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
 static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     static Tier1CfgTestBuilder builders[11];
@@ -2784,6 +2889,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_body_hints(&tally, &output, &scratch);
             tier1_cfg_test_local_phis(&tally, &output, &scratch);
             tier1_cfg_test_dispatch_entry(&tally, &output, &scratch);
+            tier1_cfg_test_use_registers(&tally, &output, &scratch, false);
+            tier1_cfg_test_use_registers(&tally, &output, &scratch, true);
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);

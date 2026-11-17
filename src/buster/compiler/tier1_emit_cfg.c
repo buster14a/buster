@@ -773,6 +773,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     const uint64_t use_capacity = (uint64_t)plan->effective_use_count + value_count + 1;
     uint32_t* use_positions = ok ? ir_allocate(output, use_capacity, 4, &ok) : 0;
     uint8_t* use_required = ok ? ir_allocate(output, use_capacity, 1, &ok) : 0;
+    // The register each use reads its value in, where a call's register argument names one (#2646).
+    uint8_t* use_registers = ok ? ir_allocate(output, use_capacity, 1, &ok) : 0;
     uint32_t* use_cursors = ok ? ir_allocate(scratch, (uint64_t)value_count + 1, 4, &ok) : 0;
     uint32_t* phi_offsets = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* phi_values = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
@@ -880,6 +882,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             {
                 use_positions[use_cursors[defined]] = 0;
                 use_required[use_cursors[defined]] = tier1_select_parameter_place(function, function->a[node]).kind != BUSTER_TIER1_PLACE_STACK;
+                use_registers[use_cursors[defined]] = UINT8_MAX;
                 use_cursors[defined] += 1;
             }
             Tier1SelectPlaces places = { 0 };
@@ -889,12 +892,19 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                 const uint32_t argument = use - plan->effective_use_offsets[node];
                 // A by-value aggregate argument's address (#789) isn't required either: its call copies its bytes from it
                 // wherever it is (tier1_emit_cfg_aggregate_copy).
-                const uint8_t kind = argument < arguments ? tier1_select_argument_place(function, called, argument, &places).kind : BUSTER_TIER1_PLACE_GENERAL;
+                const Tier1SelectPlace place = argument < arguments ? tier1_select_argument_place(function, called, argument, &places) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_GENERAL };
+                const uint8_t kind = place.kind;
                 const bool stacked = kind == BUSTER_TIER1_PLACE_STACK || kind == BUSTER_TIER1_PLACE_AGGREGATE;
+                // A register argument's register (tier1_emit_call's destinations), and an indirect call's callee's.
+                const bool callee = call && function->op[node] == IR_CALL_INDIRECT && argument == arguments;
+                const uint8_t reg = argument < arguments && kind == BUSTER_TIER1_PLACE_GENERAL ? tier1_select_parameter_registers[place.index] :
+                                    argument < arguments && kind == BUSTER_TIER1_PLACE_VECTOR ? place.index :
+                                    callee ? tier1_select_callee_register(function, called) : UINT8_MAX;
                 if (v != BUSTER_TIER1_CFG_NONE)
                 {
                     use_positions[use_cursors[v]] = base + 2 * node;
                     use_required[use_cursors[v]] = !stacked;
+                    use_registers[use_cursors[v]] = reg;
                     use_cursors[v] += 1;
                 }
             }
@@ -906,6 +916,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             {
                 use_positions[use_cursors[defined]] = base + 2 * node + 1;
                 use_required[use_cursors[defined]] = rematerializable[defined] == 0;
+                use_registers[use_cursors[defined]] = UINT8_MAX;
                 use_cursors[defined] += 1;
             }
         }
@@ -1027,6 +1038,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .use_offsets = use_offsets,
             .use_positions = use_positions,
             .use_required = use_required,
+            .use_registers = use_registers,
             .phi_offsets = phi_offsets,
             .phi_values = phi_values,
             .phi_operand_offsets = phi_operand_offsets,

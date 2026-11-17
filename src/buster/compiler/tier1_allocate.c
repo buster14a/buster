@@ -93,6 +93,10 @@ struct Tier1AllocationInput
     // block's successor, or the range that entry takes its opening from (#2774). Where that opening is the value's slot,
     // the edge stores the value there anyway, so the scan with required uses evicts it first once it has no use left.
     const uint32_t* continuation_intervals;
+    // Optional, with hint_values (#2646): per interval, a register of its class it takes where no value hint names one
+    // and the register is free (UINT8_MAX for none): the register a call reads it in, where the call is its last use, so
+    // that the call's moves move nothing for it. It never evicts a value, and the hint is ignored where it isn't allowed.
+    const uint8_t* register_hints;
     // Optional (#2767): per interval, registers of its allowed ones that it takes only where none of its others is free, and
     // never evicts another value for: a range live across a fixed register's sequence, which writes them, so that its
     // consumer would save the range's value around it. A class with any is the scan's.
@@ -290,7 +294,8 @@ static bool tier1_allocation_clobbered(const Tier1AllocationInput* input, uint32
 // BUSTER_TIER1_ALLOCATE_MEMORY_HINT where the interval had no register there, as one evicted where it starts has none
 // (#2774). Then come value_count + 1 bytes of each
 // value's first register, which the scan with required uses writes (tier1_allocation_firsts, #2768).
-static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
+// An interval's hint by values: a named interval's opening or closing, its own value's place, or its hint value's.
+static uint8_t tier1_allocation_valued_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
 {
     const uint32_t value = last != 0 ? columns->hint_values[interval] : UINT32_MAX;
     const uint32_t named = last != 0 && columns->hint_intervals != 0 ? columns->hint_intervals[interval] : UINT32_MAX;
@@ -301,6 +306,20 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, 
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
     const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED;
     return named_place ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
+}
+
+// tier1_allocation_valued_hint's, or where it names none, the register its consumer reads it in (#2646).
+static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
+{
+    const uint8_t valued = tier1_allocation_valued_hint(columns, last, interval);
+    const uint8_t named_register = last != 0 && columns->register_hints != 0 ? columns->register_hints[interval] : UINT8_MAX;
+    return valued != UINT8_MAX ? valued : named_register;
+}
+
+// Whether `follow`, an interval's hint, is its register hint alone (#2646), which evicts nothing.
+static bool tier1_allocation_register_hinted(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval, uint8_t follow)
+{
+    return last != 0 && columns->register_hints != 0 && follow != UINT8_MAX && follow == columns->register_hints[interval] && tier1_allocation_valued_hint(columns, last, interval) == UINT8_MAX;
 }
 
 // The registers an interval takes from `pool`, of the free ones it may take: those it doesn't avoid, where any is left (#2767).
@@ -688,7 +707,8 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             // recipe no use requires here (#2618), unless another interval starting here claimed it: the recipe leaves it as
             // an eviction does, recomputed at its next required use. Where a recipe holds the register an edge or a block's entry would keep a loop's value in, the value took
             // another one, and the edges moved it back (luaV_execute's frame objects' addresses and Tier 1's constants).
-            const bool hinted = columns.hints == 0 || columns.hints[interval] == UINT8_MAX;
+            // A register hint alone (#2646) evicts nothing.
+            const bool hinted = (columns.hints == 0 || columns.hints[interval] == UINT8_MAX) && !tier1_allocation_register_hinted(&columns, last, interval, follow);
             if (hinted && !idle && !recomputed && follow < 32 && ((allowed[interval] >> follow) & 1) != 0 && ((avoided >> follow) & 1) == 0 && !(starting && ((claimed >> follow) & 1) != 0 && claimers[follow] != interval) &&
                 tier1_allocation_yields(&columns, active, occupied, follow, position))
             {
@@ -1478,6 +1498,7 @@ static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
     for (uint32_t i = 0; valid && i < input->count && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
     {
         valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
+        valid = valid && (input->register_hints == 0 || input->register_hints[i] == UINT8_MAX || input->register_hints[i] < 32);
         const uint32_t alternate = input->alternate_intervals != 0 ? input->alternate_intervals[i] : UINT32_MAX;
         valid = valid && (alternate == UINT32_MAX || (input->hint_intervals != 0 && alternate < input->count && input->classes != 0 && input->starts != 0 &&
                                                       input->classes[alternate] == input->classes[i] && input->starts[alternate] < input->starts[i]));
