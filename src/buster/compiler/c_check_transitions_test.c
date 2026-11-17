@@ -286,8 +286,7 @@ static void check_test_transition_source(CheckTest* test, const CheckTransitionF
         check_test_expect(test, checked && check_test_stream_equal(&oracle, &stream, input[1].graph.argument_count) && statistics->transition_mismatches == 0 &&
                                 verified,
                           description);
-        // A scalar host's run takes the scalar path whatever its options (check_graph_run), with no transitions to count.
-        if (checked && v == 0 && BUSTER_HOST_VECTOR)
+        if (checked && v == 0)
         {
             snprintf(description, sizeof(description), "%s: node order counts %u hits (%u flushed), %u misses, %u folds and %u entries (%u (%u), %u, %u and %u expected)",
                      fixture->name, statistics->transition_hits, statistics->transition_flushed_hits, statistics->transition_misses, statistics->transition_folds,
@@ -406,7 +405,7 @@ static void check_test_transition_limit(CheckTest* test)
     const uint64_t output_mark = output.length;
     ready = ready && check_graph_run(&types.table, &input.graph, &output, &scratch, &full, &whole);
     const uint32_t entries = ready ? whole.statistics.transition_entries : 0;
-    check_test_expect(test, ready && (entries > BUSTER_CHECK_TRANSITION_FALLBACK || !BUSTER_HOST_VECTOR) &&
+    check_test_expect(test, ready && (entries > BUSTER_CHECK_TRANSITION_FALLBACK) &&
                             check_test_stream_equal(&oracle, &whole, input.graph.argument_count),
                       "the table's limit: with room, the table passes its first entries");
     arena_pop_to(&output, output_mark);
@@ -445,8 +444,7 @@ static void check_test_transition_limit(CheckTest* test)
     char description[256];
     snprintf(description, sizeof(description), "the table's limit: at the least room the regions run (%d) and past it a table (%d); the sweep stops inserting (%d) and grows whole (%d)",
              fell_back, reached, stopped, grew);
-    // A scalar host's runs take the scalar path (check_graph_run), whose streams the sweep still compares.
-    check_test_expect(test, (fell_back && reached && stopped && grew) || !BUSTER_HOST_VECTOR, description);
+    check_test_expect(test, (fell_back && reached && stopped && grew), description);
     check_test_types_close(&types);
     parse_release(&parser);
     pp_release(&pp);

@@ -259,7 +259,6 @@ static __attribute__((unused)) uint32_t check_builtin_bits_popcount_scalar(const
 
 static uint32_t check_builtin_bits_popcount_vector(const uint64_t* limbs, uint32_t count)
 {
-#if BUSTER_HOST_VECTOR
     __m512i sums = _mm512_setzero_si512();
     for (uint32_t i = 0; i < count; i += BUSTER_CHECK_WIDE_VECTOR_LIMBS)
     {
@@ -268,9 +267,6 @@ static uint32_t check_builtin_bits_popcount_vector(const uint64_t* limbs, uint32
         sums = _mm512_add_epi64(sums, _mm512_popcnt_epi64(_mm512_maskz_loadu_epi64(mask, limbs + i)));
     }
     const uint32_t total = (uint32_t)_mm512_reduce_add_epi64(sums);
-#else
-    const uint32_t total = check_builtin_bits_popcount_scalar(limbs, count);
-#endif
     return total;
 }
 

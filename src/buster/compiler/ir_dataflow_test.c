@@ -886,6 +886,6 @@ static bool ir_dataflow_tests(Arena* memory, Arena* output, Arena* scratch)
     }
     ir_dataflow_expect(&tests, output->length == output_mark && scratch->length == scratch_mark, "self-tests retained arena storage");
     arena_pop_to(memory, mark);
-    printf("ir-dataflow: self-tests checks=%" PRIu64 " failures=%" PRIu64 " vector_host=%u\n", tests.checks, tests.failures, BUSTER_HOST_VECTOR);
+    printf("ir-dataflow: self-tests checks=%" PRIu64 " failures=%" PRIu64 "\n", tests.checks, tests.failures);
     return tests.failures == 0;
 }

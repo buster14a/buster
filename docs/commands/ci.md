@@ -323,7 +323,7 @@ Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
   companion artifact `ARTIFACT-NAME-offline`. It holds:
   - the apt closure of `setup-hosted.sh`'s packages, resolved on the
     preparation's runner image, with a manifest of every package and version;
-  - the baseline runtime's 4 `.deb`s and the corpus (`downloads/DIGEST`);
+  - the corpus and Lua's archive (`downloads/DIGEST`);
   - bare mirrors of c-testsuite and SQLite at `refs/pinned/COMMIT`.
 
   The preparation keeps them in two caches. `hosted-apt-v1-…` is keyed by the
@@ -535,8 +535,8 @@ never ones that failed, so green keeps meaning the tests passed.
   | `Check out triggering commit`, `Check out the triggering commit and its parents`, `Check out the run's commit and its first parent`, `Check out the exact caller revision`, `Check out the qualification policy`, `Check out reviewed first-party performance fixtures and acceptance harnesses`, `Fetch the vector draw's script from this commit` | the checkouts |
   | `Restore verified hosted release inputs` | `.github/actions/hosted-tools` |
   | `Acquire missing inputs once and verify the complete set`, `Acquire missing offline inputs once and check each as the jobs read it` | `prepare-hosted-tools.yml`'s acquisitions |
-  | `Install official Clang 23.1.4 and test tools`, `Install official Clang, sanitizer and libFuzzer runtimes` | `tools/ci/setup-hosted.sh` |
-  | `Fetch generic baseline startup objects and runtime for emulation` | `tools/ci/setup-baseline-runtime.sh` |
+  | `Install official Clang 23.1.4 and test tools`, `Install official Clang, sanitizer and libFuzzer runtimes` (the fuzz campaigns' before #2924) | `tools/ci/setup-hosted.sh` |
+  | `Fetch generic baseline startup objects and runtime for emulation` (historical: the scalar host's, gone with #2924) | `tools/ci/setup-baseline-runtime.sh`, removed |
   | `Fetch and verify frozen corpus inputs`, `Fetch c-testsuite at its pinned commit`, `Fetch SQLite's sources at their pinned commit` | the fetches |
 
 - **Notes.** The workflow's run summary lists every stopped job by the step

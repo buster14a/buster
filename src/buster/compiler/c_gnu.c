@@ -243,14 +243,10 @@ static uint64_t gnu_syntax_candidates_scalar(const uint8_t* kinds, uint32_t coun
 
 static uint64_t gnu_syntax_candidates(const uint8_t* kinds, uint32_t count)
 {
-#if !BUSTER_HOST_VECTOR
-    return gnu_syntax_candidates_scalar(kinds, count);
-#else
     const uint64_t active = count == 64 ? UINT64_MAX : (1ull << count) - 1;
     const __m512i values = _mm512_maskz_loadu_epi8(active, kinds);
     return active & (_mm512_cmpeq_epi8_mask(values, _mm512_set1_epi8(PARSE_KIND_ATTRIBUTE)) |
                      _mm512_cmpeq_epi8_mask(values, _mm512_set1_epi8(PARSE_KIND_ASM)));
-#endif
 }
 
 // Resets counts, retaining the caller's arrays/capacities. On any failure all counts are zero, even when earlier

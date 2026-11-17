@@ -4534,8 +4534,8 @@ static void check_test_driver_tier1_extremes(CheckTest* test, const char* clang,
 }
 
 // The wide vectors' fixture (#1624): GNU C's 32- and 64-byte vectors at targets whose registers are narrower (x86-64's
-// and x86-64-v2's 16 bytes, x86-64-v3's 32), which ir_vector_split.c splits into the target's widest: the scalar host's
-// emulations' shape (host_scalar_vectors.h: a union of a vector and its lanes, the lanes computed, the vector returned),
+// and x86-64-v2's 16 bytes, x86-64-v3's 32), which ir_vector_split.c splits into the target's widest: a union of a
+// vector and its lanes, the lanes computed and the vector returned,
 // vectors passed and returned by value (the results split across xmm0 to xmm3 or ymm0 and ymm1), loaded and stored
 // through pointers in a loop, chosen at a join (a phi), and constants; and a vector operator, which Tier 0 computes in
 // pieces. The other unit (clang -O2's) passes random vectors and hashes every result.

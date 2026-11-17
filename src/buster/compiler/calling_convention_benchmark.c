@@ -38,7 +38,6 @@
 // classification; the assignment (abi_benchmark_calls, abi_benchmark_deferred); run_calling_convention_benchmark.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1600,11 +1599,3 @@ int run_calling_convention_benchmark(int argc, char** argv)
     return valid ? 0 : 1;
 }
 
-#else
-int run_calling_convention_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

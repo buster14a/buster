@@ -248,34 +248,20 @@ jobs:
             clang "${flags[@]}" -dM -E -x c /dev/null |
               grep -E '^#define (__AVX512(F|BW|VL|DQ|CD|VBMI|VBMI2|VPOPCNTDQ|BITALG|VNNI)__|__(GFNI|VAES|AES|BMI|BMI2|LZCNT|POPCNT|AVX2|SSSE3|SSE4_1|XSAVE)__) ' || true
           done
-          defines=$(clang "${host_flags[@]}" -Isrc -dM -E \
-            -include src/buster/compiler/host_isa.h -x c /dev/null)
-          if grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
-            path=vector
-          else
-            path=scalar
-          fi
-          printf '\nSelected host path: %s (%s)\n' "$path" "$BUSTER_HOST_ARCH"
+          # The host is AVX-512 alone (#2924): host_isa.h refuses a target without every feature its predicate names.
+          path=vector
+          clang "${host_flags[@]}" -Isrc -E -include src/buster/compiler/host_isa.h -x c /dev/null -o /dev/null || path=refused
+          printf '\nHost target: %s (%s)\n' "$path" "$BUSTER_HOST_ARCH"
           # Every row is drawn (#2033, #2924): its runner's probe found every feature host_isa.h's predicate names, so
-          # its build selects the vector path; the explicit vector target is the predicate, or it fails to configure
+          # host_isa.h takes its target; the explicit vector target is the predicate, or it fails to configure
           # (cmake/BusterSettings.cmake), and a native build on a qualifying CPU is at least as wide.
           if [ "$path" != vector ]; then
-            printf '%s\n' "::error::The $BUSTER_HOST_ARCH row requires BUSTER_HOST_VECTOR=1 on the CPU its probe qualified; its target selected the scalar path."
+            printf '%s\n' "::error::host_isa.h refuses the $BUSTER_HOST_ARCH row's target on the CPU its probe qualified."
             exit 1
           fi
           # An item's configuration is its own row's (the step that set it): one sanitizer and its linker.
           printf 'Configuration: %s, linker %s\n' "$BUSTER_SANITIZER" "$BUSTER_LINKER"
           test "$BUSTER_LINKER" = "$([ "$BUSTER_SANITIZER" = none ] && echo auto || echo lld)"
-
-      - name: Check baseline fallback memory and arithmetic boundaries
-        # Once per row, as the steps below that its shard 1 alone runs.
-        if: env.BUSTER_SHARD == '1'
-        run: |
-          mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
-          clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-psabi \
-            -fsanitize=undefined -fno-sanitize-recover=all -Isrc/buster/compiler \
-            "${sanitizer_flags[@]}" tests/host-fallback/edge_cases.c -o "$RUNNER_TEMP/host-fallback-edges"
-          "$RUNNER_TEMP/host-fallback-edges"
 
       # A vector configuration's product (#2032): its item 1's holder builds it, on a CPU whose probe qualified (the
       # build runs the executable), and publishes it in this run alone, by a name that holds its attempt and its
@@ -298,9 +284,9 @@ jobs:
           path: ${{ runner.temp }}/vector-product-download
 
       - name: Verify and install the vector configuration's product
-        # As a portable row's shard does, by the SHA-256 its name holds, with this runner's probe run again: the
-        # product's identity includes the target's flags and BUSTER_HOST_VECTOR 1, and the probe's verdict on every
-        # feature the target uses (tools/ci/hosted-product.sh install).
+        # By the SHA-256 its name holds, with this runner's probe run again: the product's identity includes the target's
+        # flags and host_isa.h's macros with them, and the probe's verdict on every feature the target uses
+        # (tools/ci/hosted-product.sh install).
         if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'
         env:
           DIGEST: ${{ steps.product.outputs.digest }}
@@ -354,17 +340,16 @@ jobs:
           retention-days: 14
 
       - name: Confirm the vector kernels run on this CPU
-        # The item's evidence that its executable runs the vector path here (#2033): the build's target selects it
-        # (BUSTER_HOST_VECTOR 1 in host_isa.h with the build's flags, which configuring requires), and a benchmark's
-        # plain run, which a scalar build refuses, lexes the encoder's 592 KB on this CPU by the lexer's vector kernels,
-        # every byte of it (no part needs the scalar lexer), and checks the tokens against the scalar twin's.
+        # The item's evidence that its executable runs the vector path here (#2033): host_isa.h takes the build's target
+        # (which configuring requires; #2924), and a benchmark's plain run lexes the encoder's 592 KB on this CPU by the
+        # lexer's vector kernels, every byte of it (no part needs the scalar lexer), and checks the tokens against the
+        # scalar twin's.
         if: env.BUSTER_SHARD != ''
         run: |
           draw="$RUNNER_TEMP/vector-draw"
           mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
           test "${#host_flags[@]}" -gt 0
-          clang "${host_flags[@]}" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null |
-            grep -x '#define BUSTER_HOST_VECTOR 1'
+          clang "${host_flags[@]}" -Isrc -E -include src/buster/compiler/host_isa.h -x c /dev/null -o /dev/null
           "$BUSTER_COMPILER" benchmark-lexer src/buster/compiler/x86_64_encoder.c 2>&1 | tee "$draw/kernels"
           kernels=$(grep -x 'corpus: 0 files differ, 0 files (0.00% of bytes) need the scalar lexer for a part' "$draw/kernels")
           {
@@ -594,8 +579,8 @@ jobs:
           retention-days: 14
 
       # The item's evidence, which the verdict requires once per item: the probe's verdict and the CPU it ran on, the
-      # build's target and BUSTER_HOST_VECTOR, the kernels' run, the product it built (item 1) or installed, and the
-      # suite's pass. Only an item whose every step passed records one.
+      # build's target (which host_isa.h takes: `host-vector 1`), the kernels' run, the product it built (item 1) or
+      # installed, and the suite's pass. Only an item whose every step passed records one.
       - name: Write the vector item's evidence
         if: ${{ success() && env.BUSTER_SHARD != '' }}
         env:

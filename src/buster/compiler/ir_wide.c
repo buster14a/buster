@@ -937,11 +937,7 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
 
 static __attribute__((unused)) IrCheck ir_wide_split(const IrFunction* function, Arena* output, Arena* scratch, IrWideResult* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_wide_split_path(function, output, scratch, false, result);
-#else
     return ir_wide_split_path(function, output, scratch, true, result);
-#endif
 }
 
 static __attribute__((unused)) IrCheck ir_wide_split_scalar(const IrFunction* function, Arena* output, Arena* scratch, IrWideResult* result)

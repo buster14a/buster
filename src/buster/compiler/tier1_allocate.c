@@ -1512,18 +1512,14 @@ static __attribute__((unused)) Tier1AllocationError tier1_allocate_verdict(const
     const bool hinted = input != 0 && input->hint_values != 0 && input->fixed.count == 0;
     verdict->taken = false;
     verdict->constraint = false;
-    return hinted ? tier1_allocate_hinted(input, arena, BUSTER_HOST_VECTOR && vector, verdict, result) : tier1_allocate_impl(input, arena, BUSTER_HOST_VECTOR && vector, result);
+    return hinted ? tier1_allocate_hinted(input, arena, vector, verdict, result) : tier1_allocate_impl(input, arena, vector, result);
 }
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result);
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier1_allocate_scalar(input, arena, result);
-#else
     return tier1_allocate_impl(input, arena, true, result);
-#endif
 }
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
@@ -2000,6 +1996,6 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
 static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
     const bool small = input != 0 && input->count <= BUSTER_TIER1_MOVE_SMALL_COUNT;
-    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result, BUSTER_HOST_VECTOR);
+    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result, true);
     return error;
 }

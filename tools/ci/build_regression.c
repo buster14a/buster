@@ -18,7 +18,6 @@
 //   - the target policy data owner rejects either shared row-count bound when it drifts from the canonical rows;
 //   - active fixtures, headers and arbitrary include descendants have one unity owner, except justified exact sharing;
 //   - shared fixture declaration/include boundaries cannot grow silently inside existing shared roots;
-//   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
 //   - filtered compile commands are configuration-specific, reused until an input changes and rebuilt if missing;
 //   - driver helpers preserve version thresholds, description failures and publication without redundant copies;
 //   - BUSTER_TOOLCHAIN refuses unknown values, takes PATH's release clang as it is and otherwise a staged toolchain only
@@ -47,7 +46,6 @@
 //   - shifts link the padded executables, each shift once, and lexer-variant builds a tree of its own.
 // It leaves the tree built. Each check prints what it checked; the first that fails stops it, after it restores the
 // source it edits.
-// `--crt-link-only` runs just the small CRT dependency fixture without building the compiler.
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
@@ -403,7 +401,7 @@ static void check_standalone_preprocessing(void)
             "-P",
             "-target",
             "x86_64-pc-linux-gnu",
-            "-march=x86-64",
+            "-march=znver5",
             "-Isrc",
             "-fwrapv",
             "-funsigned-char",
@@ -452,7 +450,7 @@ static void check_complete_driver_preprocessing(void)
         { "tier1_select.c", "static X86Instruction tier1_select_register_record(" },
         { "c_check_tier1.c", "static Tier1EmitCause check_tier1_fault_emission_cause(" },
     };
-    static const char* const hosts[] = { "-march=x86-64", "-march=znver5" };
+    static const char* const hosts[] = { "-march=znver5" };
     for (uint32_t host = 0; host < sizeof(hosts) / sizeof(hosts[0]); host += 1)
     {
         char* argv[] = {
@@ -531,7 +529,7 @@ static void check_target_row_counts(void)
             snprintf(changed, forms.length + 32, "%.*s%lu%s", (int)(value - forms.data), forms.data, count + 1, end);
         }
         write_file(copy, changed, 0644);
-        char* argv[] = { "clang", "-fsyntax-only", "-target", "x86_64-pc-linux-gnu", "-march=x86-64", "-Isrc", "-fwrapv", "-funsigned-char",
+        char* argv[] = { "clang", "-fsyntax-only", "-target", "x86_64-pc-linux-gnu", "-march=znver5", "-Isrc", "-fwrapv", "-funsigned-char",
                          "-fno-strict-aliasing", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-psabi", source, 0 };
         const int status = run(log, 0, argv);
         Text diagnostics = read_file(log);
@@ -1389,12 +1387,7 @@ static const OwnershipException ownership_fuzz_exceptions[] = {
     { "src/buster/compiler/ir_optimize_verified.c", "main.c main_unit_backend.c main_unit_checker.c", "production verified optimizer pass with fuzz consumers", 0 },
 };
 
-static const OwnershipException ownership_scalar_exceptions[] = {
-    { "src/buster/compiler/host_scalar.h", ownership_main_units, "production scalar host intrinsics, selected only without the vector host ISA", 0 },
-    { "src/buster/compiler/host_scalar_vectors.h", ownership_main_units, "production scalar vector types, selected only without the vector host ISA", 0 },
-};
-
-static uint32_t ownership_active_exceptions(const OwnershipGraph* graph, bool fuzz, OwnershipException* active)
+static uint32_t ownership_active_exceptions(bool fuzz, OwnershipException* active)
 {
     memcpy(active, ownership_exceptions, sizeof(ownership_exceptions));
     uint32_t count = sizeof(ownership_exceptions) / sizeof(ownership_exceptions[0]);
@@ -1413,22 +1406,6 @@ static uint32_t ownership_active_exceptions(const OwnershipGraph* graph, bool fu
         {
             fail("fuzz ownership requires one ordinary exception for %s", ownership_fuzz_exceptions[i].path);
         }
-    }
-    bool scalar = false;
-    bool vectors = false;
-    for (uint32_t i = 0; i < graph->count; i += 1)
-    {
-        scalar = scalar || strcmp(graph->files[i].path, "src/buster/compiler/host_scalar.h") == 0;
-        vectors = vectors || strcmp(graph->files[i].path, "src/buster/compiler/host_scalar_vectors.h") == 0;
-    }
-    if (scalar != vectors)
-    {
-        fail("incomplete scalar host dependency pair");
-    }
-    if (scalar)
-    {
-        memcpy(active + count, ownership_scalar_exceptions, sizeof(ownership_scalar_exceptions));
-        count += sizeof(ownership_scalar_exceptions) / sizeof(ownership_scalar_exceptions[0]);
     }
     return count;
 }
@@ -1606,9 +1583,8 @@ static void check_ownership(const char* directory, const char* config)
     static OwnershipGraph graph;
     ownership_report(&units, ownership_read(deps.data, root, config, &units, &graph));
     ownership_classify(&graph);
-    OwnershipException active[sizeof(ownership_exceptions) / sizeof(ownership_exceptions[0]) +
-                              sizeof(ownership_scalar_exceptions) / sizeof(ownership_scalar_exceptions[0])];
-    const uint32_t exceptions = ownership_active_exceptions(&graph, fuzz, active);
+    OwnershipException active[sizeof(ownership_exceptions) / sizeof(ownership_exceptions[0])];
+    const uint32_t exceptions = ownership_active_exceptions(fuzz, active);
     ownership_report(&units, ownership_check(&units, &graph, active, exceptions));
     ownership_check_structure(&units, &graph, active, exceptions);
     ownership_check_nonstandard(&units, &graph, fuzz);
@@ -2453,19 +2429,15 @@ static void check_develop(void)
     snprintf(benchmark_log, sizeof(benchmark_log), "%s/develop-benchmark.log", work);
     char* benchmark[] = { develop, "benchmark-parser", 0 };
     const int benchmark_status = run(benchmark_log, 0, benchmark);
-    // A scalar host's executable refuses every benchmark command before it dispatches one (main.c), so there the
-    // stand-in is checked by its symbol instead of its message.
-    const bool scalar = occurrences(benchmark_log, "benchmarks require an AVX-512 host build") == 1;
     const bool named = occurrences(benchmark_log, "Develop's leaves c_parser_benchmark.c out") == 1 && occurrences(benchmark_log, "build Release") == 1;
-    if (benchmark_status != 1 || (scalar ? !has_symbol(develop, " T run_parser_benchmark") : !named))
+    if (benchmark_status != 1 || !named)
     {
         fail("Develop's benchmark-parser didn't fail naming the Release configuration: %s", read_file(benchmark_log).data);
     }
     char* baked[] = { develop, "test-baked-tables", 0 };
     Text log = capture(baked);
     free(log.data);
-    pass("Develop builds in parts beside Release, which it leaves as it was, and its benchmark commands name Release%s",
-         scalar ? " (a scalar host refuses them first; the stand-in is linked)" : "");
+    pass("Develop builds in parts beside Release, which it leaves as it was, and its benchmark commands name Release");
 
     static Snapshot before;
     char names[8192];
@@ -3054,121 +3026,6 @@ static void on_signal(int number)
 
 // Exercise the production buster_link function in a tiny project: it builds actual linked outputs without recompiling
 // the compiler. The post-link copies stand in for baking and check that relinking propagates to downstream outputs.
-static void check_crt_link_dependencies(void)
-{
-    if (chdir(work) != 0)
-    {
-        fail("can't enter %s", work);
-    }
-    char* dirs[] = { "cmake", "-E", "make_directory", "runtime/usr/lib/x86_64-linux-gnu",
-                     "runtime/usr/lib/gcc/x86_64-linux-gnu/15", 0 };
-    if (run(0, 0, dirs) != 0)
-    {
-        fail("can't make the CRT fixture directories");
-    }
-    write_file("crt1.c", "void _start(void) {}\n", 0644);
-    write_file("crti.c", "void crt_init(void) {}\n", 0644);
-    write_file("crtn.c", "void crt_end(void) {}\n", 0644);
-    write_file("main.c", "int fixture(void) { return 0; }\n", 0644);
-    const char* names[] = { "crt1", "crti", "crtn" };
-    for (uint32_t i = 0; i < 3; i += 1)
-    {
-        char source[32];
-        char object[128];
-        snprintf(source, sizeof(source), "%s.c", names[i]);
-        snprintf(object, sizeof(object), "runtime/usr/lib/x86_64-linux-gnu/%s.o", names[i]);
-        char* compile[] = { "clang", "-c", source, "-o", object, 0 };
-        if (run(0, 0, compile) != 0)
-        {
-            fail("can't compile %s", source);
-        }
-    }
-    const char* libraries[] = { "runtime/usr/lib/x86_64-linux-gnu/libm.so.6",
-                                "runtime/usr/lib/x86_64-linux-gnu/libc.so.6",
-                                "runtime/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a" };
-    for (uint32_t i = 0; i < 3; i += 1)
-    {
-        char* archive[] = { "ar", "rcs", (char*)libraries[i], 0 };
-        if (run(0, 0, archive) != 0)
-        {
-            fail("can't make %s", libraries[i]);
-        }
-    }
-    write_file("CMakeLists.txt",
-        "cmake_minimum_required(VERSION 3.25)\n"
-        "project(crt_fixture C)\n"
-        "set(CMAKE_LINK_DEPENDS_USE_LINKER OFF)\n"
-        "set(BUSTER_HOST_RUNTIME ${CMAKE_CURRENT_SOURCE_DIR}/runtime)\n"
-        "set(buster_arch x86-64)\n"
-        "set(buster_link_mode -no-pie)\n"
-        "file(READ \"${BUSTER_SOURCE}/CMakeLists.txt\" source)\n"
-        "string(FIND \"${source}\" \"function(buster_link target)\" begin)\n"
-        "if(begin LESS 0)\n  message(FATAL_ERROR \"buster_link not found\")\nendif()\n"
-        "string(SUBSTRING \"${source}\" ${begin} -1 tail)\n"
-        "string(FIND \"${tail}\" \"\\nendfunction()\" end)\n"
-        "if(end LESS 0)\n  message(FATAL_ERROR \"buster_link end not found\")\nendif()\n"
-        "string(LENGTH \"\\nendfunction()\" marker_length)\n"
-        "math(EXPR length \"${end} + ${marker_length}\")\n"
-        "string(SUBSTRING \"${tail}\" 0 ${length} function_text)\n"
-        "cmake_language(EVAL CODE \"${function_text}\")\n"
-        "foreach(name compiler_link compiler_shift)\n"
-        "  add_executable(${name} main.c)\n"
-        "  buster_link(${name})\n"
-        "  add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/$<CONFIG>/${name}.baked\n"
-        "    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${name}> ${CMAKE_BINARY_DIR}/$<CONFIG>/${name}.baked\n"
-        "    DEPENDS ${name} VERBATIM)\n"
-        "  add_custom_target(${name}_baked ALL DEPENDS ${CMAKE_BINARY_DIR}/$<CONFIG>/${name}.baked)\n"
-        "endforeach()\n", 0644);
-    char source_arg[PATH_MAX + 32];
-    snprintf(source_arg, sizeof(source_arg), "-DBUSTER_SOURCE=%s", root);
-    char* configure[] = { "cmake", "-S", ".", "-B", "out", "-G", "Ninja Multi-Config", "-DCMAKE_C_COMPILER=clang",
-                          source_arg, 0 };
-    Text log = capture(configure);
-    free(log.data);
-    char* build[] = { "cmake", "--build", "out", "--config", "Debug", "--parallel", "1", 0 };
-    log = capture(build);
-    free(log.data);
-    log = capture(build);
-    if (strstr(log.data, "no work to do") == 0)
-    {
-        fail("unchanged CRT fixture rebuilt: %s", log.data);
-    }
-    free(log.data);
-    for (uint32_t i = 0; i < 2; i += 1)
-    {
-        const struct timespec delay = { 1, 0 };
-        nanosleep(&delay, 0);
-        char object[128];
-        snprintf(object, sizeof(object), "runtime/usr/lib/x86_64-linux-gnu/%s.o", names[i]);
-        if (utimensat(AT_FDCWD, object, 0, 0) != 0)
-        {
-            fail("can't update %s", object);
-        }
-        log = capture(build);
-        if (strstr(log.data, "Linking C executable Debug/compiler_link") == 0 ||
-            strstr(log.data, "Linking C executable Debug/compiler_shift") == 0 ||
-            strstr(log.data, "Generating Debug/compiler_link.baked") == 0 ||
-            strstr(log.data, "Generating Debug/compiler_shift.baked") == 0)
-        {
-            fail("%s didn't relink and post-link both executables: %s", names[i], log.data);
-        }
-        free(log.data);
-        log = capture(build);
-        if (strstr(log.data, "no work to do") == 0)
-        {
-            fail("unchanged build after %s rebuilt: %s", names[i], log.data);
-        }
-        free(log.data);
-    }
-    if (chdir(root) != 0)
-    {
-        fail("can't return to %s", root);
-    }
-    pass("each baseline CRT startup object relinks and post-links both executables; unchanged builds are no-ops");
-}
-
-// Exercise the real database target with one tiny source: both configurations, content-changing regeneration,
-// ordinary source edits, missing output and filter changes, plus a direct build with export disabled.
 static void check_compile_commands(void)
 {
     char directory[PATH_MAX];
@@ -4318,7 +4175,7 @@ static void check_parallel_codegen_compiler(void)
 {
     const char* const settings[] = {
         "BUSTER_PARALLEL_CODEGEN=1", "BUSTER_RELEASE_PARTS=1", "BUSTER_DEBUG_INFO=0", "BUSTER_SANITIZER=none",
-        "BUSTER_FUZZ_AVAILABLE=0", "BUSTER_FUZZ_ENTRY=", "BUSTER_PGO=0", "BUSTER_PGO_TRAIN=", "BUSTER_HOST_RUNTIME=",
+        "BUSTER_FUZZ_AVAILABLE=0", "BUSTER_FUZZ_ENTRY=", "BUSTER_PGO=0", "BUSTER_PGO_TRAIN=",
         "BUSTER_BUILD_DEFINES=", 0,
     };
     BUILD_ENV(settings, "build", "--config", "Release");
@@ -4369,15 +4226,14 @@ static void check_parallel_codegen_compiler(void)
 int main(int argc, char** argv)
 {
     const bool flags_only = argc == 2 && strcmp(argv[1], "--flags-only") == 0;
-    const bool crt_only = argc == 2 && strcmp(argv[1], "--crt-link-only") == 0;
     const bool commands_only = argc == 2 && strcmp(argv[1], "--compile-commands-only") == 0;
     const bool driver_only = argc == 2 && strcmp(argv[1], "--driver-only") == 0;
     const bool codegen_only = argc == 2 && strcmp(argv[1], "--parallel-codegen-only") == 0;
     const bool ownership_only = (argc == 2 || argc == 3) && strcmp(argv[1], "--ownership-only") == 0;
     const bool develop_only = argc == 2 && strcmp(argv[1], "--develop-only") == 0;
-    if (argc != 1 && !flags_only && !crt_only && !commands_only && !driver_only && !ownership_only && !codegen_only && !develop_only)
+    if (argc != 1 && !flags_only && !commands_only && !driver_only && !ownership_only && !codegen_only && !develop_only)
     {
-        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only | --driver-only | --parallel-codegen-only | --develop-only | --ownership-only [COMPILER]]");
+        fail("usage: build-regression [--flags-only | --compile-commands-only | --driver-only | --parallel-codegen-only | --develop-only | --ownership-only [COMPILER]]");
     }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -4413,15 +4269,11 @@ int main(int argc, char** argv)
         check_parallel_codegen();
         check_parallel_codegen_sanitizers();
     }
-    if (!ownership_only && !driver_only && !flags_only && !commands_only && !codegen_only && !develop_only)
-    {
-        check_crt_link_dependencies();
-    }
-    if (!ownership_only && !driver_only && !flags_only && !crt_only && !codegen_only && !develop_only)
+    if (!ownership_only && !driver_only && !flags_only && !codegen_only && !develop_only)
     {
         check_compile_commands();
     }
-    if (!ownership_only && !driver_only && !crt_only && !commands_only && !codegen_only)
+    if (!ownership_only && !driver_only && !commands_only && !codegen_only)
     {
         char* output[] = { "./build.sh", "print-output", "--config", "Release", 0 };
         char* output_debug[] = { "./build.sh", "print-output", "--config", "Debug", 0 };
@@ -4439,7 +4291,7 @@ int main(int argc, char** argv)
         BUILD("build", "--config", "Release");
         check_develop();
     }
-    if (!ownership_only && !driver_only && !crt_only && !commands_only && !codegen_only && !develop_only)
+    if (!ownership_only && !driver_only && !commands_only && !codegen_only && !develop_only)
     {
         BUILD("clean");
         check_ignored_flags();

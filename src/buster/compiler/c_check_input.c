@@ -13883,10 +13883,9 @@ static bool check_input_resolve_tests(uint8_t mark, bool scalar, uint8_t reason)
 }
 
 // check_input_resolve_tests of a reason other than the token's syntax, which few visits' marks give (on sqlite3.c, a
-// scope's end at a sixth of them and the others at fewer), so the hint expects it false (#1175); on a scalar host, whose
-// walk makes every test, true. A macro, since a hint holds only as the first test of its branch's condition: clang drops
+// scope's end at a sixth of them and the others at fewer), so the hint expects it false (#1175). A macro, since a hint holds only as the first test of its branch's condition: clang drops
 // one that wraps a chain of && but for the chain's last test.
-#define BUSTER_CHECK_RESOLVE_RARE(mark, scalar, reason) __builtin_expect(check_input_resolve_tests((mark), (scalar), (reason)), !BUSTER_HOST_VECTOR)
+#define BUSTER_CHECK_RESOLVE_RARE(mark, scalar, reason) __builtin_expect(check_input_resolve_tests((mark), (scalar), (reason)), 0)
 
 // Whether the walk in source order arrives at `token` where it acts for a reason that no mark gives the token
 // (CheckInputReader.visits): the vector path would skip the token or the test. The scalar path, which visits every
@@ -14112,7 +14111,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
         visits += 1;
-        if (__builtin_expect(parser->options.scalar, !BUSTER_HOST_VECTOR))
+        if (__builtin_expect(parser->options.scalar, 0))
         {
             reader->output->visit_misses += check_input_resolve_missed(reader, i);
         }

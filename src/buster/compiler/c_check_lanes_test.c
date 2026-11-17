@@ -2523,7 +2523,7 @@ static void check_lanes_test_benchmark_sections(CheckLanesTestTally* tally, cons
         { "__asm__(\".section .data.x,\\\"aw\\\",@progbits\\n.byte 11\\n.text\");\nint main(void) { return 0; }\n", 0 },
         { "int f(void) __attribute__((section(\".note.x\")));\nint f(void) { return 17; }\nint main(void) { return f() - 17; }\n", 1 },
     };
-    for (uint32_t i = 0; BUSTER_HOST_VECTOR && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         char source[PATH_MAX];
         char errors[PATH_MAX];

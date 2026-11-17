@@ -12,9 +12,8 @@ inherit its portability layers, build system, or performance-acceptance machiner
 - Production compiler code is **C**. Use Clang as the host compiler;
   `__attribute__`, `ext_vector_type`, AVX-512 intrinsics, and other deliberate
   Clang/x86-64 extensions are allowed. Do not add compatibility wrappers for
-  GCC, MSVC, or non-Linux host operating systems. Older x86-64 host CPUs use
-  scalar implementations; keep that selection outside hot kernels and preserve
-  the native AVX-512 implementations for capable hosts.
+  GCC, MSVC, or non-Linux host operating systems. The host is AVX-512 with the
+  extensions `host_isa.h` names; older x86-64 CPUs aren't hosts (#2924).
 - Use four spaces, no tabs, `snake_case` functions and local variables,
   `PascalCase` named structs/types, and `BUSTER_`-prefixed uppercase macros.
 - Put opening braces on their own lines. Use braces for conditionals and loops.

@@ -5076,8 +5076,8 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
     {
         if (shadow->front_unread != 0)
         {
-            printf("node-shadow: front not run in %" PRIu64 " of %" PRIu64 " units: the reader's coded walk didn't read them whole%s\n", shadow->front_unread,
-                   shadow->front_unread + shadow->front_units, BUSTER_HOST_VECTOR ? "" : " (this build has no vector paths, and reads by the scalar walk)");
+            printf("node-shadow: front not run in %" PRIu64 " of %" PRIu64 " units: the reader's coded walk didn't read them whole\n", shadow->front_unread,
+                   shadow->front_unread + shadow->front_units);
         }
     }
     if (shadow->front != 0 && shadow->front_units != 0)

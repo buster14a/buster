@@ -266,7 +266,6 @@ static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t cou
     uint64_t candidates = 0;
     if (count != 0 && count <= BUSTER_IR_IF_CONVERT_BATCH)
     {
-#if BUSTER_HOST_VECTOR
         if (!scalar)
         {
             const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - count);
@@ -274,7 +273,6 @@ static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t cou
             candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
         }
         else
-#endif
         {
             for (uint32_t lane = 0; lane < count; lane += 1)
             {
@@ -296,7 +294,6 @@ static bool ir_if_convert_scalar_type(uint32_t type)
 static uint32_t ir_if_convert_barrier(const IrFunction* f, uint32_t first, uint32_t end, uint32_t classes, bool scalar)
 {
     uint32_t found = BUSTER_IR_NONE;
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         const __m512i low = _mm512_loadu_si512(ir_if_convert_barriers);
@@ -319,7 +316,6 @@ static uint32_t ir_if_convert_barrier(const IrFunction* f, uint32_t first, uint3
         }
     }
     else
-#endif
     {
         for (uint32_t i = end; i > first && found == BUSTER_IR_NONE; i -= 1)
         {
@@ -337,7 +333,6 @@ static uint32_t ir_if_convert_barrier(const IrFunction* f, uint32_t first, uint3
 static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32_t count, IrIfConvertKey key, bool scalar)
 {
     uint32_t matches = 0;
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         const __mmask16 valid = (__mmask16)(0xffffu >> (BUSTER_IR_IF_CONVERT_LANES - count));
@@ -365,7 +360,6 @@ static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32
         matches = m;
     }
     else
-#endif
     {
         for (uint32_t lane = 0; lane < count; lane += 1)
         {
@@ -1268,7 +1262,6 @@ static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
     {
         const uint32_t lanes = count - first < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first : BUSTER_IR_IF_CONVERT_BATCH;
         uint64_t candidates = 0;
-#if BUSTER_HOST_VECTOR
         if (!scalar)
         {
             const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - lanes);
@@ -1276,7 +1269,6 @@ static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
             candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_TRUNC));
         }
         else
-#endif
         {
             for (uint32_t lane = 0; lane < lanes; lane += 1)
             {

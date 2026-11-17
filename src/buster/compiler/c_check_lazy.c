@@ -408,7 +408,6 @@ static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, bool 
     for (uint64_t block = 0; block < count; block += 64)
     {
         const uint32_t live = count - block < 64 ? (uint32_t)(count - block) : 64;
-#if BUSTER_HOST_VECTOR
         if (!scalar)
         {
             const __mmask64 active = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
@@ -431,9 +430,6 @@ static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, bool 
             }
         }
         else
-#else
-        (void)scalar;
-#endif
         {
             for (uint32_t lane = 0; lane < live; lane += 1)
             {

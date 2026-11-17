@@ -1947,9 +1947,6 @@ static bool pp_splice_possible_scalar(const uint8_t* bytes, uint32_t length, boo
 // a block's backslash in its last lane carried to the next block's first, or past the last block to its end.
 static bool pp_splice_possible_vector(const uint8_t* bytes, uint32_t length, bool trigraphs)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_splice_possible_scalar(bytes, length, trigraphs);
-#else
     const __mmask64 questions = trigraphs ? ~0ull : 0;
     uint64_t carry = 0;
     uint64_t possible = 0;
@@ -1963,7 +1960,6 @@ static bool pp_splice_possible_vector(const uint8_t* bytes, uint32_t length, boo
         carry = backslashes >> 63;
     }
     return possible != 0 || carry != 0;
-#endif
 }
 
 // `length` bytes of source of a token of kind `kind`, without the line splices in them (and trigraphs, with
@@ -2157,9 +2153,6 @@ static uint32_t pp_scan_directives_scalar(const uint8_t* kinds, uint32_t count, 
 
 static uint32_t pp_scan_directives_vector(const uint8_t* kinds, uint32_t count, uint32_t* hashes, uint64_t* lines)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_scan_directives_scalar(kinds, count, hashes, lines);
-#else
     uint32_t result = 0;
     for (uint32_t i = 0; i < count; i += 64)
     {
@@ -2181,7 +2174,6 @@ static uint32_t pp_scan_directives_vector(const uint8_t* kinds, uint32_t count, 
         }
     }
     return result;
-#endif
 }
 
 // The same, a token at a time.
@@ -2614,9 +2606,6 @@ static uint32_t pp_count_splits_scalar(const uint8_t* bytes, const uint8_t* kind
 
 static uint32_t pp_count_splits_vector(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint64_t split)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_count_splits_scalar(bytes, kinds, starts, ends, count, split);
-#else
     const __m512i ones = _mm512_set1_epi8(1);
     const __m512i low = _mm512_maskz_mov_epi8((__mmask64)split, ones);
     const __m512i high = _mm512_setzero_si512();
@@ -2634,7 +2623,6 @@ static uint32_t pp_count_splits_vector(const uint8_t* bytes, const uint8_t* kind
         }
     }
     return result;
-#endif
 }
 
 // pp_count_splits_vector's scalar twin.
@@ -2913,9 +2901,6 @@ static uint32_t pp_directive_places_scalar(const uint64_t* words, uint32_t word_
 // null ones) takes the bit-at-a-time loop for all of its places. Writes `places` only below the count it returns.
 static uint32_t pp_directive_places(const uint64_t* words, uint32_t word_count, uint32_t* places)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_directive_places_scalar(words, word_count, places);
-#else
     const __m512i positions = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37,
                                               36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9,
                                               8, 7, 6, 5, 4, 3, 2, 1, 0);
@@ -2942,7 +2927,6 @@ static uint32_t pp_directive_places(const uint64_t* words, uint32_t word_count, 
         }
     }
     return count;
-#endif
 }
 
 // pp_directive_table for a file prepared a window at a time, whose `count` directives pp_scan_directives_window found
@@ -3708,14 +3692,6 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
 // in the file isn't one) and a '\r' that no '\n' follows, 64 bytes at a time with popcounts.
 static uint32_t pp_count_lines(const PPFileData* data, uint32_t begin, uint32_t end)
 {
-#if !BUSTER_HOST_VECTOR
-    uint32_t result = 0;
-    for (uint32_t i = begin; i < end; i += 1)
-    {
-        result += data->bytes[i] == '\n' || (data->bytes[i] == '\r' && (i + 1 == data->length || data->bytes[i + 1] != '\n'));
-    }
-    return result;
-#else
     uint32_t result = 0;
     for (uint32_t i = begin; i < end; i += 64)
     {
@@ -3737,7 +3713,6 @@ static uint32_t pp_count_lines(const PPFileData* data, uint32_t begin, uint32_t 
         result += (uint32_t)__builtin_popcountll(newlines);
     }
     return result;
-#endif
 }
 
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range)

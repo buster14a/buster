@@ -8,7 +8,6 @@
 // Clock, perf readings and sample selection below are original; no imported benchmark helper is adapted.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <fcntl.h>
 #include <linux/perf_event.h>
 #include <time.h>
@@ -752,11 +751,3 @@ int run_dominator_benchmark(int argc, char** argv)
     return result;
 }
 
-#else
-int run_dominator_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

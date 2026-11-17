@@ -624,9 +624,6 @@ static void asm_lex_store(AsmToken* output, const uint32_t* starts, const uint32
 
 static void asm_lex_vector(AsmParser* parser)
 {
-#if !BUSTER_HOST_VECTOR
-    asm_lex_scalar(parser);
-#else
     const uint8_t* source = (const uint8_t*)parser->source.pointer;
     const uint32_t length = parser->source.length;
     const __m512i iota = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -750,19 +747,11 @@ static void asm_lex_vector(AsmParser* parser)
         }
     }
     parser->tokens[parser->token_count] = (AsmToken){.start = length, .end = length, .kind = 0};
-#endif
 }
 
 static void asm_lex(AsmParser* parser)
 {
     parser->instruction_capacity = 1;
-#if !BUSTER_HOST_VECTOR
-    asm_lex_scalar(parser);
-    for (uint32_t at = 0; at < parser->token_count; at += 1)
-    {
-        parser->instruction_capacity += parser->tokens[at].kind == '\n';
-    }
-#else
     if (BUSTER_VECTOR_PATH(parser->options.vectorized))
     {
         asm_lex_vector(parser);
@@ -785,7 +774,6 @@ static void asm_lex(AsmParser* parser)
             parser->instruction_capacity += parser->tokens[at].kind == '\n';
         }
     }
-#endif
 }
 
 static String8 asm_token_text(const AsmParser* parser, uint32_t token)

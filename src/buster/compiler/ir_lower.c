@@ -3464,11 +3464,7 @@ static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function
 
 static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_lower_typed_scalar(input, result_type, symbol_count, output, scratch, result);
-#else
     return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0, false, false);
-#endif
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
@@ -3481,7 +3477,7 @@ static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function
 // unsupported forms from missing target features on IR_ERROR_UNSUPPORTED.
 static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features, false, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, target_features, false, false);
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
@@ -3494,7 +3490,7 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0F
 static __attribute__((unused)) IrCheck ir_lower_typed_target_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
                                                                      IrFunction* result, bool scalar)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, false, true);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && true, target_features, false, true);
 }
 
 // The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for
@@ -3502,7 +3498,7 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target_sources(const Tier0
 static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
                                                                     IrFunction* result, bool scalar)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && true, target_features, true, false);
 }
 
 // The same code-producing replay, with optional source identity columns. The ordinary entry points keep their
@@ -3510,5 +3506,5 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0F
 static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
                                                                             IrFunction* result, bool scalar)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true, true);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && true, target_features, true, true);
 }

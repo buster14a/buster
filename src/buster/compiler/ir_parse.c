@@ -1358,11 +1358,7 @@ static IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scrat
 
 static IrParseResult ir_parse(String8 source, Arena* output, Arena* scratch, IrFunction* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_parse_scalar(source, output, scratch, result);
-#else
     return ir_parse_path(source, output, scratch, result, true);
-#endif
 }
 
 static IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scratch, IrFunction* result)

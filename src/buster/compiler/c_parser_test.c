@@ -2371,7 +2371,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
         if (scalar->errors == 0 && twins.fallback.errors)
         {
             // A declaration can make a typedef name ordinary: the production vector path retries the whole unit.
-            // Exercise that protocol here too, where scalar hosts no longer take it through parse_translation_unit.
+            // Exercise that protocol here too, apart from parse_translation_unit.
             ParseTree tree = {
                 .roles = kernels->roles,
                 .depths = kernels->node_depths,
@@ -2384,7 +2384,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
                              (uint32_t)slots, &diagnostic_count) :
                 (ParseScalarResult){ .out_of_memory = true };
             accepted = !retry.out_of_memory && retry.errors == 0;
-            if (!accepted || (BUSTER_HOST_VECTOR && !parser->statistics.whole))
+            if (!accepted || !parser->statistics.whole)
             {
                 parse_test_report("%s: the twins' whole-unit retry differs from the scalar parser or the vector path\n", name);
                 result += 1;
@@ -3697,7 +3697,7 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
                     parse_translation_unit(&fresh, &pp);
                 }
                 const char* difference = fresh_ready ? parse_test_parse_difference(&reused[scalar], &fresh) : "a fresh parser's reservation";
-                // A default parse on a scalar host must not allocate or run the emulated vector protocol (#1369).
+                // A scalar request's parse must not allocate or run the vector protocol (#1369).
                 const ParseStatistics* statistics = &reused[scalar].statistics;
                 const bool dispatch = !scalar_path || (reused[scalar].kernels.roles == 0 && statistics->fallback_items == 0 && statistics->fallback_tokens == 0 &&
                                                        statistics->flagged_tokens == 0 && !statistics->whole);
@@ -3727,7 +3727,7 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
             intern_release(&table);
         }
     }
-    if (!ready || (BUSTER_HOST_VECTOR && fallbacks == 0) || rejected == 0)
+    if (!ready || fallbacks == 0 || rejected == 0)
     {
         failures += 1;
         printf("borrowed scratch: %s\n", !ready ? "a parser or the arena couldn't be reserved, or a unit written" :

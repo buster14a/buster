@@ -1011,9 +1011,6 @@ static SsaError ssa_rename_vector(SsaWork* work)
 
 static SsaError ssa_construct_vector(SsaWork* work)
 {
-#if !BUSTER_HOST_VECTOR
-    return ssa_construct_scalar(work);
-#else
     SsaError error = ssa_place_phis(work);
     if (error == SSA_OK)
     {
@@ -1024,7 +1021,6 @@ static SsaError ssa_construct_vector(SsaWork* work)
         error = ssa_rename_vector(work);
     }
     return error;
-#endif
 }
 
 // Cleanup is followed by compacting only the phis reachable from original promoted reads. Alias substitution can
@@ -1465,11 +1461,7 @@ static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* sc
 
 static SsaError ssa_build(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ssa_build_scalar(input, output, scratch, result);
-#else
     return ssa_build_path(input, output, scratch, result, true);
-#endif
 }
 
 static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)

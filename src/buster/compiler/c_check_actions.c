@@ -170,14 +170,10 @@ _Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, object
 // Always inlined (#880), as profile-guided builds do; hot callers: check_stream_value_to and check_action_operand_value.
 static inline __attribute__((always_inline)) void check_value_copy(CheckValue* destination, const CheckValue* source)
 {
-#if BUSTER_HOST_VECTOR
     uint8_t* bytes = (uint8_t*)destination;
     const uint8_t* from = (const uint8_t*)source;
     _mm512_storeu_si512(bytes, _mm512_loadu_si512(from));
     _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_loadu_si256((const __m256i*)(from + 64)));
-#else
-    *destination = *source;
-#endif
 }
 
 // A value's two x87 payloads as their ten meaningful bytes, the significand and the sign and exponent, copied as

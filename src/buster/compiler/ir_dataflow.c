@@ -459,7 +459,7 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
 
 static __attribute__((unused)) IrCheck ir_dataflow_prepare(const IrFunction* function, Arena* output, Arena* scratch, IrDataflow* result)
 {
-    return ir_dataflow_prepare_path(function, output, scratch, result, BUSTER_VECTOR_PATH(true));
+    return ir_dataflow_prepare_path(function, output, scratch, result, true);
 }
 
 static __attribute__((unused)) IrCheck ir_dataflow_prepare_scalar(const IrFunction* function, Arena* output, Arena* scratch, IrDataflow* result)
@@ -485,7 +485,7 @@ static uint64_t ir_dataflow_solve_path(IrDataflow* dataflow, bool vector)
 
 static __attribute__((unused)) uint64_t ir_dataflow_solve(IrDataflow* dataflow)
 {
-    return ir_dataflow_solve_path(dataflow, BUSTER_VECTOR_PATH(true));
+    return ir_dataflow_solve_path(dataflow, true);
 }
 
 static __attribute__((unused)) uint64_t ir_dataflow_solve_scalar(IrDataflow* dataflow)

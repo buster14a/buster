@@ -107,9 +107,6 @@ static __attribute__((unused)) bool tier1_rematerialization_marks_scalar(const T
 
 static __attribute__((unused)) bool tier1_rematerialization_marks(const Tier1RematerializationInput* input, uint8_t* marks)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier1_rematerialization_marks_scalar(input, marks);
-#else
     const bool valid = tier1_rematerialization_input_valid(input, marks);
     if (valid)
     {
@@ -140,7 +137,6 @@ static __attribute__((unused)) bool tier1_rematerialization_marks(const Tier1Rem
         }
     }
     return valid;
-#endif
 }
 
 static bool tier1_rematerialize(const Tier1RematerializationInput* input, uint32_t index, uint8_t destination, uint8_t frame_base, uint8_t flags_live, Tier1Rematerialized* result);
@@ -176,7 +172,6 @@ static __attribute__((unused)) bool tier1_rematerialization_model_costs(const Ti
         memset(costs, 0, (uint64_t)input->count * sizeof(uint16_t));
         memset(reload_costs, 0, (uint64_t)input->count * sizeof(uint16_t));
     }
-#if BUSTER_HOST_VECTOR
     if (valid && BUSTER_VECTOR_PATH(vector))
     {
         static const uint8_t table[64] __attribute__((aligned(64))) = {
@@ -201,7 +196,6 @@ static __attribute__((unused)) bool tier1_rematerialization_model_costs(const Ti
         }
     }
     else
-#endif
     {
         for (uint32_t i = 0; valid && i < input->count; i += 1)
         {

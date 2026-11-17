@@ -262,7 +262,6 @@ static __attribute__((noinline)) uint32_t node_flat_compact(const CheckInputRead
     const bool indexed = reader->parser->tokens.count <= (uint32_t)INT32_MAX;
     uint32_t result = 0;
     uint32_t position = first;
-#if BUSTER_HOST_VECTOR
     const __m512i lane_steps = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     for (; !BUSTER_SCALAR_PATH(scalar) && indexed && position < end; position += 16)
     {
@@ -286,10 +285,6 @@ static __attribute__((noinline)) uint32_t node_flat_compact(const CheckInputRead
         _mm512_storeu_si512(positions + result, _mm512_maskz_compress_epi32(visited, _mm512_add_epi32(_mm512_set1_epi32((int32_t)position), lane_steps)));
         result += (uint32_t)__builtin_popcount(visited);
     }
-#else
-    (void)indexed;
-    (void)scalar;
-#endif
     for (; position < end; position += 1)
     {
         const uint32_t token = postorder[position];
@@ -351,7 +346,6 @@ static __attribute__((noinline)) void node_flat_classify(NodeFlat* flat, uint32_
 {
     uint32_t i = 0;
     memset(flat->list_counts, 0, sizeof(flat->list_counts));
-#if BUSTER_HOST_VECTOR
     const __m512i lane_steps = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     const __m512i metas_low = _mm512_cvtepu8_epi32(_mm_load_si128((const __m128i*)node_flat_class_metas));
     const __m512i metas_high = _mm512_cvtepu8_epi32(_mm_load_si128((const __m128i*)(node_flat_class_metas + 16)));
@@ -400,9 +394,6 @@ static __attribute__((noinline)) void node_flat_classify(NodeFlat* flat, uint32_
             flat->list_counts[code] += (uint32_t)__builtin_popcount(members);
         }
     }
-#else
-    (void)scalar;
-#endif
     for (; i < work; i += 1)
     {
         const uint32_t code = (flat->classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;

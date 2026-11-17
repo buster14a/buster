@@ -30,7 +30,7 @@
 // inliner's unit of a variadic or unprototyped call too: its signature is the call's decision, #2721), and
 // each failure prints a line naming the file, function, pass and errors. The totals line counts, per pass, the functions
 // it ran on, those it changed, those both versions refused, and its total effect. This is a test outside the compile
-// path, with no vector path of its own; it needs no hardware counter and runs on baseline hosts too.
+// path, with no vector path of its own; it needs no hardware counter.
 
 typedef enum IrSourcePass
 {

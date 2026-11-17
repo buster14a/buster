@@ -139,16 +139,9 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         tier1_burs_classify_scalar(&forest, users, columns[1][0], columns[1][1]);
         tier1_burs_label_scalar(count, columns[1][0], columns[1][1], columns[1][2]);
         tier1_burs_rules_scalar(count, columns[1][0], columns[1][2], columns[1][3]);
-#if BUSTER_HOST_VECTOR
         tier1_burs_classify_vector(&forest, users, words, columns[0][0], columns[0][1]);
         tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, columns[0][0], columns[0][1], columns[0][2]);
         tier1_burs_rules_vector(count, columns[0][0], columns[0][2], columns[0][3]);
-#else
-        for (uint32_t k = 0; k < 4; k += 1)
-        {
-            memcpy(columns[0][k], columns[1][k], (uint64_t)count * (k == 1 ? 2 : 1) * sizeof(uint32_t));
-        }
-#endif
         check->functions += 1;
         check->nodes += count;
     }
@@ -312,13 +305,8 @@ static void tier1_select_test_burs_tables(Tier1SelectTest* test)
         }
         tier1_burs_label_scalar(count, classes, kids, states[1]);
         tier1_burs_rules_scalar(count, classes, states[1], rules[1]);
-#if BUSTER_HOST_VECTOR
         tier1_burs_label_vector(maximum, level_offsets, level_nodes, count, classes, kids, states[0]);
         tier1_burs_rules_vector(count, classes, states[0], rules[0]);
-#else
-        memcpy(states[0], states[1], (uint64_t)count * sizeof(uint32_t));
-        memcpy(rules[0], rules[1], (uint64_t)count * sizeof(uint32_t));
-#endif
         tier1_select_test_expect(test, memcmp(states[0], states[1], (uint64_t)count * sizeof(uint32_t)) == 0, "the vector labeling is its scalar twin's on random columns");
         tier1_select_test_expect(test, memcmp(rules[0], rules[1], (uint64_t)count * sizeof(uint32_t)) == 0, "the vector rule choice is its scalar twin's on random columns");
         free(columns);

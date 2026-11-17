@@ -92,10 +92,10 @@ precedence; do not undo it or add the trailer manually instead.
 
 The Zen 5 requirement describes the **host compiler executable**, not necessarily
 the instruction set of every program it generates. Keep host ISA, generated-code
-ISA, and output ABI separate. Linux/x86-64 hosts without the complete AVX-512
-feature set use scalar implementations. `BUSTER_HOST_ARCH=x86-64` builds the
-baseline executable; `native` is the default and `znver5` selects approved
-benchmark builds. The host choice is made at build time, outside compiler hot paths.
+ISA, and output ABI separate. The host needs the complete AVX-512 feature set
+`host_isa.h` names; a build for any other target stops there (#2924). `native`
+is the default, `znver5` selects approved benchmark builds and `vector` is CI's
+explicit target. The host choice is made at build time, outside compiler hot paths.
 Do not add other host operating systems. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
@@ -400,9 +400,9 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
-The compiler's host path follows the target feature macros, which the
+The compiler's host check follows the target feature macros, which the
 preprocessor's predefines give as clang's do for the same options
-(`c_predefines.c`). A baseline `-march=x86-64` build selects the scalar host path.
+(`c_predefines.c`), so `-march=native` self-checks need an AVX-512 host.
 
 ## Command and module index
 
