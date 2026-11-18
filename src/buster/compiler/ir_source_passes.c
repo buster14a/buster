@@ -216,6 +216,8 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         IrLicmResult vector = { 0 };
         IrLicmResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize_licm(promoted, output, scratch, options, &vector);
+        // The per-loop walk against its whole-function oracle, the worklist's fixed point (#2979).
+        options.whole = true;
         options.scalar = true;
         const IrCheck scalar_check = ir_optimize_licm(promoted, twin, scratch, options, &scalar);
         const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function);
