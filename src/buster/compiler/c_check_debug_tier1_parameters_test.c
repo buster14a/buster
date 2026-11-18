@@ -135,27 +135,24 @@ static void check_debug_tier1_values_object_case(CheckDebugTestTally* tally, con
     const uint32_t slots[] = { 0 };
     const Tier0Home homes[] = { { .displacement = -16, .reg = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE } };
     const CheckTier1DebugSpan spans[] = { { .begin = 1, .end = 4 }, { .begin = 5, .end = 7 } };
-    for (uint32_t path = 0; path < 2; path += 1)
+    _Alignas(64) uint8_t storage[8192] = { 0 };
+    Arena scratch = { .base = storage, .capacity = sizeof(storage) };
+    CheckTier1DebugSpan* clips = NULL;
+    EmittedLocalRange locations[3] = { [2] = { .local = 77 } };
+    bool valid = check_tier1_debug_object_clips(function, ir, emitted, order, uses, slots, homes, true, &scratch, &clips);
+    valid = valid && clips != NULL && clips[0].begin == expected_clip.begin && clips[0].end == expected_clip.end;
+    const uint64_t count = valid ? check_tier1_debug_object_ranges(homes, slots, 1, spans, BUSTER_ARRAY_LENGTH(spans), clips, NULL) : UINT64_MAX;
+    valid = valid && count == expected_count && count < BUSTER_ARRAY_LENGTH(locations);
+    valid = valid && check_tier1_debug_object_ranges(homes, slots, 1, spans, BUSTER_ARRAY_LENGTH(spans), clips, locations) == count;
+    for (uint32_t k = 0; valid && k < expected_count; k += 1)
     {
-        _Alignas(64) uint8_t storage[8192] = { 0 };
-        Arena scratch = { .base = storage, .capacity = sizeof(storage) };
-        CheckTier1DebugSpan* clips = NULL;
-        EmittedLocalRange locations[3] = { [2] = { .local = 77 } };
-        bool valid = check_tier1_debug_object_clips(function, ir, emitted, order, uses, slots, homes, path != 0, &scratch, &clips);
-        valid = valid && clips != NULL && clips[0].begin == expected_clip.begin && clips[0].end == expected_clip.end;
-        const uint64_t count = valid ? check_tier1_debug_object_ranges(homes, slots, 1, spans, BUSTER_ARRAY_LENGTH(spans), clips, NULL) : UINT64_MAX;
-        valid = valid && count == expected_count && count < BUSTER_ARRAY_LENGTH(locations);
-        valid = valid && check_tier1_debug_object_ranges(homes, slots, 1, spans, BUSTER_ARRAY_LENGTH(spans), clips, locations) == count;
-        for (uint32_t k = 0; valid && k < expected_count; k += 1)
-        {
-            const EmittedLocalRange location = locations[k];
-            valid = location.local == 0 && location.begin == expected[k].begin && location.end == expected[k].end &&
-                    location.home.displacement == -16 && location.home.reg == X86_REGISTER_RSP && location.home.mode == BUSTER_X86_MEMORY_BASE &&
-                    !location.home.is_register && location.value_bytes == 0;
-        }
-        check_debug_test_expect(tally, valid && locations[2].local == 77,
-                                "shared-object locations match explicit initialization, overwrite and source-gap boundaries on both paths", description);
+        const EmittedLocalRange location = locations[k];
+        valid = location.local == 0 && location.begin == expected[k].begin && location.end == expected[k].end &&
+                location.home.displacement == -16 && location.home.reg == X86_REGISTER_RSP && location.home.mode == BUSTER_X86_MEMORY_BASE &&
+                !location.home.is_register && location.value_bytes == 0;
     }
+    check_debug_test_expect(tally, valid && locations[2].local == 77,
+                            "shared-object locations match explicit initialization, overwrite and source-gap boundaries", description);
 }
 
 static void check_debug_tier1_values_objects(CheckDebugTestTally* tally)
@@ -286,32 +283,29 @@ static void check_debug_tier1_values_objects(CheckDebugTestTally* tally)
     // Exercise the publication entry point too: both arenas are borrowed, and a late output shortage must discard
     // every tentative range just as an early scratch shortage does. Success keeps only output and releases scratch.
     // A malformed block table is a separate rejection; legal cross-boundary motion above is not malformed metadata.
-    for (uint32_t path = 0; path < 2; path += 1)
+    for (uint32_t failure = 0; failure < 4; failure += 1)
     {
-        for (uint32_t failure = 0; failure < 4; failure += 1)
+        _Alignas(64) uint8_t output_storage[4096] = { 0 };
+        _Alignas(64) uint8_t scratch_storage[16384] = { 0 };
+        Arena output = { .base = output_storage, .length = 64, .capacity = failure == 1 ? 64 : sizeof(output_storage) };
+        Arena scratch = { .base = scratch_storage, .length = 64, .capacity = failure == 2 ? 64 : sizeof(scratch_storage) };
+        CheckTier1Debug result = { .source_count = 55, .local_range_count = 66 };
+        block_records[1] = failure == 3 ? 9 : 8;
+        const bool success = check_tier1_debug(&function, &ir, &emitted, NULL, 7, true, &output, &scratch, &result);
+        bool valid = scratch.length == 64 && success == (failure == 0);
+        if (success)
         {
-            _Alignas(64) uint8_t output_storage[4096] = { 0 };
-            _Alignas(64) uint8_t scratch_storage[16384] = { 0 };
-            Arena output = { .base = output_storage, .length = 64, .capacity = failure == 1 ? 64 : sizeof(output_storage) };
-            Arena scratch = { .base = scratch_storage, .length = 64, .capacity = failure == 2 ? 64 : sizeof(scratch_storage) };
-            CheckTier1Debug result = { .source_count = 55, .local_range_count = 66 };
-            block_records[1] = failure == 3 ? 9 : 8;
-            const bool success = check_tier1_debug(&function, &ir, &emitted, NULL, 7, path != 0, &output, &scratch, &result);
-            bool valid = scratch.length == 64 && success == (failure == 0);
-            if (success)
-            {
-                valid = valid && output.length > 64 && result.source_count != 0 && result.local_range_count == 1;
-                valid = valid && result.local_ranges[0].local == 0 && result.local_ranges[0].begin == 3 && result.local_ranges[0].end == 6 &&
-                        result.local_ranges[0].home.displacement == -16;
-            }
-            else
-            {
-                valid = valid && output.length == 64 && result.source_records == NULL && result.source_origins == NULL &&
-                        result.source_count == 0 && result.local_ranges == NULL && result.local_range_count == 0;
-            }
-            check_debug_test_expect(tally, valid, "shared-object publication succeeds or rolls both arena marks back without partial metadata",
-                                    failure == 3 ? "an out-of-bounds original block interval is rejected independently of legal record motion" : "bounded output and scratch arenas");
+            valid = valid && output.length > 64 && result.source_count != 0 && result.local_range_count == 1;
+            valid = valid && result.local_ranges[0].local == 0 && result.local_ranges[0].begin == 3 && result.local_ranges[0].end == 6 &&
+                    result.local_ranges[0].home.displacement == -16;
         }
+        else
+        {
+            valid = valid && output.length == 64 && result.source_records == NULL && result.source_origins == NULL &&
+                    result.source_count == 0 && result.local_ranges == NULL && result.local_range_count == 0;
+        }
+        check_debug_test_expect(tally, valid, "shared-object publication succeeds or rolls both arena marks back without partial metadata",
+                                failure == 3 ? "an out-of-bounds original block interval is rejected independently of legal record motion" : "bounded output and scratch arenas");
     }
 }
 
@@ -323,35 +317,32 @@ static void check_debug_tier1_values_parameter_case(CheckDebugTestTally* tally, 
 {
     const IrDebugInfo debug = { .scalars = values, .scalar_count = function->parameter_count };
     const Tier1EmitResult emitted = { .code = code };
-    for (uint32_t path = 0; path < 2; path += 1)
+    _Alignas(64) uint8_t storage[8192] = { 0 };
+    Arena scratch = { .base = storage, .capacity = sizeof(storage) };
+    CheckTier1DebugParameters parameters = { 0 };
+    EmittedLocalRange locations[64] = { 0 };
+    uint8_t actual[128];
+    memset(actual, UINT8_MAX, sizeof(actual));
+    const uint64_t cells = (uint64_t)function->local_count * code.count;
+    bool valid = cells <= sizeof(actual) && check_tier1_debug_parameters(function, &debug, &emitted, order, true, &scratch, &parameters);
+    const uint64_t count = valid ? check_tier1_debug_parameter_ranges(&parameters, true, NULL) : 0;
+    valid = valid && count <= BUSTER_ARRAY_LENGTH(locations);
+    valid = valid && check_tier1_debug_parameter_ranges(&parameters, true, locations) == count;
+    for (uint64_t k = 0; valid && k < count; k += 1)
     {
-        _Alignas(64) uint8_t storage[8192] = { 0 };
-        Arena scratch = { .base = storage, .capacity = sizeof(storage) };
-        CheckTier1DebugParameters parameters = { 0 };
-        EmittedLocalRange locations[64] = { 0 };
-        uint8_t actual[128];
-        memset(actual, UINT8_MAX, sizeof(actual));
-        const uint64_t cells = (uint64_t)function->local_count * code.count;
-        bool valid = cells <= sizeof(actual) && check_tier1_debug_parameters(function, &debug, &emitted, order, path != 0, &scratch, &parameters);
-        const uint64_t count = valid ? check_tier1_debug_parameter_ranges(&parameters, path != 0, NULL) : 0;
-        valid = valid && count <= BUSTER_ARRAY_LENGTH(locations);
-        valid = valid && check_tier1_debug_parameter_ranges(&parameters, path != 0, locations) == count;
-        for (uint64_t k = 0; valid && k < count; k += 1)
+        const EmittedLocalRange location = locations[k];
+        valid = location.local < function->local_count && location.begin < location.end && location.end <= code.count &&
+                location.home.is_register && location.home.reg < 16 && location.home.mode == 0 && location.value_bytes == 0;
+        const uint32_t base = valid && tier0_class_floating(function->local_classes[location.local]) ? 16 : 0;
+        for (uint32_t r = location.begin; valid && r < location.end; r += 1)
         {
-            const EmittedLocalRange location = locations[k];
-            valid = location.local < function->local_count && location.begin < location.end && location.end <= code.count &&
-                    location.home.is_register && location.home.reg < 16 && location.home.mode == 0 && location.value_bytes == 0;
-            const uint32_t base = valid && tier0_class_floating(function->local_classes[location.local]) ? 16 : 0;
-            for (uint32_t r = location.begin; valid && r < location.end; r += 1)
-            {
-                const uint64_t cell = (uint64_t)location.local * code.count + r;
-                valid = actual[cell] == UINT8_MAX;
-                actual[cell] = (uint8_t)(base + location.home.reg);
-            }
+            const uint64_t cell = (uint64_t)location.local * code.count + r;
+            valid = actual[cell] == UINT8_MAX;
+            actual[cell] = (uint8_t)(base + location.home.reg);
         }
-        check_debug_test_expect(tally, valid && memcmp(actual, expected, cells) == 0,
-                                "parameter ranges match the independently specified machine carriers on both paths", description);
     }
+    check_debug_test_expect(tally, valid && memcmp(actual, expected, cells) == 0,
+                            "parameter ranges match the independently specified machine carriers", description);
     // Run the same independent tables through the new general binding proof too. This exercises its sparse CFG
     // states and incremental publisher, rather than comparing two implementations only against each other.
     const bool bounded = function->local_count <= 32 && code.count <= 32 && (uint64_t)function->local_count * code.count <= 128;
