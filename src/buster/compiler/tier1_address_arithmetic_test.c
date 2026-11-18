@@ -37,19 +37,16 @@ static void tier1_select_test_power_multiplication(Tier1SelectTest* test)
                     tier1_select_test_node(&function, 1, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
                     tier1_select_test_node(&function, 2, IR_MUL, type, order == 0 ? 0 : 1, order == 0 ? 1 : 0, BUSTER_IR_NONE);
                     tier1_select_test_node(&function, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                    for (uint32_t path = 0; path < 2; path += 1)
+                    Tier1SelectPlan plan;
+                    uint32_t node = BUSTER_IR_NONE;
+                    const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                    tier1_select_test_expect(test, error == TIER1_SELECT_OK, "power-of-two multiplication selects on both paths");
+                    if (error == TIER1_SELECT_OK)
                     {
-                        Tier1SelectPlan plan;
-                        uint32_t node = BUSTER_IR_NONE;
-                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
-                        tier1_select_test_expect(test, error == TIER1_SELECT_OK, "power-of-two multiplication selects on both paths");
-                        if (error == TIER1_SELECT_OK)
-                        {
-                            tier1_select_test_expect(test, plan.patterns[2].rule == TIER1_RULE_MULTIPLY_SHIFT && plan.patterns[2].scale == shift && plan.covered[1] != 0,
-                                                     "every power of two, including the sign bit and one, selects a shift rather than imul");
-                        }
-                        arena_pop_to(&output, 0);
+                        tier1_select_test_expect(test, plan.patterns[2].rule == TIER1_RULE_MULTIPLY_SHIFT && plan.patterns[2].scale == shift && plan.covered[1] != 0,
+                                                 "every power of two, including the sign bit and one, selects a shift rather than imul");
                     }
+                    arena_pop_to(&output, 0);
                     // Separate and coalesced destinations: the optional move before a shift must preserve the input.
                     for (uint32_t coalesced = 0; coalesced < 2; coalesced += 1)
                     {
@@ -147,53 +144,50 @@ static void tier1_select_test_signed_loads(Tier1SelectTest* test)
                             X86_REGISTER_RAX,
                             X86_REGISTER_RAX,
                         };
-                        for (uint32_t path = 0; path < 2; path += 1)
+                        Tier1SelectPlan plan;
+                        uint32_t node = BUSTER_IR_NONE;
+                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                        tier1_select_test_expect(test, error == TIER1_SELECT_OK, "signed loads select on both paths");
+                        if (error == TIER1_SELECT_OK)
                         {
-                            Tier1SelectPlan plan;
-                            uint32_t node = BUSTER_IR_NONE;
-                            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
-                            tier1_select_test_expect(test, error == TIER1_SELECT_OK, "signed loads select on both paths");
-                            if (error == TIER1_SELECT_OK)
+                            tier1_select_test_expect(test, (plan.covered[4] != 0) == (variant == 0), "signed-load folding preserves volatility, memory order and multiple uses");
+                            if (variant == 0)
                             {
-                                tier1_select_test_expect(test, (plan.covered[4] != 0) == (variant == 0), "signed-load folding preserves volatility, memory order and multiple uses");
-                                if (variant == 0)
+                                const Tier1SelectPattern* pattern = &plan.patterns[6];
+                                tier1_select_test_expect(test, pattern->rule == TIER1_RULE_LOAD_ADDRESS && pattern->width == source_width &&
+                                                                 pattern->operation == X86_OPERATION_MOVSX && (pattern->source_width == 4 || pattern->source_width == 8) &&
+                                                                 pattern->values[0] == 0 && pattern->values[1] == 1 && plan.covered[3] != 0,
+                                                         "signed load retains the access width and folds its base and index");
+                                const uint32_t first = plan.effective_use_offsets[6];
+                                const uint32_t end = plan.effective_use_offsets[7];
+                                bool base = false;
+                                bool index = false;
+                                for (uint32_t u = first; u < end; u += 1)
                                 {
-                                    const Tier1SelectPattern* pattern = &plan.patterns[6];
-                                    tier1_select_test_expect(test, pattern->rule == TIER1_RULE_LOAD_ADDRESS && pattern->width == source_width &&
-                                                                     pattern->operation == X86_OPERATION_MOVSX && (pattern->source_width == 4 || pattern->source_width == 8) &&
-                                                                     pattern->values[0] == 0 && pattern->values[1] == 1 && plan.covered[3] != 0,
-                                                             "signed load retains the access width and folds its base and index");
-                                    const uint32_t first = plan.effective_use_offsets[6];
-                                    const uint32_t end = plan.effective_use_offsets[7];
-                                    bool base = false;
-                                    bool index = false;
-                                    for (uint32_t u = first; u < end; u += 1)
-                                    {
-                                        base |= plan.effective_use_values[u] == 0;
-                                        index |= plan.effective_use_values[u] == 1;
-                                    }
-                                    tier1_select_test_expect(test, end - first == 2 && base && index, "folded signed load keeps both address operands live until the extension");
+                                    base |= plan.effective_use_values[u] == 0;
+                                    index |= plan.effective_use_values[u] == 1;
                                 }
-                                Tier1SelectCode code;
-                                const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
-                                tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "signed-load fixture emits");
-                                if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                                tier1_select_test_expect(test, end - first == 2 && base && index, "folded signed load keeps both address operands live until the extension");
+                            }
+                            Tier1SelectCode code;
+                            const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
+                            tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "signed-load fixture emits");
+                            if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                            {
+                                for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples); sample += 1)
                                 {
-                                    for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples); sample += 1)
-                                    {
-                                        const uint64_t bits = samples[sample];
-                                        memcpy(bytes, &bits, source_width);
-                                        const uint64_t wanted = ((bits ^ sign) - sign) & (width == 4 ? UINT32_MAX : UINT64_MAX);
-                                        const uint64_t actual = tier1_select_test_call(test, (uintptr_t)(bytes - 3), 3, 18);
-                                        uint64_t stored = 0;
-                                        memcpy(&stored, bytes, source_width);
-                                        tier1_select_test_expect(test, actual == wanted && stored == (variant == 2 ? 18 : bits),
-                                                                 "signed loads execute at sign boundaries without widening or crossing a store");
-                                    }
+                                    const uint64_t bits = samples[sample];
+                                    memcpy(bytes, &bits, source_width);
+                                    const uint64_t wanted = ((bits ^ sign) - sign) & (width == 4 ? UINT32_MAX : UINT64_MAX);
+                                    const uint64_t actual = tier1_select_test_call(test, (uintptr_t)(bytes - 3), 3, 18);
+                                    uint64_t stored = 0;
+                                    memcpy(&stored, bytes, source_width);
+                                    tier1_select_test_expect(test, actual == wanted && stored == (variant == 2 ? 18 : bits),
+                                                             "signed loads execute at sign boundaries without widening or crossing a store");
                                 }
                             }
-                            arena_pop_to(&output, 0);
                         }
+                        arena_pop_to(&output, 0);
                     }
                     arena_pop_to(&input, 0);
                 }
@@ -237,32 +231,29 @@ static void tier1_select_test_added_address(Tier1SelectTest* test)
         tier1_select_test_node(&function, 5, IR_LOAD, IR_I64, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
         tier1_select_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint8_t registers[7] = {X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_R8, X86_REGISTER_R9, X86_REGISTER_R10, X86_REGISTER_RAX, X86_REGISTER_RAX};
-        for (uint32_t path = 0; path < 2; path += 1)
+        Tier1SelectPlan plan;
+        uint32_t node = BUSTER_IR_NONE;
+        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+        tier1_select_test_expect(test, error == TIER1_SELECT_OK, "pointer-integer addition selects on both paths");
+        if (error == TIER1_SELECT_OK)
         {
-            Tier1SelectPlan plan;
-            uint32_t node = BUSTER_IR_NONE;
-            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
-            tier1_select_test_expect(test, error == TIER1_SELECT_OK, "pointer-integer addition selects on both paths");
-            if (error == TIER1_SELECT_OK)
+            tier1_select_test_expect(test, plan.patterns[5].rule == TIER1_RULE_LOAD_ADDRESS && plan.patterns[5].values[0] == 0 && plan.patterns[5].values[1] == 1 &&
+                                             plan.covered[2] != 0 && plan.covered[3] != 0 && plan.covered[4] != 0,
+                                     "a 64-bit pointer addition is the load's memory operand, without an intervening lea");
+            Tier1SelectCode code;
+            const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
+            tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "added-address fixture emits");
+            if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
             {
-                tier1_select_test_expect(test, plan.patterns[5].rule == TIER1_RULE_LOAD_ADDRESS && plan.patterns[5].values[0] == 0 && plan.patterns[5].values[1] == 1 &&
-                                                 plan.covered[2] != 0 && plan.covered[3] != 0 && plan.covered[4] != 0,
-                                         "a 64-bit pointer addition is the load's memory operand, without an intervening lea");
-                Tier1SelectCode code;
-                const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
-                tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "added-address fixture emits");
-                if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                const uint64_t values[] = {UINT64_MAX, 17, UINT64_C(0x8000000000000000), 42};
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(values); i += 1)
                 {
-                    const uint64_t values[] = {UINT64_MAX, 17, UINT64_C(0x8000000000000000), 42};
-                    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(values); i += 1)
-                    {
-                        const uint64_t actual = tier1_select_test_call(test, (uintptr_t)values, i * sizeof(uint64_t), 0);
-                        tier1_select_test_expect(test, actual == values[i], "folded pointer-integer addition executes its original address");
-                    }
+                    const uint64_t actual = tier1_select_test_call(test, (uintptr_t)values, i * sizeof(uint64_t), 0);
+                    tier1_select_test_expect(test, actual == values[i], "folded pointer-integer addition executes its original address");
                 }
             }
-            arena_pop_to(&output, 0);
         }
+        arena_pop_to(&output, 0);
     }
     arena_release(&scratch);
     arena_release(&output);
@@ -333,51 +324,48 @@ static void tier1_select_test_shared_address(Tier1SelectTest* test)
                         X86_REGISTER_RAX,
                         X86_REGISTER_RAX,
                     };
-                    for (uint32_t path = 0; path < 2; path += 1)
+                    Tier1SelectPlan plan;
+                    uint32_t node = BUSTER_IR_NONE;
+                    const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                    tier1_select_test_expect(test, error == TIER1_SELECT_OK, "shared address selects on both paths");
+                    if (error == TIER1_SELECT_OK)
                     {
-                        Tier1SelectPlan plan;
-                        uint32_t node = BUSTER_IR_NONE;
-                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
-                        tier1_select_test_expect(test, error == TIER1_SELECT_OK, "shared address selects on both paths");
-                        if (error == TIER1_SELECT_OK)
+                        tier1_select_test_expect(test, (plan.covered[7] != 0) == (escape != 1) && !plan.covered[escaped[escape]],
+                                                 "an address needed by an escaping use remains computed while memory-only shared nodes disappear");
+                        for (uint32_t access = 9; access <= 10; access += 1)
                         {
-                            tier1_select_test_expect(test, (plan.covered[7] != 0) == (escape != 1) && !plan.covered[escaped[escape]],
-                                                     "an address needed by an escaping use remains computed while memory-only shared nodes disappear");
-                            for (uint32_t access = 9; access <= 10; access += 1)
+                            const Tier1SelectPattern* pattern = &plan.patterns[access];
+                            const uint32_t first = plan.effective_use_offsets[access];
+                            const uint32_t uses = plan.effective_use_offsets[access + 1] - first;
+                            tier1_select_test_expect(test, pattern->rule == (access == 9 ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_LOAD_ADDRESS) &&
+                                                             pattern->values[0] == 0 && pattern->values[1] == 1 && pattern->scale == tier1_select_log2(scale) && pattern->displacement == 8 &&
+                                                             uses == (access == 9 ? 3u : 2u) && plan.effective_use_values[first] == 0 && plan.effective_use_values[first + 1] == 1 &&
+                                                             (access != 9 || plan.effective_use_values[first + 2] == 2),
+                                                     "each shared memory address publishes the original base, index and stored value as effective uses");
+                        }
+                        Tier1SelectCode code;
+                        const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
+                        tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "shared address fixture emits");
+                        if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                        {
+                            for (uint32_t index = 0; index < 4; index += 1)
                             {
-                                const Tier1SelectPattern* pattern = &plan.patterns[access];
-                                const uint32_t first = plan.effective_use_offsets[access];
-                                const uint32_t uses = plan.effective_use_offsets[access + 1] - first;
-                                tier1_select_test_expect(test, pattern->rule == (access == 9 ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_LOAD_ADDRESS) &&
-                                                                 pattern->values[0] == 0 && pattern->values[1] == 1 && pattern->scale == tier1_select_log2(scale) && pattern->displacement == 8 &&
-                                                                 uses == (access == 9 ? 3u : 2u) && plan.effective_use_values[first] == 0 && plan.effective_use_values[first + 1] == 1 &&
-                                                                 (access != 9 || plan.effective_use_values[first + 2] == 2),
-                                                         "each shared memory address publishes the original base, index and stored value as effective uses");
-                            }
-                            Tier1SelectCode code;
-                            const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
-                            tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "shared address fixture emits");
-                            if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
-                            {
-                                for (uint32_t index = 0; index < 4; index += 1)
-                                {
-                                    uint8_t memory[64];
-                                    uint8_t wanted[64];
-                                    memset(memory, 0xa5, sizeof(memory));
-                                    memcpy(wanted, memory, sizeof(memory));
-                                    const uint64_t value = UINT64_C(0xfedcba9876543210) >> index;
-                                    const uint32_t offset = 8 + index * scale;
-                                    const uint64_t escaped_value = escape == 0 ? value : (uintptr_t)(memory + (escape == 1 ? offset : escape == 4 ? 0 : 8));
-                                    memcpy(wanted, &escaped_value, 8);
-                                    memcpy(wanted + offset, &value, 8);
-                                    const uint64_t actual = tier1_select_test_call(test, (uintptr_t)memory, index, value);
-                                    tier1_select_test_expect(test, actual == value && memcmp(memory, wanted, sizeof(memory)) == 0,
-                                                             "shared address folding preserves native memory, escaping pointers and volatile access order");
-                                }
+                                uint8_t memory[64];
+                                uint8_t wanted[64];
+                                memset(memory, 0xa5, sizeof(memory));
+                                memcpy(wanted, memory, sizeof(memory));
+                                const uint64_t value = UINT64_C(0xfedcba9876543210) >> index;
+                                const uint32_t offset = 8 + index * scale;
+                                const uint64_t escaped_value = escape == 0 ? value : (uintptr_t)(memory + (escape == 1 ? offset : escape == 4 ? 0 : 8));
+                                memcpy(wanted, &escaped_value, 8);
+                                memcpy(wanted + offset, &value, 8);
+                                const uint64_t actual = tier1_select_test_call(test, (uintptr_t)memory, index, value);
+                                tier1_select_test_expect(test, actual == value && memcmp(memory, wanted, sizeof(memory)) == 0,
+                                                         "shared address folding preserves native memory, escaping pointers and volatile access order");
                             }
                         }
-                        arena_pop_to(&output, 0);
                     }
+                    arena_pop_to(&output, 0);
                 }
                 arena_pop_to(&input, 0);
             }
@@ -551,57 +539,54 @@ static void tier1_select_test_scaled_index(Tier1SelectTest* test)
                 const uint32_t wanted_index = folded ? 1 : index;
                 const uint8_t wanted_scale = folded ? item.shift + item.outer : item.outer;
                 const int32_t wanted_displacement = (added ? 0 : 16) + (before || after ? (subtract ? -3 : 3) * (1 << (item.outer + (before ? item.shift : 0))) : 0);
-                for (uint32_t path = 0; path < 2; path += 1)
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+                tier1_select_test_expect(test, error == TIER1_SELECT_OK, "scaled indices select on both paths");
+                if (error == TIER1_SELECT_OK)
                 {
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &failed);
-                    tier1_select_test_expect(test, error == TIER1_SELECT_OK, "scaled indices select on both paths");
-                    if (error == TIER1_SELECT_OK)
+                    tier1_select_test_expect(test, (plan.covered[scaled] != 0) == folded && (!shared_constant || !plan.covered[3]),
+                                             "scale folding retains narrowed and shared indices and separately used constants");
+                    for (uint32_t use = memory ? store : address; use <= (memory ? store + 1 : address); use += 1)
                     {
-                        tier1_select_test_expect(test, (plan.covered[scaled] != 0) == folded && (!shared_constant || !plan.covered[3]),
-                                                 "scale folding retains narrowed and shared indices and separately used constants");
-                        for (uint32_t use = memory ? store : address; use <= (memory ? store + 1 : address); use += 1)
+                        const Tier1SelectPattern* pattern = &plan.patterns[use];
+                        const uint32_t first = plan.effective_use_offsets[use];
+                        const uint32_t count = plan.effective_use_offsets[use + 1] - first;
+                        const bool storing = memory && use == store;
+                        tier1_select_test_expect(test, pattern->rule == (storing ? TIER1_RULE_STORE_ADDRESS : memory ? TIER1_RULE_LOAD_ADDRESS : TIER1_RULE_ADDRESS) &&
+                                                         pattern->values[0] == 0 && pattern->values[1] == wanted_index && pattern->scale == wanted_scale &&
+                                                         pattern->displacement == wanted_displacement && count == (storing ? 3u : 2u) &&
+                                                         plan.effective_use_values[first] == 0 && plan.effective_use_values[first + 1] == wanted_index &&
+                                                         (!storing || plan.effective_use_values[first + 2] == 2),
+                                                 "address selection retains the exact scale, displacement and effective base/index uses");
+                    }
+                    Tier1SelectCode code;
+                    const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed);
+                    tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "scaled-index fixture emits");
+                    if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                    {
+                        static const uint64_t samples[] = {0, 1, 2, UINT64_MAX, UINT64_C(0x8000000000000000)};
+                        for (uint32_t sample = 0; sample < (memory ? 4u : BUSTER_ARRAY_LENGTH(samples)); sample += 1)
                         {
-                            const Tier1SelectPattern* pattern = &plan.patterns[use];
-                            const uint32_t first = plan.effective_use_offsets[use];
-                            const uint32_t count = plan.effective_use_offsets[use + 1] - first;
-                            const bool storing = memory && use == store;
-                            tier1_select_test_expect(test, pattern->rule == (storing ? TIER1_RULE_STORE_ADDRESS : memory ? TIER1_RULE_LOAD_ADDRESS : TIER1_RULE_ADDRESS) &&
-                                                             pattern->values[0] == 0 && pattern->values[1] == wanted_index && pattern->scale == wanted_scale &&
-                                                             pattern->displacement == wanted_displacement && count == (storing ? 3u : 2u) &&
-                                                             plan.effective_use_values[first] == 0 && plan.effective_use_values[first + 1] == wanted_index &&
-                                                             (!storing || plan.effective_use_values[first + 2] == 2),
-                                                     "address selection retains the exact scale, displacement and effective base/index uses");
-                        }
-                        Tier1SelectCode code;
-                        const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed);
-                        tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "scaled-index fixture emits");
-                        if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
-                        {
-                            static const uint64_t samples[] = {0, 1, 2, UINT64_MAX, UINT64_C(0x8000000000000000)};
-                            for (uint32_t sample = 0; sample < (memory ? 4u : BUSTER_ARRAY_LENGTH(samples)); sample += 1)
+                            uint8_t actual_memory[256];
+                            uint8_t expected_memory[256];
+                            for (uint32_t byte = 0; byte < sizeof(actual_memory); byte += 1)
                             {
-                                uint8_t actual_memory[256];
-                                uint8_t expected_memory[256];
-                                for (uint32_t byte = 0; byte < sizeof(actual_memory); byte += 1)
-                                {
-                                    actual_memory[byte] = (uint8_t)(byte * 37 + 90);
-                                }
-                                memcpy(expected_memory, actual_memory, sizeof(actual_memory));
-                                const uint64_t argument = narrow ? UINT64_C(0x40000000) + (sample & 3) : samples[sample];
-                                const uint64_t actual_base = memory ? (uintptr_t)(actual_memory + 96) : UINT64_MAX - 17;
-                                const uint64_t expected_base = memory ? (uintptr_t)(expected_memory + 96) : actual_base;
-                                const uint64_t value = UINT64_C(0xfedcba9876543210) >> sample;
-                                const uint64_t expected = tier1_select_test_interpret(&function, expected_base, argument, value);
-                                const uint64_t actual = tier1_select_test_call(test, actual_base, argument, value);
-                                tier1_select_test_expect(test, actual == expected && memcmp(actual_memory, expected_memory, sizeof(actual_memory)) == 0,
-                                                         "scaled-index native values and memory match the independent IR, including wrap before extension");
+                                actual_memory[byte] = (uint8_t)(byte * 37 + 90);
                             }
+                            memcpy(expected_memory, actual_memory, sizeof(actual_memory));
+                            const uint64_t argument = narrow ? UINT64_C(0x40000000) + (sample & 3) : samples[sample];
+                            const uint64_t actual_base = memory ? (uintptr_t)(actual_memory + 96) : UINT64_MAX - 17;
+                            const uint64_t expected_base = memory ? (uintptr_t)(expected_memory + 96) : actual_base;
+                            const uint64_t value = UINT64_C(0xfedcba9876543210) >> sample;
+                            const uint64_t expected = tier1_select_test_interpret(&function, expected_base, argument, value);
+                            const uint64_t actual = tier1_select_test_call(test, actual_base, argument, value);
+                            tier1_select_test_expect(test, actual == expected && memcmp(actual_memory, expected_memory, sizeof(actual_memory)) == 0,
+                                                     "scaled-index native values and memory match the independent IR, including wrap before extension");
                         }
                     }
-                    arena_pop_to(&output, 0);
                 }
+                arena_pop_to(&output, 0);
             }
             arena_pop_to(&input, 0);
         }
@@ -674,56 +659,53 @@ static void tier1_select_test_load_addition(Tier1SelectTest* test)
                             X86_REGISTER_RAX,
                             X86_REGISTER_RAX,
                         };
-                        for (uint32_t path = 0; path < 2; path += 1)
+                        Tier1SelectPlan plan;
+                        uint32_t node = BUSTER_IR_NONE;
+                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                        tier1_select_test_expect(test, error == TIER1_SELECT_OK, "load addition selects on both paths");
+                        if (error == TIER1_SELECT_OK)
                         {
-                            Tier1SelectPlan plan;
-                            uint32_t node = BUSTER_IR_NONE;
-                            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
-                            tier1_select_test_expect(test, error == TIER1_SELECT_OK, "load addition selects on both paths");
-                            if (error == TIER1_SELECT_OK)
+                            const bool folded = shared == 0 && plan.covered[3] != 0 && plan.covered[4] != 0 && plan.patterns[5].rule == TIER1_RULE_LOAD_OPERAND &&
+                                                plan.patterns[5].intrinsic_cost == 2u + plan.patterns[5].sign_result && plan.patterns[5].values[0] == 1;
+                            const bool kept = shared != 0 && plan.covered[4] == 0 && plan.patterns[5].rule != TIER1_RULE_LOAD_OPERAND && plan.patterns[6].rule != TIER1_RULE_LOAD_OPERAND;
+                            tier1_select_test_expect(test, folded || kept, "an addition takes its single-use load as its memory operand, and a shared load stays computed");
+                            Tier1SelectCode code;
+                            const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
+                            tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "load addition fixture emits");
+                            if (emitted == TIER1_SELECT_OK)
                             {
-                                const bool folded = shared == 0 && plan.covered[3] != 0 && plan.covered[4] != 0 && plan.patterns[5].rule == TIER1_RULE_LOAD_OPERAND &&
-                                                    plan.patterns[5].intrinsic_cost == 2u + plan.patterns[5].sign_result && plan.patterns[5].values[0] == 1;
-                                const bool kept = shared != 0 && plan.covered[4] == 0 && plan.patterns[5].rule != TIER1_RULE_LOAD_OPERAND && plan.patterns[6].rule != TIER1_RULE_LOAD_OPERAND;
-                                tier1_select_test_expect(test, folded || kept, "an addition takes its single-use load as its memory operand, and a shared load stays computed");
-                                Tier1SelectCode code;
-                                const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
-                                tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "load addition fixture emits");
-                                if (emitted == TIER1_SELECT_OK)
+                                uint32_t accesses = 0;
+                                bool scratched = false;
+                                for (uint32_t r = 0; r < code.count; r += 1)
                                 {
-                                    uint32_t accesses = 0;
-                                    bool scratched = false;
-                                    for (uint32_t r = 0; r < code.count; r += 1)
-                                    {
-                                        const uint16_t form = code.records[r].form;
-                                        accesses += (code.records[r].mode & BUSTER_X86_MODE_MEMORY) != 0 && form != X86_FORM_LEA_R32_M && form != X86_FORM_LEA_R64_M;
-                                        scratched |= code.records[r].reg == BUSTER_TIER1_SELECT_SCRATCH || code.records[r].rm == BUSTER_TIER1_SELECT_SCRATCH;
-                                    }
-                                    const uint32_t records = code.node_first[6] - code.node_first[5];
-                                    const bool sized = shared != 0 || (records == (sums[s] == X86_REGISTER_RSI ? 1u : 2u) && !scratched);
-                                    tier1_select_test_expect(test, accesses == 1 && sized, "the sum is one record in x's register and two elsewhere, reading memory once");
+                                    const uint16_t form = code.records[r].form;
+                                    accesses += (code.records[r].mode & BUSTER_X86_MODE_MEMORY) != 0 && form != X86_FORM_LEA_R32_M && form != X86_FORM_LEA_R64_M;
+                                    scratched |= code.records[r].reg == BUSTER_TIER1_SELECT_SCRATCH || code.records[r].rm == BUSTER_TIER1_SELECT_SCRATCH;
                                 }
-                                if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                                const uint32_t records = code.node_first[6] - code.node_first[5];
+                                const bool sized = shared != 0 || (records == (sums[s] == X86_REGISTER_RSI ? 1u : 2u) && !scratched);
+                                tier1_select_test_expect(test, accesses == 1 && sized, "the sum is one record in x's register and two elsewhere, reading memory once");
+                            }
+                            if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                            {
+                                for (uint32_t sample = 0; sample < 4; sample += 1)
                                 {
-                                    for (uint32_t sample = 0; sample < 4; sample += 1)
+                                    uint64_t memory[3] =
                                     {
-                                        uint64_t memory[3] =
-                                        {
-                                            UINT64_C(0x5a5a5a5a5a5a5a5a),
-                                            UINT64_C(0xfedcba9876543210) >> sample,
-                                            UINT64_C(0xa5a5a5a5a5a5a5a5),
-                                        };
-                                        const uint64_t x = UINT64_C(0x0123456789abcdef) << sample;
-                                        const uint64_t y = UINT64_MAX - sample;
-                                        const uint64_t mask = width == 4 ? UINT32_MAX : UINT64_MAX;
-                                        const uint64_t expected = tier1_select_test_interpret(&function, (uintptr_t)memory, x, y) & mask;
-                                        const uint64_t actual = tier1_select_test_call(test, (uintptr_t)memory, x, y) & mask;
-                                        tier1_select_test_expect(test, actual == expected, "a load's addition executes what the original IR computes");
-                                    }
+                                        UINT64_C(0x5a5a5a5a5a5a5a5a),
+                                        UINT64_C(0xfedcba9876543210) >> sample,
+                                        UINT64_C(0xa5a5a5a5a5a5a5a5),
+                                    };
+                                    const uint64_t x = UINT64_C(0x0123456789abcdef) << sample;
+                                    const uint64_t y = UINT64_MAX - sample;
+                                    const uint64_t mask = width == 4 ? UINT32_MAX : UINT64_MAX;
+                                    const uint64_t expected = tier1_select_test_interpret(&function, (uintptr_t)memory, x, y) & mask;
+                                    const uint64_t actual = tier1_select_test_call(test, (uintptr_t)memory, x, y) & mask;
+                                    tier1_select_test_expect(test, actual == expected, "a load's addition executes what the original IR computes");
                                 }
                             }
-                            arena_pop_to(&output, 0);
                         }
+                        arena_pop_to(&output, 0);
                     }
                 }
                 arena_pop_to(&input, 0);

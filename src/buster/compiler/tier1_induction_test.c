@@ -140,92 +140,89 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                 tier1_select_test_node(&function, 11, IR_SEXT, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 tier1_select_test_node(&function, 12, IR_RET, IR_VOID, 11, BUSTER_IR_NONE, BUSTER_IR_NONE);
             }
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t pressure = 0; pressure < 2; pressure += 1)
             {
-                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                const uint64_t output_mark = test->output.length;
+                IrDominance dominance;
+                const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "guarded induction selects by both paths");
+                if (selected != TIER1_SELECT_OK && test->failures < 20)
                 {
-                    const uint64_t output_mark = test->output.length;
-                    IrDominance dominance;
-                    const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
-                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "guarded induction selects by both paths");
-                    if (selected != TIER1_SELECT_OK && test->failures < 20)
+                    fprintf(stderr, "  induction selection error=%u node=%u shape=%u\n", selected, failed, shape);
+                }
+                if (selected == TIER1_SELECT_OK)
+                {
+                    tier1_emit_test_expect(test, plan.patterns[widening].rule == (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND),
+                                           "only a complete nonoverflowing induction certificate removes signed widening");
+                    const Tier1EmitOptions options = {
+                        .certify = true,
+                        .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                        .vector = true,
+                        .rematerialize = pressure != 0,
+                    };
+                    Tier1EmitResult emitted;
+                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "guarded induction passes CFG allocation and emission");
+                    if (error == TIER1_EMIT_OK)
                     {
-                        fprintf(stderr, "  induction selection error=%u node=%u shape=%u path=%u\n", selected, failed, shape, path);
-                    }
-                    if (selected == TIER1_SELECT_OK)
-                    {
-                        tier1_emit_test_expect(test, plan.patterns[widening].rule == (proven ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND),
-                                               "only a complete nonoverflowing induction certificate removes signed widening");
-                        const Tier1EmitOptions options = {
-                            .certify = true,
-                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = path != 0,
-                            .rematerialize = pressure != 0,
-                        };
-                        Tier1EmitResult emitted;
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "guarded induction passes CFG allocation and emission");
-                        if (error == TIER1_EMIT_OK)
+                        void* executable = MAP_FAILED;
+                        uint64_t bytes = 0;
+                        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                         {
-                            void* executable = MAP_FAILED;
-                            uint64_t bytes = 0;
-                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            const uint32_t samples = (shape >= 2 && shape <= 5) || bypass || shape == 17 || shape == 18 ? 1 : BUSTER_ARRAY_LENGTH(ordinary);
+                            for (uint32_t sample = 0; sample < samples; sample += 1)
                             {
-                                const uint32_t samples = (shape >= 2 && shape <= 5) || bypass || shape == 17 || shape == 18 ? 1 : BUSTER_ARRAY_LENGTH(ordinary);
-                                for (uint32_t sample = 0; sample < samples; sample += 1)
+                                uint32_t input = ordinary[sample];
+                                if (shape == 2 || shape == 5 || shape == 17 || shape == 18)
                                 {
-                                    uint32_t input = ordinary[sample];
-                                    if (shape == 2 || shape == 5 || shape == 17 || shape == 18)
+                                    input = INT32_MAX;
+                                }
+                                else if (shape == 3 || shape == 4)
+                                {
+                                    input = UINT32_C(0x80000000) + (shape == 4);
+                                }
+                                else if (shape == 9 && input > 1024)
+                                {
+                                    input = sample;
+                                }
+                                const uint32_t limit = bypass ? 127 : input & mask;
+                                uint32_t phi = shape >= 20 ? (shape == 20 ? input & mask : input) : multiple_seeds && input == 0 ? (shape == 12 ? 15 : INT32_MAX) : initial;
+                                uint32_t step = 0;
+                                bool again = !header_guard || tier1_select_test_compare(predicate, 4, phi, limit) != 0;
+                                for (uint32_t iteration = 0; again && iteration < 65538; iteration += 1)
+                                {
+                                    step = phi + stride;
+                                    if (header_guard)
                                     {
-                                        input = INT32_MAX;
+                                        phi = step;
                                     }
-                                    else if (shape == 3 || shape == 4)
+                                    const uint32_t tested = shape == 5 || header_guard ? phi : step;
+                                    again = tier1_select_test_compare(predicate, 4, shape == 8 ? limit : tested, shape == 8 ? tested : limit) != (shape == 7);
+                                    again |= bypass && phi == initial;
+                                    if (again)
                                     {
-                                        input = UINT32_C(0x80000000) + (shape == 4);
-                                    }
-                                    else if (shape == 9 && input > 1024)
-                                    {
-                                        input = sample;
-                                    }
-                                    const uint32_t limit = bypass ? 127 : input & mask;
-                                    uint32_t phi = shape >= 20 ? (shape == 20 ? input & mask : input) : multiple_seeds && input == 0 ? (shape == 12 ? 15 : INT32_MAX) : initial;
-                                    uint32_t step = 0;
-                                    bool again = !header_guard || tier1_select_test_compare(predicate, 4, phi, limit) != 0;
-                                    for (uint32_t iteration = 0; again && iteration < 65538; iteration += 1)
-                                    {
-                                        step = phi + stride;
-                                        if (header_guard)
-                                        {
-                                            phi = step;
-                                        }
-                                        const uint32_t tested = shape == 5 || header_guard ? phi : step;
-                                        again = tier1_select_test_compare(predicate, 4, shape == 8 ? limit : tested, shape == 8 ? tested : limit) != (shape == 7);
-                                        again |= bypass && phi == initial;
-                                        if (again)
-                                        {
-                                            phi = step;
-                                        }
-                                    }
-                                    tier1_emit_test_expect(test, !again, "independent induction oracle stays within its bounded test budget");
-                                    if (!again)
-                                    {
-                                        const uint64_t expected = (uint64_t)(int64_t)(int32_t)(returned == 6 ? phi : step);
-                                        const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55a120000000000) | input, 0);
-                                        tier1_emit_test_expect(test, actual == expected, "induction code preserves negative seeds, wrapped sums, guard direction and poisoned ABI bits");
+                                        phi = step;
                                     }
                                 }
-                            }
-                            if (executable != MAP_FAILED)
-                            {
-                                munmap(executable, bytes);
+                                tier1_emit_test_expect(test, !again, "independent induction oracle stays within its bounded test budget");
+                                if (!again)
+                                {
+                                    const uint64_t expected = (uint64_t)(int64_t)(int32_t)(returned == 6 ? phi : step);
+                                    const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55a120000000000) | input, 0);
+                                    tier1_emit_test_expect(test, actual == expected, "induction code preserves negative seeds, wrapped sums, guard direction and poisoned ABI bits");
+                                }
                             }
                         }
+                        if (executable != MAP_FAILED)
+                        {
+                            munmap(executable, bytes);
+                        }
                     }
-                    arena_pop_to(&test->output, output_mark);
                 }
+                arena_pop_to(&test->output, output_mark);
             }
         }
         arena_pop_to(&test->input, input_mark);

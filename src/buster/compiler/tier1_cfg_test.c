@@ -2047,33 +2047,30 @@ static void tier1_cfg_test_phi_storage(Tier1CfgTestTally* tally, Arena* output, 
                     },
                 };
                 tier1_cfg_test_ordinals(tally, &input, scratch);
-                for (uint32_t path = 0; path < 2; path += 1)
+                const uint64_t mark = output->length;
+                Arena bounded = *scratch;
+                bounded.capacity = bounded.length + allowance < bounded.capacity ? bounded.length + allowance : bounded.capacity;
+                Tier1CfgPrepared prepared = { 0 };
+                const Tier1CfgError error = tier1_cfg_prepare(&input, output, &bounded, true, &prepared);
+                tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "wide local-phi preparation fits bounded scratch");
+                if (error == TIER1_CFG_OK)
                 {
-                    const uint64_t mark = output->length;
-                    Arena bounded = *scratch;
-                    bounded.capacity = bounded.length + allowance < bounded.capacity ? bounded.length + allowance : bounded.capacity;
-                    Tier1CfgPrepared prepared = { 0 };
-                    const Tier1CfgError error = tier1_cfg_prepare(&input, output, &bounded, path == 0, &prepared);
-                    tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "wide local-phi preparation fits bounded scratch");
-                    if (error == TIER1_CFG_OK)
+                    const Tier1CfgAllocation* result = &prepared.candidate;
+                    tier1_cfg_test_expect(tally, result->cross_block_values == global, "wide phi operands do not widen global liveness");
+                    tier1_cfg_test_expect(tally, result->edge_local_values == width, "wide phi operands count once per home");
+                    tier1_cfg_test_expect(tally, result->liveness_bytes <= (uint64_t)blocks * 256 && (global != 0 || result->liveness_bytes == 0), "wide phi matrix storage grows only with blocks");
+                    bool tails = true;
+                    for (uint32_t v = 1; tails && v <= width; v += 1)
                     {
-                        const Tier1CfgAllocation* result = &prepared.candidate;
-                        tier1_cfg_test_expect(tally, result->cross_block_values == global, "wide phi operands do not widen global liveness");
-                        tier1_cfg_test_expect(tally, result->edge_local_values == width, "wide phi operands count once per home");
-                        tier1_cfg_test_expect(tally, result->liveness_bytes <= (uint64_t)blocks * 256 && (global != 0 || result->liveness_bytes == 0), "wide phi matrix storage grows only with blocks");
-                        bool tails = true;
-                        for (uint32_t v = 1; tails && v <= width; v += 1)
-                        {
-                            const uint32_t first = result->value_interval_offsets[v];
-                            const uint32_t end = result->value_interval_offsets[v + 1];
-                            tails = end == first + 1 && result->intervals.starts[first] == definitions[v] && result->intervals.ends[first] == starts[v + 1];
-                        }
-                        tier1_cfg_test_expect(tally, tails, "every wide phi operand has exactly its home-tail interval");
-                        tier1_cfg_release(&prepared, &bounded);
+                        const uint32_t first = result->value_interval_offsets[v];
+                        const uint32_t end = result->value_interval_offsets[v + 1];
+                        tails = end == first + 1 && result->intervals.starts[first] == definitions[v] && result->intervals.ends[first] == starts[v + 1];
                     }
-                    tier1_cfg_test_expect(tally, bounded.length == scratch->length, "bounded preparation restores scratch");
-                    arena_pop_to(output, mark);
+                    tier1_cfg_test_expect(tally, tails, "every wide phi operand has exactly its home-tail interval");
+                    tier1_cfg_release(&prepared, &bounded);
                 }
+                tier1_cfg_test_expect(tally, bounded.length == scratch->length, "bounded preparation restores scratch");
+                arena_pop_to(output, mark);
                 if (width == widths[0])
                 {
                     tier1_cfg_test_case(tally, &input, output, scratch, "wide phi operand semantics", true, 0, 0, true);

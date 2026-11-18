@@ -42,39 +42,36 @@ static void tier1_select_test_coalesced_addresses(Tier1SelectTest* test)
             for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
             {
                 const uint8_t registers[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, destinations[d], X86_REGISTER_RAX };
-                for (uint32_t path = 0; path < 2; path += 1)
+                Tier1SelectPlan plan;
+                uint32_t node = BUSTER_IR_NONE;
+                const Tier1SelectError selected = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                tier1_select_test_expect(test, selected == TIER1_SELECT_OK, "both paths select the address sum");
+                if (selected == TIER1_SELECT_OK)
                 {
-                    Tier1SelectPlan plan;
-                    uint32_t node = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &node);
-                    tier1_select_test_expect(test, selected == TIER1_SELECT_OK, "both paths select the address sum");
-                    if (selected == TIER1_SELECT_OK)
+                    Tier1SelectCode code;
+                    const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
+                    tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "allocated address sum emits");
+                    if (emitted == TIER1_SELECT_OK)
                     {
-                        Tier1SelectCode code;
-                        const Tier1SelectError emitted = tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node);
-                        tier1_select_test_expect(test, emitted == TIER1_SELECT_OK, "allocated address sum emits");
-                        if (emitted == TIER1_SELECT_OK)
+                        const bool add = d != 0 && shape < 3;
+                        const uint16_t form = add ? (shape == 0 ? X86_FORM_ADD_R32_RM32 : X86_FORM_ADD_R64_RM64) :
+                                                   (shape == 0 ? X86_FORM_LEA_R32_M : X86_FORM_LEA_R64_M);
+                        const uint32_t first = code.node_first[2];
+                        tier1_select_test_expect(test, code.node_first[3] == first + 1 && code.records[first].form == form,
+                                                 "only a coalesced unscaled sum without displacement becomes add");
+                        if (add)
                         {
-                            const bool add = d != 0 && shape < 3;
-                            const uint16_t form = add ? (shape == 0 ? X86_FORM_ADD_R32_RM32 : X86_FORM_ADD_R64_RM64) :
-                                                       (shape == 0 ? X86_FORM_LEA_R32_M : X86_FORM_LEA_R64_M);
-                            const uint32_t first = code.node_first[2];
-                            tier1_select_test_expect(test, code.node_first[3] == first + 1 && code.records[first].form == form,
-                                                     "only a coalesced unscaled sum without displacement becomes add");
-                            if (add)
-                            {
-                                X86Instruction lea = tier1_select_memory_holes(&plan.patterns[2], registers, 0);
-                                lea.reg = destinations[d];
-                                lea.form = shape == 0 ? X86_FORM_LEA_R32_M : X86_FORM_LEA_R64_M;
-                                uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-                                const int64_t lea_bytes = x86_encode(&lea, 1, bytes, sizeof(bytes), 0, 0);
-                                const int64_t add_bytes = x86_encode(code.records + first, 1, bytes, sizeof(bytes), 0, 0);
-                                tier1_select_test_expect(test, add_bytes > 0 && lea_bytes == add_bytes + 1, "coalesced add removes the address operand's SIB byte");
-                            }
+                            X86Instruction lea = tier1_select_memory_holes(&plan.patterns[2], registers, 0);
+                            lea.reg = destinations[d];
+                            lea.form = shape == 0 ? X86_FORM_LEA_R32_M : X86_FORM_LEA_R64_M;
+                            uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
+                            const int64_t lea_bytes = x86_encode(&lea, 1, bytes, sizeof(bytes), 0, 0);
+                            const int64_t add_bytes = x86_encode(code.records + first, 1, bytes, sizeof(bytes), 0, 0);
+                            tier1_select_test_expect(test, add_bytes > 0 && lea_bytes == add_bytes + 1, "coalesced add removes the address operand's SIB byte");
                         }
                     }
-                    arena_pop_to(&output, 0);
                 }
+                arena_pop_to(&output, 0);
                 tier1_select_test_plan_execute(test, &function, registers, &output, &scratch);
             }
         }

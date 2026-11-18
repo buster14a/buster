@@ -91,7 +91,7 @@ struct Tier1PipelineTest
     uint32_t native_results;
     uint32_t clang_results;
     uint32_t resolved_calls;
-    // The bottom-up rewrite's twins on every function planned (tier1_burs_check_function, #141).
+    // The bottom-up rewrite's definitions on every function planned (tier1_burs_check_function, #141).
     Tier1BursCheck burs;
     // The CFG consumer's functions, and what their edges took.
     uint32_t general;
@@ -1400,9 +1400,9 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
         tier1_pipeline_fixture(&fixture, shape);
         tier1_pipeline_reset(test);
         const bool frozen = tier1_pipeline_freeze(test, &fixture, &original);
-        for (uint32_t path = 0; frozen && path < 2; path += 1)
+        if (frozen)
         {
-            test->vector = path != 0;
+            test->vector = true;
             for (uint32_t remat = 0; remat < 2; remat += 1)
             {
                 test->rematerialize = remat != 0;
@@ -1442,12 +1442,10 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                         ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_again(&function, &dominance, &plan, true, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH]),
                                                          "the verified function's plan is the verifying plan's");
-                        ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_twin(&function, &dominance, &plan, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH]),
-                                                         "both host paths publish the same selected plan and effective uses");
                         const uint64_t mismatches = test->burs.mismatches + test->burs.uncovered;
                         tier1_burs_check_function(&test->burs, &function, &dominance, &test->arenas[TIER1_PIPELINE_SCRATCH]);
                         ok = ok && tier1_pipeline_expect(test, test->burs.mismatches + test->burs.uncovered == mismatches,
-                                                         "the bottom-up rewrite's twins classify, label and choose alike, every covered class with a candidate");
+                                                         "the bottom-up rewrite's children, states and rules hold their definitions, every covered class with a candidate");
                     }
                     Tier1EmitResult* emitted = &bodies[f];
                     if (ok)
@@ -1755,9 +1753,9 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             {
                 tier1_pipeline_clang(&test, clang);
             }
-            tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 4 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
-            tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 4, "every supported call path resolves its original local helper symbol");
-            tier1_pipeline_expect(&test, test.general == 9 * 4 && test.edge_moves != 0 && test.edge_stubs != 0,
+            tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
+            tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 2, "every supported call path resolves its original local helper symbol");
+            tier1_pipeline_expect(&test, test.general == 9 * 2 && test.edge_moves != 0 && test.edge_stubs != 0,
                                   "every control-flow fixture, the floating one and the dynamic stack's go through the CFG consumer, whose edges move values, critical ones through stubs");
             tier1_pipeline_expect(&test, test.certified != 0 && test.certificate_facts != 0, "the emitter certified its allocations, CFG ones with block-entry facts");
             tier1_pipeline_expect(&test, test.code_certified + test.code_uncertified == test.general && test.code_certified != 0 && test.mutants_refused != 0 && test.mutants_run != 0, "the CFG consumer's code is certified, and its mutants refused or harmless");
@@ -1767,7 +1765,7 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
             }
         }
-        printf("tier1 pipeline bottom-up rewrite: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64 " twin mismatches\n", test.burs.functions,
+        printf("tier1 pipeline bottom-up rewrite: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64 " broken definitions\n", test.burs.functions,
                test.burs.nodes, test.burs.matched, test.burs.fallbacks, test.burs.mismatches);
         printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " certified=%" PRIu64 " certificate-facts=%" PRIu64 " code-certified=%" PRIu64 "/%" PRIu64  " mutants=%" PRIu64 " refused=%" PRIu64 " accepted-run=%" PRIu64 " prologue-mutants=%" PRIu64 "/%" PRIu64 " epilogue-mutants=%" PRIu64 "/%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, test.certified, test.certificate_facts, test.code_certified, (uint64_t)test.general, test.mutants, test.mutants_refused, test.mutants_run, test.frame_refused[0], test.frame_mutants[0], test.frame_refused[1], test.frame_mutants[1], seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)

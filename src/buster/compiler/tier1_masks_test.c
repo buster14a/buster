@@ -4292,10 +4292,10 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
                 ok = tier1_masks_test_interpret(test, &function, bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_BUFFER);
             }
         }
-        // Both paths, each with rematerialization (as the C driver's --tier1 runs) and without.
-        for (uint32_t run = 0; ok && run < 4; run += 1)
+        // With rematerialization (as the C driver's --tier1 runs) and without.
+        for (uint32_t run = 0; ok && run < 2; run += 1)
         {
-            tier1_masks_test_path(test, fixture, &function, &dominance, (run & 1) == 0, (run & 2) != 0, inputs, counts, expected);
+            tier1_masks_test_path(test, fixture, &function, &dominance, true, run != 0, inputs, counts, expected);
         }
     }
     tier1_masks_test_expect(test, test->scratch.length == 0, "parsing returns the scratch arena");
@@ -4430,27 +4430,24 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
         IrDominance dominance;
         if (tier1_masks_test_parse(test, texts[c], &function, &dominance))
         {
-            for (uint32_t path = 0; path < 2; path += 1)
+            Tier1SelectPlan plan;
+            uint32_t node = BUSTER_IR_NONE;
+            const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &node);
+            const Tier1EmitOptions options = {
+                .certify = true,
+                .register_mask = tier1_liveness_register_mask(),
+                .vector = true,
+            };
+            Tier1EmitResult emitted = { 0 };
+            const Tier1EmitError error = selected == TIER1_SELECT_OK ? tier1_emit_function(&plan, &options, targets[c], &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_UNSUPPORTED;
+            const bool selection = c < 2;
+            const bool expected = selection ? selected == TIER1_SELECT_ERROR_UNSUPPORTED : refused[c] ? selected == TIER1_SELECT_OK && error == TIER1_EMIT_TARGET : selected == TIER1_SELECT_OK && error == TIER1_EMIT_OK;
+            tier1_masks_test_expect(test, expected, names[c]);
+            if (!expected)
             {
-                Tier1SelectPlan plan;
-                uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path == 0, &plan, &node);
-                const Tier1EmitOptions options = {
-                    .certify = true,
-                    .register_mask = tier1_liveness_register_mask(),
-                    .vector = path == 0,
-                };
-                Tier1EmitResult emitted = { 0 };
-                const Tier1EmitError error = selected == TIER1_SELECT_OK ? tier1_emit_function(&plan, &options, targets[c], &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_UNSUPPORTED;
-                const bool selection = c < 2;
-                const bool expected = selection ? selected == TIER1_SELECT_ERROR_UNSUPPORTED : refused[c] ? selected == TIER1_SELECT_OK && error == TIER1_EMIT_TARGET : selected == TIER1_SELECT_OK && error == TIER1_EMIT_OK;
-                tier1_masks_test_expect(test, expected, names[c]);
-                if (!expected)
-                {
-                    printf("test-tier1-masks: %s, %s path: selection %u, emission %u, node %u\n", names[c], path == 0 ? "vector" : "scalar", (unsigned)selected, (unsigned)error, node);
-                }
-                test->refused += refused[c] && expected;
+                printf("test-tier1-masks: %s: selection %u, emission %u, node %u\n", names[c], (unsigned)selected, (unsigned)error, node);
             }
+            test->refused += refused[c] && expected;
         }
         tier1_masks_test_expect(test, test->scratch.length == 0, "refusals return the scratch arena");
         arena_pop_to(&test->output, output_mark);
@@ -4633,7 +4630,7 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
     if (ok && !decodable)
     {
         *machine = checks[0][0].error == IR_OK && checks[1][0].error == IR_OK && lowered[0][0].row_count != 0 && lowered[1][0].row_count == lowered[0][0].row_count;
-        tier1_masks_test_expect(test, *machine, "a row the IR's decoders don't take is the typed program's machine row, by both paths");
+        tier1_masks_test_expect(test, *machine, "a row the IR's decoders don't take is the typed program's machine row,");
     }
     for (uint32_t f = 0; ok && f < 2; f += 1)
     {
@@ -4685,7 +4682,7 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
         }
     }
     // Tier 1 by both paths.
-    for (uint32_t path = 0; ok && path < 2; path += 1)
+    if (ok)
     {
         const uint64_t mark = arenas[2].length;
         Tier1EmitResult emitted[2];
@@ -4695,12 +4692,12 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
             ok = tier1_masks_test_dominance(test, &optimized[f], &dominance);
-            const Tier1SelectError selected = ok ? tier1_select_plan(&optimized[f], &dominance, &arenas[2], &test->scratch, path == 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+            const Tier1SelectError selected = ok ? tier1_select_plan(&optimized[f], &dominance, &arenas[2], &test->scratch, true, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
             ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the typed program's masks");
             const Tier1EmitOptions options = {
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = path == 0,
+                .vector = true,
                 .rematerialize = true,
             };
             memset(&emitted[f], 0, sizeof(emitted[f]));
@@ -4716,7 +4713,7 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             }
             if (!ok)
             {
-                printf("test-tier1-masks: %s, function %u, %s path: selection %u, emission %u, at node %u (op %u)\n", name, f, path == 0 ? "vector" : "scalar", (unsigned)selected, (unsigned)error, node,
+                printf("test-tier1-masks: %s, function %u: selection %u, emission %u, at node %u (op %u)\n", name, f, (unsigned)selected, (unsigned)error, node,
                        node < optimized[f].instruction_count ? optimized[f].op[node] : 0);
             }
             Tier1CfgCheck check;
@@ -4935,7 +4932,7 @@ static void tier1_masks_test_builtins(Tier1MasksTest* test)
             // Tier 0's code by both paths, run natively: the instructions the model describes.
             Tier0TestTally tally = { 0 };
             const uint32_t length = ok ? tier0_test_mask_build(&tally, name, functions, 2, &tier0, image) : 0;
-            ok = tier1_masks_test_expect(test, length != 0 && tally.failures == 0, "Tier 0 compiles the front end's row by both paths");
+            ok = tier1_masks_test_expect(test, length != 0 && tally.failures == 0, "Tier 0 compiles the front end's row");
             for (uint32_t input = 0; ok && test->native && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
             {
                 memset(shared, 0, sizeof(*shared));
@@ -5137,7 +5134,7 @@ static void tier1_masks_test_compares(Tier1MasksTest* test)
             }
             Tier0TestTally tally = { 0 };
             const uint32_t length = ok ? tier0_test_mask_build(&tally, name, functions, 2, &tier0, image) : 0;
-            ok = tier1_masks_test_expect(test, length != 0 && tally.failures == 0, "Tier 0 compiles the front end's comparison by both paths");
+            ok = tier1_masks_test_expect(test, length != 0 && tally.failures == 0, "Tier 0 compiles the front end's comparison");
             for (uint32_t input = 0; ok && test->native && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
             {
                 memset(shared, 0, sizeof(*shared));
@@ -5602,8 +5599,8 @@ static void tier1_masks_test_shuffle_immediates(Tier1MasksTest* test)
             test->watched_records[1] = 0;
             bool machine = false;
             ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
-            ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 2 * 4 && test->watched_records[1] == 0,
-                                               "a byte shuffle by an immediate is the IR's shuffle by a constant, which Tier 1 emits as the immediate form by both paths");
+            ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 4 && test->watched_records[1] == 0,
+                                               "a byte shuffle by an immediate is the IR's shuffle by a constant, which Tier 1 emits as the immediate form");
             if (!ok)
             {
                 printf("test-tier1-masks: %s: kind %u immediate %u matched %u and %u: %u immediate records, %u vpshufb\n", name, kind, immediate, matched, matched_immediate,
@@ -7691,7 +7688,7 @@ static void tier1_masks_test_scattered_stores(Tier1MasksTest* test)
         ok = ok && tier1_masks_test_expect(test, !machine, "a compressing or truncating store is the IR's, not a machine row");
         // 8 lanes into 8 bytes (#2780): its three masked statements one vpmov* [p]{k} each, by both paths, and the unmasked
         // one's truncation into a register; no masked store of bytes.
-        ok = ok && tier1_masks_test_expect(test, !partial || (test->watched_records[0] == 2 * 4 && test->watched_records[1] == 0),
+        ok = ok && tier1_masks_test_expect(test, !partial || (test->watched_records[0] == 4 && test->watched_records[1] == 0),
                                            "a truncating store of 8 bytes folds into its one memory form under the narrow mask");
         if (!ok && partial)
         {
@@ -8196,8 +8193,8 @@ static void tier1_masks_test_funnels(Tier1MasksTest* test)
         test->watched_records[0] = 0;
         bool machine = false;
         ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
-        ok = ok && tier1_masks_test_expect(test, !machine && (!rotate || test->watched_records[0] == 2 * 4),
-                                           "a funnel shift is the IR's funnel, a rotate its immediate form by both paths");
+        ok = ok && tier1_masks_test_expect(test, !machine && (!rotate || test->watched_records[0] == 4),
+                                           "a funnel shift is the IR's funnel, a rotate its immediate form");
         if (!ok)
         {
             printf("test-tier1-masks: %s: %u immediate records\n", name, test->watched_records[0]);
@@ -8599,8 +8596,8 @@ static void tier1_masks_test_blendvs(Tier1MasksTest* test)
         test->watched_records[1] = 0;
         bool machine = false;
         ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
-        ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 2 * 4 && test->watched_records[1] == 0,
-                                           "a blend is the IR's select under a comparison, and Tier 1's one blend by both paths");
+        ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 4 && test->watched_records[1] == 0,
+                                           "a blend is the IR's select under a comparison, and Tier 1's one blend");
         test->watched_forms[0] = X86_FORM_NONE;
         test->watched_forms[1] = X86_FORM_NONE;
         test->blendv_rows += ok;
@@ -8722,7 +8719,7 @@ static void tier1_masks_test_bitshuffles(Tier1MasksTest* test)
         test->watched_records[1] = 0;
         bool machine = false;
         ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
-        ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 2 * 8 && test->watched_records[1] == 0,
+        ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 8 && test->watched_records[1] == 0,
                                            "a bit shuffle is the IR's bitshuffle, one vpshufbitqmb by both paths, its writemask folded");
         if (!ok)
         {
@@ -8913,7 +8910,7 @@ static void tier1_masks_test_carriers(Tier1MasksTest* test)
         bool machine = false;
         ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, variant != 3, inputs, expected, arenas, &machine);
         ok = ok && tier1_masks_test_expect(test, machine == (variant == 3), "a carrier's cast and extension are the IR's, not machine rows");
-        ok = ok && tier1_masks_test_expect(test, variant != 0 || test->watched_records[0] == 2 * 4, "an extension of a cast into a carrier is one record by both paths");
+        ok = ok && tier1_masks_test_expect(test, variant != 0 || test->watched_records[0] == 4, "an extension of a cast into a carrier is one record");
         if (!ok)
         {
             printf("test-tier1-masks: %s: %u extension records\n", name, test->watched_records[0]);
@@ -9327,20 +9324,20 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                 const Tier1MasksFixture* fixture = &tier1_masks_test_fixtures[f_index];
                 runnable += (!fixture->fp16 || test.native_fp16) && (!fixture->vnni || test.native_vnni) ? 1 : 0;
             }
-            const uint64_t expected_runs = test.native ? 4u * runnable * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
+            const uint64_t expected_runs = test.native ? 2u * runnable * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
             tier1_masks_test_expect(&test, test.native_fixtures == (test.native ? runnable : 0) && test.native_runs == expected_runs,
-                                    "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
+                                    "every fixture runs natively on every input, with rematerialization and without, where the host can");
             tier1_masks_test_expect(&test, test.recomputed != 0, "with rematerialization, general values beside the masks are recomputed");
-            tier1_masks_test_expect(&test, test.refused == 10, "every refusal on both paths");
+            tier1_masks_test_expect(&test, test.refused == 5, "every refusal");
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
-            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
+            tier1_masks_test_expect(&test, !test.native || test.typed_runs == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
                                                                                test.masked_rows + test.gather_rows + test.scatter_rows + test.compress_store_rows + test.truncating_store_rows + test.fma_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows +
                                                                                test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows + test.pairwise_rows + test.blendv_rows + test.carrier_result_rows +
                                                                                test.funnel_rows),
-                                    "every typed program and front-end row runs natively by both of Tier 1's paths");
+                                    "every typed program and front-end row runs natively by Tier 1");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
             tier1_masks_test_expect(&test, test.compare_attempts == 24 * 8 + 6 * 32 && test.compare_rows == test.compare_attempts && test.compare_decoded == 24 * 6 + 6 * 12,

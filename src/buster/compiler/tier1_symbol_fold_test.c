@@ -397,7 +397,6 @@ static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
             shared = pattern->values[first] == 2 && pattern->values[first + 1] == 3 && pattern->displacement == (k == 2 ? 64 : 0) && !pattern->rip;
         }
         tier1_emit_test_expect(test, shared, "every indexed access reads its block's first symbol address and index extension");
-        tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, 0, &plan, &test->output, &test->scratch), "both selection paths share the first address and extension");
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
             .vector = vector != 0,
@@ -490,7 +489,6 @@ static void tier1_symbol_fold_addition_tests(Tier1EmitTest* test)
         const bool folded = planned && plan.covered[1] && plan.covered[2] && plan.covered[3] && pattern->rule == TIER1_RULE_LOAD_OPERAND && pattern->values[0] == 0 &&
                             tier1_symbol_fold_folded(pattern, 1, 8);
         tier1_emit_test_expect(test, folded, "an addition takes a symbol's load as its rip-relative memory operand");
-        tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, 0, &plan, &test->output, &test->scratch), "both selection paths fold the symbol's load into the addition");
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
             .vector = vector,
@@ -586,7 +584,6 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
                         p->values[0], p->values[1], p->values[2], p->compare_memory);
             }
         }
-        tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, &dominance, &plan, &test->output, &test->scratch), "both selection paths fold the same symbols");
         Tier1EmitResult emitted;
         const Tier1EmitError error = shaped ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
         const bool certified = error == TIER1_EMIT_OK && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;

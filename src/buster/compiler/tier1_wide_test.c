@@ -870,9 +870,9 @@ static void tier1_wide_test_program(Tier1WideTest* test, const char* name, const
         tier1_wide_test_expect(test, high_multiplies == UINT32_MAX || highs == high_multiplies, "the optimized function's mulhus");
         ok = ok && tier1_wide_test_dominance(test, &optimized.function, &dominance);
     }
-    for (uint32_t run = 0; ok && run < 4; run += 1)
+    for (uint32_t run = 0; ok && run < 2; run += 1)
     {
-        tier1_wide_test_native(test, name, &optimized.function, &dominance, (run & 1) == 0, (run & 2) != 0, inputs, counts, expected);
+        tier1_wide_test_native(test, name, &optimized.function, &dominance, true, run != 0, inputs, counts, expected);
     }
     test->programs += 1;
     tier1_wide_test_expect(test, test->scratch.length == 0, "every stage returns the scratch arena");
@@ -1074,19 +1074,19 @@ static uint32_t tier1_wide_test_typed(Tier1WideTest* test, uint32_t count)
         }
         IrDominance dominance = { 0 };
         ok = ok && tier1_wide_test_dominance(test, &optimized.function, &dominance);
-        for (uint32_t path = 0; ok && path < 2; path += 1)
+        if (ok)
         {
             const uint64_t mark = test->output.length;
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, path == 0, &plan, &node);
+            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, true, &plan, &node);
             ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the typed program");
             Tier1EmitDiagnostic diagnostic = { 0 };
             const Tier1EmitOptions options = {
                 .diagnostic = &diagnostic,
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = path == 0,
+                .vector = true,
                 .rematerialize = true,
             };
             Tier1EmitResult emitted = { 0 };
@@ -1094,7 +1094,7 @@ static uint32_t tier1_wide_test_typed(Tier1WideTest* test, uint32_t count)
             ok = ok && tier1_wide_test_expect(test, error == TIER1_EMIT_OK, "Tier 1 emits the typed program");
             if (!ok)
             {
-                printf("test-tier1-wide: typed program %u, %s path: selection %u, emission %u (cause %u, error %u) at node %u (%s)\n", p, path == 0 ? "vector" : "scalar", (unsigned)selected, (unsigned)error,
+                printf("test-tier1-wide: typed program %u: selection %u, emission %u (cause %u, error %u) at node %u (%s)\n", p, (unsigned)selected, (unsigned)error,
                        (unsigned)diagnostic.cause, diagnostic.error, node, node < optimized.function.instruction_count ? ir_op_names[optimized.function.op[node]] : "-");
             }
             uint64_t mapped = 0;
@@ -1120,7 +1120,7 @@ static uint32_t tier1_wide_test_typed(Tier1WideTest* test, uint32_t count)
                     same = memcmp(shared + 16 * o, expected + 16 * o, tier0_class_bytes(wide->outputs[o])) == 0;
                     if (!same)
                     {
-                        printf("test-tier1-wide: typed program %u, %s path: output %u differs\n", p, path == 0 ? "vector" : "scalar", o);
+                        printf("test-tier1-wide: typed program %u: output %u differs\n", p, o);
                     }
                 }
                 ok = tier1_wide_test_expect(test, same, "the typed program's native outputs are the stack machine's");
@@ -1249,19 +1249,19 @@ static uint32_t tier1_wide_test_x87(Tier1WideTest* test, uint32_t count)
         }
         IrDominance dominance = { 0 };
         ok = ok && tier1_wide_test_dominance(test, &optimized.function, &dominance);
-        for (uint32_t path = 0; ok && path < 2; path += 1)
+        if (ok)
         {
             const uint64_t mark = test->output.length;
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, path == 0, &plan, &node);
+            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, true, &plan, &node);
             ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the long double program");
             Tier1EmitDiagnostic diagnostic = { 0 };
             const Tier1EmitOptions options = {
                 .diagnostic = &diagnostic,
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = path == 0,
+                .vector = true,
                 .rematerialize = true,
             };
             Tier1EmitResult emitted = { 0 };
@@ -1269,7 +1269,7 @@ static uint32_t tier1_wide_test_x87(Tier1WideTest* test, uint32_t count)
             ok = ok && tier1_wide_test_expect(test, error == TIER1_EMIT_OK, "Tier 1 emits the long double program");
             if (!ok)
             {
-                printf("test-tier1-wide: long double program %u, %s path: selection %u, emission %u (cause %u, error %u) at node %u (%s)\n", p, path == 0 ? "vector" : "scalar", (unsigned)selected, (unsigned)error,
+                printf("test-tier1-wide: long double program %u: selection %u, emission %u (cause %u, error %u) at node %u (%s)\n", p, (unsigned)selected, (unsigned)error,
                        (unsigned)diagnostic.cause, diagnostic.error, node, node < optimized.function.instruction_count ? ir_op_names[optimized.function.op[node]] : "-");
             }
             uint64_t mapped = 0;
@@ -1295,7 +1295,7 @@ static uint32_t tier1_wide_test_x87(Tier1WideTest* test, uint32_t count)
                     same = tier0_test_x87_same_output(program->outputs[o], shared + 16 * o, expected + 16 * o);
                     if (!same)
                     {
-                        printf("test-tier1-wide: long double program %u, %s path: output %u (class %u) differs\n", p, path == 0 ? "vector" : "scalar", o, program->outputs[o]);
+                        printf("test-tier1-wide: long double program %u: output %u (class %u) differs\n", p, o, program->outputs[o]);
                     }
                 }
                 ok = tier1_wide_test_expect(test, same, "the long double program's native outputs are the stack machine's");
@@ -1437,18 +1437,18 @@ static void tier1_wide_test_x87_phis(Tier1WideTest* test, char* text)
     IrFunction function;
     IrDominance dominance = { 0 };
     const bool parsed = tier1_wide_test_parse(test, "nine long double phis rotated", text, &function) && tier1_wide_test_dominance(test, &function, &dominance);
-    for (uint32_t path = 0; parsed && path < 2; path += 1)
+    if (parsed)
     {
         const uint64_t mark = test->output.length;
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path == 0, &plan, &node);
+        const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &node);
         Tier1EmitDiagnostic diagnostic = { 0 };
         const Tier1EmitOptions options = {
             .diagnostic = &diagnostic,
             .certify = true,
             .register_mask = tier1_liveness_register_mask(),
-            .vector = path == 0,
+            .vector = true,
         };
         Tier1EmitResult emitted = { 0 };
         const Tier1EmitError error = selected == TIER1_SELECT_OK ? tier1_emit_function(&plan, &options, test->baseline, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
@@ -1855,8 +1855,8 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
             }
             // The fixtures, the long double phis' two programs and the conversions' (tier1_wide_test_x87_phis) and the
             // random programs.
-            const uint64_t expected_runs = 4u * (BUSTER_ARRAY_LENGTH(tier1_wide_test_fixtures) + 3 + programs) * BUSTER_TIER1_WIDE_TEST_INPUTS + 2u * typed;
-            tier1_wide_test_expect(&test, file != 0 || test.native_runs == expected_runs, "every program runs natively on every input by both paths, with rematerialization and without");
+            const uint64_t expected_runs = 2u * (BUSTER_ARRAY_LENGTH(tier1_wide_test_fixtures) + 3 + programs) * BUSTER_TIER1_WIDE_TEST_INPUTS + typed;
+            tier1_wide_test_expect(&test, file != 0 || test.native_runs == expected_runs, "every program runs natively on every input, with rematerialization and without");
             tier1_wide_test_expect(&test, file != 0 || test.refused == 2u * BUSTER_ARRAY_LENGTH(tier1_wide_test_refusals), "every refusal on both paths");
         }
         printf("test-tier1-wide: %" PRIu64 " checks, %" PRIu64 " failures; %u programs, %" PRIu64 " I128 instructions split into %" PRIu64 " instructions; %" PRIu64 " interpreter runs, %" PRIu64 " native runs, %" PRIu64

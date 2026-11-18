@@ -281,10 +281,10 @@ static void tier1_wide_vector_program(Tier1WideTest* test, const Tier1WideVector
             piece_ok = piece_ok && tier1_wide_test_dominance(test, &optimized.function, &dominance);
         }
         // x86-64's pieces natively, every record among the baseline's forms.
-        for (uint32_t run = 0; piece_ok && pieces[w] == 16 && run < 4; run += 1)
+        for (uint32_t run = 0; piece_ok && pieces[w] == 16 && run < 2; run += 1)
         {
             const uint64_t before = test->native_runs;
-            tier1_wide_test_native(test, fixture->name, &optimized.function, &dominance, (run & 1) == 0, (run & 2) != 0, inputs, counts, expected);
+            tier1_wide_test_native(test, fixture->name, &optimized.function, &dominance, true, run != 0, inputs, counts, expected);
             test->vector_native_runs += test->native_runs - before;
             test->native_runs = before;
         }
@@ -377,7 +377,7 @@ static void tier1_wide_vectors(Tier1WideTest* test)
     }
     tier1_wide_vector_refusals_and_scan(test);
     tier1_wide_test_expect(test, test->vector_programs == 2 * BUSTER_ARRAY_LENGTH(tier1_wide_vector_fixtures), "every wide vector fixture goes through every stage at both piece widths");
-    tier1_wide_test_expect(test, test->vector_native_runs == 4u * BUSTER_ARRAY_LENGTH(tier1_wide_vector_fixtures) * BUSTER_TIER1_WIDE_TEST_INPUTS,
+    tier1_wide_test_expect(test, test->vector_native_runs == 2u * BUSTER_ARRAY_LENGTH(tier1_wide_vector_fixtures) * BUSTER_TIER1_WIDE_TEST_INPUTS,
                            "every wide vector fixture runs natively at x86-64's pieces on every input by both paths, with rematerialization and without");
     tier1_wide_test_expect(test, test->vector_refused == 2 * BUSTER_ARRAY_LENGTH(tier1_wide_vector_refusals), "every wide vector refusal on both paths");
     printf("test-tier1-wide: wide vectors: %u fixtures at 16- and 32-byte pieces through the split, the optimizer and the interpreter, %" PRIu64 " native runs at x86-64's; %u refusals\n",

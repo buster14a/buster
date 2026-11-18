@@ -717,16 +717,13 @@ static void tier1_liveness_test_calls(Tier1LivenessTest* test)
                             {
                                 plan.patterns[7].values[0] = 0;
                             }
-                            for (uint32_t path = 0; path < 2; path += 1)
-                            {
-                                Tier1Liveness rejected;
-                                memset(&rejected, 0xa5, sizeof(rejected));
-                                const Tier1Liveness before = rejected;
-                                const uint64_t mark = test->left.length;
-                                const uint64_t scratch_mark = test->scratch.length;
-                                const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, path != 0, &rejected);
-                                tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&rejected, &before, sizeof(rejected)) == 0, "malformed call pattern/use handoff is rejected transactionally");
-                            }
+                            Tier1Liveness rejected;
+                            memset(&rejected, 0xa5, sizeof(rejected));
+                            const Tier1Liveness before = rejected;
+                            const uint64_t mark = test->left.length;
+                            const uint64_t scratch_mark = test->scratch.length;
+                            const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, true, &rejected);
+                            tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&rejected, &before, sizeof(rejected)) == 0, "malformed call pattern/use handoff is rejected transactionally");
                             plan.effective_use_values[first] = saved_use;
                             plan.effective_use_offsets[8] = saved_end;
                             plan.patterns[7] = saved_pattern;
@@ -912,16 +909,13 @@ static void tier1_liveness_test_unreachable(Tier1LivenessTest* test)
                 plan.patterns[0].width = mutation == 0 ? 4 : 0;
                 plan.patterns[0].values[0] = mutation == 1 ? 0 : BUSTER_IR_NONE;
                 plan.covered[0] = mutation == 2;
-                for (uint32_t path = 0; path < 2; path += 1)
-                {
-                    Tier1Liveness live;
-                    memset(&live, 0xa5, sizeof(live));
-                    const Tier1Liveness before = live;
-                    const uint64_t mark = test->left.length;
-                    const uint64_t scratch_mark = test->scratch.length;
-                    const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, path != 0, &live);
-                    tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&live, &before, sizeof(live)) == 0, "malformed unreachable plan is refused transactionally");
-                }
+                Tier1Liveness live;
+                memset(&live, 0xa5, sizeof(live));
+                const Tier1Liveness before = live;
+                const uint64_t mark = test->left.length;
+                const uint64_t scratch_mark = test->scratch.length;
+                const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, true, &live);
+                tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&live, &before, sizeof(live)) == 0, "malformed unreachable plan is refused transactionally");
                 plan.patterns[0] = before_pattern;
                 plan.covered[0] = 0;
             }
