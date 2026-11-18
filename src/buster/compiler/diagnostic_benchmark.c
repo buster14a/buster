@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original measurement harness for diagnostic ordering. Included after diagnostic_test.c, whose frozen key generator
 // supplies the input and whose diagnostic_test_sorted checks every sample's result against the sort's definition.
-// diagnostic_sort sorts copies back to back; copying is included. --after-scalar MS conditions each sample with MS ms
+// diagnostic_sort sorts copies back to back, after 10 ms of them; copying is included. --after-scalar MS conditions each sample with MS ms
 // of scalar integer work over the keys (diagnostic_benchmark_scalar_work), the state a compiler's vector phases run in
 // after lighter ones. Report elapsed nanoseconds as well as invariant-TSC ticks, not core-cycle counters.
 
@@ -28,6 +28,8 @@ static uint64_t diagnostic_benchmark_median(uint64_t* values, uint32_t count)
     }
     return values[count / 2];
 }
+
+#define BUSTER_DIAGNOSTIC_BENCHMARK_WARM_NS 10000000ull
 
 // Scalar work for --after-scalar: a dependent chain of multiplies over the keys, which the compiler can't vectorize.
 static __attribute__((noinline)) uint64_t diagnostic_benchmark_scalar_work(const DiagnosticOrder* input, uint32_t count)
@@ -98,6 +100,16 @@ static int run_diagnostic_benchmark(int argc, char** argv)
         }
         uint64_t times[21];
         uint64_t ticks[21];
+        // A warm-up of BUSTER_DIAGNOSTIC_BENCHMARK_WARM_NS of this count's sorts: a single pass, about 37 us at 32
+        // records, left the first count's samples in a process's starting state now and then (11.32 ns/key against
+        // 4.5 in one process of three on the 9700X).
+        const uint64_t warm_until = diagnostic_benchmark_nanoseconds() + BUSTER_DIAGNOSTIC_BENCHMARK_WARM_NS;
+        while (diagnostic_benchmark_nanoseconds() < warm_until)
+        {
+            memcpy(items, input, bytes);
+            diagnostic_sort(items, count, scratch);
+            observed = items[0].source;
+        }
         for (uint32_t pass = 0; result && pass < 22; pass += 1)
         {
             const uint64_t until = diagnostic_benchmark_nanoseconds() + after_scalar * 1000000;
