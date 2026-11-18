@@ -4313,8 +4313,10 @@ restated over a record's own bytes and its consumer's:
 - **Only whether a record is evaluated chains down a tree,** and the chain
   breaks at a leaf nearly always.
 - **A call's arguments' targets are in no line** (10.8% to 16.8% of the
-  evaluated records): the kernel's call rule makes those conversions and
-  keeps none. A call is listed in this piece.
+  evaluated records): an argument's target is its conversion's type, and
+  the kernel's call rule makes none of a call's arguments' conversions,
+  which are T's still (`node_machine_argument`). A call is listed in this
+  piece.
 - **A learned table of a few bytes is not enough for the template:** 83.5%
   to 88.5% of the records by the consumer's template, the operator and the
   place alone. The rules are masks here, not a table.
@@ -4562,8 +4564,10 @@ before its code:
 
 - **Two thirds of what it lists is a call's.** Of `sqlite3.c`'s 18,696
   listed expressions 12,179 are listed for a call, 3,415 for an update and
-  2,267 for `&&`, `||` or `?:`. The kernel's call rule makes a call's
-  arguments' conversions and keeps none: keeping them is the piece after
+  2,267 for `&&`, `||` or `?:`. An argument's target is its conversion's
+  type, and the kernel's call rule makes the call's own record and none of
+  its arguments' conversions, which are T's still
+  (`node_machine_argument`): making them in the kernel is the piece after
   this one.
 - **X reads none of it, and no compile takes any.** The answers are
   compared with C's and dropped. The sum of step 2 moves when X runs on

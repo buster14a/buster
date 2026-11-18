@@ -1843,10 +1843,11 @@ it in turn; medians of seven readings, musl's of fifteen. TSC ticks:
 - **C's answers cost a third of C's on `sqlite3.c`** and nine tenths of C's
   on musl, where a chunk's first run is twice its second.
 - **Two thirds of what is listed is a call's** (12,179 of `sqlite3.c`'s
-  18,696): the kernel's call rule makes its arguments' conversions and
-  keeps none. That, the updates and the branches are the pieces after
-  this, and then X on these answers: until X reads them the sum of step 2
-  does not move.
+  18,696): an argument's target is its conversion's type, and the kernel's
+  call rule makes none of a call's arguments' conversions, which are T's
+  still. That, the updates and the branches are the pieces after this, and
+  then X on these answers: until X reads them the sum of step 2 does not
+  move.
 
 ## Step 4's first piece: a census of Tier 0's row
 
