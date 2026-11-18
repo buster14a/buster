@@ -60,10 +60,11 @@ static void tier1_move_test_shape(Tier1AllocationTestTally* tally, Arena* arena,
         .scratch = tier1_move_test_location(count * 2),
     };
     Tier1ResolvedMoves output = { 0 };
-    Tier1ResolvedMoves scalar = { 0 };
+    Tier1ResolvedMoves indexed = { 0 };
     valid = valid && tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && output.count <= count * 2;
-    valid = valid && tier1_resolve_moves_indexed(&input, arena, &scalar, false) == TIER1_ALLOCATION_OK && scalar.count == output.count;
-    valid = valid && memcmp(output.sources, scalar.sources, output.count * 4) == 0 && memcmp(output.destinations, scalar.destinations, output.count * 4) == 0;
+    // The indexed path at every count, the small-set path's eight and fewer among them.
+    valid = valid && tier1_resolve_moves_indexed(&input, arena, &indexed, true) == TIER1_ALLOCATION_OK && indexed.count == output.count;
+    valid = valid && memcmp(output.sources, indexed.sources, output.count * 4) == 0 && memcmp(output.destinations, indexed.destinations, output.count * 4) == 0;
     if (valid && count <= 64)
     {
         Tier1ResolvedMoves oracle = { 0 };

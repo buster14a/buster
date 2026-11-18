@@ -1,21 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Avoided registers (Tier1AllocationInput.avoided_registers, #2767): literal traces of a range that takes another register
-// than one it avoids, of one that takes an avoided register where no other is free without evicting the value in the
-// other, of a hint to an avoided register that yields to a free one, and of the path a class with avoided registers takes;
-// then random inputs on all three entry points against the interval verifier, the position occupancy oracle and two
-// independent properties: a range starts in a register it avoids only where every register it may take and doesn't avoid
-// is held there, and a column that avoids nothing changes no allocation. Half the random inputs have hints, whose classes
-// the common path colors where they fit, the other half are the scan's. Included by tier1_allocate_test_cases.c.
+// Avoided registers (Tier1AllocationInput.avoided_registers, #2767): literal traces of a range that takes another
+// register than one it avoids, of one that takes an avoided register where no other is free without evicting the value
+// in the other, of a hint to an avoided register that yields to a free one, and of the path a class with avoided
+// registers takes; then random inputs on both entry points (tier1_allocate and the scan reference) against the interval
+// verifier, the position occupancy oracle and two independent properties: a range starts in a register it avoids only
+// where every register it may take and doesn't avoid is held there, and a column that avoids nothing changes no
+// allocation. Half the random inputs have hints, whose classes the common path colors where they fit, the other half
+// are the scan's. Included by tier1_allocate_test_cases.c.
 
-// The paths' allocations of `input`, into `outputs`; their errors.
+// The allocations of `input` by tier1_allocate (path 0) and by the scan reference (path 1), into `outputs`; their errors.
 static void tier1_allocation_test_avoided_paths(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* outputs, Tier1AllocationError* errors)
 {
-    for (uint32_t path = 0; path < 3; path += 1)
+    for (uint32_t path = 0; path < 2; path += 1)
     {
         outputs[path] = (Tier1Allocation){ 0 };
-        errors[path] = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
+        errors[path] = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
     }
 }
 
@@ -98,10 +99,10 @@ static void tier1_allocation_test_avoided_traces(Tier1AllocationTestTally* tally
                 .registers = { registers[trace] },
             };
             const uint64_t saved = arena->length;
-            Tier1Allocation outputs[3];
-            Tier1AllocationError errors[3];
+            Tier1Allocation outputs[2];
+            Tier1AllocationError errors[2];
             tier1_allocation_test_avoided_paths(&input, arena, outputs, errors);
-            for (uint32_t path = 0; path < 3; path += 1)
+            for (uint32_t path = 0; path < 2; path += 1)
             {
                 const Tier1Allocation* output = &outputs[path];
                 bool valid = errors[path] == TIER1_ALLOCATION_OK && output->fragment_count == count && output->spill_count == 0 && tier1_allocation_verify(&input, output) && tier1_allocation_test_occupancy(&input, output);
@@ -119,13 +120,9 @@ static void tier1_allocation_test_avoided_traces(Tier1AllocationTestTally* tally
             // A class that avoids a register some interval may take is the scan's without hints, and colors with them, its
             // starts swapping an avoided register as they do for a hint; one that avoids none colors as before.
             const bool scanned = trace != 3 && !hinted[trace];
-            for (uint32_t path = 0; errors[0] == TIER1_ALLOCATION_OK && errors[1] == TIER1_ALLOCATION_OK && path < 2; path += 1)
-            {
-                const bool colored = outputs[path].vector_intervals == count && outputs[path].scalar_intervals == 0;
-                const bool scan = outputs[path].vector_intervals == 0 && outputs[path].scalar_intervals == count;
-                tier1_allocation_test_expect(tally, scanned ? scan : colored, scanned ? "a class with an avoided register is the scan's without hints" : "a class with hints, or that avoids no register it may take, colors");
-            }
-            tier1_allocation_test_expect(tally, errors[0] == TIER1_ALLOCATION_OK && errors[1] == TIER1_ALLOCATION_OK && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths avoid alike");
+            const bool colored = errors[0] == TIER1_ALLOCATION_OK && outputs[0].vector_intervals == count && outputs[0].scalar_intervals == 0;
+            const bool scan = errors[0] == TIER1_ALLOCATION_OK && outputs[0].vector_intervals == 0 && outputs[0].scalar_intervals == count;
+            tier1_allocation_test_expect(tally, scanned ? scan : colored, scanned ? "a class with an avoided register is the scan's without hints" : "a class with hints, or that avoids no register it may take, colors");
             arena_pop_to(arena, saved);
         }
     }
@@ -220,17 +217,16 @@ static void tier1_allocation_test_avoided(Tier1AllocationTestTally* tally, Arena
             .position_count = 144,
             .registers = { registers },
         };
-        Tier1Allocation outputs[3];
-        Tier1AllocationError errors[3];
+        Tier1Allocation outputs[2];
+        Tier1AllocationError errors[2];
         tier1_allocation_test_avoided_paths(&input, arena, outputs, errors);
-        const bool produced = errors[0] == TIER1_ALLOCATION_OK && errors[1] == TIER1_ALLOCATION_OK && errors[2] == TIER1_ALLOCATION_OK;
-        tier1_allocation_test_expect(tally, produced || (errors[0] == TIER1_ALLOCATION_CONSTRAINT && errors[1] == errors[0] && errors[2] == errors[0]), "an allocation with avoided registers, or an explicit simultaneous-use conflict");
-        for (uint32_t path = 0; produced && path < 3; path += 1)
+        const bool produced = errors[0] == TIER1_ALLOCATION_OK && errors[1] == TIER1_ALLOCATION_OK;
+        tier1_allocation_test_expect(tally, produced || (errors[0] == TIER1_ALLOCATION_CONSTRAINT && errors[1] == errors[0]), "an allocation with avoided registers, or an explicit simultaneous-use conflict");
+        for (uint32_t path = 0; produced && path < 2; path += 1)
         {
             tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &outputs[path]) && tier1_allocation_test_occupancy(&input, &outputs[path]), "an allocation with avoided registers passes the verifier and the occupancy oracle");
             tier1_allocation_test_expect(tally, tier1_allocation_test_avoided_held(&input, &outputs[path]), "a range starts in a register it avoids only where every other it may take is held");
         }
-        tier1_allocation_test_expect(tally, !produced || tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths avoid alike");
         for (uint32_t i = 0; produced && i < count; i += 1)
         {
             const uint32_t f = outputs[0].fragment_offsets[i];
@@ -241,13 +237,13 @@ static void tier1_allocation_test_avoided(Tier1AllocationTestTally* tally, Arena
         empty.avoided_registers = none;
         Tier1AllocationInput absent = input;
         absent.avoided_registers = 0;
-        Tier1Allocation with[3];
-        Tier1Allocation without[3];
-        Tier1AllocationError a[3];
-        Tier1AllocationError b[3];
+        Tier1Allocation with[2];
+        Tier1Allocation without[2];
+        Tier1AllocationError a[2];
+        Tier1AllocationError b[2];
         tier1_allocation_test_avoided_paths(&empty, arena, with, a);
         tier1_allocation_test_avoided_paths(&absent, arena, without, b);
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
             tier1_allocation_test_expect(tally, a[path] == b[path] && (a[path] != TIER1_ALLOCATION_OK || tier1_allocation_test_equal(&empty, &with[path], &without[path])), "a column that avoids nothing changes no allocation");
         }
