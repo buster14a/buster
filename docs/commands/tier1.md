@@ -8,14 +8,14 @@ requirements. [Command index](README.md).
 
 - Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
   consumer connects required locations, allocation, frames and spill/remat
-  records. Both host paths cover the integer core by bottom-up rewriting over
-  state tables `tier1_select_initialize` compiles from a grammar of the
-  candidates' patterns (`tier1_select_burs.c`, baked). Vector labeling takes
-  16 nodes of a depth level; the independent scalar kernels use the same costs
-  and tie-breaks. Maximal munch remains the grammar's fallback and a separate
-  test reference. `test-tier1-select` checks identical plans and records;
-  `test-tier1-pipeline` checks the kernel twins and complete plans on every
-  function, and `benchmark-tier1-select-source` checks the kernels before timing.
+  records. The integer core is covered by bottom-up rewriting over state tables
+  `tier1_select_initialize` compiles from a grammar of the candidates' patterns
+  (`tier1_select_burs.c`, baked), the AVX-512 labeling taking 16 nodes of a depth
+  level. Maximal munch remains the grammar's fallback and a separate test
+  reference. `test-tier1-select` checks every fixture's plan against a frozen
+  digest (#2924) and its records; `test-tier1-pipeline` checks the kernels'
+  definitions and complete plans on every function, and
+  `benchmark-tier1-select-source` checks the kernels before timing.
   `test-checker-driver` requires byte-identical Tier 1 scalar/vector objects for
   the #1395 regressions at the same target, with either rematerialization mode,
   including a parameter-free leaf with volatile loads. Both production
@@ -41,7 +41,7 @@ requirements. [Command index](README.md).
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. The preference's crossing test counts the calls before each
   position with a vector prefix sum, which `test-tier1-emit` checks against its
-  scalar twin. A straight line whose allocation can't place a value (an evicted
+  definition. A straight line whose allocation can't place a value (an evicted
   parameter whose incoming register another operand holds) goes through the CFG
   consumer too. The 128-bit integers are split into 64-bit halves before the
   optimizer (`ir_wide.c`, #141): `test-tier1-wide [--seed N] [--programs N]
@@ -73,9 +73,8 @@ requirements. [Command index](README.md).
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
-  [--only select|select-scalar] [-E's options] file...` selection's core cycles
-  per IR instruction on real C's functions, as `--tier1` prepares them, by both
-  paths (#141). A division by a constant that isn't a power of two is a
+  [--only select] [-E's options] file...` selection's core cycles per IR
+  instruction on real C's functions, as `--tier1` prepares them (#141). A division by a constant that isn't a power of two is a
   multiplication by its reciprocal (Granlund and Montgomery), in either consumer,
   which saves the values `mul`'s `rax` and `rdx` would clobber (the [selection
   guide](../../docs/tier1-selection.md)). `measure-mask-spills` times a mask's spill and

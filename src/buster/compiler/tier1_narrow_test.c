@@ -510,7 +510,7 @@ static void tier1_narrow_compile(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
         {
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&fixture->function, 0, &test->output, &test->scratch, vector != 0, &plan, &node);
+            const Tier1SelectError selected = tier1_select_plan(&fixture->function, 0, &test->output, &test->scratch, &plan, &node);
             tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "narrow memory and conversion IR selects");
             if (selected == TIER1_SELECT_OK)
             {
@@ -592,7 +592,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
         Tier1SelectPlan plan;
         uint32_t node;
         bool ready = tier1_narrow_fixture(test, &fixture);
-        ready = ready && tier1_select_plan(&fixture.function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+        ready = ready && tier1_select_plan(&fixture.function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         tier1_emit_test_expect(test, ready, "narrow refusal fixture selects before target/arena failures");
         if (ready)
         {
@@ -732,7 +732,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             const uint64_t output_mark = test->output.length;
             const uint64_t scratch_mark = test->scratch.length;
             uint32_t node;
-            const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &result, &node);
+            const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, &result, &node);
             tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "narrow call argument/arithmetic/compare/shift and I1 SEXT/TRUNC remain unsupported");
             tier1_emit_test_expect(test, test->output.length == output_mark && test->scratch.length == scratch_mark && memcmp(&before, &result, sizeof(result)) == 0, "unsupported narrow selection publishes no partial plan");
         }

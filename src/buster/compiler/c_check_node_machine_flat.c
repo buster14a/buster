@@ -844,7 +844,7 @@ static __attribute__((noinline)) void node_flat_ternaries(NodeFlat* flat, int64_
 static __attribute__((noinline)) void node_flat_calls(NodeFlat* flat, CheckInputReader* reader, int64_t reach, uint64_t* beyond, uint64_t* lefts)
 {
     const CheckInput* input = reader->output;
-    const bool refused = input->kr_parameter_count != 0 || input->no_builtin;
+    const bool refused = input->kr_parameter_count != 0;
     const uint32_t* list = flat->lists[CHECK_INPUT_CODE_CALL];
     const uint32_t count = flat->list_counts[CHECK_INPUT_CODE_CALL];
     uint32_t arguments = 0;

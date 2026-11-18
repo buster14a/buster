@@ -74,7 +74,7 @@ static bool tier1_liveness_test_plan(Tier1LivenessTest* test, const IrFunction* 
             .block_count = cfg->block_count,
         };
         uint32_t error_node;
-        valid = tier1_select_plan(function, &view, &test->input, &test->scratch, true, plan, &error_node) == TIER1_SELECT_OK;
+        valid = tier1_select_plan(function, &view, &test->input, &test->scratch, plan, &error_node) == TIER1_SELECT_OK;
         if (!valid && test->failures < 12)
         {
             fprintf(stderr, "tier1-liveness: planner rejected node %u\n", error_node);
@@ -184,34 +184,17 @@ static void tier1_liveness_test_oracle(Tier1LivenessTest* test, const Tier1Selec
     free(seen);
 }
 
-static bool tier1_liveness_test_compare(Tier1LivenessTest* test, const Tier1SelectPlan* plan, const IrCfg* cfg, Tier1Liveness* scalar, Tier1Liveness* vector)
+// Builds `plan`'s liveness into `live` and checks it against the independent path search (tier1_liveness_test_oracle).
+static bool tier1_liveness_test_build(Tier1LivenessTest* test, const Tier1SelectPlan* plan, const IrCfg* cfg, Tier1Liveness* live)
 {
-    arena_pop_to(&test->left, 0);
     arena_pop_to(&test->right, 0);
     const uint64_t scratch_mark = test->scratch.length;
-    const Tier1LivenessError left = tier1_liveness_build(plan, &test->left, &test->scratch, false, scalar);
-    tier1_liveness_test_expect(test, test->scratch.length == scratch_mark, "scalar adapter restores scratch");
-    const Tier1LivenessError right = tier1_liveness_build(plan, &test->right, &test->scratch, true, vector);
-    tier1_liveness_test_expect(test, test->scratch.length == scratch_mark, "vector adapter restores scratch");
-    bool valid = left == TIER1_LIVENESS_OK && right == TIER1_LIVENESS_OK;
-    tier1_liveness_test_expect(test, valid, "both adapters accept the real selected plan");
+    const bool valid = tier1_liveness_build(plan, &test->right, &test->scratch, live) == TIER1_LIVENESS_OK;
+    tier1_liveness_test_expect(test, test->scratch.length == scratch_mark, "the adapter restores scratch");
+    tier1_liveness_test_expect(test, valid, "the adapter accepts the real selected plan");
     if (valid)
     {
-        const uint64_t bytes = (uint64_t)scalar->allocation.count * sizeof(uint32_t);
-        valid = scalar->allocation.count == vector->allocation.count && scalar->allocation.use_count == vector->allocation.use_count &&
-                scalar->cross_block_values == vector->cross_block_values && scalar->iterations == vector->iterations &&
-                scalar->matrix_bytes == vector->matrix_bytes && scalar->retained_bytes == vector->retained_bytes;
-        tier1_liveness_test_expect(test, valid, "scalar/vector sizes, dense values and fixpoint iterations agree");
-        if (valid)
-        {
-            tier1_liveness_test_expect(test, bytes == 0 || memcmp(scalar->allocation.starts, vector->allocation.starts, bytes) == 0, "scalar/vector interval starts agree");
-            tier1_liveness_test_expect(test, bytes == 0 || memcmp(scalar->allocation.ends, vector->allocation.ends, bytes) == 0, "scalar/vector interval ends agree");
-            tier1_liveness_test_expect(test, bytes == 0 || memcmp(scalar->allocation.values, vector->allocation.values, bytes) == 0, "scalar/vector value identities agree");
-            tier1_liveness_test_expect(test, bytes == 0 || memcmp(scalar->allocation.allowed_registers, vector->allocation.allowed_registers, bytes) == 0, "scalar/vector register constraints agree");
-            tier1_liveness_test_expect(test, memcmp(scalar->allocation.use_offsets, vector->allocation.use_offsets, (uint64_t)(scalar->allocation.count + 1) * 4) == 0, "scalar/vector use offsets agree");
-            tier1_liveness_test_expect(test, scalar->allocation.use_count == 0 || memcmp(scalar->allocation.use_positions, vector->allocation.use_positions, (uint64_t)scalar->allocation.use_count * 4) == 0, "scalar/vector use positions agree");
-            tier1_liveness_test_oracle(test, plan, cfg, vector);
-        }
+        tier1_liveness_test_oracle(test, plan, cfg, live);
     }
     return valid;
 }
@@ -221,10 +204,10 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_liveness_test_exe
     return ((uint64_t (*)(uint64_t, uint64_t))code)(a, b);
 }
 
-static void tier1_liveness_test_emit(Tier1LivenessTest* test, const Tier1SelectPlan* plan, const Tier1Liveness* live, Arena* arena, bool vector, bool execute)
+static void tier1_liveness_test_emit(Tier1LivenessTest* test, const Tier1SelectPlan* plan, const Tier1Liveness* live, Arena* arena, bool execute)
 {
     Tier1Allocation allocation;
-    const Tier1AllocationError allocated = vector ? tier1_allocate(&live->allocation, arena, &allocation) : tier1_allocate_scalar(&live->allocation, arena, &allocation);
+    const Tier1AllocationError allocated = tier1_allocate(&live->allocation, arena, &allocation);
     const bool valid = allocated == TIER1_ALLOCATION_OK && tier1_allocation_verify(&live->allocation, &allocation);
     tier1_liveness_test_expect(test, valid, "actual allocator verifies the selected-use intervals");
     if (valid)
@@ -285,9 +268,8 @@ static void tier1_liveness_test_fold(Tier1LivenessTest* test)
         valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
         if (valid)
         {
-            Tier1Liveness scalar;
             Tier1Liveness vector;
-            valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+            valid = tier1_liveness_test_build(test, &plan, &cfg, &vector);
             tier1_liveness_test_expect(test, plan.covered[3] != 0, "fixture really folds the shift into its later consumer");
             if (valid)
             {
@@ -301,11 +283,10 @@ static void tier1_liveness_test_fold(Tier1LivenessTest* test)
                         tier1_liveness_test_expect(test, vector.allocation.ends[interval] == 11, "folded shift source stays live until the ADD use");
                     }
                 }
-                tier1_liveness_test_emit(test, &plan, &scalar, &test->left, false, true);
-                tier1_liveness_test_emit(test, &plan, &vector, &test->right, true, true);
+                tier1_liveness_test_emit(test, &plan, &vector, &test->right, true);
                 const uint64_t mark = test->input.length;
                 Tier1Liveness same_arena;
-                tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &test->input, &test->scratch, true, &same_arena) == TIER1_LIVENESS_OK, "retained plan and output may occupy successive arena regions");
+                tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &test->input, &test->scratch, &same_arena) == TIER1_LIVENESS_OK, "retained plan and output may occupy successive arena regions");
                 arena_pop_to(&test->input, mark);
             }
             Tier1Liveness sentinel;
@@ -314,22 +295,22 @@ static void tier1_liveness_test_fold(Tier1LivenessTest* test)
             const uint64_t mark = test->right.length;
             const uint32_t saved = plan.effective_use_offsets[7];
             plan.effective_use_offsets[7] = UINT32_MAX;
-            tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &test->right, &test->scratch, true, &rejected) == TIER1_LIVENESS_INVALID, "malformed use offsets fail closed");
+            tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &test->right, &test->scratch, &rejected) == TIER1_LIVENESS_INVALID, "malformed use offsets fail closed");
             plan.effective_use_offsets[7] = saved;
             tier1_liveness_test_expect(test, test->right.length == mark && memcmp(&sentinel, &rejected, sizeof(sentinel)) == 0, "invalid input is transactional");
             const uint32_t saved_value = plan.effective_use_values[0];
             plan.effective_use_values[0] = 3;
-            tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &test->right, &test->scratch, true, &rejected) == TIER1_LIVENESS_INVALID, "a selected use of a covered value fails closed");
+            tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &test->right, &test->scratch, &rejected) == TIER1_LIVENESS_INVALID, "a selected use of a covered value fails closed");
             plan.effective_use_values[0] = saved_value;
             Arena tiny = arena_reserve(64);
-            tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &tiny, &test->scratch, true, &rejected) == TIER1_LIVENESS_MEMORY && tiny.length == 0, "allocation exhaustion restores the arena");
+            tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &tiny, &test->scratch, &rejected) == TIER1_LIVENESS_MEMORY && tiny.length == 0, "allocation exhaustion restores the arena");
             arena_release(&tiny);
-            tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &test->right, &test->right, true, &rejected) == TIER1_LIVENESS_INVALID, "same output and scratch arena is rejected");
+            tier1_liveness_test_expect(test, tier1_liveness_build(&plan, &test->right, &test->right, &rejected) == TIER1_LIVENESS_INVALID, "same output and scratch arena is rejected");
             IrFunction oversized = function;
             oversized.instruction_count = BUSTER_TIER1_ALLOCATE_MAX_INTERVALS + 1;
             Tier1SelectPlan oversized_plan = plan;
             oversized_plan.function = &oversized;
-            tier1_liveness_test_expect(test, tier1_liveness_build(&oversized_plan, &test->right, &test->scratch, true, &rejected) == TIER1_LIVENESS_LIMIT, "oversized instruction count fails before reading borrowed columns");
+            tier1_liveness_test_expect(test, tier1_liveness_build(&oversized_plan, &test->right, &test->scratch, &rejected) == TIER1_LIVENESS_LIMIT, "oversized instruction count fails before reading borrowed columns");
         }
     }
     tier1_liveness_test_expect(test, valid, "fold fixture completed");
@@ -351,16 +332,13 @@ static void tier1_liveness_test_empty(Tier1LivenessTest* test)
     Tier1SelectPlan plan;
     uint32_t error_node;
     bool valid = ir_create(&test->input, &sizes, &function) == IR_OK &&
-                 tier1_select_plan(&function, 0, &test->input, &test->scratch, true, &plan, &error_node) == TIER1_SELECT_OK;
-    Tier1Liveness scalar;
+                 tier1_select_plan(&function, 0, &test->input, &test->scratch, &plan, &error_node) == TIER1_SELECT_OK;
     Tier1Liveness vector;
-    valid = valid && tier1_liveness_build(&plan, &test->left, &test->scratch, false, &scalar) == TIER1_LIVENESS_OK &&
-            tier1_liveness_build(&plan, &test->right, &test->scratch, true, &vector) == TIER1_LIVENESS_OK;
+    valid = valid && tier1_liveness_build(&plan, &test->right, &test->scratch, &vector) == TIER1_LIVENESS_OK;
     tier1_liveness_test_expect(test, valid, "empty real IR and selector plan accepted");
     if (valid)
     {
-        tier1_liveness_test_expect(test, scalar.allocation.count == 0 && vector.allocation.count == 0 && scalar.allocation.use_count == 0 && vector.allocation.use_count == 0 &&
-                                 scalar.matrix_bytes == 0 && vector.matrix_bytes == 0 && scalar.iterations == vector.iterations, "empty input has no intervals, uses or matrices");
+        tier1_liveness_test_expect(test, vector.allocation.count == 0 && vector.allocation.use_count == 0 && vector.matrix_bytes == 0, "empty input has no intervals, uses or matrices");
     }
 }
 
@@ -386,14 +364,12 @@ static void tier1_liveness_test_entry_loop(Tier1LivenessTest* test)
         valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
         if (valid)
         {
-            Tier1Liveness scalar;
             Tier1Liveness vector;
-            valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+            valid = tier1_liveness_test_build(test, &plan, &cfg, &vector);
             if (valid)
             {
                 tier1_liveness_test_expect(test, vector.cross_block_values == 2 && vector.allocation.ends[0] == 10 && vector.allocation.ends[1] == 10, "PARAMs stay live through the entry backedge despite no later local use");
-                tier1_liveness_test_emit(test, &plan, &scalar, &test->left, false, false);
-                tier1_liveness_test_emit(test, &plan, &vector, &test->right, true, false);
+                tier1_liveness_test_emit(test, &plan, &vector, &test->right, false);
             }
         }
     }
@@ -432,9 +408,8 @@ static void tier1_liveness_test_loop_definition(Tier1LivenessTest* test)
         valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
         if (valid)
         {
-            Tier1Liveness scalar;
             Tier1Liveness vector;
-            valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+            valid = tier1_liveness_test_build(test, &plan, &cfg, &vector);
             if (valid)
             {
                 uint8_t seen[4];
@@ -450,8 +425,7 @@ static void tier1_liveness_test_loop_definition(Tier1LivenessTest* test)
                     }
                 }
                 tier1_liveness_test_expect(test, found && plan.covered[5] != 0, "loop fixture retains the nonparameter definition and folds the compare into its branch");
-                tier1_liveness_test_emit(test, &plan, &scalar, &test->left, false, false);
-                tier1_liveness_test_emit(test, &plan, &vector, &test->right, true, false);
+                tier1_liveness_test_emit(test, &plan, &vector, &test->right, false);
             }
         }
     }
@@ -495,13 +469,11 @@ static void tier1_liveness_test_cfg(Tier1LivenessTest* test, uint32_t blocks, ui
         valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
         if (valid)
         {
-            Tier1Liveness scalar;
             Tier1Liveness vector;
-            valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+            valid = tier1_liveness_test_build(test, &plan, &cfg, &vector);
             if (valid)
             {
-                tier1_liveness_test_emit(test, &plan, &scalar, &test->left, false, false);
-                tier1_liveness_test_emit(test, &plan, &vector, &test->right, true, false);
+                tier1_liveness_test_emit(test, &plan, &vector, &test->right, false);
             }
         }
     }
@@ -532,9 +504,8 @@ static void tier1_liveness_test_many_values(Tier1LivenessTest* test, uint32_t co
         valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
         if (valid)
         {
-            Tier1Liveness scalar;
             Tier1Liveness vector;
-            valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+            valid = tier1_liveness_test_build(test, &plan, &cfg, &vector);
             tier1_liveness_test_expect(test, valid && vector.cross_block_values == count, "actual selected values cross dense word/vector boundaries");
         }
     }
@@ -552,32 +523,41 @@ static void tier1_liveness_test_guards(Tier1LivenessTest* test)
         for (uint32_t count = 0; count <= 65; count += 1)
         {
             uint8_t* cross = mapping + page - count;
-            uint32_t left_ids[65];
-            uint32_t right_ids[65];
-            uint32_t left_values[65];
-            uint32_t right_values[65];
-            memset(left_values, 0x5a, sizeof(left_values));
-            memset(right_values, 0x5a, sizeof(right_values));
+            // The definition: each crossing value's dense ID is the crossing values before it, every other value's
+            // none; the values in order, then the tail's canary.
+            uint32_t expected_ids[65];
+            uint32_t expected_values[65];
+            uint32_t ids[65];
+            uint32_t values[65];
+            memset(expected_values, 0x5a, sizeof(expected_values));
+            memset(values, 0x5a, sizeof(values));
+            uint32_t expected = 0;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 cross[i] = i % 3 != 0;
+                expected_ids[i] = cross[i] ? expected : BUSTER_IR_NONE;
+                expected_values[expected] = cross[i] ? i : expected_values[expected];
+                expected += cross[i];
             }
-            const uint32_t left = tier1_liveness_dense(cross, count, left_ids, left_values, false);
-            const uint32_t right = tier1_liveness_dense(cross, count, right_ids, right_values, true);
-            tier1_liveness_test_expect(test, left == right && memcmp(left_ids, right_ids, count * 4) == 0 && memcmp(left_values, right_values, sizeof(left_values)) == 0, "guarded dense compaction and untouched output tail");
+            const uint32_t dense = tier1_liveness_dense(cross, count, ids, values);
+            tier1_liveness_test_expect(test, dense == expected && memcmp(ids, expected_ids, count * 4) == 0 && memcmp(values, expected_values, sizeof(values)) == 0, "guarded dense compaction and untouched output tail");
         }
         for (uint32_t count = 0; count <= 16; count += 1)
         {
             uint32_t* ids = (uint32_t*)(mapping + page - count * 4);
-            uint64_t left[16] = { 0 };
-            uint64_t right[16] = { 0 };
+            // The definition: a bit for each ID but none.
+            uint64_t expected[16] = { 0 };
+            uint64_t row[16] = { 0 };
             for (uint32_t i = 0; i < count; i += 1)
             {
                 ids[i] = i % 5 == 0 ? BUSTER_IR_NONE : i * 3;
+                if (ids[i] != BUSTER_IR_NONE)
+                {
+                    expected[ids[i] / 64] |= UINT64_C(1) << (ids[i] & 63);
+                }
             }
-            tier1_liveness_set_row(left, ids, count, false);
-            tier1_liveness_set_row(right, ids, count, true);
-            tier1_liveness_test_expect(test, memcmp(left, right, sizeof(left)) == 0, "guarded collision-combining use/def builder");
+            tier1_liveness_set_row(row, ids, count);
+            tier1_liveness_test_expect(test, memcmp(row, expected, sizeof(row)) == 0, "guarded collision-combining use/def builder");
         }
     }
     if (mapping != MAP_FAILED)
@@ -662,9 +642,8 @@ static void tier1_liveness_test_calls(Tier1LivenessTest* test)
                 valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
                 if (valid)
                 {
-                    Tier1Liveness scalar;
                     Tier1Liveness vector;
-                    valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+                    valid = tier1_liveness_test_build(test, &plan, &cfg, &vector);
                     if (valid)
                     {
                         tier1_liveness_test_expect(test, vector.allocation.count == 7 + (result_types[type] != IR_VOID) && vector.allocation.use_count == count + 1 + (result_types[type] != IR_VOID), "call result and every duplicate argument have exact interval/use counts");
@@ -717,16 +696,13 @@ static void tier1_liveness_test_calls(Tier1LivenessTest* test)
                             {
                                 plan.patterns[7].values[0] = 0;
                             }
-                            for (uint32_t path = 0; path < 2; path += 1)
-                            {
-                                Tier1Liveness rejected;
-                                memset(&rejected, 0xa5, sizeof(rejected));
-                                const Tier1Liveness before = rejected;
-                                const uint64_t mark = test->left.length;
-                                const uint64_t scratch_mark = test->scratch.length;
-                                const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, path != 0, &rejected);
-                                tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&rejected, &before, sizeof(rejected)) == 0, "malformed call pattern/use handoff is rejected transactionally");
-                            }
+                            Tier1Liveness rejected;
+                            memset(&rejected, 0xa5, sizeof(rejected));
+                            const Tier1Liveness before = rejected;
+                            const uint64_t mark = test->left.length;
+                            const uint64_t scratch_mark = test->scratch.length;
+                            const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, &rejected);
+                            tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&rejected, &before, sizeof(rejected)) == 0, "malformed call pattern/use handoff is rejected transactionally");
                             plan.effective_use_values[first] = saved_use;
                             plan.effective_use_offsets[8] = saved_end;
                             plan.patterns[7] = saved_pattern;
@@ -773,9 +749,8 @@ static void tier1_liveness_test_call_fold(Tier1LivenessTest* test)
         valid = tier1_liveness_test_plan(test, &function, &plan, &cfg);
         if (valid)
         {
-            Tier1Liveness scalar;
             Tier1Liveness vector;
-            valid = tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector);
+            valid = tier1_liveness_test_build(test, &plan, &cfg, &vector);
             if (valid)
             {
                 bool extended = false;
@@ -822,9 +797,8 @@ static void tier1_liveness_test_narrow(Tier1LivenessTest* test)
         IrCfg cfg;
         if (tier1_liveness_test_plan(test, &function, &plan, &cfg))
         {
-            Tier1Liveness scalar;
             Tier1Liveness vector;
-            if (tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector))
+            if (tier1_liveness_test_build(test, &plan, &cfg, &vector))
             {
                 const uint32_t expected_values[] =
                 {
@@ -900,9 +874,8 @@ static void tier1_liveness_test_unreachable(Tier1LivenessTest* test)
         IrCfg cfg;
         if (tier1_liveness_test_plan(test, &function, &plan, &cfg))
         {
-            Tier1Liveness scalar;
             Tier1Liveness vector;
-            if (tier1_liveness_test_compare(test, &plan, &cfg, &scalar, &vector))
+            if (tier1_liveness_test_build(test, &plan, &cfg, &vector))
             {
                 tier1_liveness_test_expect(test, vector.allocation.count == 0 && vector.allocation.use_count == 0 && vector.cross_block_values == 0, "unreachable requires neither a value interval nor a use");
             }
@@ -912,16 +885,13 @@ static void tier1_liveness_test_unreachable(Tier1LivenessTest* test)
                 plan.patterns[0].width = mutation == 0 ? 4 : 0;
                 plan.patterns[0].values[0] = mutation == 1 ? 0 : BUSTER_IR_NONE;
                 plan.covered[0] = mutation == 2;
-                for (uint32_t path = 0; path < 2; path += 1)
-                {
-                    Tier1Liveness live;
-                    memset(&live, 0xa5, sizeof(live));
-                    const Tier1Liveness before = live;
-                    const uint64_t mark = test->left.length;
-                    const uint64_t scratch_mark = test->scratch.length;
-                    const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, path != 0, &live);
-                    tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&live, &before, sizeof(live)) == 0, "malformed unreachable plan is refused transactionally");
-                }
+                Tier1Liveness live;
+                memset(&live, 0xa5, sizeof(live));
+                const Tier1Liveness before = live;
+                const uint64_t mark = test->left.length;
+                const uint64_t scratch_mark = test->scratch.length;
+                const Tier1LivenessError error = tier1_liveness_build(&plan, &test->left, &test->scratch, &live);
+                tier1_liveness_test_expect(test, error == TIER1_LIVENESS_INVALID && test->left.length == mark && test->scratch.length == scratch_mark && memcmp(&live, &before, sizeof(live)) == 0, "malformed unreachable plan is refused transactionally");
                 plan.patterns[0] = before_pattern;
                 plan.covered[0] = 0;
             }

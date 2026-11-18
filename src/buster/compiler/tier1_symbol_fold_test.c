@@ -294,7 +294,7 @@ static void tier1_symbol_fold_straight(Tier1EmitTest* test)
     }
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    ready = ready && tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK && tier1_emit_cfg_chain(&plan);
+    ready = ready && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK && tier1_emit_cfg_chain(&plan);
     tier1_emit_test_expect(test, ready, "a straight-line load selects for the straight-line consumer");
     const Tier1EmitOptions options = {
         .register_mask = tier1_liveness_register_mask(),
@@ -317,12 +317,15 @@ static void tier1_symbol_fold_straight(Tier1EmitTest* test)
 
 // #2601: three indexed accesses of one global in one block, each made by the lowering with its own symbol's address and
 // its own sign extension of the index i: t[i] += v, then t[i + 8] read, the sum of both returned. Every pattern reads
-// the block's first address and extension, so neither repeats in the code: no node computes the later ones.
-static bool tier1_symbol_fold_repeated_function(Tier1EmitTest* test, IrFunction* function)
+// the block's first address and extension, so neither repeats in the code: no node computes the later ones. `pad`
+// unused zero constants after the parameters move the accesses later: 62 puts the first address at node 64, the first
+// of the leaves' scan's second 64.
+static bool tier1_symbol_fold_repeated_function(Tier1EmitTest* test, IrFunction* function, uint32_t pad)
 {
     const IrSizes sizes = {
-        .instruction_count = 17,
+        .instruction_count = 17 + pad,
         .block_count = 1,
+        .constant_count = 1,
         .address_count = 2,
         .parameter_count = 2,
     };
@@ -338,6 +341,11 @@ static bool tier1_symbol_fold_repeated_function(Tier1EmitTest* test, IrFunction*
         uint32_t next = 0;
         const uint32_t index = tier1_select_test_append(function, &next, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t value = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->constants[0].low = 0;
+        for (uint32_t k = 0; k < pad; k += 1)
+        {
+            tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
         uint32_t loaded = BUSTER_IR_NONE;
         uint32_t sum = BUSTER_IR_NONE;
         for (uint32_t access = 0; access < 3; access += 1)
@@ -376,28 +384,30 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_symbol_fold_call_
 
 static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
 {
-    for (uint32_t vector = 0; vector < 2; vector += 1)
+    for (uint32_t variant = 0; variant < 4; variant += 1)
     {
+        const uint32_t vector = variant & 1;
+        // The nodes past the parameters' move by the padding.
+        const uint32_t at = (variant & 2) != 0 ? 62 : 0;
         IrFunction function;
-        const bool created = tier1_symbol_fold_repeated_function(test, &function);
+        const bool created = tier1_symbol_fold_repeated_function(test, &function, at);
         const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
         tier1_emit_test_expect(test, valid, "the repeated indexed accesses' fixture is valid IR");
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;
-        // Nodes 2 and 3 are the first address and extension, 7 and 8 the second's, 11 and 12 the third's; 10 the store,
-        // and 6 and 15 the additions that take the loads 5 and 14 as their memory operands (#2602).
-        bool shared = planned && !plan.covered[2] && !plan.covered[3] && plan.covered[7] && plan.covered[8] && plan.covered[11] && plan.covered[12] && plan.covered[5] &&
-                      plan.covered[14] && plan.patterns[6].rule == TIER1_RULE_LOAD_OPERAND && plan.patterns[15].rule == TIER1_RULE_LOAD_OPERAND;
-        const uint32_t accesses[3] = { 6, 10, 15 };
+        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
+        // Unpadded, nodes 2 and 3 are the first address and extension, 7 and 8 the second's, 11 and 12 the third's; 10
+        // the store, and 6 and 15 the additions that take the loads 5 and 14 as their memory operands (#2602).
+        bool shared = planned && !plan.covered[at + 2] && !plan.covered[at + 3] && plan.covered[at + 7] && plan.covered[at + 8] && plan.covered[at + 11] && plan.covered[at + 12] &&
+                      plan.covered[at + 5] && plan.covered[at + 14] && plan.patterns[at + 6].rule == TIER1_RULE_LOAD_OPERAND && plan.patterns[at + 15].rule == TIER1_RULE_LOAD_OPERAND;
+        const uint32_t accesses[3] = { at + 6, at + 10, at + 15 };
         for (uint32_t k = 0; shared && k < 3; k += 1)
         {
             const Tier1SelectPattern* pattern = &plan.patterns[accesses[k]];
             const uint32_t first = k == 1 ? 0 : 1;
-            shared = pattern->values[first] == 2 && pattern->values[first + 1] == 3 && pattern->displacement == (k == 2 ? 64 : 0) && !pattern->rip;
+            shared = pattern->values[first] == at + 2 && pattern->values[first + 1] == at + 3 && pattern->displacement == (k == 2 ? 64 : 0) && !pattern->rip;
         }
         tier1_emit_test_expect(test, shared, "every indexed access reads its block's first symbol address and index extension");
-        tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, 0, &plan, &test->output, &test->scratch), "both selection paths share the first address and extension");
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
             .vector = vector != 0,
@@ -485,12 +495,11 @@ static void tier1_symbol_fold_addition_tests(Tier1EmitTest* test)
         tier1_emit_test_expect(test, valid, "the symbol addition's fixture is valid IR");
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         const Tier1SelectPattern* pattern = planned ? &plan.patterns[4] : 0;
         const bool folded = planned && plan.covered[1] && plan.covered[2] && plan.covered[3] && pattern->rule == TIER1_RULE_LOAD_OPERAND && pattern->values[0] == 0 &&
                             tier1_symbol_fold_folded(pattern, 1, 8);
         tier1_emit_test_expect(test, folded, "an addition takes a symbol's load as its rip-relative memory operand");
-        tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, 0, &plan, &test->output, &test->scratch), "both selection paths fold the symbol's load into the addition");
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
             .vector = vector,
@@ -566,7 +575,7 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         // Without the column every symbol is direct, and folds: the consumer, given the column, refuses each that isn't.
         Tier1SelectPlan all;
         uint32_t node = BUSTER_IR_NONE;
-        const bool unreached = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &all, &node) == TIER1_SELECT_OK;
+        const bool unreached = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &all, &node) == TIER1_SELECT_OK;
         const bool every = unreached && all.patterns[13].rip && all.patterns[13].stack_object == 2 && all.patterns[14].rip && all.covered[15] && all.patterns[18].rip && all.patterns[18].stack_object == 4 &&
                            all.covered[2];
         tier1_emit_test_expect(test, every, "without the access column every symbol folds");
@@ -574,7 +583,7 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         const Tier1EmitError mismatch = every ? tier1_emit_function(&all, &options, test->allowed, &test->output, &test->scratch, &refused, &node) : TIER1_EMIT_OK;
         tier1_emit_test_expect(test, mismatch == TIER1_EMIT_INVALID, "the consumer refuses a folded symbol its column reaches indirectly");
         Tier1SelectPlan plan;
-        const bool planned = dominated && tier1_select_plan_access(&function, &dominance, tier1_symbol_fold_access, BUSTER_ARRAY_LENGTH(tier1_symbol_fold_access), &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+        const bool planned = dominated && tier1_select_plan_access(&function, &dominance, tier1_symbol_fold_access, BUSTER_ARRAY_LENGTH(tier1_symbol_fold_access), &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         const bool shaped = planned && tier1_symbol_fold_shape(&plan) && plan.symbol_access == tier1_symbol_fold_access;
         tier1_emit_test_expect(test, shaped, "a direct symbol folds into its accesses and comparison from another block; GOT and thread-local ones don't");
         if (planned && !shaped && test->failures < 20)
@@ -586,7 +595,6 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
                         p->values[0], p->values[1], p->values[2], p->compare_memory);
             }
         }
-        tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, &dominance, &plan, &test->output, &test->scratch), "both selection paths fold the same symbols");
         Tier1EmitResult emitted;
         const Tier1EmitError error = shaped ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
         const bool certified = error == TIER1_EMIT_OK && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;

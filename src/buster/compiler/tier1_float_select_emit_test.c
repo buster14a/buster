@@ -8,9 +8,10 @@
 // With `summed`, the function returns the select plus one instead, so that the select's result takes a tie to a value's
 // register (tier1_select_ties) as the return's doesn't. With `branch`, it branches on the condition instead, to blocks
 // that return each value: a branch reaches its comparison through the copy too, which the truth walk passes for both. By
-// both paths, with every general register and with the parameters' alone, and with and without a kept frame pointer, the
-// select must be TIER1_RULE_FLOAT_SELECT_COMPARE and the branch TIER1_RULE_FLOAT_BRANCH_COMPARE for an ordered predicate
-// in every shape, and test the comparison's truth value for == and !=; the code must certify and set no flag into a
+// both frame planners (the emit options' `vector`), with every general register and with the parameters' alone, and with
+// and without a kept frame pointer, the select must be TIER1_RULE_FLOAT_SELECT_COMPARE and the branch
+// TIER1_RULE_FLOAT_BRANCH_COMPARE for an ordered predicate in every shape, and test the comparison's truth value for ==
+// and !=; the code must certify and set no flag into a
 // register where it fuses, a summed select with every register must take the register of the value it keeps (no move of
 // its own), and the native result must be C's for NaN, signed zero, infinite and finite operands.
 
@@ -228,8 +229,8 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
                         const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
                         Tier1SelectPlan plan;
                         uint32_t node = BUSTER_IR_NONE;
-                        const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
-                        tier1_emit_test_expect(test, planned, "a floating select's fixture selects by both paths");
+                        const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
+                        tier1_emit_test_expect(test, planned, "a floating select's fixture selects");
                         const uint8_t rule = planned ? plan.patterns[root].rule : TIER1_RULE_NONE;
                         const uint8_t fused_rule = branch ? TIER1_RULE_FLOAT_BRANCH_COMPARE : TIER1_RULE_FLOAT_SELECT_COMPARE;
                         const uint8_t plain_rule = branch ? TIER1_RULE_BRANCH : TIER1_RULE_SELECT;

@@ -1167,7 +1167,7 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
         .leave = fixture->dominance_leave,
         .block_count = fixture->function.block_count,
     };
-    const Tier1SelectError selected = tier1_select_plan(&fixture->function, fixture->dominated ? &dominance : 0, &test->output, &test->scratch, vector, &plan, &node);
+    const Tier1SelectError selected = tier1_select_plan(&fixture->function, fixture->dominated ? &dominance : 0, &test->output, &test->scratch, &plan, &node);
     tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "original direct-call IR selects");
     if (selected != TIER1_SELECT_OK && test->failures < 20)
     {
@@ -1360,7 +1360,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
     };
     Tier1SelectPlan plan;
     uint32_t node;
-    bool ready = tier1_call_fixture(test, &fixture) && tier1_select_plan(&fixture.function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+    bool ready = tier1_call_fixture(test, &fixture) && tier1_select_plan(&fixture.function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, ready, "transactional direct-call fixture selects");
     if (ready)
     {
@@ -1452,7 +1452,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
             memcpy(&before, &rejected, sizeof(rejected));
             const uint64_t mark = test->output.length;
             const uint64_t scratch_mark = test->scratch.length;
-            const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &rejected, &node);
+            const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, &rejected, &node);
             tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "too many arguments and wide or floating results explicitly refuse");
             tier1_emit_test_expect(test, test->output.length == mark && test->scratch.length == scratch_mark && memcmp(&before, &rejected, sizeof(rejected)) == 0, "unsupported-call selection is transactional");
         }

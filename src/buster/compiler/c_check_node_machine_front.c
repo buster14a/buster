@@ -183,9 +183,11 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_TESTS_FAR,
     NODE_FACTS_COUNT_TESTS_LINES,
     NODE_FACTS_COUNT_TESTS_SWEPT,
-    // The expressions whose root's record is apart from its operand's, and T's ticks alone on the tests' expressions.
+    // The expressions whose root's record is apart from its operand's, T's ticks alone on the tests' expressions, and
+    // the chunks the tests ran on.
     NODE_FACTS_COUNT_TESTS_APART,
     NODE_FACTS_COUNT_TESTS_AGAIN_TICKS,
+    NODE_FACTS_COUNT_TESTS_CHUNKS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 
@@ -319,6 +321,21 @@ struct NodeFrontTypes
     uint64_t own_quiet;
     uint64_t own_quiet_checked;
     uint64_t own_quiet_wrong;
+    // The calls the loop left out of its list for having no test to make (node_tests_window_loop's rule); and, with the
+    // reader's verify, those of them checked, those whose test had something, and those with a loud argument by their
+    // own list (node_tests_call_loud). And the asks (node_tests_window_asks): the casts in the loop's list, and the
+    // callees whose declaration was asked whether it wants its result, once a declaration's line.
+    uint64_t own_quiet_calls;
+    uint64_t own_quiet_calls_checked;
+    uint64_t own_quiet_calls_wrong;
+    uint64_t own_quiet_calls_loud;
+    uint64_t own_result_casts;
+    uint64_t own_result_asks;
+    // The casts the loop left out of its list for having no test to make (a pointer's to void or to a pointer); and,
+    // with the reader's verify, those of them checked and those whose test had something.
+    uint64_t own_quiet_casts;
+    uint64_t own_quiet_casts_checked;
+    uint64_t own_quiet_casts_wrong;
     // With the reader's verify: the integer constants whose record says its value (node_facts_small), and those of them
     // whose payload is another.
     uint64_t own_values_checked;
@@ -1379,7 +1396,7 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                 case CHECK_INPUT_CODE_CALL:
                 {
                     const uint32_t count = node_front_values(front, mine, values);
-                    left = count == BUSTER_NODE_FRONT_UNKNOWN || count == 0 || input->kr_parameter_count != 0 || input->no_builtin ||
+                    left = count == BUSTER_NODE_FRONT_UNKNOWN || count == 0 || input->kr_parameter_count != 0 ||
                            (!lean && front->argument_count + count > BUSTER_NODE_FRONT_RECORDS);
                     value = true;
                     if (!left)

@@ -219,9 +219,10 @@ jobs:
         run: |
           set -euo pipefail
           clang --version | head -n 1
-          for tool in gdb tcc qemu-x86_64 valgrind tclsh8.6 perf; do command -v "$tool"; done
-          valgrind --version
+          for tool in gdb tcc qemu-x86_64 tclsh8.6 perf; do command -v "$tool"; done
           qemu-x86_64 --version | head -n 1
+          # tcl8.6-dev pins the image's libtcl8.6 exactly, which the bundle carries (#2974): the pinned version is in.
+          bash tools/ci/tcl-config.sh
           printf 'Setup reached no external host: the apt closure, the corpus, both mirrors and Lua came from the handoff.\n' | tee -a "$GITHUB_STEP_SUMMARY"
 
   # A preparation whose caches hold every input contacts no external host: a cold preparation (a cache miss) fetches

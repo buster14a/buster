@@ -191,6 +191,11 @@ static const char node_census_test_quiet[] =
 // Seventy of one name summed: 139 records, so that the other operand of what is above them is further back than the
 // block before.
 #define BUSTER_NODE_CENSUS_TEST_TEN(name) name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name
+// Ten of a statement, and seventy: more of them than a block of the loop's has records.
+#define BUSTER_NODE_CENSUS_TEST_TEN_OF(text) text " " text " " text " " text " " text " " text " " text " " text " " text " " text
+#define BUSTER_NODE_CENSUS_TEST_SEVENTY_OF(text)                                                                                                                              \
+    BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " "        \
+    BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text)
 #define BUSTER_NODE_CENSUS_TEST_SEVENTY(name)                                                                                                                                 \
     BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + "             \
     BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name)
@@ -276,11 +281,11 @@ static const char node_census_test_defaults[] =
     // The loop's quiet rule: an operator listed for a constant operand alone that the loop leaves out, one of each
     // class (a sum, a unary one, an equality with zero and with a small value, a pointer's with zero, an ordering with
     // a small value and with zero against a signed operand, a shift by 3 and by 0, a division, an assignment of 5 and
-    // of 0, a compound one, a return's conversion of 1 and of 0, and a sum whose constant is in the block before its
-    // record's), with the constant second and first; and those it must keep listed: 127 and a value further past 126
-    // (126 is left out), zero against an unsigned operand, a constant of a 64-bit type whose low half alone is small,
-    // an enumeration's operand, a bool's, a floating one's under an equality, a sum and a unary operator, a 128-bit
-    // one's, a bit-field's, a pointer to void's, pointer arithmetic, a pointer against 1 (which T's rule refuses), a
+    // of 0, a compound one, a return's conversion of 1 and of 0, a pointer's sum with 1, and a sum whose constant is in
+    // the block before its record's), with the constant second and first; and those it must keep listed: 127 and a
+    // value further past 126 (126 is left out), zero against an unsigned operand, a constant of a 64-bit type whose
+    // low half alone is small, an enumeration's operand, a bool's, a floating one's under an equality, a sum and a unary
+    // operator, a 128-bit one's, a bit-field's, a pointer to void's, a pointer against 1 (which T's rule refuses), a
     // shift of a sum, a shift count and a divisor that fire, a constant that its target doesn't hold (stored,
     // initialized and returned), and a return into a float and into a pointer. An initializer's root is no record of
     // the window's: its lines are the root's own test's.
@@ -364,6 +369,53 @@ static const char node_census_test_defaults[] =
     "{\n"
     "    return *sf; // refuse: aggregate-value\n"
     "}\n"
+    // The loop's rules of a pointer. A cast that a pointer operand sends has no test where its own type is void (a
+    // statement's discard of a pointer's top, and a written one) or a pointer (to void too), and is left out; one to an
+    // integer stays listed, a 64-bit one's test finding nothing and a narrower one's, a bool's and an enumeration's
+    // firing; and nothing sends an enumeration's cast. A subscript of a plain pointer by a constant is left out (zero,
+    // a small value, a large one, a negative one, the constant first, an address constant's), and an array's and a null
+    // constant pointer's, on each side, and one by a bool's constant, which is no plain integer's, stay listed. A sum of
+    // a plain pointer and a constant is left out (on each side, in each compound assignment, a large constant, and
+    // where the pointer is the constant), and a string's, two pointers' difference and one whose constant is further
+    // back than the block before stay listed.
+    "enum V { V0, V1 };\n"
+    "static int vs[4];\n"
+    "int v(int* p, char* s, enum V e, long l, int i, int a)\n"
+    "{\n"
+    "    int x = 0;\n"
+    "    int arr[4];\n"
+    "    int* r = 0; // take\n"
+    "    r = p; // take\n"
+    "    (void)p; // take\n"
+    "    s = (char*)p; // take\n"
+    "    s = (void*)p; // take\n"
+    "    l = (long)p; // take\n"
+    "    x = (int)p; // refuse: pointer-cast-or-void-dereference\n"
+    "    x = (_Bool)p; // refuse: pointer-cast-or-void-dereference\n"
+    "    e = (enum V)p; // refuse: pointer-cast-or-void-dereference\n"
+    "    x = (int)e; // take\n"
+    "    (void)e; // take\n"
+    "    e = V1; // take\n"
+    "    x = p[0]; // take\n"
+    "    x = p[200]; // take\n"
+    "    x = p[-1]; // take\n"
+    "    x = 2[p]; // take\n"
+    "    x = p[100000]; // take\n"
+    "    x = p[(_Bool)1]; // take\n"
+    "    x = arr[1]; // take\n"
+    "    x = (&vs[1])[1]; // take\n"
+    "    x = ((int*)0)[1]; // refuse: constant\n"
+    "    x = 1[(int*)0]; // refuse: constant\n"
+    "    r = p - 200; // take\n"
+    "    r = (int*)0 + i; // take\n"
+    "    l = p - (int*)0; // take\n"
+    "    r = 100000 + p; // take\n"
+    "    p += 3; // take\n"
+    "    p -= 100000; // take\n"
+    "    s = \"abc\" + 1; // refuse: string-plus-int\n"
+    "    r = 5 + (p + (" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") ")); // take\n"
+    "    return x + (r != p) + (s != 0) + l + i + arr[0]; // take\n"
+    "}\n"
     // The tree's tests, which the loop lists by the operator above: a comparison under each bitwise operator, as its
     // first operand and as its second, and in parentheses there (listed, and its test has nothing); `!` before a
     // comparison and an ordering, in parentheses, and after one (not listed); `=` as a condition of each statement that
@@ -421,6 +473,104 @@ static const char node_census_test_defaults[] =
     "    p = &x; // take\n"
     "    \"a\\q\"[a] = 1; // refuse: warning-event\n"
     "    return x + y + z; // take\n"
+    "}\n"
+    // For the calls with no test to make and a statement that discards nothing. A call the loop leaves out: no
+    // constant, a zero and 1 to 126, a null pointer's zero, a static object's address; as a statement, under an
+    // assignment, under a cast to another type, as a comma's first operand, as a condition and in a return; through a
+    // pointer's name, a dereference and a member. A call it keeps, whose test has nothing: a
+    // constant past 126 or under zero, one that fits a narrow parameter, a floating constant to a variable argument, an
+    // integer one to a floating parameter, a callee with an enumeration's parameter or one that asks for its result, a
+    // constant a cast or a conditional makes, whose record says no value, a callee before the block before. A call
+    // whose test has something: a constant its parameter's type changes, the first of two parameters' too, an
+    // aggregate result or argument, a printf-family name, near and before the block before, a pointer whose
+    // declaration has a format. A call of six arguments, left out, and kept for its fifth and for its sixth. A loud
+    // constant whose
+    // consumer is no call, and a call's that is no argument of the call above. A statement's top: a cast to void, a cast
+    // to another type, a call whose callee asks for its result, at its declaration's first such statement and at a
+    // later one, and as a `for`'s last clause, whose discard comes after its body: in the same block, in the block
+    // before, and further back, where the call stays listed and a write does not. Seventy statements that are a call
+    // left out, and seventy whose callee asks for its result: a cast over one at each place of a block.
+    "struct G { int a; int b; };\n"
+    "struct H { int (*fn)(int); };\n"
+    "int k0(int, int);\n"
+    "void k1(int*, unsigned char, long);\n"
+    "double k2(double);\n"
+    "int k3(_Bool);\n"
+    "int k4(enum A);\n"
+    "int k5(int, ...);\n"
+    "struct G k6(int);\n"
+    "int k7(struct G);\n"
+    "__attribute__((warn_unused_result)) int k8(int);\n"
+    "__attribute__((pure)) int k9(int);\n"
+    "int printf(const char*, ...);\n"
+    "int (*kp)(int, int);\n"
+    "int k10(_Bool, int);\n"
+    "static int gx;\n"
+    "int k11(int, int, int, int, int, int);\n"
+    "int (*kf)(const char*, ...) __attribute__((format(printf, 1, 2)));\n"
+    "int calls(int a, int b, int* p, struct G sg, struct H* h, double d)\n"
+    "{\n"
+    "    int x = 0;\n"
+    "    k0(a, b); // take\n"
+    "    k0(a, 0); // take\n"
+    "    k0(a, 126); // take\n"
+    "    k0(a, 127); // take\n"
+    "    k0(a, -1); // take\n"
+    "    k1(p, 200, 5); // take\n"
+    "    k1(p, 300, 5); // refuse: constant\n"
+    "    k1(0, 1, 2); // take\n"
+    "    k1(&gx, 1, 2); // take\n"
+    "    x = k0(a, b); // take\n"
+    "    x = (int)k0(a, b); // take\n"
+    "    k0(a, b), k1(p, 1, 2); // take\n"
+    "    if (k0(a, b)) x = 1; // take\n"
+    "    x = k0(k0(a, 1000), b); // take\n"
+    "    x = k0(a + 1000, b); // take\n"
+    "    d = k2(1); // take\n"
+    "    d = k2(d); // take\n"
+    "    x = k3(2); // refuse: constant\n"
+    "    x = k3(1); // take\n"
+    "    x = k10(2, 1); // refuse: constant\n"
+    "    x = k0(a, (int)1000); // take\n"
+    "    x = k0(a, 1 ? 1000 : 3); // take\n"
+    "    x = k11(a, b, a, b, a, 1); // take\n"
+    "    x = k11(a, b, a, b, a, 1000); // take\n"
+    "    x = k11(a, b, a, b, 1000, a); // take\n"
+    "    kf(\"%d\", a); // refuse: callee\n"
+    "    x = ((int (*)(int, int))0)(a, b); // take\n"
+    "    x = k4(1); // take\n"
+    "    x = k5(a, 1.5); // take\n"
+    "    x = k5(a, 3); // take\n"
+    "    sg = k6(a); // refuse: aggregate-value\n"
+    "    x = k7(sg); // refuse: aggregate-value\n"
+    "    k8(a); // refuse: unused-value\n"
+    "    x = k8(a); // take\n"
+    "    k9(a); // refuse: unused-value\n"
+    "    k8(b); // refuse: unused-value\n"
+    "    for (x = 0; x < a; k0(x, b)) x += 2; // take\n"
+    "    for (x = 0; x < a; k8(x)) x += 2; // refuse: unused-value\n"
+    "    for (x = 0; x < a; k0(x, b)) x += " BUSTER_NODE_CENSUS_TEST_TEN("a") " + " BUSTER_NODE_CENSUS_TEST_TEN("b") "; // take\n"
+    "    for (x = 0; x < a; k8(x)) x += " BUSTER_NODE_CENSUS_TEST_TEN("a") " + " BUSTER_NODE_CENSUS_TEST_TEN("b") "; // refuse: unused-value\n"
+    "    for (x = 0; x < a; k0(x, b)) x += " BUSTER_NODE_CENSUS_TEST_TEN("a") " + " BUSTER_NODE_CENSUS_TEST_TEN("b") " + " BUSTER_NODE_CENSUS_TEST_TEN("a") "; // take\n"
+    "    for (x = 0; x < a; k8(x)) x += " BUSTER_NODE_CENSUS_TEST_TEN("a") " + " BUSTER_NODE_CENSUS_TEST_TEN("b") " + " BUSTER_NODE_CENSUS_TEST_TEN("a") "; // refuse: unused-value\n"
+    "    for (x = 0; x < a; k0(x, b)) x += " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "; // take\n"
+    "    for (x = 0; x < a; k8(x)) x += " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "; // refuse: unused-value\n"
+    "    for (x = 0; x < a; x++) x += " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "; // take\n"
+    "    " BUSTER_NODE_CENSUS_TEST_SEVENTY_OF("k0(a, b);") " // take\n"
+    "    " BUSTER_NODE_CENSUS_TEST_SEVENTY_OF("k8(a);") " // refuse: unused-value\n"
+    "    printf(\"%d\", a); // refuse: callee\n"
+    "    kp(a, b); // take\n"
+    "    (*kp)(a, b); // take\n"
+    "    h->fn(a); // take\n"
+    "    x = (*k0)(a, b); // take\n"
+    "    x = (**k0)(a, b); // take\n"
+    "    (void)a; // take\n"
+    "    (void)0; // take\n"
+    "    (int)a; // refuse: unused-value\n"
+    "    a; // refuse: unused-value\n"
+    "    x = k0(" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") ", b); // take\n"
+    "    printf(\"%d\", " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "); // refuse: callee\n"
+    "    return k0(a, b); // take\n"
     "}\n";
 
 // With no warning of a mix of enumerations and -Wassign-enum: an operator with an operand of an enumeration's type is
@@ -438,16 +588,18 @@ static const char node_census_test_enums[] =
     "}\n";
 
 // The warnings that list an expression for the tests that read T's records, off: what they would refuse is taken, and
-// an expression that only they list has nothing listed (two writes, a returned address). Its first function's return has
-// nothing listed and ends at the unit's first warning event: the events' lower bound, at its equality.
+// an expression that only they list has nothing listed (two writes, a returned address; a pointer's cast to an integer,
+// which nothing sends to its test then). Its first function's return has nothing listed and ends at the unit's first
+// warning event: the events' lower bound, at its equality.
 static const char node_census_test_off[] =
     "char e(void)\n"
     "{\n"
     "    return *\"a\\q\"; // refuse: warning-event\n"
     "}\n"
-    "int f(int a, int b, int c, int i)\n"
+    "int f(int a, int b, int c, int i, int* p)\n"
     "{\n"
     "    int x = 0;\n"
+    "    x = (int)p; // take\n"
     "    x = i + i++; // take\n"
     "    x = a & b == c; // take\n"
     "    x = !a == b; // take\n"
@@ -468,6 +620,61 @@ static const char node_census_test_whole[] =
     "{\n"
     "    a = a + b; // refuse: unmodeled-warning\n"
     "    return a; // refuse: unmodeled-warning\n"
+    "}\n";
+
+// A unit with -Wtype-safety's type tags: its calls' test has something for every call, and the loop leaves none out.
+static const char node_census_test_tagged[] =
+    "static const int tag_long __attribute__((type_tag_for_datatype(magic, long))) = 42;\n"
+    "void take(void* buffer, int tag) __attribute__((pointer_with_type_tag(magic, 1, 2)));\n"
+    "int plain(int);\n"
+    "int w(long* p, int a)\n"
+    "{\n"
+    "    take(p, 42); // refuse: callee\n"
+    "    plain(a); // refuse: callee\n"
+    "    return plain(a); // refuse: callee\n"
+    "}\n";
+
+// A unit with clang's no_builtin on two functions (#2968): its calls are made as any unit's. A plain library builtin is the
+// declaration's call in the function whose attribute names it, or names none (#1958), and has its own semantics in the
+// others, before, between and after them: each is asked by the function that holds it.
+static const char node_census_test_builtins[] =
+    "typedef unsigned long size_t;\n"
+    "void* memset(void*, int, size_t);\n"
+    "void* memcpy(void*, const void*, size_t);\n"
+    "size_t strlen(const char*);\n"
+    "int k0(int, int);\n"
+    "int before(char* p, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // refuse: callee\n"
+    "    k0(a, a); // take\n"
+    "    return (int)strlen(\"abc\"); // refuse: callee\n"
+    "}\n"
+    "__attribute__((no_builtin(\"memset\"))) int named(char* p, const char* q, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // take\n"
+    "    memcpy(p, q, 8); // refuse: callee\n"
+    "    k0(a, a); // take\n"
+    "    return (int)strlen(\"abc\"); // refuse: callee\n"
+    "}\n"
+    "int between(char* p, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // refuse: callee\n"
+    "    k0(a, a); // take\n"
+    "    return a; // take\n"
+    "}\n"
+    "__attribute__((no_builtin)) int every(char* p, const char* q, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // take\n"
+    "    memcpy(p, q, 8); // take\n"
+    "    (&memset)(p, 0, 8); // take\n"
+    "    k0(a, a); // take\n"
+    "    return (int)strlen(\"abc\"); // take\n"
+    "}\n"
+    "int after(char* p, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // refuse: callee\n"
+    "    k0(a, a); // take\n"
+    "    return (int)strlen(p); // refuse: callee\n"
     "}\n";
 
 static const char node_census_test_atomic[] =
@@ -1102,8 +1309,9 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
 // What the tests on the window count on a fixture, which the verdicts don't show: the expressions they run on; the
 // records their loop lists for the tree's tests and the operators it lists for their own; the records then sent to the
 // census's code and the expressions walked for it; the operands further back than the block before their record's; the
-// operators the loop leaves out of its list for a constant operand whose tests have nothing to say; and the integer
-// constants whose record says its value (c_check_node_machine_facts.c's node_facts_small), each then its payload's.
+// operators the loop leaves out of its list for a constant operand whose tests have nothing to say; the casts it leaves
+// out for their own type (`casts_left`; `casts` are the asks' casts over a call left out); and the integer constants
+// whose record says its value (c_check_node_machine_facts.c's node_facts_small), each then its payload's.
 typedef struct NodeTestsWindowed NodeTestsWindowed;
 struct NodeTestsWindowed
 {
@@ -1114,6 +1322,11 @@ struct NodeTestsWindowed
     uint32_t walks;
     uint32_t far;
     uint32_t quiet;
+    uint32_t calls;
+    uint32_t calls_checked;
+    uint32_t casts;
+    uint32_t casts_left;
+    uint32_t asks;
     uint32_t values;
     uint32_t spared;
     uint32_t direct;
@@ -1168,6 +1381,11 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                                                  shadow.own_visits == windowed->sent && shadow.own_walks == windowed->walks &&
                                                  shadow.reader_facts[NODE_FACTS_COUNT_TESTS_FAR] == windowed->far &&
                                                  shadow.own_quiet == windowed->quiet && shadow.own_quiet_checked == windowed->quiet && shadow.own_quiet_wrong == 0 &&
+                                                 shadow.own_quiet_calls == windowed->calls && shadow.own_quiet_calls_checked == windowed->calls_checked &&
+                                                 shadow.own_quiet_calls_wrong == 0 && shadow.own_quiet_calls_loud == 0 && shadow.own_result_asks == windowed->asks &&
+                                                 shadow.own_result_casts == windowed->casts &&
+                                                 shadow.own_quiet_casts == windowed->casts_left && shadow.own_quiet_casts_checked == windowed->casts_left &&
+                                                 shadow.own_quiet_casts_wrong == 0 &&
                                                  shadow.own_values_checked == windowed->values && shadow.own_values_wrong == 0 &&
                                                  shadow.own_tree_checked == windowed->spared && shadow.own_tree_wrong == 0 && shadow.own_lists_past == 0 &&
                                                  shadow.own_direct == windowed->direct && shadow.own_direct_checked == windowed->direct && shadow.own_direct_wrong == 0 &&
@@ -1179,7 +1397,10 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                 " not the census's code's, %" PRIu64 " walks of another count; their loop listed %" PRIu64 " records for the tree's tests (%u) and %" PRIu64
                 " operators (%u), %" PRIu64 " records went to the census's code (%u) after %" PRIu64 " walks (%u), %" PRIu64
                 " operands were before the block before (%u), and it left %" PRIu64 " operators out for their constants (%u): %" PRIu64 " of them checked, %" PRIu64
-                " with a test; %" PRIu64 " constants' records say their value (%u), %" PRIu64 " of them not their payload's; %" PRIu64
+                " with a test; it left %" PRIu64 " calls out (%u): %" PRIu64 " of them checked (%u), %" PRIu64 " with a test, %" PRIu64 " with a loud argument, and asked %" PRIu64
+                " callees for their result (%u) at %" PRIu64 " casts over one (%u); it left %" PRIu64 " casts out (%u): %" PRIu64 " of them checked, %" PRIu64
+                " with a test; %" PRIu64 " constants' records say their value (%u), %" PRIu64
+                " of them not their payload's; %" PRIu64
                 " records the tree's tests read were no listed operator's operand (%u), %" PRIu64 " of them with a test, and %" PRIu64
                 " lists' words had a bit past their expression; %" PRIu64
                 " expressions had nothing listed (%u), %" PRIu64 " of them checked, %" PRIu64 " with another verdict; the tests' own form counted %" PRIu64
@@ -1188,7 +1409,11 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                 window ? windowed->expressions : 0, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES], shadow.own_count_differences, shadow.own_trees,
                 window ? windowed->trees : 0, shadow.own_operators, window ? windowed->operators : 0, shadow.own_visits, window ? windowed->sent : 0, shadow.own_walks,
                 window ? windowed->walks : 0, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_FAR], window ? windowed->far : 0, shadow.own_quiet, window ? windowed->quiet : 0,
-                shadow.own_quiet_checked, shadow.own_quiet_wrong, shadow.own_values_checked, window ? windowed->values : 0, shadow.own_values_wrong,
+                shadow.own_quiet_checked, shadow.own_quiet_wrong, shadow.own_quiet_calls, window ? windowed->calls : 0, shadow.own_quiet_calls_checked,
+                window ? windowed->calls_checked : 0, shadow.own_quiet_calls_wrong, shadow.own_quiet_calls_loud, shadow.own_result_asks, window ? windowed->asks : 0,
+                shadow.own_result_casts, window ? windowed->casts : 0, shadow.own_quiet_casts, window ? windowed->casts_left : 0, shadow.own_quiet_casts_checked,
+                shadow.own_quiet_casts_wrong, shadow.own_values_checked,
+                window ? windowed->values : 0, shadow.own_values_wrong,
                 shadow.own_tree_checked, window ? windowed->spared : 0, shadow.own_tree_wrong, shadow.own_lists_past, shadow.own_direct, window ? windowed->direct : 0,
                 shadow.own_direct_checked,
                 shadow.own_direct_wrong, shadow.own_records, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_RECORDS], shadow.reader_facts[NODE_FACTS_COUNT_TESTS_APART],
@@ -1255,7 +1480,8 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
 // parameter, a static object, a function, enumerators) and each lookup the fact words' rules take: `->` and `.`, chained
 // and through a const record; a static record's member, an address constant; `*p`; subscripts of a pointer, of an
 // automatic and a static array, at a variable index and at constant ones (a static array's element's address is folded),
-// and of a member array; calls of a function, a variadic one, a pointer and a member; and discards, written and an
+// and of a member array; calls of a function, a variadic one, a pointer and a member, and of a function's designator and
+// a pointer to one dereferenced (`*f` is the function again, #2970); and discards, written and an
 // expression statement's. Two the rules leave to T's: the members of a record whose type has an aligned typedef's
 // wrapper, through a pointer and of an element (the subscript of a pointer to one they take).
 static const char node_facts_test_text[] =
@@ -1289,6 +1515,7 @@ static const char node_facts_test_text[] =
     "    x = la[1];\n"
     "    x = p->a[3];\n"
     "    x = f(a) + v(a, x, y) + fp(a) + p->cb(a);\n"
+    "    x = (*f)(a) + (**f)(a) + (*fp)(a);\n"
     "    (void)f(a);\n"
     "    w();\n"
     "    y = wp->m;\n"
@@ -1314,8 +1541,8 @@ static bool node_facts_test_fixture(const char* directory, uint32_t mode, uint32
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     // Its leaves by what they name (enumerators, functions, static and automatic objects), its lookups by operator (`->`,
     // `.`, `*`, a subscript, a call, a discard), and those the rules leave.
-    static const uint64_t named[4] = { 2, 4, 6, 46 };
-    static const uint64_t lookups[BUSTER_NODE_FACTS_LOOKUPS] = { 8, 6, 1, 10, 6, 21 };
+    static const uint64_t named[4] = { 2, 6, 6, 51 };
+    static const uint64_t lookups[BUSTER_NODE_FACTS_LOOKUPS] = { 8, 6, 5, 10, 9, 22 };
     static const uint64_t left[BUSTER_NODE_FACTS_LOOKUPS] = { 1, 1, 0, 0, 0, 0 };
     bool held = shadow.facts_differences == 0 && shadow.facts_list_differences == 0 && shadow.facts_failures == 0 && shadow.value_differences == 0 &&
                 shadow.facts_left_identifiers == 0;
@@ -1327,14 +1554,15 @@ static bool node_facts_test_fixture(const char* directory, uint32_t mode, uint32
     {
         held = held && shadow.facts_lookups[lookup] == lookups[lookup] && shadow.facts_left_lookups[lookup] == left[lookup];
     }
-    // The fixture's 21 discards, which a lean kernel doesn't make: each T's record by the discard's rule. Its other 31
-    // lookups less the two left: each one's conversions' entries by its rule. Two more go by their rule in any variant
-    // (a member through an array's pointer, a constant index of an address constant). `p[1].n` is its one taken member
-    // of an operand that is no address constant, at an offset: the record a dot's choices by masks would get wrong.
+    // The fixture's 22 discards, which a lean kernel doesn't make: each T's record by the discard's rule. Its other 38
+    // lookups less the two left: each one's conversions' entries by its rule. Five go by their rule in any variant (a
+    // member through an array's pointer, a constant index of an address constant, and the three dereferences of a
+    // function's designator, which is no pointer's value). `p[1].n` is its one taken member of an operand that is no
+    // address constant, at an offset: the record a dot's choices by masks would get wrong.
     const bool lean = mode != BUSTER_NODE_FACTS_WHOLE;
-    held = held && shadow.facts_discards == (lean ? 21u : 0u) && shadow.facts_discards_derived == shadow.facts_discards &&
-           shadow.facts_conversions == (lean ? 29u : 0u) && shadow.facts_conversions_derived == shadow.facts_conversions &&
-           shadow.facts_taken_lookups - shadow.facts_short_lookups == 2 && (mode != BUSTER_NODE_FACTS_LOADS || shadow.facts_loads == shadow.facts_short_lookups);
+    held = held && shadow.facts_discards == (lean ? 22u : 0u) && shadow.facts_discards_derived == shadow.facts_discards &&
+           shadow.facts_conversions == (lean ? 36u : 0u) && shadow.facts_conversions_derived == shadow.facts_conversions &&
+           shadow.facts_taken_lookups - shadow.facts_short_lookups == 5 && (mode != BUSTER_NODE_FACTS_LOADS || shadow.facts_loads == shadow.facts_short_lookups);
     if (!valid || !held)
     {
         fprintf(stderr, "test-checker: node-facts: variant %u window %u%s: %s: %" PRIu64 " records differ, %" PRIu64 " lists differ, %" PRIu64 " leaves left; named %" PRIu64
@@ -2276,6 +2504,41 @@ static bool node_flat_test_reach(const char* directory, bool first, char** optio
     return valid && same;
 }
 
+// The fronts on the no_builtin fixture (#2968), read with `options`: the front `front` makes the unit's calls, their
+// `arguments` arguments, though two of its functions have the attribute; each record is the walk's node, the whole
+// front's with its call's library mark, which the walk gives by the function that holds the call; and the flat front's
+// records beside the lean one's are the lean one's, neither with a record the other lacks.
+static bool node_front_test_builtins(const char* directory, uint8_t front, uint64_t arguments, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/front-builtins.c", directory);
+    bool valid = parse_test_write(path, node_census_test_builtins, strlen(node_census_test_builtins));
+    NodeShadow shadow = {
+        .front = front,
+        .passes = 1,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const bool flat = (front & BUSTER_NODE_FRONT_FLAT) != 0;
+    const bool same = shadow.front_differences == 0 && shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_checked == shadow.front_records &&
+                      shadow.front_arguments == arguments &&
+                      (flat ? shadow.flat_differences == 0 && shadow.flat_compared == shadow.front_records && shadow.flat_only == 0 && shadow.flat_lean_only == 0 &&
+                                  shadow.flat_unread == 0 :
+                              shadow.flat_compared == 0 && shadow.flat_records == 0);
+    if (!valid || !same)
+    {
+        fprintf(stderr, "test-checker: node-front builtins (front %u): %s: the front's records %" PRIu64 ", checked %" PRIu64 ", %" PRIu64 " differ, its calls' arguments %" PRIu64
+                        " (%" PRIu64 " expected); the flat front's %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " only its own, %" PRIu64
+                        " only the lean front's\n",
+                front, valid ? "read" : "NOT READ", shadow.front_records, shadow.front_checked, shadow.front_differences, shadow.front_arguments, arguments, shadow.flat_records,
+                shadow.flat_compared, shadow.flat_differences, shadow.flat_only, shadow.flat_lean_only);
+    }
+    unlink(path);
+    return valid && same;
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
     char directory[] = "/tmp/buster-node-census-XXXXXX";
@@ -2312,12 +2575,18 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                     "-Wno-unused-value",
                     "-Wno-unused-comparison",
                     "-Wno-parentheses",
-                    "-Wno-logical-not-parentheses" };
+                    "-Wno-logical-not-parentheses",
+                    "-Wno-pointer-to-int-cast" };
     check_test_expect(test, ready && node_census_test_fixture(directory, "off.c", node_census_test_off, off, BUSTER_ARRAY_LENGTH(off), &system),
                       "node-census takes what a warning that is off would refuse");
     char* whole[] = { "-nostdinc", "-Wc++-compat" };
     check_test_expect(test, ready && node_census_test_fixture(directory, "whole.c", node_census_test_whole, whole, BUSTER_ARRAY_LENGTH(whole), &system),
                       "node-census refuses every expression of a unit with a warning no test stands for");
+    char* tagged[] = { "-nostdinc", "-Wtype-safety" };
+    check_test_expect(test, ready && node_census_test_fixture(directory, "tagged.c", node_census_test_tagged, tagged, BUSTER_ARRAY_LENGTH(tagged), &system),
+                      "node-census refuses every call of a unit with type tags");
+    check_test_expect(test, ready && node_census_test_fixture(directory, "builtins.c", node_census_test_builtins, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
+                      "node-census asks a library call's own semantics by the function that holds it, in a unit with no_builtin");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
@@ -2332,10 +2601,15 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     static const NodeTestsWindowed windowed_warnings = {
         .expressions = 45,
         .trees = 4,
-        .operators = 63,
-        .sent = 23,
+        .operators = 56,
+        .sent = 21,
         .walks = 4,
         .quiet = 6,
+        .calls = 1,
+        .calls_checked = 1,
+        .casts = 1,
+        .casts_left = 4,
+        .asks = 1,
         .values = 45,
         .spared = 34,
         .direct = 2,
@@ -2344,13 +2618,18 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     static const NodeTestsWindowed windowed_clean = {
         .expressions = 23,
         .trees = 1,
-        .operators = 26,
+        .operators = 23,
         .sent = 10,
         .walks = 4,
-        .quiet = 3,
+        .quiet = 4,
+        .calls = 1,
+        .calls_checked = 1,
+        .casts = 1,
+        .casts_left = 1,
+        .asks = 1,
         .values = 26,
         .spared = 17,
-        .direct = 1,
+        .direct = 3,
         .apart = 2,
     };
     static const NodeTestsWindowed windowed_set = {
@@ -2363,8 +2642,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     static const NodeTestsWindowed windowed_quiet = {
         .expressions = 7,
-        .operators = 4,
-        .sent = 3,
+        .operators = 3,
+        .sent = 2,
         .quiet = 1,
         .values = 7,
         .spared = 5,
@@ -2378,17 +2657,22 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .values = 1,
     };
     static const NodeTestsWindowed windowed_defaults = {
-        .expressions = 160,
+        .expressions = 419,
         .trees = 29,
-        .operators = 60,
-        .sent = 26,
+        .operators = 95,
+        .sent = 29,
         .walks = 11,
-        .far = 25,
-        .quiet = 38,
-        .values = 113,
-        .spared = 172,
-        .direct = 57,
-        .apart = 9,
+        .far = 37,
+        .quiet = 67,
+        .calls = 173,
+        .calls_checked = 173,
+        .casts = 157,
+        .casts_left = 17,
+        .asks = 5,
+        .values = 197,
+        .spared = 242,
+        .direct = 200,
+        .apart = 19,
     };
     static const NodeTestsWindowed windowed_enums = {
         .expressions = 5,
@@ -2399,12 +2683,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .direct = 2,
     };
     static const NodeTestsWindowed windowed_off = {
-        .expressions = 12,
+        .expressions = 13,
         .trees = 5,
         .quiet = 1,
         .values = 4,
-        .spared = 5,
-        .direct = 5,
+        .spared = 6,
+        .direct = 6,
         .apart = 1,
     };
     static const NodeTestsWindowed windowed_whole = {
@@ -2412,13 +2696,28 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .spared = 1,
         .direct = 2,
     };
+    static const NodeTestsWindowed windowed_tagged = {
+        .expressions = 4,
+        .operators = 3,
+        .values = 2,
+    };
+    static const NodeTestsWindowed windowed_builtins = {
+        .expressions = 11,
+        .calls = 10,
+        .calls_checked = 10,
+        .casts = 9,
+        .casts_left = 4,
+        .asks = 3,
+        .values = 7,
+        .direct = 10,
+    };
     static const NodeTestsWindowed windowed_system = {
         .expressions = 3,
         .operators = 1,
         .quiet = 1,
         .values = 2,
         .spared = 1,
-        .direct = 1,
+        .direct = 2,
     };
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
@@ -2438,7 +2737,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                                                              BUSTER_NODE_FRONT_AFTER, 2, 0, windowed_atomic),
                       "node-tests: at reader time atomic record accesses are refused by type");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet),
-                                                             BUSTER_NODE_FRONT_AFTER, 77, 14, windowed_defaults),
+                                                             BUSTER_NODE_FRONT_AFTER, 170, 17, windowed_defaults),
                       "node-tests: at reader time the tests refuse what warns without an option, with the default warnings alone");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "enums.c", node_census_test_enums, enums, BUSTER_ARRAY_LENGTH(enums),
                                                              BUSTER_NODE_FRONT_AFTER, 1, 1, windowed_enums),
@@ -2448,6 +2747,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_tests_test_fixture(directory, "whole.c", node_census_test_whole, whole, BUSTER_ARRAY_LENGTH(whole), BUSTER_NODE_FRONT_AFTER, 2, 0,
                                                              windowed_whole),
                       "node-tests: at reader time a warning no test stands for refuses every expression");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "tagged.c", node_census_test_tagged, tagged, BUSTER_ARRAY_LENGTH(tagged), BUSTER_NODE_FRONT_AFTER, 3,
+                                                             1, windowed_tagged),
+                      "node-tests: at reader time a unit with type tags has every call's test, and its loop leaves no call out");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "builtins.c", node_census_test_builtins, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER,
+                                                             0, 0, windowed_builtins),
+                      "node-tests: at reader time a unit with no_builtin has its calls made, and each library call's semantics by its own function");
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
                                                                BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
@@ -2560,6 +2865,14 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-flat: the flat front's records are the lean front's on the shadow's fixture, the left tokens' places empty");
     check_test_expect(test, ready && node_shadow_test_fixture(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, 0, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-flat before the walk: the same records");
+    check_test_expect(test, ready && node_front_test_builtins(directory, BUSTER_NODE_FRONT_AFTER, 38, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-front: in a unit with no_builtin the front makes the calls, each one's library mark the walk's");
+    check_test_expect(test, ready && node_front_test_builtins(directory, BUSTER_NODE_FRONT_BEFORE, 38, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-front before the walk: the same calls and marks");
+    check_test_expect(test, ready && node_front_test_builtins(directory, flat, 38, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-flat: in a unit with no_builtin the flat front makes the calls the lean front makes");
+    check_test_expect(test, ready && node_front_test_builtins(directory, flat | BUSTER_NODE_FRONT_FLAT_FIRST, 38, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-flat before the walk: the same calls");
     check_test_expect(test, ready && node_front_test_limits(directory, true, flat, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat: a value whose consumer is in the next chunk is found there by its position");
     check_test_expect(test, ready && node_front_test_limits(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, 0, loud, BUSTER_ARRAY_LENGTH(loud)),

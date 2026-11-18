@@ -346,8 +346,8 @@ internal linkage, the callees #1282's Tier 1 inliner takes (every
 the caller's: [the design](../tier0-inlining.md) and what the implementation
 does are there.
 
-- `src/buster/compiler/tier0_inline.c`: the splice (`tier0_inline`, its vector
-  path, and `tier0_inline_scalar`, its twin), the callees' rule
+- `src/buster/compiler/tier0_inline.c`: the splice (`tier0_inline`, AVX-512
+  over the entries), the callees' rule
   (`tier0_inline_callee_valid`), the forwarding pass and
   `tier0_inline_code`, which puts a spliced body's code back in terms of its own
   entries and locals for `-g`'s rows.
@@ -381,19 +381,23 @@ does are there.
   `-g` keep every callee.
 
 `./build/compiler test-tier0-inline [--tier0-inline-shapes] [preprocessor
-options] [file...]` lowers each file as `-c` does and splices every body by both
-paths, each with its own lane cache: both must splice the same bodies into the
-same bytes in every column, `tier0_validate` must accept each and Tier 0 compile
-it. `--tier0-inline-shapes` splices step 5's shapes too, as `-c`'s option does
-(CI runs the fixture both ways). Without a file it takes the driver fixture
-below at x86-64-v4 (under a second), and checks that at least 20 calls were
-inlined. On the compiler's own `main.c` (`-march=native -Isrc -fwrapv
+options] [file...]` lowers each file as `-c` does and splices every body: each
+spliced stream's starts must increase to its end, `tier0_validate` must accept
+it and Tier 0 compile it. `--tier0-inline-shapes` splices step 5's shapes too,
+as `-c`'s option does (CI runs the fixture both ways). Without a file it takes
+the driver fixture below at x86-64-v4 (under a second), checks that at least 20
+calls were inlined, and folds the spliced streams (every column and the starts)
+into a digest that must equal the frozen one of its run
+(`BUSTER_TIER0_INLINE_TEST_DIGEST` and `_SHAPES_DIGEST`, taken where the splice's
+vector path and its former scalar twin gave the same bytes, #2924; a change to
+the splice, the lowering or the fixture moves them, and the run prints its own). On the compiler's own `main.c` (`-march=native -Isrc -fwrapv
 -funsigned-char -fno-strict-aliasing`) it splices 830 of 8,509 bodies,
 7,695 calls, in about 8 s on a 4-core cloud host. `test-checker-driver`'s
 fixture (`c_check_tier0_inline_driver_test.c`) builds a program of the
-splice's shapes by the vector path, the scalar twin, `--tier0-no-inline` and
-`--tier0-inline-shapes` by both paths: each runs as clang -O0's build does, the
-two paths' objects are the same bytes, and the control's differs; the object
+splice's shapes by default, with `--scalar` (Tier 0's compile twin, #2972),
+`--tier0-no-inline` and `--tier0-inline-shapes` with and without `--scalar`:
+each runs as clang -O0's build does, the builds with and without `--scalar`
+are the same bytes, and the control's differs; the object
 leaves out the callees spliced at every call (with the shapes, the two returns'
 and the result in memory's too) and keeps those a call or an address refers to,
 the same bytes by 1 and 4 lanes, with `--tier0-no-hold`, and by windows of one

@@ -2,23 +2,22 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-tier1-cfg-source (#140's corpus validity): every function -c compiles of the files, prepared, lowered and
-// promoted as test-ir-source checks them, becomes tier1_cfg_ir.c's allocation problem, which both of tier1_cfg.c's
-// paths allocate and tier1_cfg_verify checks. A function with a value the model has no class for is counted apart;
-// any other refusal, a result the checker rejects, or paths that disagree on whether the problem allocates fail the
-// command. Per path the report gives the intervals and the share the scan took, the values given a slot, the stores
-// and reloads (fragment transitions, definitions into slots and edge moves, to and from slots), the
-// rematerializations, the moves at edges and at splits, the split edges, and the time of each path's one run, which is
-// no measurement (benchmark-tier1-cfg-source is one). Each allocation's certificate (#939, tier1_certificate_cfg.c)
-// must pass tier1_certificate_check too, and the report gives its sizes: facts, edits, source records and operands, and
-// the storage units the checker read and wrote. Beside them, the frame's memory traffic: the IR's loads and
-// stores of its slots, with each path's stores and reloads added. Tier 0's code for the same functions comes from its
+// promoted as test-ir-source checks them, becomes tier1_cfg_ir.c's allocation problem, which tier1_cfg_allocate
+// allocates and tier1_cfg_verify checks. A function with a value the model has no class for is counted apart; any
+// other refusal or a result the checker rejects fails the command. The report gives the intervals and the share the
+// scan took, the values given a slot, the stores and reloads (fragment transitions, definitions into slots and edge
+// moves, to and from slots), the rematerializations, the moves at edges and at splits, the split edges, and the time
+// of the one run, which is no measurement (benchmark-tier1-cfg-source is one). Each allocation's certificate (#939,
+// tier1_certificate_cfg.c) must pass tier1_certificate_check too, and the report gives its sizes: facts, edits, source
+// records and operands, and the storage units the checker read and wrote. Beside them, the frame's memory traffic: the
+// IR's loads and stores of its slots, with the allocation's stores and reloads added. Tier 0's code for the same functions comes from its
 // own tools (-c's objects, benchmark-backend-source): ir_source_prepare's emission initializes Tier 0's tables in the
 // checker's unit, its home, and this command runs in the backend's, whose copies a call here would split from them.
 // Include after ir_source_test.c and tier1_cfg_ir.c.
 //
 //   build/compiler test-tier1-cfg-source [--simd] [--print NAME] [preprocessor options] file...
 //
-// --print NAME prints that function's allocation problem's sizes and each path's counts. --simd counts the functions
+// --print NAME prints that function's allocation problem's sizes and its counts. --simd counts the functions
 // with vectors, which the SSA promoter takes as any other (#141), so that #732's vector and mask values reach the vector
 // and opmask classes (#179): the
 // report then counts its masks, which must be some. A function whose only SIMD values are masks the promoter takes, and
@@ -73,7 +72,6 @@ struct Tier1CfgSourceTotals
     uint64_t unsupported;
     uint64_t unpromoted;
     uint64_t malformed;
-    uint64_t disagreed;
     uint64_t instructions;
     uint64_t values;
     uint64_t blocks;
@@ -82,11 +80,10 @@ struct Tier1CfgSourceTotals
     // With --simd: the functions with vectors, and the problems' mask values.
     uint64_t simd;
     uint64_t mask_values;
-    // The promoted IR's loads and stores of its slots, beside each path's stores and reloads: the frame's traffic.
+    // The promoted IR's loads and stores of its slots, beside the allocation's stores and reloads: the frame's traffic.
     uint64_t slot_accesses;
     // #2538: each function's plain problem and a random preferred one, with its definitions unbound and bound in clashing
-    // pairs (tier1_cfg_test_preference), allocated in one call and in two on both paths
-    // (tier1_cfg_test_two_orders): the cases whose plain problem allocated, those whose preferred allocation was taken,
+    // pairs (tier1_cfg_test_preference), allocated in one call and in two (tier1_cfg_test_two_orders): the cases whose plain problem allocated, those whose preferred allocation was taken,
     // those freed of their definitions' registers by a constraint, those with fixed ranges (which run without them), and
     // the orders' disagreements.
     uint64_t two_cases;
@@ -94,7 +91,7 @@ struct Tier1CfgSourceTotals
     uint64_t two_freed;
     uint64_t two_fixed;
     uint64_t two_disagreed;
-    Tier1CfgSourcePath paths[2];
+    Tier1CfgSourcePath path;
 };
 
 // Whether an IR address is a slot's: a slot address, or an address computed from one.
@@ -199,23 +196,18 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
             totals->blocks += input->block_count;
             totals->edges += input->edge_count;
             totals->phis += input->phi_count;
-            Tier1CfgError errors[2] = {
-                TIER1_CFG_INVALID,
-                TIER1_CFG_INVALID,
-            };
-            for (uint32_t p = 0; p < 2; p += 1)
             {
-                Tier1CfgSourcePath* path = &totals->paths[p];
+                Tier1CfgSourcePath* path = &totals->path;
                 const uint64_t output_mark = output->length;
                 Tier1CfgAllocation result = { 0 };
                 const uint64_t start = tier1_cfg_source_clock();
-                errors[p] = p == 0 ? tier1_cfg_allocate(input, output, scratch, &result) : tier1_cfg_allocate_scalar(input, output, scratch, &result);
+                const Tier1CfgError error = tier1_cfg_allocate(input, output, scratch, &result);
                 path->nanoseconds += tier1_cfg_source_clock() - start;
-                path->constraints += errors[p] == TIER1_CFG_CONSTRAINT;
-                path->failed += errors[p] != TIER1_CFG_OK && errors[p] != TIER1_CFG_CONSTRAINT;
+                path->constraints += error == TIER1_CFG_CONSTRAINT;
+                path->failed += error != TIER1_CFG_OK && error != TIER1_CFG_CONSTRAINT;
                 Tier1CfgCheck check = { 0 };
-                const bool verified = errors[p] == TIER1_CFG_OK && tier1_cfg_verify(input, &result, scratch, &check);
-                path->rejected += errors[p] == TIER1_CFG_OK && !verified;
+                const bool verified = error == TIER1_CFG_OK && tier1_cfg_verify(input, &result, scratch, &check);
+                path->rejected += error == TIER1_CFG_OK && !verified;
                 path->allocated += verified;
                 if (verified)
                 {
@@ -223,9 +215,9 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
                 }
                 Tier1CertReport report = { 0 };
                 Tier1CertCfgStats stats = { 0 };
-                const Tier1CertError certified = errors[p] == TIER1_CFG_OK ? tier1_certificate_cfg_check(input, &result, output, scratch, &report, &stats) : TIER1_CERT_OK;
+                const Tier1CertError certified = error == TIER1_CFG_OK ? tier1_certificate_cfg_check(input, &result, output, scratch, &report, &stats) : TIER1_CERT_OK;
                 path->uncertified += certified != TIER1_CERT_OK;
-                if (errors[p] == TIER1_CFG_OK && certified == TIER1_CERT_OK)
+                if (error == TIER1_CFG_OK && certified == TIER1_CERT_OK)
                 {
                     path->certified += 1;
                     path->facts += stats.facts;
@@ -240,29 +232,27 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
                 }
                 else if (certified != TIER1_CERT_OK)
                 {
-                    printf("tier1-cfg-source: file=%s function=%s path=%s certificate=%u block=%u edge=%u instruction=%u publication_block=%u value=%u position=%u\n", name, source->name, p == 0 ? "vector" : "scalar", (unsigned)certified, report.block, report.edge, report.instruction, stats.block, stats.value, stats.position);
+                    printf("tier1-cfg-source: file=%s function=%s certificate=%u block=%u edge=%u instruction=%u publication_block=%u value=%u position=%u\n", name, source->name, (unsigned)certified, report.block, report.edge, report.instruction, stats.block, stats.value, stats.position);
                 }
-                if (errors[p] == TIER1_CFG_CONSTRAINT)
+                if (error == TIER1_CFG_CONSTRAINT)
                 {
-                    printf("tier1-cfg-source: file=%s function=%s path=%s refused=constraint\n", name, source->name, p == 0 ? "vector" : "scalar");
+                    printf("tier1-cfg-source: file=%s function=%s refused=constraint\n", name, source->name);
                 }
-                else if (errors[p] != TIER1_CFG_OK)
+                else if (error != TIER1_CFG_OK)
                 {
-                    printf("tier1-cfg-source: file=%s function=%s path=%s error=%u\n", name, source->name, p == 0 ? "vector" : "scalar", (unsigned)errors[p]);
+                    printf("tier1-cfg-source: file=%s function=%s error=%u\n", name, source->name, (unsigned)error);
                 }
-                else if (errors[p] == TIER1_CFG_OK && !verified)
+                else if (error == TIER1_CFG_OK && !verified)
                 {
-                    printf("tier1-cfg-source: file=%s function=%s path=%s rejected=\"%s\" block=%u value=%u position=%u\n", name, source->name, p == 0 ? "vector" : "scalar", check.reason, check.block, check.value, check.position);
+                    printf("tier1-cfg-source: file=%s function=%s rejected=\"%s\" block=%u value=%u position=%u\n", name, source->name, check.reason, check.block, check.value, check.position);
                 }
                 if (print != 0 && strcmp(print, (const char*)source->name) == 0)
                 {
-                    printf("tier1-cfg-source: %s path=%s blocks=%u edges=%u values=%u phis=%u positions=%u error=%u intervals=%u spills=%u moves=%u split_edges=%u\n", source->name, p == 0 ? "vector" : "scalar", input->block_count, input->edge_count, input->value_count, input->phi_count, input->position_count, (unsigned)errors[p], result.intervals.count, result.allocation.spill_count, result.move_count, result.split_edges);
+                    printf("tier1-cfg-source: %s blocks=%u edges=%u values=%u phis=%u positions=%u error=%u intervals=%u spills=%u moves=%u split_edges=%u\n", source->name, input->block_count, input->edge_count, input->value_count, input->phi_count, input->position_count, (unsigned)error, result.intervals.count, result.allocation.spill_count, result.move_count, result.split_edges);
                 }
-                failed = failed || (errors[p] != TIER1_CFG_OK && errors[p] != TIER1_CFG_CONSTRAINT) || (errors[p] == TIER1_CFG_OK && !verified) || certified != TIER1_CERT_OK;
+                failed = failed || (error != TIER1_CFG_OK && error != TIER1_CFG_CONSTRAINT) || (error == TIER1_CFG_OK && !verified) || certified != TIER1_CERT_OK;
                 arena_pop_to(output, output_mark);
             }
-            totals->disagreed += (errors[0] == TIER1_CFG_OK) != (errors[1] == TIER1_CFG_OK);
-            failed = failed || (errors[0] == TIER1_CFG_OK) != (errors[1] == TIER1_CFG_OK);
             const uint64_t two_mark = output->length;
             uint32_t* chosen = arena_push_array(output, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
             uint32_t* defined = arena_push_array(output, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
@@ -285,19 +275,16 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
                 Tier1CfgInput plain = *problem;
                 plain.definition_registers = bind != 0 ? defined : 0;
                 plain.fixed = (Tier1FixedIntervals){ 0 };
-                for (uint32_t p = 0; p < 2; p += 1)
+                const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, true, output, scratch, allowed);
+                if (!outcome.agreed || !outcome.verified)
                 {
-                    const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, p == 0, true, output, scratch, allowed);
-                    if (!outcome.agreed || !outcome.verified)
-                    {
-                        printf("tier1-cfg-source: file=%s function=%s path=%s bound=%u two_orders=%s fields=%u\n", name, source->name, p == 0 ? "vector" : "scalar", bind, outcome.agreed ? "rejected" : "disagree", outcome.differs);
-                    }
-                    totals->two_disagreed += !outcome.agreed || !outcome.verified;
-                    failed = failed || !outcome.agreed || !outcome.verified;
-                    totals->two_cases += p == 0 && outcome.allocated;
-                    totals->two_taken += p == 0 && outcome.taken;
-                    totals->two_freed += p == 0 && outcome.freed;
+                    printf("tier1-cfg-source: file=%s function=%s bound=%u two_orders=%s fields=%u\n", name, source->name, bind, outcome.agreed ? "rejected" : "disagree", outcome.differs);
                 }
+                totals->two_disagreed += !outcome.agreed || !outcome.verified;
+                failed = failed || !outcome.agreed || !outcome.verified;
+                totals->two_cases += outcome.allocated;
+                totals->two_taken += outcome.taken;
+                totals->two_freed += outcome.freed;
             }
             arena_pop_to(output, two_mark);
         }
@@ -390,15 +377,13 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
         arena_pop_to(&lowered, 0);
         arena_pop_to(&arena, 0);
     }
-    const uint64_t refused = totals.paths[0].failed + totals.paths[0].rejected + totals.paths[1].failed + totals.paths[1].rejected + totals.paths[0].uncertified + totals.paths[1].uncertified;
+    const uint64_t refused = totals.path.failed + totals.path.rejected + totals.path.uncertified;
     if (valid)
     {
-        printf("tier1-cfg-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " unsupported=%" PRIu64 " unpromoted=%" PRIu64 " malformed=%" PRIu64 " disagreed=%" PRIu64 " instructions=%" PRIu64 " values=%" PRIu64 " blocks=%" PRIu64 " edges=%" PRIu64 " phis=%" PRIu64 " simd_vectors=%" PRIu64 " masks=%" PRIu64 "\n",
-               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.unsupported, totals.unpromoted, totals.malformed, totals.disagreed, totals.instructions, totals.values, totals.blocks, totals.edges, totals.phis, totals.simd, totals.mask_values);
-        tier1_cfg_source_print_path("vector", &totals.paths[0], totals.instructions);
-        tier1_cfg_source_print_path("scalar", &totals.paths[1], totals.instructions);
-        printf("tier1-cfg-source: frame traffic: slot_accesses=%" PRIu64 " vector=%" PRIu64 " scalar=%" PRIu64 "\n", totals.slot_accesses, totals.slot_accesses + totals.paths[0].stores + totals.paths[0].reloads,
-               totals.slot_accesses + totals.paths[1].stores + totals.paths[1].reloads);
+        printf("tier1-cfg-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " unsupported=%" PRIu64 " unpromoted=%" PRIu64 " malformed=%" PRIu64 " instructions=%" PRIu64 " values=%" PRIu64 " blocks=%" PRIu64 " edges=%" PRIu64 " phis=%" PRIu64 " simd_vectors=%" PRIu64 " masks=%" PRIu64 "\n",
+               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.unsupported, totals.unpromoted, totals.malformed, totals.instructions, totals.values, totals.blocks, totals.edges, totals.phis, totals.simd, totals.mask_values);
+        tier1_cfg_source_print_path("allocation", &totals.path, totals.instructions);
+        printf("tier1-cfg-source: frame traffic: slot_accesses=%" PRIu64 " with spills=%" PRIu64 "\n", totals.slot_accesses, totals.slot_accesses + totals.path.stores + totals.path.reloads);
         printf("tier1-cfg-source: two problems in one call and in two: cases=%" PRIu64 " taken=%" PRIu64 " freed=%" PRIu64 " fixed=%" PRIu64 " disagreed=%" PRIu64 "\n", totals.two_cases, totals.two_taken, totals.two_freed, totals.two_fixed, totals.two_disagreed);
     }
     else
@@ -414,5 +399,5 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     arena_release(&lowered);
     free(files);
     free(options);
-    return valid && totals.failed_files == 0 && totals.unpromoted == 0 && totals.malformed == 0 && totals.disagreed == 0 && totals.two_disagreed == 0 && refused == 0 && totals.functions != 0 && (!simd || totals.mask_values != 0) ? 0 : 1;
+    return valid && totals.failed_files == 0 && totals.unpromoted == 0 && totals.malformed == 0 && totals.two_disagreed == 0 && refused == 0 && totals.functions != 0 && (!simd || totals.mask_values != 0) ? 0 : 1;
 }
