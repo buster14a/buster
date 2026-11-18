@@ -107,7 +107,7 @@ requirements. [Command index](README.md).
   using the scalar form-choice oracle, and checks the concrete records and
   clobbers. Unsupported straight-line shapes publish no definition claims.
 - #938's harness allocates every problem it adapts through
-  `tier1_problem_allocate`, by both allocator paths, and reports an allocation
+  `tier1_problem_allocate`, by `tier1_allocate`, and reports an allocation
   only past `tier1_problem_certify`:
   - `tests/tier1-problem/report.c` reports problem files;
   - the integration fuzzer certifies every problem it decodes;

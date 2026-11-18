@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // The codec's round trip on every input. With BUSTER_TP_INTEGRATION, every problem that decodes is also allocated by
-// both of buster's allocator paths as #938's harness reports it (tier1_problem_allocate): an allocation that fails its
+// buster's allocator as #938's harness reports it (tier1_problem_allocate): an allocation that fails its
 // certificate (#939) aborts, since the allocator made it or the checker refused a correct one.
 #define _GNU_SOURCE
 #include <stdlib.h>

@@ -337,9 +337,9 @@ evidence is still required before selecting a production fast-path policy.
 ## Where the checker runs
 
 - **`test-tier1-allocation`** wraps every successful `tier1_allocate` and
-  `tier1_allocate_scalar` call of its fixtures with the fragment checker
+  `tier1_allocate_scan_reference` call of its fixtures with the fragment checker
   (below), and runs the stream fixtures.
-- **`test-tier1-cfg`** checks every allocation both paths make with
+- **`test-tier1-cfg`** checks every allocation it makes with
   `tier1_certificate_cfg` and `tier1_certificate_check`:
   - the eleven fixtures (loops, a critical edge, phi swaps, slot cycles through
     the temporary slot, values and masks across calls) and the random programs
@@ -356,7 +356,7 @@ evidence is still required before selecting a production fast-path policy.
   certificate refused 1,681 of 1,701 interference mutants and 1,537 of 1,551 k0
   mutants; every other refusal of the 34 is one of the structural constraints
   above.
-- **`test-tier1-cfg-source`** certifies every allocation both paths make of
+- **`test-tier1-cfg-source`** certifies every allocation it makes of
   real C (c-testsuite's subset, the frozen `sqlite3.c`, musl's units and the
   SIMD fixtures in the correctness list) and reports the certificates' sizes. A
   refused certificate fails the run.
@@ -375,8 +375,8 @@ evidence is still required before selecting a production fast-path policy.
     guide](tier1-outcomes.md)). A refusal is an internal failure and capacity a
     resource failure, so either fails the compile rather than leaving the body
     to Tier 0, which would hide it.
-- **#938's harness** allocates every problem it adapts by both of buster's
-  allocator paths, and reports an allocation only past its certificate. This
+- **#938's harness** allocates every problem it adapts by buster's allocator,
+  and reports an allocation only past its certificate. This
   goes through `tier1_problem_allocate`, whose gate is `tier1_problem_certify`
   (`tier1_problem_intervals.c`, the fragment checker on the adapter's one-block
   problems). A refusal is `certificate-rejected` in the tally.
@@ -392,7 +392,7 @@ evidence is still required before selecting a production fast-path policy.
 The existing `tier1_allocate_test.c` is now a coordinator; its original fixtures
 are retained **byte-for-byte** in `tier1_allocate_test_cases.c`. Test-only
 wrappers validate every successful `tier1_allocate` and
-`tier1_allocate_scalar` call made by those fixtures and their included suites.
+`tier1_allocate_scan_reference` call made by those fixtures and their included suites.
 They preserve allocator return statuses, output memory, arena state and
 capacity-test boundaries. They are not production allocator wrappers and do
 not automatically intercept unrelated Tier 1 emitter/pipeline test suites.

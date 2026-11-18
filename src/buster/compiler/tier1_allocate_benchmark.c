@@ -4,7 +4,8 @@
 // Whole interval preparation + assignment, including validation, position counting sort, allocation, fixed-mask
 // filtering, pressure construction, coloring/fallback, fragment publication and arena reset. Input generation is
 // untimed. Synthetic intervals are not source-corpus or generated-program speed evidence.
-// Run each process under the shared 9700X lock, pinned to CPU 2. Options: --only vector|scalar, --after-scalar MS.
+// Run each process under the shared 9700X lock, pinned to CPU 2. --after-scalar MS runs MS of scalar integer work before
+// each sample, to time it out of the vector units' warm state.
 
 #include "host_isa.h"
 #include <stdint.h>
@@ -68,14 +69,30 @@ static double tier1_allocate_benchmark_median(const double* samples)
     return ordered[BUSTER_TIER1_ALLOCATE_BENCHMARK_SAMPLES / 2];
 }
 
-static __attribute__((noinline, aligned(64))) bool tier1_allocate_benchmark_batch(const Tier1AllocationInput* input, Arena* arena, bool vector, uint32_t repetitions, uint64_t* checksum)
+// Scalar integer work for `nanoseconds`, no vector instructions: a multiply-xor chain the compiler can't vectorize.
+static uint64_t tier1_allocate_benchmark_scalar_work(uint64_t nanoseconds)
+{
+    uint64_t state = UINT64_C(0xcbf29ce484222325);
+    const uint64_t start = tier1_allocate_benchmark_now();
+    while (tier1_allocate_benchmark_now() - start < nanoseconds)
+    {
+        #pragma clang loop vectorize(disable) interleave(disable)
+        for (uint32_t i = 0; i < 4096; i += 1)
+        {
+            state = (state ^ i) * UINT64_C(0x100000001b3);
+        }
+    }
+    return state;
+}
+
+static __attribute__((noinline, aligned(64))) bool tier1_allocate_benchmark_batch(const Tier1AllocationInput* input, Arena* arena, uint32_t repetitions, uint64_t* checksum)
 {
     bool valid = true;
     const uint64_t saved = arena->length;
     for (uint32_t repetition = 0; valid && repetition < repetitions; repetition += 1)
     {
         Tier1Allocation output = { 0 };
-        const Tier1AllocationError error = vector ? tier1_allocate(input, arena, &output) : tier1_allocate_scalar(input, arena, &output);
+        const Tier1AllocationError error = tier1_allocate(input, arena, &output);
         valid = error == TIER1_ALLOCATION_OK;
         if (valid)
         {
@@ -89,29 +106,18 @@ static __attribute__((noinline, aligned(64))) bool tier1_allocate_benchmark_batc
 int run_tier1_allocate_benchmark(int argc, char** argv);
 int run_tier1_allocate_benchmark(int argc, char** argv)
 {
-    uint32_t only = 2;
     uint32_t after_scalar = 0;
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
     {
-        const bool wants_only = strcmp(argv[i], "--only") == 0;
-        const bool wants_warm = strcmp(argv[i], "--after-scalar") == 0;
-        valid = (wants_only || wants_warm) && i + 1 < argc;
+        valid = strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc;
         if (valid)
         {
             i += 1;
-            if (wants_only)
-            {
-                valid = strcmp(argv[i], "vector") == 0 || strcmp(argv[i], "scalar") == 0;
-                only = strcmp(argv[i], "vector") == 0 ? 0 : 1;
-            }
-            else
-            {
-                char* end = 0;
-                const unsigned long parsed = strtoul(argv[i], &end, 10);
-                valid = argv[i][0] >= '0' && argv[i][0] <= '9' && end != argv[i] && *end == 0 && parsed <= 1000;
-                after_scalar = (uint32_t)parsed;
-            }
+            char* end = 0;
+            const unsigned long parsed = strtoul(argv[i], &end, 10);
+            valid = argv[i][0] >= '0' && argv[i][0] <= '9' && end != argv[i] && *end == 0 && parsed <= 1000;
+            after_scalar = (uint32_t)parsed;
         }
     }
     Arena input_arena = arena_reserve(16u << 20);
@@ -177,60 +183,44 @@ int run_tier1_allocate_benchmark(int argc, char** argv)
         const uint32_t spills = output.spill_count;
         const uint64_t bytes = output.retained_bytes + output.scratch_bytes;
         arena_pop_to(&arena, 0);
-        valid = valid && tier1_allocate_scalar(&input, &arena, &output) == TIER1_ALLOCATION_OK && tier1_allocation_verify(&input, &output);
-        arena_pop_to(&arena, 0);
         uint32_t repetitions = 1;
         uint64_t elapsed = 0;
         while (valid && elapsed < 2000000 && repetitions < (1u << 20))
         {
             const uint64_t begin = tier1_allocate_benchmark_now();
-            valid = tier1_allocate_benchmark_batch(&input, &arena, true, repetitions, &checksum);
+            valid = tier1_allocate_benchmark_batch(&input, &arena, repetitions, &checksum);
             elapsed = tier1_allocate_benchmark_now() - begin;
             if (elapsed < 2000000)
             {
                 repetitions *= 2;
             }
         }
-        double nanoseconds[2][BUSTER_TIER1_ALLOCATE_BENCHMARK_SAMPLES] = { { 0 } };
-        double cycles[2][BUSTER_TIER1_ALLOCATE_BENCHMARK_SAMPLES] = { { 0 } };
+        double nanoseconds[BUSTER_TIER1_ALLOCATE_BENCHMARK_SAMPLES] = { 0 };
+        double cycles[BUSTER_TIER1_ALLOCATE_BENCHMARK_SAMPLES] = { 0 };
         for (uint32_t pass = 0; valid && pass < BUSTER_TIER1_ALLOCATE_BENCHMARK_SAMPLES; pass += 1)
         {
-            for (uint32_t order = 0; valid && order < 2; order += 1)
+            if (after_scalar != 0)
             {
-                const uint32_t variant = (pass + order) & 1;
-                if (only == 2 || variant == only)
-                {
-                    if (variant == 0 && after_scalar != 0)
-                    {
-                        const uint64_t until = tier1_allocate_benchmark_now() + (uint64_t)after_scalar * 1000000;
-                        while (valid && tier1_allocate_benchmark_now() < until)
-                        {
-                            valid = tier1_allocate_benchmark_batch(&input, &arena, false, 1, &checksum);
-                        }
-                    }
-                    const uint64_t begin_cycles = tier1_allocate_benchmark_cycles(cycles_descriptor);
-                    const uint64_t begin = tier1_allocate_benchmark_now();
-                    valid = valid && tier1_allocate_benchmark_batch(&input, &arena, variant == 0, repetitions, &checksum);
-                    const uint64_t end = tier1_allocate_benchmark_now();
-                    const uint64_t end_cycles = tier1_allocate_benchmark_cycles(cycles_descriptor);
-                    nanoseconds[variant][pass] = (double)(end - begin) / repetitions / count;
-                    cycles[variant][pass] = (double)(end_cycles - begin_cycles) / repetitions / count;
-                }
+                checksum ^= tier1_allocate_benchmark_scalar_work((uint64_t)after_scalar * 1000000);
             }
+            const uint64_t begin_cycles = tier1_allocate_benchmark_cycles(cycles_descriptor);
+            const uint64_t begin = tier1_allocate_benchmark_now();
+            valid = tier1_allocate_benchmark_batch(&input, &arena, repetitions, &checksum);
+            const uint64_t end = tier1_allocate_benchmark_now();
+            const uint64_t end_cycles = tier1_allocate_benchmark_cycles(cycles_descriptor);
+            nanoseconds[pass] = (double)(end - begin) / repetitions / count;
+            cycles[pass] = (double)(end_cycles - begin_cycles) / repetitions / count;
         }
-        for (uint32_t variant = 0; valid && variant < 2; variant += 1)
+        if (valid)
         {
-            if (only == 2 || variant == only)
+            double minimum = nanoseconds[0];
+            double maximum = minimum;
+            for (uint32_t pass = 1; pass < BUSTER_TIER1_ALLOCATE_BENCHMARK_SAMPLES; pass += 1)
             {
-                double minimum = nanoseconds[variant][0];
-                double maximum = minimum;
-                for (uint32_t pass = 1; pass < BUSTER_TIER1_ALLOCATE_BENCHMARK_SAMPLES; pass += 1)
-                {
-                    minimum = nanoseconds[variant][pass] < minimum ? nanoseconds[variant][pass] : minimum;
-                    maximum = nanoseconds[variant][pass] > maximum ? nanoseconds[variant][pass] : maximum;
-                }
-                printf("%-15s %-6s %5u intervals: %.3f ns/interval [%.3f, %.3f], %.3f cycles/interval; vector fallback %u, spill slots %u, peak arena %" PRIu64 " B\n", names[workload], variant == 0 ? "vector" : "scalar", count, tier1_allocate_benchmark_median(nanoseconds[variant]), minimum, maximum, tier1_allocate_benchmark_median(cycles[variant]), fallback, spills, bytes);
+                minimum = nanoseconds[pass] < minimum ? nanoseconds[pass] : minimum;
+                maximum = nanoseconds[pass] > maximum ? nanoseconds[pass] : maximum;
             }
+            printf("%-15s %5u intervals: %.3f ns/interval [%.3f, %.3f], %.3f cycles/interval; vector fallback %u, spill slots %u, peak arena %" PRIu64 " B\n", names[workload], count, tier1_allocate_benchmark_median(nanoseconds), minimum, maximum, tier1_allocate_benchmark_median(cycles), fallback, spills, bytes);
         }
         arena_pop_to(&input_arena, 0);
     }
@@ -240,7 +230,7 @@ int run_tier1_allocate_benchmark(int argc, char** argv)
     }
     else
     {
-        fprintf(stderr, "benchmark-tier1-allocation failed or invalid options: [--only scalar|vector] [--after-scalar MS]\n");
+        fprintf(stderr, "benchmark-tier1-allocation failed or invalid options: [--after-scalar MS]\n");
     }
     if (cycles_descriptor >= 0)
     {

@@ -489,8 +489,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
 {
     const IrFunction* function = plan->function;
     const uint32_t count = function->instruction_count;
-    const bool vector = BUSTER_VECTOR_PATH(options->vector);
-    const Tier1LivenessError checked = tier1_liveness_validate_plan(plan, scratch, vector, true);
+    const Tier1LivenessError checked = tier1_liveness_validate_plan(plan, scratch, true);
     tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_LIVENESS, checked);
     Tier1EmitError error = checked == TIER1_LIVENESS_OK ? TIER1_EMIT_OK : checked == TIER1_LIVENESS_MEMORY ? TIER1_EMIT_MEMORY : checked == TIER1_LIVENESS_LIMIT ? TIER1_EMIT_LIMIT : checked == TIER1_LIVENESS_UNSUPPORTED ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
     error = error == TIER1_EMIT_OK && count == 0 ? TIER1_EMIT_INVALID : error;
@@ -537,7 +536,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     prepared->function = function;
     // Whether the function has vectors (#141): one scan of it, by the requested path, so that a function without one pays no
     // node's vector checks.
-    const bool vectors = ir_function_has_vectors_path(function, options->vector);
+    const bool vectors = ir_function_has_vectors_path(function, true);
     for (uint32_t node = 0; ok && node < count; node += 1)
     {
         const bool x87 = function->type[node] == IR_F80;
@@ -712,10 +711,10 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         };
         prepared->recipe_values = constants;
         // The model's costs, where it has them, before the marks read them: the frame's base is rsp.
-        const bool costed = tier1_rematerialization_model_costs(&prepared->recipes, X86_REGISTER_RSP, costs, reload_costs, vector);
+        const bool costed = tier1_rematerialization_model_costs(&prepared->recipes, X86_REGISTER_RSP, costs, reload_costs);
         prepared->recipes.costs = costs;
         prepared->recipes.reload_costs = reload_costs;
-        const bool marked = costed && (vector ? tier1_rematerialization_marks(&prepared->recipes, marks) : tier1_rematerialization_marks_scalar(&prepared->recipes, marks));
+        const bool marked = costed && tier1_rematerialization_marks(&prepared->recipes, marks);
         error = marked ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
     }
     // Frame-base reservations before allocation, from every value as a prospective slot, the caller-save rows and the
@@ -3506,13 +3505,13 @@ static uint64_t tier1_emit_cfg_x87_node_records(const Tier1SelectPlan* plan, uin
 // repeated operands, calls and phi edges. Only the selected producer's own private store and the selected consumer's
 // matching load are annotated; raw loads and constants keep their initial materialization. The shared record proof
 // preserves both waiting points and every metadata index, and declines barriers, right operands and excess pressure.
-static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t records, const uint32_t* block_first, uint32_t blocks, bool vector, Arena* output, Arena* scratch)
+static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t records, const uint32_t* block_first, uint32_t blocks, Arena* output, Arena* scratch)
 {
     const IrFunction* function = plan->function;
     const uint32_t nodes = function->instruction_count;
     const uint64_t mark = scratch->length;
     IrUses uses = { 0 };
-    bool ok = emitted->prepared.x87_count != 0 && ir_uses_path(function, scratch, output, &uses, vector) == IR_OK;
+    bool ok = emitted->prepared.x87_count != 0 && ir_uses_path(function, scratch, output, &uses, true) == IR_OK;
     uint32_t* tokens = ok ? ir_allocate(scratch, (uint64_t)records + 1, 4, &ok) : 0;
     uint8_t* eligible = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
     uint8_t* boundaries = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
@@ -3590,12 +3589,12 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
                 }
             }
         }
-        (void)x87_transfer_records(emitted->code.records, records, tokens, eligible, boundaries, vector);
+        (void)x87_transfer_records(emitted->code.records, records, tokens, eligible, boundaries, true);
     }
     arena_pop_to(scratch, mark);
 }
 
-static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, bool certify, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
+static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool certify, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     const IrFunction* function = plan->function;
     const Tier1CfgInput* input = &emitted->cfg_input;
@@ -3617,7 +3616,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     Tier1EmitError error = capacity <= UINT32_MAX && branch_capacity <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
     Tier1SelectCode* code = &emitted->code;
     Tier1EmitBuffer buffer = { .capacity = (uint32_t)capacity, .branch_capacity = (uint32_t)branch_capacity };
-    Tier1SelectRequests requests = { .vector = vector };
+    Tier1SelectRequests requests = { 0 };
     // The emitter's view by node, as the straight-line consumer keeps it, and the allocation with its spill ids by node,
     // which the shared helpers read.
     Tier1EmitTransitions transitions = { 0 };
@@ -3897,7 +3896,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         // Edge moves use allocation slots, not call-save rows. With certify, publish these untrusted extra homes;
         // each is proved from the predecessor's actual records, not from this carry heuristic (#1270).
         Tier1EmitSaves saves;
-        tier1_emit_saves_reset(&saves, vector);
+        tier1_emit_saves_reset(&saves);
         if (exit_rows != 0 && only < b)
         {
             memcpy(saves.rows, exit_rows + (uint64_t)only * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, sizeof(saves.rows));
@@ -4349,7 +4348,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     if (error == TIER1_EMIT_OK)
     {
         tier1_select_requests_flush(&requests, buffer.records);
-        tier1_emit_cfg_x87_transfers(plan, emitted, buffer.count, block_first, blocks, vector, output, scratch);
+        tier1_emit_cfg_x87_transfers(plan, emitted, buffer.count, block_first, blocks, output, scratch);
     }
     if (error == TIER1_EMIT_OK && x86_validate(buffer.records, buffer.count) != buffer.count)
     {
@@ -4397,7 +4396,7 @@ static bool tier1_emit_cfg_preference_fatal(Tier1CfgError error)
 // The calls before each position (#2538): `before[q]`, for q from 0 to `positions`, counts the calls of `calls` (in
 // position order, each below `positions`) at positions below q. A 0/1 column of the calls' positions, one past each,
 // and its prefix sum, 16 positions a step: within a register by four shifted adds, then the carry, the last lane's
-// sum, broadcast into the next step. tier1_emit_cfg_calls_before_scalar is its twin.
+// sum, broadcast into the next step.
 static void tier1_emit_cfg_calls_before_vector(const uint32_t* calls, uint32_t call_count, uint32_t positions, uint32_t* before)
 {
     memset(before, 0, ((uint64_t)positions + 1) * sizeof(uint32_t));
@@ -4420,17 +4419,6 @@ static void tier1_emit_cfg_calls_before_vector(const uint32_t* calls, uint32_t c
         sum = _mm512_add_epi32(sum, carry);
         _mm512_mask_storeu_epi32(before + q, lanes, sum);
         carry = _mm512_permutexvar_epi32(last, sum);
-    }
-}
-
-// The scalar twin of tier1_emit_cfg_calls_before_vector: the running count.
-static void tier1_emit_cfg_calls_before_scalar(const uint32_t* calls, uint32_t call_count, uint32_t positions, uint32_t* before)
-{
-    uint32_t k = 0;
-    for (uint32_t q = 0; q <= positions; q += 1)
-    {
-        before[q] = k;
-        k += k < call_count && calls[k] == q;
     }
 }
 
@@ -4571,10 +4559,10 @@ static bool tier1_emit_cfg_hot_recipes(const Tier1CfgInput* input, const Tier1Cf
 //
 // An interval crosses a call where the first call at or past its start is before its end and isn't its value's own
 // definition. With `counted` (#2538's step 4) that is two loads of the calls before each position
-// (tier1_emit_cfg_calls_before_vector, or its scalar twin without `vector`): a call in [start, end), unless the first is
+// (tier1_emit_cfg_calls_before_vector): a call in [start, end), unless the first is
 // the value's own, which only a call's result's interval can start at. Without it, the first call at or past the start
 // by halving the calls, the form tier1_emit_cfg_two_calls keeps, which --verify compares.
-static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, bool counted, bool vector, Arena* output, Arena* scratch, uint32_t** preferred, uint32_t* crossing,
+static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, bool counted, Arena* output, Arena* scratch, uint32_t** preferred, uint32_t* crossing,
                                       Tier1CfgPreference* clobbering)
 {
     const IrFunction* function = plan->function;
@@ -4594,14 +4582,7 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
     uint32_t* before = ok && counted ? ir_allocate(scratch, (uint64_t)input->position_count + 1, 4, &ok) : 0;
     if (before != 0)
     {
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            tier1_emit_cfg_calls_before_vector(calls, call_count, input->position_count, before);
-        }
-        else
-        {
-            tier1_emit_cfg_calls_before_scalar(calls, call_count, input->position_count, before);
-        }
+        tier1_emit_cfg_calls_before_vector(calls, call_count, input->position_count, before);
     }
     // The asm bodies' definition phases, in position order, and the general registers each touches.
     uint32_t* bodies = ok && emitted->prepared.asm_count != 0 ? ir_allocate(scratch, (uint64_t)emitted->prepared.asm_count + 1, 4, &ok) : 0;
@@ -4788,13 +4769,12 @@ static Tier1EmitError tier1_emit_cfg_allocated(Tier1CfgError allocated, const Ti
 // `crossing` the values it moved where the preference is taken.
 static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CfgInput* input, Tier1CfgAllocation* cfg, uint32_t* crossing)
 {
-    const bool vector = BUSTER_VECTOR_PATH(options->vector);
     *crossing = 0;
-    Tier1CfgError allocated = vector ? tier1_cfg_allocate(input, output, scratch, cfg) : tier1_cfg_allocate_scalar(input, output, scratch, cfg);
+    Tier1CfgError allocated = tier1_cfg_allocate(input, output, scratch, cfg);
     if (allocated == TIER1_CFG_CONSTRAINT)
     {
         input->definition_registers = 0;
-        allocated = vector ? tier1_cfg_allocate(input, output, scratch, cfg) : tier1_cfg_allocate_scalar(input, output, scratch, cfg);
+        allocated = tier1_cfg_allocate(input, output, scratch, cfg);
     }
     tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
     Tier1EmitError error = tier1_emit_cfg_allocated(allocated, cfg);
@@ -4803,7 +4783,7 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
     Tier1CfgPreference clobbering = { 0 };
     if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
     {
-        error = tier1_emit_cfg_preference(plan, emitted, input, cfg, false, vector, output, scratch, &allowed, &moved, &clobbering) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+        error = tier1_emit_cfg_preference(plan, emitted, input, cfg, false, output, scratch, &allowed, &moved, &clobbering) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
     Tier1CfgInput problem = *input;
     const Tier1CfgPreference preference = {
@@ -4825,7 +4805,7 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
     if (error == TIER1_EMIT_OK && moved != 0)
     {
         Tier1CfgAllocation second;
-        const Tier1CfgError preferred = vector ? tier1_cfg_allocate(&problem, output, scratch, &second) : tier1_cfg_allocate_scalar(&problem, output, scratch, &second);
+        const Tier1CfgError preferred = tier1_cfg_allocate(&problem, output, scratch, &second);
         // The preferred problem only tries to keep values in callee-saved registers. A constraint or exhausted arena
         // discards the preference and keeps the plain allocation; a corrupt input is the allocator's own failure to report,
         // not a capability or capacity result.
@@ -4854,7 +4834,7 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
 {
     Tier1CfgOrder order;
     *crossing = 0;
-    Tier1CfgError allocated = tier1_cfg_order_prepare(input, output, scratch, BUSTER_VECTOR_PATH(options->vector), &order);
+    Tier1CfgError allocated = tier1_cfg_order_prepare(input, output, scratch, &order);
     tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
     Tier1EmitError error = tier1_emit_cfg_allocated(allocated, &order.prepared.candidate);
     uint32_t* sets = 0;
@@ -4862,7 +4842,7 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
     Tier1CfgPreference clobbering = { 0 };
     if (error == TIER1_EMIT_OK && emitted->callee_registers != 0)
     {
-        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, true, BUSTER_VECTOR_PATH(options->vector), output, scratch, &sets, &moved, &clobbering) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+        error = tier1_emit_cfg_preference(plan, emitted, input, &order.prepared.candidate, true, output, scratch, &sets, &moved, &clobbering) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
     if (error == TIER1_EMIT_OK)
     {
@@ -4995,7 +4975,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     }
     if (error == TIER1_EMIT_OK)
     {
-        error = tier1_emit_cfg_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->certify || options->sources, options->sources, output, scratch, emitted, error_node);
+        error = tier1_emit_cfg_records(plan, allowed_forms, options->certify || options->sources, options->sources, output, scratch, emitted, error_node);
     }
     return error;
 }
