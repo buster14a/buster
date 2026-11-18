@@ -719,6 +719,11 @@ entries and code ([the lowering guide](lowering.md#node-templates-1048)).
 `tests/checker/branch-conditions` (#2883) is too: two programs that
 `check_test_branch_conditions` (`c_check_branch_condition_test.c`) runs the same
 way ([the lowering guide](lowering.md#conditions-as-branches-2883)).
+`tests/checker/asm-label-after-definition` (#2936) is a warning catalog of
+`test-checker-driver`'s (`check_test_driver_warning_catalog`, as
+`initializer-comma` is: `buster-fixtures v1 checker-warnings`, then FILE,
+WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
+compared with clang's in every policy, mode, lane request and reader.
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
