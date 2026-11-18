@@ -16,8 +16,9 @@ struct IrLicmOptions
     // other loop is walked over its own blocks (ir_licm_loop_vectors). A function where nothing moves is returned as it
     // was given: *result's function is the input's, and nothing is written to the output.
     bool vectors;
-    // With `vectors`, walk the whole function for each loop, as the unrestricted motion does, and keep the vectors'
-    // candidates after (ir_licm_keep_vectors): the exact oracle of the walk of the loop's own blocks.
+    // Find each loop's movable values over the whole function, to the fixed point of their readiness (ir_licm_complete),
+    // in place of the walk of the loop's own blocks (ir_licm_loop_walk), whose exact oracle it is; with `vectors`, keep
+    // the vectors' candidates after (ir_licm_keep_vectors).
     bool whole;
 };
 
@@ -290,15 +291,14 @@ static void ir_licm_keep_vectors(IrLicmWork* work)
     }
 }
 
-// IrLicmOptions.vectors' walk of one loop (#2781), over the loop's own blocks in place of the whole function: the
-// motion of a function of many loops then costs each loop's size, not the function's for each. In reverse postorder a
-// value comes after its operands (a phi's aside, and a phi doesn't move), so one pass forward finds the movable values:
-// the safe ones of the loop whose operands are each a movable value of the loop or a value whose block dominates the
-// preheader. One pass backward then keeps the movable values of vector or mask type and, before it reaches them, the
-// movable values their operands are, and sends each kept value to the preheader. `candidate` is the walk's state (1
-// movable, 2 kept), current for the values `available` stamps with this walk's `epoch`: a value the walk hasn't stamped
-// doesn't move, whatever another loop's walk left there.
-static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint64_t* holders)
+// The walk of one loop (#2781, #2979), over the loop's own blocks in place of the whole function: the motion of a
+// function of many loops then costs each loop's size, not the function's for each. In reverse postorder a value comes
+// after its operands (a phi's aside, and a phi doesn't move), so one pass forward finds the movable values: the safe ones
+// of the loop whose operands are each a movable value of the loop or a value whose block dominates the preheader.
+// `candidate` is the walk's state (1 movable), current for the values `available` stamps with this walk's `epoch`: a
+// value the walk hasn't stamped doesn't move, whatever another loop's walk left there. Returns the reverse-postorder
+// index past the loop's last block, and in *found the movable values of vector or mask type.
+static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint32_t* found)
 {
     const IrFunction* f = work->ir.function;
     const Dominators* loops = &work->loops;
@@ -306,7 +306,7 @@ static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t prehe
     // The header is the first of the loop's blocks in reverse postorder; the walk ends at the last one.
     const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
     uint32_t end = first;
-    uint32_t found = 0;
+    *found = 0;
     for (uint32_t r = first, left = loops->loop_size[loop]; left != 0 && r < work->ir.dominators.reachable_count; r += 1)
     {
         const uint32_t block = rpo[r];
@@ -329,10 +329,24 @@ static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t prehe
             }
             work->available[i] = epoch;
             work->candidate[i] = movable;
-            found += movable && f->type[i] >= IR_V4I32;
+            *found += movable && f->type[i] >= IR_V4I32;
         }
         work->statistics.visits += member ? f->block_offsets[(uint64_t)block + 1] - f->block_offsets[block] : 0;
     }
+    return end;
+}
+
+// IrLicmOptions.vectors' motion of one loop (#2781): the walk (ir_licm_loop_walk), then one pass backward that keeps the
+// movable values of vector or mask type and, before it reaches them, the movable values their operands are, and sends
+// each kept value to the preheader (`candidate` 2 for kept).
+static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint64_t* holders)
+{
+    const IrFunction* f = work->ir.function;
+    const Dominators* loops = &work->loops;
+    const uint32_t* rpo = work->ir.dominators.rpo;
+    const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
+    uint32_t found = 0;
+    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
     for (uint32_t r = end; found != 0 && r != first; r -= 1)
     {
         const uint32_t block = rpo[r - 1];
@@ -358,6 +372,30 @@ static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t prehe
                 {
                     holders[preheader / 64] |= UINT64_C(1) << (preheader % 64);
                 }
+            }
+        }
+    }
+}
+
+// The unrestricted motion of one loop (#2979): the walk (ir_licm_loop_walk) sends every movable value to the preheader.
+static void ir_licm_loop_all(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch)
+{
+    const IrFunction* f = work->ir.function;
+    const Dominators* loops = &work->loops;
+    const uint32_t* rpo = work->ir.dominators.rpo;
+    const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
+    uint32_t found = 0;
+    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
+    for (uint32_t r = first; r < end; r += 1)
+    {
+        const uint32_t block = rpo[r];
+        const bool member = dominators_loop_contains(loops, loop, block);
+        for (uint32_t i = f->block_offsets[block]; member && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+        {
+            if (work->available[i] == epoch && work->candidate[i] != 0)
+            {
+                work->destination[i] = preheader;
+                work->moves += 1;
             }
         }
     }
@@ -409,6 +447,10 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
             if (held && options.vectors && !options.whole)
             {
                 ir_licm_loop_vectors(work, loop, preheader, at + 1, holders);
+            }
+            else if (held && !options.whole)
+            {
+                ir_licm_loop_all(work, loop, preheader, at + 1);
             }
             else if (held)
             {
