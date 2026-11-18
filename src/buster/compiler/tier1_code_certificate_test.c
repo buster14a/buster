@@ -47,6 +47,14 @@
 // across it and rax among the four allocatable registers. Its kernel saves rax in the scratch register and restores it
 // after, which gives the value in rax back: its code is certified. Then the restore made rax's move into itself, or a
 // move from rcx, is refused: the value in rax is lost.
+//
+// A full barrier in an asm body (#2963): b(p0, p1) calls g(), then runs a body of one record, musl's a_store's `lock or
+// dword [rsp], 0`, which touches the four allocatable registers, and returns g's result plus p0 and p1, which live across
+// both: p1 in its call-save row across the body, the others in callee-saved registers. Its code is certified. Then the
+// barrier aimed at each row a restore after it loads, its template's record and the emitted one alike: a write that leaves the row as it was (an add, or, sub or xor of zero, an
+// and of every bit, locked or not, 4 or 8 bytes wide) is certified, and one that changes it (an or of 1, an and of
+// 0x7fffffff, an adc of 0, which adds the carry, a mov of 0, an or of a register) is refused, the restore reading bytes
+// the barrier wrote.
 
 typedef struct Tier1CodeCertificateCounts Tier1CodeCertificateCounts;
 struct Tier1CodeCertificateCounts
@@ -90,6 +98,14 @@ struct Tier1CodeCertificateCounts
     uint32_t exchange_live;
     uint32_t exchange_restores;
     uint32_t exchange_restores_refused;
+    // The barrier's compiles certified, the rows it was aimed at, its writes that keep a row and those certified, and its
+    // writes that change one and those refused.
+    uint32_t barrier;
+    uint32_t barrier_rows;
+    uint32_t barrier_kept;
+    uint32_t barrier_kept_certified;
+    uint32_t barrier_changed;
+    uint32_t barrier_changed_refused;
 };
 
 static bool tier1_code_certificate_function(Arena* input, IrFunction* function, uint32_t* call)
@@ -347,6 +363,59 @@ static bool tier1_code_certificate_exchange_function(Arena* input, IrFunction* f
         tier1_select_test_append(function, &next, IR_RET, IR_VOID, parameters[3], BUSTER_IR_NONE, BUSTER_IR_NONE);
         function->instruction_count = next;
         function->block_offsets[3] = next;
+    }
+    return created;
+}
+
+// The barrier fixture's asm body (#2963): one record, a full barrier's `lock or dword [rsp], 0`, which the test aims at
+// each row in turn and replaces by its variants; it touches rax, rcx, rdx and rsi, the fixture's allocatable registers,
+// so that a value that lives across it is in its row there or in a callee-saved register.
+static X86Instruction tier1_code_certificate_barrier_records[] = {
+    { .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_LOCK_OR_M32_IMM8 },
+};
+
+static IrAsmBody tier1_code_certificate_barrier_body = {
+    .records = tier1_code_certificate_barrier_records,
+    .count = BUSTER_ARRAY_LENGTH(tier1_code_certificate_barrier_records),
+    .touched = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI),
+};
+
+// b(p0, p1): one block, r = g(), the barrier's body call, and r + p0 + p1 returned.
+static bool tier1_code_certificate_barrier_function(Arena* input, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 8,
+        .block_count = 1,
+        .call_count = 2,
+        .parameter_count = 2,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        function->result_type = IR_I64;
+        function->symbol_count = 2;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_I64;
+        function->incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 2 };
+        function->asm_bodies = &tier1_code_certificate_barrier_body;
+        function->asm_body_count = 1;
+        uint32_t next = 0;
+        const uint32_t p0 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t p1 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->calls[0] = (IrCall){
+            .result_type = IR_I64,
+        };
+        const uint32_t r = tier1_select_test_append(function, &next, IR_CALL, IR_I64, 1, 0, BUSTER_IR_NONE);
+        function->calls[1] = (IrCall){
+            .result_type = IR_VOID,
+            .body = 1,
+        };
+        tier1_select_test_append(function, &next, IR_CALL, IR_VOID, 0, 1, BUSTER_IR_NONE);
+        const uint32_t partial = tier1_select_test_append(function, &next, IR_ADD, IR_I64, r, p0, BUSTER_IR_NONE);
+        const uint32_t sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, partial, p1, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->instruction_count = next;
+        function->block_offsets[1] = next;
     }
     return created;
 }
@@ -1209,6 +1278,105 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Ti
     arena_pop_to(&test->input, 0);
 }
 
+// The barrier fixture (#2963) by one path, with or without a frame pointer: its code certified, then its barrier aimed at
+// each row a restore after it loads from the frame base register, as each of its variants: one that keeps the row's
+// bytes is certified, one that changes them refused. The body's template and its emitted record change together, and
+// are put back after each.
+static void tier1_code_certificate_barrier(Tier1EmitTest* test, bool vector, bool pointer, Tier1CodeCertificateCounts* counts)
+{
+    static const struct
+    {
+        uint16_t form;
+        int32_t immediate;
+        uint8_t reg;
+        bool kept;
+    } variants[] = {
+        { X86_FORM_LOCK_OR_M32_IMM8, 0, 0, true },
+        { X86_FORM_LOCK_ADD_M64_IMM8, 0, 0, true },
+        { X86_FORM_LOCK_SUB_M32_IMM32, 0, 0, true },
+        { X86_FORM_LOCK_XOR_M64_IMM32, 0, 0, true },
+        { X86_FORM_LOCK_AND_M32_IMM8, -1, 0, true },
+        { X86_FORM_LOCK_AND_M64_IMM32, -1, 0, true },
+        { X86_FORM_OR_RM32_IMM8, 0, 0, true },
+        { X86_FORM_LOCK_OR_M32_IMM8, 1, 0, false },
+        { X86_FORM_LOCK_AND_M32_IMM32, 0x7fffffff, 0, false },
+        { X86_FORM_LOCK_ADC_M32_IMM8, 0, 0, false },
+        { X86_FORM_MOV_RM32_IMM32, 0, 0, false },
+        // An or of a register: no immediate, whatever the field holds.
+        { X86_FORM_LOCK_OR_M32_R32, 0, X86_REGISTER_RAX, false },
+    };
+    IrFunction function;
+    const bool created = tier1_code_certificate_barrier_function(&test->input, &function);
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the code certificate's barrier fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the code certificate's barrier fixture selects");
+    const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI);
+    const Tier1EmitOptions options = {
+        .register_mask = few,
+        .vector = vector,
+        .certify = true,
+        .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+    };
+    Tier1EmitResult emitted;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.frame.frame_pointer == pointer;
+    tier1_emit_test_expect(test, certified, "the barrier fixture's code, its values in their rows across a `lock or dword [rsp], 0`, passes its certificate");
+    counts->barrier += certified;
+    // The barrier's record: the body's one, of its node's origin.
+    uint32_t barrier = UINT32_MAX;
+    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+    {
+        const bool body = tier1_cert_emitted_kind(emitted.origins[r]) == TIER1_ORIGIN_NODE && emitted.code.records[r].form == X86_FORM_LOCK_OR_M32_IMM8;
+        barrier = body && barrier == UINT32_MAX ? r : barrier;
+    }
+    const uint8_t base = (uint8_t)emitted.frame.base_register;
+    uint32_t rows = 0;
+    for (uint32_t r = barrier; barrier != UINT32_MAX && r < emitted.code.count; r += 1)
+    {
+        const X86Instruction restore = emitted.code.records[r];
+        if (restore.form == X86_FORM_MOV_R64_RM64 && restore.mode == BUSTER_X86_MEMORY_BASE && restore.rm == base)
+        {
+            rows += 1;
+            for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+            {
+                const X86Instruction mutant = {
+                    .form = variants[v].form,
+                    .reg = variants[v].reg,
+                    .rm = base,
+                    .mode = BUSTER_X86_MEMORY_BASE,
+                    .displacement = restore.displacement,
+                    .immediate = variants[v].immediate,
+                };
+                const X86Instruction original = tier1_code_certificate_barrier_records[0];
+                const X86Instruction emitted_record = emitted.code.records[barrier];
+                tier1_code_certificate_barrier_records[0] = mutant;
+                emitted.code.records[barrier] = mutant;
+                const bool refused = tier1_code_certificate_refused(test, &plan, &emitted);
+                tier1_code_certificate_barrier_records[0] = original;
+                emitted.code.records[barrier] = emitted_record;
+                counts->barrier_kept += variants[v].kept;
+                counts->barrier_kept_certified += variants[v].kept && !refused;
+                counts->barrier_changed += !variants[v].kept;
+                counts->barrier_changed_refused += !variants[v].kept && refused;
+                char message[256];
+                snprintf(message, sizeof(message), "a barrier's write of form %u, immediate %d, into the row at %d that a restore after it loads is %s", (unsigned)variants[v].form,
+                         variants[v].immediate, restore.displacement, variants[v].kept ? "certified: the row keeps its bytes" : "refused: the row's value is lost");
+                tier1_emit_test_expect(test, refused != variants[v].kept, message);
+            }
+        }
+    }
+    tier1_emit_test_expect(test, !certified || (barrier != UINT32_MAX && rows != 0), "the barrier fixture's code holds its body's `lock or`, and a restore after it from a row");
+    counts->barrier_rows += rows;
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 // A seq_cst source store remains IR_STORE and preserves a desired value live past it. Its certified kernel must retain
 // both the copy into the scratch and the locked memory exchange, including when its return takes a different CFG edge.
 static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
@@ -1740,6 +1908,13 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     {
         tier1_code_certificate_realigned(test, variant != 0, &counts);
     }
+    for (uint32_t variant = 0; variant < 4; variant += 1)
+    {
+        tier1_code_certificate_barrier(test, (variant & 1) != 0, (variant & 2) != 0, &counts);
+    }
+    tier1_emit_test_expect(test, counts.barrier == 4, "the barrier fixture's compiles are certified, each by its path, with and without a frame pointer");
+    printf("tier1 code certificate: barriers in asm bodies %u of 4 certified, aimed at %u rows: writes that keep the row %u of %u certified, writes that change it %u of %u refused\n", counts.barrier,
+           counts.barrier_rows, counts.barrier_kept_certified, counts.barrier_kept, counts.barrier_changed_refused, counts.barrier_changed);
     uint32_t literals_refused = 0;
     for (uint32_t variant = 0; variant < 2; variant += 1)
     {

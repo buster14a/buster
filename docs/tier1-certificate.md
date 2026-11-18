@@ -572,7 +572,10 @@ The decoding:
   registers at its use phase and must equal the emitted ones byte for byte. They
   are one instruction: its operands read where the allocation has them, every
   register and frame byte its records write (by their effects) killed, its
-  definition written where its interval starts. A general register the records
+  definition written where its interval starts. A frame byte a read-modify-write
+  leaves as it was is not killed: an add, or, sub or xor of an immediate zero,
+  or an and of an immediate of every bit, at its form's width, locked or not
+  (`tier1_cert_emitted_unchanged`, #2963). A general register the records
   give back is not killed: one holding its own value at the run's end, followed
   through their 64-bit `mov`s between general registers (the compare-exchange's
   save of rax in the scratch register and its restore, #1059). A call's sequence is checked
@@ -596,7 +599,10 @@ The decoding:
   block's memory isn't a value the allocation keeps), and kills every register
   the body touches
   (`IrAsmBody.touched` and `.masks`, callee-saved ones too, which the prologue
-  saved) and the frame bytes its stores write; a record of a form the
+  saved) and the frame bytes its stores write, but not those a read-modify-write
+  leaves as they were (as a node's): musl's full barrier, `lock ; orl
+  $0,(%rsp)`, writes the row at rsp, which a value saved across a call may still
+  hold (#2963); a record of a form the
   semantics' tables don't cover (`cpuid`, the x87's, MMX's) writes no register
   but those, since the front end placed no record of the stack's or control's
   in a body. The saves and reloads of the values live across it in those
@@ -776,7 +782,13 @@ fixture with an I8 parameter in `rdi` and an I16 on the stack is certified, and
 its extensions made `mov edi, edi` or a 32-bit load of the slot are refused.
 A compare-exchange with four values live across it, rax among the four
 allocatable registers, is certified; its restore of rax made `mov rax, rax` or
-`mov rax, rcx` is refused. A realigned frame (#1284's review: a 64-byte object
+`mov rax, rcx` is refused. A full barrier in an asm body (#2963: `lock or dword
+[rsp], 0`, which touches the four allocatable registers, with a value in its
+call-save row across it) is certified; aimed at each row a restore after it
+loads, a write that keeps the row (an add, or, sub or xor of zero, an and of
+every bit, 4 or 8 bytes wide, locked or not) is certified, and one that changes
+it (an or of 1, an and of `0x7fffffff`, an adc of 0, a mov of 0, an or of a
+register) is refused. A realigned frame (#1284's review: a 64-byte object
 aligned to 64, a value across a call in rbx) is certified; with its allocation
 moved before rbx's push, its epilogue matched so that every register and the
 return address still come back (its reset from rbp lower by the allocation, and
