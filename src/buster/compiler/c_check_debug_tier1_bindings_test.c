@@ -171,6 +171,48 @@ static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
     }
 }
 
+// A floating parameter's binding in xmm0 up to a call, which clobbers every xmm register: the range ends before the
+// call's record (the call's caller-saved carriers past the first sixteen, check_tier1_debug_value_ranges).
+static void check_debug_tier1_values_float_call(CheckDebugTestTally* tally)
+{
+    uint8_t classes[] = { BUSTER_TYPED_CLASS_F64 };
+    AbiLocation abi[] = { { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE } } };
+    Tier0Function function = { .count = 2, .local_classes = classes, .local_count = 1, .parameters = abi, .parameter_count = 1 };
+    uint8_t types[] = { IR_F64, IR_VOID, IR_VOID, IR_VOID };
+    IrDebugBinding bindings[] = { { .local = 0, .entry = BUSTER_IR_NONE, .value = 0, .anchor = 0, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_F64 } };
+    uint8_t flags[] = { BUSTER_IR_DEBUG_BIND_ENTRY };
+    IrDebugInfo debug = { .bindings = bindings, .binding_count = 1, .binding_flags = flags, .first_block_end = 2 };
+    IrFunction ir = { .type = types, .instruction_count = 2, .debug = &debug };
+    X86Instruction records[] = {
+        { .form = X86_FORM_SUB_RM64_IMM8, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RSP, .immediate = 32 },
+        { .form = X86_FORM_NOP },
+        { .form = X86_FORM_CALL_REL32 },
+        { .form = X86_FORM_NOP },
+        { .form = X86_FORM_ADD_RM64_IMM8, .mode = BUSTER_X86_REGISTER_DIRECT, .rm = X86_REGISTER_RSP, .immediate = 32 },
+        { .form = X86_FORM_RET },
+    };
+    uint32_t origins[BUSTER_ARRAY_LENGTH(records)];
+    uint32_t entries[BUSTER_ARRAY_LENGTH(records)];
+    uint8_t safe[BUSTER_ARRAY_LENGTH(records)] = { 0, 1, 1, 1, 0, 0 };
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(records); r += 1)
+    {
+        origins[r] = tier1_origin(r == 0 || r == 4 ? TIER1_ORIGIN_FRAME : TIER1_ORIGIN_NODE, r == 4 ? 1 : 0);
+        entries[r] = 1;
+    }
+    uint32_t sizes[] = { 0 };
+    uint32_t value_nodes[] = { 0 };
+    Tier1EmitResult emitted = {
+        .code = { .records = records, .count = BUSTER_ARRAY_LENGTH(records) }, .origins = origins, .body_record = 1,
+        .frame = { .base_register = X86_REGISTER_RSP, .stack_adjust_bytes = 32, .payload_bytes = 32 },
+        .general = true,
+        .prepared = { .function = &ir, .sizes = sizes, .slot_columns = BUSTER_ARRAY_LENGTH(sizes) }, .value_nodes = value_nodes,
+    };
+    const uint32_t xmm0 = 16;
+    const uint32_t expected[] = { xmm0, xmm0, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE };
+    check_debug_tier1_values_binding_case(tally, &function, &ir, &emitted, NULL, entries, safe, 4, expected,
+                                         "a floating parameter's xmm0 binding ends before a call, which clobbers every xmm register");
+}
+
 static void check_debug_tier1_values_bindings(CheckDebugTestTally* tally)
 {
     uint8_t classes[] = { BUSTER_TYPED_CLASS_I64 };
@@ -309,6 +351,7 @@ static void check_debug_tier1_values_bindings(CheckDebugTestTally* tally)
     check_debug_tier1_values_binding_case(tally, &function, &ir, &emitted, NULL, sequence_entries, sequence_safe, 8, absent,
                                          "without a checked later RHS, old source origins cannot justify stale assignment ranges");
     check_debug_tier1_values_fresh(tally);
+    check_debug_tier1_values_float_call(tally);
 }
 
 #undef BUSTER_CHECK_DEBUG_VALUE_MEMORY
