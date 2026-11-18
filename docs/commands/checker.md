@@ -85,7 +85,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
-  [--differential] [--carets]` and `test-checker-asm`
+  [--differential] [--carets | --carets-all]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as
   a process of its own under an `RLIMIT_AS` of 768 MiB past the executable's
@@ -121,7 +121,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   passes `-fno-caret-diagnostics`, and none of buster's own `--` options, `-o` or a `-M` one, runs again without it,
   by buster and by the oracle clang, as children, and their whole errors are compared. A `checker-driver: carets:`
   line counts those the same as clang's, apart only in highlighted ranges' `~`, apart in other source lines (fix-its,
-  scratch space, a range's lines) and apart in diagnostics' own lines; the first 64 that differ print both texts.
+  scratch space, a range's lines) and apart in diagnostics' own lines; the first 64 that differ print both texts
+  (`--carets-all`: every one).
   It fails nothing ([the caret display](preprocessor.md#caret-display-2376)).
   `--run-modes-only` checks unavailable, truncated and timed-out replies with a deterministic protocol peer,
   successful and rejected real Clang runs, invalid protocol statuses (#2740), and complete replies that genuinely differ.

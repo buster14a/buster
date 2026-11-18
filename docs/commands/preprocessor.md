@@ -541,8 +541,13 @@ t.c:3:2: warning: hi [-W#warnings]
   name, quotes or brackets and all); an unknown or nonstandard escape (its
   backslash and character); an indirection of a non-pointer (its operand); a
   shift count past the width or negative (the count); a division or remainder
-  by zero (the divisor). An expression's range is its subtree's tokens with
-  the parentheses around it (`check_semantic_range`).
+  by zero (the divisor); an assignment to what isn't assignable, an array or a
+  const (the expression assigned to; not yet the "declared const here" note's
+  declaration); a register variable's address (its operand, without its
+  parentheses); and an incompatible conversion's initializing, assigning,
+  passing or returning (its source expression). An expression's range is its
+  subtree's tokens, with the parentheses around it unless the diagnostic looks
+  through them (`check_semantic_range`).
 - **None again.** A diagnostic without ranges at the last one's place shows no
   line, unless the last was a note and this one isn't (clang's `LastLoc` rule;
   `Preprocessor.diagnostic_caret_location`). A diagnostic counts once its notes

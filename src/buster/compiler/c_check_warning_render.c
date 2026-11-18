@@ -5,7 +5,7 @@
 // visibility; the independent completion governs ordering. The collector copies all temporary text and notes.
 
 // c_check_semantic_diagnostic.c's, included after this file: an expression's tokens as a highlighted range (#2376).
-static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node);
+static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node, bool parentheses);
 
 // The highlighted ranges clang's diagnostic of a warning event has (#2376), before its publication; the caller clears
 // them. A folded shift's count: the shift's right operand.
@@ -17,7 +17,7 @@ static void check_warning_event_ranges(const Parser* parser, Preprocessor* pp, c
     const uint32_t right = node < graph->count ? graph->operand1[node] : BUSTER_CHECK_NONE;
     if (right < graph->count)
     {
-        check_semantic_range(parser, pp, graph->tokens[right]);
+        check_semantic_range(parser, pp, graph->tokens[right], true);
     }
 }
 

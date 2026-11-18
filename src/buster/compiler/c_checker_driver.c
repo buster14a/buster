@@ -3921,6 +3921,11 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
                                                                  target_declaration, target_node, 0, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
+    // The source expression highlighted (#2376), clang's SrcExpr->getSourceRange() in DiagnoseAssignmentResult.
+    if (result != NULL && source < stream->count)
+    {
+        check_semantic_range(parser, pp, graph->tokens[source], true);
+    }
     return result;
 }
 
@@ -3998,6 +4003,8 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
                 pp_diagnostic_suborder(pp, previous, suborder);
             }
         }
+        // The ranges check_semantic_expression gave the message are its alone (#2376).
+        pp_diagnostic_ranges_clear(pp);
     }
 }
 
@@ -4302,6 +4309,8 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     uint32_t argument = BUSTER_CHECK_NONE;
     const char* words = function || other ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, &argument,
                                                                           scratch) : NULL;
+    // (Only the conversion's words: its highlighted range is no overload's, #2376.)
+    pp_diagnostic_ranges_clear(pp);
     const char* prefix = "incompatible function pointer types ";
     const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
     // The target as the words spell it: between the action's words and the source's, whatever comes before them for

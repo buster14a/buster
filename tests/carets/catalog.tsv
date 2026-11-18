@@ -44,3 +44,4 @@ ranges-expressions-lines	ranges-expressions.c	-	-fsyntax-only -fcaret-diagnostic
 ranges-literals	ranges-literals.c	-	-fsyntax-only	an escape sequence's characters in a literal
 ranges-include	ranges-include.c	-	-fsyntax-only	a quoted header name not found
 ranges-include-angled	ranges-include-angled.c	-	-E -o /dev/null	an angled header name not found, under -E
+ranges-assignments	ranges-assignments.c	-	-fsyntax-only	the expression assigned to, a register variable's operand, a conversion's source

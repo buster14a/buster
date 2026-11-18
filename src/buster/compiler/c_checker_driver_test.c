@@ -98,6 +98,8 @@ struct CheckDriverRunModes
     // how their whole errors compared: the same, apart only in highlighted ranges' '~', in other source lines (fix-its,
     // scratch space, a range's lines), or in diagnostics' own lines; and how many of those were printed.
     bool carets;
+    // --carets-all: print every command line that differs, not the first 64.
+    bool carets_all;
     uint64_t caret_runs;
     uint64_t caret_same;
     uint64_t caret_ranges;
@@ -592,7 +594,7 @@ static void check_test_driver_carets(char* const* arguments)
         modes->caret_ranges += ranges ? 1 : 0;
         modes->caret_lines += lines ? 1 : 0;
         modes->caret_messages += ran && !same && !ranges && !lines ? 1 : 0;
-        if (ran && !same && modes->caret_shown < 64)
+        if (ran && !same && (modes->caret_shown < 64 || modes->carets_all))
         {
             modes->caret_shown += 1;
             printf("carets: %s (status %d, clang %d):", ranges ? "ranges" : lines ? "lines" : "messages", our_status, their_status);
@@ -7106,6 +7108,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 {
                     check_driver_diagnose(parser, pp, location, message);
                 }
+                pp_diagnostic_ranges_clear(pp);
             }
         }
         // A directive in an unfinished expression can lie beyond every safely checked prefix. Its original
@@ -9827,9 +9830,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_driver_run_modes.differential = true;
         }
-        else if (strcmp(argv[i], "--carets") == 0)
+        else if (strcmp(argv[i], "--carets") == 0 || strcmp(argv[i], "--carets-all") == 0)
         {
             check_driver_run_modes.carets = true;
+            check_driver_run_modes.carets_all = strcmp(argv[i], "--carets-all") == 0;
         }
         else if (strcmp(argv[i], "--part") == 0 && i + 1 < argc)
         {

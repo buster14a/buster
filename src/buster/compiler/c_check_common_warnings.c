@@ -1997,7 +1997,7 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     // A stashed warning's count highlighted (#2376), as a new one's below.
     if (!emitted && right < graph->count)
     {
-        check_semantic_range(emission->parser, emission->pp, graph->tokens[right]);
+        check_semantic_range(emission->parser, emission->pp, graph->tokens[right], true);
     }
     const bool replayed = !emitted && check_common_shift_replay(emission->pp, emission->shifts, token);
     pp_diagnostic_ranges_clear(emission->pp);
@@ -2018,7 +2018,7 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
         {
             const bool negative = warning == CHECK_WARNING_SHIFT_COUNT_NEGATIVE;
             // The count highlighted (#2376), clang's RHS.get()->getSourceRange().
-            check_semantic_range(emission->parser, emission->pp, graph->tokens[right]);
+            check_semantic_range(emission->parser, emission->pp, graph->tokens[right], true);
             check_common_report_deferred(emission->parser, emission->pp, emission->input, token,
                                          negative ? CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE : CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW,
                                          false, negative ? "shift count is negative" : "shift count >= width of type",
@@ -2216,7 +2216,7 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
                 const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, emission->input, token) : BUSTER_CHECK_NONE;
                 const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
                 // The divisor highlighted (#2376), clang's RHS.get()->getSourceRange().
-                check_semantic_range(parser, emission->pp, graph->tokens[graph->operand1[node]]);
+                check_semantic_range(parser, emission->pp, graph->tokens[graph->operand1[node]], true);
                 check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
                                               declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_DIVISION_BY_ZERO,
                                               false, op == CHECK_OP_DIVIDE || op == CHECK_OP_DIVIDE_ASSIGN ? "division by zero is undefined" : "remainder by zero is undefined",
