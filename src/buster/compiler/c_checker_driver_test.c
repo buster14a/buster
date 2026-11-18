@@ -6680,12 +6680,6 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
         if (show_warnings)
         {
             memset(warnings, 0, ((uint64_t)count + 1) * sizeof(*warnings));
-            for (uint32_t token = 0; token < count && token < input->token_count; token += 1)
-            {
-                const uint32_t flags = check_diagnostic_attribute_warnings(input, token);
-                warnings[token].flags = flags;
-                warnings[token].enabled = flags;
-            }
             for (uint32_t token = 0; input->constant_warnings != NULL && token < count && token < input->token_count; token += 1)
             {
                 const uint8_t flags = input->constant_warnings[token];
@@ -6962,7 +6956,6 @@ static void check_test_driver_reports(CheckTest* test)
         const CheckInput checked = input;
         const CheckStream streamed = stream;
         uint32_t warning_rows = 0;
-        uint32_t attribute_rows = 0;
         uint32_t constant_rows = 0;
         for (uint32_t node = 0; ready && node < stream.count; node += 1)
         {
@@ -6970,13 +6963,11 @@ static void check_test_driver_reports(CheckTest* test)
         }
         for (uint32_t token = 0; ready && token < count; token += 1)
         {
-            attribute_rows += check_diagnostic_attribute_warnings(&input, token) != 0;
             constant_rows += input.constant_warnings[token] != 0;
         }
-        check_test_expect(test, ready && stream.warnings_prepared && stream.warning_count == warning_rows && input.asm_warnings_prepared &&
-                               (input.ignored_asm_count != 0) == (attribute_rows != 0) && input.constant_warnings_prepared &&
+        check_test_expect(test, ready && stream.warnings_prepared && stream.warning_count == warning_rows && input.constant_warnings_prepared &&
                                input.constant_warning_count == constant_rows,
-                          "warning producers publish exact node/constant counts and ignored-asm presence for report collection");
+                          "warning producers publish exact node/constant counts for report collection");
         const uint32_t errors = pp.errors;
         const uint32_t warnings = pp.warnings;
         for (uint32_t round = 0; ready && round < 160; round += 1)
@@ -10618,6 +10609,12 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_alias_late_attributes(&test, clang, executable, directory);
+            }
+            // An asm label after a definition (#2936): clang's warning at the label's string, noted at the definition, among
+            // its declaration's other diagnostics, whole, in each policy, mode, lane request and reader.
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/asm-label-after-definition");
             }
             if (check_test_driver_takes())
             {

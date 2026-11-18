@@ -519,7 +519,8 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
         {
             for (uint32_t token = 0; check_sparse_wide_present(path->input.attributes) && token < path->input.token_count; token += 1)
             {
-                first = check_corpus_repair_warning(path, repair, token, check_diagnostic_attribute_warnings(&path->input, token), 0, first);
+                const uint32_t label = check_diagnostic_ignored_label(&path->input, token);
+                first = label != BUSTER_CHECK_NONE ? check_corpus_repair_warning(path, repair, label, CHECK_WARNING_IGNORED_ATTRIBUTES, 0, first) : first;
             }
             for (uint32_t token = 0; path->input.constant_warnings != NULL && token < path->input.token_count; token += 1)
             {
