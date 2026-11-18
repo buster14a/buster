@@ -534,10 +534,16 @@ static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally)
     loop[0].reg = X86_REGISTER_R12;
     loop[3].reg = X86_REGISTER_R12;
     check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, loop_values, "a backedge kill of r12 removes the first-trip value from the whole loop");
+    // Now the body leaves rdi alone, so the backedge's meet changes r12 alone. The header's state loses r12 either way;
+    // only the meet's change report sends the header round again, so that the body and the exit lose it too. The
+    // preserved r12 would otherwise be the carrier they publish.
+    loop[2] = (X86Instruction){ .form = X86_FORM_NOP };
+    memset(loop_values, X86_REGISTER_RDI, sizeof(loop_values));
+    check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, loop_values, "a backedge kill of r12 alone sends the loop round again");
 
-    // A floating parameter copied to xmm2 on the first arm, with another value put there on the second, and xmm0
-    // overwritten on both: the join keeps no carrier. The first arm reaches the join first, so its xmm2 is what the
-    // second arm's meet must take away, in the carriers past the first sixteen.
+    // A floating parameter copied to xmm2 on the fallthrough arm, with another value put there on the taken arm, and xmm0
+    // overwritten on both: the join keeps no carrier. The worklist takes the branch target first, so here the taken
+    // arm's empty xmm2 reaches the join first.
     const uint8_t float_classes[] = { BUSTER_TYPED_CLASS_F64 };
     AbiLocation float_abi[] = {
         { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE } },
@@ -559,6 +565,12 @@ static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally)
     const uint8_t float_joined[] = { 16, 16, 16, 18, 16, 16, UINT8_MAX, UINT8_MAX };
     code = (Tier1SelectCode){ .records = float_diamond, .count = BUSTER_ARRAY_LENGTH(float_diamond), .branches = diamond_branches, .targets = diamond_targets, .branch_count = 2 };
     check_debug_tier1_values_parameter_case(tally, &floating, float_values, code, NULL, float_joined, "an xmm2 copy on one arm and another value there on the other leave no carrier after the join");
+    // The copy on the taken arm instead: its xmm2 reaches the join first, and the fallthrough arm's meet must take it
+    // away, in the carriers past the first sixteen.
+    float_diamond[1].rm = 1;
+    float_diamond[4].rm = 0;
+    const uint8_t float_taken[] = { 16, 16, 16, UINT8_MAX, 16, 16, UINT8_MAX, UINT8_MAX };
+    check_debug_tier1_values_parameter_case(tally, &floating, float_values, code, NULL, float_taken, "an xmm2 copy on the taken arm, which reaches the join first, is gone after it");
 
     X86Instruction dead[] = {
         { .form = X86_FORM_JMP_REL32 },
