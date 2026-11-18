@@ -4,10 +4,10 @@
 
 ```text
 tier0_emit / tier0_program_functions (including abi_assign)
-  → ir_lower_typed / ir_lower_typed_scalar
+  → ir_lower_typed
   → ssa_ir_promote / ssa_ir_promote_scalar
   → ir_optimize (SCCP, DCE and CFG cleanup)
-  → rebuilt CFG and dominance; both IR verifiers
+  → rebuilt CFG and dominance; the IR verifier
   → tier1_select_plan_verified (as the C driver plans ir_optimize's verified
     result), checked against tier1_select_plan's plan
   → tier1_emit_function

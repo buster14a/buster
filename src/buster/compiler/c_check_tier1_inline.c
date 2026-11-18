@@ -756,8 +756,8 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
         // for check_tier1_passes' split (#1624), else a summary of a function with one is refused and its calls stay calls
         // (the compiler's own scalar-host build, whose AVX-512 types are wider than x86-64's: #2541). Under -g with its
         // source identities, which its callers' expansions carry as an instance's (#2541 step 3).
-        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
-                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar);
+        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
+                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
     }
     IrFunction expanded = lowered;
     uint32_t inlined = 0;

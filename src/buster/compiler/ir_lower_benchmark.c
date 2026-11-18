@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The available typed-stream -> IR -> verifier boundary, measured as one path. Include after ir_benchmark.c and the
-// IR-lowering tests (ir_lower_test_equal supplies fieldwise comparison without struct padding). The existing Tier 0
-// generator and ABI preparation make the inputs before timing; each timed ir_lower_typed[_scalar] call includes typed
+// The available typed-stream -> IR -> verifier boundary, measured as one path. Include after ir_benchmark.c. The existing Tier 0
+// generator and ABI preparation make the inputs before timing; each timed ir_lower_typed call includes typed
 // validation, block/stack planning, classification, output counting/allocation/emission and IR verification. The output
 // arena is returned to its checkpoint after each function, as a lane would release a completed function's scratch.
 //
@@ -11,17 +10,12 @@
 // per-function core allocations, including alignment gaps; peak output is the largest one, not the process's peak RSS.
 // The small and larger cases are value-only programs, as before #136's frame objects; a third case, reported apart, is
 // the larger shape with the generator's objects (local arrays and structs, and COPY between them).
-// Usage: benchmark-ir-lowering [--passes N] [--seed N] [--only scalar|vector] [--after-scalar MS] [--ordinary]
+// Usage: benchmark-ir-lowering [--passes N] [--seed N] [--ordinary]
 
 #define BUSTER_IR_LOWER_BENCHMARK_PROGRAMS 8u
-#define BUSTER_IR_LOWER_BENCHMARK_VARIANTS 2u
-#define BUSTER_IR_LOWER_BENCHMARK_SCALAR 0u
-#define BUSTER_IR_LOWER_BENCHMARK_VECTOR 1u
-#define BUSTER_IR_LOWER_BENCHMARK_MAX_AFTER_SCALAR_MS 10000u
 #define BUSTER_IR_LOWER_BENCHMARK_INPUT_BYTES (512ull << 20)
 #define BUSTER_IR_LOWER_BENCHMARK_OUTPUT_BYTES (256ull << 20)
 
-static bool ir_lower_test_equal(const IrFunction* a, const IrFunction* b);
 
 typedef struct IrLowerBenchmarkFunction IrLowerBenchmarkFunction;
 struct IrLowerBenchmarkFunction
@@ -45,7 +39,7 @@ struct IrLowerBenchmarkCorpus
     uint64_t objects;
     uint64_t copies;
     uint64_t stack_ops;
-    uint64_t scratch_bytes[2];
+    uint64_t scratch_bytes;
     uint64_t target_ops;
 };
 
@@ -194,44 +188,38 @@ static bool ir_lower_benchmark_stack(IrLowerBenchmarkCorpus* corpus, Arena* inpu
     return valid;
 }
 
-static bool ir_lower_benchmark_validate(IrLowerBenchmarkCorpus* corpus, Arena* output, Arena* twin_output, Arena* scratch)
+static bool ir_lower_benchmark_validate(IrLowerBenchmarkCorpus* corpus, Arena* output, Arena* scratch)
 {
     const uint64_t output_mark = output->length;
-    const uint64_t twin_mark = twin_output->length;
     const uint64_t scratch_mark = scratch->length;
     bool valid = true;
     for (uint32_t f = 0; valid && f < corpus->count; f += 1)
     {
         const IrLowerBenchmarkFunction item = corpus->functions[f];
-        IrFunction vector = { 0 };
-        IrFunction scalar = { 0 };
-        const IrCheck vector_check = ir_lower_typed(item.input, item.result_type, item.symbol_count, output, scratch, &vector);
-        const IrCheck scalar_check = ir_lower_typed_scalar(item.input, item.result_type, item.symbol_count, twin_output, scratch, &scalar);
-        valid = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector_check.instruction == scalar_check.instruction && vector_check.detail == scalar_check.detail && vector_check.dominance_checked == scalar_check.dominance_checked;
-        valid = valid && vector.arena_bytes == scalar.arena_bytes && ir_lower_test_equal(&vector, &scalar);
-        valid = valid && output->length - output_mark == vector.arena_bytes && twin_output->length - twin_mark == scalar.arena_bytes && scratch->length == scratch_mark;
+        IrFunction function = { 0 };
+        const IrCheck check = ir_lower_typed(item.input, item.result_type, item.symbol_count, output, scratch, &function);
+        valid = check.error == IR_OK && output->length - output_mark == function.arena_bytes && scratch->length == scratch_mark;
         if (valid)
         {
-            corpus->instructions += vector.instruction_count;
-            corpus->core_bytes += vector.arena_bytes;
-            if (vector.arena_bytes > corpus->peak_output_bytes)
+            corpus->instructions += function.instruction_count;
+            corpus->core_bytes += function.arena_bytes;
+            if (function.arena_bytes > corpus->peak_output_bytes)
             {
-                corpus->peak_output_bytes = vector.arena_bytes;
+                corpus->peak_output_bytes = function.arena_bytes;
             }
         }
         else
         {
-            fprintf(stderr, "benchmark-ir-lowering: preflight failed at seed %" PRIu64 ", function %u: vector error %u at %u, scalar error %u at %u\n", item.seed, item.index, vector_check.error, vector_check.instruction, scalar_check.error, scalar_check.instruction);
+            fprintf(stderr, "benchmark-ir-lowering: preflight failed at seed %" PRIu64 ", function %u: error %u at %u\n", item.seed, item.index, check.error, check.instruction);
         }
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin_output, twin_mark);
         arena_pop_to(scratch, scratch_mark);
     }
     return valid;
 }
 
 // Probe after recording this shape's samples so the capacity search cannot warm them up. Identical-harness A/B
-// measurements also keep the work between shapes equal. Each path includes temporary verifier storage.
+// measurements also keep the work between shapes equal. It includes temporary verifier storage.
 static bool ir_lower_benchmark_scratch(IrLowerBenchmarkCorpus* corpus, Arena* output, Arena* scratch)
 {
     const uint64_t output_mark = output->length;
@@ -241,37 +229,34 @@ static bool ir_lower_benchmark_scratch(IrLowerBenchmarkCorpus* corpus, Arena* ou
     {
         const IrLowerBenchmarkFunction item = corpus->functions[f];
         const uint64_t capacity = scratch->capacity;
-        for (uint32_t path = 0; valid && path < 2; path += 1)
+        uint64_t low = scratch_mark;
+        uint64_t high = capacity;
+        while (low < high && valid)
         {
-            uint64_t low = scratch_mark;
-            uint64_t high = capacity;
-            while (low < high && valid)
+            const uint64_t middle = low + (high - low) / 2;
+            scratch->capacity = middle;
+            IrFunction probe = { 0 };
+            const IrCheck check = ir_lower_typed(item.input, item.result_type, item.symbol_count, output, scratch, &probe);
+            valid = check.error == IR_OK || check.error == IR_ERROR_MEMORY;
+            if (check.error == IR_OK)
             {
-                const uint64_t middle = low + (high - low) / 2;
-                scratch->capacity = middle;
-                IrFunction probe = { 0 };
-                const IrCheck check = ir_lower_typed_path(item.input, item.result_type, item.symbol_count, output, scratch, &probe, path != 0);
-                valid = check.error == IR_OK || check.error == IR_ERROR_MEMORY;
-                if (check.error == IR_OK)
-                {
-                    high = middle;
-                }
-                else
-                {
-                    low = middle + 1;
-                }
-                arena_pop_to(output, output_mark);
+                high = middle;
             }
-            const uint64_t bytes = high - scratch_mark;
-            corpus->scratch_bytes[path] = bytes > corpus->scratch_bytes[path] ? bytes : corpus->scratch_bytes[path];
-            valid = valid && scratch->length == scratch_mark;
+            else
+            {
+                low = middle + 1;
+            }
+            arena_pop_to(output, output_mark);
         }
+        const uint64_t bytes = high - scratch_mark;
+        corpus->scratch_bytes = bytes > corpus->scratch_bytes ? bytes : corpus->scratch_bytes;
+        valid = valid && scratch->length == scratch_mark;
         scratch->capacity = capacity;
     }
     return valid;
 }
 
-static __attribute__((noinline)) IrError ir_lower_benchmark_run(const IrLowerBenchmarkCorpus* corpus, bool vector, uint32_t repetitions, Arena* output, Arena* scratch)
+static __attribute__((noinline)) IrError ir_lower_benchmark_run(const IrLowerBenchmarkCorpus* corpus, uint32_t repetitions, Arena* output, Arena* scratch)
 {
     const uint64_t output_mark = output->length;
     IrError error = IR_OK;
@@ -283,7 +268,7 @@ static __attribute__((noinline)) IrError ir_lower_benchmark_run(const IrLowerBen
             const IrLowerBenchmarkFunction item = corpus->functions[f];
             IrFunction function = { 0 };
             __asm__ volatile("" : : "r"(item.input) : "memory");
-            const IrCheck check = vector ? ir_lower_typed(item.input, item.result_type, item.symbol_count, output, scratch, &function) : ir_lower_typed_scalar(item.input, item.result_type, item.symbol_count, output, scratch, &function);
+            const IrCheck check = ir_lower_typed(item.input, item.result_type, item.symbol_count, output, scratch, &function);
             error = check.error;
             // Keep the published columns observable without adding a second traversal to the measured pipeline.
             __asm__ volatile("" : : "r"(&function) : "memory");
@@ -295,97 +280,61 @@ static __attribute__((noinline)) IrError ir_lower_benchmark_run(const IrLowerBen
     return error;
 }
 
-static IrError ir_lower_benchmark_after_scalar(const IrLowerBenchmarkCorpus* corpus, Arena* output, Arena* scratch, uint32_t milliseconds)
-{
-    const uint64_t start = ir_benchmark_now();
-    const uint64_t duration = (uint64_t)milliseconds * 1000000ull;
-    IrError error = IR_OK;
-    while (error == IR_OK && ir_benchmark_now() - start < duration)
-    {
-        error = ir_lower_benchmark_run(corpus, false, 1, output, scratch);
-    }
-    return error;
-}
-
-static IrBenchmarkSample ir_lower_benchmark_sample(const IrLowerBenchmarkCorpus* corpus, bool vector, Arena* output, Arena* scratch, uint32_t* repetitions, uint32_t after_scalar_ms)
+static IrBenchmarkSample ir_lower_benchmark_sample(const IrLowerBenchmarkCorpus* corpus, Arena* output, Arena* scratch, uint32_t* repetitions)
 {
     IrBenchmarkSample sample = { 0 };
     bool complete = false;
     while (!complete && sample.error == IR_OK)
     {
-        if (vector && after_scalar_ms != 0)
+        const uint64_t start_ns = ir_benchmark_now();
+        const uint64_t start_tsc = ir_benchmark_tsc();
+        sample.error = ir_lower_benchmark_run(corpus, *repetitions, output, scratch);
+        sample.tsc_ticks = ir_benchmark_tsc() - start_tsc;
+        sample.nanoseconds = ir_benchmark_now() - start_ns;
+        sample.repetitions = *repetitions;
+        complete = sample.nanoseconds >= BUSTER_IR_BENCHMARK_MIN_NS;
+        if (!complete)
         {
-            sample.error = ir_lower_benchmark_after_scalar(corpus, output, scratch, after_scalar_ms);
-        }
-        if (sample.error == IR_OK)
-        {
-            const uint64_t start_ns = ir_benchmark_now();
-            const uint64_t start_tsc = ir_benchmark_tsc();
-            sample.error = ir_lower_benchmark_run(corpus, vector, *repetitions, output, scratch);
-            sample.tsc_ticks = ir_benchmark_tsc() - start_tsc;
-            sample.nanoseconds = ir_benchmark_now() - start_ns;
-            sample.repetitions = *repetitions;
-            complete = sample.nanoseconds >= BUSTER_IR_BENCHMARK_MIN_NS;
-            if (!complete)
+            if (*repetitions == BUSTER_IR_BENCHMARK_MAX_REPETITIONS)
             {
-                if (*repetitions == BUSTER_IR_BENCHMARK_MAX_REPETITIONS)
-                {
-                    sample.error = IR_ERROR_LIMIT;
-                }
-                else
-                {
-                    *repetitions *= 2;
-                }
+                sample.error = IR_ERROR_LIMIT;
+            }
+            else
+            {
+                *repetitions *= 2;
             }
         }
     }
     return sample;
 }
 
-static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bool larger, bool objects, bool dynamic, uint8_t stack_kind, uint32_t passes, uint32_t selected, uint32_t after_scalar_ms)
+static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bool larger, bool objects, bool dynamic, uint8_t stack_kind, uint32_t passes)
 {
     const char* name = stack_kind == BUSTER_TYPED_ALLOCA ? "alloca isolated" : stack_kind == BUSTER_TYPED_STACK_SAVE ? "stack-save isolated" : stack_kind == BUSTER_TYPED_STACK_RESTORE ? "stack-restore isolated" : dynamic ? "larger dynamic stack" : objects ? "larger object" : larger ? "larger mixed" : "small mixed";
     Arena input = arena_reserve(BUSTER_IR_LOWER_BENCHMARK_INPUT_BYTES);
     Arena output = arena_reserve(BUSTER_IR_LOWER_BENCHMARK_OUTPUT_BYTES);
-    Arena twin_output = arena_reserve(BUSTER_IR_LOWER_BENCHMARK_OUTPUT_BYTES);
     Arena scratch = arena_reserve(BUSTER_IR_LOWER_BENCHMARK_OUTPUT_BYTES);
     IrLowerBenchmarkCorpus corpus = { 0 };
-    bool valid = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0;
+    bool valid = input.base != 0 && output.base != 0 && scratch.base != 0;
     valid = valid && (stack_kind != 0 ? ir_lower_benchmark_stack(&corpus, &input, stack_kind) : ir_lower_benchmark_generate(&corpus, tables, &input, seed, larger, objects, dynamic));
-    valid = valid && ir_lower_benchmark_validate(&corpus, &output, &twin_output, &scratch);
-    uint32_t repetitions[BUSTER_IR_LOWER_BENCHMARK_VARIANTS] = {
-        1,
-        1,
-    };
-    double nanoseconds[BUSTER_IR_LOWER_BENCHMARK_VARIANTS][BUSTER_IR_BENCHMARK_MAX_PASSES];
-    double ticks[BUSTER_IR_LOWER_BENCHMARK_VARIANTS][BUSTER_IR_BENCHMARK_MAX_PASSES];
-    for (uint32_t variant = 0; valid && variant < BUSTER_IR_LOWER_BENCHMARK_VARIANTS; variant += 1)
+    valid = valid && ir_lower_benchmark_validate(&corpus, &output, &scratch);
+    uint32_t repetitions = 1;
+    double nanoseconds[BUSTER_IR_BENCHMARK_MAX_PASSES];
+    double ticks[BUSTER_IR_BENCHMARK_MAX_PASSES];
+    valid = valid && ir_lower_benchmark_run(&corpus, 1, &output, &scratch) == IR_OK;
+    if (valid)
     {
-        if ((selected & (1u << variant)) != 0)
-        {
-            valid = ir_lower_benchmark_run(&corpus, variant == BUSTER_IR_LOWER_BENCHMARK_VECTOR, 1, &output, &scratch) == IR_OK;
-            if (valid)
-            {
-                const IrBenchmarkSample calibration = ir_lower_benchmark_sample(&corpus, variant == BUSTER_IR_LOWER_BENCHMARK_VECTOR, &output, &scratch, &repetitions[variant], after_scalar_ms);
-                valid = calibration.error == IR_OK;
-            }
-        }
+        const IrBenchmarkSample calibration = ir_lower_benchmark_sample(&corpus, &output, &scratch, &repetitions);
+        valid = calibration.error == IR_OK;
     }
     for (uint32_t pass = 0; valid && pass < passes; pass += 1)
     {
-        for (uint32_t step = 0; valid && step < BUSTER_IR_LOWER_BENCHMARK_VARIANTS; step += 1)
+        const IrBenchmarkSample sample = ir_lower_benchmark_sample(&corpus, &output, &scratch, &repetitions);
+        valid = sample.error == IR_OK;
+        if (valid)
         {
-            const uint32_t variant = (pass + step) % BUSTER_IR_LOWER_BENCHMARK_VARIANTS;
-            if ((selected & (1u << variant)) != 0)
-            {
-                const IrBenchmarkSample sample = ir_lower_benchmark_sample(&corpus, variant == BUSTER_IR_LOWER_BENCHMARK_VECTOR, &output, &scratch, &repetitions[variant], after_scalar_ms);
-                valid = sample.error == IR_OK;
-                if (valid)
-                {
-                    nanoseconds[variant][pass] = (double)sample.nanoseconds / sample.repetitions;
-                    ticks[variant][pass] = (double)sample.tsc_ticks / sample.repetitions;
-                }
-            }
+            nanoseconds[pass] = (double)sample.nanoseconds / sample.repetitions;
+            ticks[pass] = (double)sample.tsc_ticks / sample.repetitions;
         }
     }
     valid = valid && ir_lower_benchmark_scratch(&corpus, &output, &scratch);
@@ -394,24 +343,18 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
         printf("\n%s programs: %u functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions (%.3f/typed entry), %" PRIu64 " objects, %" PRIu64 " copies\n", name, corpus.count, corpus.entries, corpus.instructions,
                (double)corpus.instructions / corpus.entries, corpus.objects, corpus.copies);
         printf("core arena bytes: sum=%" PRIu64 " (%.3f/typed entry), peak/function=%" PRIu64 "\n", corpus.core_bytes, (double)corpus.core_bytes / corpus.entries, corpus.peak_output_bytes);
-        printf("minimum scratch capacity, peak/function: scalar=%" PRIu64 ", vector=%" PRIu64 "; dynamic stack operations=%" PRIu64 "\n", corpus.scratch_bytes[0], corpus.scratch_bytes[1], corpus.stack_ops);
+        printf("minimum scratch capacity, peak/function: %" PRIu64 "; dynamic stack operations=%" PRIu64 "\n", corpus.scratch_bytes, corpus.stack_ops);
         printf("%-8s %14s %16s %18s %20s %12s\n", "path", "ns/corpus", "ns/typed entry", "M typed entries/s", "TSC ticks/entry", "repetitions");
-        for (uint32_t variant = 0; variant < BUSTER_IR_LOWER_BENCHMARK_VARIANTS; variant += 1)
+        const double ns = ir_benchmark_median(nanoseconds, passes);
+        const double tsc = ir_benchmark_median(ticks, passes);
+        printf("%-8s %14.1f %16.3f %18.3f %20.3f %12u\n", "lower", ns, ns / corpus.entries, (double)corpus.entries * 1000.0 / ns, tsc / corpus.entries, repetitions);
+        if (corpus.stack_ops != 0)
         {
-            if ((selected & (1u << variant)) != 0)
-            {
-                const double ns = ir_benchmark_median(nanoseconds[variant], passes);
-                const double tsc = ir_benchmark_median(ticks[variant], passes);
-                printf("%-8s %14.1f %16.3f %18.3f %20.3f %12u\n", variant == BUSTER_IR_LOWER_BENCHMARK_VECTOR ? "vector" : "scalar", ns, ns / corpus.entries, (double)corpus.entries * 1000.0 / ns, tsc / corpus.entries, repetitions[variant]);
-                if (corpus.stack_ops != 0)
-                {
-                    printf("  %.3f ns/stack operation over the full lowering pipeline\n", ns / corpus.stack_ops);
-                }
-                if (corpus.target_ops != 0)
-                {
-                    printf("  %.3f ns/target operation, %" PRIu64 " targets; %u helper saves (validation, planning, emission and verification included)\n", ns / corpus.target_ops, corpus.target_ops, stack_kind == BUSTER_TYPED_STACK_RESTORE ? 1u : 0u);
-                }
-            }
+            printf("  %.3f ns/stack operation over the full lowering pipeline\n", ns / corpus.stack_ops);
+        }
+        if (corpus.target_ops != 0)
+        {
+            printf("  %.3f ns/target operation, %" PRIu64 " targets; %u helper saves (validation, planning, emission and verification included)\n", ns / corpus.target_ops, corpus.target_ops, stack_kind == BUSTER_TYPED_STACK_RESTORE ? 1u : 0u);
         }
     }
     else
@@ -419,7 +362,6 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
         fprintf(stderr, "benchmark-ir-lowering: generation, validation, lowering or calibration failed for the %s case\n", name);
     }
     arena_release(&scratch);
-    arena_release(&twin_output);
     arena_release(&output);
     arena_release(&input);
     return valid;
@@ -428,8 +370,6 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
 static int run_ir_lower_benchmark(int argc, char** argv)
 {
     uint32_t passes = BUSTER_IR_BENCHMARK_PASSES;
-    uint32_t selected = (1u << BUSTER_IR_LOWER_BENCHMARK_VARIANTS) - 1;
-    uint32_t after_scalar_ms = 0;
     uint64_t seed = 1;
     bool ordinary = false;
     bool valid = true;
@@ -449,17 +389,6 @@ static int run_ir_lower_benchmark(int argc, char** argv)
             i += 1;
             valid = ir_lower_benchmark_seed(argv[i], &seed);
         }
-        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            valid = ir_benchmark_number(argv[i], 0, BUSTER_IR_LOWER_BENCHMARK_MAX_AFTER_SCALAR_MS, &after_scalar_ms);
-        }
-        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            selected = strcmp(argv[i], "scalar") == 0 ? 1u << BUSTER_IR_LOWER_BENCHMARK_SCALAR : strcmp(argv[i], "vector") == 0 ? 1u << BUSTER_IR_LOWER_BENCHMARK_VECTOR : 0;
-            valid = selected != 0;
-        }
         else
         {
             valid = false;
@@ -467,8 +396,8 @@ static int run_ir_lower_benchmark(int argc, char** argv)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-ir-lowering [--passes N] [--seed N] [--only scalar|vector] [--after-scalar MS] [--ordinary]\n");
-        fprintf(stderr, "  passes: 1..%u; seed: decimal u64; after-scalar: 0..%u ms\n", BUSTER_IR_BENCHMARK_MAX_PASSES, BUSTER_IR_LOWER_BENCHMARK_MAX_AFTER_SCALAR_MS);
+        fprintf(stderr, "usage: benchmark-ir-lowering [--passes N] [--seed N] [--ordinary]\n");
+        fprintf(stderr, "  passes: 1..%u; seed: decimal u64\n", BUSTER_IR_BENCHMARK_MAX_PASSES);
     }
 #ifndef __OPTIMIZE__
     fprintf(stderr, "benchmark-ir-lowering: an optimized build is required; unoptimized timings are not reported\n");
@@ -488,26 +417,22 @@ static int run_ir_lower_benchmark(int argc, char** argv)
         printf("benchmark-ir-lowering: generated mixed typed programs, seed=%" PRIu64 ", %u passes; each sample >= 2 ms\n", seed, passes);
         printf("Timed: typed validation + planning + classification + count/emission + IR verification; generator/ABI preparation excluded.\n");
         printf("Counts are typed entries, not source tokens. TSC ticks are not core cycles; pin to one CPU for measurements.\n");
-        if (after_scalar_ms != 0 && (selected & (1u << BUSTER_IR_LOWER_BENCHMARK_VECTOR)) != 0)
-        {
-            printf("Each vector sample follows %u ms of untimed scalar lowering.\n", after_scalar_ms);
-        }
-        valid = ir_lower_benchmark_case(&tables, seed, false, false, false, 0, passes, selected, after_scalar_ms);
+        valid = ir_lower_benchmark_case(&tables, seed, false, false, false, 0, passes);
         if (valid)
         {
-            valid = ir_lower_benchmark_case(&tables, seed, true, false, false, 0, passes, selected, after_scalar_ms);
+            valid = ir_lower_benchmark_case(&tables, seed, true, false, false, 0, passes);
         }
         if (valid)
         {
-            valid = ir_lower_benchmark_case(&tables, seed, true, true, false, 0, passes, selected, after_scalar_ms);
+            valid = ir_lower_benchmark_case(&tables, seed, true, true, false, 0, passes);
         }
         if (valid && !ordinary)
         {
-            valid = ir_lower_benchmark_case(&tables, seed, true, true, true, 0, passes, selected, after_scalar_ms);
+            valid = ir_lower_benchmark_case(&tables, seed, true, true, true, 0, passes);
         }
         for (uint8_t kind = BUSTER_TYPED_ALLOCA; valid && !ordinary && kind <= BUSTER_TYPED_STACK_RESTORE; kind += 1)
         {
-            valid = ir_lower_benchmark_case(&tables, seed, false, false, true, kind, passes, selected, after_scalar_ms);
+            valid = ir_lower_benchmark_case(&tables, seed, false, false, true, kind, passes);
         }
     }
     tier0_tables_close(&tables);
