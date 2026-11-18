@@ -4,8 +4,8 @@
 // Original scheduling experiment: fixed machine-record blocks -> effects/model/graph -> order -> copy -> encoder.
 // Reports the complete handoff beside unscheduled encoding, then executes one original integer-loop fixture with
 // and without the schedule. This is not speedtest1, a source compiler or corpus acceptance for #172/#181.
-// Run every invocation under the 9700X per-run lock, pinned to CPU 2. --only and --after-scalar expose both vector
-// states. Timing/perf helpers below are original, with no imported timing harness or third-party cost data.
+// Run every invocation under the 9700X per-run lock, pinned to CPU 2. --only times one row; --after-scalar MS runs MS
+// of scalar integer work before each schedule sample, to read the vector state that follows it. Timing/perf helpers below are original, with no imported timing harness or third-party cost data.
 
 #include "host_isa.h"
 #include <stdbool.h>
@@ -152,7 +152,7 @@ static bool tier1_schedule_bench_run(Tier1ScheduleBench* bench, uint32_t variant
         if (variant != 0)
         {
             const Tier1ScheduleInput input = { .instructions = records, .count = bench->count };
-            valid = tier1_schedule_block(input, &bench->graph, bench->order, bench->count, variant == 2, 0) == TIER1_SCHEDULE_OK;
+            valid = tier1_schedule_block(input, &bench->graph, bench->order, bench->count, 0) == TIER1_SCHEDULE_OK;
             for (uint32_t i = 0; valid && i < bench->count; i += 1)
             {
                 bench->reordered[i] = records[bench->order[i]];
@@ -173,7 +173,6 @@ static bool tier1_schedule_bench_run(Tier1ScheduleBench* bench, uint32_t variant
 static bool tier1_schedule_bench_check(Tier1ScheduleBench* bench, uint64_t* moved, uint64_t* missing)
 {
     bool valid = true;
-    uint16_t scalar_order[BUSTER_TIER1_SCHEDULE_MAX_RECORDS];
     uint8_t scalar_code[BUSTER_X86_ENCODER_CAPACITY(BUSTER_TIER1_SCHEDULE_MAX_RECORDS)];
     *moved = 0;
     *missing = 0;
@@ -183,12 +182,10 @@ static bool tier1_schedule_bench_check(Tier1ScheduleBench* bench, uint64_t* move
         const Tier1ScheduleInput input = { .instructions = records, .count = bench->count };
         Tier1ScheduleStats stats = { 0 };
         valid = x86_validate(records, bench->count) == bench->count &&
-                tier1_schedule_block(input, &bench->graph, scalar_order, bench->count, false, &stats) == TIER1_SCHEDULE_OK;
+                tier1_schedule_block(input, &bench->graph, bench->order, bench->count, &stats) == TIER1_SCHEDULE_OK;
         *moved += stats.moved;
         *missing += stats.missing_columns[X86_COST_LATENCY];
-        valid = valid && tier1_schedule_verify(input, scalar_order) &&
-                tier1_schedule_block(input, &bench->graph, bench->order, bench->count, true, 0) == TIER1_SCHEDULE_OK &&
-                memcmp(scalar_order, bench->order, bench->count * sizeof(scalar_order[0])) == 0 && tier1_schedule_verify(input, bench->order);
+        valid = valid && tier1_schedule_verify(input, bench->order);
         if (valid)
         {
             for (uint32_t i = 0; i < bench->count; i += 1)
@@ -227,16 +224,32 @@ static Tier1ScheduleBenchSample tier1_schedule_bench_sample(Tier1ScheduleBench* 
     return sample;
 }
 
+// Scalar integer work for `nanoseconds`, no vector instructions: a multiply-xor chain the compiler can't vectorize.
+static uint64_t tier1_schedule_bench_scalar_work(uint64_t nanoseconds)
+{
+    uint64_t state = UINT64_C(0xcbf29ce484222325);
+    const uint64_t start = tier1_schedule_bench_clock();
+    while (tier1_schedule_bench_clock() - start < nanoseconds)
+    {
+        #pragma clang loop vectorize(disable) interleave(disable)
+        for (uint32_t i = 0; i < 4096; i += 1)
+        {
+            state = (state ^ i) * UINT64_C(0x100000001b3);
+        }
+    }
+    return state;
+}
+
 static bool tier1_schedule_bench_measure(Tier1ScheduleBench* bench, uint32_t only, uint32_t after_scalar)
 {
     bool valid = true;
     const int counter = tier1_schedule_bench_counter();
-    uint32_t repeats[3] = { 1, 1, 1 };
-    double ns[3][BUSTER_TIER1_SCHEDULE_BENCH_PASSES];
-    double cycles[3][BUSTER_TIER1_SCHEDULE_BENCH_PASSES];
-    for (uint32_t variant = 0; variant < 3; variant += 1)
+    uint32_t repeats[2] = { 1, 1 };
+    double ns[2][BUSTER_TIER1_SCHEDULE_BENCH_PASSES];
+    double cycles[2][BUSTER_TIER1_SCHEDULE_BENCH_PASSES];
+    for (uint32_t variant = 0; variant < 2; variant += 1)
     {
-        if (only == 3 || only == variant)
+        if (only == 2 || only == variant)
         {
             bool enough = false;
             while (!enough)
@@ -253,18 +266,14 @@ static bool tier1_schedule_bench_measure(Tier1ScheduleBench* bench, uint32_t onl
     }
     for (uint32_t pass = 0; pass < BUSTER_TIER1_SCHEDULE_BENCH_PASSES; pass += 1)
     {
-        for (uint32_t offset = 0; offset < 3; offset += 1)
+        for (uint32_t offset = 0; offset < 2; offset += 1)
         {
-            const uint32_t variant = (pass + offset) % 3;
-            if (only == 3 || only == variant)
+            const uint32_t variant = (pass + offset) % 2;
+            if (only == 2 || only == variant)
             {
-                if (variant == 2 && after_scalar != 0)
+                if (variant == 1 && after_scalar != 0)
                 {
-                    const uint64_t start = tier1_schedule_bench_clock();
-                    while (tier1_schedule_bench_clock() - start < (uint64_t)after_scalar * 1000000)
-                    {
-                        valid &= tier1_schedule_bench_run(bench, 1);
-                    }
+                    bench->sink ^= tier1_schedule_bench_scalar_work((uint64_t)after_scalar * 1000000);
                 }
                 const Tier1ScheduleBenchSample sample = tier1_schedule_bench_sample(bench, variant, repeats[variant], counter, &valid);
                 ns[variant][pass] = sample.ns;
@@ -272,10 +281,10 @@ static bool tier1_schedule_bench_measure(Tier1ScheduleBench* bench, uint32_t onl
             }
         }
     }
-    const char* names[] = { "encode only", "scalar schedule + copy + encode", "vector schedule + copy + encode" };
-    for (uint32_t variant = 0; variant < 3; variant += 1)
+    const char* names[] = { "encode only", "schedule + copy + encode" };
+    for (uint32_t variant = 0; variant < 2; variant += 1)
     {
-        if (only == 3 || only == variant)
+        if (only == 2 || only == variant)
         {
             const double median_ns = tier1_schedule_bench_median(ns[variant]);
             const double median_cycles = tier1_schedule_bench_median(cycles[variant]);
@@ -301,7 +310,7 @@ static bool tier1_schedule_bench_measure(Tier1ScheduleBench* bench, uint32_t onl
 static bool tier1_schedule_bench_code(Tier1ScheduleBench* bench)
 {
     Tier1ScheduleFixture fixture = { 0 };
-    const bool valid = tier1_schedule_fixture_open(&fixture, &bench->graph, bench->order, true) && tier1_schedule_fixture_check(&fixture);
+    const bool valid = tier1_schedule_fixture_open(&fixture, &bench->graph, bench->order) && tier1_schedule_fixture_check(&fixture);
     if (valid)
     {
         double samples[2][BUSTER_TIER1_SCHEDULE_BENCH_PASSES];
@@ -340,7 +349,7 @@ static bool tier1_schedule_bench_number(const char* text, uint32_t maximum, uint
 int run_tier1_schedule_benchmark(int argc, char** argv)
 {
     Tier1ScheduleBench bench = { .blocks = BUSTER_TIER1_SCHEDULE_BENCH_BLOCKS, .count = 64 };
-    uint32_t only = 3;
+    uint32_t only = 2;
     uint32_t after_scalar = 0;
     bool valid = true;
     for (int i = 1; valid && i < argc; i += 1)
@@ -362,8 +371,8 @@ int run_tier1_schedule_benchmark(int argc, char** argv)
         }
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
-            only = strcmp(argv[i + 1], "encode") == 0 ? 0 : strcmp(argv[i + 1], "scalar") == 0 ? 1 : strcmp(argv[i + 1], "vector") == 0 ? 2 : 4;
-            valid = only <= 2;
+            only = strcmp(argv[i + 1], "encode") == 0 ? 0 : strcmp(argv[i + 1], "schedule") == 0 ? 1 : 3;
+            valid = only <= 1;
             i += 1;
         }
         else
