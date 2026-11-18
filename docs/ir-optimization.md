@@ -49,8 +49,7 @@ independent rebuilding control.
 The C driver's `ir_if_convert.c` runs after SSA promotion, wide-value splitting,
 integer truth simplification and truth threading, before the ordinary optimizer
 prepares any analysis. It finds conditional terminators with a bounded 64-byte
-opcode mask and an exact scalar twin. A function without one needs no CFG or
-output allocation.
+opcode mask. A function without one needs no CFG or output allocation.
 
 A region is a reachable head ending in a conditional branch whose two sides
 reach one join. Each side is the join itself (a triangle) or an arm: a chain of
@@ -66,13 +65,13 @@ address. So each arm row is first numbered against the earlier arm rows and the
 head's rows. A row whose operation, type, flags, fields and represented
 operands equal an earlier row's takes that row's value, comparing an address's
 scale and offset by content. The head's rows are filtered 16 at a time
-(AVX-512 compares of the operation, type, flags and operand columns, with a
-scalar twin), latest first, and each candidate is checked whole. A load takes
+(AVX-512 compares of the operation, type, flags and operand columns), latest
+first, and each candidate is checked whole. A load takes
 an earlier value only from a plain load of the same address and type after the
 head's last write. A write here is a store, an atomic, a fence, a call, a stack
 restore, a lifetime marker or an observable load; no arm row writes. The
 barrier scan is one `vpermi2b` lookup of a 128-entry opcode class table per 64
-rows, with a scalar twin.
+rows.
 
 Then only the rows the join's phis need, through their represented operands,
 move to the head's end, before its branch. Each needed row must be total:

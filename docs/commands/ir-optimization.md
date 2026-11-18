@@ -243,8 +243,9 @@ not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
 the rules.
 
 `test-ir-optimize` runs `ir_if_convert_test.c`: complete SSA verification,
-independent execution before/after cleanup, exact scalar/vector output, every
-guarded candidate-scan tail, multi-phi edge polarity, both triangle
+independent execution before/after cleanup, every result folded into a frozen
+digest (#2924), the scans (conditional branches, barriers, keys' filter)
+against their definitions on random columns, every guarded candidate-scan tail, multi-phi edge polarity, both triangle
 orientations, sequential, nested and three-predecessor regions over rounds,
 loop-carried values, shared switch/call side-table words, allocation rollback,
 refusal of unsafe or expensive speculation, the reload and truth fixtures,

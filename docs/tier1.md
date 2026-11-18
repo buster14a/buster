@@ -761,8 +761,7 @@ IR as libgcc's calls (the checker's lowering), whose 128-bit arguments and
 results are by-value aggregates; an `I128` in a signature, or an operation the
 split doesn't take, refuses the body as unsupported, and Tier 0 compiles it.
 Every function `--tier1` compiles is scanned for an `I128` instruction, 64 type
-bytes a compare on the vector path and one at a time on its scalar twin, and a
-function without one is the promoted function itself. The rewrite is scalar:
+bytes a compare, and a function without one is the promoted function itself. The rewrite is scalar:
 two passes of one body, counting then writing, on the functions with 128-bit
 values alone (two of `sqlite3.c`'s 2,668, none of Lua's), whose cost is below
 measurement on the compile (the record below). Each phi's and call's remapped
@@ -791,11 +790,11 @@ loads and stores, which the split makes 8-byte accesses: `sqlite3Multiply128`'s
 `sqlite3Multiply128`'s product, a shift by an extended constant, phis around a
 loop, unaligned, volatile and indexed accesses), 120 random straight-line
 programs and 300 of Tier 0's random 128-bit typed programs (frame objects,
-`?:`'s blocks, conversions both ways) through the split by both paths, which
-must make the same function, the verifier, the optimizer and both of Tier 1's
+`?:`'s blocks, conversions both ways) through the split, which must count their
+`I128` instructions, the verifier, the optimizer and both of Tier 1's
 paths with their certificates, natively, against the IR's interpreter on the
 unsplit function and the programs' stack machine; the split's refusals and its
-scan's twins; overlapping `extra` slices, and `I128` phis that share one
+scan against its definition; overlapping `extra` slices, and `I128` phis that share one
 predecessor list past the `u32` limit; and 300 of Tier 0's random long double programs (calls of C
 functions of long doubles, every conversion, NaNs, frame objects, `?:`'s blocks)
 through the optimizer and both of Tier 1's paths natively against their stack

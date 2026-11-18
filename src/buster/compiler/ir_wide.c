@@ -36,8 +36,7 @@
 // extra table, their values remapped. The counts are 64-bit, and an output whose instructions or tables a u32 can't
 // count is refused before it is allocated (IR_ERROR_LIMIT): phis can share a predecessor list, so the appended lists
 // can pass the limit where the source's table doesn't (#1204's review). SIMD: what pays. Every function --tier1 compiles is scanned for an I128 instruction, 64 type bytes
-// a compare on the vector path, one at a time on its scalar twin, which must agree; a function without one is returned
-// as it is. The rewrite is scalar: it runs on functions with 128-bit values alone, two of sqlite3.c's 2,668 and none of
+// a compare; a function without one is returned as it is. The rewrite is scalar: it runs on functions with 128-bit values alone, two of sqlite3.c's 2,668 and none of
 // Lua's 1,088 (docs/tier1.md has its cost against the compile's).
 
 #ifndef BUSTER_IR_WIDE_C
@@ -83,29 +82,16 @@ struct IrWideWork
     uint32_t error_instruction;
 };
 
-// Whether a function has an I128 instruction: its type column 64 bytes a compare on the vector path, one at a time on its
-// scalar twin, which must agree.
-static bool ir_wide_present_path(const IrFunction* function, bool vector)
+// Whether a function has an I128 instruction: its type column 64 bytes a compare.
+static bool ir_wide_present(const IrFunction* function)
 {
-    (void)vector;
-
     bool found = false;
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
     {
-        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
-        {
-            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
-            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
-            found = _mm512_mask_cmpeq_epi8_mask(active, types, _mm512_set1_epi8(IR_I128)) != 0;
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
-        {
-            found = function->type[i] == IR_I128;
-        }
+        const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+        const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+        found = _mm512_mask_cmpeq_epi8_mask(active, types, _mm512_set1_epi8(IR_I128)) != 0;
     }
     return found;
 }
@@ -766,13 +752,13 @@ static bool ir_wide_resolve(IrWideWork* work)
     return resolved;
 }
 
-static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Arena* scratch, bool vector, IrWideResult* result)
+static __attribute__((unused)) IrCheck ir_wide_split(const IrFunction* function, Arena* output, Arena* scratch, IrWideResult* result)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     *result = (IrWideResult){ .function = *function };
-    const bool present = output != scratch && ir_wide_present_path(function, vector);
+    const bool present = output != scratch && ir_wide_present(function);
     if (output == scratch)
     {
         check.error = IR_ERROR_STRUCTURE;
@@ -933,16 +919,6 @@ static IrCheck ir_wide_split_path(const IrFunction* function, Arena* output, Are
     }
     arena_pop_to(scratch, scratch_mark);
     return check;
-}
-
-static __attribute__((unused)) IrCheck ir_wide_split(const IrFunction* function, Arena* output, Arena* scratch, IrWideResult* result)
-{
-    return ir_wide_split_path(function, output, scratch, true, result);
-}
-
-static __attribute__((unused)) IrCheck ir_wide_split_scalar(const IrFunction* function, Arena* output, Arena* scratch, IrWideResult* result)
-{
-    return ir_wide_split_path(function, output, scratch, false, result);
 }
 
 #endif
