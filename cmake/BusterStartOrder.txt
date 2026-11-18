@@ -445,6 +445,7 @@ main_unit_checker.c branch_sizing_run
 main_unit_checker.c link_check
 main_unit_checker.c link_groups_valid
 main_unit_checker.c link_check_fixups
+main_unit_checker.c abi_classify_all
 main_unit_checker.c abi_classify_levels
 main_unit_checker.c abi_assign
 main_unit_checker.c tier0_validate_scalar_entries
