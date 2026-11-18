@@ -6,8 +6,8 @@
 # check and offline apt install, and the offline modes of cached-download.sh, fetch-c-testsuite.sh, fetch-sqlite.sh and
 # hosted-offline.sh lua.
 # They cover a cold preparation (a cache miss, through retried failures), a warm one (a hit, with every source gone), a
-# consumer through an artifact-shaped copy, a missing file, a bad hash, a changed runner image and a changed package
-# list. apt-get, dpkg-query, sudo and curl are stand-ins; the .debs are real ones that dpkg-deb builds and reads, and
+# consumer through an artifact-shaped copy, a missing file, a bad hash, a changed runner image, the image's packages
+# that the closure pins exactly (carried, and moved on another image, #2974) and a changed package list. apt-get, dpkg-query, sudo and curl are stand-ins; the .debs are real ones that dpkg-deb builds and reads, and
 # the mirrors are real Git repositories behind file:// upstreams.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -70,8 +70,10 @@ git_upstream "$work/sources/sqlite" 3.53.2
 export BUSTER_C_TESTSUITE_URL="file://$work/sources/c-testsuite" BUSTER_C_TESTSUITE_COMMIT=$(git -C "$work/sources/c-testsuite" rev-parse HEAD)
 export BUSTER_SQLITE_URL="file://$work/sources/sqlite" BUSTER_SQLITE_COMMIT=$(git -C "$work/sources/sqlite" rev-parse HEAD)
 
-# The runner image's packages (FIXTURE/status: NAME ARCH VERSION) and the archive's .debs, real ones. The image has the
-# list's toolchain packages, an older zstd, and libimage, which tcl8.6 needs but the bundle doesn't hold.
+# The runner image's packages (FIXTURE/status: NAME ARCH VERSION [DEPENDS]) and the archive's .debs, real ones. The image
+# has the list's toolchain packages, an older zstd, and libimage, which tcl8.6 needs but the bundle doesn't hold. It also
+# has libpinned, which tcl8.6-dev pins exactly, as the real tcl8.6-dev pins the image's libtcl8.6 (and libc6-dbg pinned
+# its libc6, #2974), and pinner, which pins libpinned exactly: the bundle must carry both.
 make_deb()
 {
     local name=$1 version=$2 architecture=$3 depends=${4:-} directory="$work/debs/$1"
@@ -91,6 +93,18 @@ image_status()
         printf '%s %s 1.0\n' "$name" "$native"
     done
     printf 'zstd %s 1.0\nlibimage %s 1.0\n' "$native" "$native"
+    pinned_status 1.0
+}
+# libpinned and pinner at VERSION, as an image of the rollout has them.
+pinned_status()
+{
+    printf 'libpinned %s %s\npinner %s %s libpinned (= %s)\n' "$native" "$1" "$native" "$1" "$1"
+}
+# The image's status with libpinned and pinner at VERSION instead.
+moved_status()
+{
+    image_status | grep -v -e '^libpinned ' -e '^pinner '
+    pinned_status "$1"
 }
 make_deb gdb 2.0 "$native" 'libgdbdep (>= 2.0), gdb-common (= 2.0)'
 make_deb libgdbdep 2.0 "$native"
@@ -98,16 +112,23 @@ make_deb gdb-common 2.0 all
 make_deb tcc 2.0 "$native"
 make_deb linux-perf 2.0 "$native"
 make_deb qemu-user 1:2.0 "$native"
-make_deb valgrind 2.0 "$native"
 make_deb tcl8.6 2.0 "$native" 'libimage'
-make_deb tcl8.6-dev 2.0 "$native" 'tcl8.6 (= 2.0)'
+make_deb tcl8.6-dev 2.0 "$native" 'tcl8.6 (= 2.0), libpinned (= 1.0)'
 make_deb zstd 1.1 "$native"
+make_deb libpinned 1.0 "$native"
+make_deb pinner 1.0 "$native" 'libpinned (= 1.0)'
+# Whether the status has NAME at VERSION.
+installed_at()
+{
+    awk -v name="$1" -v version="$2" '$1 == name && $3 == version { found = 1 } END { exit !found }' "$work/status"
+}
 
 # Stand-ins: sudo runs its command; getent resolves every name but FIXTURE/unresolvable's, unless pinned; curl answers DNS over
 # HTTPS with 192.0.2.7, serves FIXTURE/upstream and fails FIXTURE/fail-curl times first; dpkg-query reads
-# FIXTURE/status; apt-get updates (failing FIXTURE/fail-update times first), downloads a closure from the archive, or
-# installs .debs given by path, checking their dependencies against the status and each other. Every request is
-# logged.
+# FIXTURE/status; apt-get updates (failing FIXTURE/fail-update times first), downloads a closure from the archive or
+# NAME=VERSION .debs into the working directory, or installs .debs given by path, checking their dependencies against
+# the status and each other, the installed packages' exact dependencies on them, and that nothing is downgraded without
+# --allow-downgrades. Every request is logged.
 cat > "$work/bin/sudo" << 'SH'
 #!/usr/bin/env bash
 exec "$@"
@@ -143,26 +164,55 @@ cp "$FIXTURE/upstream/${url##*/}" "$output"
 SH
 cat > "$work/bin/dpkg-query" << 'SH'
 #!/usr/bin/env bash
+# --show [--showformat=FORMAT] [NAME[:ARCH]...]: every package of the status when no name is given.
 set -euo pipefail
-name=${!#}
-found=$(awk -v name="${name%%:*}" -v arch="${name#*:}" -v qualified="$([[ "$name" == *:* ]] && echo 1 || echo 0)" \
-    '$1 == name && (!qualified || $2 == arch) { printf "installed %s:%s %s\n", $1, $2, $3 }' "$FIXTURE/status")
-[ -n "$found" ] || { echo "dpkg-query: no packages found matching $name" >&2; exit 1; }
-printf '%s\n' "$found"
+shopt -u patsub_replacement 2> /dev/null || true
+format='${db:Status-Status} ${Package}:${Architecture} ${Version}\n'
+names=()
+for argument in "$@"; do
+    case "$argument" in
+        --show) ;;
+        --showformat=*) format=${argument#*=} ;;
+        -*) echo "dpkg-query stand-in: unexpected option $argument" >&2; exit 2 ;;
+        *) names+=("$argument") ;;
+    esac
+done
+found=false
+while read -r name arch version depends; do
+    if [ "${#names[@]}" -gt 0 ]; then
+        match=false
+        for wanted in "${names[@]}"; do
+            if [ "${wanted%%:*}" = "$name" ] && { [[ "$wanted" != *:* ]] || [ "${wanted#*:}" = "$arch" ]; }; then
+                match=true
+            fi
+        done
+        [ "$match" = true ] || continue
+    fi
+    found=true
+    line=${format//'${db:Status-Status}'/installed}
+    line=${line//'${Package}'/$name}
+    line=${line//'${Architecture}'/$arch}
+    line=${line//'${Version}'/$version}
+    line=${line//'${Pre-Depends}'/}
+    line=${line//'${Depends}'/$depends}
+    printf '%b' "$line"
+done < "$FIXTURE/status"
+[ "$found" = true ] || [ "${#names[@]}" -eq 0 ] || { echo "dpkg-query: no packages found matching ${names[*]}" >&2; exit 1; }
 SH
 cat > "$work/bin/apt-get" << 'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FIXTURE/apt-requests"
-command='' simulate=false download_only=false no_download=false archives='' lists='' arguments=()
+command='' simulate=false download_only=false no_download=false allow_downgrades=false archives='' lists='' arguments=()
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) case "$2" in Dir::Cache::archives=*) archives=${2#*=} ;; Dir::State::Lists=*) lists=${2#*=} ;; esac; shift ;;
         --simulate) simulate=true ;;
         --download-only) download_only=true ;;
         --no-download) no_download=true ;;
-        --yes|--no-install-recommends) ;;
-        update|install) command=$1 ;;
+        --allow-downgrades) allow_downgrades=true ;;
+        --yes|--no-install-recommends|--no-remove) ;;
+        update|install|download) command=$1 ;;
         -*) echo "apt-get stand-in: unexpected option $1" >&2; exit 100 ;;
         *) arguments+=("$1") ;;
     esac
@@ -184,6 +234,14 @@ fail_count()
 }
 if [ "$command" = update ]; then
     fail_count fail-update
+    exit 0
+fi
+if [ "$command" = download ]; then
+    for argument in "${arguments[@]}"; do
+        deb=$(find "$FIXTURE/repository" -name "${argument%%=*}_${argument#*=}_*.deb" -print -quit)
+        [ -n "$deb" ] || { echo "E: Can't find a source to download version '${argument#*=}' of '${argument%%=*}'" >&2; exit 100; }
+        cp "$deb" .
+    done
     exit 0
 fi
 [ "$command" = install ] || { echo 'apt-get stand-in: no command' >&2; exit 100; }
@@ -222,8 +280,24 @@ declare -A versions=()
 for deb in "${arguments[@]}"; do
     [[ "$deb" = /* && -f "$deb" ]] || { echo "apt-get stand-in: no such file $deb" >&2; exit 100; }
     [ "$(dirname "$deb")" = "$archives" ] || [ "$simulate" = true ] || { echo "E: Internal Error, Pathname to install is not absolute" >&2; exit 100; }
-    versions[$(dpkg-deb --show --showformat='${Package}' "$deb")]=$(dpkg-deb --show --showformat='${Version}' "$deb")
+    read -r name version <<< "$(dpkg-deb --show --showformat='${Package} ${Version}' "$deb")"
+    versions[$name]=$version
+    installed=$(status_version "$name")
+    if [ -n "$installed" ] && dpkg --compare-versions "$version" lt "$installed" && [ "$allow_downgrades" = false ]; then
+        echo 'E: Packages were downgraded and -y was used without --allow-downgrades.' >&2
+        exit 100
+    fi
 done
+# An installed package that depends on one of them at exactly another version would have to go, which --no-remove
+# refuses.
+while read -r name _ _ depends; do
+    [ -z "${versions[$name]:-}" ] || continue
+    while read -r dependency; do
+        if [[ "$dependency" =~ ^[[:space:]]*([^[:space:]\(]+)[[:space:]]*\(=[[:space:]]*([^\)]*)\) ]] && [ -n "${versions[${BASH_REMATCH[1]}]:-}" ]; then
+            [ "${versions[${BASH_REMATCH[1]}]}" = "${BASH_REMATCH[2]}" ] || { echo "apt-get stand-in: the installed $name depends on $dependency" >&2; exit 100; }
+        fi
+    done < <(tr ',' '\n' <<< "$depends")
+done < "$FIXTURE/status"
 for deb in "${arguments[@]}"; do
     while read -r dependency; do
         [ -n "$dependency" ] || continue
@@ -241,8 +315,9 @@ done
 [ "$simulate" = false ] || exit 0
 for deb in "${arguments[@]}"; do
     read -r name version architecture <<< "$(dpkg-deb --show --showformat='${Package} ${Version} ${Architecture}' "$deb")"
+    depends=$(dpkg-deb --show --showformat='${Depends}' "$deb")
     awk -v name="$name" '$1 != name' "$FIXTURE/status" > "$FIXTURE/status.new"
-    printf '%s %s %s\n' "$name" "$architecture" "$version" >> "$FIXTURE/status.new"
+    printf '%s %s %s%s\n' "$name" "$architecture" "$version" "${depends:+ $depends}" >> "$FIXTURE/status.new"
     mv "$FIXTURE/status.new" "$FIXTURE/status"
 done
 mkdir -p "$archives/partial"
@@ -275,7 +350,7 @@ restore_sources()
 
 # The keys: apt's names the package list and the image, ci's the pinning scripts, including Lua's owner.
 keys=$(bash "$offline" keys)
-grep -qx 'apt-key=hosted-apt-v1-ubuntu26-20261101.1-[0-9a-f]\{16\}' <<< "$keys" || fail "unexpected apt key: $keys"
+grep -qx 'apt-key=hosted-apt-v2-ubuntu26-20261101.1-[0-9a-f]\{16\}' <<< "$keys" || fail "unexpected apt key: $keys"
 grep -qx 'ci-key=hosted-ci-v1-[0-9a-f]\{16\}' <<< "$keys" || fail "unexpected ci key: $keys"
 [ "$(ImageVersion=20261108.2 bash "$offline" keys | grep '^ci-key=')" = "$(grep '^ci-key=' <<< "$keys")" ] || fail 'the image changed the ci key'
 [ "$(ImageVersion=20261108.2 bash "$offline" keys | grep '^apt-key=')" != "$(grep '^apt-key=' <<< "$keys")" ] || fail 'the image did not change the apt key'
@@ -302,12 +377,18 @@ grep -q 'acquiring corpus failed (attempt 1 of 3)' "$work/log" || fail 'the down
 [ "$(grep -c -- '--simulate' "$work/apt-requests")" = 1 ] || fail 'the closure was not checked offline'
 [ "$(sort "$work/curl-requests" | uniq -d | grep -c .)" = 1 ] || fail 'a download other than the retried one was requested twice'
 manifest="$bundle/apt/MANIFEST"
-[ "$(head -n 1 "$manifest")" = 'format buster-hosted-apt 1' ] || fail 'the manifest has no format'
+[ "$(head -n 1 "$manifest")" = 'format buster-hosted-apt 2' ] || fail 'the manifest has no format'
 grep -qx "runner ubuntu26 20261101.1 .* $native" "$manifest" || fail 'the manifest does not record the runner'
 grep -qx "request $packages" "$manifest" || fail 'the manifest does not record the package list'
-for name in gdb libgdbdep tcc linux-perf qemu-user valgrind tcl8.6 tcl8.6-dev zstd; do
+for name in gdb libgdbdep tcc linux-perf qemu-user tcl8.6 tcl8.6-dev zstd; do
     grep -q "^bundle $name:$native " "$manifest" || fail "the bundle lacks $name"
 done
+# The image's libpinned, which tcl8.6-dev pins, and pinner, which pins it in turn, carried at the image's versions.
+grep -q 'carrying libpinned=1.0: ' "$work/log" && grep -q 'carrying pinner=1.0: ' "$work/log" || fail 'the pinned image packages were not carried'
+grep -q "^bundle libpinned:$native 1.0 " "$manifest" && grep -q "^bundle pinner:$native 1.0 " "$manifest" || fail 'the bundle lacks the carried packages'
+[ "$(grep -c '^-o Acquire::Retries=3 download ' "$work/apt-requests")" = 2 ] || fail 'the carried packages were not downloaded once each'
+[[ " $packages " != *' valgrind '* ]] && ! grep -q valgrind "$manifest" || fail 'valgrind is still in the package list or the bundle'
+
 grep -q '^bundle gdb-common:all 2.0 [0-9a-f]\{64\} gdb-common_2.0_all.deb$' "$manifest" || fail 'the bundle lacks gdb-common'
 grep -qx "bundle qemu-user:$native 1:2.0 [0-9a-f]\{64\} qemu-user_1:2.0_$native.deb" "$manifest" || fail 'qemu-user is not recorded as dpkg-deb reads it'
 for name in gcc g++ binutils libc6-dev libzstd-dev libxml2-dev zlib1g-dev; do
@@ -362,11 +443,14 @@ bash "$offline" verify "$work/consumer" 2> "$work/log" || { cat "$work/log" >&2;
 bash "$offline" apt-install "$work/consumer" > "$work/install.log" 2> "$work/log" || { cat "$work/log" >&2; fail 'the offline install failed'; }
 ! grep -q '::warning' "$work/log" || fail 'the bundle'"'"'s own image was warned about'
 [ "$(requests apt-requests)" = 1 ] && grep -q -- '--no-download' "$work/apt-requests" || fail 'the consumer did more than one offline install'
-for name in gdb libgdbdep gdb-common tcc linux-perf valgrind tcl8.6 tcl8.6-dev; do
-    grep -q "^$name [a-z0-9]* 2.0$" "$work/status" || fail "$name was not installed"
+for name in gdb libgdbdep gdb-common tcc linux-perf tcl8.6 tcl8.6-dev; do
+    installed_at "$name" 2.0 || fail "$name was not installed"
 done
-grep -qx "qemu-user $native 1:2.0" "$work/status" || fail 'qemu-user was not installed'
-grep -qx "zstd $native 1.1" "$work/status" || fail 'zstd was not upgraded'
+installed_at qemu-user 1:2.0 || fail 'qemu-user was not installed'
+installed_at zstd 1.1 || fail 'zstd was not upgraded'
+installed_at libpinned 1.0 && installed_at pinner 1.0 || fail 'the carried packages moved on their own image'
+grep -q -- '--allow-downgrades --no-remove' "$work/apt-requests" || fail 'the install would refuse a carried package'"'"'s downgrade, or remove the image'"'"'s packages'
+grep -qx "| \`zstd:$native\` | \`1.1\` | the bundle (the image had 1.0) |" "$work/summary" || fail 'the summary does not show the upgraded zstd'
 grep -qx "| \`tcl8.6-dev:$native\` | \`2.0\` | the bundle |" "$work/summary" || fail 'the summary does not list the bundle'"'"'s versions'
 grep -qx "| \`gcc:$native\` | \`1.0\` | the runner image |" "$work/summary" || fail 'the summary does not list the image'"'"'s versions'
 read_inputs || fail 'a consumer could not read its inputs offline'
@@ -470,7 +554,41 @@ consume
 image_status | sed "s/^gcc $native 1.0$/gcc $native 1.1/" > "$work/status"
 if bash "$offline" apt-install "$work/consumer" > /dev/null 2> "$work/log"; then fail 'the bundle'"'"'s own image with another gcc was accepted'; fi
 grep -q "gcc:$native is installed at 1.1, not at the recorded 1.0" "$work/log" || fail 'the changed gcc was not named'
+
+# #2974: another image of the rollout has moved libpinned, which tcl8.6-dev pins, and pinner with it. The bundle carries
+# both, so they move to its versions, down from a newer image and up from an older one, and the step summary says so.
+for moved in 1.1 0.9; do
+    consume
+    moved_status "$moved" > "$work/status"
+    : > "$work/summary"
+    ImageVersion=20261108.2 bash "$offline" apt-install "$work/consumer" > /dev/null 2> "$work/log" || { cat "$work/log" >&2; fail "an image with libpinned $moved could not install the bundle"; }
+    installed_at libpinned 1.0 && installed_at pinner 1.0 && installed_at tcl8.6-dev 2.0 || fail "the carried packages did not replace the image's $moved"
+    grep -qx "| \`libpinned:$native\` | \`1.0\` | the bundle (the image had $moved) |" "$work/summary" || fail "the summary does not show the image's libpinned $moved"
+    grep -qx "| \`pinner:$native\` | \`1.0\` | the bundle (the image had $moved) |" "$work/summary" || fail "the summary does not show the image's pinner $moved"
+done
+# What happened on 2026-11-18: a bundle that doesn't carry them (format 1's) can't install there without a download.
+consume
+for name in libpinned pinner; do
+    rm "$work/consumer/apt/${name}_1.0_$native.deb"
+    sed -i "/^bundle $name:/d" "$work/consumer/apt/MANIFEST"
+done
+cp -a "$work/consumer" "$work/uncarried"
+moved_status 1.1 > "$work/status"
+if ImageVersion=20261108.2 bash "$offline" apt-install "$work/consumer" > /dev/null 2> "$work/log"; then fail 'a bundle without the pinned packages installed on an image that moved them'; fi
+grep -q 'do not install on this one (ubuntu26 20261108.2 ' "$work/log" || fail 'the uncarried bundle failed for another reason'
 unset GITHUB_STEP_SUMMARY
+# On its own image the preparation refuses such a bundle, and acquires the closure again, carrying them.
+image_status > "$work/status"
+reset_requests
+bash "$offline" prepare "$work/uncarried" 2> "$work/log" || { cat "$work/log" >&2; fail 'an uncarried bundle was not repaired'; }
+grep -q "input=apt source=network reason=it pins this image's libpinned=1.0 without carrying them" "$work/log" || fail 'the uncarried pin was not the reason'
+grep -q "^bundle libpinned:$native 1.0 " "$work/uncarried/apt/MANIFEST" && grep -q "^bundle pinner:$native 1.0 " "$work/uncarried/apt/MANIFEST" || fail 'the repaired bundle does not carry the pinned packages'
+# A pinned package that the archive no longer has fails the preparation, naming it: nothing else would carry it.
+mv "$work/repository/libpinned_1.0_$native.deb" "$work/libpinned.hidden"
+rm -rf "$work/uncarried/apt"
+if bash "$offline" prepare "$work/uncarried" 2> "$work/log"; then fail 'a pinned package missing from the archive was not reported'; fi
+grep -q 'apt-get download failed 3 times' "$work/log" || fail 'the failed download of the pinned package was not the reason'
+mv "$work/libpinned.hidden" "$work/repository/libpinned_1.0_$native.deb"
 
 # A changed package list, release or architecture, or a malformed manifest: the bundle is not this setup's.
 check_manifest()
@@ -508,4 +626,4 @@ grep -q 'cloudflare-dns.com/dns-query?name=archive.ubuntu.com&type=A' "$work/cur
 printf '127.0.0.1 localhost\n# pinned\n192.0.2.7 archive.ubuntu.com mirror.example # pin\n198.51.100.1 GitHub.com\n' > "$work/drill-hosts"
 BUSTER_HOSTS_FILE="$work/drill-hosts" bash "$root/tools/ci/hosts-down.sh" archive.ubuntu.com github.com || fail 'the drill could not edit its table'
 [ "$(cat "$work/drill-hosts")" = "$(printf '127.0.0.1 localhost\n# pinned\n192.0.2.7 mirror.example # pin\n127.0.0.1 archive.ubuntu.com\n::1 archive.ubuntu.com\n127.0.0.1 github.com\n::1 github.com')" ] || { cat "$work/drill-hosts" >&2; fail 'the drill left an earlier address for a host it took down'; }
-printf 'hosted-offline: cold (retried) and warm preparation, the consumer'"'"'s offline install and reads, missing files, bad hashes, image and package-list changes, repairs and DNS-over-HTTPS pins checked\n'
+printf 'hosted-offline: cold (retried) and warm preparation, the consumer'"'"'s offline install and reads, missing files, bad hashes, image and package-list changes, carried exact pins on images that moved them, repairs and DNS-over-HTTPS pins checked\n'
