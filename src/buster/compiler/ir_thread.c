@@ -247,8 +247,8 @@ static void ir_thread_escapes_scalar(IrThreadWork* work)
 // The escapes of 16 instructions at a time (#2554's measured cost: this scan was a third of the pass on speedtest1):
 // each one's value mask is its opcode's operand bits, the optional ones where present (ir_value_mask's), by two 128-byte
 // tables' lookups; each used operand's block is gathered, then whether that block is a candidate's, and a candidate's
-// value used in another block is an escape. Phis, calls and ternary intrinsics, whose other operands are in the extra
-// array, take ir_thread_escapes_extra.
+// value used in another block is an escape. Phis, calls, ternary intrinsics and scatters, whose other operands are in the
+// extra array, take ir_thread_escapes_extra.
 static void ir_thread_escapes_vector(IrThreadWork* work)
 {
     const IrFunction* f = work->function;
@@ -288,7 +288,8 @@ static void ir_thread_escapes_vector(IrThreadWork* work)
             }
         }
         uint32_t extra = _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_CALL)) |
-                         _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_CALL_INDIRECT)) | _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_INTRINSIC));
+                         _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_CALL_INDIRECT)) | _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_INTRINSIC)) |
+                         _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_SCATTER));
         while (extra != 0)
         {
             ir_thread_escapes_extra(work, (uint32_t)first + (uint32_t)__builtin_ctz(extra));
