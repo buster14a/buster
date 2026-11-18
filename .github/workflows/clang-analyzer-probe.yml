@@ -75,7 +75,7 @@ jobs:
             unit=${source##*/}
             mapfile -d '' -t flags < "$report/flags.nul"
             /usr/bin/time -o "$report/$unit.time" -f '%e\t%U\t%S\t%M\t%x' \
-              timeout 25m clang "${flags[@]}" --analyze --analyzer-output=text \
+              timeout 25m clang "${flags[@]}" --analyze -Xanalyzer -analyzer-output=text \
               -Xclang -analyzer-werror -fno-color-diagnostics "$source" > "$report/$unit.log" 2>&1 || status=$?
             printf '%s\t%s\t%s\n' "$source" "$status" "$(tail -n 1 "$report/$unit.time")"
             if (( status != 0 )); then
