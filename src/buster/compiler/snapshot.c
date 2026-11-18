@@ -136,11 +136,13 @@ static __attribute__((unused)) bool snapshot_discard(const char* directory, Runt
 
 #define BUSTER_SNAPSHOT_MAGIC 0x504e535254535542ull
 #define BUSTER_SNAPSHOT_VERSION 8
-// Each kind's file: a dynamic PIE's runtime's, a static executable's, a static PIE's and a shared library's.
+// Each kind's file: a dynamic PIE's runtime's, a static executable's, a static PIE's, a shared library's and a
+// position-dependent dynamic executable's (-no-pie).
 #define BUSTER_SNAPSHOT_NAME "runtime.snapshot"
 #define BUSTER_SNAPSHOT_STATIC_NAME "runtime-static.snapshot"
 #define BUSTER_SNAPSHOT_STATIC_PIE_NAME "runtime-static-pie.snapshot"
 #define BUSTER_SNAPSHOT_SHARED_NAME "runtime-shared.snapshot"
+#define BUSTER_SNAPSHOT_NO_PIE_NAME "runtime-no-pie.snapshot"
 #define BUSTER_SNAPSHOT_ALIGNMENT 64
 // The pieces' regions are aligned to their elements' alignment, 8 bytes at most, rather than to 64: binding reads a
 // piece's records from whichever record it starts at, with masked loads, so a column's first record starting a cache
@@ -569,6 +571,7 @@ static const char* snapshot_name(RuntimeKind kind)
         [RUNTIME_KIND_STATIC] = BUSTER_SNAPSHOT_STATIC_NAME,
         [RUNTIME_KIND_STATIC_PIE] = BUSTER_SNAPSHOT_STATIC_PIE_NAME,
         [RUNTIME_KIND_SHARED] = BUSTER_SNAPSHOT_SHARED_NAME,
+        [RUNTIME_KIND_NO_PIE] = BUSTER_SNAPSHOT_NO_PIE_NAME,
     };
     return names[kind];
 }

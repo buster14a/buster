@@ -7076,7 +7076,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
         {
             options->verbose = true;
         }
-        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE)
+        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE || match.exact == C_OPTION_NO_PIE)
         {
             // Linker modes the C driver selects; preprocessing ignores them, as clang's driver does with -E and -M.
         }
