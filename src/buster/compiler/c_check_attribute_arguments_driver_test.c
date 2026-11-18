@@ -1365,6 +1365,15 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "void h(void); void f(int c) { switch (c) { case 0: [[fallthrough]]; c++; case 1: [[clang::nomerge(1)]] h(); } }\n",
         "int x __attribute__((aligned(3))); void f(int c) { switch (c) { case 0: [[fallthrough]]; c++; case 1: ; } }\n",
         "void f(int c) { switch (c) { case 0: [[fallthrough]]; c++; case 1: ; } } int x __attribute__((aligned(3)));\n",
+        // A statement's attributes don't hide its keyword (#1844): an attributed loop's and switch's breaks, continues and
+        // labels are theirs.
+        "int g(int x) { [[clang::likely]] switch (x) { case 1: x++; [[fallthrough]]; case 2: break; default: break; } return x; }\n",
+        "int g(int x) { [[clang::likely]] while (x) { if (x > 3) continue; break; } __attribute__((nomerge)) while (x) { x = g(x); break; } return x; }\n",
+        "int g(int x) { L: [[clang::likely]] while (x) { break; } if (x) [[clang::likely]] while (x) { break; } goto L; }\n",
+        "int g(int x) { __attribute__((weak)) switch (x) { default: break; } return x; }\n",
+        "int g(int x) { [[clang::likely]] for (;;) { [[clang::unlikely]] switch (x) { case 0: [[fallthrough]]; case 1: continue; } break; } return x; }\n",
+        "int g(int x) { [[clang::likely]] switch (x) { case 0: x++; [[fallthrough]]; x--; case 1: ; } return x; }\n",
+        "int g(int x) { for (;;) { [[clang::likely]] break; __attribute__((nomerge)) continue; } return x; }\n",
         "void f(int x) { [[clang::nomerge]] do x++; while (x < 3); }\n",
         "void f(int x) { [[clang::nomerge]] asm(\"\"); }\n",
         "void f(int x) { [[x, y::z(1, 2), , __gnu__::__unused__]] [[w]] asm(\"\"); }\n",

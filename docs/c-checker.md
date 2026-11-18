@@ -9028,7 +9028,14 @@ change, it refused such a declaration by name.
   that ends after such an error (`check_input_fallthrough_placements`'
   `first_error`). Where clang's Sema drops the statement itself (a return of
   an undeclared name, a parser error in the expression), it gives none of its
-  attributes' errors, which the checker still does; and
+  attributes' errors, which the checker still does. A statement's attribute
+  lists are its children in the parser's tree, before its keyword, each by
+  its closer: the walks find an attributed `while`'s, `for`'s and `switch`'s
+  keyword past them (`check_input_statement_keyword`), so that its breaks,
+  continues, cases and fallthroughs are its own and a switch's condition is
+  promoted, and the control writer finds an attributed `break`, `continue` or
+  `goto` under its specifiers as a musttail return's (`check_control_attributed`),
+  which on main compiled to nothing; and
   `suppress`'s arguments, string literals through parentheses
   (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`); a non-string
   inside them (`suppress((1))`, #2332) is the string error, then the parser's

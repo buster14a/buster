@@ -2958,7 +2958,7 @@ static bool check_input_fallthrough_breaks(CheckInputReader* reader, uint32_t bo
         uint32_t child = token;
         for (uint32_t at = parser->tree.parents[token]; own && live && !above && at < count; at = parser->tree.parents[at])
         {
-            const uint32_t keyword = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FOR ? reader->first_child[at] :
+            const uint32_t keyword = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FOR ? check_input_statement_keyword(reader, at) :
                                                                                                                                           BUSTER_CHECK_NONE;
             const uint8_t kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
             own = kind != PARSE_KIND_WHILE && kind != PARSE_KIND_FOR && kind != PARSE_KIND_SWITCH && parser->tokens.kinds[at] != PARSE_KIND_DO;
@@ -3233,7 +3233,7 @@ static bool check_input_fallthrough_leaves(CheckInputReader* reader, uint32_t it
         const uint8_t role = parser->tree.roles[node];
         const uint32_t first = check_input_fallthrough_first(reader, node);
         const uint8_t first_kind = parser->tokens.kinds[first];
-        const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR ? reader->first_child[node] : BUSTER_CHECK_NONE;
+        const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR ? check_input_statement_keyword(reader, node) : BUSTER_CHECK_NONE;
         const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
         const bool statement = parser->tokens.kinds[node] == PARSE_KIND_SEMI;
         if (statement && (first_kind == PARSE_KIND_RETURN || first_kind == PARSE_KIND_GOTO || first_kind == PARSE_KIND_BREAK || first_kind == PARSE_KIND_CONTINUE))
@@ -3483,7 +3483,7 @@ static bool check_input_fallthrough_flows(CheckInputReader* reader, uint32_t tok
             while (result == 2 && child != BUSTER_CHECK_NONE)
             {
                 const uint8_t role = parser->tree.roles[child];
-                const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION ? reader->first_child[child] : BUSTER_CHECK_NONE;
+                const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION ? check_input_statement_keyword(reader, child) : BUSTER_CHECK_NONE;
                 const bool straight = check_input_fallthrough_straight(reader, child);
                 bool if_alone = keyword < count && parser->tokens.kinds[keyword] == PARSE_KIND_IF;
                 for (uint32_t branch = if_alone ? reader->first_child[child] : BUSTER_CHECK_NONE; branch != BUSTER_CHECK_NONE; branch = reader->next_child[branch])
@@ -3578,7 +3578,7 @@ static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint3
         else if (role == PARSE_ROLE_CLOSE_CONDITION)
         {
             // An if's branch goes on after the if, and a switch's body after the switch; a loop's body goes back.
-            const uint32_t keyword = reader->first_child[parent];
+            const uint32_t keyword = check_input_statement_keyword(reader, parent);
             const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
             done = keyword_kind != PARSE_KIND_IF && keyword_kind != PARSE_KIND_SWITCH;
             statement = parent;
@@ -3892,7 +3892,7 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 uint32_t owner = end < count ? parser->tree.parents[end] : count;
                 while (owner < count)
                 {
-                    const uint32_t keyword = reader->first_child[owner];
+                    const uint32_t keyword = check_input_statement_keyword(reader, owner);
                     if (parser->tree.roles[owner] == PARSE_ROLE_CLOSE_CONDITION && keyword < count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH)
                     {
                         break;
@@ -4012,7 +4012,7 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 bool enclosed = false;
                 for (uint32_t ancestor = parser->tree.parents[token]; ancestor < count && !enclosed; ancestor = parser->tree.parents[ancestor])
                 {
-                    const uint32_t keyword = reader->first_child[ancestor];
+                    const uint32_t keyword = check_input_statement_keyword(reader, ancestor);
                     enclosed = parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_CONDITION && keyword < count &&
                                parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
                 }

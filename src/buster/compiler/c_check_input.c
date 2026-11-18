@@ -2421,6 +2421,26 @@ struct CheckConstantFailure
     bool variadic;
 };
 
+// The keyword of control statement `node`, the closing parenthesis of its condition (an if's, a while's, a switch's) or
+// of a for's head: its first child but the statement's attribute lists, which the parser makes its children before it,
+// each by its closer (`[[clang::likely]] while (x)`, `__attribute__((nomerge)) switch (x)`: #1844), as a label's are
+// its colon's (#2291).
+static uint32_t check_input_statement_keyword(const CheckInputReader* reader, uint32_t node)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t keyword = node < count ? reader->first_child[node] : BUSTER_CHECK_NONE;
+    bool attribute = true;
+    while (keyword < count && attribute)
+    {
+        const uint8_t role = parser->tree.roles[keyword];
+        attribute = role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT ||
+                    role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT || role == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
+        keyword = attribute ? reader->next_child[keyword] : keyword;
+    }
+    return keyword < count ? keyword : BUSTER_CHECK_NONE;
+}
+
 // What a constant's reading does with an undeclared name it binds (check_constant_name). By default nothing: its caller
 // reports its failure. A declarator's constant reports each one in clang's words, at the name, with its typo's
 // correction, which the reading then takes, its error recovered. One with no correction is recovered too where the
@@ -14452,7 +14472,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 for (uint32_t ancestor = parser->tree.parents[i]; ancestor < parser->tokens.count && !loop; ancestor = parser->tree.parents[ancestor])
                 {
                     const uint8_t ancestor_role = parser->tree.roles[ancestor];
-                    const uint32_t keyword = reader->first_child[ancestor];
+                    const uint32_t keyword = check_input_statement_keyword(reader, ancestor);
                     loop = (i > ancestor || ancestor_role == PARSE_ROLE_DO) && (ancestor_role == PARSE_ROLE_CLOSE_FOR || ancestor_role == PARSE_ROLE_DO ||
                            (ancestor_role == PARSE_ROLE_CLOSE_CONDITION && keyword < parser->tokens.count &&
                             (parser->tokens.kinds[keyword] == PARSE_KIND_WHILE || (kind == PARSE_KIND_BREAK && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH))));
@@ -15816,7 +15836,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     {
         // The condition itself is the first value; child statements have already been checked and dropped.
         supported = count == 1;
-        const uint32_t keyword = reader->first_child[token];
+        const uint32_t keyword = check_input_statement_keyword(reader, token);
         op = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION;
     }
     else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_FOR)

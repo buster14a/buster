@@ -1315,7 +1315,7 @@ static bool check_input_expression_condition(CheckInputReader* reader, CheckInpu
     const bool acted = values.count == 1;
     if (acted)
     {
-        const uint32_t keyword = reader->first_child[token];
+        const uint32_t keyword = check_input_statement_keyword(reader, token);
         const bool switched = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
         const uint32_t second = switched ? reader->value_next[values.first] : BUSTER_CHECK_NONE;
         const uint32_t node = check_input_expression_operator(reader, batch, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, token, values.first, second, BUSTER_CHECK_NONE);
