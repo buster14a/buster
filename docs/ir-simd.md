@@ -302,7 +302,7 @@ No expansion uses a temporary stack object or floating arithmetic.
 
 `tests/ir/splats.ir` round-trips all 18 scalar-type/vector-width combinations.
 `test-ir` checks type admission, one-operand use enumeration and malformed
-neighbors in both verifier paths. `test-ir-simd` checks actual producer rows,
+neighbors in the verifier. `test-ir-simd` checks actual producer rows,
 exact feature requirements and mutations of their roles and effects.
 `test-ir-lowering` and `test-ir-interpreter` check execution as described above.
 The existing `tier1-lanes` source fixture now requires zero machine rows where
@@ -2438,7 +2438,7 @@ lane's instruction to the scalar oracle; `tests/ir/vector-lanes.ir` round-trips
 every form, and `test-ir` refuses its neighbours (an `fadd` of integer lanes, an
 integer `add` of floats, a bitwise operation's lanes, a mask of the wrong width,
 an unsigned floating comparison, a vector shifted by a scalar, a scalar's lanes)
-by both verifiers.
+by the verifier.
 
 The decoder (`ir_simd_typed_operation`) takes the operators' rows of every
 element type, EVEX's of AVX-512 and VEX's of AVX and AVX2, into these

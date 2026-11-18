@@ -7,7 +7,7 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
-  columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
+  columns, 16-wide verifier, compact CFG/use arrays and stable printer
   (#131), with labels (`br_indirect`), by-value aggregates' ABI records (the
   producer's locations, which the IR's types can't give), a variadic
   definition's frame and anchors, and frame slots' lifetime markers (`lifetime`,
@@ -40,22 +40,23 @@ requirements. [Command index](README.md).
 `./build/compiler test-ir-metamorphic [--seed N] [--first N] [--count N]`
 checks bounded scalar IR programs against an independent arithmetic/memory
 model after ID renaming, pure-value reordering/insertion, CFG edge splitting,
-unreachable-block insertion and commutative operand exchange. Both complete
-verifiers, both text parsers and every admitted scalar/vector optimizer must
+unreachable-block insertion and commutative operand exchange. The complete
+verifier, both text parsers and every admitted scalar/vector optimizer must
 preserve checked execution. The default six-case seed is in shared correctness
 CI; longer runs accept explicit time/step budgets and failure-artifact/replay
 options. `docs/ir-tools.md` records the precise subset, categories and source
 revision requirement. This command performs correctness work, not a timing claim.
 
 `./build/compiler test-ir [--seed N] [--count N]` checks the arena-backed
-representation, both verifier paths, compact CFG/use arrays and stable printer.
+representation, the verifier, compact CFG/use arrays and stable printer.
 Independent fixtures cover operand roles, conversions, phi edges and dominance;
 guard pages cover instruction columns and vector tails. Malformed metadata,
 u32 limits, allocation rollback and adversarial switch cases are rejected or
-handled without relying on twin agreement alone. Generated multi-block
-functions with phis must give both paths the first use error, or none, that an
-independent dominance oracle gives (four per count, #786). The default random
-count is 64; `--count 1024` expands the seeded mutation cases.
+handled. Generated multi-block functions with phis must give the first use
+error, or none, that an independent dominance oracle gives (four per count,
+#786). The default random count is 64; `--count 1024` expands the seeded
+mutation cases. A default run folds every verdict and every use list into two
+digests, which must equal the frozen ones (#2924).
 
 `./build/compiler test-ir-lowering [--seed N] [--count N]` lowers generated
 typed programs through both paths, compares every column and verifies each

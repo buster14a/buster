@@ -63,7 +63,7 @@ The producer writes disjoint columns directly and publishes a complete function.
 The byte columns have stride 1 and the operand columns stride 4; allocation
 aligns their bases to 64 bytes. There is **no readable or writable tail padding**.
 Logical length, allocation capacity and the kernel's 16-lane width are distinct.
-The vector verifier uses masked final loads and bounded indexed byte reads;
+The verifier uses masked final loads and bounded indexed byte reads;
 callers may also supply unaligned, exact-length views. Empty functions are valid
 only with zero blocks and a void result. Empty side arrays may have null bases.
 Raw pointers must actually cover their declared counts; no verifier can establish
@@ -906,7 +906,7 @@ frame address (`INTERPRETER_UNSUPPORTED`); the inliner takes no function with a
 `stack_save` of either kind.
 Alignment is exactly the typed contract's fixed 16 bytes, not a configurable
 alignment or the type's size. No sparse metadata is needed: the usual 16 bytes
-per instruction suffice. The operand/rule tables drive both verifiers, use lists,
+per instruction suffice. The operand/rule tables drive the verifier, use lists,
 SSA rewrites, printer and parser. Counts other than i64, wrong result types,
 extraneous fields and memory modifiers are rejected deterministically.
 
@@ -1354,7 +1354,7 @@ size too wide, and an object's slot rounded down to 8 bytes, each fail the
 command (checked by mutation when this was added).
 
 Every lowered function of both sets is then promoted by both of `ssa_ir.c`'s
-paths, which must accept it with real dominance checking, pass both verifiers,
+paths, which must accept it with real dominance checking, pass the verifier,
 and keep each object's slot (a `void` slot that isn't a temporary) with its
 size, alignment and flags, in order: promotion compacts the slots it removes
 and must never take an object's. The two paths may order their output
