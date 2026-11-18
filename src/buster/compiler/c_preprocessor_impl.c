@@ -1114,53 +1114,7 @@ BUSTER_INLINE ScalarLexer pp_file_lexer(uint32_t refine_flags, const PPFileData*
     return result;
 }
 
-// Past the comment that starts at byte `p` of a file, its delimiters read as the lexer reads them (get_char, so that a
-// line splice may split one: `*\` and a '/' on the next line close a block comment): past a block comment's "*/" (or at
-// the end of the file without one), or at a line comment's newline, which a splice doesn't end. `p` if no comment starts
-// there.
-static uint64_t pp_skip_comment(const ScalarLexer* lexer, uint64_t p)
-{
-    uint64_t size;
-    uint64_t at;
-    uint64_t result = p;
-    if (get_char(lexer, p, &size, &at) == '/')
-    {
-        uint64_t second;
-        const int32_t kind = get_char(lexer, p + size, &second, &at);
-        uint64_t q = p + size + second;
-        bool done = kind != '*' && kind != '/';
-        bool star = false;
-        while (!done)
-        {
-            uint64_t step;
-            const int32_t c = get_char(lexer, q, &step, &at);
-            done = c == BUSTER_LEX_END_OF_FILE || (kind == '*' ? star && c == '/' : c == '\n' || c == '\r');
-            star = c == '*';
-            q = kind == '/' && done ? at : q + step;
-        }
-        result = kind == '*' || kind == '/' ? q : p;
-    }
-    return result;
-}
-
-// The first place at or past byte `p` of a file that isn't a blank, a line splice or a comment, read as the lexer reads
-// them: where a token starts, a newline outside a comment, or the end of the file.
-static uint64_t pp_skip_blanks(const ScalarLexer* lexer, uint64_t p)
-{
-    uint64_t result = p;
-    bool done = false;
-    while (!done)
-    {
-        uint64_t size;
-        uint64_t at;
-        const int32_t c = get_char(lexer, result, &size, &at);
-        const uint64_t past = pp_skip_comment(lexer, result);
-        const bool blank = c == ' ' || c == '\t' || c == '\v' || c == '\f';
-        done = c == BUSTER_LEX_END_OF_FILE || (!blank && past == result);
-        result = done ? at : past != result ? past : result + size;
-    }
-    return result;
-}
+// (pp_skip_comment and pp_skip_blanks are c_preprocessor.c's: the checker finds a pragma line's end with them too.)
 
 // The end of the line that byte `p` of a file is on: its newline (not one a line splice joins to the next line), or the
 // end of the file.

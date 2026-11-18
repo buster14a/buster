@@ -2109,6 +2109,85 @@ static uint32_t pp_identifier_end(const Preprocessor* pp, const uint8_t* bytes, 
     return result;
 }
 
+// Past the comment that starts at byte `p` of a file, its delimiters read as the lexer reads them (get_char, so that a
+// line splice may split one: `*\` and a '/' on the next line close a block comment): past a block comment's "*/" (or at
+// the end of the file without one), or at a line comment's newline, which a splice doesn't end. `p` if no comment starts
+// there.
+static uint64_t pp_skip_comment(const ScalarLexer* lexer, uint64_t p)
+{
+    uint64_t size;
+    uint64_t at;
+    uint64_t result = p;
+    if (get_char(lexer, p, &size, &at) == '/')
+    {
+        uint64_t second;
+        const int32_t kind = get_char(lexer, p + size, &second, &at);
+        uint64_t q = p + size + second;
+        bool done = kind != '*' && kind != '/';
+        bool star = false;
+        while (!done)
+        {
+            uint64_t step;
+            const int32_t c = get_char(lexer, q, &step, &at);
+            done = c == BUSTER_LEX_END_OF_FILE || (kind == '*' ? star && c == '/' : c == '\n' || c == '\r');
+            star = c == '*';
+            q = kind == '/' && done ? at : q + step;
+        }
+        result = kind == '*' || kind == '/' ? q : p;
+    }
+    return result;
+}
+
+// The first place at or past byte `p` of a file that isn't a blank, a line splice or a comment, read as the lexer reads
+// them: where a token starts, a newline outside a comment, or the end of the file.
+static uint64_t pp_skip_blanks(const ScalarLexer* lexer, uint64_t p)
+{
+    uint64_t result = p;
+    bool done = false;
+    while (!done)
+    {
+        uint64_t size;
+        uint64_t at;
+        const int32_t c = get_char(lexer, result, &size, &at);
+        const uint64_t past = pp_skip_comment(lexer, result);
+        const bool blank = c == ' ' || c == '\t' || c == '\v' || c == '\f';
+        done = c == BUSTER_LEX_END_OF_FILE || (!blank && past == result);
+        result = done ? at : past != result ? past : result + size;
+    }
+    return result;
+}
+
+// Where clang reports what a #pragma's line lacks after output token `token` (#1970): the line's end (its eod), past the
+// token's spelling and the blanks, comments and line splices after it, at the newline or the end of the file. Only for a
+// token a directive's line spelled in a file, which no expansion made: 0 where the token's location is in no range.
+static __attribute__((unused)) uint32_t pp_output_line_end(const Preprocessor* pp, uint32_t token)
+{
+    const bool spelled = token < pp->output.count && pp->output.locations != 0;
+    const uint32_t location = spelled ? pp->output.locations[token] : 0;
+    const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const PPRange* bytes = range != BUSTER_PP_NONE ? &pp->ranges[range] : 0;
+    uint32_t result = 0;
+    if (bytes != 0 && bytes->bytes != 0 && location - bytes->base < bytes->length)
+    {
+        const uint8_t kind = pp->output.kinds[token];
+        const bool named = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END);
+        // An identifier's end read again from its bytes (a line splice or a UCN makes it longer than its name), another
+        // token's from its value.
+        const uint32_t start = location - bytes->base;
+        const uint32_t value = pp->output.values[token];
+        const uint32_t end = named ? pp_identifier_end(pp, bytes->bytes, bytes->length, start) :
+                             value > location && value - bytes->base <= bytes->length ? value - bytes->base : start;
+        const ScalarLexer lexer = {
+            .source = bytes->bytes,
+            .length = bytes->length,
+            .trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
+            .cplusplus = false,
+        };
+        result = bytes->base + (uint32_t)pp_skip_blanks(&lexer, end);
+    }
+    return result;
+}
+
 // The spelling an identifier at `location` was written with, without its line splices but with its UCNs as written:
 // what stringizing it gives, as in clang ("caf\u00e9" for caf\u00e9, whose interned spelling is café). `buffer` needs
 // room for the identifier's bytes. Returns the length, or 0 if the location is in no range.

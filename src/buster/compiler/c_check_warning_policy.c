@@ -20,7 +20,9 @@ static bool check_warning_extension(uint32_t id)
                            id == CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER || id == CHECK_WARNING_ID_MANY_SCALAR_BRACES ||
                            id == CHECK_WARNING_ID_UNDEFINED_INTERNAL || id == CHECK_WARNING_ID_C23_PARAMETER ||
                            id == CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE || id == CHECK_WARNING_ID_GNU_DESIGNATOR || check_warning_pedantic(id);
-    return extension;
+    // An STDC pragma's unknown state or name (#1970): clang's ExtWarns ext_on_off_switch_syntax and ext_stdc_pragma_ignored.
+    const bool stdc = id == CHECK_WARNING_ID_UNKNOWN_PRAGMA;
+    return extension || stdc;
 }
 
 static bool check_warning_option(uint32_t id, String8 option)
@@ -51,6 +53,8 @@ static bool check_warning_option(uint32_t id, String8 option)
     else if (id == CHECK_WARNING_ID_IMPLICIT_FUNCTION_DECLARATION || id == CHECK_WARNING_ID_UNRECOGNIZED_PRAGMA || id == CHECK_WARNING_ID_UNKNOWN_PRAGMA)
     {
         matches |= check_diagnostic_option(option, "-Wall");
+        // -Wunknown-pragmas is -Wmost's, which -Wall holds (#1970).
+        matches |= id != CHECK_WARNING_ID_IMPLICIT_FUNCTION_DECLARATION && check_diagnostic_option(option, "-Wmost");
     }
     // -Wdefault-const-init holds -Wdefault-const-init-unsafe's two and -Wdefault-const-init-var, and -Wc++-compat holds it
     // (#2168).

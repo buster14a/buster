@@ -11675,8 +11675,17 @@ enables, which this checker doesn't all give.
 
 The checker consumes retained pragmas after their existing semantic handlers. An
 unknown directive is not an unsupported C construct: it is ignored, with
-`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall` or `-Wpragmas`).
-Unknown `STDC` directives warn by default. Malformed alignment hints such as
+`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall`, `-Wmost` or `-Wpragmas`).
+Unknown `STDC` directives warn by default ("unknown pragma in STDC namespace"),
+and so does an `STDC FENV_ACCESS`, `FP_CONTRACT` or `CX_LIMITED_RANGE` state
+that is no `ON`, `OFF` or `DEFAULT` ("expected 'ON' or 'OFF' or 'DEFAULT' in
+pragma"). Both are clang's lexer warnings, which the checker issues (#1970):
+they print `[-Wunknown-pragmas]`, follow its options and pragmas as
+`CHECK_WARNING_ID_UNKNOWN_PRAGMA`, an extension that `-pedantic-errors`
+promotes, and are hidden in system headers without `-Wsystem-headers`. A
+directive's line that lacks the name or the state (`#pragma STDC`, `#pragma
+GCC`, `#pragma STDC FP_CONTRACT`) is diagnosed at the line's end, clang's eod
+(`pp_output_line_end`); a `_Pragma`'s, at the `_Pragma`. Malformed alignment hints such as
 `#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
 `#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
 is not an implementation of COFF linker directives or automatic library loading.
