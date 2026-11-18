@@ -257,7 +257,7 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         const IrCheck cleaned_check = ir_optimize(promoted, twin, scratch, cleanup, &cleaned);
         if (cleaned_check.error == IR_OK)
         {
-            ir_truth_simplify(&cleaned.function, false);
+            ir_truth_simplify(&cleaned.function);
         }
         const IrFunction* input = cleaned_check.error == IR_OK ? &cleaned.function : promoted;
         IrUnrollOptions options = ir_unroll_options();

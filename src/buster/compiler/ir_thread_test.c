@@ -382,11 +382,10 @@ static uint32_t ir_thread_test_count(const IrFunction* f, uint32_t op)
     return count;
 }
 
-static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixture* fixture, Arena* input, Arena* vector, Arena* scalar, Arena* optimized, Arena* scratch)
+static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixture* fixture, Arena* input, Arena* vector, Arena* optimized, Arena* scratch)
 {
     const uint64_t im = input->length;
     const uint64_t vm = vector->length;
-    const uint64_t sm = scalar->length;
     const uint64_t om = optimized->length;
     const uint64_t tm = scratch->length;
     char message[160] = { 0 };
@@ -402,19 +401,13 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
     if (valid)
     {
         IrThreadResult v = { 0 };
-        IrThreadResult s = { 0 };
-        const IrCheck vc = ir_thread(&f, vector, scratch, false, &v);
-        const IrCheck sc = ir_thread(&f, scalar, scratch, true, &s);
-        snprintf(message, sizeof(message), "threading %s: both paths accept it and restore scratch", fixture->name);
-        ir_optimize_test_expect(test, vc.error == IR_OK && sc.error == IR_OK && scratch->length == tm, message);
-        if (vc.error == IR_OK && sc.error == IR_OK)
+        const IrCheck vc = ir_thread(&f, vector, scratch, &v);
+        snprintf(message, sizeof(message), "threading %s: it's accepted and scratch restored", fixture->name);
+        ir_optimize_test_expect(test, vc.error == IR_OK && scratch->length == tm, message);
+        if (vc.error == IR_OK)
         {
             snprintf(message, sizeof(message), "threading %s: %u blocks, %u copies, %u redirects in %u rounds", fixture->name, fixture->blocks, fixture->copies, fixture->redirects, fixture->rounds);
-            ir_optimize_test_expect(test, v.blocks == fixture->blocks && v.copies == fixture->copies && v.redirects == fixture->redirects && v.rounds == fixture->rounds &&
-                                              s.blocks == v.blocks && s.copies == v.copies && s.redirects == v.redirects && s.rounds == v.rounds,
-                                    message);
-            snprintf(message, sizeof(message), "threading %s: scalar/vector exact columns and side tables", fixture->name);
-            ir_optimize_test_expect(test, ir_optimize_test_equal(&v.function, &s.function), message);
+            ir_optimize_test_expect(test, v.blocks == fixture->blocks && v.copies == fixture->copies && v.redirects == fixture->redirects && v.rounds == fixture->rounds, message);
             ir_optimize_test_fold_function(&test->thread_digest, &v.function);
             ir_optimize_test_fold(&test->thread_digest, v.blocks);
             ir_optimize_test_fold(&test->thread_digest, v.copies);
@@ -422,7 +415,7 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
             ir_optimize_test_fold(&test->thread_digest, v.rounds);
             snprintf(message, sizeof(message), "threading %s: the result is complete SSA", fixture->name);
             const IrCheck complete = ir_verify_complete(&v.function, scratch);
-            ir_optimize_test_expect(test, complete.error == IR_OK && ir_verify_complete(&s.function, scratch).error == IR_OK, message);
+            ir_optimize_test_expect(test, complete.error == IR_OK, message);
             if (complete.error != IR_OK)
             {
                 fprintf(stderr, "  threading %s: error=%u instruction=%u detail=%u\n", fixture->name, complete.error, complete.instruction, complete.detail);
@@ -430,10 +423,18 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
             if (fixture->blocks == 0)
             {
                 snprintf(message, sizeof(message), "threading %s: a refusal borrows the unchanged input", fixture->name);
-                ir_optimize_test_expect(test, v.function.op == f.op && v.function.extra == f.extra && vector->length == vm && scalar->length == sm, message);
+                ir_optimize_test_expect(test, v.function.op == f.op && v.function.extra == f.extra && vector->length == vm, message);
+            }
+            for (uint32_t trial = 0; trial < 260; trial += 1)
+            {
+                const uint64_t parameter = trial < 256 ? trial : trial == 256 ? UINT64_MAX : trial == 257 ? UINT64_C(1) << 63 : ir_optimize_test_random(test);
+                const IrOptimizeExecution before = ir_optimize_test_execute(&f, scratch, parameter, trial & 1);
+                const IrOptimizeExecution after = ir_optimize_test_execute(&v.function, scratch, parameter, trial & 1);
+                snprintf(message, sizeof(message), "threading %s: independently executed values and effects preserved", fixture->name);
+                ir_optimize_test_expect(test, before.status == 1 && before.status == after.status && before.effects == after.effects && before.value == after.value, message);
             }
             // The C driver's next steps: the copies' tests of extended comparisons, then the optimizer.
-            ir_truth_simplify(&v.function, false);
+            ir_truth_simplify(&v.function);
             IrOptimizeResult o = { 0 };
             IrOptimizeOptions options = ir_optimize_options();
             options.passes |= BUSTER_IR_OPTIMIZE_IDENTITY;
@@ -449,24 +450,17 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
                 snprintf(message, sizeof(message), "threading %s: no phi and no extension are left: the comparisons are the branches", fixture->name);
                 ir_optimize_test_expect(test, ir_thread_test_count(&o.function, IR_PHI) == 0 && ir_thread_test_count(&o.function, IR_ZEXT) == 0, message);
             }
-            for (uint32_t trial = 0; trial < 260; trial += 1)
+            for (uint32_t trial = 0; oc.error == IR_OK && trial < 260; trial += 1)
             {
                 const uint64_t parameter = trial < 256 ? trial : trial == 256 ? UINT64_MAX : trial == 257 ? UINT64_C(1) << 63 : ir_optimize_test_random(test);
                 const IrOptimizeExecution before = ir_optimize_test_execute(&f, scratch, parameter, trial & 1);
-                const IrOptimizeExecution after = ir_optimize_test_execute(&s.function, scratch, parameter, trial & 1);
-                snprintf(message, sizeof(message), "threading %s: independently executed values and effects preserved", fixture->name);
-                ir_optimize_test_expect(test, before.status == 1 && before.status == after.status && before.effects == after.effects && before.value == after.value, message);
-                if (oc.error == IR_OK)
-                {
-                    const IrOptimizeExecution final = ir_optimize_test_execute(&o.function, scratch, parameter, trial & 1);
-                    snprintf(message, sizeof(message), "threading %s: then the truth rewrite and the optimizer preserve them", fixture->name);
-                    ir_optimize_test_expect(test, before.status == final.status && before.effects == final.effects && before.value == final.value, message);
-                }
+                const IrOptimizeExecution final = ir_optimize_test_execute(&o.function, scratch, parameter, trial & 1);
+                snprintf(message, sizeof(message), "threading %s: then the truth rewrite and the optimizer preserve them", fixture->name);
+                ir_optimize_test_expect(test, before.status == final.status && before.effects == final.effects && before.value == final.value, message);
             }
         }
     }
     arena_pop_to(optimized, om);
-    arena_pop_to(scalar, sm);
     arena_pop_to(vector, vm);
     arena_pop_to(input, im);
 }
@@ -487,7 +481,7 @@ static void ir_thread_test_scans(IrOptimizeTest* test)
             {
                 expected |= (uint64_t)(scan.op[start + lane] == IR_CBR) << lane;
             }
-            agreed &= ir_thread_candidates(scan.op + start, count, false) == expected;
+            agreed &= ir_thread_candidates(scan.op + start, count) == expected;
             uint64_t comparisons = 0;
             for (uint32_t lane = 0; lane < count; lane += 1)
             {
@@ -567,7 +561,7 @@ static void ir_thread_test_scans(IrOptimizeTest* test)
         work.cfg.instruction_blocks = blocks;
         memset(escapes, 0, sizeof(escapes));
         memset(expected, 0, sizeof(expected));
-        ir_thread_escapes(&work, false);
+        ir_thread_escapes(&work);
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint32_t mask = ir_value_mask(&f, i);
@@ -602,18 +596,16 @@ static void ir_thread_tests(IrOptimizeTest* test)
     ir_thread_test_scans(test);
     Arena input = arena_reserve(4ull << 20);
     Arena vector = arena_reserve(4ull << 20);
-    Arena scalar = arena_reserve(4ull << 20);
     Arena optimized = arena_reserve(4ull << 20);
     Arena scratch = arena_reserve(16ull << 20);
-    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && optimized.base != 0 && scratch.base != 0;
+    const bool ready = input.base != 0 && vector.base != 0 && optimized.base != 0 && scratch.base != 0;
     ir_optimize_test_expect(test, ready, "threading fixture arenas");
     for (uint32_t k = 0; ready && k < sizeof(ir_thread_test_fixtures) / sizeof(ir_thread_test_fixtures[0]); k += 1)
     {
-        ir_thread_test_fixture(test, &ir_thread_test_fixtures[k], &input, &vector, &scalar, &optimized, &scratch);
+        ir_thread_test_fixture(test, &ir_thread_test_fixtures[k], &input, &vector, &optimized, &scratch);
     }
     arena_release(&scratch);
     arena_release(&optimized);
-    arena_release(&scalar);
     arena_release(&vector);
     arena_release(&input);
 }

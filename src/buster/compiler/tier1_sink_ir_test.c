@@ -514,47 +514,41 @@ static void tier1_sink_ir_test_fixture(IrOptimizeTest* test, const Tier1SinkIrTe
     const uint64_t tm = scratch->length;
     char message[192] = { 0 };
     IrFunction vector = { 0 };
-    IrFunction scalar = { 0 };
     const String8 text = {
         .pointer = (char*)fixture->text,
         .length = strlen(fixture->text),
     };
-    const bool parsed = ir_parse(text, input, scratch, &vector).error == IR_PARSE_OK && ir_parse(text, input, scratch, &scalar).error == IR_PARSE_OK;
+    const bool parsed = ir_parse(text, input, scratch, &vector).error == IR_PARSE_OK;
     snprintf(message, sizeof(message), "operand sink %s: the fixture parses as complete SSA", fixture->name);
     const bool valid = parsed && ir_verify_complete(&vector, scratch).error == IR_OK;
     ir_optimize_test_expect(test, valid, message);
     Tier1ScheduleIrOriginal original = { 0 };
     const uint32_t n = vector.instruction_count;
     uint32_t* vector_order = valid ? BUSTER_ARENA_PUSH_ARRAY(copies, uint32_t, (uint64_t)n + 1) : 0;
-    uint32_t* scalar_order = valid ? BUSTER_ARENA_PUSH_ARRAY(copies, uint32_t, (uint64_t)n + 1) : 0;
     uint32_t* place = valid ? BUSTER_ARENA_PUSH_ARRAY(copies, uint32_t, (uint64_t)n + 1) : 0;
-    const bool copied = valid && vector_order != 0 && scalar_order != 0 && place != 0 && tier1_schedule_ir_copy(&vector, copies, &original);
+    const bool copied = valid && vector_order != 0 && place != 0 && tier1_schedule_ir_copy(&vector, copies, &original);
     snprintf(message, sizeof(message), "operand sink %s: the original's copy", fixture->name);
     ir_optimize_test_expect(test, !valid || copied, message);
     if (copied)
     {
         const uint64_t before = scratch->length;
         Tier1SinkIrStats v = { 0 };
-        Tier1SinkIrStats s = { 0 };
-        const IrError ve = tier1_schedule_ir_sink(&vector, scratch, vector_order, false, &v);
-        const IrError se = tier1_schedule_ir_sink(&scalar, scratch, scalar_order, true, &s);
-        snprintf(message, sizeof(message), "operand sink %s: both paths sink and restore scratch", fixture->name);
-        ir_optimize_test_expect(test, ve == IR_OK && se == IR_OK && scratch->length == before, message);
-        snprintf(message, sizeof(message), "operand sink %s: %u expressions, %u instructions moved, by both paths", fixture->name, fixture->trees, fixture->moved);
-        ir_optimize_test_expect(test, v.trees == fixture->trees && v.moved == fixture->moved && s.trees == v.trees && s.moved == v.moved, message);
+        const IrError ve = tier1_schedule_ir_sink(&vector, scratch, vector_order, &v);
+        snprintf(message, sizeof(message), "operand sink %s: it sinks and restores scratch", fixture->name);
+        ir_optimize_test_expect(test, ve == IR_OK && scratch->length == before, message);
+        snprintf(message, sizeof(message), "operand sink %s: %u expressions, %u instructions moved", fixture->name, fixture->trees, fixture->moved);
+        ir_optimize_test_expect(test, v.trees == fixture->trees && v.moved == fixture->moved, message);
         if (v.trees != fixture->trees || v.moved != fixture->moved)
         {
-            fprintf(stderr, "  operand sink %s: %u expressions, %u moved (scalar %u, %u)\n", fixture->name, v.trees, v.moved, s.trees, s.moved);
+            fprintf(stderr, "  operand sink %s: %u expressions, %u moved\n", fixture->name, v.trees, v.moved);
         }
-        snprintf(message, sizeof(message), "operand sink %s: scalar/vector exact columns and side tables", fixture->name);
-        ir_optimize_test_expect(test, ir_optimize_test_equal(&vector, &scalar), message);
         ir_optimize_test_fold_function(&test->sink_digest, &vector);
         ir_optimize_test_fold(&test->sink_digest, v.trees);
         ir_optimize_test_fold(&test->sink_digest, v.moved);
         // The order is written only when an expression moved.
         ir_optimize_test_fold_bytes(&test->sink_digest, vector_order, v.trees != 0 ? (uint64_t)n * 4 : 0);
         snprintf(message, sizeof(message), "operand sink %s: the order passes the preallocation schedule's reference", fixture->name);
-        ir_optimize_test_expect(test, v.trees == 0 || (tier1_schedule_ir_verify(&original, &vector, vector_order, place) && memcmp(vector_order, scalar_order, (uint64_t)n * sizeof(uint32_t)) == 0), message);
+        ir_optimize_test_expect(test, v.trees == 0 || tier1_schedule_ir_verify(&original, &vector, vector_order, place), message);
         snprintf(message, sizeof(message), "operand sink %s: a refusal leaves every instruction in place", fixture->name);
         ir_optimize_test_expect(test, v.trees != 0 || ir_optimize_test_equal(&vector, &original.function), message);
         if (fixture->root != BUSTER_IR_NONE && v.trees != 0)
@@ -603,7 +597,7 @@ static void tier1_sink_ir_test_scans(IrOptimizeTest* test)
             memset(pure, 0xa5, sizeof(pure));
             memset(barriers, 0xa5, sizeof(barriers));
             memset(phis, 0xa5, sizeof(phis));
-            tier1_sink_ir_classify(&f, pure, barriers, phis, false);
+            tier1_sink_ir_classify(&f, pure, barriers, phis);
             for (uint32_t word = 0; word * 64 < length; word += 1)
             {
                 uint64_t member = 0;
@@ -632,7 +626,7 @@ static void tier1_sink_ir_test_scans(IrOptimizeTest* test)
                         const bool reads = ((mask & 1) != 0 && f.a[j] == value) || ((mask & 2) != 0 && f.b[j] == value) || ((mask & 4) != 0 && f.c[j] == value);
                         expected |= (uint64_t)reads << (j - from);
                     }
-                    readers &= tier1_sink_ir_readers(&f, from, to, value, false) == expected;
+                    readers &= tier1_sink_ir_readers(&f, from, to, value) == expected;
                 }
             }
         }

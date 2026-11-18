@@ -7,7 +7,7 @@
 // moves or is duplicated; a comparison keeps referring to the same SSA values, including values read by observable
 // loads. SCCP/DCE subsequently remove the now-unused comparison, extensions and zero constants.
 //
-// The candidate scan is 64 bounded opcode/type bytes at a time, with an exact scalar twin. The dependent walks run
+// The candidate scan is 64 bounded opcode/type bytes at a time. The dependent walks run
 // only for equality/inequality tests, through copies and zero/sign extensions, to a zero constant and another ICMP.
 // Both extensions preserve zero versus nonzero, including sext i1 (whose true value becomes -1). Truncations,
 // nonzero constants, floating comparisons and arbitrary boolean producers deliberately stop the walks. A bounded
@@ -173,7 +173,7 @@ static uint64_t ir_truth_candidates(const uint8_t* operations, const uint8_t* ty
     return valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_ICMP)) & _mm512_cmpeq_epi8_mask(type, _mm512_set1_epi8(IR_I1));
 }
 
-static uint32_t ir_truth_simplify_rules(IrFunction* function, bool scalar, bool values)
+static uint32_t ir_truth_simplify_rules(IrFunction* function, bool values)
 {
     const uint32_t count = function->instruction_count;
     const uint8_t* const operations = function->op;
@@ -182,19 +182,7 @@ static uint32_t ir_truth_simplify_rules(IrFunction* function, bool scalar, bool 
     for (uint64_t first = 0; first < count; first += BUSTER_IR_TRUTH_BATCH)
     {
         const uint32_t lanes = count - first < BUSTER_IR_TRUTH_BATCH ? count - first : BUSTER_IR_TRUTH_BATCH;
-        uint64_t candidates = 0;
-        if (!scalar)
-        {
-            candidates = ir_truth_candidates(operations + first, types + first, lanes);
-        }
-        else
-        {
-            for (uint32_t lane = 0; lane < lanes; lane += 1)
-            {
-                const uint64_t candidate = operations[first + lane] == IR_ICMP && types[first + lane] == IR_I1;
-                candidates |= candidate << lane;
-            }
-        }
+        uint64_t candidates = ir_truth_candidates(operations + first, types + first, lanes);
         while (candidates != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
@@ -204,18 +192,17 @@ static uint32_t ir_truth_simplify_rules(IrFunction* function, bool scalar, bool 
             candidates &= candidates - 1;
         }
     }
-    (void)scalar;
     return changed;
 }
 
-static __attribute__((unused)) uint32_t ir_truth_simplify(IrFunction* function, bool scalar)
+static __attribute__((unused)) uint32_t ir_truth_simplify(IrFunction* function)
 {
-    return ir_truth_simplify_rules(function, scalar, false);
+    return ir_truth_simplify_rules(function, false);
 }
 
-static __attribute__((unused)) uint32_t ir_truth_simplify_values(IrFunction* function, bool scalar)
+static __attribute__((unused)) uint32_t ir_truth_simplify_values(IrFunction* function)
 {
-    return ir_truth_simplify_rules(function, scalar, true);
+    return ir_truth_simplify_rules(function, true);
 }
 
 #endif

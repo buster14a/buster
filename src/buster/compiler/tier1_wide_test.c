@@ -8,7 +8,7 @@
 // Each program is IR text (ir_parse.c's, #175): a function of a pointer to a buffer, and of a count where it loops,
 // that loads 128-bit integers from the buffer's first half, computes, and stores into its second half. It is parsed by
 // both of ir_parse.c's paths into the same function and run by the interpreter on random buffers: the expected buffers.
-// Then it is split by both of ir_wide.c's paths, which must make the same function, without an I128 instruction, that
+// Then it is split by ir_wide.c, which must count its I128 instructions and make a function without one, that
 // the verifier takes with its dominance, and that the interpreter runs into the same buffers; optimized (ir_optimize's
 // SCCP, dead code and CFG cleanup, as --tier1 runs it) and run again; then planned and emitted by both of Tier 1's paths
 // for the x86-64 baseline, with rematerialization and without, its allocation certified (#939), encoded by both
@@ -20,12 +20,12 @@
 // conversions of a long double to an unsigned 64-bit integer in one block, 20 records each, which it must make room for
 // too, and random straight-line programs of every operation on values loaded or computed before. And the
 // refusals: an I128 parameter, a division, a conversion to a floating value, a switch, which the split refuses as
-// unsupported; a function without an I128 instruction, returned as it is; and the scan's vector path against its scalar
-// twin on type columns of every length to 200, each ending at a PROT_NONE page, with an I128 at each place; and nine
+// unsupported; a function without an I128 instruction, returned as it is; and the scan against its definition on type
+// columns of every length to 200, each ending at a PROT_NONE page, with an I128 at each place; and nine
 // long double phis, an edge's copy past the x87 stack's depth, which the CFG consumer refuses as unsupported; and
-// functions whose extra slices overlap, a call's arguments sharing a phi's words, which both split paths keep apart;
+// functions whose extra slices overlap, a call's arguments sharing a phi's words, which the split keeps apart;
 // and I128 phis that share one predecessor list, whose halves' lists take the output's extra table past a u32's count,
-// which both paths refuse as a limit before they allocate. Then the vectors wider than the target's registers (#1624,
+// which the split refuses as a limit before it allocates. Then the vectors wider than the target's registers (#1624,
 // ir_vector_split.c), tier1_wide_vectors_test.c's.
 
 #include <inttypes.h>
@@ -618,17 +618,15 @@ static bool tier1_wide_test_agrees(Tier1WideTest* test, const char* name, const 
     return ok;
 }
 
-// Whether two functions are the same, column for column.
-static bool tier1_wide_test_same(const IrFunction* a, const IrFunction* b)
+// The instructions of `f` of type I128.
+static uint32_t tier1_wide_test_count(const IrFunction* f)
 {
-    const uint32_t n = a->instruction_count;
-    bool same = n == b->instruction_count && a->block_count == b->block_count && a->extra_count == b->extra_count && a->constant_count == b->constant_count && a->address_count == b->address_count;
-    same = same && memcmp(a->op, b->op, n) == 0 && memcmp(a->type, b->type, n) == 0 && memcmp(a->flags, b->flags, n) == 0 && memcmp(a->alignment_log2, b->alignment_log2, n) == 0;
-    same = same && memcmp(a->a, b->a, (uint64_t)n * 4) == 0 && memcmp(a->b, b->b, (uint64_t)n * 4) == 0 && memcmp(a->c, b->c, (uint64_t)n * 4) == 0;
-    same = same && memcmp(a->block_offsets, b->block_offsets, ((uint64_t)a->block_count + 1) * 4) == 0 && (a->extra_count == 0 || memcmp(a->extra, b->extra, (uint64_t)a->extra_count * 4) == 0);
-    same = same && (a->constant_count == 0 || memcmp(a->constants, b->constants, (uint64_t)a->constant_count * sizeof(IrConstant)) == 0);
-    same = same && (a->address_count == 0 || memcmp(a->addresses, b->addresses, (uint64_t)a->address_count * sizeof(IrAddress)) == 0);
-    return same;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        count += f->type[i] == IR_I128;
+    }
+    return count;
 }
 
 typedef void (*Tier1WideTestEntry)(uint8_t*, uint64_t);
@@ -815,17 +813,15 @@ static void tier1_wide_test_program(Tier1WideTest* test, const char* name, const
         ok = tier1_wide_test_interpret(test, &function, bytes, counts[input], expected + (uint64_t)input * BUSTER_TIER1_WIDE_TEST_BUFFER);
     }
     IrWideResult vector = { 0 };
-    IrWideResult scalar = { 0 };
     if (ok)
     {
         const IrCheck split = ir_wide_split(&function, &test->output, &test->scratch, &vector);
-        const IrCheck twin = ir_wide_split_scalar(&function, &test->output, &test->scratch, &scalar);
-        ok = tier1_wide_test_expect(test, split.error == IR_OK && twin.error == IR_OK && vector.split == wide && scalar.split == wide, "both paths split the program");
+        ok = tier1_wide_test_expect(test, split.error == IR_OK && vector.split == wide, "the split takes the program");
         if (!ok)
         {
-            printf("test-tier1-wide: %s: split error %u, scalar %u, at %u\n", name, (unsigned)split.error, (unsigned)twin.error, split.instruction);
+            printf("test-tier1-wide: %s: split error %u at %u\n", name, (unsigned)split.error, split.instruction);
         }
-        ok = ok && tier1_wide_test_expect(test, tier1_wide_test_same(&vector.function, &scalar.function) && vector.wide == scalar.wide && (vector.wide != 0) == wide, "both paths split it into the same function");
+        ok = ok && tier1_wide_test_expect(test, vector.wide == tier1_wide_test_count(&function) && (vector.wide != 0) == wide, "the split counts the program's I128 instructions");
         tier1_wide_test_expect(test, test->scratch.length == 0, "the split returns the scratch arena");
     }
     IrDominance dominance = { 0 };
@@ -1010,18 +1006,16 @@ static uint32_t tier1_wide_test_typed(Tier1WideTest* test, uint32_t count)
             }
         }
         IrWideResult vector = { 0 };
-        IrWideResult scalar = { 0 };
         if (ok)
         {
             const IrCheck split = ir_wide_split(&promoted, &test->output, &test->scratch, &vector);
-            const IrCheck twin = ir_wide_split_scalar(&promoted, &test->output, &test->scratch, &scalar);
-            ok = tier1_wide_test_expect(test, split.error == IR_OK && twin.error == IR_OK && vector.split == scalar.split, "both paths split the typed program");
+            const uint32_t wide = tier1_wide_test_count(&promoted);
+            ok = tier1_wide_test_expect(test, split.error == IR_OK && vector.split == (wide != 0) && vector.wide == wide, "the split takes the typed program and counts its I128 instructions");
             if (!ok)
             {
-                printf("test-tier1-wide: typed program %u: split error %u (scalar %u) at %u (%s)\n", p, (unsigned)split.error, (unsigned)twin.error, split.instruction,
+                printf("test-tier1-wide: typed program %u: split error %u at %u (%s)\n", p, (unsigned)split.error, split.instruction,
                        split.instruction < promoted.instruction_count ? ir_op_names[promoted.op[split.instruction]] : "-");
             }
-            ok = ok && tier1_wide_test_expect(test, tier1_wide_test_same(&vector.function, &scalar.function), "both paths split the typed program into the same function");
             test->wide += vector.wide;
             test->halves += vector.split ? vector.function.instruction_count : 0;
         }
@@ -1542,19 +1536,19 @@ static void tier1_wide_test_shared_slices(Tier1WideTest* test)
             }
             ok = tier1_wide_test_interpret(test, &function, bytes, 0, expected + (uint64_t)input * BUSTER_TIER1_WIDE_TEST_BUFFER);
         }
-        for (uint32_t path = 0; ok && path < 2; path += 1)
+        if (ok)
         {
             const uint64_t mark = test->output.length;
             IrWideResult result = { 0 };
-            const IrCheck split = path == 0 ? ir_wide_split(&function, &test->output, &test->scratch, &result) : ir_wide_split_scalar(&function, &test->output, &test->scratch, &result);
-            bool fine = tier1_wide_test_expect(test, split.error == IR_OK && result.split, "both paths split a function whose slices overlap");
+            const IrCheck split = ir_wide_split(&function, &test->output, &test->scratch, &result);
+            bool fine = tier1_wide_test_expect(test, split.error == IR_OK && result.split, "the split takes a function whose slices overlap");
             IrDominance split_dominance = { 0 };
             fine = fine && tier1_wide_test_dominance(test, &result.function, &split_dominance);
             const IrCheck checked = fine ? ir_verify(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
             fine = fine && tier1_wide_test_expect(test, checked.error == IR_OK, "the split of overlapping slices verifies: each reader keeps its own entries");
             if (!fine)
             {
-                printf("test-tier1-wide: %s, %s path: split error %u, verifier error %u at %u\n", name, path == 0 ? "vector" : "scalar", (unsigned)split.error, (unsigned)checked.error, checked.instruction);
+                printf("test-tier1-wide: %s: split error %u, verifier error %u at %u\n", name, (unsigned)split.error, (unsigned)checked.error, checked.instruction);
             }
             if (fine)
             {
@@ -1654,14 +1648,14 @@ static void tier1_wide_test_limit(Tier1WideTest* test)
             const IrCheck verified = ok ? ir_verify(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
             ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK, "the verifier takes I128 phis that share one predecessor list");
         }
-        for (uint32_t path = 0; ok && path < 2; path += 1)
+        if (ok)
         {
             const uint64_t mark = test->output.length;
             IrWideResult result = { 0 };
-            const IrCheck split = path == 0 ? ir_wide_split(&function, &test->output, &test->scratch, &result) : ir_wide_split_scalar(&function, &test->output, &test->scratch, &result);
+            const IrCheck split = ir_wide_split(&function, &test->output, &test->scratch, &result);
             if (s == 0)
             {
-                bool fine = tier1_wide_test_expect(test, split.error == IR_OK && result.split && result.function.extra_count == 10 + 6 * 20, "both paths split phis that share a predecessor list, each half's list its own");
+                bool fine = tier1_wide_test_expect(test, split.error == IR_OK && result.split && result.function.extra_count == 10 + 6 * 20, "the split takes phis that share a predecessor list, each half's list its own");
                 IrDominance split_dominance = { 0 };
                 fine = fine && tier1_wide_test_dominance(test, &result.function, &split_dominance);
                 const IrCheck checked = fine ? ir_verify(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
@@ -1670,10 +1664,10 @@ static void tier1_wide_test_limit(Tier1WideTest* test)
             else
             {
                 const bool refused = split.error == expected[s] && !result.split && test->output.length == mark;
-                tier1_wide_test_expect(test, refused, s == 1 ? "both paths refuse an output whose extra table a u32 can't count, before they allocate" : "both paths count an extra table just below a u32's limit as it is");
+                tier1_wide_test_expect(test, refused, s == 1 ? "the split refuses an output whose extra table a u32 can't count, before it allocates" : "the split counts an extra table just below a u32's limit as it is");
                 if (!refused)
                 {
-                    printf("test-tier1-wide: %u phis of %u predecessors, %s path: split error %u at %u\n", shapes[s][0], shapes[s][1], path == 0 ? "vector" : "scalar", (unsigned)split.error, split.instruction);
+                    printf("test-tier1-wide: %u phis of %u predecessors: split error %u at %u\n", shapes[s][0], shapes[s][1], (unsigned)split.error, split.instruction);
                 }
             }
             arena_pop_to(&test->output, mark);
@@ -1683,7 +1677,7 @@ static void tier1_wide_test_limit(Tier1WideTest* test)
     }
 }
 
-// The refusals, a function without an I128 instruction, and the scan's twins.
+// The refusals, a function without an I128 instruction, and the scan.
 static void tier1_wide_test_boundaries(Tier1WideTest* test)
 {
     for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(tier1_wide_test_refusals); r += 1)
@@ -1692,12 +1686,9 @@ static void tier1_wide_test_boundaries(Tier1WideTest* test)
         IrFunction function;
         if (tier1_wide_test_parse(test, "a refusal", tier1_wide_test_refusals[r], &function))
         {
-            for (uint32_t path = 0; path < 2; path += 1)
-            {
-                IrWideResult result = { .split = true };
-                const IrCheck check = path == 0 ? ir_wide_split(&function, &test->output, &test->scratch, &result) : ir_wide_split_scalar(&function, &test->output, &test->scratch, &result);
-                test->refused += tier1_wide_test_expect(test, check.error == IR_ERROR_UNSUPPORTED && !result.split, "the split refuses what it doesn't take as unsupported");
-            }
+            IrWideResult result = { .split = true };
+            const IrCheck check = ir_wide_split(&function, &test->output, &test->scratch, &result);
+            test->refused += tier1_wide_test_expect(test, check.error == IR_ERROR_UNSUPPORTED && !result.split, "the split refuses what it doesn't take as unsupported");
         }
         arena_pop_to(&test->output, output_mark);
     }
@@ -1706,13 +1697,10 @@ static void tier1_wide_test_boundaries(Tier1WideTest* test)
         IrFunction function;
         if (tier1_wide_test_parse(test, "no I128", "function (ptr) -> void {\nb0:\n  %0 = param.ptr 0\n  %1 = load.i64 %0 align=8\n  %2 = store.void %0, %1 align=8\n  %3 = ret.void\n}\n", &function))
         {
-            for (uint32_t path = 0; path < 2; path += 1)
-            {
-                const uint64_t mark = test->output.length;
-                IrWideResult result = { .split = true };
-                const IrCheck check = path == 0 ? ir_wide_split(&function, &test->output, &test->scratch, &result) : ir_wide_split_scalar(&function, &test->output, &test->scratch, &result);
-                tier1_wide_test_expect(test, check.error == IR_OK && !result.split && result.function.op == function.op && test->output.length == mark, "a function without an I128 instruction is returned as it is");
-            }
+            const uint64_t mark = test->output.length;
+            IrWideResult result = { .split = true };
+            const IrCheck check = ir_wide_split(&function, &test->output, &test->scratch, &result);
+            tier1_wide_test_expect(test, check.error == IR_OK && !result.split && result.function.op == function.op && test->output.length == mark, "a function without an I128 instruction is returned as it is");
         }
         arena_pop_to(&test->output, output_mark);
     }
@@ -1737,12 +1725,10 @@ static void tier1_wide_test_boundaries(Tier1WideTest* test)
                     types[place] = IR_I128;
                 }
                 const IrFunction function = { .type = types, .instruction_count = length };
-                const bool vector = ir_wide_present_path(&function, true);
-                const bool scalar = ir_wide_present_path(&function, false);
-                agree &= vector == scalar && scalar == (place < length);
+                agree &= ir_wide_present(&function) == (place < length);
             }
         }
-        tier1_wide_test_expect(test, agree, "the scan's vector path is its scalar twin's, and finds each I128");
+        tier1_wide_test_expect(test, agree, "the scan finds each I128, and no other type");
     }
     if (pages != MAP_FAILED)
     {
@@ -1852,7 +1838,7 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
             // random programs.
             const uint64_t expected_runs = 2u * (BUSTER_ARRAY_LENGTH(tier1_wide_test_fixtures) + 3 + programs) * BUSTER_TIER1_WIDE_TEST_INPUTS + typed;
             tier1_wide_test_expect(&test, file != 0 || test.native_runs == expected_runs, "every program runs natively on every input, with rematerialization and without");
-            tier1_wide_test_expect(&test, file != 0 || test.refused == 2u * BUSTER_ARRAY_LENGTH(tier1_wide_test_refusals), "every refusal on both paths");
+            tier1_wide_test_expect(&test, file != 0 || test.refused == BUSTER_ARRAY_LENGTH(tier1_wide_test_refusals), "every refusal");
         }
         printf("test-tier1-wide: %" PRIu64 " checks, %" PRIu64 " failures; %u programs, %" PRIu64 " I128 instructions split into %" PRIu64 " instructions; %" PRIu64 " interpreter runs, %" PRIu64 " native runs, %" PRIu64
                " records; %u refusals (seed=%" PRIu64 ")\n",
