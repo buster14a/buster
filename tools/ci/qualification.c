@@ -7,10 +7,9 @@
 //
 // The `evidence` job (tools/ci/nightly.sh) must succeed in every run, and says
 // whether the 9700X job was admitted. On a pull request and a merge-queue
-// candidate, the CI glue's fixtures (the `glue` job, which runs beside the rows
-// rather than before them, #2658) must have passed too, and elsewhere have been
-// skipped: the evidence counts as passed only with them as their event requires. A pull request, draft or ready, never is
-// (#2055): the context passes on its hosted correctness alone and says that
+// candidate, the CI glue fixtures and Clang Static Analyzer must pass too.
+// They run beside the hosted rows. A pull request, draft or ready, skips the
+// 9700X (#2055), and the context says that
 // native correctness and measurements run on its merged state in the nightly
 // window. A merge-queue candidate (#1430) never is either: it passes on the
 // full hosted contract (every row and sanitizer, its fuzz campaigns), whose
@@ -123,15 +122,12 @@ static Result qualification_result(const char* name)
     return (Result)qualification_find(getenv(name), names, sizeof(names) / sizeof(names[0]));
 }
 
-// The evidence input: the `evidence` job's result where the glue job's (GLUE_RESULT) is the one its event requires,
-// passed on a pull request and a merge-queue candidate, which alone run it, and skipped on the others; a failure
-// otherwise, so that a glue job that failed, was cancelled, didn't run where it should or ran where it shouldn't can't
-// pass the aggregate.
-static Result qualification_evidence(Result evidence, Result glue, Event event)
+// The glue and analyzer jobs must pass for PRs and merge-queue candidates and be skipped elsewhere.
+static Result qualification_evidence(Result evidence, Result glue, Result analyzer, Event event)
 {
     const bool runs = event == EVENT_PR || event == EVENT_MERGE_GROUP;
-    const bool expected = glue == (runs ? RESULT_SUCCESS : RESULT_SKIPPED);
-    return expected ? evidence : RESULT_FAILURE;
+    const Result expected = runs ? RESULT_SUCCESS : RESULT_SKIPPED;
+    return glue == expected && analyzer == expected ? evidence : RESULT_FAILURE;
 }
 
 static bool qualification_no_code(const Qualification* input)
@@ -157,7 +153,7 @@ static bool qualification_pass(const Qualification* input)
     bool hosted = (selected || periodic) && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS && input->tests == RESULT_SUCCESS;
     // Only a merge-queue candidate runs the coverage step.
     hosted = hosted && input->coverage == (event == EVENT_MERGE_GROUP ? RESULT_SUCCESS : RESULT_SKIPPED);
-    // A pull request, draft or ready, qualifies on its hosted plain rows alone: no fuzzing, no 9700X job (#2055).
+    // A pull request, draft or ready, qualifies on its hosted plain rows and static analysis: no fuzzing, no 9700X job (#2055).
     bool pull_request = event == EVENT_PR && hosted && input->hardware == HARDWARE_SKIP;
     pull_request = pull_request && input->fuzz == RESULT_SKIPPED && input->native == RESULT_SKIPPED;
     // A merge-queue candidate (#1430) on the full hosted contract and its fuzz campaigns, which its coverage step
@@ -267,19 +263,21 @@ static int qualification_test(void)
     }
     failures += expected == NULL || allowed_count != sizeof(allowed) / sizeof(allowed[0]);
     free(expected);
-    // The glue job's result folded into the evidence input, over every event and both results: the evidence passes
-    // through only where the glue job did what its event requires.
+    // Glue and analyzer results qualify the evidence only when both have the outcome their event requires.
     for (uint32_t event = 0; event < EVENT_COUNT; event += 1)
     {
         for (uint32_t evidence = 0; evidence < RESULT_COUNT; evidence += 1)
         {
             for (uint32_t glue = 0; glue < RESULT_COUNT; glue += 1)
             {
-                const bool runs = event == EVENT_PR || event == EVENT_MERGE_GROUP;
-                const bool expected = runs ? glue == RESULT_SUCCESS : glue == RESULT_SKIPPED;
-                const Result want = expected ? (Result)evidence : RESULT_FAILURE;
-                checks += 1;
-                failures += qualification_evidence((Result)evidence, (Result)glue, (Event)event) != want;
+                for (uint32_t analyzer = 0; analyzer < RESULT_COUNT; analyzer += 1)
+                {
+                    const bool runs = event == EVENT_PR || event == EVENT_MERGE_GROUP;
+                    const bool expected = runs ? glue == RESULT_SUCCESS && analyzer == RESULT_SUCCESS : glue == RESULT_SKIPPED && analyzer == RESULT_SKIPPED;
+                    const Result want = expected ? (Result)evidence : RESULT_FAILURE;
+                    checks += 1;
+                    failures += qualification_evidence((Result)evidence, (Result)glue, (Result)analyzer, (Event)event) != want;
+                }
             }
         }
     }
@@ -316,7 +314,7 @@ int main(int argc, char** argv)
             .changes = qualification_result("CHANGES_RESULT"),
             .size = qualification_result("SIZE_RESULT"),
             .hooks = qualification_result("DCO_RESULT"),
-            .evidence = qualification_evidence(qualification_result("EVIDENCE_RESULT"), qualification_result("GLUE_RESULT"), event),
+            .evidence = qualification_evidence(qualification_result("EVIDENCE_RESULT"), qualification_result("GLUE_RESULT"), qualification_result("ANALYZER_RESULT"), event),
             .tests = qualification_result("TEST_RESULT"),
             .fuzz = qualification_result("FUZZ_RESULT"),
             .native = qualification_result("BENCHMARK_RESULT"),
@@ -326,7 +324,7 @@ int main(int argc, char** argv)
         status = passed ? 0 : 1;
         if (passed && qualification_no_code(&input))
         {
-            puts("Documentation-only change; explicit no-code exemption, not native qualification.");
+            puts("Clang Static Analyzer passed. The documentation-only change was exempt from the test rows.");
         }
         else if (passed && input.event == EVENT_MERGE_GROUP)
         {
@@ -334,7 +332,7 @@ int main(int argc, char** argv)
         }
         else if (passed && input.event == EVENT_PR)
         {
-            puts("Hosted correctness passed. Pull requests don't use the 9700X (#2055): native correctness and measurements were NOT run here; they run on the merged first-parent state in the nightly window.");
+            puts("Hosted correctness and Clang Static Analyzer passed. Pull requests don't use the 9700X (#2055): native correctness and measurements were NOT run here; they run on the merged first-parent state in the nightly window.");
         }
         else if (passed)
         {

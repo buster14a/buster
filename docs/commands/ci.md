@@ -97,6 +97,22 @@ nothing, since the queue tested it before it landed.
 [The merge queue](../ci.md#the-merge-queue) has the details and the ruleset's
 settings.
 
+## Clang Static Analyzer
+
+Pull requests and merge-queue candidates each run a separate `Clang Static Analyzer`
+job on GitHub-hosted Ubuntu 26.04. It checks the triggering merge revision,
+including documentation-only changes. The job uses the pinned CI Clang and
+the ordinary vector Release build's translation units and flags from
+`build.sh print-sources` and `build.sh print-compile-flags`. It uses one
+analyzer process per available CPU. Static analysis does not execute the
+compiler or need an AVX-512 runner.
+
+Each analyzer finding is a Clang error. The job finishes the sweep, fails
+qualification and retains the diagnostic paths as an artifact. A candidate's
+analyzer failure also stops the rest of that candidate's run. An optional
+build configuration such as libFuzzer needs its own analysis invocation.
+[Hosted timing evidence](https://github.com/buster14a/buster-performance/tree/4087a9e563960f17e9e1fc2729f7904e12343270/docs/measurements/merge-queue-clang-analyzer-2026-11-18).
+
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
