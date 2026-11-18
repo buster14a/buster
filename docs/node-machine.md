@@ -3231,7 +3231,8 @@ nothing to say of:
   asked), pointer arithmetic, a null stored in a pointer, a constant of any
   other value or type, and every operator another warning lists whatever its
   operands are (a comparison under `-Wsign-compare`, an assignment under
-  `-Wself-assign`).
+  `-Wself-assign`). "The casts, a pointer's subscripts and its sums" later
+  takes a plain pointer's subscript and its sum out.
 
 **How it is made:**
 
@@ -4087,6 +4088,199 @@ The compiler's own source, in the cloud container, with `--verify`:
   stripped of its qualifiers, and the type table gives a function type none
   (`type_qualify`). The strip is gone.
 
+### The casts, a pointer's subscripts and its sums
+
+"The calls with no test to make, and a statement that discards nothing" left
+15,926 of `sqlite3.c`'s 50,996 expressions listed for the tests that read T's
+records, and half of their listed operators were casts. This piece takes out
+three kinds of operator whose test reads a pointer and finds nothing. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/window-tests-casts-2850-2026-11-18)
+has the census, its scripts and every reading.
+
+**What was listed, counted.** Before any code: the shadow with a line for
+each listed expression and each of its listed operators, on the piece
+before's sources with #2968's and #2970's fixes (default warnings):
+
+| | `sqlite3.c` | Lua | musl | the compiler's own source |
+| --- | ---: | ---: | ---: | ---: |
+| listed operators | 15,688 | 5,977 | 14,556 | 21,223 |
+| casts | 7,370 | 1,995 | 3,849 | 2,639 |
+| a pointer's, to void | 6,256 | 1,446 | 2,093 | 1,520 |
+| a pointer's, to a pointer | 1,026 | 464 | 609 | 373 |
+| a pointer's, to a 64-bit integer | 88 | 9 | 1,122 | 133 |
+| an enumeration's | 0 | 76 | 25 | 613 |
+| of them, with a test that finds anything | 0 | 0 | 0 | 0 |
+| subscripts with a constant operand | 3,181 | 78 | 1,582 | 2,061 |
+| of them, of a plain pointer | 2,288 | 57 | 655 | 938 |
+| sums of a plain pointer and a constant | 174 | 305 | 254 | 335 |
+
+The casts to void are statements for the most part. A statement's discard
+is a cast to void over its top, and a top of a pointer's type (`p = q;`,
+`p++;`, a call that returns one) sent the cast to the pointer cast's test,
+which asks whether the cast's own type is an integer narrower than a
+pointer.
+
+**The three rules.**
+
+| the operator | is left out where |
+| --- | --- |
+| a cast | a pointer operand sent it, and its own type is void or a pointer |
+| a subscript | one operand is a plain pointer that is no constant a test may read, and the other a plain integer |
+| `+ -` and their assignments | one operand is a plain pointer and the other a plain integer |
+
+- **A cast's one test is the pointer cast's.** It fires where a pointer is
+  cast to an integer of under 64 bits or to an enumeration. A constant
+  operand's conversion has no test at a cast. The enumerations' test reads
+  two operands' types, a conditional's arms' or a conversion's, never a
+  cast's one operand, so the table's entry for a cast sends no enumeration
+  any more.
+- **A cast to an integer stays listed, whatever its width.** The type's
+  byte says none, and a 64-bit one's test finds nothing: 35, 1, 90 and 17
+  expressions would follow.
+- **A subscript's index and a sum's integer are promoted**
+  (`check_action_pointer_arithmetic`), which narrows no integer: the
+  conversion's test has nothing to find. A subscript has two tests more. One
+  is a null constant pointer's dereference: a subscript whose pointer is a
+  constant a test may read stays listed. The other is an array's bound, and
+  an array is no plain pointer.
+- **A string's sum stays listed** by its array's bit, as before.
+
+**How it is made.** No new byte, no new sweep, nothing scalar:
+
+- **The sums and the subscripts are the quiet rule's table's.** The pairs of
+  a plain pointer and a plain integer are in the class of `+`
+  (`node_tests_quiet_pairs`), which a subscript's operator joins. No other
+  operator of that class takes a pointer.
+- **A subscript's constant pointer is one mask:** each side's value's byte,
+  which the loop has for the table already, against a plain pointer's kind
+  with the constant's bit.
+- **A cast is one mask more:** sent by its operand, its own type's byte void
+  or a pointer. It joins the mask of the operators left out, whose tests
+  the reader's verify runs all the same, counted apart.
+
+The counts, in the cloud container beside `--verify` (default warnings; the
+share before in parentheses):
+
+| | `sqlite3.c` | Lua | musl | the compiler's own source |
+| --- | ---: | ---: | ---: | ---: |
+| casts left out, each checked | 7,282 | 1,910 | 2,702 | 1,893 |
+| casts of an enumeration, sent no more | 0 | 76 | 25 | 613 |
+| subscripts and sums left out, each checked | 2,462 | 362 | 909 | 1,273 |
+| of all those, with a test that fires or a record sent | 0 | 0 | 0 | 0 |
+| operators listed, before | 15,688 | 5,977 | 14,556 | 21,223 |
+| with the piece | 5,944 | 3,629 | 10,920 | 17,444 |
+| expressions listed, before | 15,926 | 5,108 | 16,655 | 27,952 |
+| with the piece | 9,540 | 3,932 | 14,546 | 26,250 |
+| expressions with nothing listed | 81% (69%) | 64% (53%) | 66% (62%) | 50% (46%) |
+| with every warning | 42% (40%) | 37% (33%) | 42% (41%) | 24% (23%) |
+
+The census's lines put through the three rules gave the same counts before
+the code was written, to the expression.
+
+TSC ticks a record of the expressions the tests ran on, #2973's head
+`cc9c84a54` and the piece on it in turn on the 9700X (medians of seven
+readings, musl's of fifteen; with every warning of five, musl's of fifteen;
+the kernel and the front of seven):
+
+| | `sqlite3.c` | | Lua | | musl | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| | before | the piece | before | the piece | before | the piece |
+| **the tests on the window** | 35.5 | **31.2** | 53.4 | **49.4** | 99.9 | **95.8** |
+| of which the records' bytes | 9.3 | 9.3 | 10.8 | 10.7 | 19.1 | 18.8 |
+| the loop | 1.6 | 1.6 | 2.3 | 2.5 | 4.9 | 5.6 |
+| an expression's part | 9.5 | 9.5 | 9.7 | 9.6 | 17.2 | 17.2 |
+| the tests on T's records | 15.0 | 10.8 | 30.6 | 26.5 | 56.7 | 52.7 |
+| with every warning | 63.4 | 59.7 | 71.1 | 67.2 | 126.9 | 123.0 |
+| beside `--verify` (one reading) | | 85.1 | | 102.7 | | 173.4 |
+| the kernel in place, without the tests | 16.4 | 16.0 | 20.9 | 20.5 | 19.1 | 19.1 |
+| the front with the window | 53.1 | 53.3 | 71.0 | 70.7 | 89.9 | 92.5 |
+
+- **Exact.** No expression's bits, root's kind or span differ from the
+  census's code's, and no operator left out has a test or sends a record:
+  on the three corpora and the compiler's own source, with the default
+  warnings and with every warning, beside `--verify`, and on the twelve
+  fixtures.
+- **4.4 ticks a record less on `sqlite3.c`,** 4.0 on Lua and 4.1 on musl:
+  12%, 8% and 4% of the tests. A first build of the same rules read 31.2
+  for 35.9, 49.0 for 53.4 and 92.7 for 99.0 against the same base.
+- **The tests on T's records fell by less than their records.** 45% of
+  `sqlite3.c`'s listed records left the list (61,457 of 111,130 stay) and
+  28% of that sweep's ticks: what stays is costlier a record. 3,890 of the
+  9,540 expressions still listed are initializations, of three records each
+  on average (11,513 of the 61,457), under a root with tests of its own.
+- **The loop reads the same on `sqlite3.c`, 0.2 more on Lua and 0.5 to 0.7
+  more on musl:** some 50 ticks a chunk on both (244 and 2,975 chunks),
+  which the rules' dozen operations a block don't account for. No counter
+  was read for it.
+- **What is not the piece's reads the same.** The kernel in place read 16.0
+  for 16.4 in this build and 16.8 for 16.3 in the first (three readings
+  there: 16.5, 16.8 and 18.7), the front with the window within its spread,
+  and `-c sqlite3.c` as whole processes -0.05% and -0.06% in wall time
+  where the base against itself reads -0.08% and -0.16%.
+
+**Against its gates.** The piece was specified on the issue before its
+code:
+
+- **Exact: met.**
+- **The counts (no more than 9,600, 3,950, 14,600 and 26,300 expressions
+  listed): met,** at 9,540, 3,932, 14,546 and 26,250.
+- **The tests on the window under 31.0 on `sqlite3.c`, refuted at 32.0:
+  missed by 0.2,** at 31.15 and 31.18 in the two builds. **Under 50.0 on
+  Lua, refuted at 51.0: met,** at 49.4 and 49.0. musl reads no more.
+- **The records' bytes and the loop together no more than 0.3 above: met on
+  `sqlite3.c` and Lua** (the same, and 0.1 to 0.2 more). On musl the two
+  builds read 0.2 less and 0.4 more.
+- **What is not this piece's reads the same: met.**
+
+**Tests.**
+
+- **A function of the seventh fixture for the three rules,** each on both
+  sides: a pointer's cast to void (a statement's discard and a written
+  one), to a pointer and to a pointer to void, left out; to a 64-bit
+  integer, listed with nothing; to a 32-bit one, a bool and an enumeration,
+  which fire; an enumeration's cast. A subscript of a pointer by zero, a
+  small, a large and a negative constant, with the constant first and of an
+  address constant, left out; an array's, a null constant pointer's on each
+  side and one by a bool's constant, listed. A sum on each side, each
+  compound assignment and one whose pointer is the constant, left out; a
+  string's, two pointers' difference and one whose constant is further back
+  than the block before, listed. The casts left out are a pinned count of
+  their own.
+- **A pointer's cast to an integer in the fixture of warnings that are
+  off:** with `-Wno-pointer-to-int-cast` nothing sends it.
+- **Faults.** 32 were put into the piece's code, one at a time, in a copy
+  of the tree: each fails the tests (29 as written, and three whose first
+  text didn't compile, corrected). One edit went back before them for doing
+  nothing: the enumerations' trigger asked of what the operator sends, where
+  a cast that reaches its test has a pointer for an operand.
+
+**What is left, counted.** With the piece (default warnings):
+
+| | `sqlite3.c` | Lua | musl | the compiler's own source |
+| --- | ---: | ---: | ---: | ---: |
+| expressions listed for the tests that read T's records | 9,540 | 3,932 | 14,546 | 26,250 |
+| for an initialization's root alone | 3,439 | 1,278 | 5,828 | 13,027 |
+| for a listed operator alone | 4,273 | 1,440 | 6,567 | 8,669 |
+| for writes out of sequence alone | 698 | 150 | 490 | 163 |
+| operators listed | 5,944 | 3,629 | 10,920 | 17,444 |
+| assignments | 1,250 | 223 | 1,112 | 1,535 |
+| of them, with a test that finds nothing and sends nothing | 5,026 | 2,593 | 9,123 | 10,793 |
+| subscripts of an array by a constant | 893 | 21 | 927 | 1,003 |
+| calls | 854 | 673 | 1,359 | 4,393 |
+| conditionals and commas, listed whatever their operands | 988 | 925 | 816 | 5,728 |
+| casts of a pointer to a 64-bit integer | 88 | 9 | 1,122 | 133 |
+
+- **An initialization's root is the largest part now:** a third of
+  `sqlite3.c`'s listed expressions and half of the compiler's own.
+- **An assignment listed on `sqlite3.c` stores a constant in each case,**
+  and none of the 1,250 has a test that finds anything: a zero in a plain
+  pointer for 592.
+- **Two thirds of Lua's calls that an argument keeps listed have a negative
+  constant among their arguments,** which the kinds don't tell from any
+  other constant past 126: 2,079 of the 3,199 the kernel's call rule finds
+  loud over its runs there, 1,869 of 5,712 on `sqlite3.c` and 854 of 9,422
+  on musl.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -4119,17 +4313,18 @@ token and 1.21. "The constants with no test to make" took it to 59%, about
 36 cycles and the same 1.21. "The operator above, and an expression with
 nothing listed" and "The calls with no test to make, and a statement that
 discards nothing" took it to 51% and 43%: about 31 and 27 cycles,
-and 1.22. The sum stands only with the tests at a third of the own form's.
+and 1.22. "The casts, a pointer's subscripts and its sums" took it to 38%:
+about 23 cycles, and 1.22 to 1.23. The sum stands only with the tests at a
+third of the own form's.
 What would move it:
 
-- **The rest of the tests where their inputs are:** a cast's and a
-  subscript's from the window, an initialization's root's, an assignment's
-  of a constant, and a comparison's signs under `-Wsign-compare`: 15 of the
-  window's 36 ticks a record are tests on T's records still,
-  after the calls and the statements that discard nothing left the list.
-  "The calls with no test to make, and a statement that discards nothing"
-  counts what is listed still. The census's code is their oracle. They are
-  the sum's largest open term.
+- **The rest of the tests where their inputs are:** an initialization's
+  root's, an assignment's of a constant, an array's subscript by a constant,
+  and a comparison's signs under `-Wsign-compare`: 11 of the window's 31
+  ticks a record are tests on T's records still, after a pointer's casts,
+  subscripts and sums left the list. "The casts, a pointer's subscripts and
+  its sums" counts what is listed still. The census's code is their oracle.
+  They are the sum's largest open term.
 
 - **The front's walk:** over a hundred instructions an acting token for a
   stack walk, lean or not. The structure it derives (counts, distances,

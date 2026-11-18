@@ -331,6 +331,11 @@ struct NodeFrontTypes
     uint64_t own_quiet_calls_loud;
     uint64_t own_result_casts;
     uint64_t own_result_asks;
+    // The casts the loop left out of its list for having no test to make (a pointer's to void or to a pointer); and,
+    // with the reader's verify, those of them checked and those whose test had something.
+    uint64_t own_quiet_casts;
+    uint64_t own_quiet_casts_checked;
+    uint64_t own_quiet_casts_wrong;
     // With the reader's verify: the integer constants whose record says its value (node_facts_small), and those of them
     // whose payload is another.
     uint64_t own_values_checked;
