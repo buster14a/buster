@@ -14,10 +14,10 @@ static void tier1_hot_recipes_check(Tier1EmitTest* test, Tier1CfgTestBuilder* bu
     }
     Tier1CfgInput input = { 0 };
     bool ready = tier1_cfg_test_build(builder, &test->input, &input);
-    for (uint32_t path = 0; ready && path < 2; path += 1)
+    if (ready)
     {
         Tier1CfgOrder order;
-        const bool prepared = tier1_cfg_order_prepare(&input, &test->output, &test->scratch, path == 0, &order) == TIER1_CFG_OK;
+        const bool prepared = tier1_cfg_order_prepare(&input, &test->output, &test->scratch, true, &order) == TIER1_CFG_OK;
         uint8_t* hot = prepared ? arena_push(&test->scratch, (uint64_t)input.value_count + 1, 1) : 0;
         bool same = hot != 0;
         if (same)

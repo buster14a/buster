@@ -2,15 +2,17 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The bottom-up rewrite selection's own checks (#141, tier1_select_burs.c), which test-tier1-select runs, and the
-// per-function twin check the pipeline's tests and benchmark-tier1-select-source run on every function they plan:
+// per-function check the pipeline's tests and benchmark-tier1-select-source run on every function they plan:
 //
 // - the tables: built, the REG leaf's state first, every state's rules the rules' own derivations (a rule names its
 //   nonterminal), every operator's table entry a state, and a node of each leaf operator its state;
-// - the labeling and the rule choice, vector path against scalar twin, on random columns of every operator and child
-//   states drawn from every state the tables have, 16-lane tails and lone levels among them;
-// - per function (tier1_burs_check_function): the classes and visible children of the vector classifier against the
-//   scalar one, the states and the rules of both kernels, every node of a class the grammar covers with a candidate of
-//   its own (tier1_select_candidates), and the rule's candidate found for each, which it counts.
+// - the labeling and the rule choice against their equations (tier1_burs_test_equation) at every node of random
+//   columns of every operator and child states drawn from every state the tables have, 16-lane tails and lone levels
+//   among them;
+// - per function (tier1_burs_check_function): each visible child the node's own earlier operand, every node's state
+//   and rule their equations', every node of a class the grammar covers with a candidate of its own
+//   (tier1_select_candidates), and the rule's candidate found for each, which it counts. The classes themselves the
+//   plans' frozen digest checks (tier1_select_test_digest).
 //
 // Include after tier1_select_test.c. Keep the per-function check shared for the checker's code-certificate corpus;
 // the backend unit alone reads the fixtures below it, at their original definition and inclusion points.
@@ -20,13 +22,15 @@ struct Tier1BursCheck
 {
     uint64_t functions;
     uint64_t nodes;
-    // Nodes whose class, children, state or rule differs between the twins.
+    // Nodes whose children, state or rule break their definitions.
     uint64_t mismatches;
     // Nodes of a class the grammar covers without a candidate: the class promised one.
     uint64_t uncovered;
     // Nodes of a class the grammar covers whose goal rule names a candidate the walks made, and those that took munch's.
     uint64_t matched;
     uint64_t fallbacks;
+    // Integer comparisons classed as a truth value's link.
+    uint64_t links;
 };
 
 // The plan's prerequisites, built here apart from it: each node's block, uses, last user, barriers, canonical answer and
@@ -88,16 +92,30 @@ static bool tier1_burs_check_prepare(const IrFunction* function, const IrDominan
         {
             level_nodes[cursors[depths[node]]++] = node;
         }
-        tier1_select_barriers_scalar(function, count, barriers);
-        tier1_select_known_bits(function, dominance, blocks, cursors, known_bits, false);
-        tier1_select_canonical(function, blocks, known_bits, canonical, cursors, false);
-        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, cursors, scope_workspace, false);
+        tier1_select_barriers(function, count, barriers);
+        tier1_select_known_bits(function, dominance, blocks, cursors, known_bits);
+        tier1_select_canonical(function, blocks, known_bits, canonical, cursors);
+        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, cursors, scope_workspace);
     }
     return valid;
 }
 
-// Checks `function` (verified, with dominance) into `check`: the twins' classes, children, states and rules, and the
-// candidates of the grammar's classes.
+// The labeling's and the rule choice's defining equations at `node`: its state is its operator's table entry at its
+// visible children's states mapped (the REG leaf's state for an absent child), and its rule is its state's rule of its
+// operator's goal. Whether both hold, from the columns as they are.
+static bool tier1_burs_test_equation(uint32_t count, const uint32_t* classes, const uint32_t* kids, const uint32_t* states, const uint32_t* rules, uint32_t node)
+{
+    const uint32_t op = classes[node];
+    const uint32_t left = kids[node] != BUSTER_IR_NONE ? states[kids[node]] : BUSTER_TIER1_BURS_REG_STATE;
+    const uint32_t right = kids[count + node] != BUSTER_IR_NONE ? states[kids[count + node]] : BUSTER_TIER1_BURS_REG_STATE;
+    const uint32_t row = tier1_burs_pool[tier1_burs_map_base[0][op] + left];
+    const uint32_t column = tier1_burs_pool[tier1_burs_map_base[1][op] + right];
+    const uint32_t state = tier1_burs_pool[tier1_burs_table_base[op] + row * tier1_burs_table_width[op] + column];
+    return states[node] == state && rules[node] == tier1_burs_state_rules[states[node] * TIER1_BURS_NONTERMINALS + tier1_burs_goal[op]];
+}
+
+// Checks `function` (verified, with dominance) into `check`: its children, states and rules against their definitions,
+// and the candidates of the grammar's classes.
 static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* function, const IrDominance* dominance, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
@@ -111,17 +129,14 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
     uint32_t* level_offsets = arena_push_array(scratch, (uint64_t)count + 2, sizeof(uint32_t), 64);
     uint32_t* level_nodes = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64);
     uint32_t* words = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64);
-    uint32_t* columns[2][4];
+    uint32_t* columns[4];
     bool valid = blocks != 0 && uses != 0 && users != 0 && barriers != 0 && canonical != 0 && known_bits != 0 && level_offsets != 0 && level_nodes != 0 && words != 0 && tier1_select_initialize();
-    for (uint32_t path = 0; path < 2; path += 1)
-    {
-        // Classes, children (two columns), states and rules.
-        columns[path][0] = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
-        columns[path][1] = valid ? arena_push_array(scratch, (uint64_t)count * 2 + 1, sizeof(uint32_t), 64) : 0;
-        columns[path][2] = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
-        columns[path][3] = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
-        valid = valid && columns[path][0] != 0 && columns[path][1] != 0 && columns[path][2] != 0 && columns[path][3] != 0;
-    }
+    // Classes, children (two columns), states and rules.
+    columns[0] = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
+    columns[1] = valid ? arena_push_array(scratch, (uint64_t)count * 2 + 1, sizeof(uint32_t), 64) : 0;
+    columns[2] = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
+    columns[3] = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
+    valid = valid && columns[0] != 0 && columns[1] != 0 && columns[2] != 0 && columns[3] != 0;
     uint32_t maximum_depth = 0;
     valid = valid && tier1_burs_check_prepare(function, dominance, scratch, blocks, uses, users, barriers, canonical, known_bits, level_offsets, level_nodes, words, &maximum_depth);
     const Tier1SelectForest forest = {
@@ -136,12 +151,9 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
     };
     if (valid)
     {
-        tier1_burs_classify_scalar(&forest, users, columns[1][0], columns[1][1]);
-        tier1_burs_label_scalar(count, columns[1][0], columns[1][1], columns[1][2]);
-        tier1_burs_rules_scalar(count, columns[1][0], columns[1][2], columns[1][3]);
-        tier1_burs_classify_vector(&forest, users, words, columns[0][0], columns[0][1]);
-        tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, columns[0][0], columns[0][1], columns[0][2]);
-        tier1_burs_rules_vector(count, columns[0][0], columns[0][2], columns[0][3]);
+        tier1_burs_classify_vector(&forest, users, words, columns[0], columns[1]);
+        tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, columns[0], columns[1], columns[2]);
+        tier1_burs_rules_vector(count, columns[0], columns[2], columns[3]);
         check->functions += 1;
         check->nodes += count;
     }
@@ -164,23 +176,43 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
     };
     for (uint32_t node = 0; valid && node < count; node += 1)
     {
-        const bool same = columns[0][0][node] == columns[1][0][node] && columns[0][1][node] == columns[1][1][node] && columns[0][1][count + node] == columns[1][1][count + node] &&
-                          columns[0][2][node] == columns[1][2][node] && columns[0][3][node] == columns[1][3][node];
+        // A visible child is the node's own operand, an earlier node; its state and rule are their equations' (tier1_burs_test_equations).
+        const uint32_t a = columns[1][node];
+        const uint32_t b = columns[1][count + node];
+        const bool same = (a == BUSTER_IR_NONE || (a == function->a[node] && a < node)) && (b == BUSTER_IR_NONE || (b == function->b[node] && b < node)) &&
+                          tier1_burs_test_equation(count, columns[0], columns[1], columns[2], columns[3], node);
         if (!same && check->mismatches < 8)
         {
-            fprintf(stderr, "  burs twins differ at node %u (%s): class %u/%u, children %u,%u/%u,%u, state %u/%u, rule %u/%u\n", node, ir_op_names[function->op[node]],
-                    columns[0][0][node], columns[1][0][node], columns[0][1][node], columns[0][1][count + node], columns[1][1][node], columns[1][1][count + node],
-                    columns[0][2][node], columns[1][2][node], columns[0][3][node], columns[1][3][node]);
+            fprintf(stderr, "  burs node %u (%s) breaks its equations: class %u, children %u,%u, state %u, rule %u\n", node, ir_op_names[function->op[node]],
+                    columns[0][node], a, b, columns[2][node], columns[3][node]);
         }
         check->mismatches += !same;
-        if (columns[1][0][node] != TIER1_BURS_OP_REG)
+        // An integer comparison's class is the link's exactly where it is one (tier1_select_truth): eq or ne of the zero
+        // extension two nodes before it, of the I1 right before that, and of a zero right before it that it alone uses,
+        // in its block.
+        const uint32_t class = columns[0][node];
+        if (class == TIER1_BURS_OP_ICMP || class == TIER1_BURS_OP_ICMP_LINK)
+        {
+            const uint32_t extended = function->a[node];
+            const uint32_t zero = function->b[node];
+            const bool shaped = function->c[node] <= IR_NE && extended + 2 == node && zero + 1 == node && function->op[extended] == IR_ZEXT && function->op[zero] == IR_CONST;
+            const bool link = shaped && function->a[extended] + 1 == extended && function->type[function->a[extended]] == IR_I1 && function->constants[function->a[zero]].low == 0 &&
+                              uses[zero] == 1 && blocks[zero] == blocks[node];
+            if ((class == TIER1_BURS_OP_ICMP_LINK) != link && check->mismatches < 8)
+            {
+                fprintf(stderr, "  burs comparison %u classed %u where its link's definition says %s\n", node, class, link ? "a link" : "none");
+            }
+            check->mismatches += (class == TIER1_BURS_OP_ICMP_LINK) != link;
+            check->links += class == TIER1_BURS_OP_ICMP_LINK;
+        }
+        if (columns[0][node] != TIER1_BURS_OP_REG)
         {
             const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node);
             bool munched = false;
-            tier1_burs_pick(&candidates, columns[1][3][node], &munched);
+            tier1_burs_pick(&candidates, columns[3][node], &munched);
             if (candidates.count == 0 && check->uncovered < 8)
             {
-                fprintf(stderr, "  burs class %u without a candidate at node %u (%s, type %u, a %u, b %u, uses %u)\n", columns[1][0][node], node, ir_op_names[function->op[node]], function->type[node],
+                fprintf(stderr, "  burs class %u without a candidate at node %u (%s, type %u, a %u, b %u, uses %u)\n", columns[0][node], node, ir_op_names[function->op[node]], function->type[node],
                         function->a[node], function->b[node], uses[node]);
             }
             check->uncovered += candidates.count == 0;
@@ -210,7 +242,7 @@ static uint32_t tier1_burs_test_representers(void)
     return most;
 }
 
-// The tables' invariants, and the labeling and rule kernels against their twins on random columns.
+// The tables' invariants, and the labeling and rule kernels against their equations on random columns.
 static void tier1_select_test_burs_tables(Tier1SelectTest* test)
 {
     tier1_select_test_expect(test, tier1_select_initialize() && tier1_select_initialized(), "the selection's state tables build");
@@ -303,17 +335,21 @@ static void tier1_select_test_burs_tables(Tier1SelectTest* test)
         {
             level_nodes[cursors[depths[node]]++] = node;
         }
-        tier1_burs_label_scalar(count, classes, kids, states[1]);
-        tier1_burs_rules_scalar(count, classes, states[1], rules[1]);
+        memset(states[0], 0xa5, (uint64_t)count * sizeof(uint32_t));
+        memset(rules[0], 0xa5, (uint64_t)count * sizeof(uint32_t));
         tier1_burs_label_vector(maximum, level_offsets, level_nodes, count, classes, kids, states[0]);
         tier1_burs_rules_vector(count, classes, states[0], rules[0]);
-        tier1_select_test_expect(test, memcmp(states[0], states[1], (uint64_t)count * sizeof(uint32_t)) == 0, "the vector labeling is its scalar twin's on random columns");
-        tier1_select_test_expect(test, memcmp(rules[0], rules[1], (uint64_t)count * sizeof(uint32_t)) == 0, "the vector rule choice is its scalar twin's on random columns");
+        uint32_t broken = 0;
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            broken += !tier1_burs_test_equation(count, classes, kids, states[0], rules[0], node);
+        }
+        tier1_select_test_expect(test, broken == 0, "every node's state and rule on random columns are their equations' over its children's states");
         free(columns);
     }
 }
 
-// The IR's text fixtures (tests/ir and tests/ir/optimize), parsed, verified and checked by the twins.
+// The IR's text fixtures (tests/ir and tests/ir/optimize), parsed, verified and checked (tier1_burs_check_function).
 static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
 {
     static const char* const directories[] = { "tests/ir", "tests/ir/optimize" };
@@ -350,7 +386,7 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
             closedir(directory);
         }
     }
-    tier1_select_test_expect(test, files != 0 && check.mismatches == 0 && check.uncovered == 0, "the IR fixtures' classes, states and rules are the twins' alike, every covered class with a candidate");
+    tier1_select_test_expect(test, files != 0 && check.mismatches == 0 && check.uncovered == 0, "the IR fixtures' children, states and rules hold their definitions, every covered class with a candidate");
     // As the selection's own summary: on standard error where standard output carries the manifest (--manifest).
     fprintf(test->manifest ? stderr : stdout, "tier1 bottom-up rewrite: %u states, %u rules, at most %u representers in a position, a pool of %u entries; the IR fixtures: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64
            " mismatches, %" PRIu64 " uncovered\n",
@@ -362,7 +398,7 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
 
 // Addresses around a disp32's edges (tier1_burs_displacement): constant indices and offsets inside and past 32 bits, at
 // every scale, among them pairs past it whose sum fits, which the vector classifier leaves to the scalar one; an index
-// that isn't a constant and none, with offsets on both sides of the edge. The twins must agree, every address of a covered
+// that isn't a constant and none, with offsets on both sides of the edge. The definitions must hold, every address of a covered
 // class must have its candidate, and both classes must occur.
 static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
 {
@@ -422,8 +458,48 @@ static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
         }
     }
     tier1_select_test_expect(test, check.functions == 1 && check.mismatches == 0 && check.uncovered == 0 && covered != 0 && past != 0,
-                             "addresses around a disp32's edges: the twins' classes alike, a candidate for each covered one, both classes");
+                             "addresses around a disp32's edges: the definitions hold, a candidate for each covered one, both classes");
     fprintf(test->manifest ? stderr : stdout, "tier1 bottom-up rewrite addresses: %u covered, %u past a disp32\n", covered, past);
+    arena_release(&scratch);
+    arena_release(&input);
+    arena_release(&text);
+}
+
+// Truth values' links at every lane of the classifier's 16: 32 chains of five nodes, (a < b) zero-extended, compared
+// eq or ne with a zero (a one in the last 16, which are no links), then an xor of the two comparisons. A chain's link
+// sits at node 5k + 5, so the first 16 put one in each lane. Exactly those 16 must be classed links.
+static void tier1_select_test_burs_links(Tier1SelectTest* test)
+{
+    Arena text = arena_reserve(UINT64_C(1) << 20);
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    const uint64_t room = UINT64_C(1) << 16;
+    char* source = text.base != 0 ? arena_push_array(&text, room, 1, 1) : 0;
+    uint64_t length = 0;
+    bool valid = source != 0 && input.base != 0 && scratch.base != 0;
+    if (valid)
+    {
+        length += (uint64_t)snprintf(source + length, room - length, "function (i64, i64) -> i64 {\nb0:\n  %%0 = param.i64 0\n  %%1 = param.i64 1\n");
+        for (uint32_t k = 0; k < 32; k += 1)
+        {
+            const uint32_t n = 2 + 5 * k;
+            length += (uint64_t)snprintf(source + length, room - length,
+                                         "  %%%u = icmp.i1 %%0, %%1 lt\n  %%%u = zext.i32 %%%u\n  %%%u = const.i32 0x0000000000000000000000000000000%u\n  %%%u = icmp.i1 %%%u, %%%u %s\n  %%%u = xor.i1 %%%u, %%%u\n",
+                                         n, n + 1, n, n + 2, k < 16 ? 0 : 1, n + 3, n + 1, n + 2, (k & 1) != 0 ? "ne" : "eq", n + 4, n + 3, n);
+        }
+        length += (uint64_t)snprintf(source + length, room - length, "  %%%u = ret.void %%1\n}\n", 2 + 5 * 32);
+        valid = length < room;
+    }
+    IrFunction function = { 0 };
+    valid = valid && ir_parse((String8){ .pointer = source, .length = length }, &input, &scratch, &function).error == IR_PARSE_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+    tier1_select_test_expect(test, valid, "the links' fixture parses and verifies");
+    Tier1BursCheck check = { 0 };
+    if (valid)
+    {
+        tier1_burs_check_function(&check, &function, 0, &scratch);
+    }
+    tier1_select_test_expect(test, check.functions == 1 && check.mismatches == 0 && check.uncovered == 0 && check.links == 16,
+                             "a truth value's link is classed one in every lane, and a comparison with a one is not");
     arena_release(&scratch);
     arena_release(&input);
     arena_release(&text);
@@ -434,5 +510,6 @@ static void tier1_select_test_burs(Tier1SelectTest* test)
     tier1_select_test_burs_tables(test);
     tier1_select_test_burs_fixtures(test);
     tier1_select_test_burs_addresses(test);
+    tier1_select_test_burs_links(test);
 }
 #endif

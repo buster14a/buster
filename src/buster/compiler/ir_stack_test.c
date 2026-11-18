@@ -369,7 +369,7 @@ static void ir_stack_test_native_boundary(IrLowerTestTally* tally, Arena* input,
                 Tier1SelectPlan plan = { 0 };
                 const uint64_t mark = output->length;
                 uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, vector != 0, &plan, &node);
+                const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, &plan, &node);
                 const uint32_t at = op == 0 ? 0u : 1u;
                 ir_lower_test_expect(tally, error == TIER1_SELECT_OK && plan.patterns[at].rule == rules[op], "native dynamic stack selected by its rule", vector, op);
                 arena_pop_to(output, mark);

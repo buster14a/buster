@@ -105,7 +105,7 @@ static void tier1_dropped_compile(Tier1EmitTest* test, bool vector, bool remater
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the dropped definition's fixture selects");
     const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = rematerialize, .certify = true };
     Tier1EmitResult emitted;
@@ -212,7 +212,7 @@ static void tier1_bare_compile(Tier1EmitTest* test, bool vector, uint32_t regist
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the registerless definition's fixture selects");
     const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = true, .certify = true };
     Tier1EmitResult emitted;
@@ -334,7 +334,7 @@ static void tier1_rest_compile(Tier1EmitTest* test, bool vector, uint32_t regist
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the resting loop's fixture selects");
     const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = true, .certify = true };
     Tier1EmitResult emitted;

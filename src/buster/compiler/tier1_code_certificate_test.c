@@ -680,7 +680,7 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's call fixture selects");
     // The caller-saved registers alone: p0 lives across the call in one, saved and restored around it.
     const uint32_t caller_saved = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI);
@@ -798,7 +798,7 @@ static void tier1_code_certificate_debug(Tier1EmitTest* test, bool vector)
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan = { 0 };
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     const Tier1EmitOptions options = {
         .register_mask = (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
         .vector = vector,
@@ -925,7 +925,7 @@ static void tier1_code_certificate_debug_straight(Tier1EmitTest* test, bool vect
         valid = valid && tier1_terminal_dominance(test, &function, &dominance);
         Tier1SelectPlan plan = { 0 };
         uint32_t error_node = BUSTER_IR_NONE;
-        valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &error_node) == TIER1_SELECT_OK;
+        valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &error_node) == TIER1_SELECT_OK;
         Tier1EmitOptions options = {
             .register_mask = alias ? 1u << X86_REGISTER_RDI : (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
             .vector = vector,
@@ -1037,7 +1037,7 @@ static void tier1_code_certificate_debug_phis(Tier1EmitTest* test, bool vector)
     valid = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan = { 0 };
     uint32_t error_node = BUSTER_IR_NONE;
-    valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &error_node) == TIER1_SELECT_OK;
+    valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &error_node) == TIER1_SELECT_OK;
     Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .sources = true };
     Tier1EmitResult emitted = { 0 };
     valid = valid && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &error_node) == TIER1_EMIT_OK;
@@ -1122,7 +1122,7 @@ static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's dynamic-frame fixture selects");
     // Thirteen values live into b1, more than the registers: some are spilled, and the prologue allocates their rows
     // after setting rbp.
@@ -1157,7 +1157,7 @@ static void tier1_code_certificate_narrow(Tier1EmitTest* test, bool vector, Tier
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's narrow-parameter fixture selects");
     const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
     Tier1EmitResult emitted;
@@ -1216,7 +1216,7 @@ static void tier1_code_certificate_realigned(Tier1EmitTest* test, bool vector, T
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's realigned-frame fixture selects");
     const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
     Tier1EmitResult emitted;
@@ -1249,7 +1249,7 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Ti
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's compare-exchange fixture selects");
     const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI);
     const Tier1EmitOptions options = { .register_mask = few, .vector = vector, .certify = true };
@@ -1313,7 +1313,7 @@ static void tier1_code_certificate_barrier(Tier1EmitTest* test, bool vector, boo
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's barrier fixture selects");
     const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI);
     const Tier1EmitOptions options = {
@@ -1412,7 +1412,7 @@ static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError selection = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+    const Tier1SelectError selection = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
     const bool planned = selection == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's seq_cst store fixture selects");
     Tier1EmitDiagnostic diagnostic = {0};
@@ -1486,7 +1486,7 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError selection = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+    const Tier1SelectError selection = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
     const bool planned = selection == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's literal fixture selects");
     Tier1EmitDiagnostic diagnostic = {0};
@@ -1603,7 +1603,7 @@ static void tier1_code_certificate_carry(Tier1EmitTest* test, bool vector, bool 
     };
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = created && tier1_select_plan(&fixture.function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = created && tier1_select_plan(&fixture.function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     const Tier1EmitOptions options = {
         .register_mask = tier1_liveness_register_mask(),
         .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,

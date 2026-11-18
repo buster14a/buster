@@ -85,74 +85,71 @@ static void tier1_storage_tests(Tier1EmitTest* test)
             tier1_select_test_node(&function, next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, next + 1, IR_RET, IR_VOID, next, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_emit_test_expect(test, next + 2 == function.instruction_count, "signed-storage fixture fills its logical columns exactly");
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t pressure = 0; pressure < 2; pressure += 1)
             {
-                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                const uint64_t output_mark = test->output.length;
+                IrDominance dominance;
+                const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "mixed signed-storage uses select by both paths");
+                if (selected == TIER1_SELECT_OK)
                 {
-                    const uint64_t output_mark = test->output.length;
-                    IrDominance dominance;
-                    const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
-                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "mixed signed-storage uses select by both paths");
-                    if (selected == TIER1_SELECT_OK)
+                    const Tier1EmitOptions options = {
+                        .certify = true,
+                        .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                        .vector = true,
+                        .rematerialize = pressure != 0,
+                    };
+                    Tier1EmitResult emitted;
+                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "signed-storage CFG allocation and code certify");
+                    if (error != TIER1_EMIT_OK && test->failures < 20)
                     {
-                        const Tier1EmitOptions options = {
-                            .certify = true,
-                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = path != 0,
-                            .rematerialize = pressure != 0,
-                        };
-                        Tier1EmitResult emitted;
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "signed-storage CFG allocation and code certify");
-                        if (error != TIER1_EMIT_OK && test->failures < 20)
+                        fprintf(stderr, "  signed storage emission error=%u node=%u shape=%u pressure=%u\n", error, failed, shape, pressure);
+                    }
+                    if (error == TIER1_EMIT_OK)
+                    {
+                        tier1_emit_test_expect(test, pressure != 0 || emitted.cfg.allocation.spill_count != 0, "three-register signed-storage case really spills");
+                        for (uint32_t value = 0; value < count; value += 1)
                         {
-                            fprintf(stderr, "  signed storage emission error=%u node=%u shape=%u path=%u pressure=%u\n", error, failed, shape, path, pressure);
+                            tier1_emit_test_expect(test, emitted.prepared.sizes[sources[value]] == (promoted ? 8 : 4), "only sign-certified I32 values get eight-byte spill rows");
                         }
-                        if (error == TIER1_EMIT_OK)
+                        void* executable = MAP_FAILED;
+                        uint64_t bytes = 0;
+                        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                         {
-                            tier1_emit_test_expect(test, pressure != 0 || emitted.cfg.allocation.spill_count != 0, "three-register signed-storage case really spills");
-                            for (uint32_t value = 0; value < count; value += 1)
+                            for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples); sample += 1)
                             {
-                                tier1_emit_test_expect(test, emitted.prepared.sizes[sources[value]] == (promoted ? 8 : 4), "only sign-certified I32 values get eight-byte spill rows");
-                            }
-                            void* executable = MAP_FAILED;
-                            uint64_t bytes = 0;
-                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
-                            {
-                                for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples); sample += 1)
+                                uint64_t observed[18];
+                                for (uint32_t value = 0; value < BUSTER_ARRAY_LENGTH(observed); value += 1)
                                 {
-                                    uint64_t observed[18];
-                                    for (uint32_t value = 0; value < BUSTER_ARRAY_LENGTH(observed); value += 1)
-                                    {
-                                        observed[value] = UINT64_C(0xa55a1234a55a5678);
-                                    }
-                                    for (uint32_t value = 0; value < count; value += 1)
-                                    {
-                                        const uint32_t bits = samples[(sample + value) % BUSTER_ARRAY_LENGTH(samples)];
-                                        memcpy(data + value * stride, &bits, stride);
-                                    }
-                                    tier1_emit_test_expect(test, tier1_emit_test_call(executable, (uint64_t)(uintptr_t)data, (uint64_t)(uintptr_t)(observed + 1)) == 0, "signed-storage native function returns its exact value");
-                                    for (uint32_t value = 0; value < count; value += 1)
-                                    {
-                                        const uint32_t bits = samples[(sample + value) % BUSTER_ARRAY_LENGTH(samples)];
-                                        const int32_t semantic = word ? (int16_t)bits : (int32_t)bits;
-                                        tier1_emit_test_expect(test, observed[1 + value * 2] == (uint64_t)(int64_t)semantic && observed[2 + value * 2] == (uint32_t)semantic,
-                                                               "signed and unsigned widening remain independently correct after pressure, reloads and coalescing");
-                                    }
-                                    tier1_emit_test_expect(test, observed[0] == UINT64_C(0xa55a1234a55a5678) && observed[17] == UINT64_C(0xa55a1234a55a5678), "signed-storage output preserves both memory canaries");
+                                    observed[value] = UINT64_C(0xa55a1234a55a5678);
                                 }
+                                for (uint32_t value = 0; value < count; value += 1)
+                                {
+                                    const uint32_t bits = samples[(sample + value) % BUSTER_ARRAY_LENGTH(samples)];
+                                    memcpy(data + value * stride, &bits, stride);
+                                }
+                                tier1_emit_test_expect(test, tier1_emit_test_call(executable, (uint64_t)(uintptr_t)data, (uint64_t)(uintptr_t)(observed + 1)) == 0, "signed-storage native function returns its exact value");
+                                for (uint32_t value = 0; value < count; value += 1)
+                                {
+                                    const uint32_t bits = samples[(sample + value) % BUSTER_ARRAY_LENGTH(samples)];
+                                    const int32_t semantic = word ? (int16_t)bits : (int32_t)bits;
+                                    tier1_emit_test_expect(test, observed[1 + value * 2] == (uint64_t)(int64_t)semantic && observed[2 + value * 2] == (uint32_t)semantic,
+                                                           "signed and unsigned widening remain independently correct after pressure, reloads and coalescing");
+                                }
+                                tier1_emit_test_expect(test, observed[0] == UINT64_C(0xa55a1234a55a5678) && observed[17] == UINT64_C(0xa55a1234a55a5678), "signed-storage output preserves both memory canaries");
                             }
-                            if (executable != MAP_FAILED)
-                            {
-                                munmap(executable, bytes);
-                            }
+                        }
+                        if (executable != MAP_FAILED)
+                        {
+                            munmap(executable, bytes);
                         }
                     }
-                    arena_pop_to(&test->output, output_mark);
                 }
+                arena_pop_to(&test->output, output_mark);
             }
         }
         arena_pop_to(&test->input, input_mark);
@@ -232,59 +229,56 @@ static void tier1_storage_phi_tests(Tier1EmitTest* test)
             tier1_select_test_node(&function, 23, IR_STORE, IR_VOID, 22, 19, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 24, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 25, IR_RET, IR_VOID, 24, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t pressure = 0; pressure < 2; pressure += 1)
             {
-                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                const uint64_t output_mark = test->output.length;
+                IrDominance dominance;
+                const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "signed-storage join selects");
+                if (selected == TIER1_SELECT_OK)
                 {
-                    const uint64_t output_mark = test->output.length;
-                    IrDominance dominance;
-                    const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
-                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "signed-storage join selects");
-                    if (selected == TIER1_SELECT_OK)
+                    tier1_emit_test_expect(test, plan.patterns[17].storage_width == 8 && plan.patterns[18].rule == (shape >= 2 ? TIER1_RULE_SIGN_EXTEND : TIER1_RULE_COPY) && plan.patterns[19].rule == TIER1_RULE_ZERO_EXTEND,
+                                           "join keeps its sign certificate separately from unsigned widening");
+                    const Tier1EmitOptions options = {
+                        .certify = true,
+                        .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                        .vector = true,
+                        .rematerialize = pressure != 0,
+                    };
+                    Tier1EmitResult emitted;
+                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "sign-certified join and edge moves certify");
+                    if (error == TIER1_EMIT_OK)
                     {
-                        tier1_emit_test_expect(test, plan.patterns[17].storage_width == 8 && plan.patterns[18].rule == (shape >= 2 ? TIER1_RULE_SIGN_EXTEND : TIER1_RULE_COPY) && plan.patterns[19].rule == TIER1_RULE_ZERO_EXTEND,
-                                               "join keeps its sign certificate separately from unsigned widening");
-                        const Tier1EmitOptions options = {
-                            .certify = true,
-                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = path != 0,
-                            .rematerialize = pressure != 0,
-                        };
-                        Tier1EmitResult emitted;
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "sign-certified join and edge moves certify");
-                        if (error == TIER1_EMIT_OK)
+                        tier1_emit_test_expect(test, emitted.prepared.sizes[17] == 8 && emitted.prepared.sizes[3] == 8 && emitted.prepared.sizes[5] == 8, "all phi operands share eight-byte storage, including positive and opaque inputs");
+                        void* executable = MAP_FAILED;
+                        uint64_t bytes = 0;
+                        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                         {
-                            tier1_emit_test_expect(test, emitted.prepared.sizes[17] == 8 && emitted.prepared.sizes[3] == 8 && emitted.prepared.sizes[5] == 8, "all phi operands share eight-byte storage, including positive and opaque inputs");
-                            void* executable = MAP_FAILED;
-                            uint64_t bytes = 0;
-                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples); sample += 1)
                             {
-                                for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples); sample += 1)
-                                {
-                                    const uint32_t data[2] = { samples[sample], samples[(sample + 3) % BUSTER_ARRAY_LENGTH(samples)] };
-                                    const uint32_t second = shape == 1 ? 7 : shape == 3 ? (uint32_t)(uintptr_t)data : data[1];
-                                    const uint32_t picked = (int32_t)data[0] < 0 ? data[0] : second;
-                                    uint64_t observed[6];
-                                    memset(observed, 0xa5, sizeof(observed));
-                                    const uint64_t result = tier1_emit_test_call(executable, (uint64_t)(uintptr_t)data, (uint64_t)(uintptr_t)(observed + 1));
-                                    tier1_emit_test_expect(test, result == 0 && observed[1] == (uint64_t)(int64_t)(int32_t)data[0] && observed[2] == (uint64_t)(int64_t)(int32_t)second &&
-                                                               observed[3] == (uint64_t)(int64_t)(int32_t)picked && observed[4] == picked &&
-                                                               observed[0] == UINT64_C(0xa5a5a5a5a5a5a5a5) && observed[5] == UINT64_C(0xa5a5a5a5a5a5a5a5),
-                                                           "both incoming edges preserve signed bits and independent unsigned results");
-                                }
-                            }
-                            if (executable != MAP_FAILED)
-                            {
-                                munmap(executable, bytes);
+                                const uint32_t data[2] = { samples[sample], samples[(sample + 3) % BUSTER_ARRAY_LENGTH(samples)] };
+                                const uint32_t second = shape == 1 ? 7 : shape == 3 ? (uint32_t)(uintptr_t)data : data[1];
+                                const uint32_t picked = (int32_t)data[0] < 0 ? data[0] : second;
+                                uint64_t observed[6];
+                                memset(observed, 0xa5, sizeof(observed));
+                                const uint64_t result = tier1_emit_test_call(executable, (uint64_t)(uintptr_t)data, (uint64_t)(uintptr_t)(observed + 1));
+                                tier1_emit_test_expect(test, result == 0 && observed[1] == (uint64_t)(int64_t)(int32_t)data[0] && observed[2] == (uint64_t)(int64_t)(int32_t)second &&
+                                                           observed[3] == (uint64_t)(int64_t)(int32_t)picked && observed[4] == picked &&
+                                                           observed[0] == UINT64_C(0xa5a5a5a5a5a5a5a5) && observed[5] == UINT64_C(0xa5a5a5a5a5a5a5a5),
+                                                       "both incoming edges preserve signed bits and independent unsigned results");
                             }
                         }
+                        if (executable != MAP_FAILED)
+                        {
+                            munmap(executable, bytes);
+                        }
                     }
-                    arena_pop_to(&test->output, output_mark);
                 }
+                arena_pop_to(&test->output, output_mark);
             }
         }
         arena_pop_to(&test->input, input_mark);
@@ -331,70 +325,67 @@ static void tier1_storage_expression_tests(Tier1EmitTest* test)
             tier1_select_test_node(&function, 6, (uint8_t)op, IR_I32, unbounded ? 0 : 3, negate || invert ? BUSTER_IR_NONE : unbounded && !immediate ? 1 : 5, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 7, IR_SEXT, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t pressure = 0; pressure < 2; pressure += 1)
             {
-                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                const uint64_t output_mark = test->output.length;
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed);
+                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "widened expression selects");
+                if (selected == TIER1_SELECT_OK)
                 {
-                    const uint64_t output_mark = test->output.length;
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, path != 0, &plan, &failed);
-                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "widened expression selects");
-                    if (selected == TIER1_SELECT_OK)
+                    tier1_emit_test_expect(test, plan.patterns[7].rule == expected_rule && plan.covered[6] == !unbounded,
+                                           "only a complete representation and overflow proof widens the expression");
+                    const Tier1EmitOptions options = {
+                        .certify = true,
+                        .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                        .vector = true,
+                        .rematerialize = pressure != 0,
+                    };
+                    Tier1EmitResult emitted;
+                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "widened expression allocates and emits");
+                    if (error == TIER1_EMIT_OK)
                     {
-                        tier1_emit_test_expect(test, plan.patterns[7].rule == expected_rule && plan.covered[6] == !unbounded,
-                                               "only a complete representation and overflow proof widens the expression");
-                        const Tier1EmitOptions options = {
-                            .certify = true,
-                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = path != 0,
-                            .rematerialize = pressure != 0,
-                        };
-                        Tier1EmitResult emitted;
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "widened expression allocates and emits");
-                        if (error == TIER1_EMIT_OK)
+                        void* executable = MAP_FAILED;
+                        uint64_t bytes = 0;
+                        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                         {
-                            void* executable = MAP_FAILED;
-                            uint64_t bytes = 0;
-                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            for (uint32_t sample = 0; sample < 128; sample += 1)
                             {
-                                for (uint32_t sample = 0; sample < 128; sample += 1)
+                                const uint32_t a = sample < 64 ? samples[sample / 8] : (uint32_t)tier1_emit_test_random(&random);
+                                const uint32_t b = sample < 64 ? samples[sample % 8] : (uint32_t)tier1_emit_test_random(&random);
+                                const uint32_t left = full_load || unbounded ? a : (uint32_t)(int32_t)(int16_t)a;
+                                const uint32_t right = immediate ? constant : unbounded ? b : signed_right ? (uint32_t)(int32_t)(int16_t)b : (uint16_t)b;
+                                uint32_t result = 0;
+                                switch (op)
                                 {
-                                    const uint32_t a = sample < 64 ? samples[sample / 8] : (uint32_t)tier1_emit_test_random(&random);
-                                    const uint32_t b = sample < 64 ? samples[sample % 8] : (uint32_t)tier1_emit_test_random(&random);
-                                    const uint32_t left = full_load || unbounded ? a : (uint32_t)(int32_t)(int16_t)a;
-                                    const uint32_t right = immediate ? constant : unbounded ? b : signed_right ? (uint32_t)(int32_t)(int16_t)b : (uint16_t)b;
-                                    uint32_t result = 0;
-                                    switch (op)
-                                    {
-                                    case IR_ADD: result = left + right; break;
-                                    case IR_SUB: result = left - right; break;
-                                    case IR_MUL: result = left * right; break;
-                                    case IR_NEG: result = 0u - left; break;
-                                    case IR_NOT: result = ~left; break;
-                                    case IR_AND: result = left & right; break;
-                                    case IR_OR: result = left | right; break;
-                                    case IR_XOR: result = left ^ right; break;
-                                    case IR_ASHR:
-                                        result = left >> right;
-                                        result |= (left & UINT32_C(0x80000000)) != 0 ? UINT32_MAX << (32 - right) : 0;
-                                        break;
-                                    }
-                                    const uint64_t expected = (uint64_t)(int64_t)(int32_t)result;
-                                    const uint64_t first = full_load ? (uint64_t)(uintptr_t)&a : UINT64_C(0xa55a870000000000) | a;
-                                    const uint64_t actual = tier1_emit_test_call(executable, first, UINT64_C(0xf17e200000000000) | b);
-                                    tier1_emit_test_expect(test, actual == expected, "widened fields, shifts and bitwise operations preserve exact signed bits and unbounded I32 wrapping");
+                                case IR_ADD: result = left + right; break;
+                                case IR_SUB: result = left - right; break;
+                                case IR_MUL: result = left * right; break;
+                                case IR_NEG: result = 0u - left; break;
+                                case IR_NOT: result = ~left; break;
+                                case IR_AND: result = left & right; break;
+                                case IR_OR: result = left | right; break;
+                                case IR_XOR: result = left ^ right; break;
+                                case IR_ASHR:
+                                    result = left >> right;
+                                    result |= (left & UINT32_C(0x80000000)) != 0 ? UINT32_MAX << (32 - right) : 0;
+                                    break;
                                 }
-                            }
-                            if (executable != MAP_FAILED)
-                            {
-                                munmap(executable, bytes);
+                                const uint64_t expected = (uint64_t)(int64_t)(int32_t)result;
+                                const uint64_t first = full_load ? (uint64_t)(uintptr_t)&a : UINT64_C(0xa55a870000000000) | a;
+                                const uint64_t actual = tier1_emit_test_call(executable, first, UINT64_C(0xf17e200000000000) | b);
+                                tier1_emit_test_expect(test, actual == expected, "widened fields, shifts and bitwise operations preserve exact signed bits and unbounded I32 wrapping");
                             }
                         }
+                        if (executable != MAP_FAILED)
+                        {
+                            munmap(executable, bytes);
+                        }
                     }
-                    arena_pop_to(&test->output, output_mark);
                 }
+                arena_pop_to(&test->output, output_mark);
             }
         }
         arena_pop_to(&test->input, input_mark);
@@ -435,53 +426,50 @@ static void tier1_storage_narrow_arithmetic_tests(Tier1EmitTest* test)
                 tier1_select_test_node(&function, 7, IR_TRUNC, (uint8_t)type, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 tier1_select_test_node(&function, 8, IR_ZEXT, IR_I64, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 tier1_select_test_node(&function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                for (uint32_t path = 0; path < 2; path += 1)
+                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
                 {
-                    for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                    const uint64_t output_mark = test->output.length;
+                    Tier1SelectPlan plan;
+                    uint32_t failed = BUSTER_IR_NONE;
+                    const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed);
+                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "narrow arithmetic selects");
+                    if (selected == TIER1_SELECT_OK)
                     {
-                        const uint64_t output_mark = test->output.length;
-                        Tier1SelectPlan plan;
-                        uint32_t failed = BUSTER_IR_NONE;
-                        const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, path != 0, &plan, &failed);
-                        tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "narrow arithmetic selects");
-                        if (selected == TIER1_SELECT_OK)
+                        tier1_emit_test_expect(test, plan.patterns[7].rule == (folded ? unary ? TIER1_RULE_UNARY : TIER1_RULE_REGISTER : TIER1_RULE_TRUNCATE) && plan.covered[6] == folded,
+                                               "a byte or word ALU fold requires both semantic range and actual zero storage");
+                        const Tier1EmitOptions options = {
+                            .certify = true,
+                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                            .vector = true,
+                            .rematerialize = pressure != 0,
+                        };
+                        Tier1EmitResult emitted;
+                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "narrow arithmetic allocation and code certify");
+                        if (error == TIER1_EMIT_OK)
                         {
-                            tier1_emit_test_expect(test, plan.patterns[7].rule == (folded ? unary ? TIER1_RULE_UNARY : TIER1_RULE_REGISTER : TIER1_RULE_TRUNCATE) && plan.covered[6] == folded,
-                                                   "a byte or word ALU fold requires both semantic range and actual zero storage");
-                            const Tier1EmitOptions options = {
-                                .certify = true,
-                                .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                                .vector = path != 0,
-                                .rematerialize = pressure != 0,
-                            };
-                            Tier1EmitResult emitted;
-                            const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                            tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "narrow arithmetic allocation and code certify");
-                            if (error == TIER1_EMIT_OK)
+                            void* executable = MAP_FAILED;
+                            uint64_t bytes = 0;
+                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                             {
-                                void* executable = MAP_FAILED;
-                                uint64_t bytes = 0;
-                                if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                                for (uint32_t sample = 0; sample < 208; sample += 1)
                                 {
-                                    for (uint32_t sample = 0; sample < 208; sample += 1)
-                                    {
-                                        const uint32_t a = sample < 144 ? samples[sample / 12] : (uint32_t)tier1_emit_test_random(&random);
-                                        const uint32_t b = sample < 144 ? samples[sample % 12] : (uint32_t)tier1_emit_test_random(&random);
-                                        const uint32_t left = shape == 4 ? a : a & mask;
-                                        const uint32_t right = shape == 5 ? b : b & mask;
-                                        const uint32_t result = operations[shape] == IR_ADD ? left + right : operations[shape] == IR_SUB ? left - right : operations[shape] == IR_NEG ? 0u - left : ~left;
-                                        const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0x9876a55a00000000) | a, UINT64_C(0x2345f17e00000000) | b);
-                                        tier1_emit_test_expect(test, actual == (result & mask), "byte and word wrapping preserves every canonical upper bit, including aliased and poisoned inputs");
-                                    }
-                                }
-                                if (executable != MAP_FAILED)
-                                {
-                                    munmap(executable, bytes);
+                                    const uint32_t a = sample < 144 ? samples[sample / 12] : (uint32_t)tier1_emit_test_random(&random);
+                                    const uint32_t b = sample < 144 ? samples[sample % 12] : (uint32_t)tier1_emit_test_random(&random);
+                                    const uint32_t left = shape == 4 ? a : a & mask;
+                                    const uint32_t right = shape == 5 ? b : b & mask;
+                                    const uint32_t result = operations[shape] == IR_ADD ? left + right : operations[shape] == IR_SUB ? left - right : operations[shape] == IR_NEG ? 0u - left : ~left;
+                                    const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0x9876a55a00000000) | a, UINT64_C(0x2345f17e00000000) | b);
+                                    tier1_emit_test_expect(test, actual == (result & mask), "byte and word wrapping preserves every canonical upper bit, including aliased and poisoned inputs");
                                 }
                             }
+                            if (executable != MAP_FAILED)
+                            {
+                                munmap(executable, bytes);
+                            }
                         }
-                        arena_pop_to(&test->output, output_mark);
                     }
+                    arena_pop_to(&test->output, output_mark);
                 }
             }
             arena_pop_to(&test->input, input_mark);
@@ -541,61 +529,58 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
             tier1_select_test_node(&function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 10, IR_SEXT, IR_I64, source, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 11, shape == 10 ? IR_BR : IR_RET, IR_VOID, shape == 10 ? 1 : 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t pressure = 0; pressure < 2; pressure += 1)
             {
-                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                const uint64_t output_mark = test->output.length;
+                IrDominance dominance;
+                const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "scoped conversions select");
+                if (selected == TIER1_SELECT_OK)
                 {
-                    const uint64_t output_mark = test->output.length;
-                    IrDominance dominance;
-                    const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
-                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "scoped conversions select");
-                    if (selected == TIER1_SELECT_OK)
+                    tier1_emit_test_expect(test, plan.patterns[8].rule == (copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND) &&
+                                           (shape != 11 || plan.patterns[0].sign_result),
+                                           "a guarded zero representation or an explicit shared signed entry representation removes the conversion");
+                    if (plan.patterns[8].rule != (copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND))
                     {
-                        tier1_emit_test_expect(test, plan.patterns[8].rule == (copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND) &&
-                                               (shape != 11 || plan.patterns[0].sign_result),
-                                               "a guarded zero representation or an explicit shared signed entry representation removes the conversion");
-                        if (plan.patterns[8].rule != (copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND))
+                        fprintf(stderr, "  scoped conversion shape=%u pressure=%u rule=%u expected=%u\n", shape, pressure,
+                                plan.patterns[8].rule, copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND);
+                    }
+                    Tier1EmitDiagnostic diagnostic = { 0 };
+                    const Tier1EmitOptions options = {
+                        .diagnostic = &diagnostic,
+                        .certify = true,
+                        .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                        .vector = true,
+                        .rematerialize = pressure != 0,
+                    };
+                    Tier1EmitResult emitted;
+                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "scoped conversion allocation and code certify");
+                    if (error == TIER1_EMIT_OK)
+                    {
+                        void* executable = MAP_FAILED;
+                        uint64_t bytes = 0;
+                        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                         {
-                            fprintf(stderr, "  scoped conversion shape=%u path=%u pressure=%u rule=%u expected=%u\n", shape, path, pressure,
-                                    plan.patterns[8].rule, copied ? TIER1_RULE_COPY : TIER1_RULE_SIGN_EXTEND);
+                            for (uint32_t sample = 0; sample < 128; sample += 1)
+                            {
+                                const uint32_t a = sample < 64 ? samples[sample / 8] : (uint32_t)tier1_emit_test_random(&random);
+                                const uint32_t b = sample < 64 ? samples[sample % 8] : (uint32_t)tier1_emit_test_random(&random);
+                                const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0x7f80a55a00000000) | a, UINT64_C(0x9876f17e00000000) | b);
+                                tier1_emit_test_expect(test, actual == (uint64_t)(int64_t)(int32_t)a,
+                                                       "guarded and bypass paths return exact signed bits with poisoned ABI halves");
+                            }
                         }
-                        Tier1EmitDiagnostic diagnostic = { 0 };
-                        const Tier1EmitOptions options = {
-                            .diagnostic = &diagnostic,
-                            .certify = true,
-                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = path != 0,
-                            .rematerialize = pressure != 0,
-                        };
-                        Tier1EmitResult emitted;
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "scoped conversion allocation and code certify");
-                        if (error == TIER1_EMIT_OK)
+                        if (executable != MAP_FAILED)
                         {
-                            void* executable = MAP_FAILED;
-                            uint64_t bytes = 0;
-                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
-                            {
-                                for (uint32_t sample = 0; sample < 128; sample += 1)
-                                {
-                                    const uint32_t a = sample < 64 ? samples[sample / 8] : (uint32_t)tier1_emit_test_random(&random);
-                                    const uint32_t b = sample < 64 ? samples[sample % 8] : (uint32_t)tier1_emit_test_random(&random);
-                                    const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0x7f80a55a00000000) | a, UINT64_C(0x9876f17e00000000) | b);
-                                    tier1_emit_test_expect(test, actual == (uint64_t)(int64_t)(int32_t)a,
-                                                           "guarded and bypass paths return exact signed bits with poisoned ABI halves");
-                                }
-                            }
-                            if (executable != MAP_FAILED)
-                            {
-                                munmap(executable, bytes);
-                            }
+                            munmap(executable, bytes);
                         }
                     }
-                    arena_pop_to(&test->output, output_mark);
                 }
+                arena_pop_to(&test->output, output_mark);
             }
         }
         arena_pop_to(&test->input, input_mark);
@@ -653,71 +638,68 @@ static void tier1_storage_loop_state_tests(Tier1EmitTest* test)
             tier1_select_test_node(&function, exit + 2, IR_SEXT, IR_I64, exit + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, exit + 3, IR_ADD, IR_I64, exit, exit + 2, BUSTER_IR_NONE);
             tier1_select_test_node(&function, exit + 4, IR_RET, IR_VOID, exit + 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t pressure = 0; pressure < 2; pressure += 1)
             {
-                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                const uint64_t output_mark = test->output.length;
+                IrDominance dominance;
+                const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "wrapping loop state selects");
+                if (selected == TIER1_SELECT_OK)
                 {
-                    const uint64_t output_mark = test->output.length;
-                    IrDominance dominance;
-                    const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
-                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "wrapping loop state selects");
-                    if (selected == TIER1_SELECT_OK)
+                    tier1_emit_test_expect(test, plan.patterns[6].sign_result == proven && plan.patterns[exit + 2].rule == (proven ? TIER1_RULE_LEA_ADD : TIER1_RULE_SIGN_EXTEND),
+                                           "every incoming edge must exclude INT_MAX before a signed loop state permits +1 at 64 bits");
+                    const Tier1EmitOptions options = {
+                        .certify = true,
+                        .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                        .vector = true,
+                        .rematerialize = pressure != 0,
+                    };
+                    Tier1EmitResult emitted;
+                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "wrapping loop state allocation and code certify");
+                    if (error == TIER1_EMIT_OK)
                     {
-                        tier1_emit_test_expect(test, plan.patterns[6].sign_result == proven && plan.patterns[exit + 2].rule == (proven ? TIER1_RULE_LEA_ADD : TIER1_RULE_SIGN_EXTEND),
-                                               "every incoming edge must exclude INT_MAX before a signed loop state permits +1 at 64 bits");
-                        const Tier1EmitOptions options = {
-                            .certify = true,
-                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = path != 0,
-                            .rematerialize = pressure != 0,
-                        };
-                        Tier1EmitResult emitted;
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "wrapping loop state allocation and code certify");
-                        if (error == TIER1_EMIT_OK)
+                        tier1_emit_test_expect(test, emitted.prepared.sizes[5] == (proven ? 8 : 4) && emitted.prepared.sizes[6] == (proven ? 8 : 4),
+                                               "signed loop state and its wrapping definition retain the same spill width");
+                        void* executable = MAP_FAILED;
+                        uint64_t bytes = 0;
+                        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                         {
-                            tier1_emit_test_expect(test, emitted.prepared.sizes[5] == (proven ? 8 : 4) && emitted.prepared.sizes[6] == (proven ? 8 : 4),
-                                                   "signed loop state and its wrapping definition retain the same spill width");
-                            void* executable = MAP_FAILED;
-                            uint64_t bytes = 0;
-                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            const uint32_t samples = shape == 0 || bridge ? BUSTER_ARRAY_LENGTH(strides) : 1;
+                            for (uint32_t sample = 0; sample < samples; sample += 1)
                             {
-                                const uint32_t samples = shape == 0 || bridge ? BUSTER_ARRAY_LENGTH(strides) : 1;
-                                for (uint32_t sample = 0; sample < samples; sample += 1)
+                                const uint32_t stride = samples == 1 ? 1 : strides[sample];
+                                uint32_t phi = initial;
+                                bool again = true;
+                                for (uint32_t iteration = 0; again && iteration < 3; iteration += 1)
                                 {
-                                    const uint32_t stride = samples == 1 ? 1 : strides[sample];
-                                    uint32_t phi = initial;
-                                    bool again = true;
-                                    for (uint32_t iteration = 0; again && iteration < 3; iteration += 1)
+                                    const uint32_t next = phi + stride;
+                                    const uint32_t tested = shape == 3 ? phi : next;
+                                    again = shape == 4 ? tested < limit : (int32_t)tested < (int32_t)limit;
+                                    if (again)
                                     {
-                                        const uint32_t next = phi + stride;
-                                        const uint32_t tested = shape == 3 ? phi : next;
-                                        again = shape == 4 ? tested < limit : (int32_t)tested < (int32_t)limit;
-                                        if (again)
-                                        {
-                                            phi = next;
-                                        }
-                                    }
-                                    tier1_emit_test_expect(test, !again, "wrapping-state oracle terminates within its independent bound");
-                                    if (!again)
-                                    {
-                                        const uint64_t expected = (uint64_t)(int64_t)(int32_t)phi + (uint64_t)(int64_t)(int32_t)(phi + 1u);
-                                        const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55a123400000000) | stride, 0);
-                                        tier1_emit_test_expect(test, actual == expected, "loop arithmetic wraps at 32 bits while separate signed uses retain negative and INT_MAX boundaries");
+                                        phi = next;
                                     }
                                 }
-                            }
-                            if (executable != MAP_FAILED)
-                            {
-                                munmap(executable, bytes);
+                                tier1_emit_test_expect(test, !again, "wrapping-state oracle terminates within its independent bound");
+                                if (!again)
+                                {
+                                    const uint64_t expected = (uint64_t)(int64_t)(int32_t)phi + (uint64_t)(int64_t)(int32_t)(phi + 1u);
+                                    const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55a123400000000) | stride, 0);
+                                    tier1_emit_test_expect(test, actual == expected, "loop arithmetic wraps at 32 bits while separate signed uses retain negative and INT_MAX boundaries");
+                                }
                             }
                         }
+                        if (executable != MAP_FAILED)
+                        {
+                            munmap(executable, bytes);
+                        }
                     }
-                    arena_pop_to(&test->output, output_mark);
                 }
+                arena_pop_to(&test->output, output_mark);
             }
         }
         arena_pop_to(&test->input, input_mark);
@@ -784,98 +766,95 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
             }
             tier1_select_test_node(&function, next++, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_emit_test_expect(test, next == function.instruction_count, "shared signed parameter fixture fills its exact columns");
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t pressure = 0; pressure < 2; pressure += 1)
             {
-                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                const uint64_t output_mark = test->output.length;
+                IrDominance dominance;
+                const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "shared signed parameters select");
+                if (selected == TIER1_SELECT_OK)
                 {
-                    const uint64_t output_mark = test->output.length;
-                    IrDominance dominance;
-                    const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
-                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "shared signed parameters select");
-                    if (selected == TIER1_SELECT_OK)
+                    tier1_emit_test_expect(test, plan.patterns[0].sign_result && plan.patterns[second].sign_result && !plan.patterns[1].sign_result &&
+                                           plan.patterns[values[0]].rule == TIER1_RULE_COPY && plan.patterns[values[1]].rule == TIER1_RULE_COPY &&
+                                           plan.patterns[values[3]].rule == TIER1_RULE_COPY && plan.patterns[values[4]].rule == TIER1_RULE_COPY &&
+                                           plan.patterns[values[6]].rule == TIER1_RULE_SIGN_EXTEND,
+                                           "two widening roots share an explicit entry conversion while a single use remains local");
+                    Tier1EmitDiagnostic diagnostic = { 0 };
+                    const Tier1EmitOptions options = {
+                        .diagnostic = &diagnostic,
+                        .certify = true,
+                        .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                        .vector = true,
+                        .rematerialize = pressure != 0,
+                    };
+                    Tier1EmitResult emitted;
+                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "shared signed parameter allocation and code certify");
+                    if (error != TIER1_EMIT_OK)
                     {
-                        tier1_emit_test_expect(test, plan.patterns[0].sign_result && plan.patterns[second].sign_result && !plan.patterns[1].sign_result &&
-                                               plan.patterns[values[0]].rule == TIER1_RULE_COPY && plan.patterns[values[1]].rule == TIER1_RULE_COPY &&
-                                               plan.patterns[values[3]].rule == TIER1_RULE_COPY && plan.patterns[values[4]].rule == TIER1_RULE_COPY &&
-                                               plan.patterns[values[6]].rule == TIER1_RULE_SIGN_EXTEND,
-                                               "two widening roots share an explicit entry conversion while a single use remains local");
-                        Tier1EmitDiagnostic diagnostic = { 0 };
-                        const Tier1EmitOptions options = {
-                            .diagnostic = &diagnostic,
-                            .certify = true,
-                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = path != 0,
-                            .rematerialize = pressure != 0,
-                        };
-                        Tier1EmitResult emitted;
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "shared signed parameter allocation and code certify");
-                        if (error != TIER1_EMIT_OK)
+                        fprintf(stderr, "  signed parameter shape=%u pressure=%u error=%u node=%u cause=%u detail=%u\n", shape, pressure,
+                                (unsigned)error, failed, (unsigned)diagnostic.cause, diagnostic.error);
+                        if (error == TIER1_EMIT_CERTIFICATE)
                         {
-                            fprintf(stderr, "  signed parameter shape=%u path=%u pressure=%u error=%u node=%u cause=%u detail=%u\n", shape, path, pressure,
-                                    (unsigned)error, failed, (unsigned)diagnostic.cause, diagnostic.error);
-                            if (error == TIER1_EMIT_CERTIFICATE)
+                            Tier1EmitResult raw = { 0 };
+                            if (tier1_emit_cfg_function(&plan, &options, test->allowed, &test->output, &test->scratch, &raw, &failed) == TIER1_EMIT_OK)
                             {
-                                Tier1EmitResult raw = { 0 };
-                                if (tier1_emit_cfg_function(&plan, &options, test->allowed, &test->output, &test->scratch, &raw, &failed) == TIER1_EMIT_OK)
-                                {
-                                    Tier1CertReport report = { 0 };
-                                    Tier1CertEmittedStats stats = { 0 };
-                                    const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(&plan, &raw, &test->output, &test->scratch, &report, &stats);
-                                    fprintf(stderr, "  signed entry checker reason=%u record=%u error=%u block=%u instruction=%u\n", (unsigned)reason, stats.record,
-                                            (unsigned)report.error, report.block, report.instruction);
-                                }
-                            }
-                        }
-                        if (error == TIER1_EMIT_OK)
-                        {
-                            tier1_emit_test_expect(test, emitted.prepared.sizes[0] == 8 && emitted.prepared.sizes[second] == 8 && emitted.prepared.sizes[1] == 4,
-                                                   "shared signed parameters preserve eight-byte storage without widening the single-use control");
-                            uint32_t conversions = 0;
-                            for (uint32_t r = 0; emitted.general && r < emitted.code.count; r += 1)
-                            {
-                                const X86Instruction record = emitted.code.records[r];
-                                if (record.form == X86_FORM_MOVSXD_R64_RM32 && emitted.origin_values[r] < parameters &&
-                                    (emitted.origin_values[r] == 0 || emitted.origin_values[r] == second))
-                                {
-                                    X86Instruction wrong_width = record;
-                                    wrong_width.form = X86_FORM_MOV_R64_RM64;
-                                    tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, r, wrong_width, UINT32_MAX),
-                                                           "signed entry certificate refuses reading the caller's unspecified upper bytes");
-                                    tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, r, (X86Instruction){ .form = X86_FORM_NOP }, UINT32_MAX),
-                                                           "signed entry certificate refuses an omitted conversion");
-                                    conversions += 1;
-                                }
-                            }
-                            tier1_emit_test_expect(test, !emitted.general || conversions == 2, "both shared signed entry conversions are independently decoded and mutated");
-                            void* executable = MAP_FAILED;
-                            uint64_t bytes = 0;
-                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
-                            {
-                                for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
-                                {
-                                    const uint32_t x = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : (uint32_t)tier1_emit_test_random(&random);
-                                    const uint32_t y = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[BUSTER_ARRAY_LENGTH(samples) - sample - 1] : (uint32_t)tier1_emit_test_random(&random);
-                                    const uint32_t z = (uint32_t)tier1_emit_test_random(&random);
-                                    const uint64_t a = UINT64_C(0xa55ac0de00000000) | x;
-                                    const uint64_t b = UINT64_C(0x39a17e5400000000) | y;
-                                    const uint64_t c = UINT64_C(0xdeadbeef00000000) | z;
-                                    const uint64_t expected = 2 * (uint64_t)(int64_t)(int32_t)x + x + 2 * (uint64_t)(int64_t)(int32_t)y + y + (uint64_t)(int64_t)(int32_t)z;
-                                    const uint64_t actual = tier1_storage_parameter_call(executable, a, c, b);
-                                    tier1_emit_test_expect(test, actual == expected, "shared entry conversion preserves signed and unsigned uses of poisoned register and stack arguments");
-                                }
-                            }
-                            if (executable != MAP_FAILED)
-                            {
-                                munmap(executable, bytes);
+                                Tier1CertReport report = { 0 };
+                                Tier1CertEmittedStats stats = { 0 };
+                                const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(&plan, &raw, &test->output, &test->scratch, &report, &stats);
+                                fprintf(stderr, "  signed entry checker reason=%u record=%u error=%u block=%u instruction=%u\n", (unsigned)reason, stats.record,
+                                        (unsigned)report.error, report.block, report.instruction);
                             }
                         }
                     }
-                    arena_pop_to(&test->output, output_mark);
+                    if (error == TIER1_EMIT_OK)
+                    {
+                        tier1_emit_test_expect(test, emitted.prepared.sizes[0] == 8 && emitted.prepared.sizes[second] == 8 && emitted.prepared.sizes[1] == 4,
+                                               "shared signed parameters preserve eight-byte storage without widening the single-use control");
+                        uint32_t conversions = 0;
+                        for (uint32_t r = 0; emitted.general && r < emitted.code.count; r += 1)
+                        {
+                            const X86Instruction record = emitted.code.records[r];
+                            if (record.form == X86_FORM_MOVSXD_R64_RM32 && emitted.origin_values[r] < parameters &&
+                                (emitted.origin_values[r] == 0 || emitted.origin_values[r] == second))
+                            {
+                                X86Instruction wrong_width = record;
+                                wrong_width.form = X86_FORM_MOV_R64_RM64;
+                                tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, r, wrong_width, UINT32_MAX),
+                                                       "signed entry certificate refuses reading the caller's unspecified upper bytes");
+                                tier1_emit_test_expect(test, tier1_code_certificate_refuses(test, &plan, &emitted, r, (X86Instruction){ .form = X86_FORM_NOP }, UINT32_MAX),
+                                                       "signed entry certificate refuses an omitted conversion");
+                                conversions += 1;
+                            }
+                        }
+                        tier1_emit_test_expect(test, !emitted.general || conversions == 2, "both shared signed entry conversions are independently decoded and mutated");
+                        void* executable = MAP_FAILED;
+                        uint64_t bytes = 0;
+                        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                        {
+                            for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
+                            {
+                                const uint32_t x = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : (uint32_t)tier1_emit_test_random(&random);
+                                const uint32_t y = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[BUSTER_ARRAY_LENGTH(samples) - sample - 1] : (uint32_t)tier1_emit_test_random(&random);
+                                const uint32_t z = (uint32_t)tier1_emit_test_random(&random);
+                                const uint64_t a = UINT64_C(0xa55ac0de00000000) | x;
+                                const uint64_t b = UINT64_C(0x39a17e5400000000) | y;
+                                const uint64_t c = UINT64_C(0xdeadbeef00000000) | z;
+                                const uint64_t expected = 2 * (uint64_t)(int64_t)(int32_t)x + x + 2 * (uint64_t)(int64_t)(int32_t)y + y + (uint64_t)(int64_t)(int32_t)z;
+                                const uint64_t actual = tier1_storage_parameter_call(executable, a, c, b);
+                                tier1_emit_test_expect(test, actual == expected, "shared entry conversion preserves signed and unsigned uses of poisoned register and stack arguments");
+                            }
+                        }
+                        if (executable != MAP_FAILED)
+                        {
+                            munmap(executable, bytes);
+                        }
+                    }
                 }
+                arena_pop_to(&test->output, output_mark);
             }
         }
         arena_pop_to(&test->input, input_mark);
@@ -923,70 +902,67 @@ static void tier1_storage_midpoint_tests(Tier1EmitTest* test)
             tier1_select_test_node(&function, 13, IR_SEXT, IR_I64, 12, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 14, IR_ADD, IR_I64, 11, 13, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 15, IR_RET, IR_VOID, 14, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            for (uint32_t path = 0; path < 2; path += 1)
+            for (uint32_t pressure = 0; pressure < 2; pressure += 1)
             {
-                for (uint32_t pressure = 0; pressure < 2; pressure += 1)
+                const uint64_t output_mark = test->output.length;
+                IrDominance dominance;
+                const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "signed midpoint selects");
+                if (selected == TIER1_SELECT_OK)
                 {
-                    const uint64_t output_mark = test->output.length;
-                    IrDominance dominance;
-                    const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
-                    Tier1SelectPlan plan;
-                    uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
-                    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "signed midpoint selects");
-                    if (selected == TIER1_SELECT_OK)
+                    tier1_emit_test_expect(test, plan.patterns[3].sign_result == bounded && plan.patterns[6].sign_result == bounded &&
+                                           plan.patterns[11].rule == (bounded ? TIER1_RULE_IMMEDIATE : TIER1_RULE_SIGN_EXTEND) &&
+                                           plan.patterns[13].rule == (bounded ? TIER1_RULE_IMMEDIATE : TIER1_RULE_SIGN_EXTEND),
+                                           "a bounded signed midpoint shares its definition's extension while unbounded multiplication retains wrapping");
+                    const Tier1EmitOptions options = {
+                        .certify = true,
+                        .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
+                        .vector = true,
+                        .rematerialize = pressure != 0,
+                    };
+                    Tier1EmitResult emitted;
+                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
+                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "signed midpoint allocation and code certify");
+                    if (error == TIER1_EMIT_OK)
                     {
-                        tier1_emit_test_expect(test, plan.patterns[3].sign_result == bounded && plan.patterns[6].sign_result == bounded &&
-                                               plan.patterns[11].rule == (bounded ? TIER1_RULE_IMMEDIATE : TIER1_RULE_SIGN_EXTEND) &&
-                                               plan.patterns[13].rule == (bounded ? TIER1_RULE_IMMEDIATE : TIER1_RULE_SIGN_EXTEND),
-                                               "a bounded signed midpoint shares its definition's extension while unbounded multiplication retains wrapping");
-                        const Tier1EmitOptions options = {
-                            .certify = true,
-                            .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = path != 0,
-                            .rematerialize = pressure != 0,
-                        };
-                        Tier1EmitResult emitted;
-                        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
-                        tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "signed midpoint allocation and code certify");
-                        if (error == TIER1_EMIT_OK)
+                        tier1_emit_test_expect(test, emitted.prepared.sizes[5] == (bounded ? 8 : 4), "only the proved signed midpoint widens its spill storage");
+                        void* executable = MAP_FAILED;
+                        uint64_t bytes = 0;
+                        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
                         {
-                            tier1_emit_test_expect(test, emitted.prepared.sizes[5] == (bounded ? 8 : 4), "only the proved signed midpoint widens its spill storage");
-                            void* executable = MAP_FAILED;
-                            uint64_t bytes = 0;
-                            if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+                            for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
                             {
-                                for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(samples) + 64; sample += 1)
+                                const uint32_t input = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : (uint32_t)tier1_emit_test_random(&random);
+                                uint32_t phi = bounded ? (input >> 1) | (input & UINT32_C(0x80000000)) : input;
+                                bool again = true;
+                                for (uint32_t iteration = 0; again && iteration < 32; iteration += 1)
                                 {
-                                    const uint32_t input = sample < BUSTER_ARRAY_LENGTH(samples) ? samples[sample] : (uint32_t)tier1_emit_test_random(&random);
-                                    uint32_t phi = bounded ? (input >> 1) | (input & UINT32_C(0x80000000)) : input;
-                                    bool again = true;
-                                    for (uint32_t iteration = 0; again && iteration < 32; iteration += 1)
+                                    const uint32_t next = (phi >> 1) | (phi & UINT32_C(0x80000000));
+                                    again = (int32_t)next > 0;
+                                    if (again)
                                     {
-                                        const uint32_t next = (phi >> 1) | (phi & UINT32_C(0x80000000));
-                                        again = (int32_t)next > 0;
-                                        if (again)
-                                        {
-                                            phi = next;
-                                        }
-                                    }
-                                    tier1_emit_test_expect(test, !again, "midpoint oracle terminates within its independent bound");
-                                    if (!again)
-                                    {
-                                        const uint64_t product = (uint64_t)(int64_t)(int32_t)(phi * 2u);
-                                        const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55ac0de00000000) | input, 0);
-                                        tier1_emit_test_expect(test, actual == product + product, "midpoint multiplication preserves negative endpoints, raw wrapping controls and poisoned upper halves");
+                                        phi = next;
                                     }
                                 }
-                            }
-                            if (executable != MAP_FAILED)
-                            {
-                                munmap(executable, bytes);
+                                tier1_emit_test_expect(test, !again, "midpoint oracle terminates within its independent bound");
+                                if (!again)
+                                {
+                                    const uint64_t product = (uint64_t)(int64_t)(int32_t)(phi * 2u);
+                                    const uint64_t actual = tier1_emit_test_call(executable, UINT64_C(0xa55ac0de00000000) | input, 0);
+                                    tier1_emit_test_expect(test, actual == product + product, "midpoint multiplication preserves negative endpoints, raw wrapping controls and poisoned upper halves");
+                                }
                             }
                         }
+                        if (executable != MAP_FAILED)
+                        {
+                            munmap(executable, bytes);
+                        }
                     }
-                    arena_pop_to(&test->output, output_mark);
                 }
+                arena_pop_to(&test->output, output_mark);
             }
         }
         arena_pop_to(&test->input, input_mark);

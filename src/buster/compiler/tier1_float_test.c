@@ -647,7 +647,7 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+    const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
     tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "the floating fixture selects");
     if (selected != TIER1_SELECT_OK && dominated && test->failures < 20)
     {

@@ -214,7 +214,7 @@ static bool tier1_select_bench_run(Tier1SelectBench* bench, bool vector, bool co
     {
         Tier1SelectPlan plan;
         uint32_t node;
-        valid = tier1_select_plan(&bench->functions[f], 0, &bench->output, &bench->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+        valid = tier1_select_plan(&bench->functions[f], 0, &bench->output, &bench->scratch, &plan, &node) == TIER1_SELECT_OK;
         if (valid && complete)
         {
             const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .rematerialize = true };

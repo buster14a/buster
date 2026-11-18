@@ -224,7 +224,7 @@ static void tier1_emit_test_pressure(Tier1EmitTest* test)
                     {
                         Tier1SelectPlan plan;
                         uint32_t node;
-                        const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node);
+                        const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node);
                         tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real pressure IR");
                         if (selected == TIER1_SELECT_OK)
                         {
@@ -289,7 +289,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
     bool ready = tier1_emit_test_fixture(test, &function);
     Tier1SelectPlan plan;
     uint32_t node;
-    ready = ready && tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+    ready = ready && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, ready, "failure fixture selected");
     if (ready)
     {
@@ -341,7 +341,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
         function.block_offsets[1] = 2;
         tier1_emit_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
         tier1_emit_test_node(&function, 1, IR_BR, IR_VOID, 0, BUSTER_IR_NONE);
-        ready = tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+        ready = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         tier1_emit_test_expect(test, ready, "loop fixture selected independently");
         if (ready)
         {
@@ -361,7 +361,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
     arena_pop_to(&test->output, 0);
     arena_pop_to(&test->input, 0);
     const IrSizes empty_sizes = {0};
-    ready = ir_create(&test->input, &empty_sizes, &function) == IR_OK && tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+    ready = ir_create(&test->input, &empty_sizes, &function) == IR_OK && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     if (ready)
     {
         const Tier1EmitOptions options = { .vector = true, .certify = true };
@@ -932,7 +932,7 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                 uint32_t dominance_enter[3] = { 0, 1, 2 };
                 uint32_t dominance_leave[3] = { function.block_count, 2, 3 };
                 const IrDominance dominance = { .enter = dominance_enter, .leave = dominance_leave, .block_count = function.block_count };
-                const Tier1SelectError selected = created ? tier1_select_plan(&function, function.block_count > 1 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+                const Tier1SelectError selected = created ? tier1_select_plan(&function, function.block_count > 1 ? &dominance : 0, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real object IR");
                 if (selected == TIER1_SELECT_OK)
                 {
@@ -1184,7 +1184,7 @@ static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
             uint32_t dominance_enter[3] = { 0, 1, 2 };
             uint32_t dominance_leave[3] = { 3, 2, 3 };
             const IrDominance tree = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 3 };
-            const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 2 ? &tree : 0, &test->output, &test->scratch, vector != 0, &plan, &node) :
+            const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 2 ? &tree : 0, &test->output, &test->scratch, &plan, &node) :
                                                         TIER1_SELECT_ERROR_INVALID;
             tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select lifetime IR");
             if (selected == TIER1_SELECT_OK)
@@ -1280,7 +1280,7 @@ static void tier1_emit_test_object_overflow(Tier1EmitTest* test)
         }
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError selected = created ? tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+        const Tier1SelectError selected = created ? tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
         tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select overflowing displacement IR");
         if (created && selected == TIER1_SELECT_OK)
         {
@@ -1409,7 +1409,7 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
             const bool dominated = branching == 0 || tier1_terminal_dominance(test, &function, &dominance);
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const bool planned = dominated && tier1_select_plan(&function, branching != 0 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;
+            const bool planned = dominated && tier1_select_plan(&function, branching != 0 ? &dominance : 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
             tier1_emit_test_expect(test, planned, "overlong fixture selects");
             const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector != 0, .certify = true };
             Tier1EmitResult base;

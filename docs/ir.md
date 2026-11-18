@@ -870,7 +870,7 @@ floating environment and termination.
   is one), control, calls or MXCSR, or may fault. So a locked access, `mfence` and
   every SSE floating operation keep their places (`test-tier1-schedule`).
 - **Tier 1's load folding** moves a load into its single consumer past no store,
-  call, fence, `rmw`, stack move or other load (`tier1_select_fold_barrier`):
+  call, fence, `rmw`, stack move or other load (`tier1_select_barriers`):
   - The typed stream doesn't carry a C access's volatility, so the IR's loads of
     volatile objects aren't flagged `volatile`. Two volatile reads must keep their
     order, so the IR treats every unflagged load as possibly volatile.

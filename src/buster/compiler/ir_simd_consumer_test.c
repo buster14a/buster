@@ -371,7 +371,7 @@ static int run_ir_simd_tests(int argc, char** argv)
             memset(&selected, 0xa5, sizeof(selected));
             const Tier1SelectPlan before = selected;
             uint32_t failed = BUSTER_IR_NONE;
-            const Tier1SelectError selection = tier1_select_plan(&function, NULL, &output, &scratch, scalar == 0, &selected, &failed);
+            const Tier1SelectError selection = tier1_select_plan(&function, NULL, &output, &scratch, &selected, &failed);
             ir_test_expect(&tally, selection == TIER1_SELECT_ERROR_UNSUPPORTED && memcmp(&selected, &before, sizeof(selected)) == 0 && output.length == 0 && scratch.length == 0,
                            "native Tier 1 refuses SIMD without using the host ISA to authorize output instructions");
         }
