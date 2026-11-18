@@ -409,28 +409,18 @@ static uint32_t ir_unroll_test_parameters(uint32_t bits, uint64_t* parameters, u
     return count;
 }
 
-// The fixture by both twins: the same function and counts; `expected`'s outcome counted once; an unrolled one verified,
+// The fixture: its function and counts into the digest; `expected`'s outcome counted once; an unrolled one verified,
 // optimized and executed against the original on every parameter.
 static void ir_unroll_test_run(IrOptimizeTest* test, const IrFunction* f, IrUnrollOptions options, IrUnrollRefusal expected, uint32_t bits, const char* label)
 {
     Arena vector = arena_reserve(UINT64_C(1) << 28);
-    Arena scalar = arena_reserve(UINT64_C(1) << 28);
     Arena scratch = arena_reserve(UINT64_C(1) << 30);
     Arena optimized = arena_reserve(UINT64_C(1) << 28);
     char message[256] = { 0 };
     IrUnrollResult a = { 0 };
-    IrUnrollResult b = { 0 };
-    options.scalar = false;
     const IrCheck ac = ir_optimize_unroll(f, &vector, &scratch, options, &a);
-    const uint64_t after_vector = scratch.length;
-    options.scalar = true;
-    const IrCheck bc = ir_optimize_unroll(f, &scalar, &scratch, options, &b);
-    snprintf(message, sizeof(message), "%s: both twins accept the fixture and return their scratch", label);
-    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && after_vector == 0 && scratch.length == 0, message);
-    bool same = memcmp(a.outcomes, b.outcomes, sizeof(a.outcomes)) == 0 && a.copies == b.copies && a.reductions == b.reductions && a.added == b.added;
-    same = same && ir_optimize_test_equal(&a.function, &b.function);
-    snprintf(message, sizeof(message), "%s: the twins give the same function and counts", label);
-    ir_optimize_test_expect(test, same, message);
+    snprintf(message, sizeof(message), "%s: the unroller accepts the fixture and returns its scratch", label);
+    ir_optimize_test_expect(test, ac.error == IR_OK && scratch.length == 0, message);
     if (ac.error == IR_OK)
     {
         ir_optimize_test_fold_function(&test->unroll_digest, &a.function);
@@ -486,7 +476,6 @@ static void ir_unroll_test_run(IrOptimizeTest* test, const IrFunction* f, IrUnro
         ir_optimize_test_expect(test, executed, message);
     }
     arena_release(&vector);
-    arena_release(&scalar);
     arena_release(&scratch);
     arena_release(&optimized);
 }
@@ -1027,7 +1016,7 @@ static void ir_unroll_test_scans(IrOptimizeTest* test)
         {
             f.instruction_count = length;
             memset(classes, 0xa5, sizeof(classes));
-            const bool phis = ir_unroll_classify(&f, classes, false);
+            const bool phis = ir_unroll_classify(&f, classes);
             bool expected_phis = false;
             bool same = true;
             for (uint32_t i = 0; i < length; i += 1)
@@ -1055,7 +1044,7 @@ static void ir_unroll_test_scans(IrOptimizeTest* test)
                 {
                     expected |= classes[i];
                 }
-                unions &= ir_unroll_block_classes(classes, first, end, false) == expected;
+                unions &= ir_unroll_block_classes(classes, first, end) == expected;
             }
         }
         for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(map); k += 1)
@@ -1082,7 +1071,7 @@ static void ir_unroll_test_scans(IrOptimizeTest* test)
                 .b = b,
                 .c = c,
             };
-            ir_unroll_remap(&f, first, count, map, &view, out, false);
+            ir_unroll_remap(&f, first, count, map, &view, out);
             bool same = true;
             for (uint32_t k = 0; k < count; k += 1)
             {

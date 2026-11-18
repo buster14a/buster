@@ -556,7 +556,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0)
     {
         IrVectorizeResult vectorized = { 0 };
-        const IrVectorizeOptions options = { .target = lane->vectorize, .scalar = scalar };
+        const IrVectorizeOptions options = { .target = lane->vectorize };
         const IrCheck check = ir_vectorize_loops(&wide.function, &options, &lane->steps[10], scratch, &vectorized);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, NULL);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
@@ -581,7 +581,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 && !input->summary)
     {
         IrUnrollOptions options = ir_unroll_options();
-        options.scalar = scalar;
         IrUnrollResult unrolled = { 0 };
         const IrCheck check = ir_optimize_unroll(&wide.function, &lane->steps[11], scratch, options, &unrolled);
         const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
@@ -632,7 +631,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
 static CheckTier1Outcome check_tier1_unroll_own(CheckTier1Lane* lane, bool scalar, bool certify, const CheckTier1Fault* fault, IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
     IrUnrollOptions options = ir_unroll_options();
-    options.scalar = scalar;
     IrUnrollResult unrolled = { 0 };
     const IrCheck check = ir_optimize_unroll(&passes->optimized.function, &lane->steps[11], &lane->scratch, options, &unrolled);
     const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;

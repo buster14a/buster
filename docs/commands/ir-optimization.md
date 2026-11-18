@@ -66,9 +66,10 @@ two loops and a nested one; and one fixture per refusal (a prefix sum, a
 histogram, a strided store, the induction as data, a call, a volatile load, a
 division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
 than the limit, a reduction's partial value read, an early exit, a step of two).
-Each runs by both parser paths and both of the pass's paths at three targets of
-every operation the IR has, at most 64, 32 and 16 bytes wide, which must give
-the same function and counts; a fixture expects how many loops each width
+Each runs by both parser paths and the pass at three targets of every operation
+the IR has, at most 64, 32 and 16 bytes wide, its result and counts folded into
+a frozen digest (#2924); the kinds and the refusing kinds' scan are checked
+against their definitions; a fixture expects how many loops each width
 vectorizes, or its refusal's reason. Each changed result, and its form after
 the ordinary optimizer (whose final verification checks dominance), runs in the
 shared interpreter against the input on one buffer, its pointers placed apart,
@@ -112,16 +113,19 @@ loop as its remainder. [The design](../../docs/tier1-loop-unrolling.md) has its
 rules, budgets, refusals and the 9700X's record.
 
 `./build/compiler test-ir-unroll [--seed N] [--shapes N]` builds loops in the
-IR's text form (a builder that names values), runs each by both twins and
-requires the same function, outcomes and counts; an unrolled one verifies with
+IR's text form (a builder that names values), runs each and folds its function,
+outcomes and counts into a digest frozen for the default seed and shapes
+(#2924), and checks the classes, their union and the operand remap against
+their definitions; an unrolled one verifies with
 dominance, passes Tier 1's optimizer and executes as the original did (return,
 status and stores) on the shared executor, on parameters around zero and the
 main loop's size and at each type's signed and unsigned limits. Every loop
 form, predicate, operand order, branch sense, reduction kind and width, then
 `--shapes` random ones (400 by default), each refusal, the budgets and every
 short output arena are covered. `test-ir-optimize` runs its text pair
-(`tests/ir/optimize/unroll-loops-*.ir`), and `test-ir-source --passes` its twins
-on c-testsuite's subset, the frozen `sqlite3.c` and musl.
+(`tests/ir/optimize/unroll-loops-*.ir`), and `test-ir-source --passes` the pass
+on c-testsuite's subset, the frozen `sqlite3.c` and musl, where each unrolled
+function must verify with dominance.
 
 ## Vectors assembled in memory (#1344)
 

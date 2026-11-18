@@ -2,9 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-ir-vectorize [--seed N] [--print NAME] (#2743): the loop vectorizer's fixtures, tests/ir/vectorize/*.ir, one
-// function each. Each is parsed by both parser paths and vectorized by both of the pass's paths at three targets of the
-// IR's every operation, 64, 32 and 16 bytes wide (IrVectorizeTarget.moves), which must give the same function and
-// counts; a fixture expects how many loops each width vectorizes, or the refusal it gives. Then the oracle, on every
+// function each. Each is parsed by both parser paths and vectorized at three targets of the IR's every operation, 64, 32
+// and 16 bytes wide (IrVectorizeTarget.moves), each result and its counts folded into a frozen digest (#2924); a
+// fixture expects how many loops each width vectorizes, or the refusal it gives. Then the oracle, on every
 // fixture a target changed: the input, the result and the result after the ordinary optimizer (whose final
 // verification checks dominance, past if-conversion's stubs) run in the shared interpreter on one buffer, its pointer
 // parameters placed apart, at one address, a byte, an element and a vector apart either way, at lengths around zero,
@@ -117,15 +117,6 @@ static void ir_vectorize_test_target(uint32_t index, IrVectorizeTarget* target)
     target->moves = (uint8_t)(index == 0 ? 7 : index == 1 ? 3 : 1);
 }
 
-// The vectorizer's two results agree: the same function (columns, blocks, side tables) and the same counts.
-static bool ir_vectorize_test_same(const IrVectorizeResult* a, const IrVectorizeResult* b)
-{
-    bool same = a->changed == b->changed && a->loops == b->loops && a->vectorized == b->vectorized && a->reductions == b->reductions && a->guards == b->guards &&
-                memcmp(a->widths, b->widths, sizeof(a->widths)) == 0 && memcmp(a->refused, b->refused, sizeof(a->refused)) == 0;
-    same = same && ir_optimize_test_equal(&a->function, &b->function);
-    return same;
-}
-
 // One run of `function` in the interpreter on `buffer` (its first `bytes` bytes the binding), the arguments placed by
 // the fixture's roles.
 static InterpreterResult ir_vectorize_test_run(const IrFunction* function, uint8_t* buffer, const InterpreterValue* arguments, uint32_t count, Arena* execution)
@@ -225,7 +216,7 @@ static bool ir_vectorize_test_agree(IrVectorizeTest* test, const IrVectorizeTest
 
 // One fixture: both paths at each target, the counts, and the oracle on each changed result and its optimized form;
 // then the mutants at 64 bytes.
-static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTestFixture* fixture, Arena* source, Arena* input, Arena* vector, Arena* scalar, Arena* scratch, Arena* execution, uint8_t* buffers)
+static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTestFixture* fixture, Arena* source, Arena* input, Arena* vector, Arena* cleanup, Arena* scratch, Arena* execution, uint8_t* buffers)
 {
     char path[256];
     snprintf(path, sizeof(path), "tests/ir/vectorize/%s.ir", fixture->name);
@@ -241,17 +232,14 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
         IrVectorizeTarget target = { 0 };
         ir_vectorize_test_target(t, &target);
         const uint64_t vm = vector->length;
-        const uint64_t sm = scalar->length;
+        const uint64_t cm = cleanup->length;
         const uint64_t tm = scratch->length;
-        IrVectorizeOptions options = { .target = &target, .scalar = false };
+        const IrVectorizeOptions options = { .target = &target };
         IrVectorizeResult a = { 0 };
-        IrVectorizeResult b = { 0 };
         const IrCheck ac = ir_vectorize_loops(&function, &options, vector, scratch, &a);
-        options.scalar = true;
-        const IrCheck bc = ir_vectorize_loops(&function, &options, scalar, scratch, &b);
         char what[256];
-        snprintf(what, sizeof(what), "both paths accept it, restore scratch and agree at %u bytes", 64u >> t);
-        ir_vectorize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == tm && ir_vectorize_test_same(&a, &b), fixture->name, what);
+        snprintf(what, sizeof(what), "the pass accepts it and restores scratch at %u bytes", 64u >> t);
+        ir_vectorize_test_expect(test, ac.error == IR_OK && scratch->length == tm, fixture->name, what);
         if (ac.error == IR_OK)
         {
             ir_optimize_test_fold_function(&test->digest, &a.function);
@@ -294,7 +282,7 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
             IrOptimizeOptions optimize = ir_optimize_options();
             optimize.passes |= BUSTER_IR_OPTIMIZE_MERGE;
             IrOptimizeResult optimized = { 0 };
-            const IrCheck oc = ir_optimize(&a.function, scalar, scratch, optimize, &optimized);
+            const IrCheck oc = ir_optimize(&a.function, cleanup, scratch, optimize, &optimized);
             snprintf(what, sizeof(what), "the optimizer takes the result at %u bytes and verifies it with dominance (error %u)", 64u >> t, oc.error);
             ir_vectorize_test_expect(test, oc.error == IR_OK, fixture->name, what);
             snprintf(what, sizeof(what), "the result runs as the input does at %u bytes", 64u >> t);
@@ -303,7 +291,7 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
             ir_vectorize_test_expect(test, oc.error == IR_OK && ir_vectorize_test_agree(test, fixture, &function, &optimized.function, execution, buffers), fixture->name, what);
         }
         arena_pop_to(vector, vm);
-        arena_pop_to(scalar, sm);
+        arena_pop_to(cleanup, cm);
     }
     // The mutants, at 64 bytes: a mutant the verifier refuses, or whose function runs otherwise, is killed.
     for (uint32_t mutation = 1; parsed && fixture->refusal == IR_VECTORIZE_REFUSALS && mutation < BUSTER_IR_VECTORIZE_MUTATIONS; mutation += 1)
@@ -340,7 +328,7 @@ static void ir_vectorize_test_scans(IrVectorizeTest* test)
         {
             f.instruction_count = length;
             memset(kinds, 0xa5, sizeof(kinds));
-            ir_vectorize_kinds_vector(&f, kinds);
+            ir_vectorize_kinds(&f, kinds);
             bool same = true;
             for (uint32_t i = 0; i < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; i += 1)
             {
@@ -353,7 +341,7 @@ static void ir_vectorize_test_scans(IrVectorizeTest* test)
             classified &= same;
         }
         f.instruction_count = BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS;
-        ir_vectorize_kinds_vector(&f, kinds);
+        ir_vectorize_kinds(&f, kinds);
         for (uint32_t first = round % 5; first < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; first += 23)
         {
             for (uint32_t end = first; end <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS && end - first <= 130; end += 1)
@@ -363,7 +351,7 @@ static void ir_vectorize_test_scans(IrVectorizeTest* test)
                 {
                     expected = expected || (kinds[at] & 7) == BUSTER_IR_VECTORIZE_KIND_FORBID;
                 }
-                forbidden &= ir_vectorize_forbidden(kinds, first, end, false) == expected;
+                forbidden &= ir_vectorize_forbidden(kinds, first, end) == expected;
                 refusals += expected;
             }
         }
@@ -403,15 +391,15 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
         Arena source = arena_reserve(UINT64_C(1) << 24);
         Arena input = arena_reserve(UINT64_C(1) << 26);
         Arena vector = arena_reserve(UINT64_C(1) << 26);
-        Arena scalar = arena_reserve(UINT64_C(1) << 26);
+        Arena cleanup = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 28);
         Arena execution = arena_reserve(UINT64_C(1) << 28);
         uint8_t* buffers = calloc(3, BUSTER_IR_VECTORIZE_TEST_BUFFER);
-        const bool ready = source.base != 0 && input.base != 0 && vector.base != 0 && scalar.base != 0 && scratch.base != 0 && execution.base != 0 && buffers != NULL;
+        const bool ready = source.base != 0 && input.base != 0 && vector.base != 0 && cleanup.base != 0 && scratch.base != 0 && execution.base != 0 && buffers != NULL;
         ir_vectorize_test_expect(&test, ready, "setup", "the arenas and buffers are reserved");
         for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(ir_vectorize_test_fixtures); k += 1)
         {
-            ir_vectorize_test_fixture(&test, &ir_vectorize_test_fixtures[k], &source, &input, &vector, &scalar, &scratch, &execution, buffers);
+            ir_vectorize_test_fixture(&test, &ir_vectorize_test_fixtures[k], &source, &input, &vector, &cleanup, &scratch, &execution, buffers);
         }
         ir_vectorize_test_expect(&test, test.digest == BUSTER_IR_VECTORIZE_TEST_DIGEST, "fixtures", "every result and its counts have their frozen digest");
         if (test.digest != BUSTER_IR_VECTORIZE_TEST_DIGEST)
@@ -430,7 +418,7 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
         arena_release(&source);
         arena_release(&input);
         arena_release(&vector);
-        arena_release(&scalar);
+        arena_release(&cleanup);
         arena_release(&scratch);
         arena_release(&execution);
         printf("ir-vectorize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
