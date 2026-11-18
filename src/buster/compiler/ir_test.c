@@ -19,7 +19,23 @@ struct IrTestTally
     uint64_t checks;
     uint64_t failures;
     uint64_t seed;
+    // FNV-1a digests of every verdict ir_test_pair takes and every use list ir_test_uses_twins builds, in order (#2924):
+    // with the default seed and count they must equal the frozen ones, taken where the vector and scalar paths agreed.
+    uint64_t verdicts;
+    uint64_t uses;
 };
+
+// The verdicts' and the use lists' digests of a default run (seed 1, count 64).
+#define BUSTER_IR_TEST_VERDICTS_DIGEST UINT64_C(0xa439bc396d657bfd)
+#define BUSTER_IR_TEST_USES_DIGEST UINT64_C(0x99c0d102c96e08e2)
+
+static void ir_test_fold(uint64_t* digest, uint64_t value)
+{
+    for (uint32_t byte = 0; byte < 8; byte += 1)
+    {
+        *digest = (*digest ^ ((value >> (8 * byte)) & 0xff)) * UINT64_C(0x100000001b3);
+    }
+}
 
 static void ir_test_expect(IrTestTally* tally, bool condition, const char* message)
 {
@@ -60,6 +76,7 @@ static void ir_test_pair(IrTestTally* tally, const IrFunction* function, Arena* 
     ir_test_expect(tally, scratch->length == mark, "scalar verifier retained scratch");
     ir_test_expect(tally, (vector.error == IR_OK) == expected_valid && (scalar.error == IR_OK) == expected_valid, message);
     ir_test_expect(tally, vector.error == scalar.error && vector.instruction == scalar.instruction && vector.detail == scalar.detail && vector.dominance_checked == scalar.dominance_checked, "verifiers disagree on the diagnostic");
+    ir_test_fold(&tally->verdicts, (uint64_t)vector.error | (uint64_t)vector.dominance_checked << 8 | (uint64_t)vector.detail << 16 | (uint64_t)vector.instruction << 32);
     if (expected_valid && dominance != 0)
     {
         ir_test_expect(tally, vector.dominance_checked, "supplied dominance view was not checked");
@@ -94,6 +111,18 @@ static void ir_test_uses_twins(IrTestTally* tally, const IrFunction* function, A
     IrUses vector = { 0 };
     IrUses scalar = { 0 };
     const IrError vector_error = ir_uses_validated(function, memory, scratch, &vector);
+    ir_test_fold(&tally->uses, (uint64_t)vector_error);
+    for (uint32_t i = 0; vector_error == IR_OK && i <= vector.value_count; i += 1)
+    {
+        ir_test_fold(&tally->uses, vector.offsets[i]);
+    }
+    for (uint32_t u = 0; vector_error == IR_OK && u < vector.use_count; u += 1)
+    {
+        IrUse use = vector.uses[u];
+        uint64_t word = 0;
+        memcpy(&word, &use, sizeof(use) < sizeof(word) ? sizeof(use) : sizeof(word));
+        ir_test_fold(&tally->uses, word);
+    }
     const IrError scalar_error = ir_uses_validated_scalar(function, memory, scratch, &scalar);
     bool same = vector_error == scalar_error;
     if (same && vector_error == IR_OK)
@@ -2436,6 +2465,8 @@ static int run_ir_tests(int argc, char** argv)
         Arena scratch = arena_reserve(BUSTER_IR_TEST_ARENA_BYTES);
         IrTestTally tally = {
             .seed = seed,
+            .verdicts = UINT64_C(0xcbf29ce484222325),
+            .uses = UINT64_C(0xcbf29ce484222325),
         };
         ir_test_expect(&tally, memory.base != 0 && scratch.base != 0, "IR test arenas could not be reserved");
         if (memory.base != 0 && scratch.base != 0)
@@ -2471,6 +2502,12 @@ static int run_ir_tests(int argc, char** argv)
                 preserved = preserved && prefix[byte] == 0xa5;
             }
             ir_test_expect(&tally, preserved, "IR tests changed the caller's scratch prefix");
+            fprintf(stderr, "IR: verdicts digest 0x%016" PRIx64 ", use lists digest 0x%016" PRIx64 "\n", tally.verdicts, tally.uses);
+            if (seed == 1 && count == 64)
+            {
+                ir_test_expect(&tally, tally.verdicts == BUSTER_IR_TEST_VERDICTS_DIGEST && tally.uses == BUSTER_IR_TEST_USES_DIGEST,
+                               "the verdicts or the use lists differ from the frozen default run's (#2924)");
+            }
         }
         fprintf(stderr, "IR: %" PRIu64 " checks, %" PRIu64 " failures (seed=%" PRIu64 ")\n", tally.checks, tally.failures, seed);
         result = tally.failures != 0;
