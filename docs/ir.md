@@ -8,18 +8,17 @@ test corpus is imported.
 
 ## Status and consumers
 
-The producers are `ir_lower_typed` / `ir_lower_typed_scalar` and their explicit
-output-target variants `ir_lower_typed_target` / `ir_lower_typed_target_scalar`,
-which take the C driver's typed streams (`check_program_emit`'s
+The producer is `ir_lower_typed` and its explicit output-target variant
+`ir_lower_typed_target`, which take the C driver's typed streams (`check_program_emit`'s
 `Tier0Function`s, #133), the
 handwritten fixtures, `ir_parse.c` (#175) and the synthetic benchmarks. The
-consumers are the two verifiers, the CFG and use-list builders, the printer,
+consumers are the verifier, the CFG and use-list builders, the printer,
 `ssa_ir.c`'s promotion (#134), the optimizer passes (#139), the interpreters
 (#176) and Tier 1's selection (#138).
 
 The IR lowered from every function of the corpora verifies (#131): `test-ir-source`
-lowers every function `-c` compiles of a set of C files by both paths, which must
-agree column for column and verify, and promotes each by both of `ssa_ir.c`'s
+lowers every function `-c` compiles of a set of C files, which must verify, and
+promotes each by both of `ssa_ir.c`'s
 paths, whose results verify with dominance checked ("Tests and measurements"
 below). Every function of the frozen `sqlite3.c` (2,602 of them), of c-testsuite's
 subset (430, in its 220 programs), of Lua 5.4.8's 32 files but `lua.c` and
@@ -360,8 +359,8 @@ dominator tree: #174 owns that analysis.
 
 ## Typed-stream lowering
 
-`ir_lower_typed(input, result_type, symbol_count, output, scratch, result)` and
-its scalar twin accept the current `Tier0Function` contract after validating it.
+`ir_lower_typed(input, result_type, symbol_count, output, scratch, result)`
+accepts the current `Tier0Function` contract after validating it.
 The semantic result type is explicit because the stream's `AbiReturn` describes
 locations, not its source type: it is the RETURN entries' class, which for an
 aggregate is its address's (U64, `i64`). A source producer takes it from the
@@ -411,7 +410,7 @@ at least 16 bytes, which `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` read and write a
 their first 10 or 16 bytes. The expression slots that carry stack values across
 blocks are 16 bytes, aligned to 16, in a function with values of these classes,
 and 8 otherwise. The classification's signedness and floating tables (one byte
-per class, which both paths read) take `I128` as signed and `F80` as floating,
+per class) take `I128` as signed and `F80` as floating,
 which Tier 0's own predicates leave apart.
 
 #136's frame objects (a local with a size in `local_sizes`: an array, a struct
@@ -491,7 +490,7 @@ The ordered replay is written once in `ir_lower_emit.c` and instantiated for
 counting and filling. Counting fixes its output to null; filling receives the
 non-null local function after `ir_create` succeeds. Constructor helpers stay
 inline so count mode can erase column writes and fill mode can erase null checks
-before general inlining decisions. Both scalar/vector paths use the same two
+before general inlining decisions. The lowering uses the same two
 instantiations, and all existing allocation, validation and rollback gates remain.
 
 ### Slot lifetimes (#177)
@@ -576,8 +575,8 @@ value without adding a fence instruction (#1396). It still has write-only
 source semantics: an initializing store never reads undefined bytes in either
 interpreter. Tier 1 copies a live desired value into its reserved scratch before
 the destructive exchange. An explicit `fence.void seq_cst` still emits `mfence`.
-Both verifiers check the flags (`ir_access_flags_valid`; the vector path sends
-any row with flags past `volatile` to the scalar rule), and the type and the
+The verifier checks the flags (`ir_access_flags_valid`; the 16-row batch sends
+any row with flags past `volatile` to the per-row rule), and the type and the
 alignment (`ir_atomic_access`): an atomic access declared below its natural
 alignment is refused, since the backend emits one access of its size whatever
 the address. The typed stream's producer is the C lowering's direct
@@ -990,7 +989,7 @@ conceal real lifetime errors. The existing generator FP-to-integer/CVTT oracle b
 also excluded from the strict dynamic case. Neither gap is claimed resolved.
 
 The adapter finds block boundaries, compares incoming stack shapes exactly,
-classifies 16 entries at once (one at a time in the twin), counts output, then
+classifies 16 entries at once, counts output, then
 emits into final-sized columns. Stack replay and irregular calls/control flow
 are shared ordered work. Locals begin in typed slots. Only expression-stack
 depths live across block boundaries receive temporary slots, one for each depth
@@ -1272,7 +1271,6 @@ and vector classification produce identical columns, side arrays and block range
 ./build/compiler benchmark-ir
 ./build/compiler benchmark-ir --only verify
 ./build/compiler benchmark-ir-lowering
-./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
 ./build/compiler test-ir-source [--print NAME] [preprocessor options] file...
 ./build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [preprocessor options] file...
 ```
@@ -1311,8 +1309,9 @@ both parser paths, runs through both optimizer twins, reprints byte for byte
 and executes on both sides: [#175](https://github.com/buster14a/buster/issues/175)'s
 last acceptance item ([the tools guide](ir-tools.md#pass-fixtures-in-the-text-form)).
 
-`test-ir-lowering` lowers generated typed programs through both paths, verifies
-every function, compares their columns, and executes the resulting IR in a
+`test-ir-lowering` lowers generated typed programs, verifies every function,
+folds their columns into a digest frozen while the deleted scalar twin agreed
+(#2924), and executes the resulting IR in a
 test-only explicit-frame executor against the existing typed-stream interpreter.
 Calls and global-memory effects are compared, with targeted fixtures for values
 across conditional joins, backedges to entry zero, narrow shifts and wide pointer

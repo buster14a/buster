@@ -533,7 +533,7 @@ static void ir_stack_test_zero_alias(IrLowerTestTally* tally, Arena* output, Are
     const uint64_t output_mark = output->length;
     const uint64_t twin_mark = twin->length;
     IrFunction function = { 0 };
-    if (ir_lower_test_lower(tally, &source, IR_I64, 2, output, twin, scratch, &function, 131, 2))
+    if (ir_lower_test_lower(tally, &source, IR_I64, 2, output, scratch, &function, 131, 2))
     {
         ir_stack_test_execute(tally, &function, 0, 42, INTERPRETER_OK, execution);
         ir_stack_test_consumers(tally, &function, 0, 42, twin, scratch, execution);
@@ -580,7 +580,7 @@ static void ir_stack_test_class_boundary(IrLowerTestTally* tally, Arena* output,
     InterpreterResult result = interpreter_test_run(&source, execution, &options);
     ir_lower_test_expect(tally, result.status == INTERPRETER_OK, "dynamic kinds pass the typed dispatch gate", result.status, result.entry);
     IrFunction function = { 0 };
-    if (ir_lower_test_lower(tally, &source, IR_VOID, 1, output, twin, scratch, &function, 131, 3))
+    if (ir_lower_test_lower(tally, &source, IR_VOID, 1, output, scratch, &function, 131, 3))
     {
         ir_stack_test_execute(tally, &function, 0, 0, INTERPRETER_OK, execution);
     }
@@ -605,18 +605,15 @@ static void ir_stack_test_class_boundary(IrLowerTestTally* tally, Arena* output,
     // The IR lowers long double (#131): both paths give the constant its 80 bits, 1.0's, after the dynamic effects.
     arena_push(output, 24, 1);
     arena_push(scratch, 40, 1);
-    for (uint32_t vector = 0; vector < 2; vector += 1)
+    IrFunction lowered = { 0 };
+    const IrCheck check = ir_lower_typed(&source, IR_VOID, 1, output, scratch, &lowered);
+    bool constant = false;
+    for (uint32_t i = 0; check.error == IR_OK && i < lowered.instruction_count; i += 1)
     {
-        IrFunction lowered = { 0 };
-        const IrCheck check = ir_lower_typed_path(&source, IR_VOID, 1, output, scratch, &lowered, vector != 0);
-        bool constant = false;
-        for (uint32_t i = 0; check.error == IR_OK && i < lowered.instruction_count; i += 1)
-        {
-            constant |= lowered.op[i] == IR_CONST && lowered.type[i] == IR_F80 && lowered.constants[lowered.a[i]].low == constants[0] && lowered.constants[lowered.a[i]].high == constants[1];
-        }
-        ir_lower_test_expect(tally, check.error == IR_OK && constant && scratch->length == scratch_mark + 40, "F80 lowers after the dynamic effects with scratch restored", vector, check.error);
-        arena_pop_to(output, output_mark + 24);
+        constant |= lowered.op[i] == IR_CONST && lowered.type[i] == IR_F80 && lowered.constants[lowered.a[i]].low == constants[0] && lowered.constants[lowered.a[i]].high == constants[1];
     }
+    ir_lower_test_expect(tally, check.error == IR_OK && constant && scratch->length == scratch_mark + 40, "F80 lowers after the dynamic effects with scratch restored", 1, check.error);
+    arena_pop_to(output, output_mark + 24);
     arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
 }
@@ -660,7 +657,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
         .parameters = &parameter,
     };
     IrFunction function = { 0 };
-    if (ir_lower_test_lower(tally, &source, IR_I64, 2, &output, &twin, &scratch, &function, 131, 0))
+    if (ir_lower_test_lower(tally, &source, IR_I64, 2, &output, &scratch, &function, 131, 0))
     {
         const uint64_t sizes[] = { 0, 8, 15, 16, 17, 4096, 65537, UINT64_MAX - 15, UINT64_MAX - 14, UINT64_MAX };
         const SymbolId symbol = 1;
@@ -687,40 +684,34 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
         arena_pop_to(&twin, 0);
         arena_push(&twin, 24, 1);
         arena_push(&scratch, 40, 1);
-        for (uint32_t vector = 0; vector < 2; vector += 1)
+        for (uint64_t bytes = 0; bytes < total; bytes += 8)
         {
-            for (uint64_t bytes = 0; bytes < total; bytes += 8)
-            {
-                twin.capacity = 24 + bytes;
-                IrFunction result = { .instruction_count = 123 };
-                const IrFunction preserved = result;
-                const IrCheck check = ir_lower_typed_path(&source, IR_I64, 2, &twin, &scratch, &result, vector != 0);
-                const bool good = check.error == IR_OK || (check.error == IR_ERROR_MEMORY && memcmp(&result, &preserved, sizeof(result)) == 0 && twin.length == 24);
-                ir_lower_test_expect(tally, good && scratch.length == 40, "dynamic lowering allocation rollback", bytes, vector);
-                arena_pop_to(&twin, 24);
-            }
+            twin.capacity = 24 + bytes;
+            IrFunction result = { .instruction_count = 123 };
+            const IrFunction preserved = result;
+            const IrCheck check = ir_lower_typed(&source, IR_I64, 2, &twin, &scratch, &result);
+            const bool good = check.error == IR_OK || (check.error == IR_ERROR_MEMORY && memcmp(&result, &preserved, sizeof(result)) == 0 && twin.length == 24);
+            ir_lower_test_expect(tally, good && scratch.length == 40, "dynamic lowering allocation rollback", bytes, 1);
+            arena_pop_to(&twin, 24);
         }
         twin.capacity = capacity;
         arena_pop_to(&scratch, 0);
-        for (uint32_t vector = 0; vector < 2; vector += 1)
+        for (uint32_t mutation = 0; mutation < 5; mutation += 1)
         {
-            for (uint32_t mutation = 0; mutation < 5; mutation += 1)
-            {
-                values[mutation == 0 ? 0 : 3] = mutation < 2 ? 1 : 0;
-                classes[3] = mutation == 2 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
-                classes[0] = mutation == 3 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
-                classes[12] = mutation == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
-                IrFunction result = { .instruction_count = 123 };
-                const IrFunction preserved = result;
-                const uint64_t mark = twin.length;
-                const IrCheck check = ir_lower_typed_path(&source, IR_I64, 2, &twin, &scratch, &result, vector != 0);
-                ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && twin.length == mark && scratch.length == 0 && memcmp(&result, &preserved, sizeof(result)) == 0, "malformed typed stack input refused before allocation", vector, mutation);
-                values[0] = 0;
-                values[3] = 0;
-                classes[3] = BUSTER_TYPED_CLASS_U64;
-                classes[0] = BUSTER_TYPED_CLASS_U64;
-                classes[12] = BUSTER_TYPED_CLASS_U64;
-            }
+            values[mutation == 0 ? 0 : 3] = mutation < 2 ? 1 : 0;
+            classes[3] = mutation == 2 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+            classes[0] = mutation == 3 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+            classes[12] = mutation == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+            IrFunction result = { .instruction_count = 123 };
+            const IrFunction preserved = result;
+            const uint64_t mark = twin.length;
+            const IrCheck check = ir_lower_typed(&source, IR_I64, 2, &twin, &scratch, &result);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && twin.length == mark && scratch.length == 0 && memcmp(&result, &preserved, sizeof(result)) == 0, "malformed typed stack input refused before allocation", 1, mutation);
+            values[0] = 0;
+            values[3] = 0;
+            classes[3] = BUSTER_TYPED_CLASS_U64;
+            classes[0] = BUSTER_TYPED_CLASS_U64;
+            classes[12] = BUSTER_TYPED_CLASS_U64;
         }
     }
     arena_pop_to(&output, 0);
@@ -752,7 +743,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
         .parameter_count = 1,
         .parameters = &parameter,
     };
-    if (ir_lower_test_lower(tally, &edge_source, IR_I64, 1, &output, &twin, &scratch, &function, 131, 1))
+    if (ir_lower_test_lower(tally, &edge_source, IR_I64, 1, &output, &scratch, &function, 131, 1))
     {
         for (uint64_t condition = 0; condition < 2; condition += 1)
         {

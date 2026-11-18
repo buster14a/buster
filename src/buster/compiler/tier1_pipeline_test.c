@@ -725,7 +725,7 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
     {
         const Tier0Function* entry = &functions->functions[function_index];
         const uint32_t symbols = program->global_count + program->function_count + 1;
-        const IrCheck check = test->vector ? ir_lower_typed(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered) : ir_lower_typed_scalar(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
+        const IrCheck check = ir_lower_typed(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real typed-stream lowering succeeds");
         if (!ok)
         {

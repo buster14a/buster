@@ -701,8 +701,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && !own)
     {
         // A vector wider than the target moves whole is taken, and split below (#1624).
-        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar) :
-                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
+        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered) :
+                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered);
         outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         stage = outcome.stage;

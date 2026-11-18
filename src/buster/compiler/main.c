@@ -1226,7 +1226,7 @@ static __attribute__((unused)) void main_backend_test_interfaces(void)
     (void)&dominators_export_read;
     (void)&tier0_tables_open;
     (void)&tier0_tables_close;
-    (void)&ir_lower_typed_path;
+    (void)&ir_lower_typed;
     (void)&tier1_cfg_from_ir;
     (void)&ir_reduce_oracle;
     (void)&tier1_select_emit;

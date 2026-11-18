@@ -112,8 +112,8 @@ function and the first error. `--print NAME` prints that function's IR as lowere
 and as promoted. The correctness list runs it on c-testsuite's subset, the frozen
 `sqlite3.c` and the frozen musl's units.
 
-`./build/compiler benchmark-ir-source [--only lower|lower-scalar|promote|
-promote-scalar|gvn|gvn-scalar|optimize|optimize-scalar|optimize-vector|verify]
+`./build/compiler benchmark-ir-source [--only promote|promote-scalar|gvn|
+gvn-scalar|optimize|optimize-scalar|optimize-vector|lower|verify]
 [--after-scalar MS] [preprocessor options]
 file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
 does, lowers and promotes each once outside the time, and reports the IR's bytes
@@ -178,13 +178,13 @@ under the 9700X's lock, pinned to one CPU.
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
 verify|uses|cfg]` measures the verifier and derived
 builders on small and large synthetic functions. `benchmark-ir-lowering
-[--seed N] [--passes N] [--only scalar|vector] [--after-scalar MS]` measures
+[--seed N] [--passes N] [--ordinary]` measures
 the complete available typed-stream-to-verified-IR path on generated mixed
 programs: small and larger value-only ones, and the larger shape with frame
 objects and copies, reported apart. Both require optimized builds, calibrate samples to at least 2 ms,
 rotate variant order and report 21-pass medians by default. TSC ticks are
 labeled separately from core cycles. The 9700X workflow runs the tests and
-pins each benchmark to one allowed CPU; it adds the runs after 200 ms of scalar
-work before each vector sample where the pull request changes the module
+pins each benchmark to one allowed CPU; it runs the verifier alone and the lowering
+where the pull request changes the module
 ([Sharing the 9700X](ci.md#sharing-the-9700x)). [The guide](../../docs/ir.md) records
 interfaces, measurement scope and the corpora's results.

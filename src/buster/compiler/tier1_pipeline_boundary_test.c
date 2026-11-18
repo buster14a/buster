@@ -262,8 +262,7 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
     IrFunction lowered;
     IrFunction promoted;
     IrOptimizeResult optimized;
-    IrCheck check = test->vector ? ir_lower_typed(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered) :
-                                  ir_lower_typed_scalar(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
+    IrCheck check = ir_lower_typed(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
     bool ok = tier1_pipeline_expect(test, check.error == IR_OK, "boundary typed stream lowers");
     if (ok)
     {

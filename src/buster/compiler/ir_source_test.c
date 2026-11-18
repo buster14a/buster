@@ -320,9 +320,8 @@ struct IrSourceTotals
     uint64_t bytes;
     uint64_t promoted_instructions;
     uint64_t promoted_bytes;
-    // Functions a lowering refused, that the two paths lowered apart, and that a promotion refused.
+    // Functions the lowering refused, and that a promotion refused.
     uint64_t refused;
-    uint64_t disagreed;
     uint64_t unpromoted;
     uint64_t simd_promoted;
     // Representations checked through both text parser paths, and representations whose round trip failed.
@@ -336,7 +335,7 @@ struct IrSourceTotals
     uint64_t dataflow_failed;
     uint64_t dataflow_checks;
     uint64_t dataflow_benchmark_failed;
-    // Forms whose use lists both twins built (#1634), and forms where they disagreed.
+    // Forms whose use lists were checked against their definition (#1634), and forms whose lists failed it.
     uint64_t uses_forms;
     uint64_t uses_failed;
 };
@@ -405,26 +404,21 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
     {
         const IrSourceFunction* source = &file->functions[f];
         const uint64_t output_mark = output->length;
-        const uint64_t twin_mark = twin_output->length;
         const uint64_t promoted_mark = promoted_output->length;
         IrFunction vector = { 0 };
-        IrFunction scalar = { 0 };
         const IrCheck vector_check = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, output, scratch, &vector);
-        const IrCheck scalar_check = ir_lower_typed_target_scalar(source->function, source->result_type, source->symbol_count, source->target_features, twin_output, scratch, &scalar);
-        const bool lowered = vector_check.error == IR_OK && scalar_check.error == IR_OK;
-        const bool agree = lowered && ir_lower_test_equal(&vector, &scalar);
+        const bool lowered = vector_check.error == IR_OK;
         IrFunction promoted = { 0 };
         IrFunction promoted_twin = { 0 };
-        const IrCheck promotion = agree ? ssa_ir_promote(&vector, promoted_output, scratch, &promoted) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
-        const IrCheck promotion_twin = agree ? ssa_ir_promote_scalar(&scalar, promoted_output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
-        const bool promotes = agree && promotion.error == IR_OK && promotion_twin.error == IR_OK && promotion.dominance_checked && promotion_twin.dominance_checked;
+        const IrCheck promotion = lowered ? ssa_ir_promote(&vector, promoted_output, scratch, &promoted) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+        const IrCheck promotion_twin = lowered ? ssa_ir_promote_scalar(&vector, promoted_output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+        const bool promotes = lowered && promotion.error == IR_OK && promotion_twin.error == IR_OK && promotion.dominance_checked && promotion_twin.dominance_checked;
         // --simd counts the functions with vectors that promote (#141), as every function must.
         totals->simd_promoted += allow_simd && promotes && ir_function_has_vectors(&vector);
         totals->refused += !lowered;
-        totals->disagreed += lowered && !agree;
-        totals->unpromoted += agree && !promotes;
+        totals->unpromoted += lowered && !promotes;
         entries += source->function->count;
-        if (agree)
+        if (lowered)
         {
             instructions += vector.instruction_count;
             bytes += vector.arena_bytes;
@@ -446,7 +440,7 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
             "promoted-vector",
             "promoted-scalar",
         };
-        for (uint32_t form = 0; agree && form < (promotes ? 3u : 1u); form += 1)
+        for (uint32_t form = 0; lowered && form < (promotes ? 3u : 1u); form += 1)
         {
             IrSourceTextCheck check = { 0 };
             const bool roundtrip = ir_source_text_roundtrip(forms[form], text_output, scratch, &check);
@@ -476,7 +470,7 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
             }
         }
         bool dataflow_valid = true;
-        for (uint32_t form = 0; agree && form < (promotes ? 3u : 1u); form += 1)
+        for (uint32_t form = 0; lowered && form < (promotes ? 3u : 1u); form += 1)
         {
             IrDataflowTests checks = { 0 };
             const bool checked = ir_dataflow_test_function(forms[form], text_output, scratch, false, &checks);
@@ -496,7 +490,7 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
             }
         }
         bool uses_valid = true;
-        for (uint32_t form = 0; agree && form < (promotes ? 3u : 1u); form += 1)
+        for (uint32_t form = 0; lowered && form < (promotes ? 3u : 1u); form += 1)
         {
             const bool same = ir_source_uses_check(forms[form], text_output, scratch);
             totals->uses_forms += 1;
@@ -510,16 +504,16 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
         failures += !promotes || !text_valid || !dominators_valid || !dataflow_valid || !uses_valid;
         if (!promotes)
         {
-            const IrCheck first = vector_check.error != IR_OK ? vector_check : scalar_check.error != IR_OK ? scalar_check : promotion.error != IR_OK ? promotion : promotion_twin;
+            const IrCheck first = vector_check.error != IR_OK ? vector_check : promotion.error != IR_OK ? promotion : promotion_twin;
             printf("ir-source: file=%s function=%s %s error=%s instruction=%u detail=%u\n", name, source->name,
-                   !lowered ? "refused" : !agree ? "the paths disagree" : "unpromoted", ir_source_errors[first.error <= IR_ERROR_UNSUPPORTED ? first.error : IR_ERROR_IO],
+                   !lowered ? "refused" : "unpromoted", ir_source_errors[first.error <= IR_ERROR_UNSUPPORTED ? first.error : IR_ERROR_IO],
                    first.instruction, first.detail);
         }
         if (print != 0 && strcmp(print, (const char*)source->name) == 0)
         {
             printf("ir-source: %s as lowered:\n", source->name);
             fflush(stdout);
-            if (agree)
+            if (lowered)
             {
                 ir_print(&vector, scratch, stdout);
             }
@@ -531,7 +525,6 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
             }
         }
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin_output, twin_mark);
         arena_pop_to(promoted_output, promoted_mark);
     }
     printf("ir-source: file=%s functions=%u entries=%" PRIu64 " instructions=%" PRIu64 " bytes=%" PRIu64 " tokens=%" PRIu64 " failures=%u\n", name, file->count, entries,
@@ -709,12 +702,12 @@ static int ir_source_tests_command(int count, char** arguments)
     {
         printf("ir-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " entries=%" PRIu64 " tokens=%" PRIu64
                " instructions=%" PRIu64 " bytes=%" PRIu64 " (%.2f per token) promoted_instructions=%" PRIu64 " promoted_bytes=%" PRIu64
-               " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 " simd_promoted=%" PRIu64 " text_forms=%" PRIu64 " text_failed=%" PRIu64
+               " refused=%" PRIu64 " unpromoted=%" PRIu64 " simd_promoted=%" PRIu64 " text_forms=%" PRIu64 " text_failed=%" PRIu64
                " dataflow_forms=%" PRIu64 " dataflow_failed=%" PRIu64 " dataflow_checks=%" PRIu64 " dataflow_benchmark_failed=%" PRIu64
                " uses_forms=%" PRIu64 " uses_failed=%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.entries, totals.tokens, totals.instructions, totals.bytes,
                totals.tokens != 0 ? (double)totals.bytes / (double)totals.tokens : 0.0, totals.promoted_instructions, totals.promoted_bytes, totals.refused,
-               totals.disagreed, totals.unpromoted, totals.simd_promoted, totals.text_forms, totals.text_failed, totals.dataflow_forms,
+               totals.unpromoted, totals.simd_promoted, totals.text_forms, totals.text_failed, totals.dataflow_forms,
                totals.dataflow_failed, totals.dataflow_checks, totals.dataflow_benchmark_failed, totals.uses_forms, totals.uses_failed);
     }
     else
@@ -722,7 +715,7 @@ static int ir_source_tests_command(int count, char** arguments)
         fprintf(stderr, "usage: compiler test-ir-source [--simd] [--print NAME] [--dominators] [--dominators-cfg NEW_FILE] [--dataflow-benchmark] [preprocessor options] file... | --dataflow-self-test\n");
     }
     bool passed = valid && exhausted && text_oracle && dominator_oracle && dataflow_oracle && (!simd || (totals.simd_promoted != 0 && totals.left_out == 0)) &&
-                  totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 &&
+                  totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.unpromoted == 0 &&
                   totals.dataflow_failed == 0 && totals.dataflow_benchmark_failed == 0 && totals.uses_failed == 0 && (dataflow_self_test || totals.functions != 0) &&
                   (!benchmark_dataflow || totals.left_out == 0);
     if (dominators)
