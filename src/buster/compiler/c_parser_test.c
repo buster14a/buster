@@ -4063,12 +4063,12 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
 {
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", 0, 0, "", false },
     { PARSE_TEST_DRIVER_TEXT, "", 0, 0, "", false },
-    // Each located diagnostic with its source line and caret (#2376); clang's fix-it line and range come with #2376's later
-    // pieces.
+    // Each located diagnostic with its source line, caret and highlighted range (#2376); clang's fix-it line comes with
+    // #2376's later piece.
     { PARSE_TEST_DRIVER_TEXT, "int x\n", 0, 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n", false },
     { PARSE_TEST_DRIVER_TEXT, "int x\n", "--scalar", 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n", false },
     { PARSE_TEST_DRIVER_TEXT, "#error stop\n", 0, 1, "%s:1:2: error: stop\n    1 | #error stop\n      |  ^\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#include \"driver-none.h\"\n", 0, 1, "%s:1:10: fatal error: 'driver-none.h' file not found\n    1 | #include \"driver-none.h\"\n      |          ^\n",
+    { PARSE_TEST_DRIVER_TEXT, "#include \"driver-none.h\"\n", 0, 1, "%s:1:10: fatal error: 'driver-none.h' file not found\n    1 | #include \"driver-none.h\"\n      |          ^~~~~~~~~~~~~~~\n",
       false },
     { PARSE_TEST_DRIVER_MISSING, 0, 0, 1, "fatal error: can't read '%s': No such file or directory\n", false },
     { PARSE_TEST_DRIVER_DIRECTORY, 0, 0, 1, "fatal error: can't read '%s': Is a directory\n", false },
