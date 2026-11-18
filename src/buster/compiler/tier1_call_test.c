@@ -1441,7 +1441,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
             function.calls[0].variadic = failure == 1;
             tier1_emit_test_node(&function, 1, failure == 2 ? IR_CALL_INDIRECT : IR_CALL, result, failure == 2 ? 0 : 1, 0);
             tier1_emit_test_node(&function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE);
-            ready = ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+            ready = ir_verify(&function, &test->scratch, 0).error == IR_OK;
             tier1_emit_test_expect(test, ready, "unsupported-call fixture is valid semantic IR");
         }
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)

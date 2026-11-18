@@ -3999,9 +3999,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
                                   const uint64_t* counts, const uint8_t* expected)
 {
     const uint64_t output_mark = test->output.length;
-    // The scans for vectors that selection and the CFG consumer make, which must take the requested path (#141's review):
-    // a scalar run none by the vector path.
-    const uint64_t scans = ir_scan_vector_paths;
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
     const Tier1SelectError selected = tier1_select_plan(function, dominance, &test->output, &test->scratch, &plan, &node);
@@ -4025,8 +4022,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         {
             printf("test-tier1-masks: %s, %s path: emission error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)error, node);
         }
-        tier1_masks_test_expect(test, vector ? ir_scan_vector_paths > scans : ir_scan_vector_paths == scans,
-                                "selection's and the CFG consumer's scans for vectors take the requested path: none the vector path on a scalar run");
     }
     if (ok)
     {
@@ -4338,7 +4333,7 @@ static void tier1_masks_test_scan(Tier1MasksTest* test)
             type[i] = masks[i % 4];
         }
         const IrFunction function = { .op = op, .type = type, .instruction_count = count };
-        tier1_masks_test_expect(test, !ir_function_has_vectors_path(&function, true) && !ir_function_has_vectors_path(&function, false), "masks' operations hold no vector");
+        tier1_masks_test_expect(test, !ir_function_has_vectors(&function), "masks' operations hold no vector");
         for (uint32_t place = 0; place < count; place += 1)
         {
             const uint8_t saved_op = op[place];
@@ -4347,7 +4342,7 @@ static void tier1_masks_test_scan(Tier1MasksTest* test)
             {
                 op[place] = vectors[v][0];
                 type[place] = vectors[v][1];
-                tier1_masks_test_expect(test, ir_function_has_vectors_path(&function, true) && ir_function_has_vectors_path(&function, false), "a vector type or operation at any place, the tail's last among them");
+                tier1_masks_test_expect(test, ir_function_has_vectors(&function), "a vector type or operation at any place, the tail's last among them");
             }
             op[place] = saved_op;
             type[place] = saved_type;

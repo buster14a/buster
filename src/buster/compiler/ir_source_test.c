@@ -357,17 +357,36 @@ static const char* const ir_source_errors[IR_ERROR_UNSUPPORTED + 1] = {
     "unsupported",
 };
 
-// #1634: both use-list twins on one of a source function's verified forms, which must agree use for use.
-static bool ir_source_uses_twins(const IrFunction* function, Arena* arena, Arena* scratch)
+// #1634: the use lists of one of a source function's verified forms against their definition. Taken in instruction
+// order, each operand ir_operand enumerates is the next use of its value, so a cursor through each value's slice must
+// meet the operands in turn and, as many as there are uses, end every slice.
+static bool ir_source_uses_check(const IrFunction* function, Arena* arena, Arena* scratch)
 {
     const uint64_t mark = arena->length;
-    IrUses vector = { 0 };
-    IrUses scalar = { 0 };
-    const IrError vector_error = ir_uses_validated(function, arena, scratch, &vector);
-    const IrError scalar_error = ir_uses_validated_scalar(function, arena, scratch, &scalar);
-    const bool same = vector_error == IR_OK && scalar_error == IR_OK && vector.use_count == scalar.use_count && vector.value_count == scalar.value_count &&
-                      memcmp(vector.offsets, scalar.offsets, ((uint64_t)vector.value_count + 1) * sizeof(uint32_t)) == 0 &&
-                      (vector.use_count == 0 || memcmp(vector.uses, scalar.uses, (uint64_t)vector.use_count * sizeof(IrUse)) == 0);
+    IrUses uses = { 0 };
+    const IrError error = ir_uses_validated(function, arena, scratch, &uses);
+    bool same = error == IR_OK && uses.value_count == function->instruction_count && uses.offsets[0] == 0 && uses.offsets[uses.value_count] == uses.use_count;
+    uint32_t* cursor = same ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)uses.value_count + 1) : 0;
+    same = same && cursor != 0;
+    for (uint32_t value = 0; same && value < uses.value_count; value += 1)
+    {
+        same = uses.offsets[value] <= uses.offsets[value + 1];
+        cursor[value] = uses.offsets[value];
+    }
+    uint64_t total = 0;
+    for (uint32_t i = 0; same && i < function->instruction_count; i += 1)
+    {
+        const uint64_t count = ir_operand_count(function, i);
+        for (uint32_t position = 0; same && position < count; position += 1)
+        {
+            const IrOperand operand = ir_operand(function, i, position, 0);
+            const uint32_t at = cursor[operand.value];
+            same = at < uses.offsets[operand.value + 1] && uses.uses[at].instruction == i && uses.uses[at].operand == operand.position;
+            cursor[operand.value] = at + 1;
+            total += 1;
+        }
+    }
+    same = same && total == uses.use_count;
     arena_pop_to(arena, mark);
     return same;
 }
@@ -479,7 +498,7 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
         bool uses_valid = true;
         for (uint32_t form = 0; agree && form < (promotes ? 3u : 1u); form += 1)
         {
-            const bool same = ir_source_uses_twins(forms[form], text_output, scratch);
+            const bool same = ir_source_uses_check(forms[form], text_output, scratch);
             totals->uses_forms += 1;
             totals->uses_failed += !same;
             uses_valid = uses_valid && same;

@@ -7677,7 +7677,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .symbol_access = plan.symbol_access,
         .symbol_count = plan.symbol_count,
         .symbol_first = symbol_first,
-        .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, true),
+        .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors(function),
     };
     // The bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children, its state, and its
     // rule, the AVX-512 kernels labeling depth levels in batches. Nodes outside that grammar take munch's, made in the

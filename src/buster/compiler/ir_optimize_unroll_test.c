@@ -440,7 +440,7 @@ static void ir_unroll_test_run(IrOptimizeTest* test, const IrFunction* f, IrUnro
     }
     if (ac.error == IR_OK && a.outcomes[IR_UNROLL_UNROLLED] != 0)
     {
-        const IrCheck verified = ir_optimize_verify_result(&a.function, &optimized, &scratch, false);
+        const IrCheck verified = ir_optimize_verify_result(&a.function, &optimized, &scratch);
         arena_pop_to(&optimized, 0);
         snprintf(message, sizeof(message), "%s: the unrolled function verifies with dominance (error %d at %u)", label, (int)verified.error, verified.instruction);
         ir_optimize_test_expect(test, verified.error == IR_OK, message);

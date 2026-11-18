@@ -229,7 +229,7 @@ static __attribute__((unused)) IrCheck ir_dataflow_prepare(const IrFunction* fun
     IrCfg cfg = { 0 };
     if (check.error == IR_OK)
     {
-        check = ir_check_rows(function, true);
+        check = ir_check_rows(function);
     }
     if (check.error == IR_OK)
     {
@@ -237,7 +237,7 @@ static __attribute__((unused)) IrCheck ir_dataflow_prepare(const IrFunction* fun
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_graph(function, &cfg, scratch, NULL, true);
+        check = ir_check_graph(function, &cfg, scratch, NULL);
     }
     IrDataflow candidate = { .instruction_count = function->instruction_count };
     bool allocated = true;

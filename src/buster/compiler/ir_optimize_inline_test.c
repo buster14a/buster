@@ -1970,7 +1970,7 @@ static void ir_inline_test_stale_rows(IrInlineTest* test, Arena* input, Arena* o
             ir_inline_test_expect(test, result.inlined_calls == 1 && caller->call_count == 1 && caller->extra_count == 1 && caller->call_type_count == 1,
                                   "a straight line's stale rows take no rows of its caller's");
             const uint64_t mark = scratch->length;
-            ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_OK, "the caller of a straight line with stale rows verifies");
+            ir_inline_test_expect(test, ir_verify(caller, scratch, 0).error == IR_OK, "the caller of a straight line with stale rows verifies");
             arena_pop_to(scratch, mark);
         }
     }
@@ -2048,7 +2048,7 @@ static void ir_inline_test_debug_instances(IrInlineTest* test, Arena* input, Are
             }
             ir_inline_test_expect(test, constant == 1 && add == 1, "the copied instructions take their callee's origins past the caller's");
             const uint64_t mark = scratch->length;
-            ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_OK, "a caller with instances verifies");
+            ir_inline_test_expect(test, ir_verify(caller, scratch, 0).error == IR_OK, "a caller with instances verifies");
             arena_pop_to(scratch, mark);
         }
     }
@@ -2143,7 +2143,7 @@ static void ir_inline_test_debug_parameters(IrInlineTest* test, Arena* input, Ar
                                   formless ? "a parameter of no form has no binding in its expansion" :
                                   assigned ? "a parameter its callee assigns keeps its assignment at the instance's origin" : "an unassigned parameter is bound to its argument");
             const uint64_t mark = scratch->length;
-            ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_OK, "a caller with its expansions' parameters verifies");
+            ir_inline_test_expect(test, ir_verify(caller, scratch, 0).error == IR_OK, "a caller with its expansions' parameters verifies");
             arena_pop_to(scratch, mark);
             // An instance's local's assignment is at its instance's own origins, an ENTRY local's before its first block's
             // end: one at the caller's own entry, or at the instance's block end, is the verifier's error.
@@ -2151,10 +2151,10 @@ static void ir_inline_test_debug_parameters(IrInlineTest* test, Arena* input, Ar
             {
                 IrDebugBinding* binding = (IrDebugBinding*)&debug->bindings[2];
                 binding->entry = 2;
-                ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_ERROR_METADATA, "an instance's local's assignment outside its instance fails");
+                ir_inline_test_expect(test, ir_verify(caller, scratch, 0).error == IR_ERROR_METADATA, "an instance's local's assignment outside its instance fails");
                 arena_pop_to(scratch, mark);
                 binding->entry = debug->inlines[0].block_end;
-                ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_ERROR_METADATA, "an ENTRY instance local's assignment past its first block fails");
+                ir_inline_test_expect(test, ir_verify(caller, scratch, 0).error == IR_ERROR_METADATA, "an ENTRY instance local's assignment past its first block fails");
                 arena_pop_to(scratch, mark);
                 binding->entry = 6;
             }

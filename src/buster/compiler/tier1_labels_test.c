@@ -156,7 +156,7 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
         function.label_count = BUSTER_ARRAY_LENGTH(labels);
         function.symbol_count += 1;
     }
-    const bool verified = created && (fixture != 3 || (ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK));
+    const bool verified = created && (fixture != 3 || (ir_verify(&function, &test->scratch, 0).error == IR_OK));
     tier1_emit_test_expect(test, fixture != 3 || verified, "an absent label outside both indirect jumps' target lists is valid IR by both paths");
     IrDominance dominance;
     const bool dominated = verified && tier1_terminal_dominance(test, &function, &dominance);

@@ -94,7 +94,7 @@ static void tier1_sequences_compile(Tier1EmitTest* test, bool vector, uint32_t r
 {
     IrFunction function;
     const bool created = tier1_sequences_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the sequences' fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);

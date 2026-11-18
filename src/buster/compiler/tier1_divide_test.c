@@ -180,7 +180,7 @@ static uint32_t tier1_divide_compile(Tier1EmitTest* test, const Tier1DivideCase*
 {
     IrFunction function;
     const bool created = loop ? tier1_divide_loop_fixture(test, entry, width, &function) : tier1_divide_straight_fixture(test, entry, width, &function);
-    tier1_emit_test_expect(test, created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK, "division fixture is valid IR");
+    tier1_emit_test_expect(test, created && ir_verify(&function, &test->scratch, 0).error == IR_OK, "division fixture is valid IR");
     IrDominance dominance;
     const bool dominated = created && (!loop || tier1_terminal_dominance(test, &function, &dominance));
     Tier1SelectPlan plan;

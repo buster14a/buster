@@ -97,8 +97,7 @@ static void ir_test_simd_rows(IrTestTally* test, Arena* output, Arena* scratch)
         ir_test_instruction(&function, 5, IR_CALL, IR_VOID, 0, 1, BUSTER_IR_NONE);
         ir_test_instruction(&function, 6, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_pair(test, &function, scratch, NULL, true, "row calls of a vector result and of none verify");
-        ir_test_expect(test, ir_function_has_simd_path(&function, true) && ir_function_has_simd_path(&function, false) && ir_function_has_vectors_path(&function, true) &&
-                       ir_function_has_vectors_path(&function, false), "a function with machine rows has SIMD values on both scans' paths");
+        ir_test_expect(test, ir_function_has_simd(&function) && ir_function_has_vectors(&function), "a function with machine rows has SIMD values on both scans' paths");
         ir_test_expect(test, !ir_interpreter_simd_supported(&function), "the interpreter refuses a machine row, which it has no model of");
         ir_test_printer(test, &function, output, scratch);
         function.a[4] = 1;
@@ -151,8 +150,8 @@ static void ir_test_simd_rows(IrTestTally* test, Arena* output, Arena* scratch)
     arena_pop_to(output, mark);
 }
 
-// A vector operation's lanes (#141's element types, its flags): each shape accepted and its neighbours refused, by both
-// verifiers. Two vector parameters of `type` (v4i32, v8i32 or v16i32), then the operation under test on them, of
+// A vector operation's lanes (#141's element types, its flags): each shape accepted and its neighbours refused, by the
+// verifier. Two vector parameters of `type` (v4i32, v8i32 or v16i32), then the operation under test on them, of
 // `result` with flags `lane` and predicate `c` (vcmp's), and a ret.
 typedef struct IrTestLaneCase IrTestLaneCase;
 struct IrTestLaneCase
@@ -512,7 +511,7 @@ static void ir_test_splats(IrTestTally* test, Arena* output, Arena* scratch)
 }
 
 // The width changes (#1840): extract, widen and insert of every pair of vector widths and every part to 4, admitted by
-// both verifiers exactly where the result's, the operands' and the part's widths agree (an extract's narrower part of
+// the verifier exactly where the result's, the operands' and the part's widths agree (an extract's narrower part of
 // its wider operand, a widen's wider result, an insert's narrower part into its own type), every other kind's flags
 // refused; and the model's values against bytes written out: an extract's the operand's part, a widen's the operand and
 // zeros past it, an insert's the first operand with its part the second's.
@@ -705,7 +704,7 @@ static uint8_t ir_test_permute_byte(uint32_t kind, uint32_t flags, uint32_t byte
 }
 
 // The permutes (#1840): permute, shuffle, align and shuffle_lanes of two vectors at every width and every flags byte,
-// admitted by both verifiers exactly where ir_permute_flags_valid's rule, written out again here, says (permute's lanes'
+// admitted by the verifier exactly where ir_permute_flags_valid's rule, written out again here, says (permute's lanes'
 // sizes 0 to 3; shuffle's 0; align's sizes 2 and 3 in bits 4 and 5 with a count below the lanes; shuffle_lanes' 2 bits of a
 // 32-byte vector's, any byte of a 64-byte one's, none of 16), refused with operands of another type or a missing b; and
 // the model's bytes against ir_test_permute_byte on random vectors.
@@ -788,7 +787,7 @@ static void ir_test_permutes(IrTestTally* test, Arena* output, Arena* scratch)
 }
 
 // The conversions (#1840): extend and truncate between every pair of vector widths, and an extension of an SSE carrier
-// (an F32 or F64 of 4 or 8 bytes) into each width, at every flags byte below 64, admitted by both verifiers exactly where
+// (an F32 or F64 of 4 or 8 bytes) into each width, at every flags byte below 64, admitted by the verifier exactly where
 // the lanes' sizes, mode and widths agree as written out here, and the model's lanes against C's conversions of each lane
 // on random vectors.
 static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch)
@@ -896,7 +895,7 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
 }
 
 // The shifts by a scalar count (#1840): shift at every vector width, every flags byte below 32 and a count of each of
-// I32, I64, I16 and the vector's own type, admitted by both verifiers exactly where the flags name lanes of 2, 4 or 8
+// I32, I64, I16 and the vector's own type, admitted by the verifier exactly where the flags name lanes of 2, 4 or 8
 // bytes and one of the three shifts and the count is an I32; and the model's lanes against C's shifts of each lane, at
 // counts around every lane's bits and past 16 and 32 bits, read unsigned.
 static void ir_test_scalar_shifts(IrTestTally* test, Arena* output, Arena* scratch)
@@ -1071,11 +1070,7 @@ static void ir_test_ternary_dominance(IrTestTally* test, Arena* output, Arena* s
                             const IrCheck vector = ir_verify(&function, scratch, view);
                             ir_test_expect(test, vector.error == error && vector.instruction == instruction && vector.detail == detail &&
                                            vector.dominance_checked == (!invalid && supplied != 0) && scratch->length == scratch_mark,
-                                           "vector verifier checks a ternary intrinsic's third operand dominance and exact diagnostic");
-                            const IrCheck scalar = ir_verify_scalar(&function, scratch, view);
-                            ir_test_expect(test, scalar.error == error && scalar.instruction == instruction && scalar.detail == detail &&
-                                           scalar.dominance_checked == (!invalid && supplied != 0) && scratch->length == scratch_mark,
-                                           "scalar verifier checks a ternary intrinsic's third operand dominance and exact diagnostic");
+                                           "the verifier checks a ternary intrinsic's third operand dominance and exact diagnostic");
                         }
                     }
                 }
@@ -1085,7 +1080,7 @@ static void ir_test_ternary_dominance(IrTestTally* test, Arena* output, Arena* s
     }
 }
 
-// The permutes of two tables (#1840), whose third operand the extra array holds: both verifiers admit permute2 exactly
+// The permutes of two tables (#1840), whose third operand the extra array holds: the verifier admits permute2 exactly
 // where its lanes (flags 0 to 3) and its three operands' types agree, its third operand in a slot of the extra array,
 // and refuse a missing slot, a slot naming no value and a binary kind whose `c` has a slot; the model is checked
 // against each lane picked from the two tables by its index's low bits, on random vectors.
@@ -1178,7 +1173,7 @@ static void ir_test_permute2s(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 3 * 2 * 4, "permute2 is admitted at every width and lanes, its slot first or not");
 }
 
-// The funnel shifts (#1840): both verifiers admit funnel of three vectors of the result's type exactly at lanes of 2, 4 or
+// The funnel shifts (#1840): the verifier admits funnel of three vectors of the result's type exactly at lanes of 2, 4 or
 // 8 bytes and either direction (flags 1 to 3 and 5 to 7), refusing other flags and counts of another width; and the
 // model gives C's funnel shift of each lane, a:b's high half shifted left or its low half shifted right by the count
 // modulo the lanes' bits, on random vectors whose counts are often past the lanes' bits or zero.
@@ -1274,7 +1269,7 @@ static void ir_test_funnels(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's funnel shift gives C's fshl and fshr of each lane");
 }
 
-// The bitwise functions of three vectors (#1840): both verifiers admit ternlog of three vectors of the result's type with
+// The bitwise functions of three vectors (#1840): the verifier admits ternlog of three vectors of the result's type with
 // any truth table, and refuse a third operand of another width; the model is checked against each bit's table entry.
 static void ir_test_ternlogs(IrTestTally* test, Arena* output, Arena* scratch)
 {
@@ -1332,7 +1327,7 @@ static void ir_test_ternlogs(IrTestTally* test, Arena* output, Arena* scratch)
     }
 }
 
-// One lane's moves and the lanes' sign bits (#1840): both verifiers admit lane_extract, lane_insert and movemask exactly
+// One lane's moves and the lanes' sign bits (#1840): the verifier admits lane_extract, lane_insert and movemask exactly
 // where the flags' lane is below the vector's lanes, the scalar an I32 for a lane of 1, 2 or 4 bytes and an I64 for one of
 // 8, or an extraction's lane 0 of doublewords or quadwords into an SSE carrier, an F32 or an F64 (movemask an I32 of a
 // vector of 16 or 32 bytes, of bytes, doublewords or quadwords); and the model gives C's lane, C's replaced lane and C's
@@ -1435,7 +1430,7 @@ static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's lane moves and movemasks are C's");
 }
 
-// The reductions (#1840): both verifiers admit reduce exactly where its result is a V4I32, its operand a vector of any
+// The reductions (#1840): the verifier admits reduce exactly where its result is a V4I32, its operand a vector of any
 // width, its lanes doublewords or quadwords and its operation one of the nine, for every flags byte; and the model gives
 // C's minimum, maximum, sum, product, and, or and xor of all of the lanes in each of the result's lanes, on random
 // vectors with lanes at the signed and unsigned edges.
@@ -1521,7 +1516,7 @@ static void ir_test_reductions(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's reductions are C's");
 }
 
-// The quadword operations (#1840): both verifiers admit quadword_op exactly of two vectors of the result's type at flags 0
+// The quadword operations (#1840): the verifier admits quadword_op exactly of two vectors of the result's type at flags 0
 // to 3, refusing another width's b and other flags; and the model gives vpmultishiftqb's, vpsadbw's, vpmuludq's and
 // vpmuldq's quadwords (#2780), as their definitions written out here, on random vectors.
 static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratch)
@@ -1708,7 +1703,7 @@ static void ir_test_pairwise_oracle(bool dot, uint32_t flags, const uint8_t* a, 
     }
 }
 
-// The pairwise operations and the dot products (#2780): both verifiers admit pairwise exactly of two vectors of the
+// The pairwise operations and the dot products (#2780): the verifier admits pairwise exactly of two vectors of the
 // result's type at flags 0 to 5, and dot exactly of three at flags 0 to 3, refusing another width's operand and other
 // flags; and the model gives vpmaddwd's, vpmaddubsw's, the packs' and vpdpbusd's to vpdpwssds's lanes, as their
 // definitions written out (ir_test_pairwise_oracle), on random vectors whose extreme lanes saturate.
@@ -1792,7 +1787,7 @@ static void ir_test_pairwise_dots(IrTestTally* test, Arena* output, Arena* scrat
     ir_test_expect(test, exact, "the model's pairwise operations and dot products give the instructions' lanes");
 }
 
-// The bit shuffles into a mask (#1840): both verifiers admit bitshuffle exactly of two vectors of one type into the mask
+// The bit shuffles into a mask (#1840): the verifier admits bitshuffle exactly of two vectors of one type into the mask
 // of their bytes (m16, m32 or m64) with flags 0, refusing another vector's operand, another mask and flags; and the
 // model gives each byte's bit of its quadword, as vpshufbitqmb's definition, written out here, on random vectors.
 static void ir_test_bitshuffles(IrTestTally* test, Arena* output, Arena* scratch)
@@ -1861,7 +1856,7 @@ static void ir_test_bitshuffles(IrTestTally* test, Arena* output, Arena* scratch
     ir_test_expect(test, exact, "the model's bit shuffle gives each byte its quadword's indexed bit");
 }
 
-// The lanes' unary operations (#1840): both verifiers admit lane_unary exactly where its operand is of its type and its
+// The lanes' unary operations (#1840): the verifier admits lane_unary exactly where its operand is of its type and its
 // flags a population count or an absolute value (#2780) of any lanes, or a leading zero count or conflicts of
 // doublewords or quadwords, for every flags byte at each width; and the model gives C's counts, conflicts and absolute
 // values of each lane on random vectors whose lanes repeat.
@@ -2019,7 +2014,7 @@ static uint64_t ir_test_fround_oracle(uint32_t flags, uint64_t a, uint64_t b)
     return first_nan && second_nan ? first | quiet : result;
 }
 
-// The truncating conversions of lane 0 (#1840): both verifiers admit cvtt exactly of a V4I32 into the I32 or I64 its
+// The truncating conversions of lane 0 (#1840): the verifier admits cvtt exactly of a V4I32 into the I32 or I64 its
 // flags' bit 1 names, at every flags byte; and the model gives x86's result, C's truncation where the range holds it
 // and the smallest integer for NaNs, infinities and values past the range, at the range's edges both sides.
 static void ir_test_cvtts(IrTestTally* test, Arena* output, Arena* scratch)
@@ -2090,7 +2085,7 @@ static void ir_test_cvtts(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, exact, "the model's truncating conversions are x86's");
 }
 
-// The floating operations at their own rounding (#1840): both verifiers admit fround exactly of two 64-byte vectors of its
+// The floating operations at their own rounding (#1840): the verifier admits fround exactly of two 64-byte vectors of its
 // type at every flags byte below 32; and the model gives C's operation in each rounding mode (ir_test_fround_oracle) on
 // lanes chosen so that the modes differ (random fractions, ties, overflow, underflow, zeros, infinities and NaNs), and
 // leaves MXCSR as it was.
@@ -2167,7 +2162,7 @@ static void ir_test_frounds(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, kept, "the model leaves MXCSR, its flags among it, as it was");
 }
 
-// The masked loads and stores (#1840): both verifiers admit them exactly where their flags are integer lanes (0 to 3),
+// The masked loads and stores (#1840): the verifier admits them exactly where their flags are integer lanes (0 to 3),
 // whose mask is the load's b or the store's c, the address a ptr, the passthrough or the stored vector a vector (a load's
 // of its type) and the alignment's log2 at most 31; the float lanes, an invalid lane, another mask, a vector address and
 // an alignment of 2^32 are refused.
@@ -2221,7 +2216,7 @@ static void ir_test_masked_memory(IrTestTally* test, Arena* output, Arena* scrat
     ir_test_expect(test, admitted_count == 2 * 3 * 4, "masked loads and stores are admitted at every width and integer lanes");
 }
 
-// The compresses and expands (#1840): both verifiers admit them exactly where their lanes (flags 0 to 3) name b's mask
+// The compresses and expands (#1840): the verifier admits them exactly where their lanes (flags 0 to 3) name b's mask
 // type and a and the third operand are of the result's type; the model is checked against C's packing of the selected
 // lanes and spreading of the next ones, the rest the third operand's, on random vectors and masks.
 static void ir_test_compresses(IrTestTally* test, Arena* output, Arena* scratch)
@@ -2309,7 +2304,7 @@ static void ir_test_compresses(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 2 * 3 * 4, "compress and expand are admitted at every width and lanes");
 }
 
-// The AES rounds (#1840): both verifiers admit aes of two vectors of the result's type with flags 0 and 1 alone; the
+// The AES rounds (#1840): the verifier admits aes of two vectors of the result's type with flags 0 and 1 alone; the
 // model gives FIPS 197's Appendix B round 1 (vaesenc of the state after the first AddRoundKey by round key 1 is the state
 // starting round 2) and the 9700X's vaesenclast of that appendix's round-10 key, in every 16-byte lane of each width.
 static void ir_test_aes(IrTestTally* test, Arena* output, Arena* scratch)
@@ -2367,7 +2362,7 @@ static void ir_test_aes(IrTestTally* test, Arena* output, Arena* scratch)
 }
 
 // The lane operations (#1840): lane_op at every vector width, for every flags byte below 64 and a second operand of the
-// result's type or another width's, admitted by both verifiers exactly where the operation is a minimum or a maximum, or
+// result's type or another width's, admitted by the verifier exactly where the operation is a minimum or a maximum, or
 // a saturating sum or difference of bytes or words, and the operands are of the result's type; and the model's lanes
 // against C's minimum, maximum and clamped sum and difference of each lane, on random vectors with extreme lanes.
 static void ir_test_lane_ops(IrTestTally* test, Arena* output, Arena* scratch)

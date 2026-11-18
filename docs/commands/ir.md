@@ -111,8 +111,9 @@ function and the first error. `--print NAME` prints that function's IR as lowere
 and as promoted. The correctness list runs it on c-testsuite's subset, the frozen
 `sqlite3.c` and the frozen musl's units.
 
-`./build/compiler benchmark-ir-source [--only lower|lower-scalar|verify|
-verify-scalar|promote|promote-scalar] [--after-scalar MS] [preprocessor options]
+`./build/compiler benchmark-ir-source [--only lower|lower-scalar|promote|
+promote-scalar|gvn|gvn-scalar|optimize|optimize-scalar|optimize-vector|verify]
+[--after-scalar MS] [preprocessor options]
 file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
 does, lowers and promotes each once outside the time, and reports the IR's bytes
 (each function's arena, alignment gaps and all, as an arena of its own) per
@@ -174,7 +175,7 @@ nanoseconds, cycles and instructions per lowered IR instruction. Run it
 under the 9700X's lock, pinned to one CPU.
 
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
-scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
+verify|uses|cfg]` measures the verifier and derived
 builders on small and large synthetic functions. `benchmark-ir-lowering
 [--seed N] [--passes N] [--only scalar|vector] [--after-scalar MS]` measures
 the complete available typed-stream-to-verified-IR path on generated mixed

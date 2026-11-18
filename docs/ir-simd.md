@@ -557,8 +557,8 @@ same sources (main's own improvements since change the records, 538,003 and
 
 The tests:
 
-- `test-ir`: both verifiers admit each kind at every pair of widths and part
-  below 5 exactly where the widths and part agree (19 forms), and refuse another
+- `test-ir`: the verifier admits each kind at every pair of widths and part
+  below 5 exactly where the widths and part agree (19 forms), and refuses another
   kind's flags. The model's values are checked against bytes written out.
 - `test-ir-parse`: round-trips the forms.
 - `test-ir-optimize`: SCCP folds, by both paths, an insert's part back, a
@@ -646,8 +646,8 @@ use too) wait on the owner's decision on #1840.
 
 The tests:
 
-- `test-ir`: both verifiers take each kind at each width and every flags byte
-  exactly where the rule, written out again, admits it (317 forms). They refuse
+- `test-ir`: the verifier takes each kind at each width and every flags byte
+  exactly where the rule, written out again, admits it (317 forms). It refuses
   operands of another type and a missing b. The model's bytes are checked
   against a byte formula on random vectors.
 - `test-ir-parse`: round-trips the forms.
@@ -811,7 +811,7 @@ That is 52 and 104 rows fewer than with the permutes (990 and 1,510).
 
 The tests:
 
-- `test-ir`: both verifiers admit each kind between every pair of vector widths
+- `test-ir`: the verifier admits each kind between every pair of vector widths
   at every flags byte below 64 exactly where the lanes, mode and widths agree
   (156 forms). The model is checked against C's conversions of each lane on
   random vectors with saturating edges.
@@ -882,7 +882,7 @@ of its carrier into its role.
 The tests:
 
 - **`test-ir`:**
-  - both verifiers admit `extend` of an `f32` or `f64` into every width whose
+  - the verifier admits `extend` of an `f32` or `f64` into every width whose
     lanes it holds, at every flags byte (28 forms), and the model's lanes are
     C's;
   - `lane_extract` into an `f32` or `f64` is admitted for lane 0 of
@@ -960,7 +960,7 @@ unchanged (535 and 708). Spills are within 3 of before.
 
 The tests:
 
-- `test-ir`: both verifiers admit `shift` at each vector width, for every
+- `test-ir`: the verifier admits `shift` at each vector width, for every
   flags byte below 32 and a count of `i32`, `i64`, `i16` or the vector's type,
   exactly where the flags name a lane size and shift and the count is an `i32`
   (27 forms). The model is checked against C's shifts of each lane at counts
@@ -1030,7 +1030,7 @@ Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
 
 The tests:
 
-- `test-ir`: both verifiers admit `lane_op` at each vector width, for every
+- `test-ir`: the verifier admits `lane_op` at each vector width, for every
   flags byte below 64 and a second operand of the result's type or another
   width's, exactly where operation, lanes and operands agree (72 forms). The
   model is checked against C's minimum, maximum and clamped sum and difference
@@ -1189,8 +1189,8 @@ No `vpternlog` row is left in either unit.
 
 The tests:
 
-- `test-ir`: both verifiers admit ternlog with every 15th table at each width,
-  and refuse a third operand of another width. The model is checked against
+- `test-ir`: the verifier admits ternlog with every 15th table at each width,
+  and refuses a third operand of another width. The model is checked against
   each bit's table entry.
 - `test-ir-parse` and `test-ir-optimize`: `tests/ir/widths.ir` round-trips it,
   and SCCP folds it of three constants with 4 tables, on both paths.
@@ -1253,7 +1253,7 @@ sources, against the bitwise functions (`3249be86`):
 
 The tests:
 
-- `test-ir`: both verifiers admit them exactly where the flags name b's mask
+- `test-ir`: the verifier admits them exactly where the flags name b's mask
   type. The model is checked against C's lanes on random vectors and masks.
 - `test-ir-parse` and `test-ir-optimize`: the text form round-trips, and SCCP
   folds them of constants under a constant mask, on both paths.
@@ -1308,7 +1308,7 @@ No AES row is left in either unit.
 
 The tests:
 
-- **`test-ir`:** both verifiers admit it with flags 0 and 1 alone. The model
+- **`test-ir`:** the verifier admits it with flags 0 and 1 alone. The model
   gives FIPS 197 Appendix B's round 1 in every lane of each width. For the last
   round, it gives the 9700X's `vaesenclast` of that appendix's round-10 key.
 - **`test-ir-parse` and `test-ir-optimize`:** the text form round-trips, and
@@ -1409,7 +1409,7 @@ compiling this change's sources, against main `e43dfc10`:
 
 The tests:
 
-- **`test-ir`:** both verifiers admit them exactly at integer lanes whose mask
+- **`test-ir`:** the verifier admits them exactly at integer lanes whose mask
   is their mask operand, a `ptr` address and an alignment's log2 up to 31; the
   float lanes, an invalid lane, another mask, a vector address and 2^32 are
   refused, at every width.
@@ -1775,7 +1775,7 @@ compiling this change's sources, against the masked loads and stores
 
 The tests:
 
-- **`test-ir`:** both verifiers admit the three kinds exactly at a lane below
+- **`test-ir`:** the verifier admits the three kinds exactly at a lane below
   the vector's lanes, with the scalar of the lane's width, and a movemask's
   flags 0, 2 or 3 of a 16- or 32-byte vector, at every width and all 256 flags.
   The model gives C's lane, replaced lane and sign bits on random vectors.
@@ -1845,7 +1845,7 @@ floor drops from 10 to 5.
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `reduce` exactly at a `v4i32` result, of
+- **`test-ir`:** the verifier admits `reduce` exactly at a `v4i32` result, of
   a vector of each width, at every flags byte whose lanes are doublewords or
   quadwords and whose operation is one of the nine. The model gives C's
   reductions on random vectors with lanes at the signed and unsigned edges.
@@ -1911,7 +1911,7 @@ compiling this change's sources, against main (`d96b2e73`, with the reductions):
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `lane_unary` exactly of its own type at
+- **`test-ir`:** the verifier admits `lane_unary` exactly of its own type at
   every flags byte and width. The model gives C's counts and conflicts on random
   vectors whose lanes repeat or are zero.
 - **`test-ir-parse`:** `tests/ir/lane-unary.ir` round-trips.
@@ -1972,7 +1972,7 @@ truncating conversions below:
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `fround` exactly of two 64-byte vectors
+- **`test-ir`:** the verifier admits `fround` exactly of two 64-byte vectors
   of its type at every flags byte below 32. The model is checked against C's
   operation in that rounding mode (`host_fesetround`, volatile operands) on
   random lanes, ties, overflow, underflow, zeros, infinities and NaNs, and
@@ -2014,7 +2014,7 @@ are these conversions.
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `cvtt` exactly of a `v4i32` into its
+- **`test-ir`:** the verifier admits `cvtt` exactly of a `v4i32` into its
   flags' integer. The model gives x86's results at both ranges' edges, for
   infinities and for NaNs, against bounds written out in long double.
 - **`test-ir-parse`:** `tests/ir/fround.ir`'s second function.
@@ -2069,9 +2069,9 @@ byte shuffles and the carriers above: `main_unit_backend.c` 132 → 105. No
 The tests:
 
 - **`test-ir`:**
-  - both verifiers admit `bitshuffle` exactly of two vectors of one type into
+  - the verifier admits `bitshuffle` exactly of two vectors of one type into
     their bytes' mask, at flags 0;
-  - they refuse another width's b, another mask and a vector result;
+  - it refuses another width's b, another mask and a vector result;
   - the model is checked against the instruction's definition on random
     vectors.
 - **`test-ir-parse`:** `tests/ir/bitshuffle.ir` round-trips.
@@ -2119,7 +2119,7 @@ families above: `main_unit_backend.c` 105 → 96. No `vpmultishiftqb` or
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `quadword_op` exactly of two vectors of
+- **`test-ir`:** the verifier admits `quadword_op` exactly of two vectors of
   the result's type at flags 0 and 1, at every width. The model is checked
   against both instructions' definitions, written out bit by bit, on random
   vectors.
@@ -2191,7 +2191,7 @@ families above: `main_unit_backend.c` 96 → 92. The 3 `vpshrdvd` rows and the
 The tests:
 
 - **`test-ir`:**
-  - both verifiers admit `funnel` exactly of three vectors of the result's
+  - the verifier admits `funnel` exactly of three vectors of the result's
     type, at flags 1 to 3 and 5 to 7;
   - the model is checked against C's `fshl` and `fshr`, written out a bit at a
     time, on random vectors whose counts are often zero or past the lanes'
@@ -2313,7 +2313,7 @@ complete, and `measure-x86-zen5 --missing` finds none to measure.
 **Tests:**
 
 - **`test-ir`:**
-  - both verifiers admit `pairwise` at flags 0 to 5 and `dot` at 0 to 3, of
+  - the verifier admits `pairwise` at flags 0 to 5 and `dot` at 0 to 3, of
     their type, at every width;
   - the model is checked against the instructions' definitions written out
     (`ir_test_pairwise_oracle`) on extreme lanes that saturate, and against C's

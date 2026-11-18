@@ -275,9 +275,8 @@ repeated uses. Void-result instructions have empty slices. Block IDs, symbols,
 slots, constants and side-table offsets never count as value uses. Derived counts
 are accumulated in u64 and checked before becoming u32 offsets.
 
-The builder has two twins (#1634). The scalar one, `ir_uses_validated_scalar`,
-decodes each operand through `ir_operand`. The vector one, `ir_uses_validated`,
-decodes 16 instructions at a time (`ir_uses_batch`):
+The builder, `ir_uses_validated` (#1634), decodes 16 instructions at a time
+(`ir_uses_batch`):
 
 - One two-register byte permute (`vpermi2b`) of the opcode tables, 128 entries
   each since the masked loads and stores took opcodes 64 and 65 (#1840), gives
@@ -293,10 +292,10 @@ decodes 16 instructions at a time (`ir_uses_batch`):
 - A phi's inputs or a call's arguments follow that instruction's own fixed
   operands, so the mask is walked in segments that end at each phi or call.
 
-Both twins allocate the same arrays and build identical lists. The optimizer's
-preparation uses the scalar twin on its scalar path. Placing a use is still
-a dependent increment of its value's cursor, so a value with many uses
-serializes its own increments in both twins.
+Placing a use is still a dependent increment of its value's cursor, so a value
+with many uses serializes its own increments. The builder's scalar twin, which
+decoded each operand through `ir_operand`, is deleted (#2924); `test-ir` folds
+every list it builds into a digest frozen while both built identical lists.
 
 On the 9700X, against `687f44c3` (before the twins), `BUSTER_DEBUG_INFO=0`,
 CPU 2, three `ab` rounds:
@@ -326,14 +325,20 @@ function's first 64 (its parameters' and entry constants'); only a value in
 neither is a byte load of its own, so no read is a hardware gather or an
 accidental four-byte read from a byte column (`ir_operand_types`, #786).
 Constants, calls, phis, switches and conversions use exact scalar handling; a
-failing vector batch also uses the scalar rule to produce the same diagnostic.
-`ir_verify_scalar` checks one instruction at a time. Both return the same
-`IrCheck` fields, including the first error location.
+failing vector batch also uses the scalar rule to produce the diagnostic.
+
+The verifier's scalar twin, `ir_verify_scalar`, which checked one instruction
+at a time, is deleted (#2924). In #2924's C9 gate on the 9700X, the area of the
+verified optimizer, its verification included, took 1.09 to 1.16 times as long
+on the twins in every size bin
+([the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-ir-gate)).
+`test-ir` folds every verdict (the error, its instruction, detail and whether
+dominance was checked) into a digest frozen while both verifiers agreed.
 
 The graph phase checks phi coverage/types, duplicate switch constants and use
 ordering. Duplicate switch detection uses stable byte-radix sorting with at most
 16 passes, so adversarial i128 keys cannot cause a quadratic hash-probe scan. The
-vector path finds the phis and switches 64 operations at a time; a phi after a
+check finds the phis and switches 64 operations at a time; a phi after a
 non-phi of its block is the first misplaced one, so the check needs no state
 carried through the block.
 
@@ -1265,25 +1270,27 @@ and vector classification produce identical columns, side arrays and block range
 ./build/compiler test-ir --seed 81985529216486895 --count 1024
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
-./build/compiler benchmark-ir --only vector --after-scalar 200
+./build/compiler benchmark-ir --only verify
 ./build/compiler benchmark-ir-lowering
 ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
 ./build/compiler test-ir-source [--print NAME] [preprocessor options] file...
 ./build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [preprocessor options] file...
 ```
 
-`test-ir` compares the two use-list twins on its printer fixtures, guarded
-tails, every-operand-kind fixture, generated functions and allocation
-failures. `test-ir-source` compares them on every lowered and promoted source
-form (`uses_forms`, `uses_failed`). `test-ir` also has independently expected CFG/use lists and rejection fixtures,
+`test-ir` folds the use lists of its printer fixtures, guarded tails,
+every-operand-kind fixture and generated functions, and every verdict of its
+fixtures, into two digests; a default run (`--seed 1 --count 64`) must give the
+frozen ones, taken while the deleted scalar twins agreed (#2924).
+`test-ir-source` checks the use lists of every lowered and promoted source form
+against their definition, each operand `ir_operand` enumerates the next use of
+its value (`uses_forms`, `uses_failed`). `test-ir` also has independently expected CFG/use lists and rejection fixtures,
 conversion and constant coverage, loop/diamond/self phis, duplicate targets,
 8,192 adversarial i128 switch cases, guarded columns of lengths 0 through 33,
 dominance tails, overflow, arena rollback, exact printer text and random
-integer DAG mutations. Agreement alone is insufficient: malformed fixtures must
-be rejected by both paths. Generated functions of up to 40 blocks, with phis,
-selects, stores, addresses with and without an index and returns, are valid but
-for where each value is used; both paths must report the first use error, or
-none, that an independent oracle gives under no dominator view, a chain of
+integer DAG mutations. Malformed fixtures must be rejected. Generated functions
+of up to 40 blocks, with phis, selects, stores, addresses with and without an
+index and returns, are valid but for where each value is used; the verifier
+must report the first use error, or none, that an independent oracle gives under no dominator view, a chain of
 blocks (some unreachable) and random intervals (`ir_test_dominance_generated`,
 #786: four per `--count`). A labels fixture (`ir_test_labels`) checks
 `br_indirect`'s successors (three labels, two distinct blocks: two edges), a
@@ -1385,7 +1392,7 @@ signed or unsigned semantics, and F32 arithmetic/conversion rounds at F32 precis
 independent accounting and calibration happen outside retained samples. Rebuild
 timings include allocation, clearing and filling. Each sample lasts at least
 2 ms, variants rotate order, and the default is 21 passes. `--only` isolates a
-path; `--after-scalar` conditions the vector path with lighter scalar verification.
+variant.
 It reports ns/function, ns/instruction, useful instructions/s, TSC ticks and
 actual core/CFG/use arena charges. TSC ticks are not core cycles.
 

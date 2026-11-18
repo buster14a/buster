@@ -1197,7 +1197,7 @@ static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
         {
             IrFunction function;
             const bool created = tier1_emit_test_lifetime_fixture(test, shape, &function);
-            tier1_emit_test_expect(test, created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK, "construct lifetime IR");
+            tier1_emit_test_expect(test, created && ir_verify(&function, &test->scratch, 0).error == IR_OK, "construct lifetime IR");
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
             // Shape 2's dominator tree: the entry block over both of the others, whose values they read.
@@ -1419,7 +1419,7 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
                 tier1_emit_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE);
                 tier1_emit_test_node(&function, 7, IR_SUB, IR_I64, 2, 1);
                 tier1_emit_test_node(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE);
-                ready = ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+                ready = ir_verify(&function, &test->scratch, 0).error == IR_OK;
             }
         }
         tier1_emit_test_expect(test, ready, "overlong fixture is valid IR");

@@ -40,9 +40,8 @@ static void ir_interpreter_test_splats(IrInterpreterTestTally* tally, Arena* mem
                 ir_interpreter_test_instruction(&function, 2, IR_INTRINSIC, (IrType)(IR_V4I32 + width), 1, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT);
                 ir_interpreter_test_instruction(&function, 3, IR_STORE, IR_VOID, 0, 2, BUSTER_IR_NONE);
                 ir_interpreter_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                ir_interpreter_test_expect(tally, ir_verify_complete(&function, execution, false).error == IR_OK &&
-                                                 ir_verify_complete(&function, execution, true).error == IR_OK,
-                                           "both complete verifiers accept a splat's single scalar use");
+                ir_interpreter_test_expect(tally, ir_verify_complete(&function, execution).error == IR_OK,
+                                           "the complete verifier accepts a splat's single scalar use");
                 const InterpreterBinding object = { .symbol = 2, .bytes = actual, .size = sizeof(actual), .writable = true };
                 const IrInterpreterFunction binding = { .symbol = 71, .function = &function };
                 const IrInterpreterProgram program = { .functions = &binding, .function_count = 1, .bindings = &object, .binding_count = 1 };

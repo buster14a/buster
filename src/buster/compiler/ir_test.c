@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original fixtures for the per-function IR, included after ir.c. The expected CFG and use-list rows below are
-// handwritten independently of the opcode table. Invalid fixtures must be rejected by both verifiers, not merely
-// agree with one another. Guarded columns have exactly their logical readable bytes. No external data is imported.
+// handwritten independently of the opcode table. Invalid fixtures must be rejected by the verifier; the digest of
+// every diagnostic is frozen. Guarded columns have exactly their logical readable bytes. No external data is imported.
 
 #include <errno.h>
 #include <stdlib.h>
@@ -19,8 +19,9 @@ struct IrTestTally
     uint64_t checks;
     uint64_t failures;
     uint64_t seed;
-    // FNV-1a digests of every verdict ir_test_pair takes and every use list ir_test_uses_twins builds, in order (#2924):
-    // with the default seed and count they must equal the frozen ones, taken where the vector and scalar paths agreed.
+    // FNV-1a digests of every verdict ir_test_pair takes and every use list ir_test_uses builds, in order (#2924): with
+    // the default seed and count they must equal the frozen ones, taken where the vector paths and their deleted scalar
+    // twins agreed.
     uint64_t verdicts;
     uint64_t uses;
 };
@@ -70,16 +71,14 @@ static void ir_test_instruction(IrFunction* function, uint32_t id, IrOp op, IrTy
 static void ir_test_pair(IrTestTally* tally, const IrFunction* function, Arena* scratch, const IrDominance* dominance, bool expected_valid, const char* message)
 {
     const uint64_t mark = scratch->length;
-    const IrCheck vector = ir_verify(function, scratch, dominance);
-    ir_test_expect(tally, scratch->length == mark, "vector verifier retained scratch");
-    const IrCheck scalar = ir_verify_scalar(function, scratch, dominance);
-    ir_test_expect(tally, scratch->length == mark, "scalar verifier retained scratch");
-    ir_test_expect(tally, (vector.error == IR_OK) == expected_valid && (scalar.error == IR_OK) == expected_valid, message);
-    ir_test_expect(tally, vector.error == scalar.error && vector.instruction == scalar.instruction && vector.detail == scalar.detail && vector.dominance_checked == scalar.dominance_checked, "verifiers disagree on the diagnostic");
-    ir_test_fold(&tally->verdicts, (uint64_t)vector.error | (uint64_t)vector.dominance_checked << 8 | (uint64_t)vector.detail << 16 | (uint64_t)vector.instruction << 32);
+    const IrCheck verified = ir_verify(function, scratch, dominance);
+    ir_test_expect(tally, scratch->length == mark, "the verifier retained scratch");
+    ir_test_expect(tally, (verified.error == IR_OK) == expected_valid, message);
+    // The diagnostic itself is checked against the frozen digest of every verdict (BUSTER_IR_TEST_VERDICTS_DIGEST).
+    ir_test_fold(&tally->verdicts, (uint64_t)verified.error | (uint64_t)verified.dominance_checked << 8 | (uint64_t)verified.detail << 16 | (uint64_t)verified.instruction << 32);
     if (expected_valid && dominance != 0)
     {
-        ir_test_expect(tally, vector.dominance_checked, "supplied dominance view was not checked");
+        ir_test_expect(tally, verified.dominance_checked, "supplied dominance view was not checked");
     }
 }
 
@@ -103,36 +102,27 @@ static bool ir_test_simple(Arena* arena, IrFunction* function)
     return ok;
 }
 
-// #1634: the use-list twins build the same lists, offset for offset and use for use, or fail alike.
-static void ir_test_uses_twins(IrTestTally* tally, const IrFunction* function, Arena* memory, Arena* scratch)
+// #1634: the use lists, offset for offset and use for use, or the failure, folded into the frozen digest
+// (BUSTER_IR_TEST_USES_DIGEST).
+static void ir_test_uses(IrTestTally* tally, const IrFunction* function, Arena* memory, Arena* scratch)
 {
     const uint64_t mark = memory->length;
     const uint64_t scratch_mark = scratch->length;
-    IrUses vector = { 0 };
-    IrUses scalar = { 0 };
-    const IrError vector_error = ir_uses_validated(function, memory, scratch, &vector);
-    ir_test_fold(&tally->uses, (uint64_t)vector_error);
-    for (uint32_t i = 0; vector_error == IR_OK && i <= vector.value_count; i += 1)
+    IrUses uses = { 0 };
+    const IrError error = ir_uses_validated(function, memory, scratch, &uses);
+    ir_test_fold(&tally->uses, (uint64_t)error);
+    for (uint32_t i = 0; error == IR_OK && i <= uses.value_count; i += 1)
     {
-        ir_test_fold(&tally->uses, vector.offsets[i]);
+        ir_test_fold(&tally->uses, uses.offsets[i]);
     }
-    for (uint32_t u = 0; vector_error == IR_OK && u < vector.use_count; u += 1)
+    for (uint32_t u = 0; error == IR_OK && u < uses.use_count; u += 1)
     {
-        IrUse use = vector.uses[u];
+        IrUse use = uses.uses[u];
         uint64_t word = 0;
         memcpy(&word, &use, sizeof(use) < sizeof(word) ? sizeof(use) : sizeof(word));
         ir_test_fold(&tally->uses, word);
     }
-    const IrError scalar_error = ir_uses_validated_scalar(function, memory, scratch, &scalar);
-    bool same = vector_error == scalar_error;
-    if (same && vector_error == IR_OK)
-    {
-        // arena_bytes is left out: it counts the alignment before each build, and the second starts after the first.
-        same = vector.value_count == scalar.value_count && vector.use_count == scalar.use_count &&
-               memcmp(vector.offsets, scalar.offsets, ((uint64_t)vector.value_count + 1) * sizeof(uint32_t)) == 0 &&
-               (vector.use_count == 0 || memcmp(vector.uses, scalar.uses, (uint64_t)vector.use_count * sizeof(IrUse)) == 0);
-    }
-    ir_test_expect(tally, same && scratch->length == scratch_mark, "the use-list twins disagreed or retained scratch");
+    ir_test_expect(tally, scratch->length == scratch_mark, "the use-list builder retained scratch");
     arena_pop_to(memory, mark);
 }
 
@@ -173,7 +163,7 @@ static void ir_test_printer(IrTestTally* tally, const IrFunction* function, Aren
         ir_test_expect(tally, scratch->length == scratch_mark, "printing or derived-array rebuild retained scratch");
     }
     ir_test_expect(tally, ok, "stable printer failed or changed after rebuilding CFG and uses");
-    ir_test_uses_twins(tally, function, memory, scratch);
+    ir_test_uses(tally, function, memory, scratch);
     if (first != 0)
     {
         fclose(first);
@@ -197,15 +187,13 @@ static void ir_test_complete_memory(IrTestTally* tally, Arena* memory)
     if (ready)
     {
         memset(prefix, 0xa5, 19);
-        const IrCheck vector = ir_verify_complete(&function, &scratch, true);
-        const IrCheck scalar = ir_verify_complete(&function, &scratch, false);
+        const IrCheck verified = ir_verify_complete(&function, &scratch);
         bool preserved = scratch.length == 19 && scratch.peak < (1u << 20);
         for (uint32_t i = 0; i < 19; i += 1)
         {
             preserved = preserved && prefix[i] == 0xa5;
         }
-        ir_test_expect(tally, vector.error == IR_OK && scalar.error == IR_OK && vector.dominance_checked && scalar.dominance_checked,
-                       "complete verifier rejected lazy arena scratch");
+        ir_test_expect(tally, verified.error == IR_OK && verified.dominance_checked, "complete verifier rejected lazy arena scratch");
         ir_test_expect(tally, preserved, "complete verifier consumed unused capacity or changed its caller's prefix");
     }
     arena_release(&scratch);
@@ -599,13 +587,10 @@ static void ir_test_entry_phi(IrTestTally* tally, Arena* memory, Arena* scratch)
         for (uint32_t supplied = 0; supplied < 2; supplied += 1)
         {
             const IrDominance* view = supplied != 0 ? &dominance : 0;
-            const IrCheck vector = ir_verify(&function, scratch, view);
-            ir_test_expect(tally, scratch->length == scratch_mark, "entry-phi vector rejection retained scratch");
-            const IrCheck scalar = ir_verify_scalar(&function, scratch, view);
-            ir_test_expect(tally, scratch->length == scratch_mark, "entry-phi scalar rejection retained scratch");
-            ir_test_expect(tally, vector.error == IR_ERROR_PHI && vector.instruction == 0 && vector.detail == 0 && !vector.dominance_checked &&
-                                  scalar.error == IR_ERROR_PHI && scalar.instruction == 0 && scalar.detail == 0 && !scalar.dominance_checked,
-                           "entry phi with an unreachable predecessor lacks the exact shared diagnostic");
+            const IrCheck verified = ir_verify(&function, scratch, view);
+            ir_test_expect(tally, scratch->length == scratch_mark, "entry-phi rejection retained scratch");
+            ir_test_expect(tally, verified.error == IR_ERROR_PHI && verified.instruction == 0 && verified.detail == 0 && !verified.dominance_checked,
+                           "entry phi with an unreachable predecessor lacks the exact diagnostic");
         }
 
         const uint64_t derived_mark = memory->length;
@@ -651,12 +636,10 @@ static void ir_test_entry_phi(IrTestTally* tally, Arena* memory, Arena* scratch)
         for (uint32_t supplied = 0; supplied < 2; supplied += 1)
         {
             const IrDominance* view = supplied != 0 ? &self_dominance : 0;
-            const IrCheck vector = ir_verify(&function, scratch, view);
-            const IrCheck scalar = ir_verify_scalar(&function, scratch, view);
-            ir_test_expect(tally, vector.error == IR_ERROR_PHI && vector.instruction == 0 && vector.detail == 0 && !vector.dominance_checked &&
-                                  scalar.error == IR_ERROR_PHI && scalar.instruction == 0 && scalar.detail == 0 && !scalar.dominance_checked &&
+            const IrCheck verified = ir_verify(&function, scratch, view);
+            ir_test_expect(tally, verified.error == IR_ERROR_PHI && verified.instruction == 0 && verified.detail == 0 && !verified.dominance_checked &&
                                   scratch->length == scratch_mark,
-                           "entry self-phi lacks the exact shared diagnostic or retained scratch");
+                           "entry self-phi lacks the exact diagnostic or retained scratch");
         }
         ir_test_instruction(&function, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_pair(tally, &function, scratch, 0, true, "phi-free entry self-loop rejected");
@@ -1512,13 +1495,6 @@ static void ir_test_allocations(IrTestTally* tally, Arena* memory, Arena* scratc
             {
                 ir_test_expect(tally, small.length == 13 && memcmp(saved_uses, &uses, sizeof(uses)) == 0, "use-list allocation failure changed output or arena");
             }
-            // The scalar twin needs the same memory, so it fails at the same capacities (#1634).
-            const uint64_t built_length = small.length;
-            small.length = 13;
-            IrUses twin;
-            memset(&twin, 0x5a, sizeof(twin));
-            const IrError twin_error = ir_uses_validated_scalar(&function, &small, scratch, &twin);
-            ir_test_expect(tally, twin_error == use_error && small.length == built_length && scratch->length == scratch_mark, "the use-list twins failed at different capacities");
         }
     }
     arena_pop_to(memory, mark);
@@ -1601,7 +1577,7 @@ static void ir_test_guards(IrTestTally* tally, Arena* memory, Arena* scratch)
                     0
                 };
                 ir_test_expect(tally, ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK && ir_build_uses(&function, memory, scratch, &uses) == IR_OK, "derived arrays failed on guarded tails");
-                ir_test_uses_twins(tally, &function, memory, scratch);
+                ir_test_uses(tally, &function, memory, scratch);
                 if (count >= 3)
                 {
                     const uint32_t id = count - 2;
@@ -1732,11 +1708,10 @@ static void ir_test_operand_windows(IrTestTally* tally, Arena* memory, Arena* sc
                 const uint32_t value = values[v];
                 function.a[use] = value;
                 const bool void_value = function.type[value] == IR_VOID;
-                const IrCheck vector = ir_verify(&function, scratch, 0);
-                const IrCheck scalar = ir_verify_scalar(&function, scratch, 0);
+                const IrCheck verified = ir_verify(&function, scratch, 0);
                 // An i64 before the copy is valid; one after it is a forward use, a dominance error, after the rows.
                 const IrError expected = void_value ? IR_ERROR_OPERAND : value < use ? IR_OK : IR_ERROR_DOMINANCE;
-                ir_test_expect(tally, vector.error == expected && (expected == IR_OK || vector.instruction == use) && scalar.error == vector.error && scalar.instruction == vector.instruction && scalar.detail == vector.detail, "operand window lookup gave another type");
+                ir_test_expect(tally, verified.error == expected && (expected == IR_OK || verified.instruction == use), "operand window lookup gave another type");
             }
             function.a[use] = saved;
         }
@@ -1776,7 +1751,7 @@ static uint32_t ir_test_value(uint64_t* state, const uint32_t* values, uint32_t 
     return result;
 }
 
-// #786's vector dominance check, and its scalar twin, against an independent oracle: generated functions of up to 40
+// #786's dominance check against an independent oracle: generated functions of up to 40
 // blocks, whose terminators, phis, types and metadata are valid, so that where each value is used decides the result.
 // Operands are mostly earlier values of their block, some of earlier blocks and, in half the samples, some of any
 // instruction; the dominator view is none, a chain in which each block dominates the later ones (some unreachable), or
@@ -1993,16 +1968,13 @@ static void ir_test_dominance_generated(IrTestTally* tally, Arena* memory, Arena
                     }
                 }
             }
-            const IrCheck vector = ir_verify(&function, scratch, dominance);
-            const IrCheck scalar = ir_verify_scalar(&function, scratch, dominance);
-            const bool vector_valid = vector.error == expected.error && vector.instruction == expected.instruction && vector.detail == expected.detail && vector.dominance_checked == (expected.error == IR_OK && dominance != 0);
-            const bool scalar_valid = scalar.error == expected.error && scalar.instruction == expected.instruction && scalar.detail == expected.detail && scalar.dominance_checked == (expected.error == IR_OK && dominance != 0);
-            ir_test_expect(tally, vector_valid, "vector dominance check disagreed with the oracle on a generated function");
-            ir_test_expect(tally, scalar_valid, "scalar dominance check disagreed with the oracle on a generated function");
+            const IrCheck verified = ir_verify(&function, scratch, dominance);
+            const bool valid = verified.error == expected.error && verified.instruction == expected.instruction && verified.detail == expected.detail && verified.dominance_checked == (expected.error == IR_OK && dominance != 0);
+            ir_test_expect(tally, valid, "dominance check disagreed with the oracle on a generated function");
             // A dominance error leaves the function's rows valid, which is all the use lists read (#1634).
-            if (vector.error == IR_OK || vector.error == IR_ERROR_DOMINANCE)
+            if (verified.error == IR_OK || verified.error == IR_ERROR_DOMINANCE)
             {
-                ir_test_uses_twins(tally, &function, memory, scratch);
+                ir_test_uses(tally, &function, memory, scratch);
             }
         }
         arena_pop_to(memory, mark);
@@ -2184,7 +2156,7 @@ static void ir_test_operand_order(IrTestTally* tally, Arena* memory, Arena* scra
             operands += expected;
         }
         ir_test_expect(tally, operands == 38, "operand order fixture didn't reach every operand");
-        ir_test_uses_twins(tally, &function, memory, scratch);
+        ir_test_uses(tally, &function, memory, scratch);
     }
     arena_pop_to(memory, mark);
 }

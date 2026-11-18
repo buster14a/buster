@@ -439,7 +439,7 @@ static void tier1_terminal_supported(Tier1EmitTest* test)
     {
         IrFunction function;
         const bool ready = tier1_terminal_fixture(test, (Tier1TerminalShape)shape, &function);
-        tier1_emit_test_expect(test, ready && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK, "original terminal fixture is valid semantic IR on both paths");
+        tier1_emit_test_expect(test, ready && ir_verify(&function, &test->scratch, 0).error == IR_OK, "original terminal fixture is valid semantic IR on both paths");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             for (uint32_t frame = 0; frame < 2; frame += 1)
@@ -552,7 +552,7 @@ static void tier1_terminal_general(Tier1EmitTest* test)
     {
         IrFunction function;
         const bool ready = tier1_terminal_refusal_fixture(test, shape, &function);
-        tier1_emit_test_expect(test, ready && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK, "nonempty loop, conditional or phi fixture is valid semantic IR");
+        tier1_emit_test_expect(test, ready && ir_verify(&function, &test->scratch, 0).error == IR_OK, "nonempty loop, conditional or phi fixture is valid semantic IR");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             IrDominance dominance;

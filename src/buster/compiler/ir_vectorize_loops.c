@@ -2195,7 +2195,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
     // dominator tree covers until the optimizer that follows removes them (it verifies dominance then).
     if (check.error == IR_OK && work.statistics.changed)
     {
-        check = path ? ir_verify_scalar(&work.statistics.function, scratch, NULL) : ir_verify(&work.statistics.function, scratch, NULL);
+        check = ir_verify(&work.statistics.function, scratch, NULL);
     }
     if (check.error == IR_OK)
     {
