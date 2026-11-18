@@ -44,7 +44,7 @@ static void tier1_select_test_coalesced_addresses(Tier1SelectTest* test)
                 const uint8_t registers[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, destinations[d], X86_REGISTER_RAX };
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError selected = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                const Tier1SelectError selected = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                 tier1_select_test_expect(test, selected == TIER1_SELECT_OK, "both paths select the address sum");
                 if (selected == TIER1_SELECT_OK)
                 {

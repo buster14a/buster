@@ -197,7 +197,7 @@ patterns are:
   none that do: a store to any address, a call, any other load (#1059's audit:
   the typed stream doesn't carry a C access's volatility, so that a load the IR
   doesn't flag `BUSTER_IR_VOLATILE` may still be a volatile object's, and two
-  volatile reads keep their order: `tier1_select_fold_barrier`), an atomic
+  volatile reads keep their order: `tier1_select_barriers`), an atomic
   read/modify/write, a fence of any order or scope (a signal fence's too), an
   allocation or a restore of the dynamic stack; a volatile or atomic load (#1059:
   `BUSTER_IR_OBSERVABLE`) folds into nothing. On `main.c`'s `--tier1` build the

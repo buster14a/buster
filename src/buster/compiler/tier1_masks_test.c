@@ -3416,7 +3416,7 @@ static uint8_t* tier1_masks_test_mxcsr_code(Tier1MasksTest* test, uint32_t op, u
         ok = ok && tier1_masks_test_dominance(test, out, &dominance);
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError selected = ok ? tier1_select_plan(out, &dominance, &test->output, &test->scratch, true, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+        const Tier1SelectError selected = ok ? tier1_select_plan(out, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
         ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, "select MXCSR fixture");
         const Tier1EmitOptions options = { .certify = true, .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true };
         Tier1EmitResult emitted = { 0 };
@@ -4004,7 +4004,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     const uint64_t scans = ir_scan_vector_paths;
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError selected = tier1_select_plan(function, dominance, &test->output, &test->scratch, vector, &plan, &node);
+    const Tier1SelectError selected = tier1_select_plan(function, dominance, &test->output, &test->scratch, &plan, &node);
     bool ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, fixture->name);
     if (!ok)
     {
@@ -4432,7 +4432,7 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
         {
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &node);
+            const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node);
             const Tier1EmitOptions options = {
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
@@ -4692,7 +4692,7 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
             ok = tier1_masks_test_dominance(test, &optimized[f], &dominance);
-            const Tier1SelectError selected = ok ? tier1_select_plan(&optimized[f], &dominance, &arenas[2], &test->scratch, true, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+            const Tier1SelectError selected = ok ? tier1_select_plan(&optimized[f], &dominance, &arenas[2], &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
             ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the typed program's masks");
             const Tier1EmitOptions options = {
                 .certify = true,

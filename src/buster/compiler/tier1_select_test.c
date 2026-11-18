@@ -829,9 +829,9 @@ static bool tier1_select_test_plan_again(const IrFunction* function, const IrDom
     const uint64_t scratch_mark = scratch->length;
     Tier1SelectPlan again;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError error = verify ? tier1_select_plan_access(function, dominance, plan->symbol_access, plan->symbol_count, output, scratch, plan->vector, &again, &node) :
-                                            tier1_select_plan_verified(function, dominance, plan->symbol_access, plan->symbol_count, output, scratch, plan->vector, &again, &node);
-    const bool equal = error == TIER1_SELECT_OK && scratch->length == scratch_mark && plan->vector == again.vector && tier1_select_test_plans_equal(plan, &again);
+    const Tier1SelectError error = verify ? tier1_select_plan_access(function, dominance, plan->symbol_access, plan->symbol_count, output, scratch, &again, &node) :
+                                            tier1_select_plan_verified(function, dominance, plan->symbol_access, plan->symbol_count, output, scratch, &again, &node);
+    const bool equal = error == TIER1_SELECT_OK && scratch->length == scratch_mark && tier1_select_test_plans_equal(plan, &again);
     arena_pop_to(output, mark);
     return equal;
 }
@@ -840,7 +840,7 @@ static bool tier1_select_test_plan_again(const IrFunction* function, const IrDom
 // legality but chooses by coverage and its own switch's priorities, without classifying or reading the BURS tables.
 static Tier1SelectError tier1_select_test_plan_munch(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, Tier1SelectPlan* plan, uint32_t* node)
 {
-    return tier1_select_plan_checked(function, dominance, 0, 0, output, scratch, false, true, false, plan, node);
+    return tier1_select_plan_checked(function, dominance, 0, 0, output, scratch, true, false, plan, node);
 }
 
 // The reference cover's costs column (Tier1SelectPlan.costs) against its definition, worked out here from the function alone:
@@ -895,7 +895,7 @@ static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFuncti
     Tier1SelectPlan vector;
     Tier1SelectPlan reference;
     uint32_t node;
-    const Tier1SelectError ve = tier1_select_plan(function, 0, output, scratch, true, &vector, &node);
+    const Tier1SelectError ve = tier1_select_plan(function, 0, output, scratch, &vector, &node);
     const Tier1SelectError re = tier1_select_test_plan_munch(function, 0, output, scratch, &reference, &node);
     tier1_select_test_expect(test, ve == TIER1_SELECT_OK && re == TIER1_SELECT_OK, "real IR produces the costed cover and the independent reference");
     if (ve == TIER1_SELECT_OK && re == TIER1_SELECT_OK)
@@ -1282,7 +1282,7 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
                             Tier1SelectPlan plan;
                             Tier1SelectCode code;
                             uint32_t node = 0;
-                            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                             const Tier1SelectError emitted = planned == TIER1_SELECT_OK ? tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node) : planned;
                             tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[4].rule == TIER1_RULE_INTRINSIC && emitted == TIER1_SELECT_ERROR_TARGET && node == 4,
                                                      "x86-64's baseline refuses a BMI intrinsic as the target's");
@@ -1338,7 +1338,7 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
                         Tier1SelectPlan plan;
                         Tier1SelectCode code;
                         uint32_t node = 0;
-                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                         const Tier1SelectError emitted = planned == TIER1_SELECT_OK ? tier1_select_emit(&plan, registers, test->allowed, &output, &code, &node) : planned;
                         const bool needs = bits[k] == BUSTER_IR_INTRINSIC_TZCNT || bits[k] == BUSTER_IR_INTRINSIC_LZCNT || bits[k] == BUSTER_IR_INTRINSIC_POPCNT;
                         tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[3].rule == TIER1_RULE_INTRINSIC &&
@@ -1396,7 +1396,7 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
                         tier1_select_test_plan_execute(test, &function, registers, &output, &scratch);
                         Tier1SelectPlan plan;
                         uint32_t node = 0;
-                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                         tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[4].rule == TIER1_RULE_INTRINSIC, "an overflow intrinsic is its rule's");
                         arena_pop_to(&output, 0);
                     }
@@ -1479,7 +1479,7 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
             registers[subtract] = X86_REGISTER_RAX;
             Tier1SelectPlan plan;
             uint32_t error_node;
-            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &error_node);
+            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &error_node);
             tier1_select_test_expect(test, error == TIER1_SELECT_OK, "memory fixture selects");
             if (error == TIER1_SELECT_OK)
             {
@@ -1702,7 +1702,7 @@ static void tier1_select_test_load_barriers(Tier1SelectTest* test)
             }
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
             char message[160];
             snprintf(message, sizeof(message), "load barrier fixture selects: %s", shape->name);
             tier1_select_test_expect(test, planned == TIER1_SELECT_OK, message);
@@ -1790,7 +1790,7 @@ static void tier1_select_test_atomic_stores(Tier1SelectTest* test)
                     uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, X86_REGISTER_R8, X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX };
                     Tier1SelectPlan plan;
                     uint32_t failed = 0;
-                    const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+                    const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
                     const uint8_t rule = folded != 0 ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_STORE;
                     tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[store].rule == rule &&
                                                        (plan.patterns[store].operation == X86_OPERATION_XCHG) == sequential,
@@ -1883,7 +1883,7 @@ static void tier1_select_test_atomic_rmw_widths(Tier1SelectTest* test)
                 uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, narrow ? X86_REGISTER_R8 : X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX };
                 Tier1SelectPlan plan;
                 uint32_t failed = 0;
-                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
                 char message[160];
                 snprintf(message, sizeof(message), "an i%u atomic %s selects", ir_type_bits[type], operation == BUSTER_IR_RMW_ADD ? "addition" : "exchange");
                 tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[3].rule == TIER1_RULE_ATOMIC_RMW, message);
@@ -1973,7 +1973,7 @@ static void tier1_select_test_atomic_cas(Tier1SelectTest* test)
                 uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, moved < 3 ? X86_REGISTER_RAX : X86_REGISTER_R9, result, X86_REGISTER_RAX, X86_REGISTER_RAX };
                 Tier1SelectPlan plan;
                 uint32_t failed = 0;
-                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
                 char message[192];
                 snprintf(message, sizeof(message), "an i%u atomic compare-exchange (operand %u in rax) selects", ir_type_bits[type], moved);
                 tier1_select_test_expect(test, planned == TIER1_SELECT_OK && plan.patterns[4].rule == TIER1_RULE_ATOMIC_RMW, message);
@@ -2040,7 +2040,7 @@ static void tier1_select_test_errors(Tier1SelectTest* test)
         }
         function.parameter_types[0] = IR_I16;
         function.result_type = IR_I16;
-        Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+        Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
         tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && node == 2, "unsupported narrow multiplication stays explicit");
         tier1_select_test_expect(test, output.length == 0 && scratch.length == 0 && memcmp(&plan, &before, sizeof(plan)) == 0, "failed planning is transactional");
         for (uint32_t value = 0; value < 3; value += 1)
@@ -2050,13 +2050,13 @@ static void tier1_select_test_errors(Tier1SelectTest* test)
         function.parameter_types[0] = IR_I64;
         function.result_type = IR_I64;
         function.a[2] = 2;
-        error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+        error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
         tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_INVALID && node == 2, "semantic invalidity is not an unsupported-pattern fallback");
         function.a[2] = 0;
         Arena tiny = {0};
-        error = tier1_select_plan(&function, 0, &tiny, &scratch, true, &plan, &node);
+        error = tier1_select_plan(&function, 0, &tiny, &scratch, &plan, &node);
         tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_MEMORY && tiny.length == 0 && scratch.length == 0, "plan capacity exhaustion restores both arenas");
-        error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+        error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
         tier1_select_test_expect(test, error == TIER1_SELECT_OK, "valid fixture selects after failures");
         if (error == TIER1_SELECT_OK)
         {
@@ -2092,7 +2092,7 @@ static void tier1_select_test_errors(Tier1SelectTest* test)
         Tier1SelectPlan plan;
         Tier1SelectCode code;
         uint32_t node;
-        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
         const Tier1SelectError emitted = planned == TIER1_SELECT_OK ? tier1_select_emit(&plan, 0, test->allowed, &output, &code, &node) : planned;
         tier1_select_test_expect(test, emitted == TIER1_SELECT_OK && code.count == 0 && code.branch_count == 0 && plan.effective_use_count == 0, "empty function accepts null value columns");
     }
@@ -2150,7 +2150,7 @@ static void tier1_select_test_guarded(Tier1SelectTest* test)
                 tier1_select_test_expect(test, protected, "guard pages protected");
                 Tier1SelectPlan plan;
                 uint32_t node;
-                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                 tier1_select_test_expect(test, error == TIER1_SELECT_OK, "exact unpadded IR columns at guard pages");
                 arena_pop_to(&output, 0);
                 munmap(mapping, 14 * 4096);
@@ -2247,7 +2247,7 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                     tier1_select_test_node(&function, count - 1, IR_RET, IR_VOID, result_types[type] == IR_VOID ? BUSTER_IR_NONE : count - 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
                     Tier1SelectPlan selected;
                     uint32_t failed_node = 0;
-                    const Tier1SelectError planned_error = tier1_select_plan(&function, 0, &output, &scratch, true, &selected, &failed_node);
+                    const Tier1SelectError planned_error = tier1_select_plan(&function, 0, &output, &scratch, &selected, &failed_node);
                     tier1_select_test_expect(test, planned_error == TIER1_SELECT_OK && failed_node == BUSTER_IR_NONE && scratch.length == 0, "bounded direct call selects");
                     if (planned_error == TIER1_SELECT_OK)
                     {
@@ -2331,7 +2331,7 @@ static void tier1_select_test_calls(Tier1SelectTest* test)
                             const Tier1SelectPlan before = rejected;
                             const uint64_t mark = output.length;
                             uint32_t failed = 0;
-                            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &rejected, &failed);
+                            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &rejected, &failed);
                             // A variadic call of integer arguments (its AL zero), a call through a pointer
                             // (tier1_call_test.c runs both), a call of seven, its last on the stack, a double's
                             // result (#141, tier1_stack_test.c and tier1_float_test.c) and a long double's (#141,
@@ -2429,7 +2429,7 @@ static void tier1_select_test_call_barriers(Tier1SelectTest* test)
             }
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+            const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
             tier1_select_test_expect(test, error == TIER1_SELECT_OK, "call-separated patterns remain selectable");
             if (error == TIER1_SELECT_OK)
             {
@@ -2549,7 +2549,7 @@ static void tier1_select_test_conversions(Tier1SelectTest* test)
                         tier1_select_test_node(&function, count - 1, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE);
                         Tier1SelectPlan selected;
                         uint32_t failed;
-                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &selected, &failed);
+                        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &selected, &failed);
                         tier1_select_test_expect(test, planned == TIER1_SELECT_OK && scratch.length == 0, "integer conversion selects with restored scratch");
                         if (planned == TIER1_SELECT_OK)
                         {
@@ -2787,7 +2787,7 @@ static void tier1_select_test_known_bits(Tier1SelectTest* test)
             function.block_offsets[1] = function.instruction_count;
             Tier1SelectPlan plan;
             uint32_t failed = BUSTER_IR_NONE;
-            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
             tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "known-bit regression selects");
             if (planned == TIER1_SELECT_OK)
             {
@@ -2947,7 +2947,7 @@ static void tier1_select_test_known_arithmetic(Tier1SelectTest* test)
             function.block_offsets[1] = function.instruction_count;
             Tier1SelectPlan plan;
             uint32_t failed = BUSTER_IR_NONE;
-            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+            const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
             tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "bounded arithmetic selects by both paths");
             if (planned == TIER1_SELECT_OK)
             {
@@ -3007,16 +3007,16 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
                 type[n] = types[n % BUSTER_ARRAY_LENGTH(types)];
             }
             const IrFunction function = { .instruction_count = count, .op = operations, .type = type, .a = operands, .b = operands };
-            tier1_select_known_bits(&function, 0, 0, 0, known, true);
-            tier1_select_sign_requests(&function, known, storage, parameter_requests, true);
+            tier1_select_known_bits(&function, 0, 0, 0, known);
+            tier1_select_sign_requests(&function, known, storage, parameter_requests);
             IrFunction scan = function;
             scan.block_count = 2;
-            tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, true),
+            tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known),
                                      "guarded type tails admit no induction certificate without a phi");
             scan.op = type;
             scan.type = void_types;
-            tier1_select_sign_requests(&scan, known, storage, parameter_requests, true);
-            tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known, true),
+            tier1_select_sign_requests(&scan, known, storage, parameter_requests);
+            tier1_select_test_expect(test, !tier1_select_induction_bounds(&scan, 0, operands, 0, known),
                                      "guarded opcode tails admit no induction certificate without an integer phi");
             for (uint32_t n = 0; n < count; n += 1)
             {
@@ -3024,8 +3024,8 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
                 tier1_select_test_expect(test, known[n] == (width | width << 8), "unknown incoming values keep their full semantic range, including every SIMD tail");
             }
             uint32_t* parents = (uint32_t*)(memory + 3 * page - count * sizeof(uint32_t));
-            tier1_select_storage_components(&function, storage, parents, true);
-            tier1_select_storage_components(&scan, storage, parents, true);
+            tier1_select_storage_components(&function, storage, parents);
+            tier1_select_storage_components(&scan, storage, parents);
         }
         // Spill-width obligations must cross chains longer than the semantic proof budget, in either order. An
         // opaque member acquires storage alone, never SIGN; a disconnected component must remain four bytes.
@@ -3054,7 +3054,7 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
                 IrFunction function = { .instruction_count = count, .block_count = 2, .block_offsets = (uint32_t*)offsets,
                                         .op = column == 0 ? operations : guarded_column, .type = column == 0 ? guarded_column : word_types, .a = firsts };
                 memset(storage, 0, sizeof(storage));
-                tier1_select_scoped_ranges(&function, &dominance, counts, 0, storage, operands, parents, true);
+                tier1_select_scoped_ranges(&function, &dominance, counts, 0, storage, operands, parents);
                 for (uint32_t n = 0; n < count; n += 1)
                 {
                     tier1_select_test_expect(test, storage[n] == 0 && operands[n] == BUSTER_IR_NONE,
@@ -3083,7 +3083,7 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
                 {
                     storage[n] = n == seed ? BUSTER_TIER1_STORAGE_SIGN : shape == 2 && n == 1 ? BUSTER_TIER1_STORAGE_ZERO : 0;
                 }
-                tier1_select_storage_components(&function, storage, parents, true);
+                tier1_select_storage_components(&function, storage, parents);
                 for (uint32_t n = 0; n < count; n += 1)
                 {
                     const uint32_t facts = n == seed ? BUSTER_TIER1_STORAGE_SIGN : shape == 2 && n == 1 ? BUSTER_TIER1_STORAGE_ZERO : 0;
@@ -3135,8 +3135,8 @@ static void tier1_select_test_known_tails(Tier1SelectTest* test)
         uint16_t known[4];
         uint8_t canonical[4];
         uint32_t storage_workspace[4];
-        tier1_select_known_bits(&loop, 0, blocks, 0, known, true);
-        tier1_select_canonical(&loop, blocks, known, canonical, storage_workspace, true);
+        tier1_select_known_bits(&loop, 0, blocks, 0, known);
+        tier1_select_canonical(&loop, blocks, known, canonical, storage_workspace);
         tier1_select_test_expect(test, known[2] == (32 | 32 << 8) && canonical[2] == 0, "a backedge does not invent a range or register-storage proof");
     }
     arena_release(&input);
@@ -3198,7 +3198,7 @@ static void tier1_select_test_narrow_memory(Tier1SelectTest* test)
                 };
                 Tier1SelectPlan plan;
                 uint32_t failed;
-                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
                 tier1_select_test_expect(test, planned == TIER1_SELECT_OK, "narrow volatile and ordinary memory selects");
                 if (planned == TIER1_SELECT_OK)
                 {
@@ -3392,7 +3392,7 @@ static void tier1_select_test_narrow_refusals(Tier1SelectTest* test)
                 const Tier1SelectPlan before = plan;
                 const uint64_t mark = output.length;
                 uint32_t failed;
-                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
                 // A narrow parameter is taken, which the CFG consumer zero-extends at the entry (tier1_call_test.c runs it),
                 // and so is a narrow return, its canonical storage.
                 const Tier1SelectError expected = variant == 11 ? TIER1_SELECT_ERROR_INVALID : variant == 4 || variant == 5 ? TIER1_SELECT_OK : TIER1_SELECT_ERROR_UNSUPPORTED;
@@ -3429,7 +3429,7 @@ static void tier1_select_test_unreachable(Tier1SelectTest* test)
         tier1_select_test_node(&function, 0, IR_UNREACHABLE, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
         Tier1SelectPlan plan;
         uint32_t failed;
-        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+        const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
         tier1_select_test_expect(test, planned == TIER1_SELECT_OK && scratch.length == 0, "unreachable terminal selects on both paths");
         if (planned == TIER1_SELECT_OK)
         {
@@ -3470,7 +3470,7 @@ static void tier1_select_test_unreachable(Tier1SelectTest* test)
 static uint32_t tier1_select_test_walk_plans(Tier1SelectTest* test, const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, Tier1SelectPlan* plans, const char* label)
 {
     uint32_t failed = 0;
-    const Tier1SelectError error = tier1_select_plan(function, dominance, output, scratch, true, &plans[0], &failed);
+    const Tier1SelectError error = tier1_select_plan(function, dominance, output, scratch, &plans[0], &failed);
     tier1_select_test_expect(test, error == TIER1_SELECT_OK && scratch->length == 0, label);
     const uint32_t planned = error == TIER1_SELECT_OK ? 1 : 0;
     if (planned == 1)
@@ -3885,7 +3885,7 @@ static void tier1_select_test_stack_walk(Tier1SelectTest* test, uint32_t shape, 
         // Past the frame planner's bound (1 << 30) a slot is no frame object, and its address selects nothing.
         function.slots[2].alignment = UINT32_C(1) << 31;
         uint32_t failed = BUSTER_IR_NONE;
-        const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, true, &plans[0], &failed);
+        const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, &plans[0], &failed);
         tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED && failed == 2 && scratch->length == 0, "a slot aligned past the frame's bound selects nothing");
         function.slots[2].alignment = 8192;
     }
@@ -4306,7 +4306,7 @@ static void tier1_select_test_shared_divisor(Tier1SelectTest* test, uint8_t op, 
         {
             uint32_t failed = 0;
             const Tier1SelectError error = path == 1 ? tier1_select_test_plan_munch(&function, 0, output, scratch, &plans[path], &failed) :
-                                                      tier1_select_plan(&function, 0, output, scratch, true, &plans[path], &failed);
+                                                      tier1_select_plan(&function, 0, output, scratch, &plans[path], &failed);
             planned &= error == TIER1_SELECT_OK;
         }
         tier1_select_test_expect(test, planned, "shared divisor fixture selects");
@@ -4461,7 +4461,7 @@ static void tier1_select_test_indirect(Tier1SelectTest* test)
     tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the indirect jump's fixture is valid IR");
     Tier1SelectPlan plan;
     uint32_t failed = 0;
-    tier1_select_test_expect(test, created && tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_ERROR_INVALID && output.length == 0 && scratch.length == 0,
+    tier1_select_test_expect(test, created && tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed) == TIER1_SELECT_ERROR_INVALID && output.length == 0 && scratch.length == 0,
                              "values of other blocks need their dominance");
     IrCfg cfg = { 0 };
     Dominators dominators = { 0 };
@@ -4484,7 +4484,7 @@ static void tier1_select_test_indirect(Tier1SelectTest* test)
     }
     const IrDominance dominance = planned ? (IrDominance){ .enter = dominators.preorder, .leave = dominators.subtree_end, .block_count = dominators.block_count } : (IrDominance){ 0 };
     const uint64_t scratch_mark = scratch.length;
-    planned = planned && tier1_select_plan(&function, &dominance, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
+    planned = planned && tier1_select_plan(&function, &dominance, &output, &scratch, &plan, &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
     tier1_select_test_expect(test, planned, "a function of labels and an indirect jump selects");
     if (planned)
     {
@@ -4702,7 +4702,7 @@ static void tier1_select_test_indirect_review(Tier1SelectTest* test)
             Tier1SelectPlan plan;
             uint32_t failed = 0;
             const uint64_t scratch_mark = scratch.length;
-            planned = tier1_select_plan(&function, &dominance, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
+            planned = tier1_select_plan(&function, &dominance, &output, &scratch, &plan, &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
             tier1_select_test_expect(test, planned, "the review's indirect jumps' fixtures select");
             tier1_select_test_expect(test, planned && tier1_select_test_plan_consistent(&plan), "no computed node reads a covered one");
             tier1_select_test_expect(test, !planned || fixture != 0 || (plan.covered[15] == 0 && plan.covered[16] == 0 && plan.covered[17] == 0),
@@ -4898,7 +4898,7 @@ static void tier1_select_test_chained_variadic(Tier1SelectTest* test)
                                  variadic == 0 ? "a chained indirect call selects, through rax" : "a chained indirect variadic call is refused, its al rax's");
         Tier1SelectPlan plan;
         uint32_t failed = 0;
-        const Tier1SelectError planned = created ? tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_UNSUPPORTED;
+        const Tier1SelectError planned = created ? tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed) : TIER1_SELECT_ERROR_UNSUPPORTED;
         tier1_select_test_expect(test, (planned == TIER1_SELECT_OK) == (variadic == 0),
                                  variadic == 0 ? "a chained indirect call's function plans" : "a chained indirect variadic call's function is refused whole");
         arena_pop_to(&input, 0);
@@ -4925,7 +4925,7 @@ static void tier1_select_test_variadic(Tier1SelectTest* test)
         {
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            const bool planned = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
+            const bool planned = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed) == TIER1_SELECT_OK && scratch.length == scratch_mark;
             tier1_select_test_expect(test, planned, "a variadic definition selects");
             bool folded = false;
             for (uint32_t node = 0; planned && node < function.instruction_count; node += 1)
@@ -4949,7 +4949,7 @@ static void tier1_select_test_variadic(Tier1SelectTest* test)
             // doesn't count (DEMOTED).
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            tier1_select_test_expect(test, ir_verify_scalar(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_OK,
+            tier1_select_test_expect(test, ir_verify_scalar(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, &plan, &failed) == TIER1_SELECT_OK,
                                      "a function with its own ABI records of shapes selection takes selects");
             arena_pop_to(&output, 0);
             const IrPassed taken = recorded.passed[0];
@@ -4962,7 +4962,7 @@ static void tier1_select_test_variadic(Tier1SelectTest* test)
                 recorded.passed[0].location.registers[0] = refused == 2 ? BUSTER_ABI_R10 : taken.location.registers[0];
                 recorded.result_abi.flags = refused == 3 ? BUSTER_ABI_FLAG_DEMOTED : 0;
                 const uint64_t mark = output.length;
-                tier1_select_test_expect(test, tier1_select_plan(&recorded, 0, &output, &scratch, true, &plan, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED && output.length == mark,
+                tier1_select_test_expect(test, tier1_select_plan(&recorded, 0, &output, &scratch, &plan, &failed) == TIER1_SELECT_ERROR_UNSUPPORTED && output.length == mark,
                                          "a function with an ABI record of a shape selection doesn't take is refused whole");
             }
             recorded.passed[0] = taken;
@@ -5035,7 +5035,7 @@ static void tier1_select_test_overlong(Tier1SelectTest* test)
     }
     const IrDominance dominance = planned ? (IrDominance){ .enter = dominators.preorder, .leave = dominators.subtree_end, .block_count = dominators.block_count } : (IrDominance){ 0 };
     uint32_t failed_node = 0;
-    planned = planned && tier1_select_plan(&function, &dominance, &output, &scratch, true, &plans[0], &failed_node) == TIER1_SELECT_OK;
+    planned = planned && tier1_select_plan(&function, &dominance, &output, &scratch, &plans[0], &failed_node) == TIER1_SELECT_OK;
     tier1_select_test_expect(test, planned, "overlong fixture selects");
     if (planned)
     {
@@ -5312,7 +5312,7 @@ static void tier1_select_test_constant_index(Tier1SelectTest* test, int64_t cons
     if (created && !fits && !offset_fits)
     {
         uint32_t failed = 0;
-        const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, true, &plans[0], &failed);
+        const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, &plans[0], &failed);
         arena_pop_to(output, 0);
         tier1_select_test_expect(test, error != TIER1_SELECT_OK, "an address whose offset doesn't fit 32 bits beside a constant index is refused");
     }

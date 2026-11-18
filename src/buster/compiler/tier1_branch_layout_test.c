@@ -225,7 +225,7 @@ static void tier1_branch_layout_tests(Tier1EmitTest* test)
                 const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
-                const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+                const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
                 tier1_emit_test_expect(test, planned, "critical-edge layout fixture selects by both paths");
                 const Tier1EmitOptions options = {
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI),

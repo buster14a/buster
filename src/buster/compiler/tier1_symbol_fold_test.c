@@ -294,7 +294,7 @@ static void tier1_symbol_fold_straight(Tier1EmitTest* test)
     }
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    ready = ready && tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK && tier1_emit_cfg_chain(&plan);
+    ready = ready && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK && tier1_emit_cfg_chain(&plan);
     tier1_emit_test_expect(test, ready, "a straight-line load selects for the straight-line consumer");
     const Tier1EmitOptions options = {
         .register_mask = tier1_liveness_register_mask(),
@@ -384,7 +384,7 @@ static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
         tier1_emit_test_expect(test, valid, "the repeated indexed accesses' fixture is valid IR");
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;
+        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         // Nodes 2 and 3 are the first address and extension, 7 and 8 the second's, 11 and 12 the third's; 10 the store,
         // and 6 and 15 the additions that take the loads 5 and 14 as their memory operands (#2602).
         bool shared = planned && !plan.covered[2] && !plan.covered[3] && plan.covered[7] && plan.covered[8] && plan.covered[11] && plan.covered[12] && plan.covered[5] &&
@@ -484,7 +484,7 @@ static void tier1_symbol_fold_addition_tests(Tier1EmitTest* test)
         tier1_emit_test_expect(test, valid, "the symbol addition's fixture is valid IR");
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+        const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         const Tier1SelectPattern* pattern = planned ? &plan.patterns[4] : 0;
         const bool folded = planned && plan.covered[1] && plan.covered[2] && plan.covered[3] && pattern->rule == TIER1_RULE_LOAD_OPERAND && pattern->values[0] == 0 &&
                             tier1_symbol_fold_folded(pattern, 1, 8);
@@ -564,7 +564,7 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         // Without the column every symbol is direct, and folds: the consumer, given the column, refuses each that isn't.
         Tier1SelectPlan all;
         uint32_t node = BUSTER_IR_NONE;
-        const bool unreached = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &all, &node) == TIER1_SELECT_OK;
+        const bool unreached = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &all, &node) == TIER1_SELECT_OK;
         const bool every = unreached && all.patterns[13].rip && all.patterns[13].stack_object == 2 && all.patterns[14].rip && all.covered[15] && all.patterns[18].rip && all.patterns[18].stack_object == 4 &&
                            all.covered[2];
         tier1_emit_test_expect(test, every, "without the access column every symbol folds");
@@ -572,7 +572,7 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         const Tier1EmitError mismatch = every ? tier1_emit_function(&all, &options, test->allowed, &test->output, &test->scratch, &refused, &node) : TIER1_EMIT_OK;
         tier1_emit_test_expect(test, mismatch == TIER1_EMIT_INVALID, "the consumer refuses a folded symbol its column reaches indirectly");
         Tier1SelectPlan plan;
-        const bool planned = dominated && tier1_select_plan_access(&function, &dominance, tier1_symbol_fold_access, BUSTER_ARRAY_LENGTH(tier1_symbol_fold_access), &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+        const bool planned = dominated && tier1_select_plan_access(&function, &dominance, tier1_symbol_fold_access, BUSTER_ARRAY_LENGTH(tier1_symbol_fold_access), &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         const bool shaped = planned && tier1_symbol_fold_shape(&plan) && plan.symbol_access == tier1_symbol_fold_access;
         tier1_emit_test_expect(test, shaped, "a direct symbol folds into its accesses and comparison from another block; GOT and thread-local ones don't");
         if (planned && !shaped && test->failures < 20)

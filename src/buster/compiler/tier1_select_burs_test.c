@@ -91,9 +91,9 @@ static bool tier1_burs_check_prepare(const IrFunction* function, const IrDominan
             level_nodes[cursors[depths[node]]++] = node;
         }
         tier1_select_barriers(function, count, barriers);
-        tier1_select_known_bits(function, dominance, blocks, cursors, known_bits, true);
-        tier1_select_canonical(function, blocks, known_bits, canonical, cursors, true);
-        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, cursors, scope_workspace, true);
+        tier1_select_known_bits(function, dominance, blocks, cursors, known_bits);
+        tier1_select_canonical(function, blocks, known_bits, canonical, cursors);
+        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, cursors, scope_workspace);
     }
     return valid;
 }

@@ -92,7 +92,7 @@ static void tier1_storage_tests(Tier1EmitTest* test)
                 const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
                 Tier1SelectPlan plan;
                 uint32_t failed = BUSTER_IR_NONE;
-                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "mixed signed-storage uses select by both paths");
                 if (selected == TIER1_SELECT_OK)
                 {
@@ -236,7 +236,7 @@ static void tier1_storage_phi_tests(Tier1EmitTest* test)
                 const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
                 Tier1SelectPlan plan;
                 uint32_t failed = BUSTER_IR_NONE;
-                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "signed-storage join selects");
                 if (selected == TIER1_SELECT_OK)
                 {
@@ -330,7 +330,7 @@ static void tier1_storage_expression_tests(Tier1EmitTest* test)
                 const uint64_t output_mark = test->output.length;
                 Tier1SelectPlan plan;
                 uint32_t failed = BUSTER_IR_NONE;
-                const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &failed);
+                const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed);
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "widened expression selects");
                 if (selected == TIER1_SELECT_OK)
                 {
@@ -431,7 +431,7 @@ static void tier1_storage_narrow_arithmetic_tests(Tier1EmitTest* test)
                     const uint64_t output_mark = test->output.length;
                     Tier1SelectPlan plan;
                     uint32_t failed = BUSTER_IR_NONE;
-                    const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &failed);
+                    const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed);
                     tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "narrow arithmetic selects");
                     if (selected == TIER1_SELECT_OK)
                     {
@@ -536,7 +536,7 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
                 const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
                 Tier1SelectPlan plan;
                 uint32_t failed = BUSTER_IR_NONE;
-                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "scoped conversions select");
                 if (selected == TIER1_SELECT_OK)
                 {
@@ -645,7 +645,7 @@ static void tier1_storage_loop_state_tests(Tier1EmitTest* test)
                 const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
                 Tier1SelectPlan plan;
                 uint32_t failed = BUSTER_IR_NONE;
-                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "wrapping loop state selects");
                 if (selected == TIER1_SELECT_OK)
                 {
@@ -773,7 +773,7 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                 const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
                 Tier1SelectPlan plan;
                 uint32_t failed = BUSTER_IR_NONE;
-                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "shared signed parameters select");
                 if (selected == TIER1_SELECT_OK)
                 {
@@ -909,7 +909,7 @@ static void tier1_storage_midpoint_tests(Tier1EmitTest* test)
                 const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
                 Tier1SelectPlan plan;
                 uint32_t failed = BUSTER_IR_NONE;
-                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
+                const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "signed midpoint selects");
                 if (selected == TIER1_SELECT_OK)
                 {

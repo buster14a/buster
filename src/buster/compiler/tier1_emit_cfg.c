@@ -88,7 +88,7 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     chain &= function->label_count == 0 && !function->variadic && function->parameter_passed == 0;
     // A vector (#141) needs the vector class's allocation at its width: a function with one is the CFG consumer's, which
     // one scan of it says, by the path that planned it.
-    chain &= !ir_function_has_vectors_path(function, plan->vector);
+    chain &= !ir_function_has_vectors_path(function, true);
     bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {

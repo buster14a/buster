@@ -449,7 +449,7 @@ static void tier1_terminal_supported(Tier1EmitTest* test)
                 tier1_emit_test_expect(test, derived, "terminal fixture derives its real CFG and dominance before cross-block selection");
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
+                const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "terminal fixture selects on the scalar/vector path");
                 if (selected != TIER1_SELECT_OK)
                 {
@@ -561,7 +561,7 @@ static void tier1_terminal_general(Tier1EmitTest* test)
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
             const uint64_t scratch_mark = test->scratch.length;
-            const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
+            const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
             tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "valid nonempty loops, conditionals and phis select");
             if (selected != TIER1_SELECT_OK)
             {

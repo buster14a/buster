@@ -190,7 +190,7 @@ static void tier1_x87_transfer_emission(Tier1WideTest* test)
             const uint64_t path_mark = test->output.length;
             Tier1SelectPlan plan = { 0 };
             uint32_t failed = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &failed);
+            const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed);
             ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "select the canonical-result transport fixture");
             const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true, .certify = true };
             Tier1EmitResult emitted = { 0 };

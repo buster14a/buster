@@ -74,7 +74,7 @@ static bool tier1_liveness_test_plan(Tier1LivenessTest* test, const IrFunction* 
             .block_count = cfg->block_count,
         };
         uint32_t error_node;
-        valid = tier1_select_plan(function, &view, &test->input, &test->scratch, true, plan, &error_node) == TIER1_SELECT_OK;
+        valid = tier1_select_plan(function, &view, &test->input, &test->scratch, plan, &error_node) == TIER1_SELECT_OK;
         if (!valid && test->failures < 12)
         {
             fprintf(stderr, "tier1-liveness: planner rejected node %u\n", error_node);
@@ -351,7 +351,7 @@ static void tier1_liveness_test_empty(Tier1LivenessTest* test)
     Tier1SelectPlan plan;
     uint32_t error_node;
     bool valid = ir_create(&test->input, &sizes, &function) == IR_OK &&
-                 tier1_select_plan(&function, 0, &test->input, &test->scratch, true, &plan, &error_node) == TIER1_SELECT_OK;
+                 tier1_select_plan(&function, 0, &test->input, &test->scratch, &plan, &error_node) == TIER1_SELECT_OK;
     Tier1Liveness scalar;
     Tier1Liveness vector;
     valid = valid && tier1_liveness_build(&plan, &test->left, &test->scratch, false, &scalar) == TIER1_LIVENESS_OK &&

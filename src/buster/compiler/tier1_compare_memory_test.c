@@ -285,7 +285,7 @@ static void tier1_select_test_compare_memory_plan(Tier1SelectTest* test, uint32_
         };
         Tier1SelectPlan plan;
         uint32_t failed = 0;
-        const Tier1SelectError selected = tier1_select_plan(&function, 0, output, scratch, true, &plan, &failed);
+        const Tier1SelectError selected = tier1_select_plan(&function, 0, output, scratch, &plan, &failed);
         tier1_select_test_expect(test, selected == TIER1_SELECT_OK, "both selectors accept memory comparison fixtures");
         if (selected == TIER1_SELECT_OK)
         {
@@ -461,7 +461,7 @@ static void tier1_select_test_compare_memory_barriers(Tier1SelectTest* test)
             }
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            const Tier1SelectError selected = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+            const Tier1SelectError selected = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
             char message[160];
             snprintf(message, sizeof(message), "comparison barrier fixture selects: %s", shape->name);
             tier1_select_test_expect(test, selected == TIER1_SELECT_OK, message);
@@ -559,7 +559,7 @@ static void tier1_select_test_compare_memory_final_root(Tier1SelectTest* test)
                                              X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX };
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            const Tier1SelectError selected = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+            const Tier1SelectError selected = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
             tier1_select_test_expect(test, selected == TIER1_SELECT_OK, "select a comparison whose consumer follows a store");
             if (selected == TIER1_SELECT_OK)
             {

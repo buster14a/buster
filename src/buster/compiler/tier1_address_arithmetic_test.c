@@ -39,7 +39,7 @@ static void tier1_select_test_power_multiplication(Tier1SelectTest* test)
                     tier1_select_test_node(&function, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
                     Tier1SelectPlan plan;
                     uint32_t node = BUSTER_IR_NONE;
-                    const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                    const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                     tier1_select_test_expect(test, error == TIER1_SELECT_OK, "power-of-two multiplication selects on both paths");
                     if (error == TIER1_SELECT_OK)
                     {
@@ -146,7 +146,7 @@ static void tier1_select_test_signed_loads(Tier1SelectTest* test)
                         };
                         Tier1SelectPlan plan;
                         uint32_t node = BUSTER_IR_NONE;
-                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                         tier1_select_test_expect(test, error == TIER1_SELECT_OK, "signed loads select on both paths");
                         if (error == TIER1_SELECT_OK)
                         {
@@ -233,7 +233,7 @@ static void tier1_select_test_added_address(Tier1SelectTest* test)
         const uint8_t registers[7] = {X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_R8, X86_REGISTER_R9, X86_REGISTER_R10, X86_REGISTER_RAX, X86_REGISTER_RAX};
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
         tier1_select_test_expect(test, error == TIER1_SELECT_OK, "pointer-integer addition selects on both paths");
         if (error == TIER1_SELECT_OK)
         {
@@ -326,7 +326,7 @@ static void tier1_select_test_shared_address(Tier1SelectTest* test)
                     };
                     Tier1SelectPlan plan;
                     uint32_t node = BUSTER_IR_NONE;
-                    const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                    const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                     tier1_select_test_expect(test, error == TIER1_SELECT_OK, "shared address selects on both paths");
                     if (error == TIER1_SELECT_OK)
                     {
@@ -541,7 +541,7 @@ static void tier1_select_test_scaled_index(Tier1SelectTest* test)
                 const int32_t wanted_displacement = (added ? 0 : 16) + (before || after ? (subtract ? -3 : 3) * (1 << (item.outer + (before ? item.shift : 0))) : 0);
                 Tier1SelectPlan plan;
                 uint32_t failed = BUSTER_IR_NONE;
-                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &failed);
+                const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed);
                 tier1_select_test_expect(test, error == TIER1_SELECT_OK, "scaled indices select on both paths");
                 if (error == TIER1_SELECT_OK)
                 {
@@ -661,7 +661,7 @@ static void tier1_select_test_load_addition(Tier1SelectTest* test)
                         };
                         Tier1SelectPlan plan;
                         uint32_t node = BUSTER_IR_NONE;
-                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, true, &plan, &node);
+                        const Tier1SelectError error = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node);
                         tier1_select_test_expect(test, error == TIER1_SELECT_OK, "load addition selects on both paths");
                         if (error == TIER1_SELECT_OK)
                         {

@@ -706,7 +706,7 @@ static void tier1_wide_test_native(Tier1WideTest* test, const char* name, const 
     const uint64_t output_mark = test->output.length;
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const Tier1SelectError selected = tier1_select_plan(function, dominance, &test->output, &test->scratch, vector, &plan, &node);
+    const Tier1SelectError selected = tier1_select_plan(function, dominance, &test->output, &test->scratch, &plan, &node);
     bool ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the split function");
     if (!ok)
     {
@@ -1079,7 +1079,7 @@ static uint32_t tier1_wide_test_typed(Tier1WideTest* test, uint32_t count)
             const uint64_t mark = test->output.length;
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, true, &plan, &node);
+            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, &plan, &node);
             ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the typed program");
             Tier1EmitDiagnostic diagnostic = { 0 };
             const Tier1EmitOptions options = {
@@ -1254,7 +1254,7 @@ static uint32_t tier1_wide_test_x87(Tier1WideTest* test, uint32_t count)
             const uint64_t mark = test->output.length;
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, true, &plan, &node);
+            const Tier1SelectError selected = tier1_select_plan(&optimized.function, &dominance, &test->output, &test->scratch, &plan, &node);
             ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the long double program");
             Tier1EmitDiagnostic diagnostic = { 0 };
             const Tier1EmitOptions options = {
@@ -1442,7 +1442,7 @@ static void tier1_wide_test_x87_phis(Tier1WideTest* test, char* text)
         const uint64_t mark = test->output.length;
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, true, &plan, &node);
+        const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node);
         Tier1EmitDiagnostic diagnostic = { 0 };
         const Tier1EmitOptions options = {
             .diagnostic = &diagnostic,
