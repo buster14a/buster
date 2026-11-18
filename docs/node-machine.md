@@ -3787,8 +3787,8 @@ with every warning of five, musl's of fifteen.
 
 - **6.0 ticks a record less on `sqlite3.c`, 5.0 on Lua, 1.6 on musl:** 14%,
   9% and 2% of the tests.
-- **A second build of the same sources** (64 bytes of text more before the
-  fixtures', below) read 35.6 for 42.0, 53.2 for 58.0 and 96.3 for 100.0.
+- **A second build of the same sources** (with one string more) read 35.6
+  for 42.0, 53.2 for 58.0 and 96.3 for 100.0.
 - **A third, on the main the pull request was opened on** (`5fa4e76c3`, two
   merges of Tier 1's certificate later; that main and the piece in turn):
   35.6 for 42.2, 53.0 for 58.1 and 97.7 for 104.5; with every warning 63.0
@@ -3816,19 +3816,22 @@ Not this piece's to change, and read beside it (main, then the piece):
 - **`-c sqlite3.c` as whole processes** (21 runs of each of three copies,
   twice): wall -0.08% and -0.10%, user cycles -0.05% and -0.03%, where main
   against itself reads -0.10% and -0.02%, +0.01% and +0.04%.
-- **The front with the window read 71.7 for 52.8 in this build,** 91.9 for
-  71.2 on Lua and 102.0 for 90.8 on musl, **and 52.8 in the second and in
-  the third** (70.9 for 70.7 and 90.9 for 88.2 there). Its
-  functions are main's, byte for byte and at main's addresses; in two of
-  its four counted runs no counter of mispredicted branches, pipeline
-  restarts, op cache or first-level misses differs from the second
-  build's (the two others read the whole process 8% and 10% higher); and
-  the stack's place doesn't move it. What moved is the read-only data
-  after this piece's fixture lines, 3,008 bytes of text, with the front's
-  four `switch` tables among it: the only data of the program's image
-  that its function reads. Sixty-four bytes more of text put it back.
-  [#2967](https://github.com/buster14a/buster/issues/2967) has the builds
-  and the samples.
+- **The front with the window read 71.7 for 52.8 from this build's file,**
+  91.9 for 71.2 on Lua and 102.0 for 90.8 on musl, **and that was the
+  file's, not the build's.** Four fresh copies of the same executable read
+  52.8, and so did the file itself once its pages were dropped from the
+  page cache and read back; through a hard link, the same pages, it read
+  71.7. Its code is main's at main's addresses and the stack's place
+  doesn't move it. In the slow file's runs the function's ops are the
+  same, miss no more and retire sooner after they enter (27.0 cycles for
+  30.3), so they arrive more slowly, and its fetches miss the op cache at
+  102 of 3,282 for 59 of 3,647; no counter of the whole process tells the
+  two files apart. The second and the third build read 52.8, as any other
+  file did. This section first put it down to where read-only data sat:
+  wrong, and corrected with
+  [#2967](https://github.com/buster14a/buster/issues/2967), which has the
+  runs. A job that reads the shadow now runs each build from a fresh copy
+  a reading.
 
 **What moved it, and what didn't.** Ticks a record; each form in turn with
 the piece before (#2960's sources on main `aa09d1a04`), `sqlite3.c` by its
@@ -3973,8 +3976,8 @@ fault there shows only beside one in the rule.
   `-c sqlite3.c` do; the kernel in place does not,** by the form that
   replaced the specification's: its call rule gathers the arguments' part,
   and it reads 16.4 for 15.6 on `sqlite3.c`. The front with the window
-  read main's in the second build and a third more in this one, by the
-  read-only data's place, above.
+  read a third more from this build's first file and main's from every
+  other file of it, above: the file's pages, not the piece.
 - **Where it left the specification.** The arguments' part is the kernel's
   call rule's, not a mark by the front's distances; the parameters' part is
   the callee's type's row's, not its declaration's line's; a callee's result
@@ -4015,6 +4018,74 @@ warnings):
 - **With every warning** `-Wself-assign` and `-Wsign-compare` list every
   assignment and comparison: 16,165 assignments on `sqlite3.c`, 12,136 with
   nothing, and 10,830 comparisons, each sent to the census's code.
+
+### A unit with `no_builtin`, and `*f` of a function's designator
+
+Two things the pieces above never read, found while counting the calls' rule
+on the compiler's own source
+([#2968](https://github.com/buster14a/buster/issues/2968),
+[#2970](https://github.com/buster14a/buster/issues/2970)). [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/fronts-calls-2968-2026-11-18)
+has the probes and the readings.
+
+- **One `no_builtin` function left every call of its unit unmade.** The
+  fronts left a call where its unit had clang's attribute anywhere, and the
+  compiler's own source has one such function since 2026-10-21
+  (`dataflow_liveness_vector_one`). No call of it was made at reader time,
+  and each piece of the tests on the window was exact there on expressions
+  without a call. The attribute matters to a plain library builtin inside
+  the function that has it (#1958): the walk asks by the function that
+  holds the call (`check_input_no_builtin`), the whole front's library mark
+  asks the same, and the lean and the flat fronts read no mark. So the
+  fronts make the calls, whatever the unit has.
+- **`*f` of a function's name had no type.** The kernel's dereference rule
+  converts its operand as T does, a function's designator to a pointer to
+  it, and read what that pointer points at from the operand's own row. Only
+  a pointer's and an array's row have an element: the record got no type
+  and an lvalue's category, and the shadow exits 1 on `(*f)(a)`. The record
+  is the designator's own type now, a function's designator again. No
+  corpus has one among the records the kernel makes.
+
+The compiler's own source, in the cloud container, with `--verify`:
+
+| | before | with both |
+| --- | ---: | ---: |
+| expressions the tests on the window run on | 38,155 | 52,015 |
+| their records | 226,623 | 371,332 |
+| calls listed | 0 | 4,393 |
+| calls the rule leaves out, each checked | 0 | 12,484 |
+| of them with a test, or with a constant argument the rule doesn't take | | 0 |
+| casts in the asks' list | 0 | 4,140 |
+| declarations asked whether they want their result | 0 | 723 |
+| expressions with nothing listed, each checked | 18,255 (48%) | 24,063 (46%) |
+| with every warning | 7,931 (21%) | 11,812 (23%) |
+| of them with another verdict | 0 | 0 |
+| library calls T asks about at reader time | 0 | 1,171 |
+| expressions C and X compared | 13,831 | 19,450 |
+| records the kernel makes in place | 185,936 | 310,953 |
+| that differ, in any of them | 0 | 0 |
+
+- **No expression differs in any of the shadow's twelve modes on the four
+  corpora,** and the three other corpora's counts are what they were: none
+  of their units has the attribute.
+- **On the 9700X the three corpora read the same.** Two builds of the
+  fixes, each in turn with the piece before's: the tests on the window 35.6
+  for 35.7 and 35.8 for 35.4 on `sqlite3.c`, 52.9 for 53.2 and 53.5 for
+  53.1 on Lua, 95.8 for 95.2 and 100.3 for 99.7 on musl; the kernel in
+  place 16.5 for 16.4 in both.
+- **Tests.** A twelfth fixture, two functions with the attribute (one
+  naming `memset`, one naming nothing) between three without it: a library
+  call is its declaration's in the function whose attribute covers it and
+  has its own semantics in the others. The fronts run over it, whole, lean
+  and flat (`node_front_test_builtins`). `(*f)(a)`, `(**f)(a)` and a
+  pointer's `(*fp)(a)` are in the facts' fixture, and the first two in the
+  tests' function `calls`.
+- **Faults.** Nine were put into the two fixes, one at a time, in a copy of
+  the tree: eight fail the tests, the fronts' unit-wide term put back in
+  either front among them, and the whole front's mark asked of no function.
+  The ninth showed code that did nothing: the designator's type was
+  stripped of its qualifiers, and the type table gives a function type none
+  (`type_qualify`). The strip is gone.
 
 ### What it says of step 2
 
