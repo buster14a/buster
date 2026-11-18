@@ -66,6 +66,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 
 #define BUSTER_FILES_TEST_MAX_LANES 16
 #define BUSTER_FILES_TEST_MAX_UNITS 4096
@@ -1183,7 +1184,9 @@ static bool files_test_listed_unit(const char* root, const char* const* director
 
 // The walk's listings (#653): on every lane count, a walk whose second round's candidates a listing rules out leaves
 // the cache the same paths, each with a file or none and the same error, as a walk with listings off, before any unit
-// runs; and a unit of the root then opens no path through either cache.
+// runs; and a unit of the root then opens no path through either cache. On a file system whose lookups a listing
+// can't answer for (file_cache_exact_names: NFS, FUSE, 9p, vfat), no directory is listed (#2945): the walk with
+// listings on then rules out no candidate, and must still leave the cache as the walk with them off.
 static bool files_test_listings(const char* directory, const uint32_t* lanes, uint32_t lane_count)
 {
     char first[4200];
@@ -1215,6 +1218,10 @@ static bool files_test_listings(const char* directory, const uint32_t* lanes, ui
     {
         result = fclose(file) == 0 && result;
     }
+    // Whether this file system's lookups match its listings, as the cache decides when it would list `first`
+    // (file_cache_list_directory): where they do, round 2's candidates there are ruled out; where they don't, none is.
+    struct statfs system;
+    const bool listable = result && statfs(first, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
     const char* const directories[2] = { first, second };
     for (uint32_t l = 0; result && l < lane_count; l += 1)
     {
@@ -1231,7 +1238,7 @@ static bool files_test_listings(const char* directory, const uint32_t* lanes, ui
         }
         // The caches as the walks left them, before any unit adds a path. Names in the directories themselves ask for
         // nothing.
-        result = result && listed[0] != 0 && listed[1] == 0 && asks[0] == 0 && asks[1] == 0 && caches[0].path_count == caches[1].path_count;
+        result = result && (listed[0] != 0) == listable && listed[1] == 0 && asks[0] == 0 && asks[1] == 0 && caches[0].path_count == caches[1].path_count;
         for (uint32_t p = 0; result && p < caches[0].path_count; p += 1)
         {
             const FileCachePath* on = &caches[0].paths[p];
@@ -1259,7 +1266,8 @@ static bool files_test_listings(const char* directory, const uint32_t* lanes, ui
             intern_release(&tables[way]);
         }
     }
-    printf("listings: %s (the walk's ruled-out candidates' paths in the cache as without listings, on every lane count)\n", result ? "as expected" : "WRONG");
+    printf("listings: %s (%s; the walk's ruled-out candidates' paths in the cache as without listings, on every lane count)\n", result ? "as expected" : "WRONG",
+           listable ? "listed" : "this file system's directories aren't listed, so none is ruled out");
     for (uint32_t h = 0; h < BUSTER_FILES_TEST_LISTED; h += 1)
     {
         snprintf(path, sizeof(path), "%s/h%u.h", second, h);
