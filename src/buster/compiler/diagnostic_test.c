@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Tests for diagnostic.c: radix/insertion agreement including every short tail against guard pages, stable ties,
-// all 128 key bits, lane-local ownership, reversed completion, grouped notes, fatal cutoff and bounded failures.
+// Tests for diagnostic.c: the sort against its definition (ordered by source then sequence, a permutation of its input,
+// and stable: equal keys keep their input order) at every short tail against guard pages, with stable ties and all 128
+// key bits; lane-local ownership, reversed completion, grouped notes, fatal cutoff and bounded failures.
 
 #define BUSTER_DIAGNOSTIC_TEST_JOBS 129
 #define BUSTER_DIAGNOSTIC_TEST_RECORDS (BUSTER_DIAGNOSTIC_TEST_JOBS * 3)
@@ -10,6 +11,28 @@ static uint64_t diagnostic_test_random(uint64_t* state)
 {
     *state = *state * 6364136223846793005ull + 1442695040888963407ull;
     return *state;
+}
+
+// Whether `output` is `input` (count records, each record its index) sorted stably by (source, sequence): every record
+// once, with its input's keys, in order of the keys and, for equal keys, of the records. `seen` has a byte per record.
+static bool diagnostic_test_sorted(const DiagnosticOrder* input, const DiagnosticOrder* output, uint32_t count, uint8_t* seen)
+{
+    bool result = true;
+    memset(seen, 0, count);
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        const DiagnosticOrder item = output[i];
+        result = item.record < count && seen[item.record] == 0 && item.source == input[item.record].source && item.sequence == input[item.record].sequence;
+        seen[result ? item.record : 0] = 1;
+        if (result && i != 0)
+        {
+            const DiagnosticOrder last = output[i - 1];
+            const bool keys_after = item.source > last.source || (item.source == last.source && item.sequence > last.sequence);
+            const bool tie_after = item.source == last.source && item.sequence == last.sequence && item.record > last.record;
+            result = keys_after || tie_after;
+        }
+    }
+    return result;
 }
 
 static bool diagnostic_test_sort(uint64_t seed)
@@ -34,8 +57,9 @@ static bool diagnostic_test_sort(uint64_t seed)
                 lists[i] = (DiagnosticOrder*)(memory[i] + page + readable - bytes);
             }
         }
-        DiagnosticOrder* expected = calloc(count + 1, sizeof(DiagnosticOrder));
-        result = result && expected != 0;
+        DiagnosticOrder* input = calloc(count + 1, sizeof(DiagnosticOrder));
+        uint8_t* seen = calloc(count + 1, 1);
+        result = result && input != 0 && seen != 0;
         for (uint32_t pattern = 0; result && pattern < 5; pattern += 1)
         {
             for (uint32_t i = 0; i < count; i += 1)
@@ -48,17 +72,13 @@ static bool diagnostic_test_sort(uint64_t seed)
                     .sequence = pattern == 0 ? 0 : pattern >= 3 ? b : b % 4,
                     .record = i,
                 };
-                expected[i] = lists[0][i];
+                input[i] = lists[0][i];
             }
-            diagnostic_sort_scalar(expected, count);
             diagnostic_sort(lists[0], count, lists[1]);
-            for (uint32_t i = 0; result && i < count; i += 1)
-            {
-                result = lists[0][i].source == expected[i].source && lists[0][i].sequence == expected[i].sequence &&
-                         lists[0][i].record == expected[i].record;
-            }
+            result = diagnostic_test_sorted(input, lists[0], count, seen);
         }
-        free(expected);
+        free(input);
+        free(seen);
         for (uint32_t i = 0; i < 2; i += 1)
         {
             if (memory[i] != MAP_FAILED)
