@@ -2,17 +2,17 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-tier0-inline (#1398): Tier 0's splice (tier0_inline.c) and its use in the emission (c_check_tier0_inline.c) on
-// real C, the vector path against its scalar twin. Include after tier0_source_benchmark.c and c_checker_driver_test.c.
+// real C. Include after tier0_source_benchmark.c and c_checker_driver_test.c.
 //
 //   build/compiler test-tier0-inline [--tier0-inline-shapes] [preprocessor options] [file...]
 //
 // Each file is prepared as -c prepares it (check_source_prepare), its reachable definitions lowered by check_program_emit,
 // and the unit's inline callees' table built as the emission builds it (check_tier1_inline_table). Then every body goes
-// through check_tier0_inline_body twice, by the vector path and by the scalar twin, each with its own lane cache: both
-// must splice the same bodies, and every column of each G must be the same bytes, its starts too; tier0_validate accepts
-// each (the splice's own check) and Tier 0 compiles it. Without a file, it takes the driver fixture
-// (check_test_tier0_inline_source) at x86-64-v4. --tier0-inline-shapes splices callees with several returns or a result
-// in memory too, as -c's option does (#1398 step 5). The driver fixture (test-checker-driver) runs the programs.
+// through check_tier0_inline_body with the lane's cache: each G's starts must increase to its end, tier0_validate must
+// accept it (the splice's own check) and Tier 0 compile it. Without a file, it takes the driver fixture
+// (check_test_tier0_inline_source) at x86-64-v4, whose spliced streams, every column and the starts, must fold to the
+// frozen digest of their run (with and without the shapes). --tier0-inline-shapes splices callees with several returns or
+// a result in memory too, as -c's option does (#1398 step 5). The driver fixture (test-checker-driver) runs the programs.
 
 typedef struct Tier0InlineTestTally Tier0InlineTestTally;
 struct Tier0InlineTestTally
@@ -24,7 +24,15 @@ struct Tier0InlineTestTally
     uint64_t sites;
     uint64_t entries_before;
     uint64_t entries_after;
+    // The spliced streams' columns and starts, folded in body order (tier0_inline_test_fold_function).
+    uint64_t digest;
 };
+
+// The driver fixture's spliced streams' digests at x86-64-v4, without and with --tier0-inline-shapes. Frozen on the tree
+// where the splice's vector path and its scalar twin still gave the same bytes in every column (#2924); a change to the
+// splice, to the lowering that feeds it or to the fixture moves them, and a run reports its own.
+#define BUSTER_TIER0_INLINE_TEST_DIGEST UINT64_C(0xac830c6310ee733c)
+#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0x8c6c31f087ae1e75)
 
 static void tier0_inline_test_expect(Tier0InlineTestTally* tally, bool condition, const char* file, uint32_t body, const char* message)
 {
@@ -37,43 +45,62 @@ static void tier0_inline_test_expect(Tier0InlineTestTally* tally, bool condition
 }
 
 // Whether `a` and `b` are the same bytes for `count` elements of `size`, either both absent.
-static bool tier0_inline_test_same_column(const void* a, const void* b, uint64_t count, uint64_t size)
+static uint64_t tier0_inline_test_fold(uint64_t digest, const void* bytes, uint64_t size)
 {
-    return (a == 0 && b == 0) || (a != 0 && b != 0 && memcmp(a, b, count * size) == 0) || count == 0;
+    const uint8_t* data = bytes;
+    for (uint64_t i = 0; data != 0 && i < size; i += 1)
+    {
+        digest = (digest ^ data[i]) * UINT64_C(0x100000001b3);
+    }
+    return digest;
 }
 
-// Whether two spliced streams are the same in every column the splice writes.
-static bool tier0_inline_test_same(const Tier0Function* a, const Tier0Function* b)
+// A spliced stream folded into `digest`: its counts and flags, then every column the splice writes.
+static uint64_t tier0_inline_test_fold_function(uint64_t digest, const Tier0Function* a)
 {
-    bool same = a->count == b->count && a->local_count == b->local_count && a->call_count == b->call_count && a->argument_count == b->argument_count &&
-                a->operation_count == b->operation_count && a->x87_constant_count == b->x87_constant_count &&
-                a->vector_constant_count == b->vector_constant_count && a->vectors == b->vectors && a->masks == b->masks && a->x87 == b->x87 &&
-                a->int128 == b->int128 && a->vector_bytes == b->vector_bytes && a->label_count == b->label_count && a->table_count == b->table_count;
-    same = same && tier0_inline_test_same_column(a->kinds, b->kinds, a->count, 1) && tier0_inline_test_same_column(a->classes, b->classes, a->count, 1) &&
-           tier0_inline_test_same_column(a->values, b->values, a->count, sizeof(uint64_t));
-    same = same && tier0_inline_test_same_column(a->local_classes, b->local_classes, a->local_count, 1) &&
-           tier0_inline_test_same_column(a->local_flags, b->local_flags, a->local_count, 1) &&
-           tier0_inline_test_same_column(a->local_sizes, b->local_sizes, a->local_count, sizeof(uint32_t)) &&
-           tier0_inline_test_same_column(a->local_alignments, b->local_alignments, a->local_count, 1);
-    same = same && tier0_inline_test_same_column(a->call_targets, b->call_targets, a->call_count, sizeof(SymbolId)) &&
-           tier0_inline_test_same_column(a->call_first, b->call_first, a->call_count, sizeof(uint32_t)) &&
-           tier0_inline_test_same_column(a->call_argument_counts, b->call_argument_counts, a->call_count, sizeof(uint32_t)) &&
-           tier0_inline_test_same_column(a->call_variadic, b->call_variadic, a->call_count, 1) &&
-           tier0_inline_test_same_column(a->calls, b->calls, a->call_count, sizeof(AbiCall)) &&
-           tier0_inline_test_same_column(a->call_result_objects, b->call_result_objects, a->call_count, sizeof(uint32_t)) &&
-           tier0_inline_test_same_column(a->call_tails, b->call_tails, a->call_count, 1);
-    same = same && tier0_inline_test_same_column(a->argument_locations, b->argument_locations, a->argument_count, sizeof(AbiLocation)) &&
-           tier0_inline_test_same_column(a->argument_classes, b->argument_classes, a->argument_count, 1) &&
-           tier0_inline_test_same_column(a->argument_sizes, b->argument_sizes, a->argument_count, sizeof(uint32_t));
-    same = same && tier0_inline_test_same_column(a->operations, b->operations, a->operation_count, sizeof(Tier0Operation)) &&
-           tier0_inline_test_same_column(a->x87_constants, b->x87_constants, 2 * (uint64_t)a->x87_constant_count, sizeof(uint64_t)) &&
-           tier0_inline_test_same_column(a->vector_constants, b->vector_constants, 8 * (uint64_t)a->vector_constant_count, sizeof(uint64_t)) &&
-           tier0_inline_test_same_column(a->vector_constant_bytes, b->vector_constant_bytes, a->vector_constant_count, 1) &&
-           tier0_inline_test_same_column(a->label_entries, b->label_entries, a->label_count, sizeof(uint32_t));
-    return same;
+    const uint32_t counts[] = {
+        a->count,
+        a->local_count,
+        a->call_count,
+        a->argument_count,
+        a->operation_count,
+        a->x87_constant_count,
+        a->vector_constant_count,
+        a->vectors,
+        a->masks,
+        a->x87,
+        a->int128,
+        a->vector_bytes,
+        a->label_count,
+        a->table_count,
+    };
+    digest = tier0_inline_test_fold(digest, counts, sizeof(counts));
+    digest = tier0_inline_test_fold(digest, a->kinds, a->count);
+    digest = tier0_inline_test_fold(digest, a->classes, a->count);
+    digest = tier0_inline_test_fold(digest, a->values, (uint64_t)a->count * sizeof(uint64_t));
+    digest = tier0_inline_test_fold(digest, a->local_classes, a->local_count);
+    digest = tier0_inline_test_fold(digest, a->local_flags, a->local_count);
+    digest = tier0_inline_test_fold(digest, a->local_sizes, (uint64_t)a->local_count * sizeof(uint32_t));
+    digest = tier0_inline_test_fold(digest, a->local_alignments, a->local_count);
+    digest = tier0_inline_test_fold(digest, a->call_targets, (uint64_t)a->call_count * sizeof(SymbolId));
+    digest = tier0_inline_test_fold(digest, a->call_first, (uint64_t)a->call_count * sizeof(uint32_t));
+    digest = tier0_inline_test_fold(digest, a->call_argument_counts, (uint64_t)a->call_count * sizeof(uint32_t));
+    digest = tier0_inline_test_fold(digest, a->call_variadic, a->call_count);
+    digest = tier0_inline_test_fold(digest, a->calls, (uint64_t)a->call_count * sizeof(AbiCall));
+    digest = tier0_inline_test_fold(digest, a->call_result_objects, (uint64_t)a->call_count * sizeof(uint32_t));
+    digest = tier0_inline_test_fold(digest, a->call_tails, a->call_count);
+    digest = tier0_inline_test_fold(digest, a->argument_locations, (uint64_t)a->argument_count * sizeof(AbiLocation));
+    digest = tier0_inline_test_fold(digest, a->argument_classes, a->argument_count);
+    digest = tier0_inline_test_fold(digest, a->argument_sizes, (uint64_t)a->argument_count * sizeof(uint32_t));
+    digest = tier0_inline_test_fold(digest, a->operations, (uint64_t)a->operation_count * sizeof(Tier0Operation));
+    digest = tier0_inline_test_fold(digest, a->x87_constants, 2 * (uint64_t)a->x87_constant_count * sizeof(uint64_t));
+    digest = tier0_inline_test_fold(digest, a->vector_constants, 8 * (uint64_t)a->vector_constant_count * sizeof(uint64_t));
+    digest = tier0_inline_test_fold(digest, a->vector_constant_bytes, a->vector_constant_count);
+    digest = tier0_inline_test_fold(digest, a->label_entries, (uint64_t)a->label_count * sizeof(uint32_t));
+    return digest;
 }
 
-// One file's bodies by both paths (the file's comment): false where it couldn't be prepared or emitted.
+// One file's bodies (the file's comment): false where it couldn't be prepared or emitted.
 static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file, char** options, uint32_t option_count, bool shapes)
 {
     CheckSource prepared;
@@ -97,50 +124,42 @@ static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file
     {
         memset(table.ready, 1, count);
     }
-    CheckTier0InlineLane caches[2] = { 0 };
+    CheckTier0InlineLane cache = { 0 };
     uint64_t sites = 0;
     for (uint32_t b = 0; callees && b < count; b += 1)
     {
-        Tier0Inlined inlined[2];
-        bool spliced[2];
-        for (uint32_t path = 0; path < 2; path += 1)
-        {
-            CheckEmitRun run = {
-                .program = program,
-                .lowered = &code.lowered,
-                .scalar = path != 0,
-                .tier0_inline = &table,
-                .inline_table = &table,
-                .tier0_inline_shapes = shapes,
-            };
-            CheckEmitLane lane = { .tier0_inline = &caches[path] };
-            spliced[path] = check_tier0_inline_body(&run, &lane, b, &work, &inlined[path]);
-        }
+        Tier0Inlined inlined;
+        CheckEmitRun run = {
+            .program = program,
+            .lowered = &code.lowered,
+            .tier0_inline = &table,
+            .inline_table = &table,
+            .tier0_inline_shapes = shapes,
+        };
+        CheckEmitLane lane = { .tier0_inline = &cache };
+        const bool spliced = check_tier0_inline_body(&run, &lane, b, &work, &inlined);
         const Tier0Function* function = &code.lowered.functions[b];
         tally->bodies += 1;
-        tier0_inline_test_expect(tally, spliced[0] == spliced[1], file, b, "the two paths splice the same bodies");
-        if (spliced[0] && spliced[1])
+        if (spliced)
         {
             tally->spliced += 1;
-            sites += inlined[0].sites;
+            sites += inlined.sites;
             tally->entries_before += function->count;
-            tally->entries_after += inlined[0].function.count;
-            tier0_inline_test_expect(tally, inlined[0].sites == inlined[1].sites && tier0_inline_test_same(&inlined[0].function, &inlined[1].function), file, b,
-                                     "the two paths' streams are the same bytes");
-            tier0_inline_test_expect(tally, memcmp(inlined[0].starts, inlined[1].starts, ((uint64_t)function->count + 1) * sizeof(uint32_t)) == 0, file, b,
-                                     "the two paths' starts are the same");
-            bool increasing = inlined[0].starts[function->count] == inlined[0].function.count;
+            tally->entries_after += inlined.function.count;
+            const uint64_t body[2] = { b, inlined.sites };
+            tally->digest = tier0_inline_test_fold(tally->digest, body, sizeof(body));
+            tally->digest = tier0_inline_test_fold(tally->digest, inlined.starts, ((uint64_t)function->count + 1) * sizeof(uint32_t));
+            tally->digest = tier0_inline_test_fold_function(tally->digest, &inlined.function);
+            bool increasing = inlined.starts[function->count] == inlined.function.count;
             for (uint32_t e = 0; increasing && e < function->count; e += 1)
             {
-                increasing = inlined[0].starts[e] <= inlined[0].starts[e + 1];
+                increasing = inlined.starts[e] <= inlined.starts[e + 1];
             }
             tier0_inline_test_expect(tally, increasing, file, b, "the starts increase to G's end");
-            tier0_inline_test_expect(tally, tier0_validate(&inlined[0].function).error == TIER0_OK, file, b, "tier0_validate accepts the spliced stream");
+            tier0_inline_test_expect(tally, tier0_validate(&inlined.function).error == TIER0_OK, file, b, "tier0_validate accepts the spliced stream");
             const uint64_t mark = work.length;
-            const Tier0Code compiled = tier0_compile(&inlined[0].function, &work);
-            const Tier0Code twin = tier0_compile_scalar(&inlined[1].function, &work);
-            tier0_inline_test_expect(tally, compiled.error == TIER0_OK && twin.error == TIER0_OK && compiled.count == twin.count, file, b,
-                                     "Tier 0 compiles the spliced stream by both paths");
+            const Tier0Code compiled = tier0_compile(&inlined.function, &work);
+            tier0_inline_test_expect(tally, compiled.error == TIER0_OK, file, b, "Tier 0 compiles the spliced stream");
             arena_pop_to(&work, mark);
         }
     }
@@ -151,10 +170,7 @@ static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file
     {
         fprintf(stderr, "test-tier0-inline: %s: couldn't be prepared and lowered (%s)\n", file, code.reason != NULL ? code.reason : "a refusal or a resource");
     }
-    for (uint32_t path = 0; path < 2; path += 1)
-    {
-        arena_release(&caches[path].cache);
-    }
+    arena_release(&cache.cache);
     arena_release(&work);
     arena_release(&bytes);
     arena_release(&lowered);
@@ -205,7 +221,7 @@ static int run_tier0_inline_tests(int count, char** arguments)
         files[file_count++] = fixture;
         options[option_count++] = "-march=x86-64-v4";
     }
-    Tier0InlineTestTally tally = { 0 };
+    Tier0InlineTestTally tally = { .digest = UINT64_C(0xcbf29ce484222325) };
     for (uint32_t f = 0; valid && f < file_count; f += 1)
     {
         valid = tier0_inline_test_file(&tally, files[f], options, option_count, shapes);
@@ -213,13 +229,20 @@ static int run_tier0_inline_tests(int count, char** arguments)
     if (own)
     {
         unlink(fixture);
-        // The fixture's calls of always_inline functions are inlined.
+        // The fixture's calls of always_inline functions are inlined, into the streams of the frozen digest.
         tally.checks += 1;
         tally.failures += valid && tally.sites >= 20 ? 0 : 1;
+        const uint64_t frozen = shapes ? BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST : BUSTER_TIER0_INLINE_TEST_DIGEST;
+        tally.checks += 1;
+        tally.failures += valid && tally.digest == frozen ? 0 : 1;
+        if (tally.digest != frozen)
+        {
+            fprintf(stderr, "test-tier0-inline: the fixture's spliced streams fold to %016" PRIx64 ", not the frozen %016" PRIx64 "\n", tally.digest, frozen);
+        }
     }
     printf("test-tier0-inline: %" PRIu64 " bodies, %" PRIu64 " spliced, %" PRIu64 " calls inlined, entries %" PRIu64 " -> %" PRIu64 "; %" PRIu64 " checks, %" PRIu64
-           " failures\n",
-           tally.bodies, tally.spliced, tally.sites, tally.entries_before, tally.entries_after, tally.checks, tally.failures);
+           " failures; digest %016" PRIx64 "\n",
+           tally.bodies, tally.spliced, tally.sites, tally.entries_before, tally.entries_after, tally.checks, tally.failures, tally.digest);
     if (!valid)
     {
         fprintf(stderr, "usage: compiler test-tier0-inline [--tier0-inline-shapes] [preprocessor options] [file...]\n");
