@@ -574,9 +574,11 @@ static uint32_t assembly_opcode(const X86FormDescription* form)
 // F6/F7 /0 and 87; B0+r and B8+r for MOV r, imm; the imm8 forms of 81, 69 and 68 and of the accumulator's arithmetic; D0
 // and D1 for a shift by 1; INT3 for INT 3; FMA4's and XOP's other W between registers; 50+r and 58+r for PUSH and POP
 // of a register; XCHG EAX, EAX's and RAX's 90 forms; PREFETCHIT0 and 1 off RIP; LEA with a segment override; the x87's
-// DC between st(0) and st(0); and an index scaled by 1 without a base, which GNU as makes the base. The sink prints such
-// a record's bytes.
-static bool assembly_escaped(const X86Instruction* record, const X86FormDescription* form)
+// DC between st(0) and st(0); and an index scaled by 1 without a base, which GNU as makes the base. And MPX's
+// bnd-prefixed branches (notrack's too), which GNU as reads only after `.arch .mpx` since binutils 2.46. The sink prints
+// such a record's bytes. `symbolic` says the immediate is a relocation's, whose value GNU as can't shorten: the rules of
+// its value don't apply.
+static bool assembly_escaped(const X86Instruction* record, const X86FormDescription* form, bool symbolic)
 {
     const uint32_t row = (uint32_t)(form - x86_form_descriptions);
     const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0;
@@ -585,7 +587,7 @@ static bool assembly_escaped(const X86Instruction* record, const X86FormDescript
     const uint32_t opcode = assembly_opcode(form);
     const bool one = form->opcode_bytes == 1;
     const int32_t immediate = form->immediate_bytes == 1 ? (int8_t)record->immediate : form->immediate_bytes == 2 ? (int16_t)record->immediate : record->immediate;
-    const bool fits8 = immediate >= -128 && immediate <= 127;
+    const bool fits8 = !symbolic && immediate >= -128 && immediate <= 127;
     const bool movq = row == X86_FORM_MOVQ_X_RM64 || row == X86_FORM_MOVQ_RM64_X || row == X86_FORM_VMOVQ_X_RM64 || row == X86_FORM_VMOVQ_RM64_X ||
                       row == X86_FORM_VMOVQ_X_XM64_EVEX || row == X86_FORM_VMOVQ_XM64_X_EVEX || row == X86_FORM_MOVQ_MM_RM64 || row == X86_FORM_MOVQ_RM64_MM;
     const bool index_only = (record->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)) == BUSTER_X86_MODE_INDEX && (record->mode & BUSTER_X86_MODE_SCALE) == 0 &&
@@ -596,8 +598,8 @@ static bool assembly_escaped(const X86Instruction* record, const X86FormDescript
     result |= legacy && one && register_direct && (opcode == 0xc6 || opcode == 0xc7) && !form->w;
     result |= legacy && one && (opcode == 0x81 || opcode == 0x69 || opcode == 0x68) && form->immediate_bytes != 1 && fits8;
     result |= legacy && one && (opcode & 0xc7) == 0x05 && form->syntax == X86_SYNTAX_ACC_IMM && fits8;
-    result |= legacy && one && (opcode == 0xc0 || opcode == 0xc1) && record->immediate == 1;
-    result |= legacy && one && opcode == 0xcd && record->immediate == 3;
+    result |= legacy && one && (opcode == 0xc0 || opcode == 0xc1) && !symbolic && record->immediate == 1;
+    result |= legacy && one && opcode == 0xcd && !symbolic && record->immediate == 3;
     result |= register_direct && form->syntax == X86_SYNTAX_REG_VVVV_RM_IS4 && form->opcode >= 0x0f3a5c;
     result |= register_direct && form->w && ((form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM && x86_opcode_map(form) >= 8) || form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM_IMM);
     result |= legacy && one && register_direct && (opcode == 0xff || opcode == 0x8f) && (form->encoding == BUSTER_X86_ENCODING_D6 || opcode == 0x8f);
@@ -606,6 +608,7 @@ static bool assembly_escaped(const X86Instruction* record, const X86FormDescript
     result |= legacy && one && opcode == 0x8d && x86_form_segment(record->form) != 0;
     result |= legacy && one && register_direct && opcode == 0xdc && record->rm == 0;
     result |= memory && index_only;
+    result |= strncmp(form->mnemonic, "bnd ", 4) == 0 || strstr(form->mnemonic, " bnd ") != 0;
     return result;
 }
 
@@ -732,7 +735,10 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
     const X86FormDescription* form = x86_form_description(record->form);
     const char* operands = assembly_operands(form->syntax);
     const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0;
-    const bool escaped = assembly_escaped(record, form) && !displacement->present && !immediate->present;
+    // A record GNU as encodes otherwise: its bytes, but where a relocation is in them, which the sink refuses (below).
+    const bool otherwise = assembly_escaped(record, form, immediate->present);
+    const bool referenced = displacement->present || immediate->present;
+    const bool escaped = otherwise && !referenced;
     bool spelled = operands != 0;
     if (escaped)
     {
@@ -901,9 +907,14 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
             }
         }
     }
+    // A form GNU as encodes otherwise with a relocation in it (`mov $symbol, %ecx` by C7, an MPX bnd branch to a
+    // symbol), which no backend emits: refused, rather than printed as another encoding.
+    const bool unescaped = otherwise && referenced;
+    spelled = spelled && !unescaped;
     if (!spelled)
     {
-        *reason = operands == 0 ? "an instruction form without an AT&T spelling" : "a relocation the instruction's operand can't spell";
+        *reason = operands == 0 ? "an instruction form without an AT&T spelling" : unescaped ? "a relocation on an instruction GNU as encodes otherwise (MPX's bnd branches, or a shorter form)" :
+                                                                                               "a relocation the instruction's operand can't spell";
     }
     assembly_append(text, "\n");
     return spelled;

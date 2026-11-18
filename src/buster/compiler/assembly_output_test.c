@@ -10,7 +10,8 @@
 //     zeros, zero-fill data, weak, hidden and local symbols, a name GNU as reads only quoted), and the text of a small
 //     unit compared whole with its expected text;
 //   - the refusals, each by its reason (thread-local storage, section groups, a common symbol, code without records,
-//     two symbols of one name, a name of the sink's prefix), and the views that contradict themselves (records that
+//     two symbols of one name, a name of the sink's prefix, a relocation in a record GNU as encodes otherwise: an MPX
+//     bnd call), and the views that contradict themselves (records that
 //     aren't their atom's bytes, a symbol inside an instruction, a branch without a target);
 //   - the guarded tails: an output arena too small for the text, at every length short of it, and a scratch arena too
 //     small for the tables, each leaving both arenas as they were;
@@ -582,6 +583,7 @@ enum
     ASSEMBLY_TEST_INSIDE,
     ASSEMBLY_TEST_TARGETLESS,
     ASSEMBLY_TEST_TLS_FIXUP,
+    ASSEMBLY_TEST_BND_CALL,
     ASSEMBLY_TEST_CHANGES,
 };
 
@@ -631,6 +633,10 @@ static void assembly_test_refusal(AssemblyTest* test, uint32_t change, AssemblyE
     {
         const AtomId branching = assembly_fixture_function(test, &fixture, "g", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4, "jmp .L1\n.L1:\nret\n");
         fixture.code[branching].branch_count = 0;
+    }
+    if (change == ASSEMBLY_TEST_BND_CALL)
+    {
+        assembly_fixture_function(test, &fixture, "g", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4, "bnd call external\nret\n");
     }
     if (change == ASSEMBLY_TEST_TLS_FIXUP)
     {
@@ -786,7 +792,7 @@ static void assembly_test_forms(AssemblyTest* test, uint32_t variants)
                     code[atom] = (AssemblyCode){ .records = &records[i], .count = 1 };
                     atoms_records[atoms] = i;
                     atoms += 1;
-                    escaped += pass == 1 && assembly_escaped(&records[i], x86_form_description(records[i].form));
+                    escaped += pass == 1 && assembly_escaped(&records[i], x86_form_description(records[i].form), false);
                 }
             }
         }
@@ -1196,6 +1202,7 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_refusal(&test, ASSEMBLY_TEST_INSIDE, ASSEMBLY_INVALID, "a symbol inside an instruction");
         assembly_test_refusal(&test, ASSEMBLY_TEST_TARGETLESS, ASSEMBLY_INVALID, "a relative branch without a target");
         assembly_test_refusal(&test, ASSEMBLY_TEST_TLS_FIXUP, ASSEMBLY_UNSUPPORTED, "thread-local storage");
+        assembly_test_refusal(&test, ASSEMBLY_TEST_BND_CALL, ASSEMBLY_UNSUPPORTED, "GNU as encodes otherwise");
         if (test.cross_check)
         {
             assembly_test_forms(&test, 2);
