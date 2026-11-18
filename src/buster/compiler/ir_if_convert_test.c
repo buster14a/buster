@@ -84,7 +84,7 @@ static void ir_if_convert_test_compare(IrOptimizeTest* test, const IrFunction* f
     const uint64_t sm = scalar->length;
     const uint64_t om = optimized->length;
     const uint64_t tm = scratch->length;
-    const IrCheck valid = ir_verify_complete(f, scratch, false);
+    const IrCheck valid = ir_verify_complete(f, scratch);
     ir_optimize_test_expect(test, valid.error == IR_OK, "if-conversion fixture is complete SSA");
     if (valid.error == IR_OK)
     {
@@ -98,7 +98,7 @@ static void ir_if_convert_test_compare(IrOptimizeTest* test, const IrFunction* f
         {
             ir_optimize_test_expect(test, v.regions == regions && v.selects == selects && s.regions == regions && s.selects == selects, "if-conversion bounded admission and select count");
             ir_optimize_test_expect(test, ir_optimize_test_equal(&v.function, &s.function), "if-conversion scalar/vector exact columns and side tables");
-            ir_optimize_test_expect(test, ir_verify_complete(&v.function, scratch, true).error == IR_OK && ir_verify_complete(&s.function, scratch, false).error == IR_OK,
+            ir_optimize_test_expect(test, ir_verify_complete(&v.function, scratch).error == IR_OK && ir_verify_complete(&s.function, scratch).error == IR_OK,
                                     "if-conversion preserves complete SSA, including unreachable arm stubs");
             if (regions == 0)
             {

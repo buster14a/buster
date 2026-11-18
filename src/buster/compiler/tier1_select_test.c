@@ -1271,7 +1271,7 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
                             tier1_select_test_node(&function, 3, IR_AND, type, 1, 2, BUSTER_IR_NONE);
                             tier1_select_test_node(&function, 4, IR_INTRINSIC, type, shape == 1 ? 1 : 0, shape == 0 ? 1 : shape == 1 ? 0 : 3, operations[k]);
                             tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                            const bool verified = ir_verify_scalar(&function, &scratch, 0).error == IR_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+                            const bool verified = ir_verify(&function, &scratch, 0).error == IR_OK;
                             tier1_select_test_expect(test, verified, "intrinsic IR fixture verifies by both paths");
                             uint8_t* const baseline = test->allowed;
                             test->allowed = allowed;
@@ -1327,7 +1327,7 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
                         tier1_select_test_node(&function, 2, IR_OR, type, 0, 1, BUSTER_IR_NONE);
                         tier1_select_test_node(&function, 3, IR_INTRINSIC, type, 2, BUSTER_IR_NONE, bits[k]);
                         tier1_select_test_node(&function, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                        const bool verified = ir_verify_scalar(&function, &scratch, 0).error == IR_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+                        const bool verified = ir_verify(&function, &scratch, 0).error == IR_OK;
                         tier1_select_test_expect(test, verified, "bit intrinsic IR fixture verifies by both paths");
                         uint8_t* const baseline = test->allowed;
                         test->allowed = allowed;
@@ -1391,7 +1391,7 @@ static void tier1_select_test_intrinsics(Tier1SelectTest* test)
                         const uint32_t right = shape == 0 ? 1 : shape == 1 ? 0 : 3;
                         tier1_select_test_node(&function, 4, IR_INTRINSIC, type, left, right, overflows[k]);
                         tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                        const bool verified = ir_verify_scalar(&function, &scratch, 0).error == IR_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+                        const bool verified = ir_verify(&function, &scratch, 0).error == IR_OK;
                         tier1_select_test_expect(test, verified, "overflow intrinsic IR fixture verifies by both paths");
                         tier1_select_test_plan_execute(test, &function, registers, &output, &scratch);
                         Tier1SelectPlan plan;
@@ -4458,7 +4458,7 @@ static void tier1_select_test_indirect(Tier1SelectTest* test)
     Arena scratch = arena_reserve(8u << 20);
     IrFunction function;
     const bool created = tier1_select_test_indirect_function(&input, &function);
-    tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the indirect jump's fixture is valid IR");
+    tier1_select_test_expect(test, created && ir_verify(&function, &scratch, 0).error == IR_OK, "the indirect jump's fixture is valid IR");
     Tier1SelectPlan plan;
     uint32_t failed = 0;
     tier1_select_test_expect(test, created && tier1_select_plan(&function, 0, &output, &scratch, &plan, &failed) == TIER1_SELECT_ERROR_INVALID && output.length == 0 && scratch.length == 0,
@@ -4694,7 +4694,7 @@ static void tier1_select_test_indirect_review(Tier1SelectTest* test)
     {
         IrFunction function;
         const bool created = fixture == 0 ? tier1_select_test_indirect_chain_function(&input, &function) : tier1_select_test_shared_labels_function(&input, fixture == 1, &function);
-        tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the review's indirect jumps' fixtures are valid IR");
+        tier1_select_test_expect(test, created && ir_verify(&function, &scratch, 0).error == IR_OK, "the review's indirect jumps' fixtures are valid IR");
         IrDominance dominance;
         bool planned = created && tier1_select_test_dominance(&function, &output, &scratch, &dominance);
         if (planned)
@@ -4892,7 +4892,7 @@ static void tier1_select_test_chained_variadic(Tier1SelectTest* test)
             const uint32_t called = tier1_select_test_append(&function, &next, IR_CALL_INDIRECT, IR_I64, callee, 0, BUSTER_IR_NONE);
             tier1_select_test_append(&function, &next, IR_RET, IR_VOID, called, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
-        tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the chained indirect call's fixture is valid IR");
+        tier1_select_test_expect(test, created && ir_verify(&function, &scratch, 0).error == IR_OK, "the chained indirect call's fixture is valid IR");
         const bool supported = created && tier1_select_call_supported(&function, 2);
         tier1_select_test_expect(test, supported == (variadic == 0),
                                  variadic == 0 ? "a chained indirect call selects, through rax" : "a chained indirect variadic call is refused, its al rax's");
@@ -4919,7 +4919,7 @@ static void tier1_select_test_variadic(Tier1SelectTest* test)
     {
         IrFunction function;
         const bool created = tier1_select_test_variadic_function(&input, shape, false, &function);
-        tier1_select_test_expect(test, created && ir_verify_scalar(&function, &scratch, 0).error == IR_OK, "the variadic definition's fixture is valid IR");
+        tier1_select_test_expect(test, created && ir_verify(&function, &scratch, 0).error == IR_OK, "the variadic definition's fixture is valid IR");
         const uint64_t scratch_mark = scratch.length;
         if (created)
         {
@@ -4949,7 +4949,7 @@ static void tier1_select_test_variadic(Tier1SelectTest* test)
             // doesn't count (DEMOTED).
             Tier1SelectPlan plan;
             uint32_t failed = 0;
-            tier1_select_test_expect(test, ir_verify_scalar(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, &plan, &failed) == TIER1_SELECT_OK,
+            tier1_select_test_expect(test, ir_verify(&recorded, &scratch, 0).error == IR_OK && tier1_select_plan(&recorded, 0, &output, &scratch, &plan, &failed) == TIER1_SELECT_OK,
                                      "a function with its own ABI records of shapes selection takes selects");
             arena_pop_to(&output, 0);
             const IrPassed taken = recorded.passed[0];

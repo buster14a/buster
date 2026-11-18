@@ -416,7 +416,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     // built again at each use otherwise; the general registers' values, whose longer ranges the allocator spills
     // (#2719), stay as they are. One scan of the types and operations decides, so that a function without such values
     // pays that scan alone.
-    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && ir_function_has_simd_path(input->function, !scalar);
+    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && ir_function_has_simd(input->function);
     // The solver's, in steps[7], before promotion as --tier1-gvn's is. A function it refuses or finds past its limits
     // goes on as it was; any other error is the function's.
     IrGvnResult shared = { 0 };

@@ -674,7 +674,7 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
     IrFunction function;
     uint32_t call = BUSTER_IR_NONE;
     const bool created = tier1_code_certificate_function(&test->input, &function, &call);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's call fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -793,7 +793,7 @@ static void tier1_code_certificate_debug(Tier1EmitTest* test, bool vector)
     IrFunction function = { 0 };
     uint32_t call = BUSTER_IR_NONE;
     const bool created = tier1_code_certificate_function(&test->input, &function, &call);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     IrDominance dominance = { 0 };
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan = { 0 };
@@ -920,7 +920,7 @@ static void tier1_code_certificate_debug_straight(Tier1EmitTest* test, bool vect
                 tier1_emit_test_node(&function, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE);
             }
         }
-        valid = valid && ir_verify_scalar(&function, &test->scratch, NULL).error == IR_OK;
+        valid = valid && ir_verify(&function, &test->scratch, NULL).error == IR_OK;
         IrDominance dominance = { 0 };
         valid = valid && tier1_terminal_dominance(test, &function, &dominance);
         Tier1SelectPlan plan = { 0 };
@@ -1032,7 +1032,7 @@ static void tier1_code_certificate_debug_phis(Tier1EmitTest* test, bool vector)
         function.instruction_count += 1;
         function.block_offsets[4] = function.instruction_count;
     }
-    valid = valid && ir_verify_scalar(&function, &test->scratch, NULL).error == IR_OK;
+    valid = valid && ir_verify(&function, &test->scratch, NULL).error == IR_OK;
     IrDominance dominance = { 0 };
     valid = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan = { 0 };
@@ -1116,7 +1116,7 @@ static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1
 {
     IrFunction function;
     const bool created = tier1_code_certificate_saved_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's dynamic-frame fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -1151,7 +1151,7 @@ static void tier1_code_certificate_narrow(Tier1EmitTest* test, bool vector, Tier
 {
     IrFunction function;
     const bool created = tier1_code_certificate_narrow_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's narrow-parameter fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -1210,7 +1210,7 @@ static void tier1_code_certificate_realigned(Tier1EmitTest* test, bool vector, T
 {
     IrFunction function;
     const bool created = tier1_code_certificate_realigned_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's realigned-frame fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -1243,7 +1243,7 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Ti
 {
     IrFunction function;
     const bool created = tier1_code_certificate_exchange_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's compare-exchange fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -1307,7 +1307,7 @@ static void tier1_code_certificate_barrier(Tier1EmitTest* test, bool vector, boo
     };
     IrFunction function;
     const bool created = tier1_code_certificate_barrier_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's barrier fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -1406,7 +1406,7 @@ static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
         tier1_select_test_node(&function, 7, IR_RET, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
         tier1_select_test_node(&function, 8, IR_RET, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
     }
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's seq_cst store fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -1480,7 +1480,7 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
         function.alignment_log2[4] = 4;
         tier1_select_test_node(&function, 5, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
     }
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the code certificate's literal fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);

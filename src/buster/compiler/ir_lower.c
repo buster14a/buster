@@ -3428,7 +3428,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             candidate.symbol_count = symbol_count;
             if (check.error == IR_OK)
             {
-                check = BUSTER_VECTOR_PATH(vector) ? ir_verify(&candidate, scratch, 0) : ir_verify_scalar(&candidate, scratch, 0);
+                check = ir_verify(&candidate, scratch, 0);
             }
         }
     }

@@ -4,7 +4,7 @@
 // #131's measurement on real C (benchmark-ir-source): the IR's bytes per source token of the functions the driver's -c
 // compiles of a set of files, with the largest function's share (#15: sqlite3.c's sqlite3VdbeExec, 5.0% of its -O0
 // code), and the time per typed entry of lowering them (ir_lower_typed and its scalar twin), of verifying the result
-// (ir_verify and ir_verify_scalar), of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar), with each
+// (ir_verify), of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar), with each
 // promotion's phis (#134), of #866's two GVN paths on the lowered IR, and of the shared SCCP/DCE/CFG optimizer's
 // default and forced-scalar paths (#860). Include after ir_source_test.c and
 // tier0_benchmark_measure.c, whose clock, counters and medians it takes.
@@ -20,27 +20,26 @@
 // in an arena of its own), lowered and promoted; the tokens the parser's. Each variant's
 // run takes every function once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of each
 // pair runs first; --only times one alone, back to back, and --after-scalar MS runs a vector variant's scalar twin, untimed,
-// for MS ms before each of its passes. Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
+// for MS ms before each of its passes. The variants below BUSTER_IR_SOURCE_PAIRED come in pairs, a vector path and then
+// its twin; optimize-vector and verify have none. Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
 
 #define BUSTER_IR_SOURCE_LOWER 0
 #define BUSTER_IR_SOURCE_LOWER_SCALAR 1
-#define BUSTER_IR_SOURCE_VERIFY 2
-#define BUSTER_IR_SOURCE_VERIFY_SCALAR 3
-#define BUSTER_IR_SOURCE_PROMOTE 4
-#define BUSTER_IR_SOURCE_PROMOTE_SCALAR 5
-#define BUSTER_IR_SOURCE_GVN 6
-#define BUSTER_IR_SOURCE_GVN_SCALAR 7
-#define BUSTER_IR_SOURCE_OPTIMIZE 8
-#define BUSTER_IR_SOURCE_OPTIMIZE_SCALAR 9
-#define BUSTER_IR_SOURCE_OPTIMIZE_VECTOR 10
-#define BUSTER_IR_SOURCE_VARIANTS 11
+#define BUSTER_IR_SOURCE_PROMOTE 2
+#define BUSTER_IR_SOURCE_PROMOTE_SCALAR 3
+#define BUSTER_IR_SOURCE_GVN 4
+#define BUSTER_IR_SOURCE_GVN_SCALAR 5
+#define BUSTER_IR_SOURCE_OPTIMIZE 6
+#define BUSTER_IR_SOURCE_OPTIMIZE_SCALAR 7
+#define BUSTER_IR_SOURCE_PAIRED 8
+#define BUSTER_IR_SOURCE_OPTIMIZE_VECTOR 8
+#define BUSTER_IR_SOURCE_VERIFY 9
+#define BUSTER_IR_SOURCE_VARIANTS 10
 #define BUSTER_IR_SOURCE_LARGEST 10
 
 static const char* const ir_source_variant_names[BUSTER_IR_SOURCE_VARIANTS] = {
     "lower",
     "lower-scalar",
-    "verify",
-    "verify-scalar",
     "promote",
     "promote-scalar",
     "gvn",
@@ -48,6 +47,7 @@ static const char* const ir_source_variant_names[BUSTER_IR_SOURCE_VARIANTS] = {
     "optimize",
     "optimize-scalar",
     "optimize-vector",
+    "verify",
 };
 
 // The corpus: every file's functions (their streams in `lowered`, their table in `table`), each one's IR as the vector
@@ -106,9 +106,8 @@ static Tier0BenchmarkReading ir_source_run(uint32_t variant, const IrSourceCorpu
         {
         case BUSTER_IR_SOURCE_LOWER: check = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, output, scratch, &result); break;
         case BUSTER_IR_SOURCE_LOWER_SCALAR: check = ir_lower_typed_target_scalar(source->function, source->result_type, source->symbol_count, source->target_features, output, scratch, &result); break;
-        case BUSTER_IR_SOURCE_VERIFY: check = ir_verify(lowered, scratch, 0); break;
-        case BUSTER_IR_SOURCE_VERIFY_SCALAR: check = ir_verify_scalar(lowered, scratch, 0); break;
         case BUSTER_IR_SOURCE_PROMOTE: check = ssa_ir_promote(lowered, output, scratch, &result); break;
+        case BUSTER_IR_SOURCE_PROMOTE_SCALAR: check = ssa_ir_promote_scalar(lowered, output, scratch, &result); break;
         case BUSTER_IR_SOURCE_GVN:
         case BUSTER_IR_SOURCE_GVN_SCALAR:
         {
@@ -131,7 +130,7 @@ static Tier0BenchmarkReading ir_source_run(uint32_t variant, const IrSourceCorpu
             check = ir_optimize(lowered, output, scratch, options, &run);
         }
         break;
-        default: check = ssa_ir_promote_scalar(lowered, output, scratch, &result); break;
+        default: check = ir_verify(lowered, scratch, 0); break;
         }
         failures += check.error != IR_OK;
         arena_pop_to(output, mark);
@@ -326,13 +325,13 @@ static bool ir_source_measure(const IrSourceCorpus* corpus, Arena* output, Arena
     {
         for (uint32_t k = 0; k < BUSTER_IR_SOURCE_VARIANTS && failed == BUSTER_IR_SOURCE_VARIANTS; k += 1)
         {
-            // Each pair's two paths take turns running first; optimize-vector has no twin to turn with.
-            const uint32_t v = (pass & 1) != 0 && (k ^ 1) < BUSTER_IR_SOURCE_VARIANTS ? k ^ 1 : k;
+            // Each pair's two paths take turns running first; optimize-vector and verify have no twin to turn with.
+            const uint32_t v = (pass & 1) != 0 && k < BUSTER_IR_SOURCE_PAIRED ? k ^ 1 : k;
             if (only != BUSTER_IR_SOURCE_VARIANTS && v != only)
             {
                 continue;
             }
-            if ((v & 1) == 0 && v + 1 < BUSTER_IR_SOURCE_VARIANTS && after_scalar != 0)
+            if ((v & 1) == 0 && v < BUSTER_IR_SOURCE_PAIRED && after_scalar != 0)
             {
                 const uint64_t until = tier0_benchmark_now() + after_scalar * 1000000ull;
                 while (tier0_benchmark_now() < until && failed == BUSTER_IR_SOURCE_VARIANTS)

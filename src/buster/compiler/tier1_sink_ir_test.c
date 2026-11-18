@@ -521,7 +521,7 @@ static void tier1_sink_ir_test_fixture(IrOptimizeTest* test, const Tier1SinkIrTe
     };
     const bool parsed = ir_parse(text, input, scratch, &vector).error == IR_PARSE_OK && ir_parse(text, input, scratch, &scalar).error == IR_PARSE_OK;
     snprintf(message, sizeof(message), "operand sink %s: the fixture parses as complete SSA", fixture->name);
-    const bool valid = parsed && ir_verify_complete(&vector, scratch, false).error == IR_OK;
+    const bool valid = parsed && ir_verify_complete(&vector, scratch).error == IR_OK;
     ir_optimize_test_expect(test, valid, message);
     Tier1ScheduleIrOriginal original = { 0 };
     const uint32_t n = vector.instruction_count;
@@ -563,7 +563,7 @@ static void tier1_sink_ir_test_fixture(IrOptimizeTest* test, const Tier1SinkIrTe
             ir_optimize_test_expect(test, place[fixture->root] == place[fixture->anchor] + fixture->moved && place[fixture->anchor] < fixture->anchor, message);
         }
         snprintf(message, sizeof(message), "operand sink %s: the result is complete SSA", fixture->name);
-        ir_optimize_test_expect(test, ir_verify_complete(&vector, scratch, true).error == IR_OK, message);
+        ir_optimize_test_expect(test, ir_verify_complete(&vector, scratch).error == IR_OK, message);
         for (uint32_t trial = 0; trial < 260; trial += 1)
         {
             const uint64_t parameter = trial < 256 ? trial : trial == 256 ? UINT64_MAX : trial == 257 ? UINT64_C(1) << 63 : ir_optimize_test_random(test);

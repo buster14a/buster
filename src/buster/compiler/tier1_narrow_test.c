@@ -257,7 +257,7 @@ static bool tier1_narrow_fixture(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
         function->constant_count = fixture->constants;
         function->block_offsets[1] = fixture->nodes;
         ready = fixture->nodes <= BUSTER_TIER1_NARROW_NODES && fixture->constants <= BUSTER_TIER1_NARROW_CONSTANTS;
-        ready = ready && ir_verify_scalar(function, &test->scratch, 0).error == IR_OK;
+        ready = ready && ir_verify(function, &test->scratch, 0).error == IR_OK;
     }
     return ready;
 }
@@ -720,7 +720,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             tier1_emit_test_node(&function, count++, IR_RET, IR_VOID, value, BUSTER_IR_NONE);
             function.instruction_count = count;
             function.block_offsets[1] = count;
-            ready = count <= sizes.instruction_count && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+            ready = count <= sizes.instruction_count && ir_verify(&function, &test->scratch, 0).error == IR_OK;
             tier1_emit_test_expect(test, ready, "unsupported narrow ABI/arithmetic/conversion fixture is valid IR");
         }
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)

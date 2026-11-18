@@ -639,9 +639,9 @@ static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* so
     if (ok)
     {
         ok = ir_lower_test_expect(tally, ir_lower_test_equal(function, &twin), "identical IR columns and side tables", seed, index);
-        ok = ir_lower_test_expect(tally, ir_verify(function, scratch, 0).error == IR_OK && ir_verify_scalar(function, scratch, 0).error == IR_OK &&
-                                       ir_verify(&twin, scratch, 0).error == IR_OK && ir_verify_scalar(&twin, scratch, 0).error == IR_OK,
-                                  "both verifiers accept both lowerings", seed, index) && ok;
+        ok = ir_lower_test_expect(tally, ir_verify(function, scratch, 0).error == IR_OK &&
+                                       ir_verify(&twin, scratch, 0).error == IR_OK,
+                                  "the verifier accepts both lowerings", seed, index) && ok;
     }
     return ok;
 }
@@ -670,7 +670,7 @@ static bool ir_lower_test_objects_kept(const IrFunction* lowered, const IrFuncti
 }
 
 // #134's promotion of a lowered function, by both paths, which may order their output differently (test-ssa-ir checks
-// their semantics): each must accept it with real dominance, pass both verifiers and keep every object's slot.
+// their semantics): each must accept it with real dominance, pass the verifier and keep every object's slot.
 static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* lowered, Arena* output, Arena* twin_output, Arena* scratch, uint64_t seed, uint32_t index)
 {
     const uint64_t output_mark = output->length;
@@ -687,9 +687,9 @@ static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* low
     const IrCheck scalar_check = ssa_ir_promote_scalar(lowered, twin_output, scratch, &scalar);
     bool ok = ir_lower_test_expect(tally, vector_check.error == IR_OK && scalar_check.error == IR_OK && vector_check.dominance_checked && scalar_check.dominance_checked,
                                    "both SSA promotion paths accept the lowering", seed, index);
-    ok = ok && ir_lower_test_expect(tally, ir_verify(&vector, scratch, 0).error == IR_OK && ir_verify_scalar(&vector, scratch, 0).error == IR_OK &&
-                                               ir_verify(&scalar, scratch, 0).error == IR_OK && ir_verify_scalar(&scalar, scratch, 0).error == IR_OK,
-                                    "both verifiers accept both promotions", seed, index);
+    ok = ok && ir_lower_test_expect(tally, ir_verify(&vector, scratch, 0).error == IR_OK &&
+                                               ir_verify(&scalar, scratch, 0).error == IR_OK,
+                                    "the verifier accepts both promotions", seed, index);
     if (ok)
     {
         ir_lower_test_expect(tally, ir_lower_test_objects_kept(lowered, &vector) && ir_lower_test_objects_kept(lowered, &scalar), "promotion keeps every object's slot", seed, index);
@@ -3607,7 +3607,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
             saves += result.op[i] == IR_STACK_SAVE && result.type[i] == IR_I64 && result.flags[i] == BUSTER_IR_STACK_SAVE_FRAME;
         }
         ir_lower_test_expect(tally, tier0_validate(&frame).error == TIER0_OK && check.error == IR_OK && saves == 1 &&
-                                        ir_verify(&result, &scratch, 0).error == IR_OK && ir_verify_scalar(&result, &scratch, 0).error == IR_OK,
+                                        ir_verify(&result, &scratch, 0).error == IR_OK,
                              "the frame address lowered to a frame's stack save", 0, vector);
         arena_pop_to(&output, output_mark);
         arena_pop_to(&scratch, scratch_mark);

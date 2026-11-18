@@ -117,7 +117,7 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             }
             if (ir_lower_test_expect(tally, check.error == IR_OK, "stack IR consumer accepts", scalar, pass))
             {
-                ir_lower_test_expect(tally, ir_verify(&transformed, scratch, 0).error == IR_OK && ir_verify_scalar(&transformed, scratch, 0).error == IR_OK, "stack IR verifies after transformation", scalar, pass);
+                ir_lower_test_expect(tally, ir_verify(&transformed, scratch, 0).error == IR_OK, "stack IR verifies after transformation", scalar, pass);
                 ir_stack_test_effects(tally, function, &transformed);
                 ir_stack_test_execute(tally, &transformed, argument, expected, INTERPRETER_OK, execution);
             }
@@ -256,7 +256,7 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
                 break;
             }
             }
-            ok = ir_lower_test_expect(tally, check.error == IR_OK && ir_verify_complete(&next, scratch, true).error == IR_OK && ir_verify_complete(&next, scratch, false).error == IR_OK, "chained stack SSA/optimizers preserve complete verification", scalar, pass);
+            ok = ir_lower_test_expect(tally, check.error == IR_OK && ir_verify_complete(&next, scratch).error == IR_OK, "chained stack SSA/optimizers preserve complete verification", scalar, pass);
             if (ok)
             {
                 ir_stack_test_effects(tally, function, &next);
@@ -337,9 +337,8 @@ static void ir_stack_test_invalid(IrLowerTestTally* tally, IrFunction* function,
                 function->a[i] = BUSTER_IR_NONE;
             }
             const uint64_t scratch_mark = scratch->length;
-            const IrCheck vector = ir_verify(function, scratch, 0);
-            const IrCheck scalar = ir_verify_scalar(function, scratch, 0);
-            ir_lower_test_expect(tally, vector.error == errors[mutation] && vector.error == scalar.error && vector.instruction == scalar.instruction && vector.instruction == i && vector.detail == scalar.detail && scratch->length == scratch_mark, "malformed dynamic IR preserves diagnostic priority and scratch in both verifiers", op, mutation);
+            const IrCheck verified = ir_verify(function, scratch, 0);
+            ir_lower_test_expect(tally, verified.error == errors[mutation] && verified.instruction == i && scratch->length == scratch_mark, "malformed dynamic IR preserves diagnostic priority and scratch in the verifier", op, mutation);
             function->type[i] = type;
             function->a[i] = a;
             function->b[i] = BUSTER_IR_NONE;

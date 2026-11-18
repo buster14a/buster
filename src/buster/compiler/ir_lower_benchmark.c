@@ -15,6 +15,9 @@
 
 #define BUSTER_IR_LOWER_BENCHMARK_PROGRAMS 8u
 #define BUSTER_IR_LOWER_BENCHMARK_VARIANTS 2u
+#define BUSTER_IR_LOWER_BENCHMARK_SCALAR 0u
+#define BUSTER_IR_LOWER_BENCHMARK_VECTOR 1u
+#define BUSTER_IR_LOWER_BENCHMARK_MAX_AFTER_SCALAR_MS 10000u
 #define BUSTER_IR_LOWER_BENCHMARK_INPUT_BYTES (512ull << 20)
 #define BUSTER_IR_LOWER_BENCHMARK_OUTPUT_BYTES (256ull << 20)
 
@@ -360,10 +363,10 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
     {
         if ((selected & (1u << variant)) != 0)
         {
-            valid = ir_lower_benchmark_run(&corpus, variant == IR_BENCHMARK_VECTOR, 1, &output, &scratch) == IR_OK;
+            valid = ir_lower_benchmark_run(&corpus, variant == BUSTER_IR_LOWER_BENCHMARK_VECTOR, 1, &output, &scratch) == IR_OK;
             if (valid)
             {
-                const IrBenchmarkSample calibration = ir_lower_benchmark_sample(&corpus, variant == IR_BENCHMARK_VECTOR, &output, &scratch, &repetitions[variant], after_scalar_ms);
+                const IrBenchmarkSample calibration = ir_lower_benchmark_sample(&corpus, variant == BUSTER_IR_LOWER_BENCHMARK_VECTOR, &output, &scratch, &repetitions[variant], after_scalar_ms);
                 valid = calibration.error == IR_OK;
             }
         }
@@ -375,7 +378,7 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
             const uint32_t variant = (pass + step) % BUSTER_IR_LOWER_BENCHMARK_VARIANTS;
             if ((selected & (1u << variant)) != 0)
             {
-                const IrBenchmarkSample sample = ir_lower_benchmark_sample(&corpus, variant == IR_BENCHMARK_VECTOR, &output, &scratch, &repetitions[variant], after_scalar_ms);
+                const IrBenchmarkSample sample = ir_lower_benchmark_sample(&corpus, variant == BUSTER_IR_LOWER_BENCHMARK_VECTOR, &output, &scratch, &repetitions[variant], after_scalar_ms);
                 valid = sample.error == IR_OK;
                 if (valid)
                 {
@@ -399,7 +402,7 @@ static bool ir_lower_benchmark_case(const Tier0Tables* tables, uint64_t seed, bo
             {
                 const double ns = ir_benchmark_median(nanoseconds[variant], passes);
                 const double tsc = ir_benchmark_median(ticks[variant], passes);
-                printf("%-8s %14.1f %16.3f %18.3f %20.3f %12u\n", ir_benchmark_names[variant], ns, ns / corpus.entries, (double)corpus.entries * 1000.0 / ns, tsc / corpus.entries, repetitions[variant]);
+                printf("%-8s %14.1f %16.3f %18.3f %20.3f %12u\n", variant == BUSTER_IR_LOWER_BENCHMARK_VECTOR ? "vector" : "scalar", ns, ns / corpus.entries, (double)corpus.entries * 1000.0 / ns, tsc / corpus.entries, repetitions[variant]);
                 if (corpus.stack_ops != 0)
                 {
                     printf("  %.3f ns/stack operation over the full lowering pipeline\n", ns / corpus.stack_ops);
@@ -449,12 +452,12 @@ static int run_ir_lower_benchmark(int argc, char** argv)
         else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
         {
             i += 1;
-            valid = ir_benchmark_number(argv[i], 0, BUSTER_IR_BENCHMARK_MAX_AFTER_SCALAR_MS, &after_scalar_ms);
+            valid = ir_benchmark_number(argv[i], 0, BUSTER_IR_LOWER_BENCHMARK_MAX_AFTER_SCALAR_MS, &after_scalar_ms);
         }
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             i += 1;
-            selected = strcmp(argv[i], "scalar") == 0 ? 1u << IR_BENCHMARK_SCALAR : strcmp(argv[i], "vector") == 0 ? 1u << IR_BENCHMARK_VECTOR : 0;
+            selected = strcmp(argv[i], "scalar") == 0 ? 1u << BUSTER_IR_LOWER_BENCHMARK_SCALAR : strcmp(argv[i], "vector") == 0 ? 1u << BUSTER_IR_LOWER_BENCHMARK_VECTOR : 0;
             valid = selected != 0;
         }
         else
@@ -465,7 +468,7 @@ static int run_ir_lower_benchmark(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: benchmark-ir-lowering [--passes N] [--seed N] [--only scalar|vector] [--after-scalar MS] [--ordinary]\n");
-        fprintf(stderr, "  passes: 1..%u; seed: decimal u64; after-scalar: 0..%u ms\n", BUSTER_IR_BENCHMARK_MAX_PASSES, BUSTER_IR_BENCHMARK_MAX_AFTER_SCALAR_MS);
+        fprintf(stderr, "  passes: 1..%u; seed: decimal u64; after-scalar: 0..%u ms\n", BUSTER_IR_BENCHMARK_MAX_PASSES, BUSTER_IR_LOWER_BENCHMARK_MAX_AFTER_SCALAR_MS);
     }
 #ifndef __OPTIMIZE__
     fprintf(stderr, "benchmark-ir-lowering: an optimized build is required; unoptimized timings are not reported\n");
@@ -485,7 +488,7 @@ static int run_ir_lower_benchmark(int argc, char** argv)
         printf("benchmark-ir-lowering: generated mixed typed programs, seed=%" PRIu64 ", %u passes; each sample >= 2 ms\n", seed, passes);
         printf("Timed: typed validation + planning + classification + count/emission + IR verification; generator/ABI preparation excluded.\n");
         printf("Counts are typed entries, not source tokens. TSC ticks are not core cycles; pin to one CPU for measurements.\n");
-        if (after_scalar_ms != 0 && (selected & (1u << IR_BENCHMARK_VECTOR)) != 0)
+        if (after_scalar_ms != 0 && (selected & (1u << BUSTER_IR_LOWER_BENCHMARK_VECTOR)) != 0)
         {
             printf("Each vector sample follows %u ms of untimed scalar lowering.\n", after_scalar_ms);
         }

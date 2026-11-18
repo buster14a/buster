@@ -9,10 +9,8 @@
 // normally. The caller's length and prefix are preserved on every outcome; no hidden arena is reserved.
 // Input columns must not overlap scratch's unused remainder. The tree-only analysis takes no bitset matrix.
 
-static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cfg, const Dominators* tree, bool vector)
+static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cfg, const Dominators* tree)
 {
-    (void)vector;
-
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     IrUseBatch batch = { 0 };
     for (uint32_t instruction = 0; check.error == IR_OK && instruction < function->instruction_count; instruction += 1)
@@ -38,7 +36,7 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
                 batch.count += 1;
                 if (batch.count == BUSTER_IR_VECTOR_COUNT)
                 {
-                    check = ir_check_use_batch(&batch, true, BUSTER_VECTOR_PATH(vector));
+                    check = ir_check_use_batch(&batch, true);
                     batch.count = 0;
                 }
             }
@@ -46,7 +44,7 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
     }
     if (check.error == IR_OK && batch.count != 0)
     {
-        check = ir_check_use_batch(&batch, true, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_use_batch(&batch, true);
     }
     if (check.error == IR_OK)
     {
@@ -55,10 +53,8 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
     return check;
 }
 
-static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* function, Arena* scratch, bool vector)
+static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* function, Arena* scratch)
 {
-    (void)vector;
-
     IrCheck check = ir_check(function != 0 && scratch != 0 && scratch->length <= scratch->capacity ? IR_ERROR_MEMORY : IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0);
     const uint64_t mark = scratch != 0 ? scratch->length : 0;
     if (function != 0 && scratch != 0 && scratch->base != 0 && mark <= scratch->capacity)
@@ -68,7 +64,7 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
         check = ir_check_shape(function);
         if (check.error == IR_OK)
         {
-            check = ir_check_rows(function, BUSTER_VECTOR_PATH(vector));
+            check = ir_check_rows(function);
         }
         IrCfg cfg = { 0 };
         if (check.error == IR_OK)
@@ -77,7 +73,7 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
         }
         if (check.error == IR_OK)
         {
-            check = ir_check_graph(function, &cfg, scratch, 0, BUSTER_VECTOR_PATH(vector));
+            check = ir_check_graph(function, &cfg, scratch, 0);
         }
         if (check.error == IR_OK)
         {
@@ -112,7 +108,7 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
                 const DominatorStatus status = dominators_analyze(&columns, scratch, &graph, options, &tree);
                 if (status == DOMINATOR_OK)
                 {
-                    check = ir_validate_reachable(function, &cfg, &tree, BUSTER_VECTOR_PATH(vector));
+                    check = ir_validate_reachable(function, &cfg, &tree);
                 }
                 else
                 {

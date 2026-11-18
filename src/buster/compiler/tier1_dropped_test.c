@@ -99,7 +99,7 @@ static void tier1_dropped_compile(Tier1EmitTest* test, bool vector, bool remater
 {
     IrFunction function;
     const bool created = tier1_dropped_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the dropped definition's fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -206,7 +206,7 @@ static void tier1_bare_compile(Tier1EmitTest* test, bool vector, uint32_t regist
 {
     IrFunction function;
     const bool created = tier1_bare_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the registerless definition's fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
@@ -328,7 +328,7 @@ static void tier1_rest_compile(Tier1EmitTest* test, bool vector, uint32_t regist
 {
     IrFunction function;
     const bool created = tier1_rest_function(&test->input, &function);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the resting loop's fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);

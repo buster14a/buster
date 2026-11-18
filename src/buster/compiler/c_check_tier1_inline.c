@@ -704,7 +704,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     // source's or an expanded callee's (*vectors): a COPY's 16-byte pieces (#2693, ir_typed_copy_pointers) are vectors in
     // the IR but give SROA nothing of theirs to split, and on sqlite3.c they made it split sqlite3VdbeExec (+141 M
     // instructions).
-    if (aggregates || (*vectors && ir_function_has_vectors_path(&current, !scalar)))
+    if (aggregates || (*vectors && ir_function_has_vectors(&current)))
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;

@@ -792,7 +792,7 @@ loads and stores, which the split makes 8-byte accesses: `sqlite3Multiply128`'s
 loop, unaligned, volatile and indexed accesses), 120 random straight-line
 programs and 300 of Tier 0's random 128-bit typed programs (frame objects,
 `?:`'s blocks, conversions both ways) through the split by both paths, which
-must make the same function, both verifiers, the optimizer and both of Tier 1's
+must make the same function, the verifier, the optimizer and both of Tier 1's
 paths with their certificates, natively, against the IR's interpreter on the
 unsplit function and the programs' stack machine; the split's refusals and its
 scan's twins; overlapping `extra` slices, and `I128` phis that share one

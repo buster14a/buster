@@ -1660,12 +1660,12 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir
 
-      - name: Benchmark the IR verifier after scalar work
+      - name: Benchmark the IR verifier alone
         # Where `changes` doesn't rule it out (the module's sources).
         if: needs.changes.outputs.ir != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir --only vector --after-scalar 200
+          taskset -c "$cpu" ./build/compiler benchmark-ir --only verify
 
       - name: Benchmark typed-stream lowering through IR verification
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-lowering,')

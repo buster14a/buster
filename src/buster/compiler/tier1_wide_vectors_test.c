@@ -9,7 +9,7 @@
 // taken, phis at joins and swapped around a loop, and a frame object's stores and loads. Each is
 // parsed by both parsers and run by the interpreter on random buffers: the expected buffers. Then it is split at both
 // piece widths (16 bytes, x86-64's, and 32, AVX's) by both paths, which must make the same function, with no vector
-// wider than a piece, that both verifiers take and the interpreter runs into the same buffers; optimized and run again;
+// wider than a piece, that the verifier takes and the interpreter runs into the same buffers; optimized and run again;
 // and, split into 16-byte pieces, planned and emitted by both of Tier 1's paths for the x86-64 baseline (every record
 // among its forms), with rematerialization and without, and run natively on every buffer. And the refusals: a wide
 // vector's addition, comparison, call argument and parameter, which the split refuses as
@@ -261,8 +261,7 @@ static void tier1_wide_vector_program(Tier1WideTest* test, const Tier1WideVector
         {
             piece_ok = tier1_wide_test_dominance(test, &vector.function, &dominance);
             const IrCheck verified = piece_ok ? ir_verify(&vector.function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-            const IrCheck verified_twin = piece_ok ? ir_verify_scalar(&vector.function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-            piece_ok = piece_ok && tier1_wide_test_expect(test, verified.error == IR_OK && verified_twin.error == IR_OK, "both verifiers take the split function with its dominance");
+            piece_ok = piece_ok && tier1_wide_test_expect(test, verified.error == IR_OK, "the verifier takes the split function with its dominance");
             if (!piece_ok)
             {
                 printf("test-tier1-wide: %s at %u-byte pieces: verifier error %u at %u (%u)\n", fixture->name, pieces[w], (unsigned)verified.error, verified.instruction, verified.detail);
