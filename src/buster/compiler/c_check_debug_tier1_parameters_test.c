@@ -139,7 +139,7 @@ static void check_debug_tier1_values_object_case(CheckDebugTestTally* tally, con
     Arena scratch = { .base = storage, .capacity = sizeof(storage) };
     CheckTier1DebugSpan* clips = NULL;
     EmittedLocalRange locations[3] = { [2] = { .local = 77 } };
-    bool valid = check_tier1_debug_object_clips(function, ir, emitted, order, uses, slots, homes, true, &scratch, &clips);
+    bool valid = check_tier1_debug_object_clips(function, ir, emitted, order, uses, slots, homes, &scratch, &clips);
     valid = valid && clips != NULL && clips[0].begin == expected_clip.begin && clips[0].end == expected_clip.end;
     const uint64_t count = valid ? check_tier1_debug_object_ranges(homes, slots, 1, spans, BUSTER_ARRAY_LENGTH(spans), clips, NULL) : UINT64_MAX;
     valid = valid && count == expected_count && count < BUSTER_ARRAY_LENGTH(locations);
@@ -291,7 +291,7 @@ static void check_debug_tier1_values_objects(CheckDebugTestTally* tally)
         Arena scratch = { .base = scratch_storage, .length = 64, .capacity = failure == 2 ? 64 : sizeof(scratch_storage) };
         CheckTier1Debug result = { .source_count = 55, .local_range_count = 66 };
         block_records[1] = failure == 3 ? 9 : 8;
-        const bool success = check_tier1_debug(&function, &ir, &emitted, NULL, 7, true, &output, &scratch, &result);
+        const bool success = check_tier1_debug(&function, &ir, &emitted, NULL, 7, &output, &scratch, &result);
         bool valid = scratch.length == 64 && success == (failure == 0);
         if (success)
         {
@@ -324,10 +324,10 @@ static void check_debug_tier1_values_parameter_case(CheckDebugTestTally* tally, 
     uint8_t actual[128];
     memset(actual, UINT8_MAX, sizeof(actual));
     const uint64_t cells = (uint64_t)function->local_count * code.count;
-    bool valid = cells <= sizeof(actual) && check_tier1_debug_parameters(function, &debug, &emitted, order, true, &scratch, &parameters);
-    const uint64_t count = valid ? check_tier1_debug_parameter_ranges(&parameters, true, NULL) : 0;
+    bool valid = cells <= sizeof(actual) && check_tier1_debug_parameters(function, &debug, &emitted, order, &scratch, &parameters);
+    const uint64_t count = valid ? check_tier1_debug_parameter_ranges(&parameters, NULL) : 0;
     valid = valid && count <= BUSTER_ARRAY_LENGTH(locations);
-    valid = valid && check_tier1_debug_parameter_ranges(&parameters, true, locations) == count;
+    valid = valid && check_tier1_debug_parameter_ranges(&parameters, locations) == count;
     for (uint64_t k = 0; valid && k < count; k += 1)
     {
         const EmittedLocalRange location = locations[k];

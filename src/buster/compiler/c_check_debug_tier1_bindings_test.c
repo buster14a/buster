@@ -20,10 +20,10 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
     uint32_t actual[128];
     memset(actual, 0xff, sizeof(actual));
     const uint64_t cells = (uint64_t)function->local_count * emitted->code.count;
-    bool valid = cells <= BUSTER_ARRAY_LENGTH(actual) && check_tier1_debug_values(function, ir, emitted, order, NULL, NULL, true, &scratch, &proof);
-    const uint64_t count = valid ? check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, true, NULL) : 0;
+    bool valid = cells <= BUSTER_ARRAY_LENGTH(actual) && check_tier1_debug_values(function, ir, emitted, order, NULL, NULL, &scratch, &proof);
+    const uint64_t count = valid ? check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, NULL) : 0;
     valid = valid && count <= BUSTER_ARRAY_LENGTH(locations);
-    valid = valid && check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, true, locations) == count;
+    valid = valid && check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, locations) == count;
     for (uint64_t k = 0; valid && k < count; k += 1)
     {
         const EmittedLocalRange location = locations[k];
@@ -131,7 +131,7 @@ static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
     _Alignas(64) uint8_t storage[32768] = { 0 };
     Arena scratch = { .base = storage, .capacity = sizeof(storage) };
     CheckTier1DebugValues proof = { 0 };
-    bool valid = check_tier1_debug_values(&function, &ir, &emitted, NULL, NULL, NULL, true, &scratch, &proof);
+    bool valid = check_tier1_debug_values(&function, &ir, &emitted, NULL, NULL, NULL, &scratch, &proof);
     check_debug_test_expect(tally, valid, "the dynamic backedge trace constructs the real bounded region and machine proof", "fresh phi and repeated definition identities");
     if (valid)
     {
@@ -143,7 +143,7 @@ static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
         for (uint32_t r = 0; r < 3; r += 1)
         {
             check_tier1_debug_value_boundary(&proof, &live, r);
-            check_tier1_debug_value_follow(&proof, &live, proof.transfers[r], true);
+            check_tier1_debug_value_follow(&proof, &live, proof.transfers[r]);
         }
         // Observe each loop PC before executing it, then take the actual backedge once. Registers/private
         // rows use carrier IDs here (32 and 33); these winners are specified independently of the producer.
@@ -159,11 +159,11 @@ static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
             const bool empty_old_rows = r != 3 || (proof.state[32] == BUSTER_IR_NONE && proof.state[33] == BUSTER_IR_NONE);
             check_debug_test_expect(tally, regions_visible && empty_old_rows && proof.winner[3] == phi_winners[k] && proof.winner[4] == result_winners[k],
                                     "a backedge starts fresh phi and RHS identities before any stale private row can win", "two concrete iterations with unchanged witnessed source origins");
-            check_tier1_debug_value_follow(&proof, &live, proof.transfers[r], true);
+            check_tier1_debug_value_follow(&proof, &live, proof.transfers[r]);
         }
         // Isolate completion invalidation as well: no fresh-block boundary intervenes between the old spill
         // and another execution of this checked definition. Its new register must beat no surviving old row.
-        check_tier1_debug_value_follow(&proof, &live, proof.transfers[4], true);
+        check_tier1_debug_value_follow(&proof, &live, proof.transfers[4]);
         check_tier1_debug_value_winners(&proof, &live, false);
         check_debug_test_expect(tally, proof.state[33] == BUSTER_IR_NONE && proof.state[X86_REGISTER_RAX] == 4 && proof.winner[4] == X86_REGISTER_RAX &&
                                 check_tier1_debug_value_region(&proof, 2, 5, 15) == 1,
