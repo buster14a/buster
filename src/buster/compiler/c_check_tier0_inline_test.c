@@ -31,8 +31,8 @@ struct Tier0InlineTestTally
 // The driver fixture's spliced streams' digests at x86-64-v4, without and with --tier0-inline-shapes. Frozen on the tree
 // where the splice's vector path and its scalar twin still gave the same bytes in every column (#2924); a change to the
 // splice, to the lowering that feeds it or to the fixture moves them, and a run reports its own.
-#define BUSTER_TIER0_INLINE_TEST_DIGEST UINT64_C(0xac830c6310ee733c)
-#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0x8c6c31f087ae1e75)
+#define BUSTER_TIER0_INLINE_TEST_DIGEST UINT64_C(0xb4a261ea907626a8)
+#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0xdff8badce317e533)
 
 static void tier0_inline_test_expect(Tier0InlineTestTally* tally, bool condition, const char* file, uint32_t body, const char* message)
 {
@@ -178,6 +178,130 @@ static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file
     return valid;
 }
 
+static uint64_t tier0_inline_test_random(uint64_t* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return *state;
+}
+
+// The splice's fills against their definitions (#2924), on random columns, every lane of their 64-entry steps and of
+// their tails: tier0_inline_segment copies the caller's entries [from, to), a branch's target (tier0_inline_branch)
+// remapped through the starts where it is within the caller; tier0_inline_body copies a callee's entries past the site's
+// skipped ones, a RETURN made a JUMP (VOID) or a JUMP_VALUE to the body's end, each value rebased from the site's bases
+// (tier0_inline_bases) by its meaning (tier0_inline_meaning, a CONST's by its class), a target past the body clamped to
+// it. Neither writes outside the entries it returns.
+static void tier0_inline_test_fills(Tier0InlineTestTally* tally)
+{
+    enum
+    {
+        CAPACITY = 200,
+        SLACK = 64,
+    };
+    uint64_t random = UINT64_C(0x9e3779b97f4a7c15);
+    uint8_t kinds[CAPACITY];
+    uint8_t classes[CAPACITY];
+    uint64_t values[CAPACITY];
+    uint32_t starts[CAPACITY + 1];
+    uint8_t g_kinds[CAPACITY + 2 * SLACK];
+    uint8_t g_classes[CAPACITY + 2 * SLACK];
+    uint64_t g_values[CAPACITY + 2 * SLACK];
+    bool segments = true;
+    bool bodies = true;
+    uint64_t remapped = 0;
+    uint64_t clamped = 0;
+    uint64_t rewritten = 0;
+    uint64_t constants[2] = { 0, 0 };
+    for (uint32_t round = 0; round < 400; round += 1)
+    {
+        const uint32_t count = 1 + (uint32_t)(tier0_inline_test_random(&random) % (CAPACITY - 10));
+        for (uint32_t e = 0; e < count; e += 1)
+        {
+            kinds[e] = (uint8_t)(tier0_inline_test_random(&random) % BUSTER_TYPED_KIND_LIMIT);
+            classes[e] = (uint8_t)(tier0_inline_test_random(&random) % BUSTER_TYPED_CLASS_LIMIT);
+            const uint64_t pick = tier0_inline_test_random(&random);
+            values[e] = pick % 4 == 0 ? pick >> 20 : (pick >> 2) % ((uint64_t)count + 3);
+        }
+        for (uint32_t e = 0; e <= count; e += 1)
+        {
+            starts[e] = (uint32_t)(tier0_inline_test_random(&random) % 100000);
+        }
+        const Tier0Function function = { .kinds = kinds, .classes = classes, .values = values, .count = count };
+        Tier0InlineColumns g = { .kinds = g_kinds, .classes = g_classes, .values = g_values };
+        const uint32_t at = SLACK / 2 + (uint32_t)(tier0_inline_test_random(&random) % (SLACK / 2));
+        // The caller's segment.
+        const uint32_t from = (uint32_t)(tier0_inline_test_random(&random) % count);
+        const uint32_t to = from + (uint32_t)(tier0_inline_test_random(&random) % (count - from + 1));
+        memset(g_kinds, 0xa5, sizeof(g_kinds));
+        memset(g_classes, 0xa5, sizeof(g_classes));
+        memset(g_values, 0xa5, sizeof(g_values));
+        Tier0InlinePlan plan = { .starts = starts };
+        const uint32_t segment_end = tier0_inline_segment(&function, &plan, from, to, &g, at);
+        bool same = segment_end == at + (to - from);
+        for (uint32_t e = from; same && e < to; e += 1)
+        {
+            const bool branch = tier0_inline_branch(kinds[e]) && values[e] <= count;
+            remapped += branch ? 1u : 0u;
+            same = g_kinds[at + e - from] == kinds[e] && g_classes[at + e - from] == classes[e] && g_values[at + e - from] == (branch ? starts[values[e]] : values[e]);
+        }
+        for (uint32_t w = 0; same && w < CAPACITY + 2 * SLACK; w += 1)
+        {
+            same = (w >= at && w < segment_end) || (g_kinds[w] == 0xa5 && g_classes[w] == 0xa5 && g_values[w] == UINT64_C(0xa5a5a5a5a5a5a5a5));
+        }
+        segments = segments && same;
+        // The callee's body at a site, forwarded (its first parameters' entries left out) one round in four.
+        Tier0InlineCallee distinct = {
+            .body = count,
+            .operation_base = (uint32_t)(tier0_inline_test_random(&random) % 5000),
+            .x87_base = (uint32_t)(tier0_inline_test_random(&random) % 5000),
+            .vector_base = (uint32_t)(tier0_inline_test_random(&random) % 5000),
+        };
+        const bool forward = tier0_inline_test_random(&random) % 4 == 0;
+        const Tier0InlineSite site = {
+            .local_base = (uint32_t)(tier0_inline_test_random(&random) % 5000),
+            .row_base = (uint32_t)(tier0_inline_test_random(&random) % 5000),
+            .body_base = 1000 + (uint32_t)(tier0_inline_test_random(&random) % 5000),
+            .forward = forward,
+            .parameters = forward ? (uint32_t)(tier0_inline_test_random(&random) % count) : 0,
+        };
+        plan.distinct = &distinct;
+        uint64_t bases[BUSTER_TIER0_INLINE_MEANINGS];
+        tier0_inline_bases(&plan, &site, bases);
+        const uint32_t skipped = tier0_inline_skipped(&site);
+        memset(g_kinds, 0xa5, sizeof(g_kinds));
+        memset(g_classes, 0xa5, sizeof(g_classes));
+        memset(g_values, 0xa5, sizeof(g_values));
+        const uint32_t body_end = tier0_inline_body(&function, &plan, &site, &g, at);
+        same = body_end == at + (count - skipped);
+        for (uint32_t e = skipped; same && e < count; e += 1)
+        {
+            const bool returns = kinds[e] == BUSTER_TYPED_RETURN;
+            const uint32_t kind = !returns ? kinds[e] : classes[e] == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE;
+            const uint32_t meaning = tier0_inline_meaning(kind, classes[e]);
+            const uint64_t target = returns ? count : values[e];
+            const bool clamp = meaning == BUSTER_TIER0_INLINE_ENTRY && target > count;
+            rewritten += returns ? 1u : 0u;
+            clamped += clamp ? 1u : 0u;
+            constants[0] += kind == BUSTER_TYPED_CONST && meaning == BUSTER_TIER0_INLINE_X87 ? 1u : 0u;
+            constants[1] += kind == BUSTER_TYPED_CONST && meaning == BUSTER_TIER0_INLINE_VECTOR ? 1u : 0u;
+            const uint64_t wanted = (clamp ? count : target) + bases[meaning];
+            same = g_kinds[at + e - skipped] == kind && g_classes[at + e - skipped] == classes[e] && g_values[at + e - skipped] == wanted;
+        }
+        for (uint32_t w = 0; same && w < CAPACITY + 2 * SLACK; w += 1)
+        {
+            same = (w >= at && w < body_end) || (g_kinds[w] == 0xa5 && g_classes[w] == 0xa5 && g_values[w] == UINT64_C(0xa5a5a5a5a5a5a5a5));
+        }
+        bodies = bodies && same;
+    }
+    tier0_inline_test_expect(tally, segments, "fills", 0, "the caller's segments copy every lane, a branch's target remapped through the starts");
+    tier0_inline_test_expect(tally, bodies, "fills", 1, "the callee's bodies copy every lane, a RETURN made a jump to the end, each value rebased by its meaning and a target past the body clamped");
+    tier0_inline_test_expect(tally, remapped != 0 && clamped != 0 && rewritten != 0 && constants[0] != 0 && constants[1] != 0, "fills", 2,
+                             "the random columns reach remapped targets, clamped targets, rewritten RETURNs and both constants' meanings");
+    printf("test-tier0-inline: fills: %" PRIu64 " targets remapped, %" PRIu64 " clamped, %" PRIu64 " RETURNs rewritten, %" PRIu64 " x87 and %" PRIu64 " vector constants rebased\n",
+           remapped, clamped, rewritten, constants[0], constants[1]);
+}
+
 static int run_tier0_inline_tests(int count, char** arguments)
 {
     char** options = calloc((size_t)count + 2, sizeof(char*));
@@ -222,6 +346,10 @@ static int run_tier0_inline_tests(int count, char** arguments)
         options[option_count++] = "-march=x86-64-v4";
     }
     Tier0InlineTestTally tally = { .digest = UINT64_C(0xcbf29ce484222325) };
+    if (valid)
+    {
+        tier0_inline_test_fills(&tally);
+    }
     for (uint32_t f = 0; valid && f < file_count; f += 1)
     {
         valid = tier0_inline_test_file(&tally, files[f], options, option_count, shapes);

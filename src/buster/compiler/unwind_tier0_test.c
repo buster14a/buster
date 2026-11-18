@@ -589,6 +589,32 @@ static void unwind_tier0_test_mutations(UnwindTier0Test* test)
     }
 }
 
+// A write of a nonvolatile register the prologue doesn't save is refused wherever it is in the body, in every lane of the
+// analyzer's batches of BUSTER_UNWIND_TIER0_BATCH records (#2924): RBX written in place of each of the body's NOPs, in
+// a frame that saves R12 alone, over two batches of filler.
+static void unwind_tier0_test_forbidden_lanes(UnwindTier0Test* test)
+{
+    UnwindTier0Fixture original;
+    const bool ready = unwind_tier0_test_fixture(&original, 4, 40, 2 * BUSTER_UNWIND_TIER0_BATCH + 3);
+    uint32_t lanes = 0;
+    for (uint32_t r = original.body; ready && r < original.epilogue; r += 1)
+    {
+        if (original.records[r].form == X86_FORM_NOP)
+        {
+            UnwindTier0Fixture fixture;
+            memcpy(&fixture, &original, sizeof(fixture));
+            unwind_tier0_test_bind(&fixture);
+            fixture.records[r] = unwind_tier0_test_record(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_RBX, 0, 0, 1);
+            if (unwind_tier0_test_expect(test, unwind_tier0_test_measure(&fixture), "a forbidden write's fixture is encoder-valid", 9100 + r))
+            {
+                unwind_tier0_test_result(test, &fixture, UNWIND_ERROR_UNSUPPORTED, 9100 + r);
+                lanes |= 1u << ((r - original.body) % BUSTER_UNWIND_TIER0_BATCH);
+            }
+        }
+    }
+    unwind_tier0_test_expect(test, ready && lanes == (1u << BUSTER_UNWIND_TIER0_BATCH) - 1, "a forbidden write is refused in every lane of the analyzer's batches", 9000);
+}
+
 static void unwind_tier0_test_boundaries(UnwindTier0Test* test)
 {
     static const uint16_t branches[][2] = {
@@ -1207,6 +1233,7 @@ static bool unwind_tier0_test(void)
         unwind_tier0_test_shapes(&test);
         unwind_tier0_test_mutations(&test);
         unwind_tier0_test_boundaries(&test);
+        unwind_tier0_test_forbidden_lanes(&test);
         unwind_tier0_test_guards(&test);
         unwind_tier0_test_frames(&test);
         unwind_tier0_test_exits(&test);
