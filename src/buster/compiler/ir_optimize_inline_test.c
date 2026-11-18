@@ -18,7 +18,12 @@ struct IrInlineTest
     uint64_t failures;
     uint64_t random;
     uint64_t executions;
+    // An FNV-1a digest of every unit's result by ir_inline_test_run, in order (#2924): frozen where the vector path and
+    // its scalar twin agreed. The units come from the fixed seed.
+    uint64_t digest;
 };
+
+#define BUSTER_IR_INLINE_TEST_DIGEST UINT64_C(0xf2140f99bcbea37a)
 
 typedef unsigned __int128 IrInlineTestValue;
 
@@ -516,6 +521,76 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
     return execution;
 }
 
+// A function's columns and side tables, as ir_inline_test_same_function compares them: their bytes and lengths.
+#define BUSTER_IR_INLINE_TEST_COLUMNS 20u
+
+static void ir_inline_test_columns(const IrFunction* f, const void** columns, uint64_t* bytes)
+{
+    const void* pointers[BUSTER_IR_INLINE_TEST_COLUMNS] = {
+        f->op,
+        f->type,
+        f->flags,
+        f->alignment_log2,
+        f->a,
+        f->b,
+        f->c,
+        f->block_offsets,
+        f->extra,
+        f->constants,
+        f->slots,
+        f->addresses,
+        f->calls,
+        f->call_types,
+        f->parameter_types,
+        f->labels,
+        f->abi_calls,
+        f->passed,
+        f->vector_constants,
+        f->rows,
+    };
+    const uint64_t lengths[BUSTER_IR_INLINE_TEST_COLUMNS] = {
+        f->instruction_count,
+        f->instruction_count,
+        f->instruction_count,
+        f->instruction_count,
+        (uint64_t)f->instruction_count * 4,
+        (uint64_t)f->instruction_count * 4,
+        (uint64_t)f->instruction_count * 4,
+        ((uint64_t)f->block_count + 1) * 4,
+        (uint64_t)f->extra_count * 4,
+        (uint64_t)f->constant_count * sizeof(IrConstant),
+        (uint64_t)f->slot_count * sizeof(IrSlot),
+        (uint64_t)f->address_count * sizeof(IrAddress),
+        (uint64_t)f->call_count * sizeof(IrCall),
+        f->call_type_count,
+        f->parameter_count,
+        (uint64_t)f->label_count * 4,
+        (uint64_t)f->abi_call_count * sizeof(IrAbiCall),
+        (uint64_t)f->passed_count * sizeof(IrPassed),
+        (uint64_t)f->vector_constant_count * sizeof(IrSimdValue),
+        (uint64_t)f->row_count * sizeof(Tier0Operation),
+    };
+    for (uint32_t k = 0; k < BUSTER_IR_INLINE_TEST_COLUMNS; k += 1)
+    {
+        columns[k] = pointers[k];
+        bytes[k] = lengths[k];
+    }
+}
+
+static void ir_inline_test_fold(uint64_t* digest, const void* data, uint64_t bytes)
+{
+    const uint8_t* source = data;
+    for (uint64_t k = 0; k < bytes; k += 1)
+    {
+        *digest = (*digest ^ source[k]) * UINT64_C(0x100000001b3);
+    }
+}
+
+static void ir_inline_test_fold_value(uint64_t* digest, uint64_t value)
+{
+    ir_inline_test_fold(digest, &value, sizeof(value));
+}
+
 static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* b)
 {
     bool same = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->extra_count == b->extra_count && a->constant_count == b->constant_count && a->slot_count == b->slot_count && a->address_count == b->address_count && a->call_count == b->call_count && a->call_type_count == b->call_type_count && a->parameter_count == b->parameter_count && a->result_type == b->result_type && a->symbol_count == b->symbol_count;
@@ -523,73 +598,12 @@ static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* 
     same = same && a->vector_constant_count == b->vector_constant_count && a->row_count == b->row_count;
     if (same)
     {
-        const void* left[] = {
-            a->op,
-            a->type,
-            a->flags,
-            a->alignment_log2,
-            a->a,
-            a->b,
-            a->c,
-            a->block_offsets,
-            a->extra,
-            a->constants,
-            a->slots,
-            a->addresses,
-            a->calls,
-            a->call_types,
-            a->parameter_types,
-            a->labels,
-            a->abi_calls,
-            a->passed,
-            a->vector_constants,
-            a->rows,
-        };
-        const void* right[] = {
-            b->op,
-            b->type,
-            b->flags,
-            b->alignment_log2,
-            b->a,
-            b->b,
-            b->c,
-            b->block_offsets,
-            b->extra,
-            b->constants,
-            b->slots,
-            b->addresses,
-            b->calls,
-            b->call_types,
-            b->parameter_types,
-            b->labels,
-            b->abi_calls,
-            b->passed,
-            b->vector_constants,
-            b->rows,
-        };
-        const uint64_t bytes[] = {
-            a->instruction_count,
-            a->instruction_count,
-            a->instruction_count,
-            a->instruction_count,
-            (uint64_t)a->instruction_count * 4,
-            (uint64_t)a->instruction_count * 4,
-            (uint64_t)a->instruction_count * 4,
-            ((uint64_t)a->block_count + 1) * 4,
-            (uint64_t)a->extra_count * 4,
-            (uint64_t)a->constant_count * sizeof(IrConstant),
-            (uint64_t)a->slot_count * sizeof(IrSlot),
-            (uint64_t)a->address_count * sizeof(IrAddress),
-            (uint64_t)a->call_count * sizeof(IrCall),
-            a->call_type_count,
-            a->parameter_count,
-            (uint64_t)a->label_count * 4,
-            (uint64_t)a->abi_call_count * sizeof(IrAbiCall),
-            (uint64_t)a->passed_count * sizeof(IrPassed),
-            (uint64_t)a->vector_constant_count * sizeof(IrSimdValue),
-            (uint64_t)a->row_count * sizeof(Tier0Operation),
-        };
-        for (uint32_t column = 0; same && column < sizeof(bytes) / sizeof(bytes[0]); column += 1)
+        const void* left[BUSTER_IR_INLINE_TEST_COLUMNS];
+        const void* right[BUSTER_IR_INLINE_TEST_COLUMNS];
+        uint64_t bytes[BUSTER_IR_INLINE_TEST_COLUMNS];
+        ir_inline_test_columns(b, right, bytes);
+        ir_inline_test_columns(a, left, bytes);
+        for (uint32_t column = 0; same && column < BUSTER_IR_INLINE_TEST_COLUMNS; column += 1)
         {
             same = bytes[column] == 0 || memcmp(left[column], right[column], bytes[column]) == 0;
         }
@@ -698,6 +712,78 @@ static void ir_inline_test_same_result(IrInlineTest* test, const IrInlineUnit* i
     }
 }
 
+// Every count, column and decision ir_inline_test_same_result compares, into the test's digest.
+static void ir_inline_test_fold_result(IrInlineTest* test, const IrInlineUnit* input, const IrInlineResult* result)
+{
+    const uint64_t counts[] = {
+        result->function_count,
+        result->call_count,
+        result->inlined_calls,
+        result->component_count,
+        result->input_instructions,
+        result->output_instructions,
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(counts); k += 1)
+    {
+        ir_inline_test_fold_value(&test->digest, counts[k]);
+    }
+    for (uint32_t f = 0; f < input->count; f += 1)
+    {
+        const IrFunction* function = &result->functions[f];
+        const uint64_t sizes[] = {
+            function->instruction_count,
+            function->block_count,
+            function->extra_count,
+            function->constant_count,
+            function->slot_count,
+            function->address_count,
+            function->call_count,
+            function->call_type_count,
+            function->parameter_count,
+            function->result_type,
+            function->symbol_count,
+            function->label_count,
+            function->abi_call_count,
+            function->passed_count,
+            function->parameter_passed,
+            function->result_size,
+            function->variadic,
+            function->vector_constant_count,
+            function->row_count,
+        };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(sizes); k += 1)
+        {
+            ir_inline_test_fold_value(&test->digest, sizes[k]);
+        }
+        ir_inline_test_fold(&test->digest, &function->result_abi, sizeof(AbiReturn));
+        ir_inline_test_fold(&test->digest, &function->incoming, sizeof(AbiCall));
+        const void* columns[BUSTER_IR_INLINE_TEST_COLUMNS];
+        uint64_t bytes[BUSTER_IR_INLINE_TEST_COLUMNS];
+        ir_inline_test_columns(function, columns, bytes);
+        for (uint32_t k = 0; k < BUSTER_IR_INLINE_TEST_COLUMNS; k += 1)
+        {
+            ir_inline_test_fold(&test->digest, columns[k], bytes[k]);
+        }
+        ir_inline_test_fold_value(&test->digest, result->components[f]);
+        ir_inline_test_fold_value(&test->digest, result->recursive[f]);
+        ir_inline_test_fold_value(&test->digest, result->call_offsets[f]);
+    }
+    for (uint32_t c = 0; c < result->call_count; c += 1)
+    {
+        const uint64_t decision[] = {
+            result->call_nodes[c],
+            result->callees[c],
+            result->costs[c],
+            result->expanded_sizes[c],
+            result->decisions[c],
+        };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(decision); k += 1)
+        {
+            ir_inline_test_fold_value(&test->digest, decision[k]);
+        }
+    }
+}
+
 // The unit by the scalar twin, and by the vector path twice: its caller's runs by the other form first (the masked adds
 // where `options` gathers, or the gathers where it adds: IrInlineOptions.add_sites, #2541 step 3), then by `options`'s,
 // whose result the caller reads; each column for column the twin's.
@@ -732,6 +818,7 @@ static bool ir_inline_test_run(IrInlineTest* test, const IrInlineUnit* input, Ir
     if (success)
     {
         ir_inline_test_same_result(test, input, result, &scalar);
+        ir_inline_test_fold_result(test, input, result);
     }
     return success;
 }
@@ -1705,6 +1792,22 @@ static void ir_inline_test_threshold_guards(IrInlineTest* test)
                 ir_inline_test_expect(test, result[i] == (costs[i] <= limits[l]), "cost threshold independent scalar expression");
             }
         }
+        // The sweep against a limit per call (#2924): every cost against every limit, rotated through the calls.
+        uint32_t maxima[65];
+        for (uint32_t shift = 0; shift < 4; shift += 1)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                maxima[i] = limits[(i + shift) % (sizeof(limits) / sizeof(limits[0]))];
+            }
+            ir_inline_threshold_limits(costs, maxima, count, false, result);
+            bool fits = true;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                fits = fits && result[i] == (costs[i] <= maxima[i]);
+            }
+            ir_inline_test_expect(test, fits, "cost threshold against each call's limit, against its definition");
+        }
     }
     if (mapping != MAP_FAILED)
     {
@@ -2301,7 +2404,10 @@ static void ir_inline_test_general(IrInlineTest* test, Arena* input, Arena* outp
 static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char** argv)
 {
     (void)argv;
-    IrInlineTest test = { .random = UINT64_C(0x823a91c57e684dbf) };
+    IrInlineTest test = {
+        .random = UINT64_C(0x823a91c57e684dbf),
+        .digest = UINT64_C(0xcbf29ce484222325),
+    };
     Arena input = arena_reserve(64u << 20);
     Arena output = arena_reserve(64u << 20);
     Arena twin = arena_reserve(64u << 20);
@@ -2326,6 +2432,11 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
         ir_inline_test_simd(&test, &input, &output, &twin, &scratch);
         ir_inline_test_general(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_expect(&test, test.digest == BUSTER_IR_INLINE_TEST_DIGEST, "every unit's result has its frozen digest");
+        if (test.digest != BUSTER_IR_INLINE_TEST_DIGEST)
+        {
+            fprintf(stderr, "ir-inline digest %#018" PRIx64 "\n", test.digest);
+        }
     }
     arena_release(&scratch);
     arena_release(&twin);

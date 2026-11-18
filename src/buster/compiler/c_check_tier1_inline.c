@@ -325,9 +325,28 @@ static uint32_t check_tier1_inline_callee(const CheckTier1Inline* inlining, cons
     return candidate != 0 && candidate - 1 != self && inlining->ready[candidate - 1] != 0 ? candidate : 0;
 }
 
-// The candidates whose address a body's code takes (a BUSTER_TYPED_GLOBAL_ADDRESS entry of its typed stream, whose value
-// is the symbol), marked in `addressed` (cleared, a byte a body): 64 kinds a vector by a compare, then each match's
-// value; the scalar path, its twin, reads every entry.
+// One body's typed entries (`count` of `kinds` and `values`) that take an address (BUSTER_TYPED_GLOBAL_ADDRESS, whose value
+// is the symbol), each marking the candidate its symbol is in `addressed` (`candidates` of `symbol_count` symbols), or the
+// byte past the `body_count` bodies where it names none: 64 kinds a vector by a compare, then each match's value.
+static void check_tier1_inline_addressed_entries(const uint8_t* kinds, const uint64_t* values, uint32_t count, const uint32_t* candidates, uint32_t symbol_count, uint32_t body_count,
+                                                 uint8_t* addressed)
+{
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const uint32_t n = count - first < 64 ? count - first : 64;
+        const __mmask64 mask = n == 64 ? UINT64_MAX : (UINT64_C(1) << n) - 1;
+        const __m512i loaded = _mm512_maskz_loadu_epi8(mask, kinds + first);
+        for (__mmask64 hits = _mm512_mask_cmpeq_epi8_mask(mask, loaded, _mm512_set1_epi8(BUSTER_TYPED_GLOBAL_ADDRESS)); hits != 0; hits &= hits - 1)
+        {
+            const uint64_t symbol = values[first + (uint32_t)__builtin_ctzll(hits)];
+            const uint32_t candidate = symbol != 0 && symbol < symbol_count ? candidates[symbol] : 0;
+            addressed[candidate != 0 ? candidate - 1 : body_count] = 1;
+        }
+    }
+}
+
+// The candidates whose address a body's code takes, marked in `addressed` (cleared, a byte a body), by each ready body's
+// entries (check_tier1_inline_addressed_entries); the scalar path, its twin, reads every entry.
 static void check_tier1_inline_addressed(const CheckTier1Inline* inlining, bool scalar, uint8_t* addressed)
 {
     (void)scalar;
@@ -347,18 +366,7 @@ static void check_tier1_inline_addressed(const CheckTier1Inline* inlining, bool 
         }
         else
         {
-            for (uint32_t first = 0; first < count; first += 64)
-            {
-                const uint32_t n = count - first < 64 ? count - first : 64;
-                const __mmask64 mask = n == 64 ? UINT64_MAX : (UINT64_C(1) << n) - 1;
-                const __m512i kinds = _mm512_maskz_loadu_epi8(mask, function->kinds + first);
-                for (__mmask64 hits = _mm512_mask_cmpeq_epi8_mask(mask, kinds, _mm512_set1_epi8(BUSTER_TYPED_GLOBAL_ADDRESS)); hits != 0; hits &= hits - 1)
-                {
-                    const uint64_t symbol = function->values[first + (uint32_t)__builtin_ctzll(hits)];
-                    const uint32_t candidate = symbol != 0 && symbol < inlining->symbol_count ? inlining->candidates[symbol] : 0;
-                    addressed[candidate != 0 ? candidate - 1 : inlining->body_count] = 1;
-                }
-            }
+            check_tier1_inline_addressed_entries(function->kinds, function->values, count, inlining->candidates, inlining->symbol_count, inlining->body_count, addressed);
         }
     }
 }

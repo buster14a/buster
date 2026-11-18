@@ -1034,6 +1034,10 @@ static void check_tier1_lane_release(CheckTier1Lane* lane);
 static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, bool scalar, Arena* arena,
                                      CheckTier1Inline* table);
 static void check_tier1_inline_release(CheckTier1Inline* table);
+// Defined in c_check_tier1_inline.c (#2541 step 2): one body's entries that take a candidate's address, marked in `addressed`
+// (test-tier0-inline checks it against its definition).
+static void check_tier1_inline_addressed_entries(const uint8_t* kinds, const uint64_t* values, uint32_t count, const uint32_t* candidates, uint32_t symbol_count, uint32_t body_count,
+                                                 uint8_t* addressed);
 // Gives `table` a new generation, which no lane's cache is valid for: its bodies are lowered again.
 static void check_tier1_inline_renew(CheckTier1Inline* table);
 // Defined in c_check_tier1_inline.c (#2541 step 2): the candidates the emission gives no code, once every body's is made.

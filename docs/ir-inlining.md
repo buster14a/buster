@@ -386,7 +386,10 @@ leaf, slots with and without lifetime markers, an unreachable path, parameters
 that don't begin the body, and stores to memory through an address row) into
 six callers (from the entry, from a loop's latch, twice from a phi's block,
 before a branch whose successor's phi names the call's block, beside a guarded
-call of a callee that never returns, and from a switch's targets). Each unit is
+call of a callee that never returns, and from a switch's targets). Each callee
+also runs with a constant ahead of its parameters, which sends it to the
+node-at-a-time splice (#2924), and a diamond of 16 and one of 17 parameters, the
+vector splice's bound, run from a caller of their own. Each unit is
 inlined without `control_flow` (every such call `IR_INLINE_BODY`) and with it
 (every call expanded but the external one's), and runs on the shared IR
 interpreter before inlining, after it, and after SROA and promotion of the
