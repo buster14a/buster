@@ -46,6 +46,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-dominators, benchmark-dominators` | `dominators.c` | [dominators](dominators.md) |
 | `test-emission-metadata` | `emission_metadata.c` | [emission-metadata](emission-metadata.md) |
 | `-E, parse, -fsyntax-only, -c` | `main.c` | [driver](driver.md) |
+| `test-assembly-output` (the assembly sink) | `assembly_output.c` | [driver](driver.md#the-assembly-sink-1362) |
 | `test-emitted-code` | `emitted_code.c` | [emission](emission.md) |
 | `test-executable, test-dynamic, test-static` | `executable.c` | [executable](executable.md) |
 | `test-files, benchmark-files` | `c_files.c` | [files](files.md) |
@@ -109,6 +110,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 The original section titles are retained in their owning guides.
 
 - [C driver build-system integration](../cc-driver.md).
+- [The assembly sink (#1362)](driver.md#the-assembly-sink-1362).
 - [The merge queue](ci.md#the-merge-queue).
 - [Sharing the 9700X](ci.md#sharing-the-9700x).
 - [Shard costs](ci.md#shard-costs).

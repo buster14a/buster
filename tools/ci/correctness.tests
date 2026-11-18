@@ -664,6 +664,10 @@ corpus=$BUSTER_CORPUS
 "$BUSTER_COMPILER" test-checker-corpus --clang clang --deferred 8 --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 == Test the scalar and AVX-512 assembly frontends
 "$BUSTER_COMPILER" test-assembler --cross-check
+== Test the assembly sink against GNU as
+# #1362: hand-built units printed as AT&T assembly (the sink -S is to write), and every form the matcher admits,
+# assembled by GNU as into the object writer's sections, symbols and relocations and the encoder's bytes.
+"$BUSTER_COMPILER" test-assembly-output --cross-check
 == Assemble a .s and a .S file that -c comes before
 # #652: a first argument that starts with '-' goes to the source commands at once, past the units' chains of command
 # names, but for the assembler's -c of a .s or .S file (main_assembly_source). Each assembles, the .S preprocessed, and
