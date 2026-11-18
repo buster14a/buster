@@ -4225,8 +4225,10 @@ static const char* check_driver_builtin_conversion(const Parser* parser, Preproc
 // token; else, at its name, its
 // first difference from the target's function type, clang's HandleFunctionTypeMismatch's: "has different number of
 // parameters (expected N but has M)", "has type mismatch at Nth parameter (expected 'T' but has 'U')", "has different
-// return type ('T' expected but has 'U')", or none ("candidate function"). An initialization's or an assignment's; NULL
-// for any other report.
+// return type ('T' expected but has 'U')", or none ("candidate function"). A target of no function pointer type (#2935:
+// `void *`, an integer, a record) has the incompatible words with each candidate's plain note, the enable_ifs' too; where
+// they leave one candidate, which clang converts, its conversion's words stay (a `void *` takes it, check_overload_address).
+// An initialization's or an assignment's; NULL for any other report.
 static const char* check_driver_overload_address(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                  CheckWarningSpelling* spell, const CheckReport* report, uint32_t* located, PPOutputDiagnosticNote* notes,
                                                  Arena* scratch)
@@ -4256,16 +4258,19 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     const TypeId pointer = target != 0 ? type_strip_aligned(types, target) : 0;
     const TypeId expected = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, pointer)) : 0;
     const bool function = expected != 0 && type_kind(types, expected) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool other = head != 0 && !function && !multiversioned;
     uint32_t note_token = BUSTER_CHECK_NONE;
     const char* note = NULL;
     uint32_t argument = BUSTER_CHECK_NONE;
-    const char* words = function ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, &argument, scratch) :
-                                   NULL;
+    const char* words = function || other ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, &argument,
+                                                                          scratch) : NULL;
     const char* prefix = "incompatible function pointer types ";
     const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
-    // The target as the words spell it: between the action's words and the source's.
-    const char* action = shaped ? words + strlen(prefix) : NULL;
-    const char* separator = action == NULL ? NULL : op == CHECK_OP_INITIALIZE ? strstr(action, " with an expression of type ") : strstr(action, " from ");
+    // The target as the words spell it: between the action's words and the source's, whatever comes before them for
+    // another target.
+    const char* action = shaped ? words + strlen(prefix) : other && words != NULL ? strstr(words, op == CHECK_OP_INITIALIZE ? "initializing " : "assigning to ") : NULL;
+    const char* separator = action == NULL ? NULL : op == CHECK_OP_ASSIGN ? strstr(action, " from ") :
+                            strstr(action, function ? " with an expression of type " : " with an expression of ");
     const uint64_t skip = op == CHECK_OP_INITIALIZE ? strlen("initializing ") : strlen("assigning to ");
     const bool spelled = separator != NULL && (uint64_t)(separator - action) > skip;
     const char* result = NULL;
@@ -4291,15 +4296,16 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
         const TypeId type = type_strip_aligned(types, candidate->type);
         uint32_t have = 0;
         uint32_t want = 0;
-        const TypeId* parameters = type_parameters(types, type, &have);
-        const TypeId* wanted = type_parameters(types, expected, &want);
+        // (Against another target, no difference: clang's HandleFunctionTypeMismatch compares function types alone.)
+        const TypeId* parameters = function ? type_parameters(types, type, &have) : NULL;
+        const TypeId* wanted = function ? type_parameters(types, expected, &want) : NULL;
         uint32_t mismatch = UINT32_MAX;
         for (uint32_t k = 0; have == want && mismatch == UINT32_MAX && k < have; k += 1)
         {
             mismatch = type_unqualified(type_strip_aligned(types, parameters[k])) != type_unqualified(type_strip_aligned(types, wanted[k])) ? k : mismatch;
         }
-        const TypeId returned = type_return(types, type);
-        const TypeId wanted_return = type_return(types, expected);
+        const TypeId returned = function ? type_return(types, type) : 0;
+        const TypeId wanted_return = function ? type_return(types, expected) : 0;
         const char* text = "candidate function";
         uint32_t at = candidate->declaration;
         const CheckConditionDeclaration* conditions = check_condition_find(&graph->conditions, candidate->declaration);
@@ -4333,7 +4339,7 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     }
     // With one candidate left by the enable_ifs, clang converts its address, a function pointer's conversion.
     const bool ineligible = eligible == 1;
-    if (spelled && note_count != 0)
+    if (spelled && note_count != 0 && !(other && ineligible))
     {
         const int length = (int)(separator - action - (int64_t)skip);
         const char* target_text = action + skip;
@@ -4479,6 +4485,108 @@ static const char* check_driver_overload_operand(const Parser* parser, Preproces
             *note = named ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)intern_length(pp->table, identifier),
                                                intern_bytes(pp->table, identifier)) : "passing argument to parameter here";
         }
+    }
+    return result;
+}
+
+// An overloadable set read where nothing expects a type (#2935), as clang's CheckPlaceholderExpr finds it: an operator's
+// operand (an assignment's target too), a condition's, a cast's to void. With none or several candidates whose address
+// is available (one is taken, check_overload_address's placeholder), clang's err_ovl_unresolvable at the operand:
+// "reference to overloaded function could not be resolved; did you mean to call it?", " with no arguments" where its
+// tryExprAsCall finds one candidate that takes none (it then reads the operand as that call), and "possible target for
+// call" at each candidate's latest declaration, in its lookup's order (noteOverloads). The node's first such operand,
+// which its check refused (check_graph_overload_operands); NULL for any other report, an initialization's, an
+// assignment's source, a return's and a call's among them (check_driver_overload_address, check_driver_overload_operand).
+static const char* check_driver_overload_unresolved(const Parser* parser, const CheckStream* stream, const TypeTable* types, const CheckReport* report,
+                                                    uint32_t* located, PPOutputDiagnosticNote* notes)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool discarded = op == CHECK_OP_CAST && graph->types != NULL && type_kind(types, type_strip_aligned(types, graph->types[node])) == BUSTER_TYPE_KIND_VOID;
+    const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op != CHECK_OP_COUNT &&
+                         op != CHECK_OP_VALUE && op != CHECK_OP_SELECT && op != CHECK_OP_ADDRESS && op != CHECK_OP_CALL && op != CHECK_OP_INITIALIZE &&
+                         op != CHECK_OP_CONVERT && (op != CHECK_OP_CAST || discarded);
+    const uint32_t operands[] = { applies ? graph->operand0[node] : BUSTER_CHECK_NONE, applies && op != CHECK_OP_CAST && op != CHECK_OP_ASSIGN ? graph->operand1[node] :
+                                  BUSTER_CHECK_NONE, applies && op != CHECK_OP_CAST && op != CHECK_OP_ASSIGN ? graph->operand2[node] : BUSTER_CHECK_NONE };
+    uint32_t operand = BUSTER_CHECK_NONE;
+    uint32_t head = 0;
+    for (uint32_t i = 0; operand == BUSTER_CHECK_NONE && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+    {
+        const uint32_t at = operands[i];
+        const uint32_t named = at < stream->count && graph->ops[at] == CHECK_OP_ADDRESS ? graph->operand0[at] : at;
+        const uint32_t found = named < stream->count ? check_stream_overload_head(stream, named) : 0;
+        const bool overloadable = found != 0 && found - 1 < graph->overload_candidate_count && (graph->overload_candidates[found - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0;
+        // (A set of one available candidate resolved, and isn't the refused operand.)
+        uint32_t available = 0;
+        uint32_t seen[BUSTER_CHECK_SEMANTIC_NOTES];
+        uint32_t seen_count = 0;
+        uint32_t steps = 0;
+        for (uint32_t current = overloadable ? found - 1 : UINT32_MAX; current < graph->overload_candidate_count && steps < graph->overload_candidate_count &&
+             seen_count < BUSTER_CHECK_SEMANTIC_NOTES; current = graph->overload_candidates[current].previous, steps += 1)
+        {
+            const CheckOverloadCandidate* candidate = graph->overload_candidates + current;
+            bool repeated = false;
+            for (uint32_t k = 0; k < seen_count; k += 1)
+            {
+                repeated |= seen[k] == candidate->canonical;
+            }
+            const CheckConditionDeclaration* conditions = repeated ? NULL : check_condition_find(&graph->conditions, candidate->declaration);
+            available += !repeated && candidate->object_sizes == NULL && (conditions == NULL || !conditions->restricted) ? 1u : 0u;
+            seen[seen_count] = candidate->canonical;
+            seen_count += repeated ? 0u : 1u;
+        }
+        operand = overloadable && available != 1 ? at : BUSTER_CHECK_NONE;
+        head = overloadable && available != 1 ? found : 0;
+    }
+    // tryExprAsCall's candidate that takes no arguments (a later one again after two, as its loop has it), and the notes.
+    uint32_t note_count = 0;
+    bool callable = false;
+    bool ambiguous = false;
+    uint32_t seen[BUSTER_CHECK_SEMANTIC_NOTES];
+    uint32_t seen_count = 0;
+    uint32_t steps = 0;
+    for (uint32_t current = head != 0 ? head - 1 : UINT32_MAX; current < graph->overload_candidate_count && steps < graph->overload_candidate_count &&
+         seen_count < BUSTER_CHECK_SEMANTIC_NOTES; current = graph->overload_candidates[current].previous, steps += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + current;
+        bool repeated = false;
+        for (uint32_t k = 0; k < seen_count; k += 1)
+        {
+            repeated |= seen[k] == candidate->canonical;
+        }
+        if (!repeated)
+        {
+            seen[seen_count++] = candidate->canonical;
+            uint32_t parameters = 0;
+            const TypeId function = type_strip_aligned(types, candidate->type);
+            (void)(type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameters) : NULL);
+            const bool none = type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION && parameters == 0;
+            const bool again = none && callable && !ambiguous;
+            ambiguous |= again;
+            callable = none ? !again : callable;
+            check_semantic_add_note(parser, notes, &note_count, candidate->declaration, "possible target for call");
+        }
+    }
+    const char* result = NULL;
+    if (operand < stream->count && note_count != 0)
+    {
+        result = callable ? "reference to overloaded function could not be resolved; did you mean to call it with no arguments?" :
+                            "reference to overloaded function could not be resolved; did you mean to call it?";
+        // At the operand's begin, its parentheses' (a ParenExpr's, sizeof's operand's) included.
+        uint32_t first = check_warning_graph_first(graph, parser, operand);
+        uint32_t end = graph->source_positions != NULL ? graph->source_positions[operand] : BUSTER_CHECK_NONE;
+        while (first != 0 && end < parser->tokens.count && parser->tokens.kinds[first - 1] == PARSE_KIND_L_PAREN && parser->tree.parents[first - 1] == end &&
+               (parser->tree.roles[end] == PARSE_ROLE_CLOSE_GROUP || parser->tree.roles[end] == PARSE_ROLE_CLOSE_SIZEOF))
+        {
+            first -= 1;
+            end += 1;
+        }
+        *located = first;
+    }
+    else
+    {
+        memset(notes, 0, sizeof(*notes) * BUSTER_CHECK_SEMANTIC_NOTES);
     }
     return result;
 }
@@ -5266,6 +5374,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     {
                         x86_message = check_driver_overload_operand(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
                                                                     &conversion_note_token, &conversion_note, &conversion_argument, scratch);
+                    }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_overload_unresolved(parser, stream, types, stream->reports + index, &x86_location, x86_note);
                     }
                     if (x86_message == NULL && phase == 1)
                     {

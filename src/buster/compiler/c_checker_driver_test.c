@@ -10639,6 +10639,12 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_fortify(&test, clang, executable, directory);
             }
+            // An overload set where nothing expects a function pointer (#2935): an initialization's or an assignment's other
+            // target, an operator's operand, a condition, a cast to void, whole, in each policy, mode, lane request and reader.
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/overload-placeholders");
+            }
             if (!lazy)
             {
                 check_test_driver_void_conditionals(&test, clang, executable, directory);

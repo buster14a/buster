@@ -1,0 +1,7 @@
+buster-fixtures v1 checker-warnings
+issue.c	0	3	6	an overload set initializing void * and compared, as #2935 found it
+targets.c	0	8	16	an overload set initializing or assigned to a target of no function pointer type, typedefs and records too
+operators.c	0	16	32	an overload set as an operand of operators, conditions, a cast to void and sizeof, with and without a call of no arguments
+calls.c	0	5	11	which candidates make a call of no arguments: void, variadic, an ellipsis, two of them
+enable-if.c	0	2	4	enable_if leaves one candidate (taken) or none (an error with each candidate made ineligible)
+single.c	0	0	0	the one candidate enable_if leaves is the address a void * and a discarded operand take

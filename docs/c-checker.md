@@ -752,7 +752,18 @@ of this reader change and its recorded controls, not whole-compiler acceptance.
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
-the destination function-pointer type. Initializers, casts, assignments,
+the destination function-pointer type. A `void *` destination, an operator's
+operand, a condition and a cast to void take the one candidate whose address is
+available, not made ineligible by an enable_if, as clang does (#2935,
+`check_overload_address`). Otherwise the set has clang's errors: a
+destination of no function-pointer type is "initializing 'T' with an expression
+of incompatible type '<overloaded function type>'" (or "assigning to") with a
+note at each candidate, and an operand is "reference to overloaded function
+could not be resolved; did you mean to call it?", " with no arguments" where
+one candidate takes none, with "possible target for call" at each
+(`check_driver_overload_unresolved`). Clang then reads that operand as the
+call, which may report a later operand of the same expression too; the checker
+reports the expression's first. Initializers, casts, assignments,
 callbacks and returns retain that selected object and conversion on the use
 edge, without rewriting a shared identifier leaf. Candidate availability is
 checked at the use's source position. Function calling conventions participate
