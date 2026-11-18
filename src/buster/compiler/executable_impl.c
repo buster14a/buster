@@ -3523,9 +3523,10 @@ static void executable_mark_symbols(Link* link, ExecutableShared* shared, uint32
 }
 
 // A PIE's fixup that doesn't read a GOT slot and isn't ABS64, whose target the filter (or with `exact`, its atom) says
-// may be outside the image. A CALL to a dynamic symbol goes to the symbol's stub, which reads its GOT slot: both are
-// marked in this lane's bitsets. A dynamic PIE's general-dynamic access (TLSGD) to a dynamic symbol relaxes to
-// initial-exec, which reads the symbol's GOT slot (a TPOFF64 relocation fills it): the slot is marked. Any other kind
+// may be outside the image. A CALL to a dynamic symbol goes to the symbol's stub, which reads its GOT slot: the stub is
+// marked in this lane's bitset, and executable_reduce_got marks its slot. A dynamic PIE's general-dynamic access
+// (TLSGD) to a dynamic symbol relaxes to initial-exec, which reads the symbol's GOT slot (a TPOFF64 relocation fills
+// it): the slot is marked. Any other kind
 // of fixup to a dynamic symbol can't be relocated (lld refuses it too: the code isn't position-independent), and nor
 // can a PC32 or PC64 to address 0 (executable_is_absolute_zero) or a CALL, PC32 or PC64 to an absolute symbol
 // (executable_refuses_absolute); they are only counted here, and executable_check_relocations reports them. A CALL to
@@ -3558,8 +3559,9 @@ static void executable_check_direct(const Link* link, ExecutableShared* shared, 
         const bool addressed = relative || kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_ABS32S;
         const bool zero = !shared->pie && dynamic && !import && addressed;
         const uint64_t word = lane * shared->words_per_lane + target / 64;
+        // A dynamic symbol's stub reads its GOT slot, which executable_reduce_got marks for each stub that stays.
         const uint64_t bit = dynamic && call ? 1ull << (target % 64) : 0;
-        shared->got_marks[word] |= bit | (initial_exec ? 1ull << (target % 64) : 0);
+        shared->got_marks[word] |= initial_exec ? 1ull << (target % 64) : 0;
         shared->stub_marks[word] |= bit;
         if (zero)
         {
@@ -4252,13 +4254,15 @@ static void executable_reduce_got(const Link* link, ExecutableShared* shared, ui
             gd |= shared->tlsgd_marks != 0 ? shared->tlsgd_marks[other * shared->words_per_lane + word] : 0;
             zero |= shared->zero_marks != 0 ? shared->zero_marks[other * shared->words_per_lane + word] : 0;
         }
-        // A weak reference to nothing that a position-dependent executable's field takes at address 0 has no stub: its
-        // calls reach address 0 too, as GNU ld resolves them, so that it has one address however it is taken.
+        // A weak reference to nothing that a position-dependent executable's field takes at address 0 has no stub (nor its
+        // slot, but for a GOT kind's): its calls reach address 0 too, as GNU ld resolves them, so that it has one address
+        // however it is taken. A dynamic symbol's stub that stays reads its slot.
         stub_marks &= ~zero;
         if (shared->zero_marks != 0)
         {
             shared->zero_marks[word] = zero;
         }
+        marks |= shared->dynamic_bits != 0 ? stub_marks & shared->dynamic_bits[word] : 0;
         marks |= candidates != 0 ? executable_unrelaxed(link, shared, far_possible, word, candidates) : 0;
         // An IFUNC whose stub only calls reach reads the stub's slot through the GOT, as lld's reads its .got.plt entry:
         // nothing takes the stub for the IFUNC's address, so every load through the GOT may get the IFUNC's code, which
