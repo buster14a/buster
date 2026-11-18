@@ -4147,9 +4147,9 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
 }
 
 // Of a word of the GOT's marks, the symbols whose slots a PIE relocates by class (RELATIVE, SYMBOLIC or TPOFF): from
-// the bitsets, or with `exact` executable_relocation_class of each; none RELATIVE in a position-dependent executable. In a PIE that takes IFUNCs, the slots of the IFUNCs
-// without stubs, which IRELATIVE relocations fill (executable_ifunc_slots), aren't RELATIVE: an IFUNC with a stub has
-// the stub's address in its slot, which is.
+// the bitsets, or with `exact` executable_relocation_class of each; none RELATIVE in a position-dependent executable. In
+// a PIE that takes IFUNCs, the slots of the IFUNCs without stubs, which IRELATIVE relocations fill
+// (executable_ifunc_slots), aren't RELATIVE: an IFUNC with a stub has the stub's address in its slot, which is.
 static uint64_t executable_slots_of_class(const Link* link, const ExecutableShared* shared, uint64_t word, uint64_t marks, uint8_t class)
 {
     uint64_t result = 0;

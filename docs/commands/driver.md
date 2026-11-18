@@ -226,8 +226,10 @@ requirements. [Command index](README.md).
 ## Build-system integration (#1113)
 
 Dependency files (`-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`),
-buffered standard input (`-`), the explicit `-static`/`-static-pie`/`-pie`
-link modes, stderr-only `-v`, and the common `-print-*` and numeric-version
+buffered standard input (`-`), the explicit `-static`/`-static-pie`/`-pie`/`-no-pie`
+link modes (`-no-pie`, #1503: a position-dependent dynamic executable, with
+Clang's precedence; `c_driver_no_pie_test.c` compares its links with clang and
+GNU ld's), stderr-only `-v`, and the common `-print-*` and numeric-version
 probes are handled by the driver. `c_dependency_driver.c` owns dependency
 collection, naming and publication; `c_driver_information.c` owns the
 information probes; `string8.h` is the bounded byte slice those modules share
@@ -406,7 +408,10 @@ selects a populated archive, the source command uses the mixed/foreign path
 (#1470), so that archive gets the same lazy member selection and input ordering
 as a positional archive. Empty archives retain the direct path. The selection
 keeps `-L` directory order and static runtime mode; named DSOs on an archive
-link keep their named-search identity and as-needed state. Exact `-l:FILE`
+link keep their named-search identity and as-needed state. `-no-pie`'s
+mixed links use its runtime's startup files (`crt1.o`, `crtbegin.o`,
+`crtend.o`) and write the same position-dependent executable through the
+foreign resolver. Exact `-l:FILE`
 DSO-only links retain the direct importer's existing refusal. No new runtime or
 writer mode is introduced. `-c` and syntax checking do not resolve libraries.
 Selected nonempty `.a` files also use the mixed path when they are GNU ld scripts
