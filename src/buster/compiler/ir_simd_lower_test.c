@@ -98,6 +98,10 @@ static void ir_simd_lower_splats(IrLowerTestTally* tally)
             const IrCheck cb = ir_lower_typed_target_scalar(&source, IR_VOID, 3, features, &twin, &scratch, &b);
             const bool lowered = reason == NULL && ca.error == IR_OK && cb.error == IR_OK && ir_lower_test_equal(&a, &b);
             ir_lower_test_expect(tally, lowered, "both typed adapters lower scalar splats identically", width, scalar);
+            if (ca.error == IR_OK)
+            {
+                ir_lower_test_fold_function(&tally->lowered, &a);
+            }
             uint32_t splats = 0;
             uint32_t narrowed = 0;
             for (uint32_t i = 0; lowered && i < a.instruction_count; i += 1)
@@ -264,6 +268,10 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
                     const IrCheck cb = ir_lower_typed_target_scalar(&source, IR_VOID, 3, features, &twin, &scratch, &b);
                     const bool lowered = ca.error == IR_OK && cb.error == IR_OK && ir_lower_test_equal(&a, &b);
                     ir_lower_test_expect(tally, lowered, "whole VECTOR/X86 functions lower identically with width-qualified edge spills", width, operation);
+                    if (ca.error == IR_OK)
+                    {
+                        ir_lower_test_fold_function(&tally->lowered, &a);
+                    }
                     if (!lowered)
                     {
                         fprintf(stderr, "  SIMD lowering: errors %u/%u entry %u detail %u; typed %u at %u (%s)\n", ca.error, cb.error, ca.instruction, ca.detail, tier0_validate(&source).error, tier0_validate(&source).node, tier0_validate(&source).rule);

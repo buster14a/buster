@@ -12,7 +12,31 @@ struct IrLowerTestTally
 {
     uint64_t checks;
     uint64_t failures;
+    // An FNV-1a digest of every function ir_lower_test_lower lowers, in order (#2924): with the default seed and count it
+    // must equal the frozen one, taken where the vector and scalar lowerings agreed. The long double programs' functions
+    // aren't in it (ir_lower_test_lower_unfolded): their constants hold host addresses.
+    uint64_t lowered;
 };
+
+// The lowered functions' digest of a default run (seed 131, count 32).
+#define BUSTER_IR_LOWER_TEST_DIGEST UINT64_C(0xfa8a6114710fa332)
+
+static void ir_lower_test_fold(uint64_t* digest, uint64_t value)
+{
+    for (uint32_t byte = 0; byte < 8; byte += 1)
+    {
+        *digest = (*digest ^ ((value >> (byte * 8)) & 0xff)) * UINT64_C(0x100000001b3);
+    }
+}
+
+static void ir_lower_test_fold_bytes(uint64_t* digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* at = bytes;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        *digest = (*digest ^ at[i]) * UINT64_C(0x100000001b3);
+    }
+}
 
 static bool ir_lower_test_expect(IrLowerTestTally* tally, bool condition, const char* name, uint64_t seed, uint32_t function)
 {
@@ -623,7 +647,105 @@ static bool ir_lower_test_equal(const IrFunction* a, const IrFunction* b)
     return equal;
 }
 
-static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, uint32_t symbols, Arena* output, Arena* twin_output, Arena* scratch, IrFunction* function, uint64_t seed, uint32_t index)
+// Every field ir_lower_test_equal compares, in its order.
+static void ir_lower_test_fold_function(uint64_t* digest, const IrFunction* f)
+{
+    const uint64_t counts[] = {
+        f->instruction_count,
+        f->block_count,
+        f->slot_count,
+        f->constant_count,
+        f->vector_constant_count,
+        f->address_count,
+        f->call_count,
+        f->extra_count,
+        f->call_type_count,
+        f->parameter_count,
+        f->result_type,
+        f->symbol_count,
+        f->label_count,
+        f->abi_call_count,
+        f->passed_count,
+        f->parameter_passed,
+        f->result_size,
+        f->variadic,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(counts); i += 1)
+    {
+        ir_lower_test_fold(digest, counts[i]);
+    }
+    ir_lower_test_fold_bytes(digest, &f->result_abi, sizeof(AbiReturn));
+    ir_lower_test_fold_bytes(digest, &f->incoming, sizeof(AbiCall));
+    const uint64_t count = f->instruction_count;
+    ir_lower_test_fold_bytes(digest, f->op, count);
+    ir_lower_test_fold_bytes(digest, f->type, count);
+    ir_lower_test_fold_bytes(digest, f->flags, count);
+    ir_lower_test_fold_bytes(digest, f->alignment_log2, count);
+    ir_lower_test_fold_bytes(digest, f->a, count * 4);
+    ir_lower_test_fold_bytes(digest, f->b, count * 4);
+    ir_lower_test_fold_bytes(digest, f->c, count * 4);
+    ir_lower_test_fold_bytes(digest, f->block_offsets, ((uint64_t)f->block_count + 1) * 4);
+    ir_lower_test_fold_bytes(digest, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
+    for (uint32_t k = 0; k < f->constant_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->constants[k].low);
+        ir_lower_test_fold(digest, f->constants[k].high);
+    }
+    for (uint32_t k = 0; k < f->slot_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->slots[k].size);
+        ir_lower_test_fold(digest, f->slots[k].alignment);
+        ir_lower_test_fold(digest, f->slots[k].type);
+        ir_lower_test_fold(digest, f->slots[k].flags);
+    }
+    for (uint32_t k = 0; k < f->address_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->addresses[k].offset);
+        ir_lower_test_fold(digest, f->addresses[k].scale);
+    }
+    for (uint32_t k = 0; k < f->call_count; k += 1)
+    {
+        const IrCall call = f->calls[k];
+        ir_lower_test_fold(digest, call.argument_first);
+        ir_lower_test_fold(digest, call.argument_count);
+        ir_lower_test_fold(digest, call.type_first);
+        ir_lower_test_fold(digest, call.parameter_count);
+        ir_lower_test_fold(digest, call.result_type);
+        ir_lower_test_fold(digest, call.variadic);
+        ir_lower_test_fold(digest, call.abi);
+    }
+    for (uint32_t k = 0; k < f->label_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->labels[k]);
+    }
+    for (uint32_t k = 0; k < f->abi_call_count; k += 1)
+    {
+        ir_lower_test_fold_bytes(digest, &f->abi_calls[k].call, sizeof(AbiCall));
+        ir_lower_test_fold(digest, f->abi_calls[k].passed);
+        ir_lower_test_fold(digest, f->abi_calls[k].result_size);
+    }
+    for (uint32_t k = 0; k < f->passed_count; k += 1)
+    {
+        ir_lower_test_fold_bytes(digest, &f->passed[k].location, sizeof(AbiLocation));
+        ir_lower_test_fold(digest, f->passed[k].size);
+    }
+    for (uint32_t k = 0; k < f->extra_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->extra[k]);
+    }
+    for (uint32_t k = 0; k < f->call_type_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->call_types[k]);
+    }
+    for (uint32_t k = 0; k < f->parameter_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->parameter_types[k]);
+    }
+}
+
+// The lowering of `source`, checked, outside the digest: for the long double programs, whose calls of C functions go
+// through their addresses, which are the host's and move with its build.
+static bool ir_lower_test_lower_unfolded(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, uint32_t symbols, Arena* output, Arena* twin_output, Arena* scratch, IrFunction* function, uint64_t seed, uint32_t index)
 {
     IrFunction twin =
     {
@@ -642,6 +764,17 @@ static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* so
         ok = ir_lower_test_expect(tally, ir_verify(function, scratch, 0).error == IR_OK &&
                                        ir_verify(&twin, scratch, 0).error == IR_OK,
                                   "the verifier accepts both lowerings", seed, index) && ok;
+    }
+    return ok;
+}
+
+// ir_lower_test_lower_unfolded, its function folded into the frozen digest (BUSTER_IR_LOWER_TEST_DIGEST).
+static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, uint32_t symbols, Arena* output, Arena* twin_output, Arena* scratch, IrFunction* function, uint64_t seed, uint32_t index)
+{
+    const bool ok = ir_lower_test_lower_unfolded(tally, source, result_type, symbols, output, twin_output, scratch, function, seed, index);
+    if (ok)
+    {
+        ir_lower_test_fold_function(&tally->lowered, function);
     }
     return ok;
 }
@@ -1074,7 +1207,7 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
         state = seed ^ (0x87ull << 32) ^ p;
         tier0_test_x87_program(x87, &x87_abi, &state);
         const Tier0Function long_double = tier0_test_x87_function(x87, &x87_abi);
-        if (!x87->overflow && ir_lower_test_lower(tally, &long_double, IR_VOID, 1, &output, &twin_output, &scratch, &function, seed, p))
+        if (!x87->overflow && ir_lower_test_lower_unfolded(tally, &long_double, IR_VOID, 1, &output, &twin_output, &scratch, &function, seed, p))
         {
             ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, seed, p);
             long double in[BUSTER_TIER0_TEST_X87_IN];
@@ -5372,7 +5505,7 @@ static int run_ir_lower_tests(int argc, char** argv)
     {
         IrLowerTestTally tally =
         {
-            0
+            .lowered = UINT64_C(0xcbf29ce484222325),
         };
         ir_simd_lower_tests(&tally);
         ir_lower_test_fixtures(&tally);
@@ -5432,6 +5565,11 @@ static int run_ir_lower_tests(int argc, char** argv)
         dynamic.floating = false;
         ir_lower_test_programs(&tally, seed, count, dynamic, false, "dynamic stack (strict shared IR / Tier 0 native)");
         ir_lower_test_wide(&tally, seed, 4 * count);
+        printf("test-ir-lowering: lowered digest 0x%016" PRIx64 "\n", tally.lowered);
+        if (seed == 131 && count == 32)
+        {
+            ir_lower_test_expect(&tally, tally.lowered == BUSTER_IR_LOWER_TEST_DIGEST, "the lowered functions' digest is the frozen one", seed, 0);
+        }
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
         result = tally.failures != 0;
     }
