@@ -76,7 +76,7 @@ jobs:
             mapfile -d '' -t flags < "$report/flags.nul"
             /usr/bin/time -o "$report/$unit.time" -f '%e\t%U\t%S\t%M\t%x' \
               timeout 25m clang "${flags[@]}" --analyze -Xanalyzer -analyzer-output=text \
-              -Xclang -analyzer-werror -fno-color-diagnostics "$source" > "$report/$unit.log" 2>&1 || status=$?
+              -Xclang -analyzer-werror -ferror-limit=0 -fno-color-diagnostics "$source" > "$report/$unit.log" 2>&1 || status=$?
             printf '%s\t%s\t%s\n' "$source" "$status" "$(tail -n 1 "$report/$unit.time")"
             if (( status != 0 )); then
               tail -n 25 "$report/$unit.log" >&2
@@ -86,7 +86,7 @@ jobs:
           export -f analyze
           printf 'unit\tstatus\twall_seconds\tuser_seconds\tsystem_seconds\tpeak_rss_KiB\ttime_exit\n' > "$report/units.tsv"
           status=0
-          /usr/bin/time -o "$report/sweep.time" -f '%e' bash -o pipefail -c '
+          /usr/bin/time -q -o "$report/sweep.time" -f '%e' bash -o pipefail -c '
             tr "\n" "\0" < "$report/order.txt" |
               xargs -0 -r -n 1 -P "$1" bash -c '\''analyze "$1"'\'' _
           ' _ "$workers" | tee -a "$report/units.tsv" || status=$?
