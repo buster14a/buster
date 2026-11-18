@@ -98,6 +98,21 @@ static void ir_if_convert_test_compare(IrOptimizeTest* test, const IrFunction* f
         {
             ir_optimize_test_expect(test, v.regions == regions && v.selects == selects && s.regions == regions && s.selects == selects, "if-conversion bounded admission and select count");
             ir_optimize_test_expect(test, ir_optimize_test_equal(&v.function, &s.function), "if-conversion scalar/vector exact columns and side tables");
+            ir_optimize_test_fold_function(&test->if_convert_digest, &v.function);
+            const uint64_t counts[] = {
+                v.regions,
+                v.selects,
+                v.folded,
+                v.reused,
+                v.loads,
+                v.sunk,
+                v.recurrences,
+                v.rounds,
+            };
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(counts); k += 1)
+            {
+                ir_optimize_test_fold(&test->if_convert_digest, counts[k]);
+            }
             ir_optimize_test_expect(test, ir_verify_complete(&v.function, scratch).error == IR_OK && ir_verify_complete(&s.function, scratch).error == IR_OK,
                                     "if-conversion preserves complete SSA, including unreachable arm stubs");
             if (regions == 0)
@@ -530,8 +545,89 @@ static void ir_if_convert_test_guards(IrOptimizeTest* test)
                             "if-conversion empty and invalid mask counts do not access columns");
 }
 
+// #2924: the conditional branches' scan, the barriers' and the keys' filter against their definitions, on random columns:
+// every count of a batch at several offsets, ranges longer than a batch, and keys of every field set.
+static void ir_if_convert_test_scans(IrOptimizeTest* test)
+{
+    IrOptimizeTestScan scan;
+    bool candidates = true;
+    bool barriers = true;
+    bool filters = true;
+    for (uint32_t round = 0; round < 48; round += 1)
+    {
+        ir_optimize_test_scan_fill(test, &scan);
+        const IrFunction* f = &scan.function;
+        for (uint32_t count = 0; count <= BUSTER_IR_IF_CONVERT_BATCH; count += 1)
+        {
+            const uint32_t start = round * 3 % (BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS - BUSTER_IR_IF_CONVERT_BATCH);
+            uint64_t expected = 0;
+            for (uint32_t lane = 0; lane < count; lane += 1)
+            {
+                expected |= (uint64_t)(f->op[start + lane] == IR_CBR) << lane;
+            }
+            candidates &= ir_if_convert_candidates(f->op + start, count, false) == expected;
+            uint64_t truncations = 0;
+            for (uint32_t lane = 0; lane < count; lane += 1)
+            {
+                truncations |= (uint64_t)(f->op[start + lane] == IR_TRUNC) << lane;
+            }
+            candidates &= count == 0 || ir_if_convert_truncations(f->op + start, count) == truncations;
+        }
+        for (uint32_t first = round % 7; first < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; first += 23)
+        {
+            for (uint32_t end = first; end <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; end += 1 + (end - first) / 4)
+            {
+                for (uint32_t classes = 1; classes <= 3; classes += 1)
+                {
+                    uint32_t expected = BUSTER_IR_NONE;
+                    for (uint32_t row = first; row < end; row += 1)
+                    {
+                        const bool observable = f->op[row] == IR_LOAD && (f->flags[row] & BUSTER_IR_OBSERVABLE) != 0 && (classes & BUSTER_IR_IF_CONVERT_WRITE) != 0;
+                        expected = (ir_if_convert_barriers[f->op[row]] & classes) != 0 || observable ? row : expected;
+                    }
+                    barriers &= ir_if_convert_barrier(f, first, end, classes, false) == expected;
+                }
+            }
+        }
+        for (uint32_t count = 1; count <= BUSTER_IR_IF_CONVERT_LANES; count += 1)
+        {
+            const uint32_t first = (round * 17 + count) % (BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS - BUSTER_IR_IF_CONVERT_LANES);
+            for (uint32_t fields = 0; fields < 32; fields += 1)
+            {
+                const uint32_t model = first + (round + fields) % count;
+                const IrIfConvertKey key = {
+                    .a = f->a[model],
+                    .b = f->b[model],
+                    .c = f->c[model],
+                    .fields = fields,
+                    .op = f->op[model],
+                    .type = f->type[model],
+                    .flags = f->flags[model],
+                };
+                uint32_t expected = 0;
+                for (uint32_t lane = 0; lane < count; lane += 1)
+                {
+                    const uint32_t row = first + lane;
+                    bool match = f->op[row] == key.op;
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) == 0 || f->type[row] == key.type);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) == 0 || f->flags[row] == key.flags);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_A) == 0 || f->a[row] == key.a);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_B) == 0 || f->b[row] == key.b);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_C) == 0 || f->c[row] == key.c);
+                    expected |= (uint32_t)match << lane;
+                }
+                filters &= ir_if_convert_filter(f, first, count, key, false) == expected;
+            }
+        }
+    }
+    ir_optimize_test_expect(test, candidates, "if-conversion's conditional branches' and narrowing casts' scans, against their definitions");
+    ir_optimize_test_expect(test, barriers, "if-conversion's barriers' scan, against its definition");
+    ir_optimize_test_expect(test, filters, "if-conversion's keys' filter, against its definition");
+}
+
 static void ir_if_convert_tests(IrOptimizeTest* test)
 {
+    ir_if_convert_test_scans(test);
     Arena input = arena_reserve(4ull << 20);
     Arena vector = arena_reserve(4ull << 20);
     Arena scalar = arena_reserve(4ull << 20);

@@ -548,6 +548,11 @@ static void tier1_sink_ir_test_fixture(IrOptimizeTest* test, const Tier1SinkIrTe
         }
         snprintf(message, sizeof(message), "operand sink %s: scalar/vector exact columns and side tables", fixture->name);
         ir_optimize_test_expect(test, ir_optimize_test_equal(&vector, &scalar), message);
+        ir_optimize_test_fold_function(&test->sink_digest, &vector);
+        ir_optimize_test_fold(&test->sink_digest, v.trees);
+        ir_optimize_test_fold(&test->sink_digest, v.moved);
+        // The order is written only when an expression moved.
+        ir_optimize_test_fold_bytes(&test->sink_digest, vector_order, v.trees != 0 ? (uint64_t)n * 4 : 0);
         snprintf(message, sizeof(message), "operand sink %s: the order passes the preallocation schedule's reference", fixture->name);
         ir_optimize_test_expect(test, v.trees == 0 || (tier1_schedule_ir_verify(&original, &vector, vector_order, place) && memcmp(vector_order, scalar_order, (uint64_t)n * sizeof(uint32_t)) == 0), message);
         snprintf(message, sizeof(message), "operand sink %s: a refusal leaves every instruction in place", fixture->name);
@@ -578,8 +583,67 @@ static void tier1_sink_ir_test_fixture(IrOptimizeTest* test, const Tier1SinkIrTe
     arena_pop_to(input, im);
 }
 
+// #2924: the classification and the readers' scan against their definitions, on random columns of every length to 200
+// (the classification) and every range of up to 64 rows at several places (the readers).
+static void tier1_sink_ir_test_scans(IrOptimizeTest* test)
+{
+    IrOptimizeTestScan scan;
+    uint64_t pure[4];
+    uint64_t barriers[4];
+    uint64_t phis[4];
+    bool classified = true;
+    bool readers = true;
+    for (uint32_t round = 0; round < 32; round += 1)
+    {
+        ir_optimize_test_scan_fill(test, &scan);
+        IrFunction f = scan.function;
+        for (uint32_t length = round; length <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; length += 33)
+        {
+            f.instruction_count = length;
+            memset(pure, 0xa5, sizeof(pure));
+            memset(barriers, 0xa5, sizeof(barriers));
+            memset(phis, 0xa5, sizeof(phis));
+            tier1_sink_ir_classify(&f, pure, barriers, phis, false);
+            for (uint32_t word = 0; word * 64 < length; word += 1)
+            {
+                uint64_t member = 0;
+                uint64_t cut = 0;
+                uint64_t join = 0;
+                for (uint32_t i = word * 64; i < length && i < word * 64 + 64; i += 1)
+                {
+                    member |= (uint64_t)(tier1_sink_ir_operations[f.op[i]] != 0 && tier1_sink_ir_types[f.type[i]] != 0) << (i % 64);
+                    cut |= (uint64_t)tier1_schedule_ir_barrier(&f, i) << (i % 64);
+                    join |= (uint64_t)(f.op[i] == IR_PHI) << (i % 64);
+                }
+                classified &= pure[word] == member && barriers[word] == cut && phis[word] == join;
+            }
+        }
+        f.instruction_count = BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS;
+        for (uint32_t from = round % 11; from < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; from += 29)
+        {
+            for (uint32_t to = from; to <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS && to - from <= 64; to += 1)
+            {
+                for (uint32_t value = 0; value < 4; value += 1)
+                {
+                    uint64_t expected = 0;
+                    for (uint32_t j = from; j < to; j += 1)
+                    {
+                        const uint32_t mask = ir_value_mask(&f, j);
+                        const bool reads = ((mask & 1) != 0 && f.a[j] == value) || ((mask & 2) != 0 && f.b[j] == value) || ((mask & 4) != 0 && f.c[j] == value);
+                        expected |= (uint64_t)reads << (j - from);
+                    }
+                    readers &= tier1_sink_ir_readers(&f, from, to, value, false) == expected;
+                }
+            }
+        }
+    }
+    ir_optimize_test_expect(test, classified, "the operand sink's classification, against its definition");
+    ir_optimize_test_expect(test, readers, "the operand sink's readers' scan, against its definition");
+}
+
 static void tier1_sink_ir_tests(IrOptimizeTest* test)
 {
+    tier1_sink_ir_test_scans(test);
     Arena input = arena_reserve(4ull << 20);
     Arena copies = arena_reserve(4ull << 20);
     Arena scratch = arena_reserve(16ull << 20);

@@ -164,6 +164,15 @@ static bool ir_truth_rewrite_value(IrFunction* function, uint32_t root)
     return changed;
 }
 
+// The comparisons of an i1 result among `lanes` (1 to 64) rows of `operations` and `types`, a bit each.
+static uint64_t ir_truth_candidates(const uint8_t* operations, const uint8_t* types, uint32_t lanes)
+{
+    const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_TRUTH_BATCH - lanes);
+    const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
+    const __m512i type = _mm512_maskz_loadu_epi8(valid, types);
+    return valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_ICMP)) & _mm512_cmpeq_epi8_mask(type, _mm512_set1_epi8(IR_I1));
+}
+
 static uint32_t ir_truth_simplify_rules(IrFunction* function, bool scalar, bool values)
 {
     const uint32_t count = function->instruction_count;
@@ -176,10 +185,7 @@ static uint32_t ir_truth_simplify_rules(IrFunction* function, bool scalar, bool 
         uint64_t candidates = 0;
         if (!scalar)
         {
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_TRUTH_BATCH - lanes);
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, operations + first);
-            const __m512i type = _mm512_maskz_loadu_epi8(valid, types + first);
-            candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_ICMP)) & _mm512_cmpeq_epi8_mask(type, _mm512_set1_epi8(IR_I1));
+            candidates = ir_truth_candidates(operations + first, types + first, lanes);
         }
         else
         {

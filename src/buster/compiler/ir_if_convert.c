@@ -1254,6 +1254,14 @@ static bool ir_if_convert_fold_cast(IrFunction* function, uint32_t row)
     return operation != IR_OP_COUNT;
 }
 
+// The narrowing casts among `lanes` (1 to 64) operations, a bit each.
+static uint64_t ir_if_convert_truncations(const uint8_t* operations, uint32_t lanes)
+{
+    const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - lanes);
+    const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
+    return valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_TRUNC));
+}
+
 static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
 {
     const uint32_t count = function->instruction_count;
@@ -1264,9 +1272,7 @@ static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
         uint64_t candidates = 0;
         if (!scalar)
         {
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - lanes);
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, operations + first);
-            candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_TRUNC));
+            candidates = ir_if_convert_truncations(operations + first, lanes);
         }
         else
         {

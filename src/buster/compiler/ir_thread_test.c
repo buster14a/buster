@@ -415,6 +415,11 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
                                     message);
             snprintf(message, sizeof(message), "threading %s: scalar/vector exact columns and side tables", fixture->name);
             ir_optimize_test_expect(test, ir_optimize_test_equal(&v.function, &s.function), message);
+            ir_optimize_test_fold_function(&test->thread_digest, &v.function);
+            ir_optimize_test_fold(&test->thread_digest, v.blocks);
+            ir_optimize_test_fold(&test->thread_digest, v.copies);
+            ir_optimize_test_fold(&test->thread_digest, v.redirects);
+            ir_optimize_test_fold(&test->thread_digest, v.rounds);
             snprintf(message, sizeof(message), "threading %s: the result is complete SSA", fixture->name);
             const IrCheck complete = ir_verify_complete(&v.function, scratch);
             ir_optimize_test_expect(test, complete.error == IR_OK && ir_verify_complete(&s.function, scratch).error == IR_OK, message);
@@ -466,8 +471,135 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
     arena_pop_to(input, im);
 }
 
+// #2924: the conditional branches' scan against its definition, every count of a batch at several offsets.
+static void ir_thread_test_scans(IrOptimizeTest* test)
+{
+    IrOptimizeTestScan scan;
+    bool agreed = true;
+    for (uint32_t round = 0; round < 32; round += 1)
+    {
+        ir_optimize_test_scan_fill(test, &scan);
+        for (uint32_t count = 0; count <= BUSTER_IR_THREAD_BATCH; count += 1)
+        {
+            const uint32_t start = round * 5 % (BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS - BUSTER_IR_THREAD_BATCH);
+            uint64_t expected = 0;
+            for (uint32_t lane = 0; lane < count; lane += 1)
+            {
+                expected |= (uint64_t)(scan.op[start + lane] == IR_CBR) << lane;
+            }
+            agreed &= ir_thread_candidates(scan.op + start, count, false) == expected;
+            uint64_t comparisons = 0;
+            for (uint32_t lane = 0; lane < count; lane += 1)
+            {
+                comparisons |= (uint64_t)(scan.op[start + lane] == IR_ICMP && scan.type[start + lane] == IR_I1) << lane;
+            }
+            agreed &= count == 0 || ir_truth_candidates(scan.op + start, scan.type + start, count) == comparisons;
+        }
+    }
+    ir_optimize_test_expect(test, agreed, "threading's conditional branches' scan and truth simplification's comparisons', against their definitions");
+    // The escapes' scan: rows without phis or calls (whose operands the shared walk of the extra array takes), with
+    // ternary and binary intrinsics and scatters among them; their fixed operands valid values, their optional ones
+    // absent or not, their other columns any word; blocks of 1 to 13 rows, some of them candidates.
+    uint32_t a[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t b[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t c[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t extra[2 * BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t blocks[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t candidates[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t escapes[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t expected[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    bool escaped = true;
+    uint64_t found = 0;
+    for (uint32_t round = 0; round < 64; round += 1)
+    {
+        ir_optimize_test_scan_fill(test, &scan);
+        const uint32_t count = 1 + round * 37 % BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS;
+        uint32_t block = 0;
+        uint32_t left = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint64_t r = ir_optimize_test_random(test);
+            const uint32_t op = scan.op[i];
+            const uint32_t extra_kind = (uint32_t)(r >> 52) % 8;
+            scan.op[i] = extra_kind == 0 ? IR_INTRINSIC : extra_kind == 1 ? IR_SCATTER : op == IR_PHI || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_INTRINSIC ? IR_ADD : (uint8_t)op;
+            if (left == 0)
+            {
+                block += i != 0;
+                left = 1 + (uint32_t)(r % 13);
+                candidates[block] = (r >> 8) % 3 != 0;
+            }
+            left -= 1;
+            blocks[i] = block;
+            uint32_t* const columns[3] = { a, b, c };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                const uint64_t pick = r >> (16 + k * 12);
+                const bool fixed = (ir_operand_table[scan.op[i]] >> k & 1) != 0;
+                const bool optional = (ir_optional_table[scan.op[i]] >> k & 1) != 0;
+                columns[k][i] = fixed || (optional && (pick & 1) != 0) ? (uint32_t)(pick >> 1) % count : optional ? BUSTER_IR_NONE : (uint32_t)(pick >> 1) | UINT32_C(0x40000000);
+            }
+            // A ternary intrinsic's third operand, or an intrinsic of two, and a scatter's stored vector and mask, in the
+            // extra array at c's index.
+            if (scan.op[i] == IR_INTRINSIC || scan.op[i] == IR_SCATTER)
+            {
+                const uint32_t kind = scan.op[i] == IR_SCATTER ? 0 : (r >> 60) != 0 ? BUSTER_IR_INTRINSIC_TERNLOG : 0;
+                c[i] = kind | 2 * i << BUSTER_IR_INTRINSIC_EXTRA_SHIFT;
+                extra[2 * i] = (uint32_t)(r >> 20) % count;
+                extra[2 * i + 1] = (uint32_t)(r >> 36) % count;
+            }
+        }
+        const IrFunction f = {
+            .op = scan.op,
+            .type = scan.type,
+            .flags = scan.flags,
+            .a = a,
+            .b = b,
+            .c = c,
+            .extra = extra,
+            .instruction_count = count,
+            .extra_count = 2 * count,
+        };
+        IrThreadWork work = {
+            .function = &f,
+            .candidates = candidates,
+            .escapes = escapes,
+        };
+        work.cfg.instruction_blocks = blocks;
+        memset(escapes, 0, sizeof(escapes));
+        memset(expected, 0, sizeof(expected));
+        ir_thread_escapes(&work, false);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t mask = ir_value_mask(&f, i);
+            const uint32_t operands[3] = { a[i], b[i], c[i] };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                if ((mask >> k & 1) != 0 && candidates[blocks[operands[k]]] != 0 && blocks[operands[k]] != blocks[i])
+                {
+                    expected[operands[k]] = 1;
+                }
+            }
+            for (uint32_t k = 0; k < ir_extra_value_count(&f, i); k += 1)
+            {
+                const uint32_t value = ir_extra_value(&f, i, k);
+                if (candidates[blocks[value]] != 0 && blocks[value] != blocks[i])
+                {
+                    expected[value] = 1;
+                }
+            }
+        }
+        escaped &= memcmp(escapes, expected, sizeof(escapes)) == 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            found += expected[i];
+        }
+    }
+    ir_optimize_test_expect(test, escaped && found != 0, "threading's escapes' scan, against its definition");
+}
+
 static void ir_thread_tests(IrOptimizeTest* test)
 {
+    ir_thread_test_scans(test);
     Arena input = arena_reserve(4ull << 20);
     Arena vector = arena_reserve(4ull << 20);
     Arena scalar = arena_reserve(4ull << 20);
