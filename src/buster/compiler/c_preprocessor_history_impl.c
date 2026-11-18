@@ -968,21 +968,17 @@ static uint32_t pp_diagnostic_token_length(Preprocessor* pp, uint32_t token)
 
 // Adds output tokens [first, last] as a highlighted range of the next diagnostic (#2376), clang's token range: a caller
 // sets them before it and clears them after it (pp_diagnostic_ranges_clear), as diagnostic_spans. Beyond
-// BUSTER_PP_DIAGNOSTIC_RANGES ranges, or for tokens not in the output, nothing.
+// BUSTER_PP_DIAGNOSTIC_RANGES ranges, nothing. They stay tokens until the diagnostic is accepted
+// (pp_diagnostic_resolve_ranges).
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_tokens(Preprocessor* pp, uint32_t first, uint32_t last)
 {
-    pp_history_ensure(pp);
-    pp_output_ensure(pp);
-    const uint32_t count = pp->output.count;
-    if (pp->diagnostic_range_count < BUSTER_PP_DIAGNOSTIC_RANGES && first <= last && last < count)
+    if (pp->diagnostic_range_count < BUSTER_PP_DIAGNOSTIC_RANGES && first <= last)
     {
         pp->diagnostic_ranges[pp->diagnostic_range_count] = (PPDiagnosticRange)
         {
-            .begin = pp->output.locations[first],
-            .begin_origin = pp_history_at(pp, first),
-            .end = pp->output.locations[last],
-            .end_origin = pp_history_at(pp, last),
-            .end_length = pp_diagnostic_token_length(pp, last),
+            .begin = first,
+            .end = last,
+            .pending = PP_RANGE_TOKENS,
         };
         pp->diagnostic_range_count += 1;
     }
@@ -1011,22 +1007,61 @@ static uint32_t pp_spelling_offset_location(Preprocessor* pp, uint32_t location,
 // range inside a literal.
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_offsets(Preprocessor* pp, uint32_t token, uint32_t offset, uint32_t length)
 {
-    pp_history_ensure(pp);
-    pp_output_ensure(pp);
-    if (pp->diagnostic_range_count < BUSTER_PP_DIAGNOSTIC_RANGES && token < pp->output.count && length != 0)
+    if (pp->diagnostic_range_count < BUSTER_PP_DIAGNOSTIC_RANGES && length != 0)
     {
-        const uint32_t base = pp->output.locations[token];
-        const uint32_t origin = pp_history_at(pp, token);
         pp->diagnostic_ranges[pp->diagnostic_range_count] = (PPDiagnosticRange)
         {
-            .begin = pp_spelling_offset_location(pp, base, offset),
-            .begin_origin = origin,
-            .end = pp_spelling_offset_location(pp, base, offset + length - 1),
-            .end_origin = origin,
-            .end_length = 1,
+            .begin = token,
+            .end = offset,
+            .end_length = length,
+            .pending = PP_RANGE_OFFSETS,
         };
         pp->diagnostic_range_count += 1;
     }
+}
+
+// The pending ranges of an accepted diagnostic as places (PPDiagnosticRange.pending): tokens' and offsets' from the
+// output and its history, which an output diagnostic's path (pp_diagnose_source_location) has ensured; `resolve` false
+// keeps the places alone, as the lexical paths and the collection do, which mustn't ask for the history (its replay
+// reports through them). A range of tokens not in the output is dropped.
+static void pp_diagnostic_resolve_ranges(Preprocessor* pp, bool resolve)
+{
+    const uint32_t count = resolve ? pp->output.count : 0;
+    uint32_t kept = 0;
+    for (uint32_t r = 0; r < pp->diagnostic_range_count; r += 1)
+    {
+        PPDiagnosticRange range = pp->diagnostic_ranges[r];
+        bool valid = true;
+        if (range.pending == PP_RANGE_TOKENS)
+        {
+            valid = range.end < count;
+            range = valid ? (PPDiagnosticRange)
+                            {
+                                .begin = pp->output.locations[range.begin],
+                                .begin_origin = pp_history_at(pp, range.begin),
+                                .end = pp->output.locations[range.end],
+                                .end_origin = pp_history_at(pp, range.end),
+                                .end_length = pp_diagnostic_token_length(pp, range.end),
+                            } : range;
+        }
+        else if (range.pending == PP_RANGE_OFFSETS)
+        {
+            valid = range.begin < count;
+            const uint32_t base = valid ? pp->output.locations[range.begin] : 0;
+            const uint32_t origin = valid ? pp_history_at(pp, range.begin) : 0;
+            range = valid ? (PPDiagnosticRange)
+                            {
+                                .begin = pp_spelling_offset_location(pp, base, range.end),
+                                .begin_origin = origin,
+                                .end = pp_spelling_offset_location(pp, base, range.end + range.end_length - 1),
+                                .end_origin = origin,
+                                .end_length = 1,
+                            } : range;
+        }
+        pp->diagnostic_ranges[kept] = range;
+        kept += valid ? 1 : 0;
+    }
+    pp->diagnostic_range_count = kept;
 }
 
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_ranges_clear(Preprocessor* pp)
@@ -1253,6 +1288,7 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
         valid = placed_notes[i].message != NULL && !__builtin_add_overflow(bytes, (uint64_t)strlen(placed_notes[i].message) + 1u, &bytes);
     }
     bytes = valid ? bytes : 0;
+    pp_diagnostic_resolve_ranges(pp, false);
     PPDiagnosticRecord* record = bytes != 0 && !pp->diagnostic_collection_failed ? arena_push(&pp->arena, bytes, _Alignof(PPDiagnosticRecord)) : NULL;
     if (record != NULL)
     {
@@ -1490,6 +1526,7 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
         }
         else
         {
+            pp_diagnostic_resolve_ranges(pp, false);
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, note, format, arguments);
@@ -1518,6 +1555,8 @@ static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, u
     // The notes' places are the output's (pp_release_output).
     pp_output_ensure(pp);
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
+    // Its ranges' tokens are the output's too (#2376); its callers have ensured the history.
+    pp_diagnostic_resolve_ranges(pp, true);
     severity = always ? PP_SEVERITY_WARNING : severity;
     const PPSeverity requested = severity;
     const bool visible = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, origin);
@@ -1758,6 +1797,7 @@ static __attribute__((format(printf, 6, 7))) void pp_diagnose_notes(Preprocessor
         }
         else
         {
+            pp_diagnostic_resolve_ranges(pp, false);
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);

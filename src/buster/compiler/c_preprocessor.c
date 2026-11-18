@@ -1495,7 +1495,17 @@ struct PPDiagnosticSourceNote
 
 // A diagnostic's highlighted range (#2376), clang's token range: its first token's place and history, and its last
 // token's, which it ends `end_length` bytes after (that token's spelling's bytes in the source). A range of characters
-// has its first character's place as both, and its length.
+// has its first character's place as both, and its length. A pending range (Preprocessor.diagnostic_ranges) can name
+// output tokens instead (`pending`): PP_RANGE_TOKENS, `begin` and `end` the first and last; PP_RANGE_OFFSETS, `begin`
+// the token, `end` the offset in its spelling and `end_length` the characters. pp_diagnostic_resolve_ranges makes them
+// places once a diagnostic is accepted, so that a range of one that isn't asks for no history.
+typedef enum PPRangePending
+{
+    PP_RANGE_PLACES,
+    PP_RANGE_TOKENS,
+    PP_RANGE_OFFSETS,
+} PPRangePending;
+
 typedef struct PPDiagnosticRange PPDiagnosticRange;
 struct PPDiagnosticRange
 {
@@ -1504,6 +1514,7 @@ struct PPDiagnosticRange
     uint32_t end;
     uint32_t end_origin;
     uint32_t end_length;
+    uint32_t pending;
 };
 
 // The highlighted ranges a diagnostic keeps at most (clang's diagnostics give one to three).

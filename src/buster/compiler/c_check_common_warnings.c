@@ -1172,6 +1172,27 @@ static void check_common_shift_report(Preprocessor* pp, CheckCommonShiftWarning*
     }
 }
 
+// Whether a warning is stashed at this operator (check_common_shift_replay's search alone).
+static bool check_common_shift_stashed(const CheckCommonShiftWarnings* shifts, uint32_t token)
+{
+    uint32_t first = 0;
+    uint32_t last = shifts != NULL ? shifts->count : 0;
+    const uint32_t count = last;
+    while (first < last)
+    {
+        const uint32_t middle = first + (last - first) / 2;
+        const bool before = shifts->records[middle].token < token;
+        first = before ? middle + 1 : first;
+        last = before ? last : middle;
+    }
+    bool result = false;
+    for (uint32_t i = first; i < count && shifts->records[i].token == token; i += 1)
+    {
+        result |= shifts->records[i].message != NULL;
+    }
+    return result;
+}
+
 // The stashed warnings at this operator, reported where the arithmetic walk places them among its new runtime
 // diagnostics: whether it has any.
 static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings* shifts, uint32_t token)
@@ -1995,7 +2016,7 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
     const bool emitted = (emission->emitted[node] & BUSTER_CHECK_EMITTED_SHIFT_COUNT) != 0;
     // A stashed warning's count highlighted (#2376), as a new one's below.
-    if (!emitted && right < graph->count)
+    if (!emitted && right < graph->count && check_common_shift_stashed(emission->shifts, token))
     {
         check_semantic_range(emission->parser, emission->pp, graph->tokens[right], true);
     }

@@ -7,6 +7,7 @@
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
+static void pp_diagnostic_resolve_ranges(Preprocessor* pp, bool resolve);
 static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const PPDiagnosticSourceNote* placed_notes, uint32_t placed_note_count, const char* format, va_list arguments);
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
@@ -136,6 +137,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         }
         else
         {
+            pp_diagnostic_resolve_ranges(pp, false);
             pp->render_ranges = pp->diagnostic_ranges;
             pp->render_range_count = pp->diagnostic_range_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
