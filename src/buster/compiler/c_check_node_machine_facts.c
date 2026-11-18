@@ -117,6 +117,22 @@
 // (BUSTER_NODE_MACHINE_WIDE), which whatever makes the windows without T reads here (node_facts_front_expression).
 #define BUSTER_NODE_FACTS_HIGH 0x04u
 
+// What a record's `exponent` says where its payload is no floating value's: the payload and one, 0xffff for a payload
+// past 0xfffd; 0 says none. The census's tests on the window read an integer constant's value there, with its standing,
+// where they would gather its payload (c_check_node_census.c's node_tests_window_bytes): of a constant whose type is an
+// integer's of 64 bits at most, whose payload is its value. T's own record says none (node_facts_expected), and so does
+// a record made as no constant's (node_facts_record).
+static inline __attribute__((always_inline)) uint32_t node_facts_small(uint64_t payload)
+{
+    return (uint32_t)(payload < 0xffffu ? payload : 0xfffeu) + 1u;
+}
+
+// A record's exponent: a floating value's (`exponent`, its operand's), or what its payload says.
+static inline __attribute__((always_inline)) uint32_t node_facts_exponent(uint32_t standing, uint64_t payload, uint32_t exponent)
+{
+    return (standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING ? exponent : node_facts_small(payload);
+}
+
 // A row's `function` field: whether the type is a function or a pointer to one, whether it is the function itself (a
 // designator's type), and whether its return type is void or complete somewhere in the unit; then its
 // BUSTER_TYPE_FLAG_* in bits 8 to 15 and its parameter count from bit 16.
@@ -806,6 +822,7 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
         .payload = enumerator ? (uint64_t)value : 0,
         .standing = BUSTER_NODE_MACHINE_STANDING(category, enumerator ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS),
         .taken = 1,
+        .exponent = (uint16_t)(enumerator ? node_facts_small((uint64_t)value) : 0),
         .unfit = ((bits & BUSTER_CHECK_BITS_REGISTER) != 0 ? BUSTER_NODE_FACTS_REGISTER : 0) | (wide ? BUSTER_NODE_FACTS_WIDE : 0) |
                  (valued && (uint64_t)(value >> 64) != 0 ? BUSTER_NODE_FACTS_HIGH : 0),
     };
@@ -889,7 +906,7 @@ static uint32_t node_facts_literal(NodeFacts* facts, uint32_t r)
         .payload = columns->payloads[r],
         .standing = standing,
         .taken = 1,
-        .exponent = (standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING ? columns->exponents[r] : 0,
+        .exponent = (uint16_t)node_facts_exponent(standing, columns->payloads[r], columns->exponents[r]),
     };
     const bool own = facts->literal_capacity != 0;
     const uint32_t number = own ? (facts->literal_count < facts->literal_capacity ? facts->literal_count + 1 : 0) :
@@ -1072,18 +1089,20 @@ static void node_facts_append(NodeFacts* facts, uint32_t body)
     }
 }
 
-// T's record of the unit's record `at`, as a line.
+// T's record of the unit's record `at`, as a line: with a floating value's exponent, and else an exponent that says
+// none (node_facts_small): T's columns don't hold what a payload says.
 static inline NodeFactsRecord node_facts_expected(const NodeFacts* facts, uint64_t at)
 {
+    const uint8_t standing = facts->expected_standings[at];
     return (NodeFactsRecord){
         .type = facts->expected_types[at],
         .word = facts->expected_words[at],
         .flags = facts->expected_flags[at],
         .object = facts->expected_objects[at],
         .payload = facts->expected_payloads[at],
-        .standing = facts->expected_standings[at],
+        .standing = standing,
         .taken = 1,
-        .exponent = facts->expected_exponents[at],
+        .exponent = (standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING ? facts->expected_exponents[at] : 0,
         .converted = { facts->expected_converted[2 * at], facts->expected_converted[2 * at + 1] },
         .conversion_flags = { facts->expected_conversion_flags[2 * at], facts->expected_conversion_flags[2 * at + 1] },
         .member_offset = facts->expected_member_offsets[at],
@@ -1165,6 +1184,18 @@ static inline __attribute__((always_inline)) void node_facts_record(NodeFactsRec
     node_facts_store(record, 8, (uint64_t)flags | (uint64_t)object << 32);
     node_facts_store(record, 16, payload);
     node_facts_store(record, 24, (uint64_t)standing | 0x100u);
+}
+
+// The same of a record that may be an integer constant (a fold's, a truth's, a size's): its exponent says its payload
+// (node_facts_small).
+static inline __attribute__((always_inline)) void node_facts_record_integer(NodeFactsRecord* records, uint32_t w, TypeId type, uint32_t word, uint8_t standing, uint32_t flags,
+                                                                             uint32_t object, uint64_t payload)
+{
+    NodeFactsRecord* record = records + w;
+    node_facts_store(record, 0, (uint64_t)type | (uint64_t)word << 32);
+    node_facts_store(record, 8, (uint64_t)flags | (uint64_t)object << 32);
+    node_facts_store(record, 16, payload);
+    node_facts_store(record, 24, (uint64_t)standing | 0x100u | (uint64_t)node_facts_small(payload) << 16);
 }
 
 static inline __attribute__((always_inline)) void node_facts_conversions(NodeFactsRecord* records, uint32_t w, TypeId first, uint32_t first_flags, TypeId second,
@@ -1394,9 +1425,10 @@ static inline __attribute__((always_inline)) void node_facts_from(NodeFactsRecor
     node_facts_store(record, 24, (uint64_t)standing | 0x100u | (uint64_t)records[a].exponent << 16);
 }
 
-// Record `w`'s value: record `a`'s object and exponent with the type, standing (its category, constant kind and
-// payload's field), flags and payload given: node_machine_record_from's with an integer replaced, and a value's that
-// node_machine_put_value writes from record `a`'s made whole.
+// Record `w`'s value: record `a`'s object with the type, standing (its category, constant kind and payload's field),
+// flags and payload given: node_machine_record_from's with an integer replaced, and a value's that
+// node_machine_put_value writes from record `a`'s made whole. Its exponent is record `a`'s where the payload is a
+// floating value's, and else says the payload given (node_facts_small).
 static inline __attribute__((always_inline)) void node_facts_from_with(NodeFactsRecord* records, uint32_t w, uint32_t a, TypeId type, uint32_t word, uint8_t standing,
                                                                         uint32_t flags, uint64_t payload)
 {
@@ -1404,7 +1436,7 @@ static inline __attribute__((always_inline)) void node_facts_from_with(NodeFacts
     node_facts_store(record, 0, (uint64_t)type | (uint64_t)word << 32);
     node_facts_store(record, 8, (uint64_t)flags | (uint64_t)records[a].object << 32);
     node_facts_store(record, 16, payload);
-    node_facts_store(record, 24, (uint64_t)standing | 0x100u | (uint64_t)records[a].exponent << 16);
+    node_facts_store(record, 24, (uint64_t)standing | 0x100u | (uint64_t)node_facts_exponent(standing, payload, records[a].exponent) << 16);
 }
 
 // A dereference `w` of record `a`, node_machine_dereference's steps.
@@ -1741,7 +1773,7 @@ static inline __attribute__((always_inline)) bool node_facts_fold(NodeFactsRecor
             const bool ice = (flags_a & BUSTER_CHECK_ICE) != 0 && (flags_b & BUSTER_CHECK_ICE) != 0;
             const bool gnu_ice = !ice && (flags_a & forms) != 0 && (flags_b & forms) != 0;
             const uint32_t flags = ((flags_a | flags_b) & BUSTER_CHECK_INHERITED) | (ice ? BUSTER_CHECK_ICE : gnu_ice ? BUSTER_CHECK_GNU_ICE_FORM : 0);
-            node_facts_record(records, w, BUSTER_TYPE_BUILTIN(row->result), view->rows[row->result].word, constant, node_facts_source(flags), 0, answer);
+            node_facts_record_integer(records, w, BUSTER_TYPE_BUILTIN(row->result), view->rows[row->result].word, constant, node_facts_source(flags), 0, answer);
             node_facts_conversions(records, w, BUSTER_TYPE_BUILTIN(row->converted[0]), row->conversion_flags[0], unary ? 0 : BUSTER_TYPE_BUILTIN(row->converted[1]),
                                    unary ? 0 : row->conversion_flags[1], 0);
         }
@@ -1821,8 +1853,8 @@ static inline __attribute__((always_inline)) bool node_facts_truth(NodeFactsReco
         const uint32_t forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
         const uint32_t flags = (operand.flags & BUSTER_CHECK_INHERITED) |
                                ((operand.flags & BUSTER_CHECK_ICE) != 0 ? BUSTER_CHECK_ICE : (operand.flags & forms) != 0 ? BUSTER_CHECK_GNU_ICE_FORM : 0);
-        node_facts_record(records, w, BUSTER_TYPE_INT, view->int_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE),
-                          node_facts_source(flags), 0, known ? (uint64_t)(negated ? !truth : truth) : 0);
+        node_facts_record_integer(records, w, BUSTER_TYPE_INT, view->int_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE),
+                                  node_facts_source(flags), 0, known ? (uint64_t)(negated ? !truth : truth) : 0);
         if (!lean)
         {
             node_facts_conversions(records, w, converted, conversion_flags, 0, 0, 0);
@@ -1860,8 +1892,8 @@ static inline __attribute__((always_inline)) bool node_facts_logic(NodeFactsReco
         const uint32_t flags = inherited | (ice ? BUSTER_CHECK_ICE : (left & forms) != 0 && right_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
         const bool constant = left_known && (skips_right || right_known);
         const bool value = conjunction ? left_truth && right_truth : left_truth || right_truth;
-        node_facts_record(records, w, BUSTER_TYPE_INT, view->int_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, constant ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE),
-                          node_facts_source(flags), 0, constant && value);
+        node_facts_record_integer(records, w, BUSTER_TYPE_INT, view->int_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, constant ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE),
+                                  node_facts_source(flags), 0, constant && value);
         if (!lean)
         {
             node_facts_conversions(records, w, converted[0], conversion_flags[0], converted[1], conversion_flags[1], 0);
@@ -2241,8 +2273,8 @@ static inline __attribute__((always_inline)) bool node_facts_query(NodeFactsReco
     if (taken)
     {
         const NodeFactsSide* side = view->sides + type_index(queried);
-        node_facts_record(records, w, BUSTER_TYPE_ULONG, view->ulong_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER), BUSTER_CHECK_ICE, 0,
-                          size ? side->size : side->alignment);
+        node_facts_record_integer(records, w, BUSTER_TYPE_ULONG, view->ulong_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER), BUSTER_CHECK_ICE, 0,
+                                  size ? side->size : side->alignment);
         if (!lean)
         {
             node_facts_conversions(records, w, valued ? queried : 0, 0, 0, 0, 0);
@@ -2473,7 +2505,7 @@ static inline __attribute__((always_inline)) bool node_facts_store_fast(NodeFact
                          ~(BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_NULL_POINTER | forms);
         flags = store ? (flags & ~stored) | BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION | (records[a].flags & BUSTER_CHECK_INHERITED) : flags;
         NodeFactsRecord* record = records + w;
-        const uint32_t exponent = records[s].exponent;
+        const uint32_t exponent = node_facts_exponent(standing, payload, records[s].exponent);
         node_facts_store(record, 0, (uint64_t)target | (uint64_t)target_row->word << 32);
         node_facts_store(record, 8, (uint64_t)node_facts_source(flags) | (uint64_t)object << 32);
         node_facts_store(record, 16, payload);
@@ -4159,15 +4191,16 @@ static bool node_facts_value_line(const NodeMachine* machine, const CheckValue* 
                       value->bit_width != 0 || value->fault != CHECK_FAULT_NONE || value->fault_node != 0 || value->object_bit_offset != 0 ||
                       (uint32_t)value->category > 0x03u || (uint32_t)kind > 0x07u;
     const uint32_t fields = (low != 0) + (offset != 0) + floating;
+    const uint64_t payload = offset != 0 ? offset : floating ? significand : low;
     *line = (NodeFactsRecord){
         .type = value->type,
         .word = node_machine_word(machine, value->type),
         .flags = value->flags,
         .object = value->object,
-        .payload = offset != 0 ? offset : floating ? significand : low,
+        .payload = payload,
         .standing = (uint8_t)(BUSTER_NODE_MACHINE_STANDING(value->category & 0x03u, kind & 0x07u) | (offset != 0 ? BUSTER_NODE_MACHINE_OFFSET : floating ? BUSTER_NODE_MACHINE_FLOATING : 0)),
         .taken = 1,
-        .exponent = floating ? (uint16_t)exponent : 0,
+        .exponent = (uint16_t)(offset == 0 && floating ? exponent : node_facts_small(payload)),
     };
     return !rare && fields <= 1;
 }
@@ -4213,6 +4246,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_front_integer(N
         .payload = integer,
         .standing = BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER),
         .taken = 1,
+        .exponent = (uint16_t)node_facts_small(integer),
     };
     const uint32_t number = facts->literal_count < facts->literal_capacity ? facts->literal_count + 1 : 0;
     if (number != 0)
@@ -4600,7 +4634,7 @@ static inline __attribute__((always_inline)) void node_facts_window_leaf(NodeFro
             line[0] = (uint64_t)type | (uint64_t)facts->rows[index].word << 32;
             line[1] = BUSTER_CHECK_ICE | (zero ? BUSTER_CHECK_LITERAL_ZERO : 0);
             line[2] = integer;
-            line[3] = (uint64_t)BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER) | UINT64_C(1) << 8;
+            line[3] = (uint64_t)BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER) | UINT64_C(1) << 8 | (uint64_t)node_facts_small(integer) << 16;
         }
         else
         {
