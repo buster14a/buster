@@ -95,6 +95,9 @@ static void pp_diagnostic_limit(Preprocessor* pp)
 {
     FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
     fputs("fatal error: too many errors emitted, stopping now [-ferror-limit=]\n", stream);
+    // A diagnostic of no place: the next one's source line shows (pp_diagnostic_snippet).
+    pp->diagnostic_caret_location = 0;
+    pp->diagnostic_caret_note = false;
 }
 
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_summary(const Preprocessor* pp)
@@ -14425,6 +14428,8 @@ static void pp_history_record(Preprocessor* pp, bool report)
         // The include stack the replay's diagnostics printed last, as the unit's own run would have left it: a later
         // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
         pp->diagnostic_include_range = replay->diagnostic_include_range;
+        pp->diagnostic_caret_location = replay->diagnostic_caret_location;
+        pp->diagnostic_caret_note = replay->diagnostic_caret_note;
         pp->history_replay = replay;
         if (pp->options.collect_diagnostics)
         {

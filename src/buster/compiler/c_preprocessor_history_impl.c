@@ -454,6 +454,177 @@ static void pp_diagnostic_place(Preprocessor* pp, PPDiagnostic* diagnostic, uint
     }
 }
 
+// Clang's caret display (#2376): TextDiagnostic::emitSnippetAndCaret's source line, gutter and caret, which
+// pp_render_diagnostic writes under each located line it prints, the primary's and its notes'. Clang 23's limits: no
+// source line for a caret past BUSTER_PP_SNIPPET_BYTES bytes into its line, or a line longer than that
+// (MaxLineLengthToPrint); tabs to stops BUSTER_PP_SNIPPET_TAB_STOP columns apart (DefaultTabStop), counted in bytes from
+// the previous tab, as clang counts them; and a gutter as wide as the line number BUSTER_PP_SNIPPET_LINES lines on
+// (DefaultSnippetLineLimit, or -fcaret-diagnostics-max-lines=N), and at least 4 digits.
+#define BUSTER_PP_SNIPPET_BYTES 4096
+#define BUSTER_PP_SNIPPET_TAB_STOP 8
+#define BUSTER_PP_SNIPPET_LINES 16
+#define BUSTER_PP_SNIPPET_GUTTER 4
+
+// The decimal digits of `value` (getNumDisplayWidth).
+static uint32_t pp_snippet_digits(uint32_t value)
+{
+    uint32_t digits = 1;
+    for (uint64_t power = 10; power <= value; power *= 10)
+    {
+        digits += 1;
+    }
+    return digits;
+}
+
+// The code point of the UTF-8 sequence `bytes`, `size` bytes (1 to 6, the count its first byte says) and all of them in
+// the line, where LLVM's isLegalUTF8 takes it: at most four bytes, continuation bytes 0x80 to 0xBF, no overlong form,
+// surrogate or code point past U+10FFFF. Else UINT32_MAX.
+static uint32_t pp_snippet_code_point(const uint8_t* bytes, uint32_t size)
+{
+    const uint8_t first = bytes[0];
+    bool legal = size <= 4 && first <= 0xF4 && (first < 0x80 || first >= 0xC2);
+    for (uint32_t i = 1; legal && i < size; i += 1)
+    {
+        legal = bytes[i] >= 0x80 && bytes[i] <= 0xBF;
+    }
+    const uint8_t second = size > 1 ? bytes[1] : 0x80;
+    legal = legal && (first != 0xE0 || second >= 0xA0) && (first != 0xED || second <= 0x9F) && (first != 0xF0 || second >= 0x90) && (first != 0xF4 || second <= 0x8F);
+    uint32_t code_point = size == 1 ? first : size == 2 ? first & 0x1Fu : size == 3 ? first & 0x0Fu : first & 0x07u;
+    for (uint32_t i = 1; legal && i < size; i += 1)
+    {
+        code_point = (code_point << 6) | (bytes[i] & 0x3Fu);
+    }
+    return legal ? code_point : UINT32_MAX;
+}
+
+// Appends source line `line` (`length` bytes) as clang's emitSnippet prints it, and returns the display column that
+// contains byte `caret` (SourceColumnMap::byteToContainingColumn; the line's width for `caret` == `length`). Printable
+// ASCII is itself, a column a byte; a tab, spaces to the next stop; a well-formed UTF-8 character that LLVM's tables
+// call printable, itself, in unicode_column_width's columns; another well-formed one, <U+XXXX>; and a byte of no
+// well-formed character, <XX>. The plain runs are found and copied 64 bytes at a time; the other bytes, a line's
+// rare tabs, controls and non-ASCII characters, take a step each, since a character's size and width come from its
+// own bytes and LLVM's range tables. Cold: it runs once a printed diagnostic.
+static uint32_t pp_snippet_line(PPDiagnostic* diagnostic, const uint8_t* line, uint32_t length, uint32_t caret)
+{
+    uint32_t column = 0;
+    uint32_t caret_column = 0;
+    // The byte after the last tab, from which a tab's stop counts bytes (bytesSincePreviousTabOrLineBegin).
+    uint32_t tab_end = 0;
+    uint32_t at = 0;
+    while (at < length)
+    {
+        const uint32_t remaining = length - at;
+        const uint32_t loaded = remaining < 64 ? remaining : 64;
+        const __mmask64 valid = _bzhi_u64(~0ull, loaded);
+        const __m512i bytes = _mm512_maskz_loadu_epi8(valid, line + at);
+        const uint64_t special = (_mm512_cmplt_epu8_mask(bytes, _mm512_set1_epi8(0x20)) | _mm512_cmpge_epu8_mask(bytes, _mm512_set1_epi8(0x7f))) & valid;
+        const uint32_t run = special != 0 ? (uint32_t)_tzcnt_u64(special) : loaded;
+        pp_diagnostic_append(diagnostic, "%.*s", (int)run, (const char*)line + at);
+        caret_column = caret >= at && caret - at < run ? column + (caret - at) : caret_column;
+        column += run;
+        at += run;
+        if (special != 0)
+        {
+            const uint8_t byte = line[at];
+            // LLVM's getNumBytesForUTF8: a continuation byte counts 1, a lead byte its sequence's length.
+            const uint32_t claimed = byte < 0xC0 ? 1 : byte < 0xE0 ? 2 : byte < 0xF0 ? 3 : byte < 0xF8 ? 4 : byte < 0xFC ? 5 : 6;
+            const uint32_t code_point = byte != '\t' && claimed <= length - at ? pp_snippet_code_point(line + at, claimed) : UINT32_MAX;
+            const int32_t width = code_point != UINT32_MAX && code_point >= 0x80 ? unicode_column_width(code_point) : -1;
+            const uint32_t size = code_point != UINT32_MAX ? claimed : 1;
+            uint32_t shown = 0;
+            if (byte == '\t')
+            {
+                shown = BUSTER_PP_SNIPPET_TAB_STOP - (at - tab_end) % BUSTER_PP_SNIPPET_TAB_STOP;
+                pp_diagnostic_append(diagnostic, "%*s", (int)shown, "");
+                tab_end = at + 1;
+            }
+            else if (width >= 0)
+            {
+                pp_diagnostic_append(diagnostic, "%.*s", (int)size, (const char*)line + at);
+                shown = (uint32_t)width;
+            }
+            else
+            {
+                char escaped[16];
+                const int written = code_point != UINT32_MAX ? snprintf(escaped, sizeof(escaped), "<U+%04X>", code_point) : snprintf(escaped, sizeof(escaped), "<%02X>", byte);
+                pp_diagnostic_append(diagnostic, "%s", escaped);
+                shown = (uint32_t)written;
+            }
+            caret_column = caret >= at && caret - at < size ? column : caret_column;
+            column += shown;
+            at += size;
+        }
+    }
+    pp_diagnostic_append(diagnostic, "\n");
+    return caret >= length ? column : caret_column;
+}
+
+// The source line and caret under a diagnostic's line at `location`, its printed place (or a note's, with `note`), as
+// clang's emitSnippetAndCaret shows them: none where carets are off, at no place or a place in scratch space, or at the
+// last diagnostic's place again (but after a note where this one is no note), as clang's LastLoc rule says; none past
+// the file's end or the limits above. The line is the place's physical one, the gutter its presumed number.
+static void pp_diagnostic_snippet(Preprocessor* pp, PPDiagnostic* diagnostic, uint32_t location, bool note)
+{
+    const bool repeated = location == pp->diagnostic_caret_location && (!pp->diagnostic_caret_note || note);
+    const uint32_t range = pp->options.carets && location != 0 && !repeated ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const uint32_t file = range != BUSTER_PP_NONE ? pp->ranges[range].file : BUSTER_PP_NONE;
+    if (file != BUSTER_PP_NONE)
+    {
+        const PPFileData* data = &pp->datas[pp->files[file].data];
+        const uint8_t* bytes = data->bytes;
+        const uint32_t length = data->length;
+        const uint32_t offset = location - pp->ranges[range].base < length ? location - pp->ranges[range].base : length;
+        uint32_t column;
+        pp_line_of(pp, range, location, &column);
+        const uint32_t start = offset - (column - 1);
+        // The line's end: its first '\n' or '\r', looked for 64 bytes at a time up to one byte past the longest line shown.
+        const uint32_t limit = length - start < BUSTER_PP_SNIPPET_BYTES + 1 ? length - start : BUSTER_PP_SNIPPET_BYTES + 1;
+        uint32_t line_length = limit;
+        for (uint32_t at = 0; line_length == limit && at < limit; at += 64)
+        {
+            const uint32_t loaded = limit - at < 64 ? limit - at : 64;
+            const __m512i block = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, loaded), bytes + start + at);
+            const uint64_t ends = (_mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8('\n')) | _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8('\r'))) & _bzhi_u64(~0ull, loaded);
+            line_length = ends != 0 ? at + (uint32_t)_tzcnt_u64(ends) : line_length;
+        }
+        if (column <= BUSTER_PP_SNIPPET_BYTES && start < length && line_length <= BUSTER_PP_SNIPPET_BYTES)
+        {
+            // Clang drops the line's trailing NUL bytes past the caret's.
+            while (line_length > column && bytes[start + line_length - 1] == 0)
+            {
+                line_length -= 1;
+            }
+            const char* name;
+            uint32_t name_length;
+            const uint32_t presumed = pp_presumed(pp, location, &name, &name_length);
+            const uint32_t lines = pp->options.caret_lines_given ? pp->options.caret_lines : BUSTER_PP_SNIPPET_LINES;
+            // Unsigned arithmetic, as clang's: a large -fcaret-diagnostics-max-lines= wraps.
+            const uint32_t widest = pp_snippet_digits(presumed + lines);
+            const uint32_t gutter = pp->options.no_line_numbers ? 0 : widest > BUSTER_PP_SNIPPET_GUTTER ? widest : BUSTER_PP_SNIPPET_GUTTER;
+            const uint32_t digits = pp_snippet_digits(presumed);
+            if (gutter != 0)
+            {
+                pp_diagnostic_append(diagnostic, "%*s%u | ", (int)(gutter + 1 > digits ? gutter + 1 - digits : 0), "", presumed);
+            }
+            const uint32_t caret = column - 1 < line_length ? column - 1 : line_length;
+            const uint32_t caret_column = pp_snippet_line(diagnostic, bytes + start, line_length, caret);
+            if (gutter != 0)
+            {
+                pp_diagnostic_append(diagnostic, "%*s| ", (int)(gutter + 2), "");
+            }
+            pp_diagnostic_append(diagnostic, "%*s^\n", (int)caret_column, "");
+        }
+    }
+}
+
+// The place clang's renderer compares the next diagnostic's with (pp_diagnostic_snippet): a diagnostic's, once it and
+// its notes are printed, and an "expanded from" note's, once it is.
+static void pp_diagnostic_snippet_done(Preprocessor* pp, uint32_t location, bool note)
+{
+    pp->diagnostic_caret_location = location;
+    pp->diagnostic_caret_note = note;
+}
+
 // Where the file `location` is presumed in was included, as clang's PresumedLoc::getIncludeLoc gives it (#1954): a line
 // marker's (PPLineDirective.include_location) in effect there, else its range's inclusion's; BUSTER_PP_NONE for none.
 static uint32_t pp_presumed_include(const Preprocessor* pp, uint32_t location)
@@ -576,6 +747,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
         pp_diagnostic_fatal_flag(&diagnostic, message);
     }
     pp_diagnostic_append(&diagnostic, "\n");
+    pp_diagnostic_snippet(pp, &diagnostic, location, severity == PP_SEVERITY_NOTE);
     for (uint32_t i = count; i > 0; i -= 1)
     {
         const PPDiagnosticSource note = notes[i - 1];
@@ -596,7 +768,11 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
         {
             pp_diagnostic_append(&diagnostic, "note: expanded from here\n");
         }
+        // A generated pragma's note is placed in scratch space, which shows no line here.
+        pp_diagnostic_snippet(pp, &diagnostic, note.column != 0 ? 0 : note.location, true);
+        pp_diagnostic_snippet_done(pp, note.location, true);
     }
+    pp_diagnostic_snippet_done(pp, location, severity == PP_SEVERITY_NOTE);
     if (note != 0)
     {
         // An attached note's place is the include context the next primary compares with, as a separately rendered note's
@@ -611,6 +787,8 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
         {
             pp_diagnostic_append(&diagnostic, "note: %s\n", note->message);
         }
+        pp_diagnostic_snippet(pp, &diagnostic, note->location, true);
+        pp_diagnostic_snippet_done(pp, note->location, true);
     }
     pp_diagnostic_flush(&diagnostic);
     scratch_end(scratch);
@@ -797,6 +975,7 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
         pp->warnings = 0;
         pp->fatal = false;
         pp->diagnostic_include_range = BUSTER_PP_NONE;
+        pp_diagnostic_snippet_done(pp, 0, false);
         if (pp->diagnostic_collection_failed)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "diagnostic collection capacity exhausted");
@@ -819,6 +998,8 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                     const bool owner_fatal = owner->fatal;
                     owner->fatal = pp->fatal;
                     owner->diagnostic_include_range = pp->diagnostic_include_range;
+                    owner->diagnostic_caret_location = pp->diagnostic_caret_location;
+                    owner->diagnostic_caret_note = pp->diagnostic_caret_note;
                     const bool owner_arguments = owner->diagnostic_arguments;
                     owner->diagnostic_arguments = record->arguments;
                     const PPDiagnosticNote note = {
@@ -836,6 +1017,8 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                         pp_render_message(owner, PP_SEVERITY_NOTE, source->location, source->origin, NULL, "%s", source->message);
                     }
                     pp->diagnostic_include_range = owner->diagnostic_include_range;
+                    pp->diagnostic_caret_location = owner->diagnostic_caret_location;
+                    pp->diagnostic_caret_note = owner->diagnostic_caret_note;
                     owner->diagnostic_arguments = owner_arguments;
                     owner->fatal = owner_fatal;
                 }

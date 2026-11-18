@@ -203,6 +203,10 @@ test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c > build/interpreter-units.out && printf 'typed units: 1\n' | cmp - build/interpreter-units.out
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 "$BUSTER_COMPILER" test-unwind --cross-check
+== Test the caret display against clang
+# #2376: tests/carets' command lines, each run by this compiler and by clang with carets on, as both have them by
+# default; their exit statuses and diagnostics, source lines, gutters and carets among them, must be the same bytes.
+"$BUSTER_COMPILER" test-carets
 == Test the preprocessor's cases against clang (part 1 of 4)
 # --clang also preprocesses each case with clang -E and compares the tokens. --part deals the checks (the cases,
 # the header sets, the predefines' option sets in four slices, the fuzz batch's own checks and each of its modes)

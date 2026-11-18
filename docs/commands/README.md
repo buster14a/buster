@@ -79,7 +79,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-oracle-cache, BUSTER_ORACLE_CACHE` | `oracle_cache.c` | [oracle-cache](oracle-cache.md) |
 | `parallel, test-parallel, test-tool` | `parallel.c`, `test_tool.c` | [parallel](parallel.md) |
 | `test-parser, benchmark-parser` | `c_parser.c` | [parser](parser.md) |
-| `test-preprocessor, benchmark-preprocessor` | `c_preprocessor.c` | [preprocessor](preprocessor.md) |
+| `test-preprocessor, benchmark-preprocessor, test-carets` | `c_preprocessor.c`, `c_caret_test.c` | [preprocessor](preprocessor.md) |
 | `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` | `preprocessor_fuzz.c` | [preprocessor-fuzz](preprocessor-fuzz.md) |
 | `ab, time-runs, start-order, start-trace, test-profile` | `profile.c` | [profiling](profiling.md) |
 | `test-refinement, benchmark-refinement` | `c_intern.c` | [refinement](refinement.md) |
@@ -159,6 +159,7 @@ The original section titles are retained in their owning guides.
 - [Refinement tests](refinement.md#refinement-tests).
 - [Refinement benchmark](refinement.md#refinement-benchmark).
 - [Preprocessor tests](preprocessor.md#preprocessor-tests).
+- [Caret display (#2376)](preprocessor.md#caret-display-2376).
 - [Preprocessor benchmark](preprocessor.md#preprocessor-benchmark).
 - [Per-file jobs tests](files.md#per-file-jobs-tests).
 - [Per-file jobs benchmark](files.md#per-file-jobs-benchmark).

@@ -26,6 +26,7 @@
 #: cpu 12 0.80 AMD EPYC 9V74 80-Core Processor
 #: cpu 4 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: unmeasured Test the caret display against clang
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
@@ -218,6 +219,7 @@
 2452.4 Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
 4.0 Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
 15.2 Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
+25.9 Test the caret display against clang
 92.3 Test the preprocessor's cases against clang (part 1 of 4)
 66.5 Test the preprocessor's cases against clang (part 2 of 4)
 182.3 Test the preprocessor's cases against clang (part 3 of 4)
