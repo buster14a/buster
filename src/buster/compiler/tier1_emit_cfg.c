@@ -4108,8 +4108,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         into.valid = into_node < count && function->op[into_node] == IR_STACK_ADDR && tier1_emit_cfg_object(function, emitted, function->a[into_node], &into.displacement);
                         // A long double result (#141) goes from st0 into the call's own object.
                         into.valid = function->type[node] == IR_F80 ? tier1_emit_cfg_x87_offset(function, emitted, node, &into.displacement) : into.valid;
-                        error = function->type[node] != IR_F80 || into.valid ? error : TIER1_EMIT_FRAME;
-                        error = tier1_emit_call(plan, node, argument_registers, saved, tier1_emit_kept(&saves, &transitions, saved), transitions.registers[node], &into, &buffer, scratch, emitted);
+                        error = function->type[node] != IR_F80 || into.valid ?
+                                tier1_emit_call(plan, node, argument_registers, saved, tier1_emit_kept(&saves, &transitions, saved), transitions.registers[node], &into, &buffer, scratch, emitted) :
+                                TIER1_EMIT_FRAME;
                         tier1_emit_saved(&saves, &transitions, saved);
                     }
                 }

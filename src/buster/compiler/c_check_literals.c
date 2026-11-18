@@ -512,7 +512,6 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
         if (c == 'i' || c == 'j')
         {
             imaginary = suffix - 1;
-            suffix -= 1;
             break;
         }
         if (c != 'f' && c != 'l' && c != 'u' && c != 'q')

@@ -2993,7 +2993,6 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
             cur_kind = cursors.kind;
             cur_start = cursors.start;
             cur_end = cursors.end;
-            pending = false;
         }
 
         transpose_property_masks(properties[current], o);
@@ -3022,7 +3021,6 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         U64x8 star = BUSTER_LEX_MASK(M_STAR);
         U64x8 dot = BUSTER_LEX_MASK(M_DOT);
         const U64x8 exponent_sign = BUSTER_LEX_MASK(M_EXPSIGN);
-        U64x8 nonascii = BUSTER_LEX_MASK(M_NONASCII);
 
         // II. Analysis
 
@@ -3248,7 +3246,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         backslash = BUSTER_LEX_MASK(M_BACKSLASH);
         star = BUSTER_LEX_MASK(M_STAR);
         dot = BUSTER_LEX_MASK(M_DOT);
-        nonascii = BUSTER_LEX_MASK(M_NONASCII);
+        const U64x8 nonascii = BUSTER_LEX_MASK(M_NONASCII);
         const U64x8 hash_digraph = BUSTER_LEX_MASK(M_HASHDIG);
         const U64x8 pair_ends = BUSTER_LEX_MASK(M_OP2);
         const U64x8 triple_ends = BUSTER_LEX_MASK(M_OP3);

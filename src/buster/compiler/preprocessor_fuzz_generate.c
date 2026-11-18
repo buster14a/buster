@@ -543,7 +543,7 @@ static const char* const preprocessor_fuzz_random_identifiers[] =
 static void preprocessor_fuzz_random_literal(PreprocessorFuzzGenerator* generator)
 {
     const uint32_t kind = preprocessor_fuzz_random_below(generator, 20);
-    const char* text = "x";
+    const char* text;
     if (kind < 4)
     {
         text = preprocessor_fuzz_random_identifiers[preprocessor_fuzz_random_below(generator, BUSTER_ARRAY_LENGTH(preprocessor_fuzz_random_identifiers))];

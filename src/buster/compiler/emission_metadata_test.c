@@ -321,7 +321,12 @@ static void test_layouts(void)
     EmissionResolved result;
     for (uint32_t scalar = 0; scalar < 2; scalar += 1)
     {
-        BUSTER_EMISSION_TEST(emission_metadata_resolve(&metadata, &layout, &storage, scalar != 0, &result).error == EMISSION_OK);
+        const bool resolved = emission_metadata_resolve(&metadata, &layout, &storage, scalar != 0, &result).error == EMISSION_OK;
+        BUSTER_EMISSION_TEST(resolved);
+        if (!resolved)
+        {
+            continue;
+        }
         BUSTER_EMISSION_TEST(result.source_count == 10 && result.frame_count == 8 && result.size == 16);
         for (uint32_t i = 0; i < 10; i += 1)
         {
@@ -349,10 +354,14 @@ static void test_layouts(void)
         .count = 5,
         .size = 13,
     };
-    BUSTER_EMISSION_TEST(emission_metadata_resolve(&metadata, &relaxed, &storage, false, &result).error == EMISSION_OK);
-    BUSTER_EMISSION_TEST(source_rows[4].offset == 5 && source_rows[5].offset == 5);
-    BUSTER_EMISSION_TEST(frame_rows[6].offset == 7 && source_rows[7].offset == 9);
-    BUSTER_EMISSION_TEST(source_rows[8].offset == 10 && source_rows[9].offset == 13);
+    const bool resolved = emission_metadata_resolve(&metadata, &relaxed, &storage, false, &result).error == EMISSION_OK;
+    BUSTER_EMISSION_TEST(resolved);
+    if (resolved)
+    {
+        BUSTER_EMISSION_TEST(source_rows[4].offset == 5 && source_rows[5].offset == 5);
+        BUSTER_EMISSION_TEST(frame_rows[6].offset == 7 && source_rows[7].offset == 9);
+        BUSTER_EMISSION_TEST(source_rows[8].offset == 10 && source_rows[9].offset == 13);
+    }
 }
 
 static void test_failure(const EmissionMetadata* metadata, const EmissionLayout* layout, EmissionError error, EmissionPart part, uint32_t index)
@@ -751,6 +760,7 @@ static void test_properties(uint32_t seed)
             .origin_count = 8,
             .register_count = 17,
         };
+        bool resolved_all = true;
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
             const EmissionStorage storage = {
@@ -761,9 +771,19 @@ static void test_properties(uint32_t seed)
             };
             EmissionResolved result;
             EmissionMetadataPlan plan;
-            BUSTER_EMISSION_TEST(emission_metadata_plan(&metadata, &layout, scalar != 0, &plan).error == EMISSION_OK);
-            BUSTER_EMISSION_TEST(plan.source_count == events && plan.frame_count == events);
-            BUSTER_EMISSION_TEST(emission_metadata_resolve(&metadata, &layout, &storage, scalar != 0, &result).error == EMISSION_OK);
+            const bool planned = emission_metadata_plan(&metadata, &layout, scalar != 0, &plan).error == EMISSION_OK;
+            BUSTER_EMISSION_TEST(planned);
+            if (planned)
+            {
+                BUSTER_EMISSION_TEST(plan.source_count == events && plan.frame_count == events);
+            }
+            const bool resolved = emission_metadata_resolve(&metadata, &layout, &storage, scalar != 0, &result).error == EMISSION_OK;
+            BUSTER_EMISSION_TEST(resolved);
+            resolved_all &= resolved;
+            if (!resolved)
+            {
+                continue;
+            }
             for (uint32_t i = 0; i < events; i += 1)
             {
                 const uint32_t boundary = i / 2;
@@ -773,8 +793,11 @@ static void test_properties(uint32_t seed)
                 BUSTER_EMISSION_TEST(result.frames[i].value == frames[i].value && result.frames[i].reserved == 0);
             }
         }
-        BUSTER_EMISSION_TEST(memcmp(source_rows[0], source_rows[1], (size_t)events * sizeof(EmissionSourceRow)) == 0);
-        BUSTER_EMISSION_TEST(memcmp(frame_rows[0], frame_rows[1], (size_t)events * sizeof(EmissionFrameRow)) == 0);
+        if (resolved_all)
+        {
+            BUSTER_EMISSION_TEST(memcmp(source_rows[0], source_rows[1], (size_t)events * sizeof(EmissionSourceRow)) == 0);
+            BUSTER_EMISSION_TEST(memcmp(frame_rows[0], frame_rows[1], (size_t)events * sizeof(EmissionFrameRow)) == 0);
+        }
     }
 }
 

@@ -3214,8 +3214,13 @@ static bool changes_main_policy(Text workflow)
         { 6, "        run: bash tools/ci/nightly.sh coverage \"$RUNNER_TEMP/coverage\"" },
         { 6, "          COVERAGE_RESULT: ${{ steps.coverage.outcome }}" },
         { 6, "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}" },
-        { 6, "    needs: [changes, evidence, glue, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]" },
+        { 6, "    needs: [changes, evidence, glue, analyze, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]" },
         { 6, "          GLUE_RESULT: ${{ needs.glue.result }}" },
+        { 6, "          ANALYZER_RESULT: ${{ needs.analyze.result }}" },
+        { 11, "    name: Clang Static Analyzer" },
+        { 11, "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'" },
+        { 11, "    runs-on: ubuntu-26.04" },
+        { 11, "          ref: ${{ github.sha }}" },
         // The CI glue's fixtures run on pull requests and candidates beside the rows, which don't wait for them (#2658);
         // the aggregate requires them (tools/ci/qualification.c's qualification_evidence).
         { 3, "    name: CI glue fixtures" },
@@ -3305,7 +3310,7 @@ static bool changes_main_policy(Text workflow)
             }
             else if (section == 3 && indent == 2)
             {
-                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : text_equal_c(line, "  changes:") ? 5 : text_equal_c(line, "  qualification:") ? 6 : text_equal_c(line, "  auxiliary-build:") ? 7 : text_equal_c(line, "  auxiliary-selfhost:") ? 8 : text_equal_c(line, "  auxiliary-tier1-problem:") ? 9 : text_equal_c(line, "  auxiliary-build-pgo:") ? 10 : 3;
+                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : text_equal_c(line, "  changes:") ? 5 : text_equal_c(line, "  qualification:") ? 6 : text_equal_c(line, "  auxiliary-build:") ? 7 : text_equal_c(line, "  auxiliary-selfhost:") ? 8 : text_equal_c(line, "  auxiliary-tier1-problem:") ? 9 : text_equal_c(line, "  auxiliary-build-pgo:") ? 10 : text_equal_c(line, "  analyze:") ? 11 : 3;
             }
             const uint32_t current = section == 2 ? 0 : section == 3 ? job : 3;
             for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
@@ -3446,6 +3451,8 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  qualification:", "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}\n", "", "a candidate's auxiliary workflows unchecked" },
         { "  qualification:", ", glue, ", ", ", "the aggregate doesn't wait for the CI glue's fixtures" },
         { "  qualification:", "          GLUE_RESULT: ${{ needs.glue.result }}\n", "", "the aggregate ignores the CI glue's fixtures" },
+        { "  qualification:", "          ANALYZER_RESULT: ${{ needs.analyze.result }}\n", "", "the aggregate ignores analysis" },
+        { "  qualification:", "glue, analyze, policy", "glue, policy", "the aggregate does not await analysis" },
         { "  glue:", "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'", "    if: github.event_name == 'pull_request'", "a candidate skips the CI glue's fixtures" },
         { "  qualification:", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) && github.event_name != 'merge_group' }}", "a candidate without the required aggregate" },
         { "  qualification:", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}", " && !contains(github.event.pull_request.labels.*.name, 'hotfix') }}", "a hotfix label that could skip more than a pull request's aggregate" },

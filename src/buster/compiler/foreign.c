@@ -1315,8 +1315,8 @@ static bool foreign_list_inputs(Foreign* foreign, ForeignLane* lane)
             foreign->as_needed_waiting += as_needed ? 1 : 0;
         }
     }
-    foreign->archives_begin = foreign->archive_count != 0 ? foreign_position(foreign->archives[0].input, 1) : BUSTER_FOREIGN_NO_POSITION;
-    foreign->libraries_begin = foreign->library_count != 0 ? foreign_position(foreign->libraries[0].input, 0) : BUSTER_FOREIGN_NO_POSITION;
+    foreign->archives_begin = result && foreign->archive_count != 0 ? foreign_position(foreign->archives[0].input, 1) : BUSTER_FOREIGN_NO_POSITION;
+    foreign->libraries_begin = result && foreign->library_count != 0 ? foreign_position(foreign->libraries[0].input, 0) : BUSTER_FOREIGN_NO_POSITION;
     if (!result)
     {
         foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));

@@ -1559,7 +1559,10 @@ static void tier1_wide_test_shared_slices(Tier1WideTest* test)
             {
                 printf("test-tier1-wide: %s, %s path: split error %u, verifier error %u at %u\n", name, path == 0 ? "vector" : "scalar", (unsigned)split.error, (unsigned)checked.error, checked.instruction);
             }
-            fine = fine && tier1_wide_test_agrees(test, name, "the split function", &result.function, inputs, counts, expected);
+            if (fine)
+            {
+                tier1_wide_test_agrees(test, name, "the split function", &result.function, inputs, counts, expected);
+            }
             tier1_wide_test_expect(test, function.calls[function.b[9]].argument_first == function.a[6] && function.extra[function.a[6]] == 2, "the split leaves the source's shared slice as it was");
             arena_pop_to(&test->output, mark);
         }

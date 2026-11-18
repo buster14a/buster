@@ -278,6 +278,75 @@ jobs:
           node tests/ci/vector-runtime.cjs
           bash tests/ci/rerun.sh
 
+  analyze:
+    name: Clang Static Analyzer
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Restore pinned release inputs
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-release-inputs
+          key: hosted-inputs-v1-linux-x64-${{ hashFiles('tools/ci/hosted-tools.lock') }}
+      - name: Stage the pinned compiler and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BUSTER_HOSTED_RELEASES="$RUNNER_TEMP/hosted-release-inputs"
+          bash tools/ci/hosted-release.sh verify "$BUSTER_HOSTED_RELEASES" ||
+              bash tools/ci/hosted-release.sh prepare "$BUSTER_HOSTED_RELEASES"
+          root="$RUNNER_TEMP/buster-hosted-tools"
+          bash tools/ci/install-hosted-tools.sh "$root"
+          version=$(bash tools/ci/hosted-release.sh version llvm)
+          printf '%s\n' "$root/llvm-$version/bin" "$root/bin" >> "$GITHUB_PATH"
+          bash tools/ci/setup-build-tools.sh "$root/build-tools" >> "$GITHUB_PATH"
+      - name: Analyze each Release compiler translation unit
+        shell: bash
+        env:
+          BUSTER_TOOLCHAIN: path
+          BUSTER_HOST_ARCH: vector
+          BUSTER_DEBUG_INFO: 0
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          export report="$RUNNER_TEMP/clang-analysis"
+          mkdir -p "$report"
+          ./build.sh print-compile-flags --config Release > "$report/flags.nul"
+          ./build.sh print-sources > "$report/sources.nul"
+          test -s "$report/flags.nul"
+          test -s "$report/sources.nul"
+
+          analyze_unit()
+          {
+              local source=$1
+              local -a flags
+              mapfile -d '' -t flags < "$report/flags.nul"
+              clang "${flags[@]}" --analyze -Xanalyzer -analyzer-output=text \
+                  -Xclang -analyzer-werror -ferror-limit=0 -fno-color-diagnostics \
+                  "$source" > "$report/${source##*/}.log" 2>&1
+          }
+          export -f analyze_unit
+          status=0
+          xargs -0 -n 1 -P "$(nproc)" bash -c 'analyze_unit "$1"' _ < "$report/sources.nul" || status=$?
+          awk '/^.+:[0-9]+:[0-9]+: (error|warning): / || /^([^ ]+: )?(fatal )?error: / { print }' \
+              "$report/"*.log | sort -u
+          exit "$status"
+      - name: Preserve complete diagnostic paths
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: clang-static-analyzer-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clang-analysis/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
   # One verified release-input acquisition before any hosted shard starts.
   prepare-hosted-tools:
     needs: [changes, evidence, policy]
@@ -1930,8 +1999,8 @@ jobs:
   # A merge-queue candidate stops at its first failure (#1430, the owner's choice on 2026-11-12), but GitHub's fail-fast
   # works within one matrix alone: after a row failed, the aggregate still waited for the fuzz campaigns (about 21
   # minutes), the glue fixtures and the auxiliary workflows, so a failure that took seconds to show held the candidate,
-  # its runners and the queue's entries behind it until then (#2703: 22.5 minutes on average). Once the test rows or the
-  # fuzz campaigns have failed, these cancel the candidate's run. Its `Integration qualification` still runs (always())
+  # its runners and the queue's entries behind it until then (#2703: 22.5 minutes on average). Once a test row, fuzz campaign or
+  # the analyzer job fails, these cancel the candidate's run. Its `Integration qualification` still runs (always())
   # and fails at once, as it does in the runs `stale` cancels, and GitHub rebuilds the entries behind. A candidate's
   # run alone: a pull request's tests are its last jobs, and the other runs report every row (#1195's reasons).
   stop-tests:
@@ -1953,6 +2022,22 @@ jobs:
   stop-fuzz:
     name: Stop a failing merge-queue candidate (fuzz)
     needs: [fuzz]
+    if: ${{ failure() && github.event_name == 'merge_group' && github.repository_id == '1421805693' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this candidate's run
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel"
+
+  stop-analyze:
+    name: Stop a failing merge-queue candidate (Clang Static Analyzer)
+    needs: [analyze]
     if: ${{ failure() && github.event_name == 'merge_group' && github.repository_id == '1421805693' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -2029,7 +2114,7 @@ jobs:
     # waiting for its own rows (hotfix.yml reports the context when the label is added); its candidate runs this job in
     # full, since a merge_group event has no pull request labels.
     name: Integration qualification
-    needs: [changes, evidence, glue, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
+    needs: [changes, evidence, glue, analyze, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -2067,6 +2152,7 @@ jobs:
           DCO_RESULT: ${{ needs.policy.result }}
           EVIDENCE_RESULT: ${{ needs.evidence.result }}
           GLUE_RESULT: ${{ needs.glue.result }}
+          ANALYZER_RESULT: ${{ needs.analyze.result }}
           HARDWARE: ${{ needs.evidence.outputs.hardware }}
           HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
           TEST_RESULT: ${{ needs.test.result }}
