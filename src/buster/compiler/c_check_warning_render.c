@@ -4,6 +4,23 @@
 // Sparse semantic facts to atomic diagnostic groups. The located token governs source policy and system-header
 // visibility; the independent completion governs ordering. The collector copies all temporary text and notes.
 
+// c_check_semantic_diagnostic.c's, included after this file: an expression's tokens as a highlighted range (#2376).
+static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node);
+
+// The highlighted ranges clang's diagnostic of a warning event has (#2376), before its publication; the caller clears
+// them. A folded shift's count: the shift's right operand.
+static void check_warning_event_ranges(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
+{
+    const bool shift = event->id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || event->id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = shift && input->token_nodes != NULL && event->token < input->token_count ? input->token_nodes[event->token] : BUSTER_CHECK_NONE;
+    const uint32_t right = node < graph->count ? graph->operand1[node] : BUSTER_CHECK_NONE;
+    if (right < graph->count)
+    {
+        check_semantic_range(parser, pp, graph->tokens[right]);
+    }
+}
+
 static const char* check_warning_text(Arena* arena, const char* format, ...) __attribute__((format(printf, 2, 3)));
 static const char* check_warning_text(Arena* arena, const char* format, ...)
 {
@@ -3042,9 +3059,12 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE || event->kind == CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE)
                     {
-                        // At its backslash inside the literal's token (#1447), with the macro argument it came from.
+                        // At its backslash inside the literal's token (#1447), with the macro argument it came from, the
+                        // backslash and its character highlighted (#2376, clang's MakeCharSourceRange).
                         pp->diagnostic_arguments = true;
+                        pp_diagnostic_range_offsets(pp, source, event->payload.data, 2);
                         pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data, boundary, "%s%s", message, suffix);
+                        pp_diagnostic_ranges_clear(pp);
                         pp->diagnostic_arguments = false;
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE ||
@@ -3103,7 +3123,9 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     }
                     else
                     {
+                        check_warning_event_ranges(parser, pp, input, event);
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnostic_ranges_clear(pp);
                     }
                     pp_diagnostic_suborder(pp, previous, event->suborder);
                     valid = !pp->diagnostic_collection_failed;

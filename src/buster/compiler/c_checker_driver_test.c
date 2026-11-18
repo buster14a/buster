@@ -94,6 +94,16 @@ struct CheckDriverRunModes
     uint64_t differences;
     uint64_t sweep_fixtures;
     uint64_t sweep_nanoseconds;
+    // --carets (#2376, check_test_driver_carets): the command lines run again with carets on by buster and by clang, and
+    // how their whole errors compared: the same, apart only in highlighted ranges' '~', in other source lines (fix-its,
+    // scratch space, a range's lines), or in diagnostics' own lines; and how many of those were printed.
+    bool carets;
+    uint64_t caret_runs;
+    uint64_t caret_same;
+    uint64_t caret_ranges;
+    uint64_t caret_lines;
+    uint64_t caret_messages;
+    uint64_t caret_shown;
 };
 
 static CheckDriverRunModes check_driver_run_modes = {
@@ -484,6 +494,123 @@ static int check_test_driver_buster_command(char* const* arguments, char** text,
     return status;
 }
 
+// Whether `line` (`length` bytes) is a caret display's: a source line's, behind its gutter, or a caret line's.
+static bool check_test_driver_snippet_line(const char* line, uint64_t length)
+{
+    uint64_t at = 0;
+    while (at < length && line[at] == ' ')
+    {
+        at += 1;
+    }
+    while (at < length && line[at] >= '0' && line[at] <= '9')
+    {
+        at += 1;
+    }
+    at += at < length && line[at] == ' ' ? 1 : 0;
+    return at + 1 < length && line[at] == '|' && line[at + 1] == ' ';
+}
+
+// `text` with its lines rewritten: with `ranges`, each caret line's '~' as spaces and its trailing spaces dropped; else
+// every caret display's line dropped (malloc's; the caller frees it).
+static char* check_test_driver_caret_text(const char* text, bool ranges)
+{
+    const uint64_t length = text != NULL ? strlen(text) : 0;
+    char* result = malloc(length + 1);
+    uint64_t used = 0;
+    for (uint64_t at = 0; result != NULL && at < length;)
+    {
+        const char* end = memchr(text + at, '\n', length - at);
+        const uint64_t size = end != NULL ? (uint64_t)(end - (text + at)) : length - at;
+        const bool snippet = check_test_driver_snippet_line(text + at, size);
+        if (!snippet || ranges)
+        {
+            uint64_t kept = size;
+            memcpy(result + used, text + at, size);
+            for (uint64_t i = 0; snippet && i < size; i += 1)
+            {
+                result[used + i] = result[used + i] == '~' ? ' ' : result[used + i];
+            }
+            while (snippet && kept != 0 && result[used + kept - 1] == ' ')
+            {
+                kept -= 1;
+            }
+            used += kept;
+            result[used++] = '\n';
+        }
+        at += size + 1;
+    }
+    if (result != NULL)
+    {
+        result[used] = 0;
+    }
+    return result;
+}
+
+// --carets (#2376): a command line of buster's that passes -fno-caret-diagnostics and -fsyntax-only, and none of
+// buster's own '--' options, -o or a -M one, run again without it by buster and by the oracle clang, and their whole errors compared (the counters above;
+// the first 64 that differ printed). It measures the caret display over the suite's command lines; it fails nothing.
+static void check_test_driver_carets(char* const* arguments)
+{
+    CheckDriverRunModes* modes = &check_driver_run_modes;
+    char* again[64];
+    uint32_t count = 1;
+    bool named = false;
+    // Only a check alone, which writes nothing a test reads afterwards (an object, a dependency file).
+    bool syntax = false;
+    bool clang_options = modes->clang != NULL;
+    for (uint32_t i = 1; arguments[i] != NULL; i += 1)
+    {
+        const bool caret = strcmp(arguments[i], "-fno-caret-diagnostics") == 0;
+        named |= caret;
+        syntax |= strcmp(arguments[i], "-fsyntax-only") == 0;
+        clang_options &= strncmp(arguments[i], "--", 2) != 0 && strcmp(arguments[i], "-o") != 0 && strncmp(arguments[i], "-M", 2) != 0 &&
+                         count < BUSTER_ARRAY_LENGTH(again) - 1;
+        if (!caret && count < BUSTER_ARRAY_LENGTH(again) - 1)
+        {
+            again[count++] = arguments[i];
+        }
+    }
+    again[count] = NULL;
+    if (named && syntax && clang_options)
+    {
+        char* ours = NULL;
+        char* theirs = NULL;
+        again[0] = (char*)modes->clang;
+        const int their_status = check_test_driver_child(again, &theirs, false, true);
+        again[0] = arguments[0];
+        const int our_status = check_test_driver_child(again, &ours, false, true);
+        char* our_ranges = check_test_driver_caret_text(ours, true);
+        char* their_ranges = check_test_driver_caret_text(theirs, true);
+        char* our_lines = check_test_driver_caret_text(ours, false);
+        char* their_lines = check_test_driver_caret_text(theirs, false);
+        const bool ran = ours != NULL && theirs != NULL && our_ranges != NULL && their_ranges != NULL && our_lines != NULL && their_lines != NULL;
+        const bool same = ran && strcmp(ours, theirs) == 0;
+        const bool ranges = ran && !same && strcmp(our_ranges, their_ranges) == 0;
+        const bool lines = ran && !same && !ranges && strcmp(our_lines, their_lines) == 0;
+        modes->caret_runs += ran ? 1 : 0;
+        modes->caret_same += same ? 1 : 0;
+        modes->caret_ranges += ranges ? 1 : 0;
+        modes->caret_lines += lines ? 1 : 0;
+        modes->caret_messages += ran && !same && !ranges && !lines ? 1 : 0;
+        if (ran && !same && modes->caret_shown < 64)
+        {
+            modes->caret_shown += 1;
+            printf("carets: %s (status %d, clang %d):", ranges ? "ranges" : lines ? "lines" : "messages", our_status, their_status);
+            for (uint32_t i = 1; again[i] != NULL; i += 1)
+            {
+                printf(" %s", again[i]);
+            }
+            printf("\nours:\n%sclang's:\n%s", ours, theirs);
+        }
+        free(ours);
+        free(theirs);
+        free(our_ranges);
+        free(their_ranges);
+        free(our_lines);
+        free(their_lines);
+    }
+}
+
 // Runs `arguments` (arguments[0] the program), capturing the selected stream into *text and discarding the other. The
 // caller frees *text. Returns the exit status, or -1 if it didn't exit. Buster's runs (arguments[0] --executable's name
 // or /proc/self/exe) and the oracle clang's take the run modes above.
@@ -494,6 +621,10 @@ static int check_test_driver_spawn_stream(char* const* arguments, char** text, b
     const bool clang = !buster && arguments[0] != NULL && modes->server.path != NULL && modes->clang != NULL && strcmp(arguments[0], modes->clang) == 0;
     int status = -1;
     *text = NULL;
+    if (buster && modes->carets && !stdout_capture)
+    {
+        check_test_driver_carets(arguments);
+    }
     if (buster)
     {
         status = check_test_driver_buster_command(arguments, text, stdout_capture, true);
@@ -9696,6 +9827,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_driver_run_modes.differential = true;
         }
+        else if (strcmp(argv[i], "--carets") == 0)
+        {
+            check_driver_run_modes.carets = true;
+        }
         else if (strcmp(argv[i], "--part") == 0 && i + 1 < argc)
         {
             unsigned index = 0;
@@ -11210,6 +11345,12 @@ static int run_checker_driver_tests(int argc, char** argv)
            modes->in_process ? "in-process" : "as children", modes->server.path != NULL ? "through the server (" : "as children",
            modes->server.path != NULL ? modes->server.version : "", modes->server.path != NULL ? ")" : "", modes->differential ? ", differential" : "",
            modes->in_process_runs, modes->served_runs, modes->child_runs, modes->sweep_fixtures, (double)modes->sweep_nanoseconds / 1e9, modes->differences);
+    if (modes->carets)
+    {
+        printf("checker-driver: carets: %" PRIu64 " command lines again with carets on: %" PRIu64 " the same as clang's, %" PRIu64 " apart only in ranges' '~', %" PRIu64
+               " in other source lines, %" PRIu64 " in diagnostics' own lines\n",
+               modes->caret_runs, modes->caret_same, modes->caret_ranges, modes->caret_lines, modes->caret_messages);
+    }
     const double served_seconds = (double)modes->served_nanoseconds / 1e9;
     const double child_seconds = (double)modes->child_nanoseconds / 1e9;
     const double child_cpu_seconds = (double)modes->child_cpu_nanoseconds / 1e9;

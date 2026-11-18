@@ -85,7 +85,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
-  [--differential]` and `test-checker-asm`
+  [--differential] [--carets]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as
   a process of its own under an `RLIMIT_AS` of 768 MiB past the executable's
@@ -117,6 +117,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   setting) differ from the test's own at its start. `--differential` also
   runs each such command as a child and fails on a difference in a complete server reply's status or
   output. A request with no complete reply uses the child's result without a differential comparison (#2421).
+  `--carets` (#2376) measures the caret display over the suite: each of buster's `-fsyntax-only` command lines that
+  passes `-fno-caret-diagnostics`, and none of buster's own `--` options, `-o` or a `-M` one, runs again without it,
+  by buster and by the oracle clang, as children, and their whole errors are compared. A `checker-driver: carets:`
+  line counts those the same as clang's, apart only in highlighted ranges' `~`, apart in other source lines (fix-its,
+  scratch space, a range's lines) and apart in diagnostics' own lines; the first 64 that differ print both texts.
+  It fails nothing ([the caret display](preprocessor.md#caret-display-2376)).
   `--run-modes-only` checks unavailable, truncated and timed-out replies with a deterministic protocol peer,
   successful and rejected real Clang runs, invalid protocol statuses (#2740), and complete replies that genuinely differ.
   `--time-stages` and `--lane-cpus` runs, whose numeric report

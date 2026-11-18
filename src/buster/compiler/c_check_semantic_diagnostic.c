@@ -41,6 +41,55 @@ static uint32_t check_semantic_first_token(const Parser* parser, uint32_t node)
     return first;
 }
 
+// Whether parser token `token`'s parents reach `node` (a token is its own).
+static bool check_semantic_inside(const Parser* parser, uint32_t token, uint32_t node)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t ancestor = token;
+    for (uint32_t steps = 0; ancestor < count && ancestor != node && steps < count; steps += 1)
+    {
+        const uint32_t up = parser->tree.parents[ancestor];
+        ancestor = up != ancestor ? up : count;
+    }
+    return ancestor == node;
+}
+
+// Adds the parser tokens of `node`'s subtree, which are contiguous around it, as a highlighted range of the next
+// diagnostic (#2376): clang's source range of the expression the node is (getSourceRange).
+static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node)
+{
+    const uint32_t count = parser->tokens.count;
+    if (node < count)
+    {
+        uint32_t first = node;
+        uint32_t last = node;
+        while (first != 0 && check_semantic_inside(parser, first - 1, node))
+        {
+            first -= 1;
+        }
+        while (last + 1 < count && check_semantic_inside(parser, last + 1, node))
+        {
+            last += 1;
+        }
+        // The parentheses around it, which the graph leaves out and clang's ParenExpr keeps: a group's opener and closer
+        // just outside it, one level outside its shallowest token.
+        bool grouped = true;
+        while (grouped && first != 0 && last + 1 < count)
+        {
+            uint32_t shallowest = UINT32_MAX;
+            for (uint32_t at = first; at <= last; at += 1)
+            {
+                shallowest = parser->tree.depths[at] < shallowest ? parser->tree.depths[at] : shallowest;
+            }
+            grouped = parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.roles[last + 1] == PARSE_ROLE_CLOSE_GROUP &&
+                      parser->tree.depths[first - 1] + 1 == shallowest && parser->tree.depths[last + 1] + 1 == shallowest;
+            first -= grouped ? 1 : 0;
+            last += grouped ? 1 : 0;
+        }
+        pp_diagnostic_range_tokens(pp, parser->tokens.sources[first], parser->tokens.sources[last]);
+    }
+}
+
 static const char* check_semantic_text(Preprocessor* pp, const char* text)
 {
     // Do not quietly replace a failed contextual rendering with a successful generic diagnostic.
@@ -3104,6 +3153,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_value_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "indirection requires pointer operand (%.*s invalid)", (int)type.length, type.pointer) : NULL;
+            // The operand (#2376), clang's Op->getSourceRange().
+            if (result != NULL && operand < count)
+            {
+                check_semantic_range(parser, pp, graph->tokens[operand]);
+            }
         }
         else if ((report->diagnostic == CHECK_DIAG_POINTER_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED) &&
                  op == CHECK_OP_SUBSCRIPT && token < parser->tokens.count)

@@ -805,6 +805,17 @@ static const char* check_driver_interrupt_message(uint32_t detail)
     return messages[rule < BUSTER_ARRAY_LENGTH(messages) ? rule : 0];
 }
 
+// The highlighted ranges clang's diagnostic of an input report has (#2376), as tokens of the output, before its
+// publication at output token `source`; the caller clears them after it (pp_diagnostic_ranges_clear).
+static void check_driver_input_ranges(Preprocessor* pp, const CheckInputReport* report, uint32_t source)
+{
+    // A name that names nothing: the name (clang's Sema::DiagnoseEmptyLookup, its lookup's name range).
+    if (report->message == CHECK_INPUT_UNDECLARED || report->message == CHECK_INPUT_UNDECLARED_CORRECTED)
+    {
+        pp_diagnostic_range_tokens(pp, source, source);
+    }
+}
+
 static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
 {
     const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
@@ -5442,6 +5453,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         // expression's end, as for an attribute count diagnosed after an argument's call error.
                         const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
                         const bool named = phase == 0 && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER;
+                        // Its highlighted ranges (#2376), for the kinds whose branch below publishes it alone.
+                        if (phase == 0)
+                        {
+                            check_driver_input_ranges(pp, input->reports + index, source);
+                        }
                         if (kind >= CHECK_INPUT_MUSTTAIL_ARGUMENTS && kind <= CHECK_INPUT_MUSTTAIL_STATEMENT && named)
                         {
                             // clang's musttail attribute where it doesn't go (#147), spelled as clang spells it there.
@@ -6847,6 +6863,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     {
                         check_driver_diagnose(parser, pp, located, message);
                     }
+                    // A report's highlighted ranges, which its message's producer or check_driver_input_ranges set, are its
+                    // alone (#2376).
+                    pp_diagnostic_ranges_clear(pp);
                     if (types->atomic_records && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_ACTION &&
                         stream->reports[index].diagnostic == CHECK_DIAG_MEMBER && node < input->graph.count &&
                         check_common_atomic_member(&input->graph, stream, types, node))

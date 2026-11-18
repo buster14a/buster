@@ -1994,7 +1994,13 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
     const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
     const bool emitted = (emission->emitted[node] & BUSTER_CHECK_EMITTED_SHIFT_COUNT) != 0;
+    // A stashed warning's count highlighted (#2376), as a new one's below.
+    if (!emitted && right < graph->count)
+    {
+        check_semantic_range(emission->parser, emission->pp, graph->tokens[right]);
+    }
     const bool replayed = !emitted && check_common_shift_replay(emission->pp, emission->shifts, token);
+    pp_diagnostic_ranges_clear(emission->pp);
     if (replayed)
     {
         emission->emitted[node] |= BUSTER_CHECK_EMITTED_SHIFT_COUNT;
@@ -2011,10 +2017,13 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
         if (warning != 0)
         {
             const bool negative = warning == CHECK_WARNING_SHIFT_COUNT_NEGATIVE;
+            // The count highlighted (#2376), clang's RHS.get()->getSourceRange().
+            check_semantic_range(emission->parser, emission->pp, graph->tokens[right]);
             check_common_report_deferred(emission->parser, emission->pp, emission->input, token,
                                          negative ? CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE : CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW,
                                          false, negative ? "shift count is negative" : "shift count >= width of type",
                                          NULL, 0, emission->scratch);
+            pp_diagnostic_ranges_clear(emission->pp);
             // An ineligible ordinary visit (notably a dropped arm) cannot suppress a later detached visit.
             emission->emitted[node] |= BUSTER_CHECK_EMITTED_SHIFT_COUNT;
         }
@@ -2206,10 +2215,13 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
                 const uint32_t boundary = check_common_function_boundary(parser, token);
                 const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, emission->input, token) : BUSTER_CHECK_NONE;
                 const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
+                // The divisor highlighted (#2376), clang's RHS.get()->getSourceRange().
+                check_semantic_range(parser, emission->pp, graph->tokens[graph->operand1[node]]);
                 check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
                                               declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_DIVISION_BY_ZERO,
                                               false, op == CHECK_OP_DIVIDE || op == CHECK_OP_DIVIDE_ASSIGN ? "division by zero is undefined" : "remainder by zero is undefined",
                                               NULL, 0, emission->scratch);
+                pp_diagnostic_ranges_clear(emission->pp);
                 if (declarator != BUSTER_CHECK_NONE && node < emission->input->graph.count && emission->input->graph.source_positions != NULL)
                 {
                     pp_diagnostic_suborder(emission->pp, previous, (uint64_t)emission->input->graph.source_positions[node] + 1);

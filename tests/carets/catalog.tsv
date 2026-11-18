@@ -1,8 +1,8 @@
 buster-fixtures v1 carets
 # test-carets' cases (c_caret_test.c; #2376): ID, FILE, FLAGS, OPTIONS, NAME, tab-separated. Each command line runs as
 # ours and as clang's, carets on by default; their exit statuses and standard errors must be the same bytes, or with
-# FLAGS `prefix` clang's error must start ours (ours adds its usage text). Every diagnostic here is one clang shows
-# with a caret alone: no highlighted range, fix-it or scratch space, which later pieces of #2376 add.
+# FLAGS `prefix` clang's error must start ours (ours adds its usage text). No diagnostic here has a fix-it or a line of
+# scratch space, which a later piece of #2376 adds; those with highlighted ranges are below.
 directives	directives.c	-	-fsyntax-only	preprocessor and checker diagnostics at a line's start, middle and end, with a note
 directives-preprocessed	directives.c	-	-E -o /dev/null	the same diagnostics under -E
 directives-compiled	directives.c	-	-c -o /dev/null	the same diagnostics under -c
@@ -36,3 +36,11 @@ target-inline	target-inline.c	-	-c -o /dev/null	an always_inline function's targ
 target-flatten	target-flatten.c	-	-c -o /dev/null	a flatten function's callee's target feature
 target-builtin	target-builtin.c	-	-c -o /dev/null	a builtin's target feature
 target-abi	target-abi.c	-	-c -o /dev/null	AVX vectors' ABI warnings
+# Highlighted ranges (#2376's second piece): each diagnostic's, through macros (the invocation a range maps to, and in
+# each "expanded from" note the range in the macro's body), over several lines and within the line limit.
+ranges-names	ranges-names.c	-	-fsyntax-only	a name that names nothing, directly and through macros' bodies and arguments
+ranges-expressions	ranges-expressions.c	-	-fsyntax-only	operands, counts and divisors, with parentheses, through a macro and over lines
+ranges-expressions-lines	ranges-expressions.c	-	-fsyntax-only -fcaret-diagnostics-max-lines=2	a range's lines cut to the line limit
+ranges-literals	ranges-literals.c	-	-fsyntax-only	an escape sequence's characters in a literal
+ranges-include	ranges-include.c	-	-fsyntax-only	a quoted header name not found
+ranges-include-angled	ranges-include-angled.c	-	-E -o /dev/null	an angled header name not found, under -E
