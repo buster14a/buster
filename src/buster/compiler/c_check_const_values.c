@@ -562,11 +562,19 @@ static bool check_const_zero(const TypeTable* types, TypeId type, CheckValue* va
         constant = CHECK_CONSTANT_ADDRESS;
     }
     uint64_t* limbs = NULL;
+    uint64_t* parts[2] = { NULL, NULL };
     if (constant == CHECK_CONSTANT_NONE && kind == BUSTER_TYPE_KIND_BIT_INT && check_wide_type(types, type, &width, &sign))
     {
         // A _BitInt past 128 bits' zero (#1447): its limbs, zeros as the region gives them (c_check_wide.c).
         limbs = check_wide_allocate(check_wide_count(width));
         constant = limbs != NULL ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
+    }
+    else if (constant == CHECK_CONSTANT_COMPLEX && check_complex_wide_element(types, type_element(types, type_strip_aligned(types, type)), &width, &sign))
+    {
+        // A complex integer element past 64 bits' (#2219): each part's limbs, zeros (c_check_complex.c).
+        parts[0] = check_wide_allocate(check_wide_count(width));
+        parts[1] = check_wide_allocate(check_wide_count(width));
+        constant = parts[0] != NULL && parts[1] != NULL ? CHECK_CONSTANT_COMPLEX : CHECK_CONSTANT_NONE;
     }
     if (constant != CHECK_CONSTANT_NONE)
     {
@@ -574,6 +582,10 @@ static bool check_const_zero(const TypeTable* types, TypeId type, CheckValue* va
         if (limbs != NULL)
         {
             check_wide_publish(value, limbs);
+        }
+        if (parts[0] != NULL)
+        {
+            check_complex_wide_publish(value, parts);
         }
     }
     return constant != CHECK_CONSTANT_NONE;
