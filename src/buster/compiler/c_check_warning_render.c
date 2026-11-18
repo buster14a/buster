@@ -8,9 +8,22 @@
 static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node, bool parentheses);
 
 // The highlighted ranges clang's diagnostic of a warning event has (#2376), before its publication; the caller clears
-// them. A folded shift's count: the shift's right operand.
+// them. A folded shift's count: the shift's right operand. An unknown attribute: its name, from its scope where it has
+// one (`gnu::bar`, the `::` one token in C23 and two colons before it).
 static void check_warning_event_ranges(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
+    const uint32_t count = parser->tokens.count;
+    if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE && event->token < count)
+    {
+        const uint32_t first = event->token;
+        const bool scoped = (event->payload.data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0 && first + 2 < count;
+        const bool colons = scoped && parser->tokens.kinds[first + 1] == PARSE_KIND_COLON && parser->tokens.kinds[first + 2] == PARSE_KIND_COLON;
+        const uint32_t last = !scoped ? first : colons ? first + 3 : first + 2;
+        if (last < count)
+        {
+            pp_diagnostic_range_tokens(pp, parser->tokens.sources[first], parser->tokens.sources[last]);
+        }
+    }
     const bool shift = event->id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || event->id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE;
     const CheckGraph* graph = &input->graph;
     const uint32_t node = shift && input->token_nodes != NULL && event->token < input->token_count ? input->token_nodes[event->token] : BUSTER_CHECK_NONE;

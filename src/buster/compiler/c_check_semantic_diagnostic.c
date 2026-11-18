@@ -2939,6 +2939,16 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                      aggregate ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) :
                      suggestion ? check_warning_text(scratch, "member reference type %.*s is a pointer; did you mean to use '->'?", (int)type.length, type.pointer) :
                      check_warning_text(scratch, "member reference base type %.*s is not a structure or union", (int)type.length, type.pointer);
+            // The base highlighted (#2376), clang's BaseExpr->getSourceRange(), and for a base of no record the member's
+            // name too (its MemberLoc).
+            if (result != NULL && kind != BUSTER_TYPE_KIND_EXT_VECTOR && operand < count)
+            {
+                check_semantic_range(parser, pp, graph->tokens[operand], true);
+            }
+            if (result != NULL && !aggregate && !suggestion && kind != BUSTER_TYPE_KIND_EXT_VECTOR && token + 1 < parser->tokens.count)
+            {
+                pp_diagnostic_range_tokens(pp, parser->tokens.sources[token + 1], parser->tokens.sources[token + 1]);
+            }
             if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
             {
                 // The typed action already rejected this member. Spell its first illegal component, or the valid

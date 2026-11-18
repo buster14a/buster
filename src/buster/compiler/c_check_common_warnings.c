@@ -5174,8 +5174,11 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
             };
             // Clang checks the condition once it is whole (CheckBooleanCondition): after the diagnostics its operands gave as
             // they were built, a call's format or a statement expression's own (#1941), so published at its `)` or `;`.
+            // The assignment highlighted (#2376), clang's E->getSourceRange() in DiagnoseAssignmentAsCondition.
+            check_semantic_range(parser, pp, token, true);
             check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES, false,
                                    "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
+            pp_diagnostic_ranges_clear(pp);
         }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
         {

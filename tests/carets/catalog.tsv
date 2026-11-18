@@ -45,3 +45,5 @@ ranges-literals	ranges-literals.c	-	-fsyntax-only	an escape sequence's character
 ranges-include	ranges-include.c	-	-fsyntax-only	a quoted header name not found
 ranges-include-angled	ranges-include-angled.c	-	-E -o /dev/null	an angled header name not found, under -E
 ranges-assignments	ranges-assignments.c	-	-fsyntax-only	the expression assigned to, a register variable's operand, a conversion's source
+ranges-members	ranges-members.c	-	-fsyntax-only	an unknown attribute's name with its scope, a member access's base and name
+ranges-members-c23	ranges-members.c	-	-fsyntax-only -std=gnu23	the same in C23, whose '::' is one token
