@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Tests for diagnostic.c: the sort against its definition (ordered by source then sequence, a permutation of its input,
-// and stable: equal keys keep their input order) at every short tail against guard pages, with stable ties and all 128
-// key bits; lane-local ownership, reversed completion, grouped notes, fatal cutoff and bounded failures.
+// and stable: equal keys keep their input order) at every short tail against guard pages and on both sides of the
+// count sort's cutoff, with stable ties and all 128 key bits; lane-local ownership, reversed completion, grouped notes, fatal cutoff and bounded failures.
 
 #define BUSTER_DIAGNOSTIC_TEST_JOBS 129
 #define BUSTER_DIAGNOSTIC_TEST_RECORDS (BUSTER_DIAGNOSTIC_TEST_JOBS * 3)
@@ -39,9 +39,10 @@ static bool diagnostic_test_sort(uint64_t seed)
 {
     bool result = true;
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    for (uint32_t trial = 0; result && trial < 323; trial += 1)
+    // Every count through 319, those around the count sort's cutoff (BUSTER_DIAGNOSTIC_SMALL_COUNT), and 4,095 to 4,097.
+    for (uint32_t trial = 0; result && trial < 339; trial += 1)
     {
-        const uint32_t count = trial < 320 ? trial : 4095 + trial - 320;
+        const uint32_t count = trial < 320 ? trial : trial < 336 ? BUSTER_DIAGNOSTIC_SMALL_COUNT - 8 + trial - 320 : 4095 + trial - 336;
         const uint64_t bytes = (uint64_t)count * sizeof(DiagnosticOrder);
         const uint64_t readable = (bytes + page - 1) / page * page;
         const uint64_t mapped = readable + 2 * page;
