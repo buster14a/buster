@@ -6289,7 +6289,6 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             check_input_specifiers_recover(reader, first, end, i - 1, !specifiers_recovered, &specifier_drops, &state) &&
             !state.complex)
         {
-            specifiers_recovered = true;
             complex = false;
             valid = true;
         }
@@ -17801,8 +17800,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 }
             }
         }
-        valid &= check_input_intrinsic_initialize(&reader);
-        valid &= check_input_overload_initialize(&reader, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] != 0, counts.operands, counts.calls);
+        check_input_intrinsic_initialize(&reader);
+        check_input_overload_initialize(&reader, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] != 0, counts.operands, counts.calls);
         if (!check_input_target_supported(&pp->options))
         {
             check_input_report(&reader, 0, CHECK_INPUT_TARGET);

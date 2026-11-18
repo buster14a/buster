@@ -1948,7 +1948,7 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
         uint32_t signature = 0;
         uint32_t result_size = 0;
         Tier0TestVectorRun run = 0;
-        const char* name = "";
+        const char* name;
         if (f == 0)
         {
             // PICK: locals a, b, c, d, e, out and the result's object.

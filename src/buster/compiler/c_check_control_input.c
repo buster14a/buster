@@ -1242,7 +1242,7 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         if (valid && returns && musttail != BUSTER_CHECK_NONE)
         {
             const CheckInputMusttail record = { .statement = after, .attributes = first, .name = musttail, .body = reader->function_body };
-            valid = check_input_musttail_record(reader, record);
+            check_input_musttail_record(reader, record);
             // Its function's own type and its scopes' cleanups, which the check reads, are source order's.
             check_input_lane_refuse(reader, reader->lane, "a body has a musttail return");
         }

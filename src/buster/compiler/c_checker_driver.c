@@ -118,7 +118,7 @@ static const char* check_driver_fault_message(CheckFault fault)
 
 static const char* check_driver_input_message(CheckInputMessage message)
 {
-    const char* result = "invalid checker input";
+    const char* result;
     switch (message)
     {
         case CHECK_INPUT_UNSUPPORTED: result = "construct is not yet supported by the type checker"; break;
@@ -333,6 +333,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_VM_EXTERN: result = "variably modified type declaration cannot have 'extern' linkage"; break;
         case CHECK_INPUT_VLA_FIELD: result = "fields must have a constant size: 'variable length array in structure' extension will never be supported"; break;
         case CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION: result = "expected identifier or '('"; break;
+        default: result = "invalid checker input"; break;
     }
     return result;
 }
@@ -892,7 +893,7 @@ static String8 check_driver_function_scope(const Parser* parser, Preprocessor* p
 
 static const char* check_driver_report_message(const CheckReport* report)
 {
-    const char* result = "invalid expression";
+    const char* result;
     switch (report->message)
     {
         case CHECK_MESSAGE_ACTION: result = check_driver_action_message(report->diagnostic); break;
@@ -900,6 +901,7 @@ static const char* check_driver_report_message(const CheckReport* report)
         case CHECK_MESSAGE_ICE: result = "expression is not an integer constant expression"; break;
         case CHECK_MESSAGE_STATIC_ASSERT: result = "static assertion failed"; break;
         case CHECK_MESSAGE_STATIC_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
+        default: result = "invalid expression"; break;
     }
     return result;
 }
@@ -13557,14 +13559,20 @@ static int check_driver_one_unit(const CheckDriverRun* run)
                                   run->command->deferred_bodies ? &deferred : NULL, NULL);
     if (check_attested_again(run->lanes->attested, result != 0))
     {
-        result = fseeko(errors, 0, SEEK_SET) == 0 ? result : 1;
-        arena_pop_to(run->arena, marks[0]);
-        arena_pop_to(run->scratch, marks[1]);
-        arena_pop_to(run->output_arena, marks[2]);
-        dependency = (DependencyOutput){ 0 };
-        check_attested_begin(run->lanes->attested, true);
-        result = check_driver_unit(run->command, &options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
-                                   run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, errors, NULL, run->release, &dependency, run->arena, NULL, NULL);
+        if (fseeko(errors, 0, SEEK_SET) == 0)
+        {
+            arena_pop_to(run->arena, marks[0]);
+            arena_pop_to(run->scratch, marks[1]);
+            arena_pop_to(run->output_arena, marks[2]);
+            dependency = (DependencyOutput){ 0 };
+            check_attested_begin(run->lanes->attested, true);
+            result = check_driver_unit(run->command, &options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
+                                       run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, errors, NULL, run->release, &dependency, run->arena, NULL, NULL);
+        }
+        else
+        {
+            result = 1;
+        }
     }
     if (stream != NULL)
     {

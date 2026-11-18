@@ -2683,7 +2683,7 @@ What the lowering covers past scalars (#145's programs):
   code passes it: its registers from the member, and where none is left a stack
   slot of the union's size and alignment (`getIndirectResult`;
   `abi_finish_transparent` records the union in the ABI table's `transparent`
-  column, which `abi_assign_call` and its vector twin read), and `va_arg` reads
+  column, which `abi_assign`'s vector path and `abi_assign_call` read), and `va_arg` reads
   the member from a slot of the union's size and alignment. Such a union past
   two eightbytes, or whose first member passes as an aggregate, a pair, a
   vector or in memory, is refused by name. And a union made transparent, by a

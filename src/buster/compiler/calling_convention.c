@@ -46,9 +46,11 @@
 //
 // Entry points: abi_initialize (the table, with the builtin types classified), abi_classify_all (every complete type
 // not yet classified, in levels whose types depend only on earlier ones) and abi_classify (one such level: the vector
-// path), with their twins abi_classify_all_scalar and abi_classify_scalar; abi_assign (many calls' arguments and
-// results: the vector path, 16 arguments at a time across calls) and its twin abi_assign_scalar; abi_classes and
-// abi_va_arg (va_arg's plan for a type). The twins give identical results, and the tests compare them.
+// path); abi_assign (many calls' arguments and results: the vector path, 16 arguments at a time across calls);
+// abi_classes and abi_va_arg (va_arg's plan for a type). The vector paths keep scalar fallbacks until they are
+// vectorized (#2924's phase D), which give the same results: abi_classify_scalar, the scalar classification, for a
+// level whose fold has no room in scratch, and abi_classify_levels' scan when its columns have none; abi_assign_scalar,
+// the per-call assignment (abi_assign_call), for the calls the vector path leaves and when its columns have no room.
 //
 // Who writes what: the table is the code generator's, which classifies after the front end has made the types (the
 // type table's columns never change once written, but a tag's at its completion, after which abi_classify_all
@@ -80,8 +82,8 @@
 //     abi_fold_groups, abi_store_row and abi_classify_vector.
 //   - The drivers: abi_capacity_bytes, abi_initialize, abi_classify_scalar, abi_classify, abi_classifiable,
 //     abi_is_classified, abi_wide_classified, abi_members_classified, abi_dependencies_classified, abi_is_larger_root,
-//     abi_schedule_wide, abi_classify_pending, abi_classify_levels, abi_classify_all, abi_classify_all_scalar and abi_classes.
-//   - Assignment: abi_stack_place, abi_assign_call (the twin, one call), abi_assign_scalar, the vector path's AbiScan,
+//     abi_schedule_wide, abi_classify_pending, abi_classify_levels, abi_classify_all and abi_classes.
+//   - Assignment: abi_stack_place, abi_assign_call (the fallback, one call), abi_assign_scalar, the vector path's AbiScan,
 //     abi_scan, abi_scan_add, abi_scan_or and abi_assign.
 //   - va_arg: abi_va_arg.
 
@@ -460,11 +462,10 @@ static __attribute__((unused)) bool abi_initialize(AbiTable* abi, Arena* arena, 
 // made after it unclassified; abi_classify, abi_classes and the rest must be given types below `types` alone.
 static __attribute__((unused)) bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes, uint32_t types);
 // Classifies every complete type the table has that isn't yet, a level at a time (each level's types depend only on
-// types classified before it): with the vector path, or its twin. Returns how many types it classified.
+// types classified before it): with the vector path, or its fallback. Returns how many types it classified.
 static __attribute__((unused)) uint32_t abi_classify_all(AbiTable* abi, const TypeTable* table);
-static __attribute__((unused)) uint32_t abi_classify_all_scalar(AbiTable* abi, const TypeTable* table);
 // Classifies `count` types, every one of whose members, elements or bases is classified: the vector path (records and
-// arrays folded four at a time, one per 128-bit lane) and its twin (an offset of a type at a time). A type classified
+// arrays folded four at a time, one per 128-bit lane) and its fallback (an offset of a type at a time). A type classified
 // already is classified again, to the same result.
 static __attribute__((unused)) void abi_classify(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count);
 static __attribute__((unused)) void abi_classify_scalar(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count);
@@ -473,7 +474,7 @@ static __attribute__((unused)) AbiClasses abi_classes(const AbiTable* abi, TypeI
 // Each call's arguments' locations (`locations`, as `arguments` is indexed) and its totals and result (`calls`). Every
 // argument's and result's type must be classified, and its pass bits not UNSUPPORTED, nor its stack bytes UINT32_MAX:
 // the code generator refuses those first. The vector path takes 16 arguments at a time across calls, and gives the
-// calls it can't decide exactly to its twin, which takes one call at a time.
+// calls it can't decide exactly to its fallback, which takes one call at a time.
 static __attribute__((unused)) void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls);
 static __attribute__((unused)) void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls);
 // va_arg's plan for a classified type, after the default argument promotions.
@@ -784,7 +785,7 @@ static __m128i abi_simple_row(AbiSimple simple)
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Entries: a record's or an array's classes at one offset, from its members' rows, as clang's classify gives them.
-// This is the scalar classification, the vector fold's twin.
+// This is the scalar classification, the vector fold's fallback.
 
 static AbiClasses abi_row_at(const AbiTable* abi, uint32_t index, uint32_t offset)
 {
@@ -2476,7 +2477,7 @@ static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t i
     abi->transparent[index] = kind == BUSTER_TYPE_KIND_UNION ? abi_finish_transparent(abi, table, index) : 0;
 }
 
-// What follows from a type's row and what it is (the twin's finishing step, and the vector path's for the types it
+// What follows from a type's row and what it is (the fallback's finishing step, and the vector path's for the types it
 // doesn't fold or whose members' parts it doesn't reduce): its storage and layout from its members', elements' or
 // base's, then the rest.
 static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
@@ -2902,7 +2903,7 @@ static void abi_store_row(AbiTable* abi, uint32_t index, __m128i row)
 }
 
 // The vector classification of a level (see abi_classify). Returns false, having classified only some of the types, if
-// the scratch memory can't hold the fold; the caller then classifies them all with the twin.
+// the scratch memory can't hold the fold; the caller then classifies them all with the fallback.
 static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
 {
     Scratch scratch = scratch_begin(0);
@@ -3296,10 +3297,8 @@ static bool abi_schedule_wide(const TypeTable* table, TypeId type)
 // A level of 0 is unseen, the high bit is a live DFS frame with its longest child level, and UINT32_MAX is blocked.
 // Type indices have 29 bits, so a valid longest path cannot reach the high bit.
 static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, const uint32_t* pending, uint32_t pending_count, TypeId* ready,
-                                     uint32_t count, Arena* arena, bool scalar)
+                                     uint32_t count, Arena* arena)
 {
-    (void)scalar;
-
     const uint32_t live = 1u << 31;
     uint32_t* levels = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
     uint32_t* cursors = levels != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
@@ -3405,14 +3404,7 @@ static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, cons
             const uint32_t end = cursors[level];
             if (end != result)
             {
-                if (BUSTER_SCALAR_PATH(scalar))
-                {
-                    abi_classify_scalar(abi, table, ready + result, end - result);
-                }
-                else
-                {
-                    abi_classify(abi, table, ready + result, end - result);
-                }
+                abi_classify(abi, table, ready + result, end - result);
                 result = end;
             }
         }
@@ -3423,10 +3415,8 @@ static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, cons
 // Common shallow tables keep the measured scan/frontier path. After a fixed number of scans, classify the remainder
 // topologically: at most 16 visits per type/member plus one graph walk, so deep chains cannot make scheduling
 // quadratic. Wide records retain their early-classification shortcut. Without scratch, keep the original scalar scan.
-static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool scalar)
+static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table)
 {
-    (void)scalar;
-
     Scratch scratch = scratch_begin(0);
     const uint32_t count = table->types.count < abi->capacity ? table->types.count : abi->capacity;
     uint32_t* pending = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
@@ -3490,20 +3480,13 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
             }
             pending_count = kept;
             progress = ready_count != 0;
-            if (BUSTER_SCALAR_PATH(scalar))
-            {
-                abi_classify_scalar(abi, table, ready, ready_count);
-            }
-            else
-            {
-                abi_classify(abi, table, ready, ready_count);
-            }
+            abi_classify(abi, table, ready, ready_count);
             classified += ready_count;
             scans += 1;
         }
         if (pending_count != 0 && progress)
         {
-            const uint32_t extra = abi_classify_pending(abi, table, pending, pending_count, ready, count, scratch.arena, BUSTER_SCALAR_PATH(scalar));
+            const uint32_t extra = abi_classify_pending(abi, table, pending, pending_count, ready, count, scratch.arena);
             fallback = extra == UINT32_MAX;
             classified += fallback ? 0 : extra;
         }
@@ -3534,16 +3517,9 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
     return classified;
 }
 
-static uint32_t abi_classify_all_scalar(AbiTable* abi, const TypeTable* table);
-
 static uint32_t abi_classify_all(AbiTable* abi, const TypeTable* table)
 {
-    return abi_classify_levels(abi, table, false);
-}
-
-static uint32_t abi_classify_all_scalar(AbiTable* abi, const TypeTable* table)
-{
-    return abi_classify_levels(abi, table, true);
+    return abi_classify_levels(abi, table);
 }
 
 static AbiClasses abi_classes(const AbiTable* abi, TypeId type, bool named)
@@ -3571,7 +3547,7 @@ static uint32_t abi_stack_place(uint64_t* stack, uint8_t* area_alignment_log2, u
     return (uint32_t)offset;
 }
 
-// One call, as clang and LLVM assign it (the vector path's twin): clang decides from its count of free registers
+// One call, as clang and LLVM assign it (the vector path's fallback): clang decides from its count of free registers
 // whether an argument's eightbytes go to registers; LLVM then gives each value it gets the next register of its kind
 // or, once there is none, a stack slot of its own. The two counts differ where clang counts otherwise than LLVM
 // assigns: LLVM uses registers clang doesn't count for an UNCOUNTED argument, a DEMOTED result's hidden pointer and a
@@ -3816,10 +3792,10 @@ static void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, Abi
 
 // The most arguments a call may have for the vector path to assign it: each class's prefix sum of registers has 16 bits
 // of a lane, and an argument needs at most two registers of a class, the hidden pointer one more (2 * 32,767 + 1 =
-// 65,535). A longer call goes to the twin: past it, the general registers' sum would carry into the vector ones'.
+// 65,535). A longer call goes to the fallback: past it, the general registers' sum would carry into the vector ones'.
 #define BUSTER_ABI_COUNTED_ARGUMENTS 32767u
 #define BUSTER_ABI_LANES 16
-// The bit of a call's ORed slot alignments (every one 8 or more) that says the twin must assign the call.
+// The bit of a call's ORed slot alignments (every one 8 or more) that says the fallback must assign the call.
 #define BUSTER_ABI_LANE_DEFERRED 0x01
 
 // A segmented scan's windows: steps[k] holds the lanes that add the lane 2^k below them (no segment starts between),
@@ -3874,7 +3850,7 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 // prefix sums of the slot sizes of those on the stack their offsets. That is exactly the assignment unless:
 //   - an argument doesn't fit while a register it needs is still free (a two-eightbyte one with one free, or one of
 //     both classes with one class full), which the sums count as used though it stays free for the arguments after;
-//   - a stack argument's alignment doesn't divide the offset the sums give it, so the twin would pad before it, or is
+//   - a stack argument's alignment doesn't divide the offset the sums give it, so the fallback would pad before it, or is
 //     more than 32 bits hold;
 //   - an argument is UNCOUNTED, whose registers clang doesn't count but LLVM does, or a named WIDE one of a variadic
 //     call, the reverse;
@@ -3882,7 +3858,7 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 //     eightbyte clang counts as SSE and LLVM puts in a general register, or the result is one LLVM demotes to a hidden
 //     pointer, which clang doesn't count (DEMOTED);
 //   - the call has more than BUSTER_ABI_COUNTED_ARGUMENTS arguments, whose sums 16 bits a class can't hold;
-// and the calls with one of those (rare in compiled code) go to the twin, which assigns them one argument at a time.
+// and the calls with one of those (rare in compiled code) go to the fallback, which assigns them one argument at a time.
 // No loop goes over a call's arguments: the setup marks each call's first argument and its first unnamed one, and the
 // lanes take their call's marks with a segmented OR scan; a call ends where the next argument starts one, and there the
 // scans' inclusive values are its totals, which a last pass over the calls reads.
@@ -3985,7 +3961,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __m512i exclusive_integers = _mm512_and_si512(exclusive, low_halves);
             const __m512i exclusive_vectors = _mm512_srli_epi32(exclusive, 16);
             // Each class only where the argument needs it: a long fits after nine doubles, whose sum is past 8 (the
-            // benchmark found the vector path left 23% of its arguments to the twin before, and 5% so).
+            // benchmark found the vector path left 23% of its arguments to the fallback before, and 5% so).
             const __mmask16 integers_fit = (__mmask16)~_mm512_test_epi32_mask(need_integers, need_integers) |
                                            _mm512_cmple_epu32_mask(_mm512_add_epi32(exclusive_integers, need_integers), _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS));
             const __mmask16 vectors_fit = (__mmask16)~_mm512_test_epi32_mask(need_vectors, need_vectors) |
@@ -4014,11 +3990,11 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             // DEMOTED and LONG mark a call's first lane, and its ORed alignments take them to its last.
             const __mmask16 demoted = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_DEMOTED));
             const __mmask16 long_call = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_LONG));
-            // A transparent union of a slot of its own (AbiTable.transparent): its member's classes, the twin's.
+            // A transparent union of a slot of its own (AbiTable.transparent): its member's classes, the fallback's.
             const __m512i transparent = _mm512_mask_i32gather_epi32(zero, valid, indices, abi->transparent, 4);
             const __mmask16 transparent_lanes = _mm512_test_epi32_mask(transparent, transparent);
             const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | huge | wide_named | empty | general_low | demoted | long_call | transparent_lanes);
-            // The alignments ORed (the highest bit is the largest), with DEFERRED for a lane the twin must assign.
+            // The alignments ORed (the highest bit is the largest), with DEFERRED for a lane the fallback must assign.
             const __m512i stacked_alignment = _mm512_maskz_mov_epi32(on_stack, slot_alignment);
             const __m512i alignments = _mm512_mask_or_epi32(stacked_alignment, deferred_lanes, stacked_alignment, _mm512_set1_epi32(BUSTER_ABI_LANE_DEFERRED));
             const __m512i alignment_inclusive = abi_scan_or(alignments, scan, carry_alignment);
@@ -4052,7 +4028,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             _mm512_mask_storeu_epi32(end_alignment + base, ends, alignment_inclusive);
         }
         // Each call's totals from its last argument (a call without arguments keeps its starting ones), and the calls
-        // with a deferred argument by the twin.
+        // with a deferred argument by the fallback.
         for (uint32_t c = 0; c < signatures.count; c += 1)
         {
             const uint32_t count = signatures.counts[c];

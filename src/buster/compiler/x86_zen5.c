@@ -299,7 +299,7 @@ static uint8_t x86_zen5_id(const X86Instruction* instruction)
 
 // Every byte indexes a slot; the slots past the rows are unknown. Inputs and outputs are disjoint bounded slices; zero
 // count touches neither. Columns must be one of X86CostColumn; keeping that invariant out of the loop is deliberate.
-static __attribute__((noinline)) void x86_zen5_lookup_scalar(const uint8_t* restrict ids, uint64_t count, X86CostColumn column, uint16_t* restrict output)
+static __attribute__((noinline, unused)) void x86_zen5_lookup_scalar(const uint8_t* restrict ids, uint64_t count, X86CostColumn column, uint16_t* restrict output)
 {
     const uint16_t* table = x86_zen5_columns[column];
     #pragma clang loop vectorize(disable) interleave(disable)

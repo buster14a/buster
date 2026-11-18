@@ -113,44 +113,111 @@ static void tier1_schedule_test_records(X86Instruction* records, uint8_t* pins, 
     }
 }
 
-static void tier1_schedule_test_compare(Tier1ScheduleTest* test, Tier1ScheduleInput input, Tier1ScheduleGraph* scalar, Tier1ScheduleGraph* vector)
+static bool tier1_schedule_test_bit(const uint64_t* row, uint32_t index)
 {
-    uint16_t scalar_order[BUSTER_TIER1_SCHEDULE_MAX_RECORDS + 1];
-    uint16_t vector_order[BUSTER_TIER1_SCHEDULE_MAX_RECORDS + 1];
-    memset(scalar_order, 0x5a, sizeof(scalar_order));
-    memset(vector_order, 0x5a, sizeof(vector_order));
-    Tier1ScheduleStats scalar_stats;
-    Tier1ScheduleStats vector_stats;
-    const Tier1ScheduleStatus left = tier1_schedule_block(input, scalar, scalar_order, input.count, false, &scalar_stats);
-    const Tier1ScheduleStatus right = tier1_schedule_block(input, vector, vector_order, input.count, true, &vector_stats);
-    tier1_schedule_test_expect(test, left == TIER1_SCHEDULE_OK && right == TIER1_SCHEDULE_OK, "both paths accept bounded input");
-    tier1_schedule_test_expect(test, memcmp(scalar_order, vector_order, sizeof(scalar_order)) == 0, "identical order and untouched output tail");
-    tier1_schedule_test_expect(test, scalar_order[input.count] == 0x5a5a, "no store outside logical output");
-    tier1_schedule_test_expect(test, memcmp(&scalar_stats, &vector_stats, sizeof(scalar_stats)) == 0, "identical coverage and scheduling statistics");
-    tier1_schedule_test_expect(test, tier1_schedule_verify(input, scalar_order) && tier1_schedule_verify(input, vector_order), "independent dependency verifier accepts both orders");
-    for (uint32_t i = 0; i < input.count; i += 1)
+    return ((row[index / 64] >> (index & 63)) & 1) != 0;
+}
+
+// Schedules `input` into a poisoned graph and checks the graph and the order against their definitions, from the
+// graph's own effect columns (x86_instructions_effects resolves them; test-x86-semantics checks that):
+// - record j precedes a later record i exactly where they conflict: one's writes meet the other's reads, or a write
+//   meets the other's live writes, or either is a barrier; successors are the predecessors transposed; a data successor
+//   is an edge whose earlier record writes a register or flag the later one reads;
+// - each height is the record's latency plus its data successors' greatest height, or zero at a barrier; each level is
+//   one more than its successors' greatest level, or 1 without one; each latency is the model's for the record's cost
+//   id where the model has one;
+// - the statistics count the edges, the levels and the moved records;
+// - the order takes, at each step, the earliest of the ready records with the greatest height, and leaves the slot past
+//   the block untouched; tier1_schedule_verify accepts it.
+static void tier1_schedule_test_check(Tier1ScheduleTest* test, Tier1ScheduleInput input, Tier1ScheduleGraph* graph)
+{
+    uint16_t order[BUSTER_TIER1_SCHEDULE_MAX_RECORDS + 1];
+    memset(order, 0x5a, sizeof(order));
+    memset(graph, 0xa5, sizeof(*graph));
+    Tier1ScheduleStats stats;
+    memset(&stats, 0xa5, sizeof(stats));
+    const Tier1ScheduleStatus status = tier1_schedule_block(input, graph, order, input.count, &stats);
+    tier1_schedule_test_expect(test, status == TIER1_SCHEDULE_OK, "bounded input schedules");
+    if (status == TIER1_SCHEDULE_OK)
     {
-        tier1_schedule_test_expect(test, scalar->reads[i] == vector->reads[i] && scalar->writes[i] == vector->writes[i], "identical resolved effects");
-        tier1_schedule_test_expect(test, scalar->heights[i] == vector->heights[i] && scalar->levels[i] == vector->levels[i], "identical weighted heights and reverse levels");
-        tier1_schedule_test_expect(test, scalar->latencies[i] == vector->latencies[i] && scalar->cost_ids[i] == vector->cost_ids[i], "identical operand-sensitive model consumption");
-        tier1_schedule_test_expect(test, memcmp(scalar->predecessors[i], vector->predecessors[i], sizeof(scalar->predecessors[i])) == 0, "identical predecessor bitsets");
-        tier1_schedule_test_expect(test, memcmp(scalar->successors[i], vector->successors[i], sizeof(scalar->successors[i])) == 0, "identical successor bitsets");
-        tier1_schedule_test_expect(test, memcmp(scalar->data_successors[i], vector->data_successors[i], sizeof(scalar->data_successors[i])) == 0, "identical GPR RAW priority edges");
-    }
-    // The columns whose value each record's case lacks: unknown, an absent path's too (x86_zen5_missing counts the ones
-    // a row doesn't account for, which an absent path is).
-    for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
-    {
-        uint32_t unknown = 0;
-        for (uint32_t i = 0; i < input.count; i += 1)
+        const uint32_t count = input.count;
+        uint32_t edges = 0;
+        uint32_t levels = 0;
+        uint32_t moved = 0;
+        bool graph_valid = true;
+        bool heights_valid = true;
+        bool latencies_valid = true;
+        for (uint32_t i = 0; i < count; i += 1)
         {
-            unknown += x86_zen5_columns[column][x86_zen5_id(&input.instructions[i])] == BUSTER_X86_COST_UNKNOWN;
+            for (uint32_t j = 0; j < count; j += 1)
+            {
+                const bool conflict = j < i && ((graph->writes[j] & graph->reads[i]) != 0 || (graph->reads[j] & graph->writes[i]) != 0 ||
+                                                (graph->writes[j] & graph->live_writes[i]) != 0 || (graph->live_writes[j] & graph->writes[i]) != 0 ||
+                                                graph->barriers[j] != 0 || graph->barriers[i] != 0);
+                const bool data = conflict && (graph->writes[j] & graph->reads[i] & BUSTER_TIER1_SCHEDULE_DATA) != 0;
+                graph_valid = graph_valid && tier1_schedule_test_bit(graph->predecessors[i], j) == conflict && tier1_schedule_test_bit(graph->successors[j], i) == conflict &&
+                              tier1_schedule_test_bit(graph->data_successors[j], i) == data;
+                edges += conflict;
+            }
+            const uint16_t model = x86_zen5_columns[X86_COST_LATENCY][graph->cost_ids[i]];
+            latencies_valid = latencies_valid && graph->cost_ids[i] == x86_zen5_id(&input.instructions[i]) && (model == BUSTER_X86_COST_UNKNOWN || graph->latencies[i] == model);
         }
-        tier1_schedule_test_expect(test, scalar_stats.missing_columns[column] == unknown, "coverage counts the actual input records");
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            uint32_t height = 0;
+            uint32_t level = 0;
+            for (uint32_t next = i + 1; next < count; next += 1)
+            {
+                height = tier1_schedule_test_bit(graph->data_successors[i], next) && graph->heights[next] > height ? graph->heights[next] : height;
+                level = tier1_schedule_test_bit(graph->successors[i], next) && graph->levels[next] > level ? graph->levels[next] : level;
+            }
+            heights_valid = heights_valid && graph->heights[i] == (graph->barriers[i] != 0 ? 0 : graph->latencies[i] + height) && graph->levels[i] == level + 1;
+            levels = graph->levels[i] > levels ? graph->levels[i] : levels;
+        }
+        uint64_t pending[BUSTER_TIER1_SCHEDULE_WORDS] = { 0 };
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            pending[i / 64] |= UINT64_C(1) << (i & 63);
+        }
+        bool order_valid = true;
+        for (uint32_t position = 0; order_valid && position < count; position += 1)
+        {
+            uint32_t best = count;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                uint64_t waiting = 0;
+                for (uint32_t word = 0; word < BUSTER_TIER1_SCHEDULE_WORDS; word += 1)
+                {
+                    waiting |= graph->predecessors[i][word] & pending[word];
+                }
+                const bool ready = tier1_schedule_test_bit(pending, i) && waiting == 0;
+                best = ready && (best == count || graph->heights[i] > graph->heights[best]) ? i : best;
+            }
+            order_valid = best < count && order[position] == best;
+            pending[best / 64] &= order_valid ? ~(UINT64_C(1) << (best & 63)) : UINT64_MAX;
+            moved += order[position] != position;
+        }
+        tier1_schedule_test_expect(test, graph_valid, "each edge is exactly a conflict, successors transpose predecessors, data edges are register or flag RAW");
+        tier1_schedule_test_expect(test, heights_valid, "each height is its latency plus its data successors' greatest, zero at a barrier; each level one past its successors'");
+        tier1_schedule_test_expect(test, latencies_valid, "each record's cost id and measured latency are the model's");
+        tier1_schedule_test_expect(test, stats.records == count && stats.edges == edges && stats.levels == levels && stats.moved == moved, "statistics count the edges, levels and moved records");
+        tier1_schedule_test_expect(test, order_valid && order[count] == 0x5a5a, "the order takes the earliest ready record of greatest height and stores nothing past the block");
+        tier1_schedule_test_expect(test, tier1_schedule_verify(input, order), "the independent dependency verifier accepts the order");
+        // The columns whose value each record's case lacks: unknown, an absent path's too (x86_zen5_missing counts the ones
+        // a row doesn't account for, which an absent path is).
+        for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
+        {
+            uint32_t unknown = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                unknown += x86_zen5_columns[column][x86_zen5_id(&input.instructions[i])] == BUSTER_X86_COST_UNKNOWN;
+            }
+            tier1_schedule_test_expect(test, stats.missing_columns[column] == unknown, "coverage counts the actual input records");
+        }
     }
 }
 
-static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleGraph* scalar, Tier1ScheduleGraph* vector)
+static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleGraph* graph)
 {
     X86Instruction records[] = {
         { .form = X86_FORM_NOT_RM64, .rm = X86_REGISTER_R8, .mode = BUSTER_X86_REGISTER_DIRECT },
@@ -161,11 +228,11 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     Tier1ScheduleInput input = { .instructions = records, .count = 4 };
     uint16_t order[8];
     Tier1ScheduleStats stats;
-    tier1_schedule_test_compare(test, input, scalar, vector);
-    tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, order, 8, true, &stats) == TIER1_SCHEDULE_OK, "measured dependency example schedules");
+    tier1_schedule_test_check(test, input, graph);
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, graph, order, 8, &stats) == TIER1_SCHEDULE_OK, "measured dependency example schedules");
     const uint16_t expected[] = { 2, 0, 1, 3 };
     tier1_schedule_test_expect(test, memcmp(order, expected, sizeof(expected)) == 0 && stats.moved == 3, "measured IMUL chain starts first with stable ties");
-    tier1_schedule_test_expect(test, vector->heights[2] == 4 * BUSTER_X86_COST_SCALE && vector->heights[0] == BUSTER_X86_COST_SCALE, "actual three-cycle IMUL weights its GPR dependency");
+    tier1_schedule_test_expect(test, graph->heights[2] == 4 * BUSTER_X86_COST_SCALE && graph->heights[0] == BUSTER_X86_COST_SCALE, "actual three-cycle IMUL weights its GPR dependency");
     tier1_schedule_test_expect(test, stats.unknown_cases == 0 && stats.missing_columns[X86_COST_PIPES] == 0, "the measured cases' pipes are known (#181)");
     uint16_t invalid[] = { 3, 0, 1, 2 };
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, invalid), "verifier rejects RAW reversal");
@@ -181,15 +248,15 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "verifier rejects WAR reversal");
     records[1] = tier1_schedule_test_instruction(X86_FORM_IMUL_R64_RM64, X86_REGISTER_R12, X86_REGISTER_R13);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "verifier rejects flags WAW reversal");
-    tier1_schedule_test_compare(test, input, scalar, vector);
-    tier1_schedule_test_expect(test, vector->heights[0] == 3 * BUSTER_X86_COST_SCALE && vector->heights[1] == 3 * BUSTER_X86_COST_SCALE, "flags-only ordering does not acquire a GPR latency");
+    tier1_schedule_test_check(test, input, graph);
+    tier1_schedule_test_expect(test, graph->heights[0] == 3 * BUSTER_X86_COST_SCALE && graph->heights[1] == 3 * BUSTER_X86_COST_SCALE, "flags-only ordering does not acquire a GPR latency");
 
     records[0] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R8);
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R9);
     uint8_t pins[] = { 1, 0 };
     input.pinned = pins;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "caller anchor cannot move");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     input.pinned = 0;
 
     records[0] = tier1_schedule_test_instruction(X86_FORM_CMP_RM64_R64, X86_REGISTER_R8, X86_REGISTER_R9);
@@ -198,7 +265,7 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     input.count = 3;
     const uint16_t separated[] = { 0, 2, 1 };
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, separated), "compare and branch stay adjacent");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
 
     // A load moves among the records that don't access memory; any two accesses keep their order (no alias analysis,
     // and a volatile access stays where it was among the others).
@@ -207,68 +274,68 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R10);
     input.count = 2;
     tier1_schedule_test_expect(test, x86_zen5_id(records) != 0 && tier1_schedule_verify(input, reversed), "a known L1 load moves past a register operation");
-    tier1_schedule_test_compare(test, input, scalar, vector);
-    tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, order, 8, true, &stats) == TIER1_SCHEDULE_OK && stats.pinned == 0 &&
-                                         vector->latencies[0] == 4 * BUSTER_X86_COST_SCALE, "a load is no barrier, its measured latency its weight");
+    tier1_schedule_test_check(test, input, graph);
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, graph, order, 8, &stats) == TIER1_SCHEDULE_OK && stats.pinned == 0 &&
+                                         graph->latencies[0] == 4 * BUSTER_X86_COST_SCALE, "a load is no barrier, its measured latency its weight");
     records[1] = tier1_schedule_test_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_R10, X86_REGISTER_R11);
     records[1].mode = BUSTER_X86_MEMORY_BASE;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "two loads keep their order");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[1] = tier1_schedule_test_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_R10, X86_REGISTER_R11);
     records[1].mode = BUSTER_X86_MEMORY_BASE;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a load and a store keep their order");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[0] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R8);
     tier1_schedule_test_expect(test, tier1_schedule_verify(input, reversed), "a store moves past a register operation");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[1] = tier1_schedule_test_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_R10, X86_REGISTER_R8);
     records[1].mode = BUSTER_X86_MEMORY_BASE;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a store stays after its value's definition");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     // A rotate: a form the backends don't emit, which the model has no row of (#181).
     records[0] = tier1_schedule_test_instruction(X86_FORM_ROL_RM64_IMM8, 0, X86_REGISTER_R8);
     records[0].immediate = 4;
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R10);
     tier1_schedule_test_expect(test, x86_zen5_id(records) == 0 && tier1_schedule_verify(input, reversed), "an unmeasured form moves");
-    tier1_schedule_test_compare(test, input, scalar, vector);
-    tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, order, 8, true, &stats) == TIER1_SCHEDULE_OK && stats.unknown_cases == 1 &&
-                                         vector->latencies[0] == BUSTER_X86_COST_SCALE, "an unmeasured case is counted unknown and weighs its class");
+    tier1_schedule_test_check(test, input, graph);
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, graph, order, 8, &stats) == TIER1_SCHEDULE_OK && stats.unknown_cases == 1 &&
+                                         graph->latencies[0] == BUSTER_X86_COST_SCALE, "an unmeasured case is counted unknown and weighs its class");
     records[0] = tier1_schedule_test_instruction(X86_FORM_DIV_RM64, 0, X86_REGISTER_R8);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "possible arithmetic fault stays pinned");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     // #1059's audit: a fence, a locked read/modify/write and a reader of the floating environment (MXCSR, which a
     // FENV_ACCESS region's rounding mode and exception flags live in) stay pinned, so that no access, and no floating
     // operation, moves across an ordering point or a fesetround call's effect.
     records[0] = tier1_schedule_test_instruction(X86_FORM_MFENCE, 0, 0);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a fence stays pinned");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[0] = tier1_schedule_test_instruction(X86_FORM_FLD_ST, 0, 0);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a retained x87 result keeps its original spill's waiting boundary");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[0] = tier1_schedule_test_instruction(X86_FORM_FSTP_ST, 0, 0);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a retained x87 reload keeps its waiting boundary");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[0] = tier1_schedule_test_instruction(X86_FORM_LOCK_CMPXCHG_M64_R64, X86_REGISTER_R9, X86_REGISTER_R8);
     records[0].mode = BUSTER_X86_MEMORY_BASE;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a locked compare-exchange stays pinned");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     // A floating operation reads MXCSR's controls and may set its sticky status flags: floating operations move among
     // the others, and stmxcsr, which reads the status flags, stays pinned, as do calls (fesetround's, fetestexcept's).
     records[0] = tier1_schedule_test_instruction(X86_FORM_ADDSD_X_XM64, 0, 1);
     tier1_schedule_test_expect(test, tier1_schedule_verify(input, reversed), "a floating addition moves past a register operation");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[1] = tier1_schedule_test_instruction(X86_FORM_MULSD_X_XM64, 2, 3);
     tier1_schedule_test_expect(test, tier1_schedule_verify(input, reversed), "two independent floating operations change places");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[1] = tier1_schedule_test_instruction(X86_FORM_STMXCSR_M32, 0, X86_REGISTER_R8);
     records[1].mode = BUSTER_X86_MEMORY_BASE;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "stmxcsr stays after a floating operation");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R9);
     records[0] = tier1_schedule_test_instruction(X86_FORM_MOV_RM8_R8, X86_REGISTER_R8, X86_REGISTER_R9);
     records[1] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R9);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "partial register write retains the whole-register dependency");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
 
     // Flags: a writer whose flags are overwritten before any read is dead, and two dead writers may change places; a
     // live writer (read, or the block's last) keeps its order with every other writer and its readers.
@@ -280,8 +347,8 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     const uint16_t live_swapped[] = { 0, 2, 1 };
     tier1_schedule_test_expect(test, tier1_schedule_verify(input, dead_swapped), "two dead flag writers change places");
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, live_swapped), "the block's last flag writer stays last");
-    tier1_schedule_test_compare(test, input, scalar, vector);
-    tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, order, 8, true, &stats) == TIER1_SCHEDULE_OK && stats.dead_flags == 2 && stats.edges == 2,
+    tier1_schedule_test_check(test, input, graph);
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, graph, order, 8, &stats) == TIER1_SCHEDULE_OK && stats.dead_flags == 2 && stats.edges == 2,
                                "dead flag writers depend only on the live one");
     records[0] = tier1_schedule_test_instruction(X86_FORM_CMP_RM64_R64, X86_REGISTER_R9, X86_REGISTER_R8);
     records[1] = tier1_schedule_test_instruction(X86_FORM_SETE_RM8, 0, X86_REGISTER_R10);
@@ -289,19 +356,19 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     const uint16_t reader_first[] = { 2, 0, 1 };
     const uint16_t reader_split[] = { 0, 2, 1 };
     tier1_schedule_test_expect(test, tier1_schedule_verify(input, reader_first) && tier1_schedule_verify(input, reader_split), "a flags reader moves with its writer");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[2] = tier1_schedule_test_instruction(X86_FORM_ADD_RM64_R64, X86_REGISTER_R13, X86_REGISTER_R12);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reader_split), "no flag writer between a reader and its writer");
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reader_first), "no reordering of the block's last flag writer");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[1] = tier1_schedule_test_instruction(X86_FORM_CMOVE_R64_RM64, X86_REGISTER_R10, X86_REGISTER_R11);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reader_split), "no flag writer between a cmov and its writer");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
     records[1] = tier1_schedule_test_instruction(X86_FORM_CALL_REL32, 0, 0);
     records[2] = tier1_schedule_test_instruction(X86_FORM_NOT_RM64, 0, X86_REGISTER_R11);
     const uint16_t across[] = { 0, 2, 1 };
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, across), "a call is a barrier");
-    tier1_schedule_test_compare(test, input, scalar, vector);
+    tier1_schedule_test_check(test, input, graph);
 
     Tier1ScheduleStats saved;
     memset(&saved, 0x5a, sizeof(saved));
@@ -309,18 +376,18 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     order[0] = 0x5a5a;
     input.count = BUSTER_TIER1_SCHEDULE_MAX_RECORDS + 1;
     input.instructions = (const X86Instruction*)1;
-    tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, order, input.count, true, &stats) == TIER1_SCHEDULE_CAPACITY, "oversized block declines before input access");
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, order, input.count, &stats) == TIER1_SCHEDULE_CAPACITY, "oversized block declines before input access");
     tier1_schedule_test_expect(test, order[0] == 0x5a5a && memcmp(&stats, &saved, sizeof(saved)) == 0, "capacity rejection preserves output and statistics");
     input.count = 1;
-    tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, order, 0, true, &stats) == TIER1_SCHEDULE_CAPACITY, "short output capacity declines before input access");
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, order, 0, &stats) == TIER1_SCHEDULE_CAPACITY, "short output capacity declines before input access");
     input.instructions = 0;
-    tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, order, 1, true, &stats) == TIER1_SCHEDULE_INVALID_ARGUMENT, "null nonempty input is invalid");
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, order, 1, &stats) == TIER1_SCHEDULE_INVALID_ARGUMENT, "null nonempty input is invalid");
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, order), "null nonempty verification is invalid");
     input.count = 0;
-    tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, 0, 0, true, &stats) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, 0), "empty input permits null slices");
+    tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, 0, 0, &stats) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, 0), "empty input permits null slices");
 }
 
-static void tier1_schedule_test_guards(Tier1ScheduleTest* test, Tier1ScheduleGraph* scalar, Tier1ScheduleGraph* vector)
+static void tier1_schedule_test_guards(Tier1ScheduleTest* test, Tier1ScheduleGraph* graph)
 {
     const long page = sysconf(_SC_PAGESIZE);
     bool allocated = page >= (long)(BUSTER_TIER1_SCHEDULE_MAX_RECORDS * sizeof(X86Instruction));
@@ -354,8 +421,8 @@ static void tier1_schedule_test_guards(Tier1ScheduleTest* test, Tier1ScheduleGra
                 .pinned = pins,
                 .count = count,
             };
-            tier1_schedule_test_compare(test, input, scalar, vector);
-            tier1_schedule_test_expect(test, tier1_schedule_block(input, vector, output, count, true, 0) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, output), "every guarded input/output length through 256");
+            tier1_schedule_test_check(test, input, graph);
+            tier1_schedule_test_expect(test, tier1_schedule_block(input, graph, output, count, 0) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, output), "every guarded input/output length through 256");
         }
     }
     if (records_mapping != MAP_FAILED)
@@ -372,18 +439,13 @@ static void tier1_schedule_test_guards(Tier1ScheduleTest* test, Tier1ScheduleGra
     }
 }
 
-static void tier1_schedule_test_execution(Tier1ScheduleTest* test, Tier1ScheduleGraph* scalar, Tier1ScheduleGraph* vector)
+static void tier1_schedule_test_execution(Tier1ScheduleTest* test, Tier1ScheduleGraph* graph)
 {
-    for (uint32_t path = 0; path < 2; path += 1)
-    {
-        Tier1ScheduleFixture fixture = { 0 };
-        uint16_t order[BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS];
-        const bool ready = tier1_schedule_fixture_open(&fixture, path == 0 ? scalar : vector, order, path != 0);
-        tier1_schedule_test_expect(test, ready && tier1_schedule_fixture_check(&fixture),
-                                   path == 0 ? "scalar schedule and both encoders execute 64 independent integer inputs" :
-                                               "requested vector schedule and both encoders execute 64 independent integer inputs");
-        tier1_schedule_fixture_close(&fixture);
-    }
+    Tier1ScheduleFixture fixture = { 0 };
+    uint16_t order[BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS];
+    const bool ready = tier1_schedule_fixture_open(&fixture, graph, order);
+    tier1_schedule_test_expect(test, ready && tier1_schedule_fixture_check(&fixture), "the schedule and both encoders execute 64 independent integer inputs");
+    tier1_schedule_fixture_close(&fixture);
 }
 
 static int run_tier1_schedule_tests(int argc, char** argv)
@@ -407,14 +469,13 @@ static int run_tier1_schedule_tests(int argc, char** argv)
         }
     }
     const bool initialized = arguments && x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize();
-    Tier1ScheduleGraph* scalar = initialized ? malloc(sizeof(*scalar)) : 0;
-    Tier1ScheduleGraph* vector = initialized ? malloc(sizeof(*vector)) : 0;
-    const bool ready = initialized && scalar && vector;
+    Tier1ScheduleGraph* graph = initialized ? malloc(sizeof(*graph)) : 0;
+    const bool ready = initialized && graph;
     if (ready)
     {
-        tier1_schedule_test_examples(&test, scalar, vector);
-        tier1_schedule_test_guards(&test, scalar, vector);
-        tier1_schedule_test_execution(&test, scalar, vector);
+        tier1_schedule_test_examples(&test, graph);
+        tier1_schedule_test_guards(&test, graph);
+        tier1_schedule_test_execution(&test, graph);
         X86Instruction records[BUSTER_TIER1_SCHEDULE_MAX_RECORDS];
         uint8_t pins[BUSTER_TIER1_SCHEDULE_MAX_RECORDS];
         uint32_t state = test.seed;
@@ -427,15 +488,14 @@ static int run_tier1_schedule_tests(int argc, char** argv)
                 .pinned = trial % 3 == 0 ? 0 : pins,
                 .count = count,
             };
-            tier1_schedule_test_compare(&test, input, scalar, vector);
+            tier1_schedule_test_check(&test, input, graph);
         }
     }
     else
     {
         fprintf(stderr, "test-tier1-schedule: invalid arguments, initialization or allocation failure\n");
     }
-    free(scalar);
-    free(vector);
+    free(graph);
     printf("Tier 1 scheduling: %" PRIu64 " checks, %" PRIu64 " failures, seed=%u; machine-record fixtures only\n", test.checks, test.failures, test.seed);
     return ready && test.failures == 0 ? 0 : 1;
 }

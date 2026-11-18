@@ -404,11 +404,14 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
         bind_benchmark_restore(&begun, link, &program->bytes);
         result = bind_begin(&bind, link, runtime, path, &program->bytes, units, arena);
         bind_benchmark_restore(&begun, link, &program->bytes);
-        memset(bind.name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
-        bind.named_count = 0;
-        bind_benchmark_start(clock);
-        bind_match(&bind, link, 1, link->symbols.count);
-        bind_benchmark_stop(clock, &figure[BIND_BENCHMARK_MATCH], run);
+        if (result)
+        {
+            memset(bind.name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
+            bind.named_count = 0;
+            bind_benchmark_start(clock);
+            bind_match(&bind, link, 1, link->symbols.count);
+            bind_benchmark_stop(clock, &figure[BIND_BENCHMARK_MATCH], run);
+        }
         bind_benchmark_restore(&begun, link, &program->bytes);
         arena_pop_to(arena, bind_arena);
         bind_benchmark_start(clock);
@@ -417,8 +420,11 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
         arena_pop_to(arena, bind_arena);
     }
     // bind_end, each run from the program's atoms as they were after bind_begin.
-    bind_benchmark_restore(&begun, link, &program->bytes);
-    result = result && bind_begin(&bind, link, runtime, path, &program->bytes, units, arena) && link_program_generate_atoms(program);
+    if (result)
+    {
+        bind_benchmark_restore(&begun, link, &program->bytes);
+        result = bind_begin(&bind, link, runtime, path, &program->bytes, units, arena) && link_program_generate_atoms(program);
+    }
     // The libraries named with -l, which binding takes between bind_begin and bind_end, as the driver sets them.
     bind.libraries = libraries;
     BindBenchmarkMark atoms_added;

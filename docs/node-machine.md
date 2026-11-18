@@ -3179,6 +3179,489 @@ code did for no result:
   tree's tests and the writes, and the undoing of a root's bytes after its
   tests. Nothing differed without them on the four corpora.
 
+### The constants with no test to make
+
+"The tests on the window" left 37 of its 54 ticks a record to tests that
+read T's records. This piece takes those apart, then drops the largest part
+that asks nothing new of T: the operators a constant operand sends to tests
+that have nothing to say. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/window-tests-second-half-2850-2026-11-17)
+has the experiments, the variants and their patches.
+
+**What the tests on T's records are.** An experiment build with switches
+that leave one part out; a part is the difference of two settings of the
+same executable (ticks a record):
+
+| the tests on T's records | `sqlite3.c` | Lua |
+| --- | ---: | ---: |
+| all | 38.0 | 52.4 |
+| the operators' tests | 19.2 | 30.3 |
+| an expression's fixed part: its root's kind, the pragmas' bodies, the events, the lists' frame | 6.3 | 6.5 |
+| the tree's tests | 4.0 | 4.0 |
+| the root's own | 3.1 | 4.5 |
+| the unsequenced test | 1.9 | 3.0 |
+| what is left with no call at all: T between other code, the root's bytes | 3.5 | 4.2 |
+
+- **Half is the operators' tests.** Of `sqlite3.c`'s 48,645 listed
+  operators, 27,241 are listed for a constant operand alone, 12,918 are
+  calls and 8,486 the rest.
+- **97% of the constants' tests conclude nothing.** 26,466 of those 27,241
+  have no test that fires and send nothing to the census's code; on Lua,
+  8,582 of 8,742.
+
+**The rule.** The loop leaves an operator out of its list where it is listed
+for a constant operand alone and its operands are of kinds its tests have
+nothing to say of:
+
+| the operator | left out where |
+| --- | --- |
+| `+ - * & \| ^` and their assignments | both operands are plain integers |
+| unary `+ - ~` | its operand is a plain integer |
+| `== !=` | both are plain integers, and a constant against no constant is zero or 1 to 126; or one is a plain pointer and the other a constant zero |
+| `< <= > >=` | both are plain integers, and a constant against no constant is 1 to 126, or zero against a signed operand |
+| `<< >>`, but under `-Wshift-sign-overflow` | both are plain integers, a constant count is 0 to 31 and a constant shifted is zero or 1 to 126 |
+| `/ %` | both are plain integers, and a constant divisor is 1 to 126 |
+| `=` | both are plain integers, and the constant stored is zero or 1 to 126 |
+| a return's conversion | its operand is a constant zero or 1 to 126, and its own type is a plain integer's |
+
+- **A plain integer** has an integer's type of 8 to 64 bits (no bool,
+  enumeration, `_BitInt` or atomic one) and is no bit-field's value.
+- **A plain pointer** points to no void.
+- **What stays listed:** a subscript by a constant (its array's length is
+  asked), pointer arithmetic, a null stored in a pointer, a constant of any
+  other value or type, and every operator another warning lists whatever its
+  operands are (a comparison under `-Wsign-compare`, an assignment under
+  `-Wself-assign`).
+
+**How it is made:**
+
+- **A record says its constant's value.** The rule asks whether a constant
+  is zero, 1 to 31 or 1 to 126, and the value is the record's payload: one
+  more gather. A record's exponent, which only a floating value used, now
+  says it: the payload and one, 0xffff for a payload past 0xfffd. It is
+  written where the record is made (`node_facts_small`: a fold's, a truth's,
+  a size's, a store's and a conversion's, a literal's line and an
+  enumerator's; a plain copy of an operand's value says what the operand
+  says). The standing's gather has it, in the same four bytes. T's own
+  record says none, and reads as a constant of any value.
+- **A kind a record.** The records' bytes' pass puts the record's kind as an
+  operand in three spare bits of its value's byte: none; a plain pointer; a
+  plain integer that is no constant, signed or unsigned; an integer constant
+  that is zero, 1 to 31, 32 to 126, or any other. A plain integer's type is
+  one range of its word's low three bytes: an integer's kind, no fact, a
+  class of 8 to 64 bits. No column is added.
+- **One table by the pair.** The rule is a table of 64 bytes by the first
+  operand's kind and eight times the second's: the classes of operator that
+  pair is left out for (`node_tests_quiet_pairs`). The loop reads each
+  side's value's byte by its distance, as it reads the operands' other
+  bytes, and the table by one byte permute. An operator's class is a bit,
+  from one more table by operator. A return's conversion's class is the bit
+  that says its own type is a plain integer's.
+- **Checked where the reader verifies.** With `--verify` each operator left
+  out has its tests run all the same, and they must find nothing and send
+  nothing. Each value a record says is compared with its payload, by the
+  gather the rule does without. Either fails the command.
+
+The counts, on the 9700X (the compiler's own source in the cloud
+container):
+
+| | `sqlite3.c` | Lua | musl | the compiler's own source |
+| --- | ---: | ---: | ---: | ---: |
+| operators the loop lists, main | 48,645 | 16,513 | 36,260 | 35,075 |
+| with the rule | 27,750 | 9,486 | 21,783 | 12,412 |
+| with every warning, main | 62,602 | 19,138 | 45,924 | 45,734 |
+| with the rule | 52,451 | 13,420 | 35,327 | 34,745 |
+| operators left out with a test that fires or a record sent, beside `--verify` | 0 | 0 | 0 | 0 |
+| integer constants whose record says its value | 46,532 | 16,700 | 30,664 | 41,190 |
+| of them not their payload's | 0 | 0 | 0 | 0 |
+
+TSC ticks a record of the expressions the tests ran on, main `aa09d1a04`
+and the piece in turn on the 9700X (medians of seven readings, musl's of
+fifteen; with every warning of five, musl's of fifteen):
+
+| | `sqlite3.c` | | Lua | | musl | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| | main | the piece | main | the piece | main | the piece |
+| **the tests on the window** | 54.7 | **48.7** | 70.0 | **63.2** | 111.9 | **108.7** |
+| of which the records' bytes | 9.0 | 9.3 | 9.7 | 10.4 | 16.9 | 17.9 |
+| the loop | 0.7 | 0.9 | 1.0 | 1.1 | 2.2 | 2.4 |
+| an expression's part | 7.2 | 7.4 | 7.6 | 7.7 | 13.1 | 12.7 |
+| the tests on T's records | 37.8 | 31.0 | 51.6 | 43.9 | 80.3 | 75.4 |
+| with every warning | 73.0 | 70.1 | 81.7 | 76.9 | 131.1 | 130.4 |
+| beside `--verify` (one reading) | 61.7 | 71.2 | 79.1 | 87.2 | 127.6 | 139.5 |
+
+- **Exact.** No expression's bits, root's kind or span differ from the
+  census's code's, no operator left out has a test, and no value said is
+  another than its payload: on the three corpora and the compiler's own
+  source, with the default warnings and with every warning, beside
+  `--verify`, and on the eight fixtures.
+- **6.0 ticks a record less on `sqlite3.c`,** 6.8 on Lua, 3.2 on musl: 11%,
+  10% and 3% of the tests.
+- **The rule's inputs cost a tenth of what it saves on `sqlite3.c`.** The
+  tests on T's records fall by 6.8; the bytes rise by 0.4, the loop by 0.1
+  and an expression's part by 0.2, its sweep's source unchanged.
+- **With every warning: 2.9 less on `sqlite3.c`,** 4.8 on Lua, 0.6 on musl.
+  `-Wsign-compare` and `-Wself-assign` list every comparison and assignment
+  whatever its operands are, and on `sqlite3.c` the rule then leaves out
+  half as many operators.
+- **musl is read with its spread.** Fifteen readings of one build spread
+  11% to 16% there, and one executable's reading moves by as much with the
+  size of the environment alone, which moves the stack: over twelve sizes
+  it read 108.0 to 121.2. Three builds of this form read 0%, 1% and 3%
+  under main with the default warnings, and 1%, 3% and 0% with every one.
+- **The kernel reads the same.** Without the tests the window's kernel in
+  place reads 15.6 and 15.7 ticks a record on `sqlite3.c`, main and piece
+  (Lua 20.2 and 20.2, musl 18.9 and 18.7). `-c sqlite3.c`, read twice, is
+  -0.07% and -0.01% in wall time and +0.15% and -0.01% in user cycles; main
+  against itself is -0.08% and +0.04%, +0.05% and +0.03%.
+- **The gate is still ahead.** 48.7 where the gate is 40.
+
+**What moved it, and what didn't** (`sqlite3.c`, ticks a record; each form
+in turn with main, which read 54.3 to 54.7):
+
+| the rule's inputs, and its form in the loop | the tests | the records' bytes | the loop | an expression's part |
+| --- | ---: | ---: | ---: | ---: |
+| main, without the rule | 54.3 to 54.7 | 8.9 | 0.8 | 7.2 |
+| a constant's payload by two masked gathers; the rule as masks | 53.1 | 11.9 | 1.2 | 7.8 |
+| one gather, of the constants of types of 32 bits at most | 51.4 | 10.8 | 1.2 | 7.8 |
+| a literal's value from the front's column, a gather for the others | 51.9 | 11.1 | 1.1 | 7.9 |
+| the kernel writes three tests' bytes a record, one gather for them | 48.3 | 6.9 | 1.2 | 7.9 |
+| the value said in the record's exponent, no gather | 50.3 | 9.7 | 1.1 | 7.9 |
+| the same, the rule one table by the pair, the verify's words out of the sweep | 50.2 | 9.3 | 0.8 | 7.3 |
+| the same, the kind in the value's byte and no column of its own | 48.7 | 9.3 | 0.9 | 7.4 |
+
+- **A masked gather costs what a gather costs:** 1.3 to 1.5 ticks a record,
+  for a field 7% of the records have.
+- **The kernel can't write the bytes for less.** With a record's three
+  tests' bytes made as the kernel makes the record, the bytes' pass read 6.9
+  for 8.9, and the kernel in place 19.5 for 15.6: some forty operations a
+  record on its critical path, where the pass does the same for sixteen
+  records at once. The names' pass rose by 2.2 ticks a name too.
+- **The value said costs the kernel nothing it can read:** a compare, a
+  select and an add where it writes a constant's record, in the quadword it
+  writes anyway.
+- **The rule as masks doubled the loop on musl** (2.0 to 4.2 ticks a
+  record): fourteen byte tests and some forty mask operations a step, on a
+  corpus whose chunks are short. As one permute by the pair it reads 2.4.
+- **A flag tested in the sweep cost 0.6 ticks a record.** The verify's two
+  branches in an expression's part, never taken in a timed run, read +0.6 to
+  +0.7 in every build that had them. In a loop of their own after the sweep
+  they read +0.1 to +0.2.
+- **A column of its own cost musl 2 ticks a record.** One more byte column
+  is one more array cleared a unit and one more stream stored and loaded,
+  cold in each of musl's 1,336 units: with every warning its fifteen
+  readings read 134.0 with the column and 128.1 without, where main read
+  129.7.
+
+**What stays scalar, and why:**
+
+- **The pairs' table's making:** 64 entries a unit, the rule written once as
+  conditions on two kinds.
+- **The check of an operator left out:** the tests' own code, under
+  `--verify` alone.
+
+**Faults.** 131 were put into the new code, one at a time, in a copy of the
+tree: 129 fail the node machine's tests. The other two change no result a
+test can read:
+
+- **The second operand's kind read only where the first one's is near.** A
+  second operand of an operator the rule takes is the record before it, and
+  is never before the block before.
+- **The store's slow rule's converted constant saying its operand's value.**
+  The window's kernel makes such a record by the store's fast path, which
+  says the converted value. The slow rule makes one in the reads' census
+  alone, which reads no value said.
+
+The campaign's three earlier rounds found what the fixtures didn't hold and
+what the code did for no result:
+
+- **New fixture lines,** one for each class the rule leaves out and for what
+  it must keep listed: a constant past a bound (126 and 127, 200, a 64-bit
+  one), zero against an unsigned operand and against a signed one, a shift
+  by 0, by 3 and by 32, a division by 2 and by zero, a constant first,
+  pointer arithmetic, a pointer against 0 and against 1, a bool, a
+  bit-field, an enumeration, a 128-bit operand, a floating one, a store of
+  0, of 5 and of 300 into a char, and returns of 0, 1 and 300 into an int, a
+  char, a float and a pointer.
+- **An eighth fixture:** no warning of a mix of enumerations, and
+  `-Wassign-enum`: an enumeration's constant is then listed for itself
+  alone, and must stay listed.
+- **Removed:** an initialization's class (its root is no record of the
+  window's); the six type bits beside the type's kind, a constant's kind
+  beside its type's, and the wide standing's test beside the value said; a
+  unary class's test of a second operand; a pointer's constant kind; and
+  where a value is said, the test that its record is a constant's. Nothing
+  differed without them on the four corpora.
+
+### The operator above, and an expression with nothing listed
+
+"The constants with no test to make" left 31 of the window's 48.7 ticks a
+record on `sqlite3.c` to the tests that read T's records, and those ran on
+every expression. This piece takes two things out of them: the tree's tests'
+list, and the tests themselves where an expression has nothing for them.
+[The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/window-tests-listing-2850-2026-11-18)
+has each form's patch and readings.
+
+**The tree's tests, counted.** A test of the parser's tree reads its
+record's token's parent's role, and nearly every one ends there. The loop
+listed every record such a test reads: a comparison's token, `!`, `=`.
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| records listed for the tree's tests | 27,794 | 4,844 | 17,871 |
+| of them, the parent's role lets a test fire | 1,890 | 318 | 951 |
+| operators listed by the operator above, below | 6 | 0 | 34 |
+
+Of `sqlite3.c`'s 1,890, 1,182 are an `=` in a `for`'s head and 708 a
+comparison under a `;`: the role lets the test go on, and its next question
+ends it.
+
+**By the parents' roles: exact, and no gain.** The first form kept the list
+and asked the role in the records' bytes' pass: the listed records
+compressed, sixteen a step, a gather of their tokens' parents and one of
+those parents' roles, and two more for an `=` under a terminator. It read,
+in turn with the piece before:
+
+| ticks a record | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the tests on the window, before | 48.8 | 63.2 | 109.7 |
+| with the parents' roles | 48.5 | 63.1 | 112.0 |
+| of which the records' bytes, before | 9.3 | 10.4 | 18.3 |
+| with the parents' roles | 11.3 | 12.5 | 23.8 |
+| the tests that read T's records, before | 31.2 | 44.1 | 75.0 |
+| with the parents' roles | 29.1 | 41.9 | 71.1 |
+
+- **The pass costs what the tests it saves did:** 2.0 ticks a record more in
+  the bytes for 2.1 less on T's records, on `sqlite3.c`.
+- **A chunk has ten of them.** Of some hundred records a chunk, ten are
+  listed: a step of sixteen is never full at a chunk's end, and what each
+  costs is its two loads, which the scalar test paid too.
+
+**By the operator above.** A test fires in four places, and in each the
+parent that the role is asked of is the token of the record's consumer:
+
+| the test | the record | its token's parent | its consumer |
+| --- | --- | --- | --- |
+| a comparison under a bitwise operator, no parentheses | the comparison | `&`, `\|`, `^` | the bitwise operator, either operand |
+| `!` before a comparison | `!` | the comparison | the comparison, its first operand |
+| `=` as a condition | `=` | a condition's `)`, a `for`'s condition's `;` | the condition's root, which the reader puts at that token |
+| a comparison discarded | the comparison | an expression statement's `;` | the discard, the reader's cast to void at that `;` |
+
+So the loop lists the consumer, by what its operands are, and no token's
+parent is read to make the list:
+
+- **Three tables by operator, one permute.** What an operator is as a first
+  operand to these tests, `!` or `=` (`own_tree_marks`); what a first
+  operand must be to list its consumer, `!` for a comparison and `=` for a
+  condition (`own_tree_firsts`); and the operand properties that list it, a
+  comparison for `&`, `|`, `^` and for a cast (`own_tree_sends`). The first
+  operand's mark comes by its distance as its other bytes do, and the
+  comparison's property was the loop's already.
+- **The list is a superset, and the test decides.** A comparison in
+  parentheses under `&`, `(void)` of one, `!` in parentheses: the consumer
+  is listed, the record's token's parent is then read
+  (`node_tests_expression`, for the listed operator's operands), and the
+  test has nothing. The operators are listed whatever warnings the unit
+  enables: they are few, and the test reads the switches.
+- **An operand further back than the block before** has its mark by a load,
+  as its other bytes have.
+- **A root is listed too.** The discard and the condition are roots'
+  records: an expression's lists take their bit, as they took the root's
+  operators' bit.
+- **The role's gather is gone.** The records' bytes' pass read each record's
+  token's role for this list alone: 0.8 ticks a record on `sqlite3.c`.
+
+**An expression with nothing listed.** The tests that read T's records had
+a call an expression, whatever it held. An expression is now listed for
+them only where one can have something:
+
+- an operator in one of its two lists;
+- two writes, or one under its top, under `-Wunsequenced`;
+- an initialization, whose root's tests are its object's type's;
+- a statement whose top is no write: it may be a value without an effect.
+  Its root is the front's discard, the one root it makes with a cast's
+  operator, so no token's role is read to tell it from an explicit cast;
+- a return of an address, by its set's bits, under
+  `-Wreturn-stack-address`;
+- a warning of T's actions, which the kernel's reader keeps a bit an
+  expression for.
+
+One with nothing listed has its verdict from the window alone: its set's
+bits; the control's bit of a root inside a statement expression; the bit of
+a warning no test stands for; under `-Wfor-loop-analysis`, a `for`'s
+clause; a pragma's body around its root; and a warning event at its tokens,
+asked only where its span meets the bounds of the unit's events so far.
+Neither T nor the tests run on it.
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions the tests ran on | 50,993 | 10,839 | 43,415 |
+| with nothing listed | 21,157 | 3,069 | 21,925 |
+| share | 41% | 28% | 51% |
+| with every warning | 8,793 | 1,302 | 15,146 |
+| share | 17% | 12% | 35% |
+
+**Checked where the reader verifies.** With `--verify`:
+
+- each record the tree's tests read that no listed operator has as an
+  operand has its test run all the same, and must have none (27,788, 4,844
+  and 17,837 checked on the three corpora);
+- each expression with nothing listed is run through the tests that read
+  T's records all the same, and must have the same bits, root's kind and
+  span;
+- no list has a bit past its expression's records.
+
+Any of the three fails the command.
+
+**Measured.** The 9700X, CPU 2, under the lock a run, Release; the piece
+before (#2955's sources on main `aa09d1a04`) and this one in turn. TSC ticks
+a record of the expressions the tests ran on; medians of seven readings,
+musl's of fifteen; with every warning of five, musl's of fifteen.
+
+| | `sqlite3.c` | | Lua | | musl | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| | before | the piece | before | the piece | before | the piece |
+| **the tests on the window** | 48.9 | **42.0** | 63.3 | **59.1** | 111.3 | **100.0** |
+| of which the records' bytes | 9.3 | 8.5 | 10.4 | 9.4 | 18.0 | 18.1 |
+| the loop | 0.8 | 0.9 | 1.1 | 1.2 | 2.6 | 2.5 |
+| an expression's part | 7.4 | 9.5 | 7.7 | 9.9 | 13.9 | 16.7 |
+| the tests on T's records | 31.3 | 23.2 | 43.9 | 38.6 | 76.1 | 61.9 |
+| with every warning | 70.2 | 67.3 | 76.6 | 74.3 | 128.8 | 122.3 |
+| beside `--verify` (one reading) | 71.2 | 80.2 | 87.2 | 98.0 | 139.5 | 170.7 |
+
+- **6.9 ticks a record less on `sqlite3.c`, 4.2 on Lua, 11.4 on musl:** 14%,
+  7% and 10% of the tests.
+- **musl is read with its spread.** Its fifteen readings run from 97.6 to
+  105.2, and the piece before's from 107.3 to 120.4. This form's build
+  before its last change read 102.4 there, for 109.3.
+- **The listing costs every expression 12 ticks, and saves some 80 at each
+  one with nothing listed** (`sqlite3.c`): an expression's part rises by 2.1
+  ticks a record, and the tests on T's records fall by 8.1, of which 2.1
+  were the tree's tests' calls (what the form by the parents' roles took
+  off them).
+- **With every warning: 2.9, 2.4 and 6.5 less.** `-Wsign-compare` and
+  `-Wself-assign` list every comparison and assignment, and a sixth of
+  `sqlite3.c`'s expressions are then left with nothing listed.
+- **The verify checks more, and reads more:** it runs the tests on every
+  expression, and the tree's test of every record that has one.
+
+**What moved it, and what didn't.** `sqlite3.c`, ticks a record; each form
+in turn with the piece before, which read 48.5 to 48.9:
+
+| the form | the tests | the records' bytes | an expression's part | the tests on T's records |
+| --- | ---: | ---: | ---: | ---: |
+| the piece before | 48.5 to 48.9 | 9.3 | 7.3 to 7.4 | 31.0 to 31.3 |
+| the tree's list by the parents' roles | 48.5 | 11.3 | 7.5 | 29.1 |
+| by the operator above; nothing listed, no call: the listing with branches | 46.6 | 8.4 | 12.9 | 24.2 |
+| the same with no branch, the expressions to call as a list | 45.2 | 8.5 | 13.0 | 22.7 |
+| the listing trimmed | 43.5 | 8.5 | 10.0 | 24.1 |
+| a `for`'s clause asked of the unlisted alone | 42.7 | 8.5 | 9.8 | 23.5 |
+| T's warning a bit of the kernel's reader's byte, the events' intake out of line | 42.3 | 8.5 | 9.7 | 23.1 |
+| a statement's root's token's role not read: this piece | 42.0 | 8.5 | 9.5 | 23.2 |
+
+- **It was not the branches.** The listing first cost 5.6 ticks a record,
+  with a branch on each condition (12.9) or with none (13.0).
+- **What trimmed it.** An expression's events are asked only where its span
+  meets the bounds of the unit's events so far, two compares for two words
+  read and masked; its lists are OR-ed in the loop that makes them; what
+  the report counts is counted after the timed sweeps; and a statement
+  expression's bit is read only in a unit that has one.
+- **The tests on T's records move by a tick between builds** that list the
+  same expressions (24.2, 22.7, 24.1, 23.5, 23.1, 23.2): T's own time is
+  taken off them, and it read 32.1, 30.8, 29.9, 30.6, 30.5 and 30.6.
+- **Under `-Wfor-loop-analysis` a clause's test is two loads,** a token's
+  parent and its role: asked of every expression they cost what the piece
+  saved with every warning (69.9 before, 70.2 with), and asked of the
+  unlisted alone they read 67.9.
+- **A statement's root's token's role was read for nothing.** The listing
+  told the reader's discard from an explicit cast by that role, as the
+  census's code does on T's records. The front makes a root with a cast's
+  operator at a terminator alone, and the three terms changed no result
+  (the faults below): without the load an expression's part reads 9.5 for
+  9.7.
+
+Not this piece's to change, and read beside it (before, then the piece):
+
+- **The window's kernel in place, without the tests:** 15.7 and 15.8 ticks
+  a record on `sqlite3.c`, 20.2 and 20.2 on Lua, 18.8 and 18.9 on musl.
+- **The front with the window: 53.0 and 53.0** on `sqlite3.c`, 70.5 and
+  70.4 on Lua, 87.2 and 89.3 on musl (its three readings 88.0, 89.3 and
+  93.1, for 87.2, 87.2 and 90.3), once a hook of the tests was out of its
+  code. The reader's intake of a chunk's warning events was inlined into
+  the front's own function. Ten instructions more there (the events'
+  bounds) moved that function's stack slots and the code after them, and in
+  six builds the front's ticks read 53.4 to 53.8 where the piece before
+  read 52.7 to 52.8 on `sqlite3.c`, and 70.9 to 71.8 for 70.0 to 70.5 on
+  Lua, the same front without the window unchanged. The intake is now a
+  function of its own (`node_census_reader_chunk`).
+- **`-c sqlite3.c` as whole processes** (21 runs of each of three copies,
+  twice): wall -0.07% and -0.05%, user cycles -0.04% and -0.08%, where the
+  piece before against itself reads -0.24% and -0.14%, -0.04% and -0.15%.
+
+**What stays scalar, and why:**
+
+- **An expression's listing and verdict,** in the sweep that makes its set
+  and its lists, one expression at a time: 12 ticks an expression on
+  `sqlite3.c`. Its inputs are four loads at its root (the statement
+  expression's bit, the operator's kind, T's warnings' byte, the root's two
+  masks' bits). As gathers of sixteen expressions they are 1.3 to 1.5 ticks
+  an element each, what "The constants with no test to make" measured: five
+  to six ticks an expression for the loads alone.
+- **The tree's tests of a listed operator's operands:** 6, 0 and 34
+  operators on the three corpora.
+- **The three tables' making,** 128 entries each a unit.
+- **The check of what is left out:** the tests' own code, under `--verify`
+  alone.
+
+**Faults.** 119 were put into the new code, one at a time, in a copy of the
+tree: 117 fail the node machine's tests. The other two change no result a
+test can read:
+
+- **The events' lower bound started at zero.** More expressions then ask
+  their events, and find the same.
+- **An empty span's guard in the events' words.** A span with no token of
+  the unit reads the first word's top bit and its lowest, which no mask
+  shares.
+
+The campaign's three earlier rounds found what the fixtures didn't hold,
+what the verify didn't check and what the code did for no result:
+
+- **New fixture lines** (the seventh fixture's function `t`): the other
+  operator's mark where an operator asks for one (`(a = b) == c`,
+  `if (!a)`), an initializer whose top is listed, in each list, a warning
+  event in each word of an expression's span, and an address taken outside
+  a return.
+- **A ninth and a tenth fixture:** the warnings that list an expression,
+  off; and a warning no test stands for.
+- **The events' lower bound at its equality.** A return with nothing listed
+  can end at the unit's first warning event; a statement can't, whose last
+  token is its terminator. The ninth fixture's first function is one.
+- **A list's range,** which the verify now checks: a bit past an
+  expression's records.
+- **A statement's root's token's role, read for nothing.** The listing told
+  the reader's discard from an explicit cast by that role, as the census's
+  code does on T's records, and three faults in those terms changed no
+  result. The front makes a root with a cast's operator at a terminator
+  alone (`CHECK_INPUT_FORM_DISCARD`): the terms and their load are gone.
+
+**Against its gates.** The pieces were specified on the issue before their
+code:
+
+- **The tree's tests under 1.0 tick a record on `sqlite3.c`, for a pass of
+  its own under 1.0: missed by the form specified, met by the other.** The
+  parents' roles' pass read 2.0. By the operator above there is no pass: the
+  loop reads under 0.1 more, the bytes 0.8 less, and the tree's tests are 6
+  calls.
+- **Both pieces, 40 on `sqlite3.c`, refuted at 44: neither.** 42.0.
+- **An expression with nothing listed: fewer than counted for.** 57%, 39%
+  and 62% of the expressions have no listed operator and no write out of
+  sequence; 41%, 28% and 51% have nothing listed, once an initialization's
+  root, a statement whose top is no write and a return of an address keep
+  their call.
+- **What is left on T's records** is 23.2: the calls' tests first, 12,918
+  of the 27,750 operators still listed.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -3207,14 +3690,17 @@ tests in the machine's own form" made the same bits from T's records at 62:
 1.19, a hair under it. "The tests on the window" made its loop 64 records a
 step and its leaves' bits a byte a declaration's line: 65% of the own form's
 ticks on `sqlite3.c`, which at the same share is about 40 cycles a body
-token and 1.21. The sum stands only with the tests at a third of the own
-form's. What would move it:
+token and 1.21. "The constants with no test to make" took it to 59%, about
+36 cycles and the same 1.21. The sum stands only with the tests at a third
+of the own form's. What would move it:
 
-- **The rest of the tests where their inputs are:** a constant operand's
-  tests in the rule that types its operator, a call's from the window, and
-  the tree's from a byte the front writes: 37 of the window's 54 ticks a
-  record are those, on T's records still. The census's code is their
-  oracle. They are the sum's largest open term.
+- **The rest of the tests where their inputs are:** a call's from the
+  window, the tree's from a byte the front writes, an expression's fixed
+  part, and a comparison's signs under `-Wsign-compare`: 31 of the window's
+  49 ticks a record are tests on T's records still, after "The constants
+  with no test to make" took the operators a constant sends for nothing out
+  of the list. The census's code is their oracle. They are the sum's
+  largest open term.
 
 - **The front's walk:** over a hundred instructions an acting token for a
   stack walk, lean or not. The structure it derives (counts, distances,

@@ -52,7 +52,7 @@ static void tier1_schedule_fixture_close(Tier1ScheduleFixture* fixture)
     *fixture = (Tier1ScheduleFixture){ 0 };
 }
 
-static bool tier1_schedule_fixture_open(Tier1ScheduleFixture* fixture, Tier1ScheduleGraph* graph, uint16_t* order, bool vector)
+static bool tier1_schedule_fixture_open(Tier1ScheduleFixture* fixture, Tier1ScheduleGraph* graph, uint16_t* order)
 {
     X86Instruction body[BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS];
     for (uint32_t i = 0; i < BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS; i += 4)
@@ -67,7 +67,7 @@ static bool tier1_schedule_fixture_open(Tier1ScheduleFixture* fixture, Tier1Sche
         .count = BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS,
     };
     Tier1ScheduleStats stats = { 0 };
-    bool valid = tier1_schedule_block(input, graph, order, input.count, vector, &stats) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, order);
+    bool valid = tier1_schedule_block(input, graph, order, input.count, &stats) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, order);
     fixture->moved = stats.moved;
     for (uint32_t variant = 0; valid && variant < 2; variant += 1)
     {

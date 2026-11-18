@@ -8367,10 +8367,12 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
         uint32_t first_argument = format_index != UINT32_MAX ? format_index + 1 : UINT32_MAX;
         if (format_index == UINT32_MAX && definition < input->token_count)
         {
-            bool found = check_common_format_attribute(parser, pp, check_input_attributes_at(input, definition), &format_index, &first_argument);
+            const bool found = check_common_format_attribute(parser, pp, check_input_attributes_at(input, definition), &format_index, &first_argument);
             const uint32_t canonical = input->declarations != NULL ? input->declarations[definition] : BUSTER_CHECK_NONE;
-            found = found || (canonical < input->token_count &&
-                              check_common_format_attribute(parser, pp, check_input_attributes_at(input, canonical), &format_index, &first_argument));
+            if (!found && canonical < input->token_count)
+            {
+                check_common_format_attribute(parser, pp, check_input_attributes_at(input, canonical), &format_index, &first_argument);
+            }
         }
         const uint32_t offset = graph->argument_offsets[node];
         const uint32_t count = graph->argument_counts[node];

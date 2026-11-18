@@ -2647,7 +2647,7 @@ static bool oracle_run_wait(OracleRun* run, int* status)
     {
         kill(-run->pid, SIGKILL);
     }
-    pid_t waited = run->pid > 0 ? -1 : 0;
+    pid_t waited;
     struct rusage usage = { 0 };
     do
     {

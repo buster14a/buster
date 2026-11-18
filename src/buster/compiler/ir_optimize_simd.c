@@ -305,7 +305,7 @@ static bool ir_optimize_simd_float_vector(uint32_t op, uint32_t width, uint32_t 
     }
     const __mmask16 nan = a_nan | b_nan;
     __mmask16 refused = subnormal & (__mmask16)~nan;
-    __m512i staged = _mm512_setzero_si512();
+    __m512i staged;
     if (op == IR_VCMP)
     {
         // C's predicates from the bits, as ir_optimize_simd_float_compare orders them: Clang drops a comparison's

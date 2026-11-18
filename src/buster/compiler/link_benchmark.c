@@ -1498,7 +1498,7 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Run
     const Runtime* runtime = settings->runtimes[kind];
     char* search[2] = {
         names,
-        names + BUSTER_LINK_BENCHMARK_PATH_BYTES,
+        names != NULL ? names + BUSTER_LINK_BENCHMARK_PATH_BYTES : NULL,
     };
     const String8 script = runtime_kind_is_static(kind) ? runtime->archives[runtime->archive_count - 1].path : runtime->libc_script;
     uint64_t directory_length = script.length;

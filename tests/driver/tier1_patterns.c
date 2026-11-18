@@ -22,8 +22,12 @@
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
-// - and #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
-//   it from, as a range that waits in its slot (#2768) and is evicted after its reload did.
+// - #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
+//   it from, as a range that waits in its slot (#2768) and is evicted after its reload did;
+// - and #2870's pager, SQLite's pagerWriteLargeSector cut down: a loop's bound reloaded from its slot at the loop's head
+//   and evicted again two blocks later, in that run of single-predecessor blocks, whose store the emitter leaves out as
+//   the slot already holds the value; the code's certificate must prove the slot from the run's entries (checked by
+//   --verify, and natively against the oracle).
 
 #if defined(BUSTER_TIER1_PATTERNS_SUBJECT)
 
@@ -307,6 +311,62 @@ __attribute__((noinline)) long patterns_gsub(void* state, struct patterns_buffer
     return n;
 }
 
+struct patterns_pager
+{
+    int sector;
+    long long page;
+    unsigned pages;
+    void* journal;
+};
+struct patterns_page
+{
+    struct patterns_pager* pager;
+    unsigned number;
+    unsigned short flags;
+};
+int patterns_journaled(void* journal, unsigned number);
+int patterns_fetch_page(struct patterns_pager* pager, unsigned number, struct patterns_page** page);
+struct patterns_page* patterns_find(struct patterns_pager* pager, unsigned number);
+
+__attribute__((noinline)) long patterns_sector(struct patterns_page* page)
+{
+    struct patterns_pager* pager = page->pager;
+    const unsigned per_sector = (unsigned)(pager->sector / pager->page);
+    const unsigned first = ((page->number - 1) & ~(per_sector - 1)) + 1;
+    int count = 0;
+    int rc = 0;
+    int sync = 0;
+    if (page->number > pager->pages)
+    {
+        count = (int)(page->number - first) + 1;
+    }
+    for (int i = 0; i < count && rc == 0; i += 1)
+    {
+        const unsigned number = first + (unsigned)i;
+        struct patterns_page* other;
+        if (number == page->number || !patterns_journaled(pager->journal, number))
+        {
+            rc = patterns_fetch_page(pager, number, &other);
+        }
+        else if ((other = patterns_find(pager, number)) != 0)
+        {
+            if ((other->flags & 8) != 0)
+            {
+                sync = 1;
+            }
+        }
+    }
+    long touched = 0;
+    if (sync)
+    {
+        for (int i = 0; i < count; i += 1)
+        {
+            touched += 1;
+        }
+    }
+    return rc * 1000 + touched;
+}
+
 __attribute__((noinline)) long patterns_max(long a, long b)
 {
     return a > b ? a : b;
@@ -497,6 +557,20 @@ struct patterns_buffer
     unsigned long capacity;
 };
 long patterns_gsub(void* state, struct patterns_buffer* b, const char* src, unsigned long length, const char* p, long max_s, int tr);
+struct patterns_pager
+{
+    int sector;
+    long long page;
+    unsigned pages;
+    void* journal;
+};
+struct patterns_page
+{
+    struct patterns_pager* pager;
+    unsigned number;
+    unsigned short flags;
+};
+long patterns_sector(struct patterns_page* page);
 typedef long long patterns_vector __attribute__((vector_size(64)));
 typedef struct
 {
@@ -754,6 +828,95 @@ static bool gsub_runs(void)
     return valid;
 }
 
+// patterns_sector's callees: a journal that holds every third page, a fetch that fails on the journal's own number,
+// and a lookup that finds the odd pages, every fourth one needing a sync. Each counts its calls, and the fetch sums the
+// numbers it took.
+#define BUSTER_PATTERNS_SECTOR_PAGES 64
+static struct patterns_page sector_pages[BUSTER_PATTERNS_SECTOR_PAGES];
+static unsigned long sector_calls;
+static unsigned long sector_fetched;
+
+int patterns_journaled(void* journal, unsigned number)
+{
+    sector_calls += 1;
+    return journal != 0 && number % 3 == 0;
+}
+
+int patterns_fetch_page(struct patterns_pager* pager, unsigned number, struct patterns_page** page)
+{
+    sector_calls += 1;
+    sector_fetched += number;
+    *page = &sector_pages[number % BUSTER_PATTERNS_SECTOR_PAGES];
+    return pager->journal != 0 && number == *(const unsigned*)pager->journal ? 7 : 0;
+}
+
+struct patterns_page* patterns_find(struct patterns_pager* pager, unsigned number)
+{
+    sector_calls += 1 + (pager->journal != 0);
+    struct patterns_page* page = &sector_pages[number % BUSTER_PATTERNS_SECTOR_PAGES];
+    page->flags = (unsigned short)(number % 4 == 1 ? 8 : 0);
+    return number % 2 != 0 ? page : 0;
+}
+
+// patterns_sector's semantics, for Clang to compile.
+static long sector_reference(struct patterns_page* page)
+{
+    struct patterns_pager* pager = page->pager;
+    const unsigned per_sector = (unsigned)(pager->sector / pager->page);
+    const unsigned first = ((page->number - 1) & ~(per_sector - 1)) + 1;
+    const int count = page->number > pager->pages ? (int)(page->number - first) + 1 : 0;
+    int rc = 0;
+    bool sync = false;
+    for (int i = 0; i < count && rc == 0; i += 1)
+    {
+        const unsigned number = first + (unsigned)i;
+        struct patterns_page* other = 0;
+        if (number == page->number || !patterns_journaled(pager->journal, number))
+        {
+            rc = patterns_fetch_page(pager, number, &other);
+        }
+        else
+        {
+            other = patterns_find(pager, number);
+            sync = sync || (other != 0 && (other->flags & 8) != 0);
+        }
+    }
+    return rc * 1000 + (sync ? count : 0);
+}
+
+// patterns_sector against its reference on each sector size, page and journal: the same result, calls and fetches.
+static bool sector_runs(void)
+{
+    static const int sectors[] = { 512, 4096, 8192 };
+    static const unsigned numbers[] = { 1, 5, 9, 17, 23, 32 };
+    static const unsigned failing[] = { 0, 3, 21, 31 };
+    bool valid = true;
+    for (unsigned i = 0; i < sizeof(sectors) / sizeof(sectors[0]); i += 1)
+    {
+        for (unsigned j = 0; j < sizeof(numbers) / sizeof(numbers[0]); j += 1)
+        {
+            for (unsigned k = 0; k <= sizeof(failing) / sizeof(failing[0]); k += 1)
+            {
+                long results[2];
+                unsigned long calls[2];
+                unsigned long fetched[2];
+                for (unsigned reference = 0; reference < 2; reference += 1)
+                {
+                    struct patterns_pager pager = { .sector = sectors[i], .page = 512, .pages = j % 3 == 0 ? 0 : j % 3 == 1 ? numbers[j] - 1 : 1000, .journal = k == 0 ? 0 : (void*)&failing[k - 1] };
+                    struct patterns_page page = { .pager = &pager, .number = numbers[j], .flags = 0 };
+                    sector_calls = 0;
+                    sector_fetched = 0;
+                    results[reference] = reference != 0 ? sector_reference(&page) : patterns_sector(&page);
+                    calls[reference] = sector_calls;
+                    fetched[reference] = sector_fetched;
+                }
+                valid = results[0] == results[1] && calls[0] == calls[1] && fetched[0] == fetched[1] && valid;
+            }
+        }
+    }
+    return valid;
+}
+
 int main(void)
 {
     const long inputs[] = { LONG_MIN, -2, -1, 0, 1, 2, 3, LONG_MAX };
@@ -881,6 +1044,7 @@ int main(void)
     // Three lookups, two of which hit, and two misses, one of which asks for the hook: six calls.
     valid = spilled_results[0] == spilled_results[1] && memcmp(spilled_registers[0], spilled_registers[1], sizeof(spilled_registers[0])) == 0 && spilled_counts[0] == spilled_counts[1] && spilled_counts[0] == 6 && spilled_hooks[0] == spilled_hooks[1] && spilled_hooks[0] != 0 && valid;
     valid = gsub_runs() && valid;
+    valid = sector_runs() && valid;
     patterns_vector vector;
     unsigned long long lanes[8];
     for (int l = 0; l < 8; l += 1)

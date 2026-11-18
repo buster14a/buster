@@ -2551,10 +2551,11 @@ static void oracle_test_replay_seen(const char* directory, char* seen, size_t ca
         at += put > 0 ? (size_t)put : 0;
     }
     struct stat place;
-    const int put = lstat(directory, &place) == 0 && at < capacity ? snprintf(seen + at, capacity - at, ". %lld.%09ld %lld.%09ld\n", (long long)place.st_mtim.tv_sec,
-                                                                             place.st_mtim.tv_nsec, (long long)place.st_ctim.tv_sec, place.st_ctim.tv_nsec)
-                                                                  : 0;
-    at += put > 0 ? (size_t)put : 0;
+    if (lstat(directory, &place) == 0 && at < capacity)
+    {
+        snprintf(seen + at, capacity - at, ". %lld.%09ld %lld.%09ld\n", (long long)place.st_mtim.tv_sec,
+                 place.st_mtim.tv_nsec, (long long)place.st_ctim.tv_sec, place.st_ctim.tv_nsec);
+    }
 }
 
 // Whether the replay test's files are as one run of its tool from their state before it leaves them: the counter at 2,
