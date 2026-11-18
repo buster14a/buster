@@ -217,7 +217,7 @@ static bool tier1_select_test_load_code(Tier1SelectTest* test, const X86Instruct
 static Tier1SelectRecords tier1_select_test_expand(Tier1SelectTest* test, const Tier1SelectHoles* holes)
 {
     Tier1SelectRecords chosen = tier1_select_expand(holes);
-    Tier1SelectRequests requests = { .vector = true };
+    Tier1SelectRequests requests = { 0 };
     tier1_select_requests_add(&requests, &chosen, 0, chosen.records);
     tier1_select_requests_flush(&requests, chosen.records);
     tier1_select_test_expect(test, !chosen.overflowed && chosen.count <= BUSTER_TIER1_SELECT_RECORDS_PER_NODE, "a rule's sequence fits a node's room");

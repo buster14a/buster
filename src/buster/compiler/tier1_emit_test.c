@@ -502,7 +502,7 @@ static void tier1_emit_test_saves_rows(Tier1EmitTest* test)
         Tier1EmitSaves saves;
         Tier1EmitTransitions transitions = { 0 };
         memset(&saves, 0xa5, sizeof(saves));
-        tier1_emit_saves_reset(&saves, true);
+        tier1_emit_saves_reset(&saves);
         uint32_t rows[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
         for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
         {

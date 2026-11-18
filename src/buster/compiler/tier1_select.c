@@ -537,8 +537,7 @@ static void tier1_select_request(Tier1SelectRecords* result, X86Operation operat
 }
 
 // A function's requests, in its records' order, held until x86_choose_forms' 32 lanes are full or the function's records
-// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context. On the
-// scalar path (`vector` false) each is chosen as it comes, by the twin, and none is held.
+// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context.
 #define BUSTER_TIER1_SELECT_BATCH 32
 typedef struct Tier1SelectRequests Tier1SelectRequests;
 struct Tier1SelectRequests
@@ -550,7 +549,6 @@ struct Tier1SelectRequests
     uint16_t forms[BUSTER_TIER1_SELECT_BATCH];
     uint8_t destinations[BUSTER_TIER1_SELECT_BATCH];
     uint32_t count;
-    bool vector;
 };
 
 // The held requests' forms, chosen in one batch by x86_choose_forms: each record the chosen form's, or left empty where
@@ -570,19 +568,10 @@ static void tier1_select_requests_flush(Tier1SelectRequests* requests, X86Instru
 }
 
 // The node's request, if it has one, its record at `first` among the function's `records`: held, a full batch's forms
-// chosen into the records first, or on the scalar path chosen at once.
+// chosen into the records first.
 static void tier1_select_requests_add(Tier1SelectRequests* requests, const Tier1SelectRecords* selected, uint32_t first, X86Instruction* records)
 {
-    if (selected->requested && !requests->vector)
-    {
-        uint16_t form = X86_FORM_NONE;
-        x86_choose_forms_scalar(&selected->row, &selected->value, &selected->context, 1, &form);
-        if (form != X86_FORM_NONE)
-        {
-            records[first + selected->request] = x86_choice_instruction(form, (X86Instruction){ .rm = selected->destination }, selected->value);
-        }
-    }
-    else if (selected->requested)
+    if (selected->requested)
     {
         if (requests->count == BUSTER_TIER1_SELECT_BATCH)
         {
@@ -8062,7 +8051,7 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             failed_node = node;
         }
     }
-    Tier1SelectRequests requests = { .vector = true };
+    Tier1SelectRequests requests = { 0 };
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;

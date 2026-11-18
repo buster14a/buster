@@ -63,7 +63,7 @@ static void tier1_move_test_shape(Tier1AllocationTestTally* tally, Arena* arena,
     Tier1ResolvedMoves indexed = { 0 };
     valid = valid && tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && output.count <= count * 2;
     // The indexed path at every count, the small-set path's eight and fewer among them.
-    valid = valid && tier1_resolve_moves_indexed(&input, arena, &indexed, true) == TIER1_ALLOCATION_OK && indexed.count == output.count;
+    valid = valid && tier1_resolve_moves_indexed(&input, arena, &indexed) == TIER1_ALLOCATION_OK && indexed.count == output.count;
     valid = valid && memcmp(output.sources, indexed.sources, output.count * 4) == 0 && memcmp(output.destinations, indexed.destinations, output.count * 4) == 0;
     if (valid && count <= 64)
     {
@@ -192,7 +192,7 @@ static void tier1_move_test_guarded(Tier1AllocationTestTally* tally, Arena* aren
         };
         Tier1ResolvedMoves output = { 0 };
         Tier1ResolvedMoves oracle = { 0 };
-        valid = valid && tier1_resolve_moves_indexed(&input, arena, &output, true) == TIER1_ALLOCATION_OK && tier1_resolve_moves_scalar(&input, arena, &oracle) == TIER1_ALLOCATION_OK;
+        valid = valid && tier1_resolve_moves_indexed(&input, arena, &output) == TIER1_ALLOCATION_OK && tier1_resolve_moves_scalar(&input, arena, &oracle) == TIER1_ALLOCATION_OK;
         valid = valid && output.count == oracle.count && memcmp(output.sources, oracle.sources, output.count * 4) == 0 && memcmp(output.destinations, oracle.destinations, output.count * 4) == 0;
         arena_pop_to(arena, saved);
     }

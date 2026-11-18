@@ -350,8 +350,8 @@ static void tier1_allocation_test_fixed(Tier1AllocationTestTally* tally, Arena* 
                 .count = fixed_count,
             },
         };
-        const bool filtered = tier1_allocation_filter_fixed(&input, arena, true, events, event_count, buckets, actual);
-        tier1_allocation_filter_fixed_simple(&input, true, crossed);
+        const bool filtered = tier1_allocation_filter_fixed(&input, arena, events, event_count, buckets, actual);
+        tier1_allocation_filter_fixed_simple(&input, crossed);
         tier1_allocation_test_expect(tally, filtered && memcmp(expected, actual, count * 4) == 0 && memcmp(expected, crossed, count * 4) == 0, "fixed masks, by the sweep or the cross product and by the cross product alone, match the independent position bitmap");
         arena_pop_to(arena, saved);
         Tier1AllocationInput prefiltered = input;
