@@ -21,9 +21,10 @@
 //     and records of them), at each target vector width, by the vector path and by its fallback; calls whose locations
 //     clang and LLVM give (an UNCOUNTED argument's shift, the LARGER copies' slots, a SMALLER one's, a DEMOTED result
 //     and two that access units decide among them); the levels across calls (abi_test_ordering); the walk without
-//     scratch memory for its stack (abi_test_short_scratch); the walk over records that 2^64 paths lead to, under an
-//     alarm (abi_test_shared_records); and plain char's extension, and an enum's of a fixed underlying char, with each
-//     signedness of char (abi_test_char_signedness).
+//     scratch memory for its stack (abi_test_short_scratch); a chain of records against the table's order, by the
+//     levels and by the scan they fall back to (abi_test_reversed_chain); the walk over records that 2^64 paths lead
+//     to, under an alarm (abi_test_shared_records); and plain char's extension, and an enum's of a fixed underlying
+//     char, with each signedness of char (abi_test_char_signedness).
 //   - Worlds: random worlds of types (abi_test_world_build: scalars, vectors, complex types, _BitInts, _Atomic and
 //     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with
 //     bit-fields, arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the
@@ -2600,6 +2601,94 @@ static void abi_test_short_scratch(AbiTestTally* tally)
     }
 }
 
+// The records of abi_test_reversed_chain: more than the scan classifies in a pass of its own, 64 being the most a
+// mutant that stops it there leaves classified.
+#define BUSTER_ABI_TEST_REVERSED_LINKS 80
+
+// A chain of records against the table's order: tags R0 to R79 made first, then completed from the last, R79 {int} and
+// Ri {Ri+1}, so that each needs the one after it, whose index is larger. abi_classify_all's levels order them, and its
+// scan, which it falls back to when scratch can't hold its columns (here 64 bytes), takes a pass over the table per
+// link; then the scan as the test drives it. By each route every type must be classified, and every link be INTEGER,
+// NO_CLASS, in a register, 4 bytes as {int} is.
+static void abi_test_reversed_chain(AbiTestTally* tally)
+{
+    for (uint32_t route = 0; route < 3; route += 1)
+    {
+        AbiTestTables tables;
+        if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+        {
+            TypeTable* table = &tables.types.table;
+            AbiTestBuilder builder = {
+                .table = table,
+                .expectations = 0,
+                .count = 0,
+                .next_name = 31000,
+                .vector_bytes = 16,
+            };
+            const bool started = abi_test_tables_start(&tables, 16);
+            TypeId links[BUSTER_ABI_TEST_REVERSED_LINKS];
+            bool made = true;
+            for (uint32_t i = 0; i < BUSTER_ABI_TEST_REVERSED_LINKS; i += 1)
+            {
+                builder.next_name += 1;
+                links[i] = type_tag(table, BUSTER_TYPE_KIND_STRUCT, builder.next_name);
+                made = made && links[i] != 0;
+            }
+            const TypeRecordAttributes attributes = {
+                .packed = false,
+                .pack_log2 = 0,
+                .alignment_log2 = 0,
+            };
+            for (uint32_t i = BUSTER_ABI_TEST_REVERSED_LINKS; made && i > 0; i -= 1)
+            {
+                const TypeId member_type = i == BUSTER_ABI_TEST_REVERSED_LINKS ? BUSTER_TYPE_INT : links[i];
+                const TypeMember member = abi_test_member(&builder, member_type);
+                made = type_complete_record(table, links[i - 1], &member, 1, attributes);
+            }
+            if (route == 0)
+            {
+                abi_classify_all(&tables.abi, table);
+            }
+            else if (route == 1)
+            {
+                const Arena saved = thread_context.scratch[0];
+                thread_context.scratch[0] = arena_reserve(64);
+                abi_classify_all(&tables.abi, table);
+                arena_release(&thread_context.scratch[0]);
+                thread_context.scratch[0] = saved;
+            }
+            else
+            {
+                abi_test_classify_all_fallback(&tables.abi, table);
+            }
+            bool every = true;
+            for (uint32_t index = 1; index < table->types.count; index += 1)
+            {
+                every = every && abi_classifiable(table, index) == ((tables.abi.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0);
+            }
+            uint32_t wrong = 0;
+            for (uint32_t i = 0; made && i < BUSTER_ABI_TEST_REVERSED_LINKS; i += 1)
+            {
+                const uint32_t index = links[i] >> BUSTER_TYPE_INDEX_SHIFT;
+                const bool right = tables.abi.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES] == BUSTER_ABI_TEST_INTEGER_ONLY &&
+                                   (tables.abi.pass[index] & (BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_MEMORY)) == BUSTER_ABI_PASS_LOW_INTEGER &&
+                                   table->types.size[index] == 4;
+                wrong += right ? 0 : 1;
+            }
+            const char* names[3] = {
+                "abi_classify_all",
+                "abi_classify_all's scan, 64 bytes of scratch",
+                "the test's scan",
+            };
+            char detail[160];
+            snprintf(detail, sizeof(detail), "a chain of %u records against the table's order, by %s: every type classified %d, %u links wrong",
+                     BUSTER_ABI_TEST_REVERSED_LINKS, names[route], every, wrong);
+            abi_test_expect(tally, started && made && every && wrong == 0, "fixtures", detail);
+            abi_test_tables_close(&tables);
+        }
+    }
+}
+
 // The unions over each other in abi_test_shared_records.
 #define BUSTER_ABI_TEST_SHARED_LEVELS 64
 
@@ -4224,6 +4313,7 @@ static bool abi_test_fixtures(void)
     }
     abi_test_ordering(&tally);
     abi_test_short_scratch(&tally);
+    abi_test_reversed_chain(&tally);
     abi_test_shared_records(&tally);
     abi_test_char_signedness(&tally);
     abi_test_report("fixtures", tally);

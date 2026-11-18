@@ -82,7 +82,9 @@ own and never against the other, at 16-, 32- and 64-byte vectors:
   hold a struct of 128 bytes by an array of none, which wait for what its
   alignment reads), the walk without scratch memory for its stack, after which
   every type must be classified and an `_Atomic` it aligns be right or
-  refused, and the walk over 64 unions of two members of the one before, 2^64
+  refused, a chain of 80 records against the table's order, by the levels
+  and by the scan they fall back to with 64 bytes of scratch, and the walk
+  over 64 unions of two members of the one before, 2^64
   paths, under an alarm;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
   the vector path into one table and by the fallback, the scalar

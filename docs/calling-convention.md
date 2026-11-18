@@ -1353,7 +1353,7 @@ files. The counts below are the defaults'
   at each supported width and both char modes, including zero and partial
   builtin prefixes, reserved holes, small/requested capacities and refusals,
   poisoned padding and tails, and the first derived type's ordinary scheduling.
-- **Fixtures** (3,656 checks): types whose classes, pass bits and
+- **Fixtures** (3,662 checks): types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1475,8 +1475,13 @@ files. The counts below are the defaults'
   `abi_wide_alignment` reads. And the walk without scratch memory for its
   stack: with the thread's first scratch arena of 64 bytes and up, every type
   must be classified all the same, and the `_Atomic` that an array of none of
-  a record of 116 bytes aligns must have its 16 bytes or be refused. And
-  records that many paths lead to: over a struct of 32 bytes aligned to 16, 64
+  a record of 116 bytes aligns must have its 16 bytes or be refused. And a
+  chain of 80 records against the table's order (tags made first, then each
+  completed with the next as its member, from the last), which
+  `abi_classify_all`'s levels order and its scan, the fallback when 64 bytes
+  of scratch can't hold the levels' columns, takes a pass per link: by each,
+  and by the test's own scan, every type must be classified and every link
+  be `{int}`'s INTEGER in a register. And records that many paths lead to: over a struct of 32 bytes aligned to 16, 64
   unions of two members of the one before, 2^64 paths, under a 60-second alarm
   (a walk per path wouldn't end), where by each path every type must be
   classified, and an `_Atomic` of a struct of no size that an array of none of
