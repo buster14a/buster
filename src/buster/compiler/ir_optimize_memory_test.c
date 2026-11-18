@@ -6,9 +6,10 @@
 // of i32s and i64s at constant offsets and indexed places of three slots (one private, two whose addresses escape: the
 // first to a call, the second stored in the first), calls and fences, in straight blocks, diamonds and bounded loops,
 // every loaded value added to an accumulator in a fourth slot (private) that the function returns. Some addresses
-// wrap around int64_t's range back to their slot, which no forwarding may follow. The pass runs by both twins, which
-// must give the same function, alone with dead-code removal and in Tier 1's set, and every result folds into a digest
-// frozen where they agreed (IrOptimizeTest.memory_digest, #2924); an independent interpreter runs the
+// wrap around int64_t's range back to their slot, which no forwarding may follow. The pass runs alone with dead-code
+// removal and in Tier 1's set, by both of the optimizer's paths, whose other passes keep their twins; every result folds
+// into a digest frozen where the pass's own twins agreed (IrOptimizeTest.memory_digest, #2924, which deleted the scalar
+// one); an independent interpreter runs the
 // program before and after it, where each call writes every byte of the escaped slots anew, so a load that took a
 // value across a call, a store of its bytes or another write would return something else.
 
@@ -386,7 +387,8 @@ static IrMemoryTestRun ir_memory_test_run(const IrFunction* f, uint64_t first, u
     return run;
 }
 
-// One generated program through both twins with `passes`: the same function, which verifies, and the same runs.
+// One generated program through both of the optimizer's paths with `passes`: the same function, which verifies, and the
+// same runs.
 static void ir_memory_test_check(IrOptimizeTest* test, const IrFunction* f, uint32_t passes, Arena* vector, Arena* scalar, Arena* scratch, uint64_t* values, uint64_t* forwarded)
 {
     IrOptimizeOptions options = ir_optimize_options();
@@ -397,11 +399,11 @@ static void ir_memory_test_check(IrOptimizeTest* test, const IrFunction* f, uint
     const IrCheck vector_check = ir_optimize(f, vector, scratch, options, &vector_result);
     options.path = BUSTER_IR_OPTIMIZE_SCALAR;
     const IrCheck scalar_check = ir_optimize(f, scalar, scratch, options, &scalar_result);
-    ir_optimize_test_expect(test, vector_check.error == IR_OK && scalar_check.error == IR_OK, "memory: both twins take a generated program");
+    ir_optimize_test_expect(test, vector_check.error == IR_OK && scalar_check.error == IR_OK, "memory: both of the optimizer's paths take a generated program");
     if (vector_check.error == IR_OK && scalar_check.error == IR_OK)
     {
         ir_optimize_test_expect(test, ir_optimize_test_equal(&vector_result.function, &scalar_result.function) && vector_result.forwarded_loads == scalar_result.forwarded_loads,
-                                "memory: the twins give the same function");
+                                "memory: the optimizer's paths give the same function");
         *forwarded += vector_result.forwarded_loads;
         ir_optimize_test_fold_function(&test->memory_digest, &vector_result.function);
         ir_optimize_test_fold(&test->memory_digest, vector_result.forwarded_loads);
@@ -417,8 +419,8 @@ static void ir_memory_test_check(IrOptimizeTest* test, const IrFunction* f, uint
 }
 
 // Forwarding's arithmetic at the edges of int64_t: an address whose constant index or displacement sum overflows stops
-// there, by both twins, and a pair whose wrapped offsets meet again isn't forwarded through the overflow.
-static void ir_memory_test_overflows(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+// there, and a pair whose wrapped offsets meet again isn't forwarded through the overflow.
+static void ir_memory_test_overflows(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scratch)
 {
     static const char text[] =
         "function (i64) -> i64 {\n"
@@ -455,23 +457,22 @@ static void ir_memory_test_overflows(IrOptimizeTest* test, Arena* input, Arena* 
     const String8 source = { .pointer = (char*)text, .length = sizeof(text) - 1 };
     const IrParseResult parsed = ir_parse(source, input, scratch, &f);
     ir_optimize_test_expect(test, parsed.error == IR_PARSE_OK, "memory: the overflow fixture parses");
-    for (uint32_t path = 0; parsed.error == IR_PARSE_OK && path < 2; path += 1)
+    if (parsed.error == IR_PARSE_OK)
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = BUSTER_IR_OPTIMIZE_MEMORY;
-        options.path = path == 0 ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_SCALAR;
+        options.path = BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult result = { 0 };
-        Arena* output = path == 0 ? vector : scalar;
-        const uint64_t output_mark = output->length;
-        const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
+        const uint64_t output_mark = vector->length;
+        const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
         // Only %19 takes %18's value: the wrapped addresses keep their roots where an offset overflowed (%7 and %12, and
         // %4 for %5, whose constant index's product overflows), so none meets the store at offset 0 or another's key.
         ir_optimize_test_expect(test, check.error == IR_OK && result.forwarded_loads == 1, "memory: an overflowing offset stops the address there");
-        if (check.error == IR_OK && path == 0)
+        if (check.error == IR_OK)
         {
             ir_optimize_test_fold_function(&test->memory_digest, &result.function);
         }
-        arena_pop_to(output, output_mark);
+        arena_pop_to(vector, output_mark);
     }
     arena_pop_to(input, mark);
 }
@@ -670,7 +671,7 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test)
     ir_optimize_test_expect(test, !ready || forwarded >= programs, "memory: the generated programs forward loads");
     if (ready)
     {
-        ir_memory_test_overflows(test, &input, &vector, &scalar, &scratch);
+        ir_memory_test_overflows(test, &input, &vector, &scratch);
         ir_memory_test_shapes(test, &input, &vector, &scratch, values);
     }
     free(values);

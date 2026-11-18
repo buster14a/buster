@@ -37,9 +37,10 @@ requirements. [Command index](README.md).
   `BUSTER_IR_OPTIMIZE_MEMORY`): `test-ir-optimize` runs its six
   `tests/ir/optimize/memory-*.ir` pairs and `ir_optimize_memory_test.c`'s 400
   generated programs, whose interpreter's calls rewrite every escaped byte,
-  through both twins (exact) and an overflow fixture.
-  [Its guide](../../docs/ir-memory-value-numbering.md) has the rules, the twins
-  and the measurements.
+  folded into a frozen digest (the default seed; its scalar twin went in #2924),
+  and an overflow fixture. `benchmark-ir-source --passes` times its `memory`
+  row once. [Its guide](../../docs/ir-memory-value-numbering.md) has the rules,
+  the vector phases and the measurements.
 - #139's acceptance on real C: `test-ir-source --passes` runs every pass's
   vector and scalar versions on every function of c-testsuite's subset, the
   frozen `sqlite3.c` and musl in the correctness list, and
