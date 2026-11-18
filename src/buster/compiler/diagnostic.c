@@ -11,7 +11,7 @@
 // The two packed 64-bit keys retain all four u32 fields. A stable byte radix sort counts and places 16 keys at a time;
 // conflicts give equal digits their ranks within a block. Scalar stores avoid Zen 5's expensive gather/scatter.
 // At most BUSTER_DIAGNOSTIC_SMALL_COUNT records, diagnostic_sort_small counts each record's place 8 keys at a time
-// instead (#2959); insertion sort is the twin. All buffers are bounded; any failed
+// instead (#2959). All buffers are bounded; any failed
 // append or merge rejects the whole result before printing. The caller can then report its resource failure deterministically.
 //
 // Include after lane.c and String8. Layout: records and buffers; append; sorting; merge and write.
@@ -114,26 +114,6 @@ static bool diagnostic_append(DiagnosticBuffer* buffer, DiagnosticJob* job, uint
         buffer->failed |= !result;
     }
     return result;
-}
-
-static bool diagnostic_order_before(DiagnosticOrder a, DiagnosticOrder b)
-{
-    return a.source < b.source || (a.source == b.source && a.sequence < b.sequence);
-}
-
-static void diagnostic_sort_scalar(DiagnosticOrder* items, uint32_t count)
-{
-    for (uint32_t i = 1; i < count; i += 1)
-    {
-        const DiagnosticOrder value = items[i];
-        uint32_t at = i;
-        while (at != 0 && diagnostic_order_before(value, items[at - 1]))
-        {
-            items[at] = items[at - 1];
-            at -= 1;
-        }
-        items[at] = value;
-    }
 }
 
 // diagnostic_sort's path for BUSTER_DIAGNOSTIC_SMALL_COUNT records or fewer, which the radix sort's 16 passes cost more
@@ -276,10 +256,8 @@ static void diagnostic_sort(DiagnosticOrder* items, uint32_t count, DiagnosticOr
 
 // The text remains owned by the lane buffers, which must live until diagnostic_write finishes. `arena` is separate
 // from those buffers. No output is usable after a failed merge, including a buffer that ran out of room after a fatal.
-static Diagnostics diagnostic_merge(const DiagnosticBuffer* buffers, uint32_t buffer_count, Arena* arena, bool scalar)
+static Diagnostics diagnostic_merge(const DiagnosticBuffer* buffers, uint32_t buffer_count, Arena* arena)
 {
-    (void)scalar;
-
     Diagnostics result = { 0 };
     const uint64_t before = arena->length;
     uint64_t total = 0;
@@ -293,8 +271,8 @@ static Diagnostics diagnostic_merge(const DiagnosticBuffer* buffers, uint32_t bu
     {
         result.records = BUSTER_ARENA_PUSH_ARRAY(arena, Diagnostic, total);
         result.order = BUSTER_ARENA_PUSH_ARRAY(arena, DiagnosticOrder, total);
-        DiagnosticOrder* scratch = BUSTER_SCALAR_PATH(scalar) ? 0 : BUSTER_ARENA_PUSH_ARRAY(arena, DiagnosticOrder, total);
-        valid = result.records != 0 && result.order != 0 && (BUSTER_SCALAR_PATH(scalar) || scratch != 0);
+        DiagnosticOrder* scratch = BUSTER_ARENA_PUSH_ARRAY(arena, DiagnosticOrder, total);
+        valid = result.records != 0 && result.order != 0 && scratch != 0;
         for (uint32_t lane = 0; valid && lane < buffer_count; lane += 1)
         {
             for (uint32_t i = 0; i < buffers[lane].count; i += 1)
@@ -312,14 +290,7 @@ static Diagnostics diagnostic_merge(const DiagnosticBuffer* buffers, uint32_t bu
         }
         if (valid)
         {
-            if (BUSTER_SCALAR_PATH(scalar))
-            {
-                diagnostic_sort_scalar(result.order, result.count);
-            }
-            else
-            {
-                diagnostic_sort(result.order, result.count, scratch);
-            }
+            diagnostic_sort(result.order, result.count, scratch);
             for (uint32_t i = 0; i < result.count; i += 1)
             {
                 if (result.records[result.order[i].record].severity == DIAGNOSTIC_FATAL)

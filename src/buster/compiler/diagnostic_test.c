@@ -149,7 +149,7 @@ static bool diagnostic_test_lanes(void)
     char* first = 0;
     size_t first_length = 0;
     bool result = merged.base != 0;
-    for (uint32_t mode = 0; result && mode < 4; mode += 1)
+    for (uint32_t mode = 0; result && mode < 2; mode += 1)
     {
         for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
         {
@@ -172,7 +172,7 @@ static bool diagnostic_test_lanes(void)
             {
                 result = result && test.passed[i];
             }
-            const Diagnostics diagnostics = diagnostic_merge(test.buffers, counts[c], &merged, mode >= 2);
+            const Diagnostics diagnostics = diagnostic_merge(test.buffers, counts[c], &merged);
             result = result && diagnostics.success && diagnostics.count == 29;
             char* text = 0;
             size_t length = 0;
@@ -228,7 +228,7 @@ static bool diagnostic_test_limits(void)
     result = result && diagnostic_append(&buffer, &job, UINT32_MAX, DIAGNOSTIC_ERROR, BUSTER_S8("last\n")) &&
              records[0].source == UINT64_MAX && records[0].sequence == UINT64_MAX - 1;
     result = result && !diagnostic_append(&buffer, &job, 0, DIAGNOSTIC_ERROR, BUSTER_S8("full\n")) && buffer.failed;
-    Diagnostics diagnostics = diagnostic_merge(&buffer, 1, &merged, false);
+    Diagnostics diagnostics = diagnostic_merge(&buffer, 1, &merged);
     result = result && !diagnostics.success && diagnostics.count == 0 && merged.length == 0;
     FILE* stream = tmpfile();
     result = result && stream != 0 && !diagnostic_write(&diagnostics, stream) && ftell(stream) == 0;
@@ -261,9 +261,9 @@ static bool diagnostic_test_limits(void)
     };
     result = result && diagnostic_append(&buffer, &job, 0, DIAGNOSTIC_NOTE, (String8){ 0 });
     merged.length = merged.capacity;
-    diagnostics = diagnostic_merge(&buffer, 1, &merged, false);
+    diagnostics = diagnostic_merge(&buffer, 1, &merged);
     result = result && !diagnostics.success && diagnostics.count == 0 && merged.length == merged.capacity;
-    diagnostics = diagnostic_merge(0, 0, &merged, false);
+    diagnostics = diagnostic_merge(0, 0, &merged);
     result = result && diagnostics.success && diagnostics.count == 0;
     arena_release(&text);
     arena_release(&merged);
