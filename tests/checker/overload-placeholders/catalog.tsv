@@ -5,3 +5,4 @@ operators.c	0	16	32	an overload set as an operand of operators, conditions, a ca
 calls.c	0	5	11	which candidates make a call of no arguments: void, variadic, an ellipsis, two of them
 enable-if.c	0	2	4	enable_if leaves one candidate (taken) or none (an error with each candidate made ineligible)
 single.c	0	0	0	the one candidate enable_if leaves is the address a void * and a discarded operand take
+recovered.c	0	9	18	after an operand clang reads as a call of no arguments, the next operand, a conditional's condition last

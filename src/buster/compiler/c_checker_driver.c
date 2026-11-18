@@ -4494,11 +4494,13 @@ static const char* check_driver_overload_operand(const Parser* parser, Preproces
 // is available (one is taken, check_overload_address's placeholder), clang's err_ovl_unresolvable at the operand:
 // "reference to overloaded function could not be resolved; did you mean to call it?", " with no arguments" where its
 // tryExprAsCall finds one candidate that takes none (it then reads the operand as that call), and "possible target for
-// call" at each candidate's latest declaration, in its lookup's order (noteOverloads). The node's first such operand,
-// which its check refused (check_graph_overload_operands); NULL for any other report, an initialization's, an
-// assignment's source, a return's and a call's among them (check_driver_overload_address, check_driver_overload_operand).
+// call" at each candidate's latest declaration, in its lookup's order (noteOverloads). The node's first such operand from
+// its `from`th (its check refused the first, check_graph_overload_operands), its index in `*index`, and whether clang reads
+// it as that call and goes on to the node's next operand, as BuildBinOp and CheckConditionalOperands do (`*recovers`); NULL
+// for any other report, an initialization's, an assignment's source, a return's and a call's among them
+// (check_driver_overload_address, check_driver_overload_operand).
 static const char* check_driver_overload_unresolved(const Parser* parser, const CheckStream* stream, const TypeTable* types, const CheckReport* report,
-                                                    uint32_t* located, PPOutputDiagnosticNote* notes)
+                                                    uint32_t from, uint32_t* located, PPOutputDiagnosticNote* notes, uint32_t* index, bool* recovers)
 {
     const CheckGraph* graph = stream->graph;
     const uint32_t node = report->node;
@@ -4507,11 +4509,19 @@ static const char* check_driver_overload_unresolved(const Parser* parser, const 
     const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op != CHECK_OP_COUNT &&
                          op != CHECK_OP_VALUE && op != CHECK_OP_SELECT && op != CHECK_OP_ADDRESS && op != CHECK_OP_CALL && op != CHECK_OP_INITIALIZE &&
                          op != CHECK_OP_CONVERT && (op != CHECK_OP_CAST || discarded);
-    const uint32_t operands[] = { applies ? graph->operand0[node] : BUSTER_CHECK_NONE, applies && op != CHECK_OP_CAST && op != CHECK_OP_ASSIGN ? graph->operand1[node] :
-                                  BUSTER_CHECK_NONE, applies && op != CHECK_OP_CAST && op != CHECK_OP_ASSIGN ? graph->operand2[node] : BUSTER_CHECK_NONE };
+    // (A conditional's in clang's CheckConditionalOperands' order: its second and third operands, then its condition.)
+    const bool conditional = op == CHECK_OP_CONDITIONAL;
+    const bool single = op == CHECK_OP_CAST || op == CHECK_OP_ASSIGN;
+    const uint32_t operands[] = {
+        !applies ? BUSTER_CHECK_NONE : conditional ? graph->operand1[node] : graph->operand0[node],
+        !applies || single ? BUSTER_CHECK_NONE : conditional ? graph->operand2[node] : graph->operand1[node],
+        !applies || single ? BUSTER_CHECK_NONE : conditional ? graph->operand0[node] : graph->operand2[node],
+    };
     uint32_t operand = BUSTER_CHECK_NONE;
     uint32_t head = 0;
-    for (uint32_t i = 0; operand == BUSTER_CHECK_NONE && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+    *index = BUSTER_ARRAY_LENGTH(operands);
+    *recovers = false;
+    for (uint32_t i = from; operand == BUSTER_CHECK_NONE && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
     {
         const uint32_t at = operands[i];
         const uint32_t named = at < stream->count && graph->ops[at] == CHECK_OP_ADDRESS ? graph->operand0[at] : at;
@@ -4538,6 +4548,7 @@ static const char* check_driver_overload_unresolved(const Parser* parser, const 
         }
         operand = overloadable && available != 1 ? at : BUSTER_CHECK_NONE;
         head = overloadable && available != 1 ? found : 0;
+        *index = operand != BUSTER_CHECK_NONE ? i : *index;
     }
     // tryExprAsCall's candidate that takes no arguments (a later one again after two, as its loop has it), and the notes.
     uint32_t note_count = 0;
@@ -4583,6 +4594,7 @@ static const char* check_driver_overload_unresolved(const Parser* parser, const 
             end += 1;
         }
         *located = first;
+        *recovers = callable;
     }
     else
     {
@@ -5366,6 +5378,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     // built, each one's warnings and errors alike, so its error is published with the call's conversion
                     // warnings, at the call's token (check_driver_pointer_arguments), in its argument's place among them.
                     uint32_t conversion_argument = BUSTER_CHECK_NONE;
+                    // An overload set's operand that clang reads as a call (#2935): the node's next set operand is reported too.
+                    uint32_t unresolved_index = BUSTER_CHECK_NONE;
+                    bool unresolved_recovers = false;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_overload_address(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location, x86_note, scratch);
@@ -5377,7 +5392,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     if (x86_message == NULL && phase == 1)
                     {
-                        x86_message = check_driver_overload_unresolved(parser, stream, types, stream->reports + index, &x86_location, x86_note);
+                        x86_message = check_driver_overload_unresolved(parser, stream, types, stream->reports + index, 0, &x86_location, x86_note,
+                                                                       &unresolved_index, &unresolved_recovers);
                     }
                     if (x86_message == NULL && phase == 1)
                     {
@@ -6742,6 +6758,21 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             {
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, x86_note,
                                                             check_semantic_note_count(x86_note), "%s", x86_message);
+                            }
+                            // A set operand clang read as a call, which goes on to the node's next (#2935): its set too, at the
+                            // same place among the diagnostics, until one it can't read as a call.
+                            for (uint32_t next = unresolved_index + 1; unresolved_recovers && unresolved_index != BUSTER_CHECK_NONE && next < 3; next = unresolved_index + 1)
+                            {
+                                PPOutputDiagnosticNote more[BUSTER_CHECK_SEMANTIC_NOTES] = { 0 };
+                                uint32_t at = BUSTER_CHECK_NONE;
+                                const char* again = check_driver_overload_unresolved(parser, stream, types, stream->reports + index, next, &at, more, &unresolved_index,
+                                                                                     &unresolved_recovers);
+                                if (again != NULL && at < count)
+                                {
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[at], publication, more, check_semantic_note_count(more), "%s",
+                                                                again);
+                                }
+                                unresolved_recovers &= again != NULL;
                             }
                             // CFString's argument that doesn't convert is no ordinary literal either: clang's CheckObjCString
                             // adds its own error after the conversion's (#2460).

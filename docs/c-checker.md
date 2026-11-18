@@ -761,9 +761,10 @@ of incompatible type '<overloaded function type>'" (or "assigning to") with a
 note at each candidate, and an operand is "reference to overloaded function
 could not be resolved; did you mean to call it?", " with no arguments" where
 one candidate takes none, with "possible target for call" at each
-(`check_driver_overload_unresolved`). Clang then reads that operand as the
-call, which may report a later operand of the same expression too; the checker
-reports the expression's first. Initializers, casts, assignments,
+(`check_driver_overload_unresolved`). Where clang then reads that operand as
+the call, it goes on to the expression's next operand, a conditional's
+condition last, and so does the driver; it doesn't check what the call's type
+makes of the expression (`*f`). Initializers, casts, assignments,
 callbacks and returns retain that selected object and conversion on the use
 edge, without rewriting a shared identifier leaf. Candidate availability is
 checked at the use's source position. Function calling conventions participate
