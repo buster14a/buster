@@ -121,7 +121,14 @@
 // past 0xfffd; 0 says none. The census's tests on the window read an integer constant's value there, with its standing,
 // where they would gather its payload (c_check_node_census.c's node_tests_window_bytes): of a constant whose type is an
 // integer's of 64 bits at most, whose payload is its value. T's own record says none (node_facts_expected), and so does
-// a record made as no constant's (node_facts_record).
+// a record made as no constant's (node_facts_record). And a call's says 1 where its arguments have nothing for those
+// tests' call's test (node_facts_call_fast), which neither T's own record of a call nor the rule's (node_facts_call)
+// says: a call's record says 0 or 1.
+#define BUSTER_NODE_FACTS_QUIET_CALL 1u
+// Two of a type's word's six bits for the census's tests (BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT): an aggregate, an
+// enumeration.
+#define BUSTER_NODE_FACTS_TESTS_AGGREGATE 0x02u
+#define BUSTER_NODE_FACTS_TESTS_ENUM 0x04u
 static inline __attribute__((always_inline)) uint32_t node_facts_small(uint64_t payload)
 {
     return (uint32_t)(payload < 0xffffu ? payload : 0xfffeu) + 1u;
@@ -134,11 +141,14 @@ static inline __attribute__((always_inline)) uint32_t node_facts_exponent(uint32
 }
 
 // A row's `function` field: whether the type is a function or a pointer to one, whether it is the function itself (a
-// designator's type), and whether its return type is void or complete somewhere in the unit; then its
-// BUSTER_TYPE_FLAG_* in bits 8 to 15 and its parameter count from bit 16.
+// designator's type), whether its return type is void or complete somewhere in the unit, and whether each of its
+// parameters takes an integer constant of zero or 1 to 126 unchanged (no enumeration's type, no floating one, no
+// integer's but a plain one of 8 to 64 bits: what the census's tests' conversion of a constant argument asks,
+// node_facts_call_fast's); then its BUSTER_TYPE_FLAG_* in bits 8 to 15 and its parameter count from bit 16.
 #define BUSTER_NODE_FACTS_FUNCTION 0x01u
 #define BUSTER_NODE_FACTS_DESIGNATOR 0x02u
 #define BUSTER_NODE_FACTS_RETURNS 0x04u
+#define BUSTER_NODE_FACTS_TAKES 0x08u
 
 // A row's `flags`: whether check_action_is_integer takes the type; a builtin integer type's sign and, in bits 8 to 15,
 // its width (node_machine_operand_width's, 0 for another type); and whether `stride` is its element's size (an element
@@ -602,14 +612,23 @@ static void node_facts_row(const NodeMachine* machine, uint32_t index, NodeFacts
         const TypeId returned = type_return(types, function);
         const uint32_t returned_index = type_index(returned);
         uint32_t parameters = 0;
-        (void)type_parameters(types, function, &parameters);
+        const TypeId* parameter_types = type_parameters(types, function, &parameters);
+        bool takes = true;
+        for (uint32_t p = 0; p < parameters; p += 1)
+        {
+            const uint32_t word = node_machine_word(machine, parameter_types[p]);
+            const uint8_t parameter_kind = (uint8_t)(word >> 16);
+            const bool plain_integer = (word & 0x00ffffffu) - ((uint32_t)BUSTER_TYPE_KIND_INTEGER << 16 | BUSTER_TYPED_CLASS_I8) <= BUSTER_TYPED_CLASS_U64 - BUSTER_TYPED_CLASS_I8;
+            takes = takes && parameter_kind != BUSTER_TYPE_KIND_FLOATING && (word >> BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT & BUSTER_NODE_FACTS_TESTS_ENUM) == 0 &&
+                    (parameter_kind != BUSTER_TYPE_KIND_INTEGER || plain_integer);
+        }
         row->returned = returned;
         row->returned_word = node_machine_word(machine, returned);
         row->returned_complete_at = returned_index < machine->type_count ? machine->type_complete_at[returned_index] : UINT32_MAX;
         row->returned_ready_at = (uint8_t)(row->returned_word >> 16) == BUSTER_TYPE_KIND_VOID ? 0 : row->returned_complete_at;
         row->function = BUSTER_NODE_FACTS_FUNCTION | (kind == BUSTER_TYPE_KIND_FUNCTION ? BUSTER_NODE_FACTS_DESIGNATOR : 0) |
-                        (row->returned_ready_at != UINT32_MAX ? BUSTER_NODE_FACTS_RETURNS : 0) | (uint32_t)types->types.flags[function_index] << 8 |
-                        (parameters < 0xffffu ? parameters : 0xffffu) << 16;
+                        (row->returned_ready_at != UINT32_MAX ? BUSTER_NODE_FACTS_RETURNS : 0) | (takes ? BUSTER_NODE_FACTS_TAKES : 0) |
+                        (uint32_t)types->types.flags[function_index] << 8 | (parameters < 0xffffu ? parameters : 0xffffu) << 16;
     }
 }
 
@@ -1527,9 +1546,41 @@ static inline __attribute__((always_inline)) bool node_facts_pointer(NodeFactsRe
     return taken;
 }
 
+// What the census's tests on the window ask of a call's arguments (c_check_node_census.c's calls' rule), gathered where
+// the call's short path reads each one's record: the kinds of constant among them, a bit each; whether an integer constant
+// among them is not zero or 1 to 126, by what its record says of its value (node_facts_small); and their types' words
+// together, for an aggregate's bit.
+typedef struct NodeFactsArguments NodeFactsArguments;
+struct NodeFactsArguments
+{
+    uint32_t kinds;
+    uint32_t large;
+    uint32_t words;
+};
+
+static inline __attribute__((always_inline)) void node_facts_argument(NodeFactsArguments* asked, const NodeFactsRecord* argument)
+{
+    const uint32_t kind = ((uint32_t)argument->standing >> 2) & 0x07u;
+    asked->kinds |= 1u << kind;
+    asked->large |= (kind == CHECK_CONSTANT_INTEGER) & ((uint32_t)argument->exponent - 1u > 126u);
+    asked->words |= argument->word;
+}
+
+// Whether a call's arguments are quiet (BUSTER_NODE_FACTS_QUIET_CALL), of a callee whose type's row has `function`: no
+// aggregate among them, no constant but an address's or an integer's of zero or 1 to 126, and such an integer only
+// where each parameter takes it unchanged.
+static inline __attribute__((always_inline)) uint32_t node_facts_arguments_quiet(const NodeFactsArguments* asked, uint32_t function)
+{
+    const uint32_t quiet_kinds = 1u << CHECK_CONSTANT_NONE | 1u << CHECK_CONSTANT_INTEGER | 1u << CHECK_CONSTANT_ADDRESS;
+    const uint32_t loud = (asked->words >> BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT & BUSTER_NODE_FACTS_TESTS_AGGREGATE) | (asked->kinds & ~quiet_kinds) | asked->large;
+    const bool takes = (asked->kinds & 1u << CHECK_CONSTANT_INTEGER) == 0 || (function & BUSTER_NODE_FACTS_TAKES) != 0;
+    return loud == 0 && takes ? BUSTER_NODE_FACTS_QUIET_CALL : 0;
+}
+
 // A call `w` of callee `a`: node_machine_call_rule's value, its callee's prototype's return type's rvalue with its
 // callee's and its arguments' inherited flags, where the prototype takes the arguments' count and no argument's value is
-// wide. Its arguments' conversions are the rule's.
+// wide. Its arguments' conversions are the rule's. It says nothing of its arguments to the census's tests, as the short
+// path does (node_facts_call_fast): a call it makes stays in their list.
 static inline __attribute__((always_inline)) bool node_facts_call(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a)
 {
     const NodeFactsRow* row = node_facts_row_of(view, records[a].type);
@@ -2810,8 +2861,11 @@ static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFacts
     // the few calls of more have a loop for the rest. An argument's distance is read whether the call has the argument
     // or not (the list has entries to spare past its last call's), so that the choice is between two places in
     // registers: a choice with a load behind it is compiled as a branch on the count, which the predictor misses.
+    // What the census's tests ask of the arguments is gathered with them (node_facts_argument): the callee's record,
+    // which stands for an argument past the count, has an address's constant or none, and no aggregate's type.
     uint32_t gathered = flags;
     uint32_t standings = 0;
+    NodeFactsArguments asked = { 0 };
 #pragma clang loop vectorize(disable) interleave(disable) unroll(full)
     for (uint32_t i = 0; i < 4; i += 1)
     {
@@ -2819,6 +2873,7 @@ static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFacts
         const uint32_t place = i < count ? w - distance : a;
         gathered |= records[place].flags;
         standings |= records[place].standing;
+        node_facts_argument(&asked, records + place);
     }
 #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
     for (uint32_t i = 4; i < count; i += 1)
@@ -2826,14 +2881,16 @@ static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFacts
         const NodeFactsRecord* argument = records + (w - arguments[i]);
         gathered |= argument->flags;
         standings |= argument->standing;
+        node_facts_argument(&asked, argument);
     }
     const uint32_t unfit = (designator ? as_designator : as_value) | (~function & wanted) | (standings & BUSTER_NODE_MACHINE_WIDE) |
                            (count < parameters || ((function >> 8 & BUSTER_TYPE_FLAG_VARIADIC) == 0 && count != parameters) ? 1u : 0u);
     const bool fast = unfit == 0 && row->returned_ready_at <= view->positions[w];
     if (fast)
     {
-        node_facts_record(records, w, row->returned, row->returned_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE),
-                          BUSTER_CHECK_SIDE_EFFECT | (gathered & BUSTER_CHECK_INHERITED), 0, 0);
+        const uint8_t made = BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE);
+        node_facts_record(records, w, row->returned, row->returned_word, made, BUSTER_CHECK_SIDE_EFFECT | (gathered & BUSTER_CHECK_INHERITED), 0, 0);
+        node_facts_store(records + w, 24, (uint64_t)made | 0x100u | (uint64_t)node_facts_arguments_quiet(&asked, function) << 16);
         if (!lean)
         {
             node_facts_conversions(records, w, designator ? pointer : lvalue != 0 ? row->value : type, designator ? BUSTER_CHECK_CONVERT_FUNCTION : lvalue & 1u, 0, 0, 0);
