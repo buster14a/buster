@@ -29,6 +29,8 @@ struct Tier1BursCheck
     // Nodes of a class the grammar covers whose goal rule names a candidate the walks made, and those that took munch's.
     uint64_t matched;
     uint64_t fallbacks;
+    // Integer comparisons classed as a truth value's link.
+    uint64_t links;
 };
 
 // The plan's prerequisites, built here apart from it: each node's block, uses, last user, barriers, canonical answer and
@@ -185,6 +187,24 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
                     columns[0][node], a, b, columns[2][node], columns[3][node]);
         }
         check->mismatches += !same;
+        // An integer comparison's class is the link's exactly where it is one (tier1_select_truth): eq or ne of the zero
+        // extension two nodes before it, of the I1 right before that, and of a zero right before it that it alone uses,
+        // in its block.
+        const uint32_t class = columns[0][node];
+        if (class == TIER1_BURS_OP_ICMP || class == TIER1_BURS_OP_ICMP_LINK)
+        {
+            const uint32_t extended = function->a[node];
+            const uint32_t zero = function->b[node];
+            const bool shaped = function->c[node] <= IR_NE && extended + 2 == node && zero + 1 == node && function->op[extended] == IR_ZEXT && function->op[zero] == IR_CONST;
+            const bool link = shaped && function->a[extended] + 1 == extended && function->type[function->a[extended]] == IR_I1 && function->constants[function->a[zero]].low == 0 &&
+                              uses[zero] == 1 && blocks[zero] == blocks[node];
+            if ((class == TIER1_BURS_OP_ICMP_LINK) != link && check->mismatches < 8)
+            {
+                fprintf(stderr, "  burs comparison %u classed %u where its link's definition says %s\n", node, class, link ? "a link" : "none");
+            }
+            check->mismatches += (class == TIER1_BURS_OP_ICMP_LINK) != link;
+            check->links += class == TIER1_BURS_OP_ICMP_LINK;
+        }
         if (columns[0][node] != TIER1_BURS_OP_REG)
         {
             const Tier1SelectCandidates candidates = tier1_select_candidates(&costed, node);
@@ -445,10 +465,51 @@ static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
     arena_release(&text);
 }
 
+// Truth values' links at every lane of the classifier's 16: 32 chains of five nodes, (a < b) zero-extended, compared
+// eq or ne with a zero (a one in the last 16, which are no links), then an xor of the two comparisons. A chain's link
+// sits at node 5k + 5, so the first 16 put one in each lane. Exactly those 16 must be classed links.
+static void tier1_select_test_burs_links(Tier1SelectTest* test)
+{
+    Arena text = arena_reserve(UINT64_C(1) << 20);
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    const uint64_t room = UINT64_C(1) << 16;
+    char* source = text.base != 0 ? arena_push_array(&text, room, 1, 1) : 0;
+    uint64_t length = 0;
+    bool valid = source != 0 && input.base != 0 && scratch.base != 0;
+    if (valid)
+    {
+        length += (uint64_t)snprintf(source + length, room - length, "function (i64, i64) -> i64 {\nb0:\n  %%0 = param.i64 0\n  %%1 = param.i64 1\n");
+        for (uint32_t k = 0; k < 32; k += 1)
+        {
+            const uint32_t n = 2 + 5 * k;
+            length += (uint64_t)snprintf(source + length, room - length,
+                                         "  %%%u = icmp.i1 %%0, %%1 lt\n  %%%u = zext.i32 %%%u\n  %%%u = const.i32 0x0000000000000000000000000000000%u\n  %%%u = icmp.i1 %%%u, %%%u %s\n  %%%u = xor.i1 %%%u, %%%u\n",
+                                         n, n + 1, n, n + 2, k < 16 ? 0 : 1, n + 3, n + 1, n + 2, (k & 1) != 0 ? "ne" : "eq", n + 4, n + 3, n);
+        }
+        length += (uint64_t)snprintf(source + length, room - length, "  %%%u = ret.void %%1\n}\n", 2 + 5 * 32);
+        valid = length < room;
+    }
+    IrFunction function = { 0 };
+    valid = valid && ir_parse((String8){ .pointer = source, .length = length }, &input, &scratch, &function).error == IR_PARSE_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+    tier1_select_test_expect(test, valid, "the links' fixture parses and verifies");
+    Tier1BursCheck check = { 0 };
+    if (valid)
+    {
+        tier1_burs_check_function(&check, &function, 0, &scratch);
+    }
+    tier1_select_test_expect(test, check.functions == 1 && check.mismatches == 0 && check.uncovered == 0 && check.links == 16,
+                             "a truth value's link is classed one in every lane, and a comparison with a one is not");
+    arena_release(&scratch);
+    arena_release(&input);
+    arena_release(&text);
+}
+
 static void tier1_select_test_burs(Tier1SelectTest* test)
 {
     tier1_select_test_burs_tables(test);
     tier1_select_test_burs_fixtures(test);
     tier1_select_test_burs_addresses(test);
+    tier1_select_test_burs_links(test);
 }
 #endif
