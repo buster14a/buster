@@ -888,7 +888,7 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's eight fixtures run again with its tests at reader time
+The census's ten fixtures run again with its tests at reader time
 (`node_tests_test_fixture`: `--front-tests` with `--verify`, then the same
 with the lean front's window and `--window-tests`, the machine's own form
 beside the census's code, whose bits, root's kinds and spans must be its;
@@ -919,7 +919,27 @@ doesn't fit and one whose own type is no integer's), the eighth fixture (no
 warning of a mix of enumerations and `-Wassign-enum`, where an enumeration's
 constant is listed for itself alone), and each fixture's counts of the
 operators left out, each checked, and of the constants whose record says
-its value.
+its value. For the tree's tests listed by the operator above and the
+expressions with nothing listed: the seventh's function `t` (a comparison
+under each bitwise operator, first and second, and in parentheses; `!`
+before a comparison, in parentheses, after one; `=` as each statement's
+condition and a `for`'s, in parentheses, as a `switch`'s, in a `for`'s
+other clauses; a comparison discarded whose operand writes, and under a
+cast to void; `!` and `=` further back than the block before the operator
+above them, and in the block before it; an initializer whose top is listed,
+in each list; a warning event in an expression with nothing listed, in its
+tokens' first word, their last and one between, and at its first token; a
+pointer compared with an integer, which T's action warns of; an address
+taken outside a return), the ninth fixture (the warnings that list an
+expression, off: what they would refuse is taken, and two writes or a
+returned address list nothing; its first function's return has nothing
+listed and ends at the unit's first warning event, the events' lower bound
+at its equality), the tenth (`-Wc++-compat`, a warning no test stands for: every
+expression refused, one with nothing listed too), and each fixture's counts
+of the operators listed for the tree's tests, of the records those tests
+read that no listed operator has as an operand, each checked, of the
+expressions with nothing listed, each run through the tests all the same,
+and of the roots' records apart from their operand's.
 The fact words' kernel runs at reader time on the fixture twice
 (`node_shadow_test_kernel`: after T alone, and in the `--scalar` run with the
 census's tests and C and X beside it) and on the two generated texts: no
@@ -1471,18 +1491,29 @@ kernel's run in place (`node_facts_window_run`).
   step: four gathers from the kernel's 64-byte records (the word, the flags,
   the object, the standing), one of a name's declaration's line's byte
   (`NodeCensusReader.line_bytes`, which the census's code makes at the
-  line's first leaf), and one of the token's role. Three byte columns come
-  out: the type's byte, the value's (a constant a test may read, a
-  bit-field, a declaration the tests refuse, and the record's kind for the
-  rule below) and the role.
+  line's first leaf). Two byte columns come out: the type's byte and the
+  value's (a constant a test may read, a bit-field, a declaration the tests
+  refuse, and the record's kind for the rule below).
 - **The loop** (`node_tests_window_loop`), 64 records a step. Each of the
-  six tables by operator is one byte permute of two registers. An operand's
+  nine tables by operator is one byte permute of two registers. An operand's
   byte comes by its distance, from this block's bytes and the block
   before's, one permute a side; an operand further back is read by a load,
   and counted. It writes what each record is as an operand, its operands'
   bytes together, its part of the set's tests, and four masks a block: the
-  records with a tree's test, the operators with tests of their own, the
-  writes, and the operators the rule below left out.
+  operators listed for their operands' tree's tests, the operators with
+  tests of their own, the writes, and the operators the rule below left
+  out.
+- **The tree's tests, by the operator above.** A test of the parser's tree
+  (`node_tests_tree`) reads its record's token's parent's role, and fires
+  only where that parent is the record's consumer's token. So the loop
+  lists the consumer: a comparison whose first operand is `!`, a condition
+  whose first operand is `=` (`own_tree_firsts` against the operand's
+  `own_tree_marks`), and `&`, `|`, `^` or a cast with a comparison for an
+  operand (`own_tree_sends` against the operands' properties). The test
+  then runs on the listed operator's operands, and decides. With
+  `--verify`, each record such a test reads (a comparison's token, `!`,
+  `=`) that no listed operator has as an operand has its test run all the
+  same and must have none.
 - **The constants with no test to make.** An operator listed for a constant
   operand alone is left out of the list where its operands' kinds say its
   tests have nothing to say (`BUSTER_NODE_TESTS_QUIET_*`, the classes;
@@ -1499,13 +1530,28 @@ kernel's run in place (`node_facts_window_run`).
   must have none, and each value said is compared with its payload.
 - **An expression's part** (`node_tests_window_chunk`'s first sweep). The
   set is an OR of its records' bytes. Its lists are the masks' words aligned
-  at its first record (`node_tests_window_word`), its root's bit last. Its
+  at its first record (`node_tests_window_word`), its root's bits last. Its
   tokens' span is a masked minimum and maximum.
+- **An expression with nothing listed** has its verdict there, from the
+  window alone, and neither T nor the tests below run on it. It is listed
+  for them where it has an operator in a list, two writes or one under its
+  top (`-Wunsequenced`), an initialization's root, a statement whose top is
+  no write, a return of an address (`-Wreturn-stack-address`), or a warning
+  of T's actions (`BUSTER_NODE_FACTS_PLACED_WARNED`, a bit of the kernel's
+  reader's byte an expression). Its verdict is its set's bits, the
+  control's bit of a root inside a statement expression, the bit of a
+  warning no test stands for, a `for`'s clause under
+  `-Wfor-loop-analysis`, a pragma's body and a warning event at its tokens
+  (`node_census_reader_marks`, asked where its span meets the bounds of the
+  unit's events so far). With `--verify`, each such expression is run
+  through the tests all the same and must have the same bits, root's kind
+  and span.
 - **The tests that read T's records still** (the tree's, the operators', the
   expression's own, and the census's code for a record sent to it) run in a
-  second sweep, each expression's after T has made its records again. A
-  third sweep runs T alone on the same expressions, and its ticks are taken
-  off the second's.
+  second sweep, on the expressions listed for them
+  (`NodeCensusReader.called`), each one's after T has made its records
+  again. A third sweep runs T alone on the same expressions, and its ticks
+  are taken off the second's.
 - **The comparison:** each expression's bits, its root's kind and its
   tokens' span, against what the census's code gave at reader time.
 
@@ -1526,13 +1572,24 @@ The report adds:
   not-their-payloads'=0`: the operators the rule left out, of every record
   the loop swept; with `--verify`, those of them in an expression the tests
   ran on, each checked (a swept record of an expression without tests has
-  none to check), and the integer constants whose record says its value.
+  none to check), and the integer constants whose record says its value;
+- `node-shadow: own tests tree's-tests'-records-no-listed-operator-has
+  checked=N of-them-with-a-test=0
+  lists'-words-with-a-bit-past-their-expression=0`: with `--verify`, the
+  records the tree's tests read that no listed operator has as an operand,
+  each checked;
+- `node-shadow: own tests expressions-with-nothing-listed=N (P%) checked=N
+  of-them-with-another-verdict=0`: the expressions whose verdict is the
+  window's alone; with `--verify`, each run through the tests that read T's
+  records and compared.
 
 `--list N` lists the first differences (`node-tests: window difference`),
-and a difference, an operator left out with a test, or a value said that is
-not its payload's fails the command.
+and a difference, an operator left out with a test, a value said that is
+not its payload's, a record left to no listed operator with a tree's test,
+a list's bit past its expression, or an expression with nothing listed and
+another verdict fails the command.
 
-`test-checker` runs it on the census's eight fixtures, as "The shadow" above
+`test-checker` runs it on the census's ten fixtures, as "The shadow" above
 has, and on the window's test of values without room at a chunk's end: the
 tests run on the 8,259 expressions the kernel makes in place there, and on
 none of the 64 that the ends cut. [The

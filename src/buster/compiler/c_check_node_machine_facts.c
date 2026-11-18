@@ -3960,6 +3960,10 @@ struct NodeFactsReader;
 static void node_tests_window_chunk(struct NodeCensusReader* tests, struct NodeFactsReader* state, const NodeFront* front);
 static bool node_tests_window_lines(struct NodeCensusReader* tests, Arena* arena, uint32_t capacity);
 
+// An expression's byte in the reader's batch (NodeFactsReader.placed).
+#define BUSTER_NODE_FACTS_PLACED 0x01u
+#define BUSTER_NODE_FACTS_PLACED_WARNED 0x02u
+
 struct NodeFactsReader
 {
     NodeFacts facts;
@@ -4006,7 +4010,8 @@ struct NodeFactsReader
     uint32_t* argument_bases;
     uint8_t* given;
     // Whether the expression's records are the front's window's in a row, which the kernel's run in place then makes
-    // (node_facts_window_expression).
+    // (node_facts_window_expression): BUSTER_NODE_FACTS_PLACED; and for such a one, whether T's actions gave a warning
+    // in it (NodeMachine.action_warnings after T's run), which the tests on the window ask.
     uint8_t* placed;
     uint32_t expression_count;
     // By the batch's record: whether its expression is one the whole machine takes there.
@@ -5325,7 +5330,7 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
         state->operands[e] = operand;
         state->argument_bases[e] = argument_base;
         state->given[e] = kept;
-        state->placed[e] = placed;
+        state->placed[e] = (uint8_t)(placed ? BUSTER_NODE_FACTS_PLACED | ((machine->action_warnings & 0x01ffffffu) != 0 ? BUSTER_NODE_FACTS_PLACED_WARNED : 0u) : 0u);
         state->expression_count = e + 1;
     }
 }

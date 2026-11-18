@@ -101,7 +101,7 @@ token; the issue has each row's source:
 | --- | --- | --- | --- |
 | 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | measured: 16.7 and 20.6 cycles, 0.025 and 0.045 mispredicted |
 | 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
-| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35. The tests on the window measured: exact; 54.1 TSC ticks a record on `sqlite3.c` where their pass over T's columns reads 83.0 (gate 40, refuted at 65): the loop 0.7, its inputs 8.9, and 37.2 the tests that read T's records still. Their second half's first piece: an operator a constant sends for nothing is left out of the loop's list (20,898 of 48,645): 48.7 |
+| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35. The tests on the window measured: exact; 54.1 TSC ticks a record on `sqlite3.c` where their pass over T's columns reads 83.0 (gate 40, refuted at 65): the loop 0.7, its inputs 8.9, and 37.2 the tests that read T's records still. Their second half's first piece: an operator a constant sends for nothing is left out of the loop's list (20,898 of 48,645): 48.7. Its second: the tree's tests listed by the operator above (6 operators for 27,794 records), and an expression with nothing listed has its verdict from the window alone (21,157 of 50,993): 42.0 |
 | 3 | The front's row, into the window | 35 cycles a token or less | first part measured, in the shadow: the node machine's front writes the kernel's window and the kernel reads it in place, exact; the kernel with its inputs 29.9 TSC ticks a record on `sqlite3.c` (gate 35), 38.4 on Lua, 61.5 on musl. The lexer's and the parser's rows are not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted. Allocated: 14.3 to 15.0 on `sqlite3.c` and 25.0 on musl as one command, each row to the issue that removes it or kept. The kept rows optimized in the compile since (#2885, #2903, #2941): the row about 12 on `sqlite3.c`. Whether the budget's line moves to it is not settled |
@@ -1565,6 +1565,60 @@ ran on:
 - **musl is read with its spread:** one build's fifteen readings spread 11%
   to 16% there, and three builds of this form read 0% to 3% under main.
 - **What stays scalar:** the table's making, 64 entries a unit.
+
+### The operator above, and an expression with nothing listed
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/window-tests-listing-2850-2026-11-18);
+[the node machine's page](node-machine.md#the-operator-above-and-an-expression-with-nothing-listed)
+has it whole.
+
+The second half's second piece takes two things out of the tests that read
+T's records.
+
+- **The tree's tests' list.** A test of the parser's tree reads its record's
+  token's parent's role, and the loop listed every record one reads: 27,794
+  on `sqlite3.c`. A test fires only where that parent is the record's
+  consumer's token, so the loop lists the consumer, by what its operands
+  are: 6 operators. The role's gather in the records' bytes' pass goes with
+  the list.
+- **Reading the parents' roles was tried first, and bought nothing:**
+  sixteen candidates a step, two gathers each: 48.5 where the piece before
+  read 48.8, the bytes 2.0 up for 2.1 off the tests.
+- **The call itself.** An expression with no operator in a list, no write
+  out of sequence, no root with tests of its own and no warning of T's
+  actions has its verdict from the window alone: 21,157 of `sqlite3.c`'s
+  50,993, 28% of Lua's and 51% of musl's. Neither T nor the tests run on it.
+- **Checked under `--verify`:** a record the tree's tests read that no
+  listed operator has as an operand has its test run all the same, with
+  nothing; an expression with nothing listed is run through the tests all
+  the same, with the same verdict.
+
+The 9700X, CPU 2, under the lock, Release; the piece before and this one in
+turn; medians of seven readings, musl's of fifteen (with every warning of
+five, musl's of fifteen). TSC ticks a record of the expressions the tests
+ran on:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the tests on the window, before | 48.9 | 63.3 | 111.3 |
+| **with the piece** | **42.0** | **59.1** | **100.0** |
+| of which the tests that read T's records | 23.2 | 38.6 | 61.9 |
+| an expression's part, before | 7.4 | 7.7 | 13.9 |
+| with the piece | 9.5 | 9.9 | 16.7 |
+| with every warning, before | 70.2 | 76.6 | 128.8 |
+| with the piece | 67.3 | 74.3 | 122.3 |
+
+- **Exact,** on the three corpora and the compiler's own source, with the
+  default warnings and with every warning.
+- **The gate (40 on `sqlite3.c`, refuted at 44) is neither met nor
+  refuted:** 42.0. What is left on T's records is the calls' tests first:
+  12,918 of the 27,750 operators still listed.
+- **The listing costs every expression, and pays at two in five.** An
+  expression's part rises by its listing and its verdict; with every
+  warning a sixth of `sqlite3.c`'s expressions have nothing listed, and the
+  piece saves less.
+- **What stays scalar:** an expression's listing and verdict, one
+  expression at a time, four loads at its root.
 
 ## Step 4's first piece: a census of Tier 0's row
 

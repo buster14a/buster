@@ -323,6 +323,17 @@ struct NodeFrontTypes
     // whose payload is another.
     uint64_t own_values_checked;
     uint64_t own_values_wrong;
+    // With the reader's verify: the records whose token's parent the tree's tests read (a comparison's, `!`, `=`) that
+    // no operator listed for them has as an operand, and those of them whose test had something; and the words of an
+    // expression's lists with a bit past its records.
+    uint64_t own_tree_checked;
+    uint64_t own_tree_wrong;
+    uint64_t own_lists_past;
+    // The expressions with nothing for the tests that read T's records, whose verdict is the window's alone; and, with
+    // the reader's verify, those of them run through those tests all the same, and those that then had another verdict.
+    uint64_t own_direct;
+    uint64_t own_direct_checked;
+    uint64_t own_direct_wrong;
     // The fact words' kernel at reader time (BUSTER_NODE_READER_FACTS; c_check_node_machine_facts.c's
     // node_facts_reader_flush): its counts (NodeFactsCount); the records it is to make and those it left to T, by
     // operator; and the first differences, each by its record's token, its operator and what differed

@@ -363,6 +363,64 @@ static const char node_census_test_defaults[] =
     "struct F r(struct F* sf)\n"
     "{\n"
     "    return *sf; // refuse: aggregate-value\n"
+    "}\n"
+    // The tree's tests, which the loop lists by the operator above: a comparison under each bitwise operator, as its
+    // first operand and as its second, and in parentheses there (listed, and its test has nothing); `!` before a
+    // comparison and an ordering, in parentheses, and after one (not listed); `=` as a condition of each statement that
+    // has one and of a `for`, in parentheses, as a `switch`'s (no test), and in a `for`'s other clauses; a comparison
+    // discarded whose operand writes, an ordering too, under an explicit cast to void (listed, no test), and in a
+    // `for`'s first and last clauses, where the discarded value's own test fires; `!` and `=` further back than the
+    // block before the operator above them: a comparison's first operand, and the conditions whose root's record comes
+    // after a body of 142 records; `!` 40 and 60 records before its comparison, in the block before it for some; and
+    // the other operator's mark where an operator asks for one (`=` before a comparison, `!` as a condition: not
+    // listed), and initializers whose top is listed, in each list, which have no root's record. And what an expression
+    // with nothing listed has from the window alone: a warning event at its tokens (found in their first word, in
+    // their last, and in a word between the two; and the unit's last, at its expression's first token), and no warning
+    // of T's actions (a pointer compared with an integer, which lists it); and an address taken lists a return alone.
+    "int t(int a, int b, int c, int d, int* p, const char* s)\n"
+    "{\n"
+    "    int x = 0;\n"
+    "    x = a == b & c; // refuse: parentheses\n"
+    "    x = a | b != c; // refuse: parentheses\n"
+    "    x = a ^ b <= c; // refuse: parentheses\n"
+    "    x = a & (b == c); // take\n"
+    "    x = (a == b) & c; // take\n"
+    "    x = !a == b; // refuse: parentheses\n"
+    "    x = !a < b; // refuse: parentheses\n"
+    "    x = (!a) == b; // take\n"
+    "    x = a == !b; // take\n"
+    "    x = !(a == b); // take\n"
+    "    while (a = b) x = 1; // refuse: parentheses\n"
+    "    do x = 1; while (a = b); // refuse: parentheses\n"
+    "    for (; a = b;) x = 1; // refuse: parentheses\n"
+    "    if ((a = b)) x = 1; // take\n"
+    "    switch (a = b) { default: break; } // take\n"
+    "    for (a = b; a < c; a = d) x = 1; // take\n"
+    "    a < d++; // refuse: unused-value\n"
+    "    (void)(a == d++); // take\n"
+    "    for (a == b; a < c; a != b) x = 1; // refuse: unused-value\n"
+    "    x = !a == (" BUSTER_NODE_CENSUS_TEST_SEVENTY("b") "); // refuse: parentheses\n"
+    "    x = a == (" BUSTER_NODE_CENSUS_TEST_SEVENTY("b") "); // take\n"
+    "    if (a = b) x = " BUSTER_NODE_CENSUS_TEST_SEVENTY("c") "; // refuse: parentheses\n"
+    "    for (; a = b;) x = " BUSTER_NODE_CENSUS_TEST_SEVENTY("c") "; // refuse: parentheses\n"
+    "    while (a = b) x = " BUSTER_NODE_CENSUS_TEST_SEVENTY("c") "; // refuse: parentheses\n"
+    "    if (a == b) x = " BUSTER_NODE_CENSUS_TEST_SEVENTY("c") "; // take\n"
+    "    s = \"a\\q\"; // refuse: warning-event\n"
+    "    x = p == a; // refuse: action-warning\n"
+    "    x = (a = b) == c; // take\n"
+    "    if (!a) x = 1; // take\n"
+    "    int y = a & b == c; // refuse: parentheses\n"
+    "    int z = a / 0; // refuse: constant\n"
+    "    x = !a == (" BUSTER_NODE_CENSUS_TEST_TEN("b") " + " BUSTER_NODE_CENSUS_TEST_TEN("c") "); // refuse: parentheses\n"
+    "    x = !b == (" BUSTER_NODE_CENSUS_TEST_TEN("c") " + " BUSTER_NODE_CENSUS_TEST_TEN("d") " + " BUSTER_NODE_CENSUS_TEST_TEN("a") "); // refuse: parentheses\n"
+    "    x = !c == (" BUSTER_NODE_CENSUS_TEST_TEN("d") " + " BUSTER_NODE_CENSUS_TEST_TEN("a") "); // refuse: parentheses\n"
+    "    x = *\"a\\q\"; // refuse: warning-event\n"
+    "    x = *\"a\\q\" + (" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "); // refuse: warning-event\n"
+    "    x = (" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") ") + *\"a\\q\"; // refuse: warning-event\n"
+    "    x = (" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") ") + *\"a\\q\" + (" BUSTER_NODE_CENSUS_TEST_SEVENTY("b") "); // refuse: warning-event\n"
+    "    p = &x; // take\n"
+    "    \"a\\q\"[a] = 1; // refuse: warning-event\n"
+    "    return x + y + z; // take\n"
     "}\n";
 
 // With no warning of a mix of enumerations and -Wassign-enum: an operator with an operand of an enumeration's type is
@@ -377,6 +435,39 @@ static const char node_census_test_enums[] =
     "    x = e == 1; // take\n"
     "    x = a + 1; // take\n"
     "    return x; // take\n"
+    "}\n";
+
+// The warnings that list an expression for the tests that read T's records, off: what they would refuse is taken, and
+// an expression that only they list has nothing listed (two writes, a returned address). Its first function's return has
+// nothing listed and ends at the unit's first warning event: the events' lower bound, at its equality.
+static const char node_census_test_off[] =
+    "char e(void)\n"
+    "{\n"
+    "    return *\"a\\q\"; // refuse: warning-event\n"
+    "}\n"
+    "int f(int a, int b, int c, int i)\n"
+    "{\n"
+    "    int x = 0;\n"
+    "    x = i + i++; // take\n"
+    "    x = a & b == c; // take\n"
+    "    x = !a == b; // take\n"
+    "    if (a = b) x = 1; // take\n"
+    "    a == i++; // take\n"
+    "    a == b; // take\n"
+    "    return x; // take\n"
+    "}\n"
+    "int* g(void)\n"
+    "{\n"
+    "    int local = 0;\n"
+    "    return &local; // take\n"
+    "}\n";
+
+// A warning no test stands for (-Wc++-compat): every expression is refused for it, one with nothing listed too.
+static const char node_census_test_whole[] =
+    "int w(int a, int b)\n"
+    "{\n"
+    "    a = a + b; // refuse: unmodeled-warning\n"
+    "    return a; // refuse: unmodeled-warning\n"
     "}\n";
 
 static const char node_census_test_atomic[] =
@@ -1024,6 +1115,9 @@ struct NodeTestsWindowed
     uint32_t far;
     uint32_t quiet;
     uint32_t values;
+    uint32_t spared;
+    uint32_t direct;
+    uint32_t apart;
 };
 
 // The census's tests at reader time (docs/node-machine.md, "The tests where they sit") on fixture `text`, written to
@@ -1067,12 +1161,16 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                                     shadow.tested_refused == refused && shadow.typed_discards == discards &&
                                     (!window || (shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0 && shadow.own_count_differences == 0 &&
                                                  shadow.own_expressions == windowed->expressions &&
+                                                 shadow.own_records == shadow.reader_facts[NODE_FACTS_COUNT_TESTS_RECORDS] &&
+                                                 shadow.reader_facts[NODE_FACTS_COUNT_TESTS_APART] == windowed->apart &&
                                                  shadow.reader_facts[NODE_FACTS_COUNT_TESTS_EXPRESSIONS] == windowed->expressions &&
                                                  shadow.own_trees == windowed->trees && shadow.own_operators == windowed->operators &&
                                                  shadow.own_visits == windowed->sent && shadow.own_walks == windowed->walks &&
                                                  shadow.reader_facts[NODE_FACTS_COUNT_TESTS_FAR] == windowed->far &&
                                                  shadow.own_quiet == windowed->quiet && shadow.own_quiet_checked == windowed->quiet && shadow.own_quiet_wrong == 0 &&
                                                  shadow.own_values_checked == windowed->values && shadow.own_values_wrong == 0 &&
+                                                 shadow.own_tree_checked == windowed->spared && shadow.own_tree_wrong == 0 && shadow.own_lists_past == 0 &&
+                                                 shadow.own_direct == windowed->direct && shadow.own_direct_checked == windowed->direct && shadow.own_direct_wrong == 0 &&
                                                  shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] == 0 &&
                                                  shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] == 0));
     if (!valid || !same)
@@ -1081,12 +1179,20 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                 " not the census's code's, %" PRIu64 " walks of another count; their loop listed %" PRIu64 " records for the tree's tests (%u) and %" PRIu64
                 " operators (%u), %" PRIu64 " records went to the census's code (%u) after %" PRIu64 " walks (%u), %" PRIu64
                 " operands were before the block before (%u), and it left %" PRIu64 " operators out for their constants (%u): %" PRIu64 " of them checked, %" PRIu64
-                " with a test; %" PRIu64 " constants' records say their value (%u), %" PRIu64 " of them not their payload's\n",
+                " with a test; %" PRIu64 " constants' records say their value (%u), %" PRIu64 " of them not their payload's; %" PRIu64
+                " records the tree's tests read were no listed operator's operand (%u), %" PRIu64 " of them with a test, and %" PRIu64
+                " lists' words had a bit past their expression; %" PRIu64
+                " expressions had nothing listed (%u), %" PRIu64 " of them checked, %" PRIu64 " with another verdict; the tests' own form counted %" PRIu64
+                " records of %" PRIu64 ", and %" PRIu64 " roots were apart from their operand (%u)\n",
                 name, window ? " (on the window)" : "", valid ? "read" : "NOT READ", shadow.reader_facts[NODE_FACTS_COUNT_TESTS_EXPRESSIONS],
                 window ? windowed->expressions : 0, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES], shadow.own_count_differences, shadow.own_trees,
                 window ? windowed->trees : 0, shadow.own_operators, window ? windowed->operators : 0, shadow.own_visits, window ? windowed->sent : 0, shadow.own_walks,
                 window ? windowed->walks : 0, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_FAR], window ? windowed->far : 0, shadow.own_quiet, window ? windowed->quiet : 0,
-                shadow.own_quiet_checked, shadow.own_quiet_wrong, shadow.own_values_checked, window ? windowed->values : 0, shadow.own_values_wrong);
+                shadow.own_quiet_checked, shadow.own_quiet_wrong, shadow.own_values_checked, window ? windowed->values : 0, shadow.own_values_wrong,
+                shadow.own_tree_checked, window ? windowed->spared : 0, shadow.own_tree_wrong, shadow.own_lists_past, shadow.own_direct, window ? windowed->direct : 0,
+                shadow.own_direct_checked,
+                shadow.own_direct_wrong, shadow.own_records, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_RECORDS], shadow.reader_facts[NODE_FACTS_COUNT_TESTS_APART],
+                window ? windowed->apart : 0);
         fprintf(stderr, "test-checker: node-tests %s: %s: the tests ran on %" PRIu64 " expressions at reader time and refused %" PRIu64 " (%u expected); %" PRIu64
                 " compared and %" PRIu64 " never lowered; %" PRIu64 " taken there that the census refuses, %" PRIu64 " differ, %" PRIu64 " roots' kinds differ, %" PRIu64
                 " nodes outside the records, %" PRIu64 " units' enabled warnings differ; T's rows and rules there: %" PRIu64 " values not the action's, %" PRIu64
@@ -2200,6 +2306,18 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "-Wno-implicit-enum-enum-cast" };
     check_test_expect(test, ready && node_census_test_fixture(directory, "enums.c", node_census_test_enums, enums, BUSTER_ARRAY_LENGTH(enums), &system),
                       "node-census refuses an enumeration's constant by its own test where no mix of enumerations is asked about");
+    char* off[] = { "-nostdinc",
+                    "-Wno-unsequenced",
+                    "-Wno-return-stack-address",
+                    "-Wno-unused-value",
+                    "-Wno-unused-comparison",
+                    "-Wno-parentheses",
+                    "-Wno-logical-not-parentheses" };
+    check_test_expect(test, ready && node_census_test_fixture(directory, "off.c", node_census_test_off, off, BUSTER_ARRAY_LENGTH(off), &system),
+                      "node-census takes what a warning that is off would refuse");
+    char* whole[] = { "-nostdinc", "-Wc++-compat" };
+    check_test_expect(test, ready && node_census_test_fixture(directory, "whole.c", node_census_test_whole, whole, BUSTER_ARRAY_LENGTH(whole), &system),
+                      "node-census refuses every expression of a unit with a warning no test stands for");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
@@ -2213,36 +2331,44 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // What the tests on the window count on each of the eight fixtures, which no verdict shows.
     static const NodeTestsWindowed windowed_warnings = {
         .expressions = 45,
-        .trees = 38,
+        .trees = 4,
         .operators = 63,
         .sent = 23,
         .walks = 4,
         .quiet = 6,
         .values = 45,
+        .spared = 34,
+        .direct = 2,
+        .apart = 3,
     };
     static const NodeTestsWindowed windowed_clean = {
         .expressions = 23,
-        .trees = 18,
+        .trees = 1,
         .operators = 26,
         .sent = 10,
         .walks = 4,
         .quiet = 3,
         .values = 26,
+        .spared = 17,
+        .direct = 1,
+        .apart = 2,
     };
     static const NodeTestsWindowed windowed_set = {
         .expressions = 13,
-        .trees = 5,
         .operators = 8,
         .quiet = 2,
         .values = 8,
+        .spared = 5,
+        .direct = 2,
     };
     static const NodeTestsWindowed windowed_quiet = {
         .expressions = 7,
-        .trees = 5,
         .operators = 4,
         .sent = 3,
         .quiet = 1,
         .values = 7,
+        .spared = 5,
+        .direct = 2,
     };
     static const NodeTestsWindowed windowed_atomic = {
         .expressions = 3,
@@ -2252,28 +2378,47 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .values = 1,
     };
     static const NodeTestsWindowed windowed_defaults = {
-        .expressions = 103,
-        .trees = 120,
-        .operators = 57,
+        .expressions = 160,
+        .trees = 29,
+        .operators = 60,
         .sent = 26,
-        .walks = 8,
-        .far = 9,
-        .quiet = 30,
-        .values = 95,
+        .walks = 11,
+        .far = 25,
+        .quiet = 38,
+        .values = 113,
+        .spared = 172,
+        .direct = 57,
+        .apart = 9,
     };
     static const NodeTestsWindowed windowed_enums = {
         .expressions = 5,
-        .trees = 4,
         .operators = 2,
         .quiet = 1,
         .values = 4,
+        .spared = 4,
+        .direct = 2,
+    };
+    static const NodeTestsWindowed windowed_off = {
+        .expressions = 12,
+        .trees = 5,
+        .quiet = 1,
+        .values = 4,
+        .spared = 5,
+        .direct = 5,
+        .apart = 1,
+    };
+    static const NodeTestsWindowed windowed_whole = {
+        .expressions = 2,
+        .spared = 1,
+        .direct = 2,
     };
     static const NodeTestsWindowed windowed_system = {
         .expressions = 3,
-        .trees = 1,
         .operators = 1,
         .quiet = 1,
         .values = 2,
+        .spared = 1,
+        .direct = 1,
     };
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
@@ -2293,11 +2438,16 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                                                              BUSTER_NODE_FRONT_AFTER, 2, 0, windowed_atomic),
                       "node-tests: at reader time atomic record accesses are refused by type");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet),
-                                                             BUSTER_NODE_FRONT_AFTER, 50, 11, windowed_defaults),
+                                                             BUSTER_NODE_FRONT_AFTER, 77, 14, windowed_defaults),
                       "node-tests: at reader time the tests refuse what warns without an option, with the default warnings alone");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "enums.c", node_census_test_enums, enums, BUSTER_ARRAY_LENGTH(enums),
                                                              BUSTER_NODE_FRONT_AFTER, 1, 1, windowed_enums),
                       "node-tests: at reader time an enumeration's constant is tested where no mix of enumerations is asked about");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "off.c", node_census_test_off, off, BUSTER_ARRAY_LENGTH(off), BUSTER_NODE_FRONT_AFTER, 1, 2, windowed_off),
+                      "node-tests: at reader time a warning that is off refuses nothing and lists no expression, and the unit's first warning event refuses its own");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "whole.c", node_census_test_whole, whole, BUSTER_ARRAY_LENGTH(whole), BUSTER_NODE_FRONT_AFTER, 2, 0,
+                                                             windowed_whole),
+                      "node-tests: at reader time a warning no test stands for refuses every expression");
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
                                                                BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
