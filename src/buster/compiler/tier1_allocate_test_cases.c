@@ -692,6 +692,41 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
     };
     Tier1ResolvedMoves output = { 0 };
     tier1_allocation_test_expect(tally, tier1_resolve_moves(&broken, arena, &output) == TIER1_ALLOCATION_INVALID, "duplicate move destinations rejected");
+    // A move from or to the scratch register is refused, in each lane of the indexed resolver's steps and of the small
+    // set's: 6 and 24 moves among registers 0 to 23, the scratch (30) put in each one's source and then its destination.
+    for (uint32_t i = 0; i < 24; i += 1)
+    {
+        sources[i] = (i + 1) % 24;
+        destinations[i] = i;
+    }
+    const uint32_t sizes[] = { 6, 24 };
+    bool resolved = true;
+    bool refused = true;
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        const Tier1ParallelMoves moves = {
+            .sources = sources,
+            .destinations = destinations,
+            .count = sizes[s],
+            .scratch = 30,
+        };
+        const uint64_t saved = arena->length;
+        resolved = resolved && tier1_resolve_moves(&moves, arena, &output) == TIER1_ALLOCATION_OK;
+        arena_pop_to(arena, saved);
+        for (uint32_t k = 0; k < sizes[s]; k += 1)
+        {
+            for (uint32_t side = 0; side < 2; side += 1)
+            {
+                uint32_t* edited = side == 0 ? sources : destinations;
+                const uint32_t kept = edited[k];
+                edited[k] = 30;
+                refused = refused && tier1_resolve_moves(&moves, arena, &output) == TIER1_ALLOCATION_INVALID && arena->length == saved;
+                edited[k] = kept;
+            }
+        }
+    }
+    tier1_allocation_test_expect(tally, resolved, "moves away from the scratch register resolve");
+    tier1_allocation_test_expect(tally, refused, "a move from or to the scratch register is refused in each lane");
 }
 
 static void tier1_allocation_test_required(Tier1AllocationTestTally* tally, Arena* arena)

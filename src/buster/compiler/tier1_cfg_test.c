@@ -160,6 +160,9 @@ struct Tier1CfgTestTally
     uint64_t two_freed;
     uint64_t two_fixed;
     uint64_t two_seed;
+    // The values whose column sets were probed (tier1_cfg_test_column_sets), and the most in one problem.
+    uint64_t column_values;
+    uint32_t column_widest;
 };
 
 static void tier1_cfg_test_expect(Tier1CfgTestTally* tally, bool condition, const char* message)
@@ -848,6 +851,66 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
     return ready;
 }
 
+// The column's set checks (tier1_cfg_column, tier1_cfg_input_valid's two conditions on a value's registers), value by
+// value for the first 48: over `plain`'s prepared intervals, the preferred problem's own column stands; a register
+// outside its class's added to one value's set is refused, and so is one value's definition bound to a register outside
+// its set, every other definition as the preferred problem binds it. Counts the values probed into `tally`.
+static void tier1_cfg_test_column_sets(Tier1CfgTestTally* tally, const Tier1CfgInput* plain, const uint32_t* chosen, uint32_t extra, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    const Tier1CfgPreference preference = {
+        .sets = chosen,
+        .registers = {
+            plain->registers[BUSTER_TIER1_ALLOCATE_GPR] | extra,
+            plain->registers[BUSTER_TIER1_ALLOCATE_VECTOR],
+            plain->registers[BUSTER_TIER1_ALLOCATE_MASK],
+        },
+    };
+    const uint32_t values = plain->value_count;
+    Tier1CfgInput preferred = { 0 };
+    Tier1CfgPrepared prepared = { 0 };
+    uint32_t* column = 0;
+    uint32_t* sets = arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* bound = arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    const bool built = sets != 0 && bound != 0 && tier1_cfg_preferred(plain, &preference, output, &preferred);
+    const bool held = built && tier1_cfg_prepare(plain, output, scratch, &prepared) == TIER1_CFG_OK;
+    tier1_cfg_test_expect(tally, !held || tier1_cfg_column(&preferred, &prepared, output, &column) == TIER1_CFG_OK, "the preferred problem's column stands");
+    bool outside = true;
+    bool unallowed = true;
+    for (uint32_t v = 0; held && v < values; v += 1)
+    {
+        sets[v] = preferred.allowed_registers[v];
+        bound[v] = preferred.definition_registers != 0 ? preferred.definition_registers[v] : 0;
+    }
+    for (uint32_t k = 0; held && k < values && k < 48; k += 1)
+    {
+        Tier1CfgInput probe = preferred;
+        probe.allowed_registers = sets;
+        probe.definition_registers = bound;
+        const uint32_t registers = preferred.registers[preferred.classes[k]];
+        const uint32_t set = sets[k];
+        const uint32_t definition = bound[k];
+        // The lowest register outside the class's, and the lowest outside the value's set.
+        const uint32_t foreign = ~registers & (registers + 1);
+        const uint32_t loose = ~set & (set + 1);
+        sets[k] = set | foreign;
+        outside = outside && (foreign == 0 || tier1_cfg_column(&probe, &prepared, output, &column) == TIER1_CFG_INVALID);
+        sets[k] = set;
+        bound[k] = loose;
+        unallowed = unallowed && (loose == 0 || tier1_cfg_column(&probe, &prepared, output, &column) == TIER1_CFG_INVALID);
+        bound[k] = definition;
+        tally->column_values += 1;
+        tally->column_widest = k + 1 > tally->column_widest ? k + 1 : tally->column_widest;
+    }
+    tier1_cfg_test_expect(tally, outside, "the column refuses a register outside its class's, value by value");
+    tier1_cfg_test_expect(tally, unallowed, "the column refuses a definition bound outside its value's set, value by value");
+    if (held)
+    {
+        tier1_cfg_release(&prepared, scratch);
+    }
+    arena_pop_to(output, mark);
+}
+
 // #2538: a case of two problems (tier1_cfg_test_two_orders) on both paths, with a random preference and binding
 // (tier1_cfg_test_preference). Where the input has fixed ranges the intervals depend on the registers: then
 // tier1_cfg_column must refuse another problem, as the CFG consumer takes the order before, and the case runs without
@@ -879,6 +942,10 @@ static void tier1_cfg_test_two_problems(Tier1CfgTestTally* tally, const Tier1Cfg
         }
         tally->two_fixed += 1;
         plain.fixed = (Tier1FixedIntervals){ 0 };
+    }
+    if (ready)
+    {
+        tier1_cfg_test_column_sets(tally, &plain, chosen, extra, output, scratch);
     }
     // With the plain problem's verdict inside the preferred assignment's call and with it assigned whole first.
     for (uint32_t run = 0; ready && run < 2; run += 1)
@@ -2819,12 +2886,14 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // #2538: the one-call order reaches a taken preference, a refused one, a constraint that frees the definitions and a
         // case with fixed ranges.
         tier1_cfg_test_expect(&tally, count < 500 || (tally.two_taken != 0 && tally.two_refused != 0 && tally.two_freed != 0 && tally.two_fixed != 0), "two problems reach every outcome");
+        // The column's set checks probed past a step of 16 values and into the next's tail.
+        tier1_cfg_test_expect(&tally, count < 500 || tally.column_widest > 16, "the column's set checks reach a second step of values");
         // A malformed shape must fail both, before either reads through it (#1142's review).
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
         printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
         printf("test-tier1-cfg: fixed sequences (#2767): %" PRIu64 " ranges avoid their registers, %" PRIu64 " readers' ranges across their own\n", tally.avoiding_ranges, tally.reading_ranges);
-        printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed);
+        printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column; %" PRIu64 " values' column sets probed, at most %u in one problem\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed, tally.column_values, tally.column_widest);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);
