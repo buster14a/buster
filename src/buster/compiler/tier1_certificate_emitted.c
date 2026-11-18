@@ -1586,6 +1586,20 @@ static bool tier1_cert_emitted_kills(Tier1CertEmittedBuild* build, const Tier1Ce
     return valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX);
 }
 
+// Whether a record that writes its memory operand leaves the operand's bytes as they were (#2963): an add, or, sub or xor
+// of an immediate zero, or an and of an immediate of every bit, at its form's width, locked or not. The read and the
+// write are one instruction's of the same bytes, so a frame row there keeps its value: a full barrier's `lock or dword
+// [rsp], 0` (musl's a_store, in an asm body) leaves the row at rsp as it was. Its flags are written all the same.
+static bool tier1_cert_emitted_unchanged(X86Instruction record)
+{
+    const X86Effects* effects = x86_effects(record.form);
+    const uint32_t operation = effects->operation;
+    const uint64_t all = x86_width_mask(effects->width);
+    const uint64_t value = x86_immediate_value(record.form, record.immediate, 0);
+    const bool zero = operation == X86_OPERATION_ADD || operation == X86_OPERATION_OR || operation == X86_OPERATION_SUB || operation == X86_OPERATION_XOR;
+    return x86_effects_immediate_kind(effects) == BUSTER_X86_IMMEDIATE_VALUE && ((zero && value == 0) || (operation == X86_OPERATION_AND && value == all));
+}
+
 // Node `node`'s ORIGINALs, its records [first, first + count) its kernel's: its uses in eights, then every register and
 // frame range its records write, killed in eights, then its definition. A general register its records give back is not
 // killed: one that holds its own value at the run's end, followed through the records' full-width copies between general
@@ -1642,11 +1656,11 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         valid = ((written & BUSTER_X86_RESOURCE_GPR(build->base)) == 0 || (build->base == X86_REGISTER_RSP && control)) && ((written & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSP)) == 0 || control);
         valid = valid && (build->frame_pointer == INT64_MIN || (written & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBP)) == 0);
         valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX);
-        // A store into the frame kills the bytes it writes that are the frame's storage; a write the semantics doesn't
-        // bound kills the 64 bytes from its operand on.
+        // A store into the frame kills the bytes it writes that are the frame's storage, but one that leaves them as they
+        // were (tier1_cert_emitted_unchanged); a write the semantics doesn't bound kills the 64 bytes from its operand on.
         int64_t at = 0;
         bool entry = false;
-        if ((written & BUSTER_X86_RESOURCE_MEMORY) != 0 && tier1_cert_emitted_frame_operand(build, records[r], &at, &entry))
+        if ((written & BUSTER_X86_RESOURCE_MEMORY) != 0 && !tier1_cert_emitted_unchanged(record) && tier1_cert_emitted_frame_operand(build, records[r], &at, &entry))
         {
             const X86FormDescription* description = x86_form_description(records[r].form & (BUSTER_X86_FORM_FIXUP - 1));
             const int64_t end = at + (description->operand_bytes != 0 ? description->operand_bytes : BUSTER_CERT_MAX_WIDTH);

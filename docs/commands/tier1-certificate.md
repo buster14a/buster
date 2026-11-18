@@ -41,7 +41,11 @@ requirements. [Command index](README.md).
   a value in rax across a `lock cmpxchg`, which keeps rax in r11, and must be
   certified; the rule that keeps rax (`tier1_cert_emitted_kept`) is checked on
   its own cases too. Its realigned fixture's prologue, its allocation moved
-  before its push of rbx and its epilogue matched, must be refused. `test-tier1-masks` corrupts machine rows and wide vectors'
+  before its push of rbx and its epilogue matched, must be refused. Its barrier
+  fixture (#2963) keeps a value in its call-save row across an asm body's `lock
+  or dword [rsp], 0`, and must be certified; the barrier aimed at that row, its
+  writes that leave the row as it was must be certified and those that change
+  it refused. `test-tier1-masks` corrupts machine rows and wide vectors'
   moves: borrowed masks' reloads left out, staging copies onto live registers,
   claimed placements of roles sharing a register while both hold values, of k0
   for a numbered opmask register or of a corrupted split (#1283's early
