@@ -26,12 +26,15 @@ struct IrOptimizeTest
     uint64_t if_convert_digest;
     uint64_t thread_digest;
     uint64_t sink_digest;
+    // test-ir-unroll's: every fixture's unrolled function and counts, with the default seed and shapes.
+    uint64_t unroll_digest;
 };
 
 #define BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
 #define BUSTER_IR_OPTIMIZE_TEST_IF_CONVERT_DIGEST UINT64_C(0x08b48b9d3a2b7413)
 #define BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST UINT64_C(0xdf6ed6b7ef142f23)
 #define BUSTER_IR_OPTIMIZE_TEST_SINK_DIGEST UINT64_C(0x9f4d956b5e0b38fc)
+#define BUSTER_IR_OPTIMIZE_TEST_UNROLL_DIGEST UINT64_C(0xc92a6941c51cf4e2)
 
 static void ir_optimize_test_expect(IrOptimizeTest* test, bool condition, const char* description)
 {

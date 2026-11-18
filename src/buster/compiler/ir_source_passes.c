@@ -19,8 +19,10 @@
 //   three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), value numbering with memory alone
 //   (#2718) and Tier 1's set with it, forced vector and forced scalar: the same function and the same forwarded loads.
 // - LICM on P, vector and scalar: the same function, or the same refusal.
-// - #2755's unroller on P optimized with Tier 1's set and its truth values simplified, vector and scalar: the same
-//   function, outcomes and counts.
+// - #2755's unroller on P optimized with Tier 1's set and its truth values simplified: an unrolled function must verify
+//   with dominance (#2924: its twin is gone).
+// - The loop vectorizer (#2743) on P optimized with Tier 1's set: a changed function must go through the optimizer,
+//   whose final verification checks dominance.
 // For each caller among them, the inliner on a unit of it and its direct callees among the file's functions, as the C
 // driver's expansion takes one (every function of internal linkage and #2541's general splice on, so that every such call is
 // a candidate), vector and scalar: the same decisions and the same caller, whose expansion must promote.
@@ -237,13 +239,12 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         const IrCheck cleanup_check = ir_optimize(promoted, output, scratch, cleanup, &cleaned);
         const IrFunction* input = cleanup_check.error == IR_OK ? &cleaned.function : promoted;
         IrVectorizeResult vector = { 0 };
-        IrVectorizeResult scalar = { 0 };
         const IrCheck vector_check = ir_vectorize_loops(input, &options, output, scratch, &vector);
-        options.scalar = true;
-        const IrCheck scalar_check = ir_vectorize_loops(input, &options, twin, scratch, &scalar);
-        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.changed == scalar.changed && vector.vectorized == scalar.vectorized &&
-                          vector.loops == scalar.loops && memcmp(vector.refused, scalar.refused, sizeof(vector.refused)) == 0 && ir_source_passes_equal(&vector.function, &scalar.function);
-        ir_source_passes_record(totals, IR_SOURCE_PASS_VECTORIZE, file, name, vector_check, scalar_check, same, true, vector.changed, vector.vectorized);
+        // A changed function goes through the optimizer, whose final verification checks dominance (the pass's own is
+        // structural: its input may hold if-conversion's unreachable stubs).
+        IrOptimizeResult optimized = { 0 };
+        const bool verified = vector_check.error != IR_OK || !vector.changed || ir_optimize(&vector.function, twin, scratch, cleanup, &optimized).error == IR_OK;
+        ir_source_passes_record(totals, IR_SOURCE_PASS_VECTORIZE, file, name, vector_check, vector_check, verified, true, vector.changed, vector.vectorized);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
     }
@@ -262,14 +263,12 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         const IrFunction* input = cleaned_check.error == IR_OK ? &cleaned.function : promoted;
         IrUnrollOptions options = ir_unroll_options();
         IrUnrollResult vector = { 0 };
-        IrUnrollResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize_unroll(input, output, scratch, options, &vector);
-        options.scalar = true;
-        const IrCheck scalar_check = ir_optimize_unroll(input, twin, scratch, options, &scalar);
-        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && memcmp(vector.outcomes, scalar.outcomes, sizeof(vector.outcomes)) == 0 &&
-                          vector.copies == scalar.copies && vector.reductions == scalar.reductions && vector.added == scalar.added &&
-                          ir_source_passes_equal(&vector.function, &scalar.function);
-        ir_source_passes_record(totals, IR_SOURCE_PASS_UNROLL, file, name, vector_check, scalar_check, same, true, vector.outcomes[IR_UNROLL_UNROLLED] != 0, vector.copies);
+        // An unrolled function must verify, with dominance.
+        const uint64_t verify_mark = twin->length;
+        const bool verified = vector_check.error != IR_OK || vector.outcomes[IR_UNROLL_UNROLLED] == 0 || ir_optimize_verify_result(&vector.function, twin, scratch).error == IR_OK;
+        arena_pop_to(twin, verify_mark);
+        ir_source_passes_record(totals, IR_SOURCE_PASS_UNROLL, file, name, vector_check, vector_check, verified, true, vector.outcomes[IR_UNROLL_UNROLLED] != 0, vector.copies);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
     }
@@ -602,14 +601,13 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
             IrVectorizeTarget target = { 0 };
             ir_vectorize_target_ir(&target);
             // Timed on the promoted form: the benchmark's inputs are prepared outside the time, and this one cleans none.
-            const IrVectorizeOptions options = { .target = &target, .scalar = scalar };
+            const IrVectorizeOptions options = { .target = &target };
             IrVectorizeResult result = { 0 };
             check = ir_vectorize_loops(&corpus->promoted[f], &options, output, scratch, &result);
         }
         else if (pass == IR_SOURCE_PASS_UNROLL)
         {
             IrUnrollOptions options = ir_unroll_options();
-            options.scalar = scalar;
             IrUnrollResult result = { 0 };
             check = ir_optimize_unroll(&corpus->promoted[f], output, scratch, options, &result);
         }
@@ -831,15 +829,17 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             }
             double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
             memset(values, 0, sizeof(values));
-            for (uint32_t version = 0; version < 2; version += 1)
+            // The unroller and the loop vectorizer have one path (#2924): timed once.
+            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL ? 1 : 2;
+            for (uint32_t version = 0; version < versions; version += 1)
             {
                 failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;
             }
             for (uint32_t round = 0; round < BUSTER_TIER0_BENCHMARK_PASSES && failed == 0; round += 1)
             {
-                for (uint32_t turn = 0; turn < 2; turn += 1)
+                for (uint32_t turn = 0; turn < versions; turn += 1)
                 {
-                    const uint32_t version = (round & 1) != 0 ? 1 - turn : turn;
+                    const uint32_t version = (round & 1) != 0 && versions == 2 ? 1 - turn : turn;
                     const Tier0BenchmarkReading taken = ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters);
                     failed += taken.failures;
                     values[version][0][round] = (double)taken.nanoseconds;
@@ -847,13 +847,13 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
                     values[version][2][round] = (double)taken.instructions;
                 }
             }
-            for (uint32_t version = 0; version < 2 && failed == 0; version += 1)
+            for (uint32_t version = 0; version < versions && failed == 0; version += 1)
             {
                 const double ns = tier0_benchmark_median(values[version][0]);
                 const double cycles = tier0_benchmark_median(values[version][1]);
                 const double instructions = tier0_benchmark_median(values[version][2]);
                 const double r = (double)corpus.instructions;
-                printf("%-12s %-7s %12.3f %12.3f %12.3f %12.3f %8.2f\n", ir_source_pass_names[pass], version == 0 ? "vector" : "scalar", ns / 1e6, ns / r, cycles / r, instructions / r,
+                printf("%-12s %-7s %12.3f %12.3f %12.3f %12.3f %8.2f\n", ir_source_pass_names[pass], versions == 1 ? "one" : version == 0 ? "vector" : "scalar", ns / 1e6, ns / r, cycles / r, instructions / r,
                        cycles != 0 ? instructions / cycles : 0.0);
             }
         }
