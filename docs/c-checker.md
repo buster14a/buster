@@ -8703,8 +8703,14 @@ qualifiers at the placeholder), and a declaration's later declarators, which
 must deduce the same type, by C23 `auto`'s deduction below
 (`check_input_c23_auto_deduce`; `BUSTER_CHECK_DECLARATION_GNU_AUTO` keeps
 `__auto_type`'s words in its errors). Declarators that deduce differently are
-clang's error at the declaration, in the checker's words ("'__auto_type'
-deduced types differ within one declaration"). A variably modified deduced
+clang's error at the `__auto_type` or `auto` keyword, in its words (#1844):
+"'__auto_type' deduced as 'int *' in declaration of 'c' and deduced as 'int'
+in declaration of 'd'", each deduction without the specifiers' qualifiers and
+spelled as its initializer spells it (`'T' (aka 'int')`), once a declaration,
+as clang's comparison of its declarators stops there
+(`CheckInputReader.declaration_deduced_first`). The later declarator is
+invalid, its uses quiet (`check_input_invalid_declare`), and the reader goes
+on past the error. A variably modified deduced
 type is the initializer's, whose sizes its own declaration evaluated, and the
 declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
 cast to a variably modified type in the initializer evaluates its bounds once,
