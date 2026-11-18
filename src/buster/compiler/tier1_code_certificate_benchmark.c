@@ -76,6 +76,10 @@ struct Tier1CodeCertBench
     uint64_t unemitted;
     uint64_t uncertified[TIER1_CERT_EMITTED_REASON_COUNT];
     Tier1CodeCertBenchFailure failure;
+    // The failing function's index in the corpus, and its emission's diagnostic (or, for the decoding's own refusal,
+    // its Tier1CertEmittedReason plus BUSTER_TIER1_EMIT_CODE_CERTIFICATE), printed with the failure.
+    uint32_t failed_function;
+    Tier1EmitDiagnostic failed;
 };
 
 // A function's planning and emission as the preparation takes them: a refusal of its code, or a selection or emission
@@ -147,10 +151,13 @@ static Tier0BenchmarkReading tier1_code_cert_bench_run(uint32_t variant, const T
 // decoding's refusal or capacity), which Tier1CodeCertBench.failure says.
 static bool tier1_code_cert_bench_prepare(Tier1CodeCertBench* bench, const Tier1SelectSourceCorpus* corpus, Arena* kept, Arena* programs, Arena* scratch)
 {
-    const Tier1EmitOptions options = tier1_code_cert_bench_options(true);
+    Tier1EmitDiagnostic diagnostic = { 0 };
+    Tier1EmitOptions options = tier1_code_cert_bench_options(true);
+    options.diagnostic = &diagnostic;
     bool valid = true;
     for (uint32_t f = 0; valid && f < corpus->count; f += 1)
     {
+        diagnostic = (Tier1EmitDiagnostic){ 0 };
         const uint64_t mark = kept->length;
         Tier1SelectPlan plan = { 0 };
         uint32_t node = BUSTER_IR_NONE;
@@ -173,6 +180,7 @@ static bool tier1_code_cert_bench_prepare(Tier1CodeCertBench* bench, const Tier1
             const Tier1CertEmittedReason decoded = tier1_certificate_emitted(&plan, &emitted, programs, scratch, &program, &stats);
             bench->failure = decoded == TIER1_CERT_EMITTED_OK ? bench->failure : decoded == TIER1_CERT_EMITTED_CAPACITY ? TIER1_CODE_CERT_BENCH_EXHAUSTED : TIER1_CODE_CERT_BENCH_REFUSED;
             valid = decoded == TIER1_CERT_EMITTED_OK;
+            diagnostic = valid ? diagnostic : (Tier1EmitDiagnostic){ .cause = TIER1_EMIT_CAUSE_CERTIFICATE, .error = BUSTER_TIER1_EMIT_CODE_CERTIFICATE | decoded };
             const size_t size = valid ? tier1_certificate_scratch_size(&program) : 0;
             bench->buffer_bytes = size > bench->buffer_bytes ? size : bench->buffer_bytes;
             bench->program_bytes_max = stats.bytes > bench->program_bytes_max ? stats.bytes : bench->program_bytes_max;
@@ -191,6 +199,8 @@ static bool tier1_code_cert_bench_prepare(Tier1CodeCertBench* bench, const Tier1
             bench->units += stats.units;
             bench->program_bytes += stats.bytes;
         }
+        bench->failed_function = valid ? bench->failed_function : f;
+        bench->failed = valid ? bench->failed : diagnostic;
         if (!certified || !valid)
         {
             arena_pop_to(programs, program_mark);
@@ -368,7 +378,12 @@ static __attribute__((unused)) int run_tier1_code_certificate_benchmark(int coun
         printf("benchmark-tier1-code-certificate: unit_reads=%" PRIu64 " unit_writes=%" PRIu64 "\n", bench.unit_reads, bench.unit_writes);
         if (!prepared)
         {
-            printf("benchmark-tier1-code-certificate: %s: no report\n", bench.failure == TIER1_CODE_CERT_BENCH_EXHAUSTED ? "a function's preparation ran out of room" : "a function's code certificate refused it");
+            // Which function, and why: a code certificate's reason by name (#2870), any other step's cause and error.
+            const uint32_t error = bench.failed.error;
+            const bool code = bench.failed.cause == TIER1_EMIT_CAUSE_CERTIFICATE && (error & BUSTER_TIER1_EMIT_CODE_CERTIFICATE) != 0 && (error & 0xffu) < TIER1_CERT_EMITTED_REASON_COUNT;
+            printf("benchmark-tier1-code-certificate: %s: function=%u instructions=%u cause=%u error=%u%s%s: no report\n",
+                   bench.failure == TIER1_CODE_CERT_BENCH_EXHAUSTED ? "a function's preparation ran out of room" : "a function's code certificate refused it", bench.failed_function,
+                   corpus.functions[bench.failed_function].instruction_count, (uint32_t)bench.failed.cause, error, code ? " reason=" : "", code ? tier1_cert_emitted_reason_name((Tier1CertEmittedReason)(error & 0xffu)) : "");
         }
     }
     else if (!valid)

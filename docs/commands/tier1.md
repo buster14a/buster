@@ -363,7 +363,10 @@ a union's, a compound literal's, and a union's other member read back), no
 store of a zero immediate may be left; a volatile object and a union whose
 designator moves to another member after the vector's keep their eight. In
 #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
-into the memory the instruction before loaded it from:
+into the memory the instruction before loaded it from. #2870's
+`patterns_sector`, SQLite's `pagerWriteLargeSector` cut down, leaves out a
+store into a slot two blocks after its reload, which the code's certificate
+must prove from the run's entries:
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"
