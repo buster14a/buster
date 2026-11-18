@@ -16,8 +16,8 @@
 // The digest and count of every plan the fixtures select (tier1_select_test_digest), frozen on a tree where both host
 // paths still agreed on every plan (#2924). A change to any cover shows here; once the change is checked, set them to
 // the values test-tier1-select prints.
-#define BUSTER_TIER1_SELECT_TEST_PLAN_DIGEST UINT64_C(0xc485097574ea77f5)
-#define BUSTER_TIER1_SELECT_TEST_PLANS UINT64_C(5425)
+#define BUSTER_TIER1_SELECT_TEST_PLAN_DIGEST UINT64_C(0x83f0cb530824bdad)
+#define BUSTER_TIER1_SELECT_TEST_PLANS UINT64_C(5761)
 
 typedef struct Tier1SelectTest Tier1SelectTest;
 struct Tier1SelectTest
