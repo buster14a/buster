@@ -379,6 +379,49 @@ static void check_debug_tier1_values_parameter_case(CheckDebugTestTally* tally, 
     }
 }
 
+// The source rows' compaction (check_tier1_debug_sources) against its definition: a row at the first record and at each
+// record whose origin differs from the one before it. Every length to 40 from each of four first records, so runs cross
+// the 16-lane batches; the origins drawn from three values and none, and two trials of none alone and of one value
+// alone, so the first record may have no origin and may equal the one before it.
+static void check_debug_tier1_sources(CheckDebugTestTally* tally)
+{
+    uint32_t entries[48];
+    uint32_t records[50];
+    uint32_t origins[50];
+    uint64_t random = UINT64_C(0x9e3779b97f4a7c15);
+    bool valid = true;
+    for (uint32_t trial = 0; trial < 66; trial += 1)
+    {
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(entries); k += 1)
+        {
+            random = random * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+            const uint32_t pick = trial == 64 ? 3 : trial == 65 ? 0 : (uint32_t)(random >> 62);
+            entries[k] = pick == 3 ? BUSTER_EMISSION_NO_ORIGIN : pick + 5;
+        }
+        for (uint32_t first = 0; first < 4; first += 1)
+        {
+            for (uint32_t end = first; end <= 40; end += 1)
+            {
+                memset(records, 0xa5, sizeof(records));
+                memset(origins, 0xa5, sizeof(origins));
+                const uint32_t count = check_tier1_debug_sources(entries, first, end, records, origins);
+                uint32_t expected = 0;
+                for (uint32_t at = first; at < end; at += 1)
+                {
+                    if (at == first || entries[at] != entries[at - 1])
+                    {
+                        valid = valid && expected < count && records[expected] == at && origins[expected] == entries[at];
+                        expected += 1;
+                    }
+                }
+                valid = valid && count == expected && records[count] == end && records[count + 1] == UINT32_C(0xa5a5a5a5) && origins[count] == UINT32_C(0xa5a5a5a5);
+            }
+        }
+    }
+    check_debug_test_expect(tally, valid, "source rows start at the first record and wherever the origin changes, across 16-lane batches",
+                            "every length to 40 from four first records, origins of three values and none");
+}
+
 static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally)
 {
     const uint8_t classes[] = { BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_I8, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32 };
@@ -486,6 +529,36 @@ static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally)
     loop[3] = (X86Instruction){ .form = X86_FORM_MOV_R32_RM32, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = X86_REGISTER_RBX, .rm = X86_REGISTER_RAX };
     memset(loop_values + 1, UINT8_MAX, sizeof(loop_values) - 1);
     check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, loop_values, "a backedge kill removes the first-trip value before publishing any loop ranges");
+    // The same in r12, a carrier past the first eight: the header's meet changes only its byte, which must still send
+    // the loop body round again.
+    loop[0].reg = X86_REGISTER_R12;
+    loop[3].reg = X86_REGISTER_R12;
+    check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, loop_values, "a backedge kill of r12 removes the first-trip value from the whole loop");
+
+    // A floating parameter copied to xmm2 on the first arm, with another value put there on the second, and xmm0
+    // overwritten on both: the join keeps no carrier. The first arm reaches the join first, so its xmm2 is what the
+    // second arm's meet must take away, in the carriers past the first sixteen.
+    const uint8_t float_classes[] = { BUSTER_TYPED_CLASS_F64 };
+    AbiLocation float_abi[] = {
+        { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE } },
+    };
+    IrDebugScalar float_values[] = {
+        { .local = 0, .entry = BUSTER_IR_NONE, .kind = IR_DEBUG_PARAMETER, .bytes = 8 },
+    };
+    Tier0Function floating = { .local_classes = float_classes, .local_count = 1, .parameter_count = 1, .parameters = float_abi };
+    X86Instruction float_diamond[] = {
+        { .form = X86_FORM_JE_REL32 },
+        { .form = X86_FORM_MOVSD_X_XM64, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = 2, .rm = 0 },
+        { .form = X86_FORM_MOVSD_X_XM64, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = 0, .rm = 1 },
+        { .form = X86_FORM_JMP_REL32 },
+        { .form = X86_FORM_MOVSD_X_XM64, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = 2, .rm = 1 },
+        { .form = X86_FORM_MOVSD_X_XM64, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = 0, .rm = 1 },
+        { .form = X86_FORM_NOP },
+        { .form = X86_FORM_RET },
+    };
+    const uint8_t float_joined[] = { 16, 16, 16, 18, 16, 16, UINT8_MAX, UINT8_MAX };
+    code = (Tier1SelectCode){ .records = float_diamond, .count = BUSTER_ARRAY_LENGTH(float_diamond), .branches = diamond_branches, .targets = diamond_targets, .branch_count = 2 };
+    check_debug_tier1_values_parameter_case(tally, &floating, float_values, code, NULL, float_joined, "an xmm2 copy on one arm and another value there on the other leave no carrier after the join");
 
     X86Instruction dead[] = {
         { .form = X86_FORM_JMP_REL32 },
@@ -502,5 +575,6 @@ static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally)
     check_debug_tier1_values_frames(tally);
     check_debug_tier1_values_objects(tally);
     check_debug_tier1_values_bindings(tally);
+    check_debug_tier1_sources(tally);
 }
 
