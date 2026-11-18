@@ -99,7 +99,7 @@ static bool unwind_tier0_test_keeps_rbp(const Tier0Code* code)
     return keeps;
 }
 
-// Every producer/analysis combination must describe the same final records. The test allocates exactly count
+// Both producers' code must describe the same final records, to the analyzer and as published. The test allocates exactly count
 // offsets: no sentinel element is offered to the analyzer. No function or code is executed by this helper.
 static bool unwind_tier0_test_function(UnwindTier0Test* test, const Tier0Function* function, Arena* arena, uint64_t id, uint32_t expected_saved)
 {
@@ -139,39 +139,35 @@ static bool unwind_tier0_test_function(UnwindTier0Test* test, const Tier0Functio
     const bool pointer = valid && codes[0].frame_pointer;
     for (uint32_t producer = 0; valid && producer < 2; producer += 1)
     {
-        for (uint32_t exact = 0; exact < 2; exact += 1)
+        UnwindFunction descriptor;
+        memset(&descriptor, 0xa5, sizeof(descriptor));
+        UnwindFunction sentinel;
+        memcpy(&sentinel, &descriptor, sizeof(sentinel));
+        const UnwindError error = unwind_tier0(&codes[producer], offsets[producer], sizes[producer], &descriptor);
+        bool accepted = false;
+        if (pointer)
         {
-            UnwindFunction descriptor;
-            memset(&descriptor, 0xa5 + exact, sizeof(descriptor));
-            UnwindFunction sentinel;
-            memcpy(&sentinel, &descriptor, sizeof(sentinel));
-            const UnwindError error = exact != 0 ? unwind_tier0_scalar(&codes[producer], offsets[producer], sizes[producer], &descriptor) :
-                                                  unwind_tier0(&codes[producer], offsets[producer], sizes[producer], &descriptor);
-            bool accepted = false;
-            if (pointer)
-            {
-                // The analyzer proves fixed frames alone: a frame pointer's prologue is no shape it takes.
-                accepted = unwind_tier0_test_expect(test, error == UNWIND_ERROR_UNSUPPORTED && memcmp(&descriptor, &sentinel, sizeof(descriptor)) == 0,
-                                                    "the analyzer refuses a frame pointer's function", id);
-            }
-            else
-            {
-                accepted = unwind_tier0_test_expect(test, error == UNWIND_OK && unwind_check(&descriptor, 1) == UNWIND_OK,
-                                                    "actual generated function has a valid descriptor", id);
-            }
-            if (accepted && !pointer)
-            {
-                if (producer == 0 && exact == 0)
-                {
-                    reference = descriptor;
-                }
-                unwind_tier0_test_expect(test, memcmp(&descriptor, &reference, sizeof(descriptor)) == 0,
-                                        "scalar/vector producers and analyzers agree", id);
-                unwind_tier0_test_expect(test, expected_saved == UINT32_MAX || descriptor.saved == expected_saved,
-                                        "typed expression forces its expected saved registers", id);
-            }
-            valid = accepted && valid;
+            // The analyzer proves fixed frames alone: a frame pointer's prologue is no shape it takes.
+            accepted = unwind_tier0_test_expect(test, error == UNWIND_ERROR_UNSUPPORTED && memcmp(&descriptor, &sentinel, sizeof(descriptor)) == 0,
+                                                "the analyzer refuses a frame pointer's function", id);
         }
+        else
+        {
+            accepted = unwind_tier0_test_expect(test, error == UNWIND_OK && unwind_check(&descriptor, 1) == UNWIND_OK,
+                                                "actual generated function has a valid descriptor", id);
+        }
+        if (accepted && !pointer)
+        {
+            if (producer == 0)
+            {
+                reference = descriptor;
+            }
+            unwind_tier0_test_expect(test, memcmp(&descriptor, &reference, sizeof(descriptor)) == 0,
+                                    "the scalar and vector producers' descriptors agree", id);
+            unwind_tier0_test_expect(test, expected_saved == UINT32_MAX || descriptor.saved == expected_saved,
+                                    "typed expression forces its expected saved registers", id);
+        }
+        valid = accepted && valid;
     }
     // The frame each producer published (unwind_tier0_frame, the C driver's): the analyzer's descriptor wherever the
     // analyzer takes the function, and a frame pointer's as its prologue and epilogue lay it out.
@@ -465,20 +461,16 @@ static void unwind_tier0_test_result(UnwindTier0Test* test, UnwindTier0Fixture* 
 {
     UnwindTier0Fixture before;
     memcpy(&before, fixture, sizeof(before));
-    for (uint32_t exact = 0; exact < 2; exact += 1)
-    {
-        UnwindFunction descriptor;
-        UnwindFunction sentinel;
-        memset(&descriptor, 0xb6 + exact, sizeof(descriptor));
-        memcpy(&sentinel, &descriptor, sizeof(sentinel));
-        const UnwindError error = exact != 0 ? unwind_tier0_scalar(&fixture->code, fixture->offsets, fixture->size, &descriptor) :
-                                              unwind_tier0(&fixture->code, fixture->offsets, fixture->size, &descriptor);
-        unwind_tier0_test_expect(test, error == wanted, "fixture acceptance/refusal code", id);
-        const bool output = wanted == UNWIND_OK ? memcmp(&descriptor, &fixture->expected, sizeof(descriptor)) == 0 :
-                                                 memcmp(&descriptor, &sentinel, sizeof(descriptor)) == 0;
-        unwind_tier0_test_expect(test, output, "exact expected events or unchanged poisoned descriptor", id);
-        unwind_tier0_test_expect(test, memcmp(&before, fixture, sizeof(before)) == 0, "analyzer preserves all input records and columns", id);
-    }
+    UnwindFunction descriptor;
+    UnwindFunction sentinel;
+    memset(&descriptor, 0xb6, sizeof(descriptor));
+    memcpy(&sentinel, &descriptor, sizeof(sentinel));
+    const UnwindError error = unwind_tier0(&fixture->code, fixture->offsets, fixture->size, &descriptor);
+    unwind_tier0_test_expect(test, error == wanted, "fixture acceptance/refusal code", id);
+    const bool output = wanted == UNWIND_OK ? memcmp(&descriptor, &fixture->expected, sizeof(descriptor)) == 0 :
+                                             memcmp(&descriptor, &sentinel, sizeof(descriptor)) == 0;
+    unwind_tier0_test_expect(test, output, "exact expected events or unchanged poisoned descriptor", id);
+    unwind_tier0_test_expect(test, memcmp(&before, fixture, sizeof(before)) == 0, "analyzer preserves all input records and columns", id);
 }
 
 static void unwind_tier0_test_shapes(UnwindTier0Test* test)
@@ -595,6 +587,32 @@ static void unwind_tier0_test_mutations(UnwindTier0Test* test)
             }
         }
     }
+}
+
+// A write of a nonvolatile register the prologue doesn't save is refused wherever it is in the body, in every lane of the
+// analyzer's batches of BUSTER_UNWIND_TIER0_BATCH records (#2924): RBX written in place of each of the body's NOPs, in
+// a frame that saves R12 alone, over two batches of filler.
+static void unwind_tier0_test_forbidden_lanes(UnwindTier0Test* test)
+{
+    UnwindTier0Fixture original;
+    const bool ready = unwind_tier0_test_fixture(&original, 4, 40, 2 * BUSTER_UNWIND_TIER0_BATCH + 3);
+    uint32_t lanes = 0;
+    for (uint32_t r = original.body; ready && r < original.epilogue; r += 1)
+    {
+        if (original.records[r].form == X86_FORM_NOP)
+        {
+            UnwindTier0Fixture fixture;
+            memcpy(&fixture, &original, sizeof(fixture));
+            unwind_tier0_test_bind(&fixture);
+            fixture.records[r] = unwind_tier0_test_record(X86_FORM_MOV_R64_IMM64, 0, X86_REGISTER_RBX, 0, 0, 1);
+            if (unwind_tier0_test_expect(test, unwind_tier0_test_measure(&fixture), "a forbidden write's fixture is encoder-valid", 9100 + r))
+            {
+                unwind_tier0_test_result(test, &fixture, UNWIND_ERROR_UNSUPPORTED, 9100 + r);
+                lanes |= 1u << ((r - original.body) % BUSTER_UNWIND_TIER0_BATCH);
+            }
+        }
+    }
+    unwind_tier0_test_expect(test, ready && lanes == (1u << BUSTER_UNWIND_TIER0_BATCH) - 1, "a forbidden write is refused in every lane of the analyzer's batches", 9000);
 }
 
 static void unwind_tier0_test_boundaries(UnwindTier0Test* test)
@@ -1140,24 +1158,21 @@ static void unwind_tier0_test_guards(UnwindTier0Test* test)
                 .records = records,
                 .count = count,
             };
-            for (uint32_t exact = 0; exact < 2; exact += 1)
+            memset(output, 0xd8, sizeof(*output));
+            UnwindFunction expected = {
+                .size = count,
+            };
+            if (count == 0)
             {
-                memset(output, 0xd8 + exact, sizeof(*output));
-                UnwindFunction expected = {
-                    .size = count,
-                };
-                if (count == 0)
-                {
-                    memcpy(&expected, output, sizeof(expected));
-                }
-                const UnwindError error = exact != 0 ? unwind_tier0_scalar(&code, offsets, count, output) : unwind_tier0(&code, offsets, count, output);
-                unwind_tier0_test_expect(test, error == (count != 0 ? UNWIND_OK : UNWIND_ERROR_INVALID) &&
-                                                  memcmp(output, &expected, sizeof(expected)) == 0, "exact guarded analyzer tails", case_index);
-                memset(output, 0xd8 + exact, sizeof(*output));
-                const UnwindError framed = unwind_tier0_frame(&code, offsets, count, output);
-                unwind_tier0_test_expect(test, framed == (count != 0 ? UNWIND_OK : UNWIND_ERROR_INVALID) &&
-                                                  memcmp(output, &expected, sizeof(expected)) == 0, "guarded published frame tails", case_index);
+                memcpy(&expected, output, sizeof(expected));
             }
+            const UnwindError error = unwind_tier0(&code, offsets, count, output);
+            unwind_tier0_test_expect(test, error == (count != 0 ? UNWIND_OK : UNWIND_ERROR_INVALID) &&
+                                              memcmp(output, &expected, sizeof(expected)) == 0, "exact guarded analyzer tails", case_index);
+            memset(output, 0xd8, sizeof(*output));
+            const UnwindError framed = unwind_tier0_frame(&code, offsets, count, output);
+            unwind_tier0_test_expect(test, framed == (count != 0 ? UNWIND_OK : UNWIND_ERROR_INVALID) &&
+                                              memcmp(output, &expected, sizeof(expected)) == 0, "guarded published frame tails", case_index);
         }
     }
     if (mapping != MAP_FAILED)
@@ -1182,15 +1197,13 @@ static void unwind_tier0_test_terminal(UnwindTier0Test* test, Arena* arena)
         const UnwindFunction expected = {
             .size = 2,
         };
-        for (uint32_t reader = 0; ready && reader < 3; reader += 1)
+        for (uint32_t reader = 0; ready && reader < 2; reader += 1)
         {
             UnwindFunction descriptor;
             memset(&descriptor, 0xe7, sizeof(descriptor));
-            const UnwindError error = reader == 0 ? unwind_tier0(&helper.code, offsets, 2, &descriptor) :
-                                      reader == 1 ? unwind_tier0_scalar(&helper.code, offsets, 2, &descriptor) :
-                                                    unwind_tier0_frame(&helper.code, offsets, 2, &descriptor);
+            const UnwindError error = reader == 0 ? unwind_tier0(&helper.code, offsets, 2, &descriptor) : unwind_tier0_frame(&helper.code, offsets, 2, &descriptor);
             unwind_tier0_test_expect(test, error == UNWIND_OK && unwind_check(&descriptor, 1) == UNWIND_OK && memcmp(&descriptor, &expected, sizeof(expected)) == 0,
-                                     "the terminal helper's frameless descriptor", 7010 + 3 * i + reader);
+                                     "the terminal helper's frameless descriptor", 7010 + 2 * i + reader);
         }
         // The ud2 followed by a ret: a body's ud2 has no successor the analyzer follows; the reader takes the producer's
         // word for the body, and its ret ends the function.
@@ -1200,9 +1213,7 @@ static void unwind_tier0_test_terminal(UnwindTier0Test* test, Arena* arena)
         code.count = 2;
         const uint32_t sized[2] = { 0, 2 };
         UnwindFunction descriptor;
-        unwind_tier0_test_expect(test, ready && unwind_tier0(&code, sized, 3, &descriptor) == UNWIND_ERROR_UNSUPPORTED &&
-                                           unwind_tier0_scalar(&code, sized, 3, &descriptor) == UNWIND_ERROR_UNSUPPORTED,
-                                 "the analyzer refuses a ud2 in a body", 7020 + i);
+        unwind_tier0_test_expect(test, ready && unwind_tier0(&code, sized, 3, &descriptor) == UNWIND_ERROR_UNSUPPORTED, "the analyzer refuses a ud2 in a body", 7020 + i);
         arena_pop_to(arena, mark);
     }
 }
@@ -1222,6 +1233,7 @@ static bool unwind_tier0_test(void)
         unwind_tier0_test_shapes(&test);
         unwind_tier0_test_mutations(&test);
         unwind_tier0_test_boundaries(&test);
+        unwind_tier0_test_forbidden_lanes(&test);
         unwind_tier0_test_guards(&test);
         unwind_tier0_test_frames(&test);
         unwind_tier0_test_exits(&test);

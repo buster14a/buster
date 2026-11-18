@@ -1384,7 +1384,7 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
             .error = TIER0_OK,
         };
         UnwindFunction proven;
-        const UnwindError analyzed = scalar ? unwind_tier0_scalar(&records, offsets, (uint32_t)length, &proven) : unwind_tier0(&records, offsets, (uint32_t)length, &proven);
+        const UnwindError analyzed = unwind_tier0(&records, offsets, (uint32_t)length, &proven);
         const EmittedSame same = analyzed != UNWIND_OK ? EMITTED_SAME : emitted_unwind_same(&proven, frame, scratch);
         status = same == EMITTED_SAME ? status : same == EMITTED_SAME_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
         *reason = same == EMITTED_SAME ? 0 : same == EMITTED_SAME_MEMORY ? "no room to compare a function's unwind table with Tier 0's analyzer's" : mismatch;

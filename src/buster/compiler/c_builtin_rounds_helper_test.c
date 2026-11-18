@@ -76,20 +76,17 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
             Tier0Code sized_code = helper->code;
             sized_code.records = records;
             UnwindFunction published = { 0 };
-            UnwindFunction scalar_frame = { 0 };
-            UnwindFunction vector_frame = { 0 };
+            UnwindFunction proven_frame = { 0 };
             const UnwindError described = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &published);
-            const UnwindError scalar_proof = unwind_tier0_scalar(&sized_code, offsets, program->byte_count, &scalar_frame);
-            const UnwindError vector_proof = unwind_tier0(&sized_code, offsets, program->byte_count, &vector_frame);
-            result = cbuiltin_rounds_test_expect(tally, sized.error == BRANCH_SIZING_OK && described == UNWIND_OK &&
-                scalar_proof == UNWIND_OK && vector_proof == UNWIND_OK && memcmp(&published, &scalar_frame, sizeof(published)) == 0 &&
-                memcmp(&published, &vector_frame, sizeof(published)) == 0 && published.frame_size == 8 && published.event_count == 2 &&
+            const UnwindError proof = unwind_tier0(&sized_code, offsets, program->byte_count, &proven_frame);
+            result = cbuiltin_rounds_test_expect(tally, sized.error == BRANCH_SIZING_OK && described == UNWIND_OK && proof == UNWIND_OK &&
+                memcmp(&published, &proven_frame, sizeof(published)) == 0 && published.frame_size == 8 && published.event_count == 2 &&
                 published.saved == 0 && published.pointer == 0 && published.offsets[0] == 4 && published.offsets[1] == program->byte_count - 1,
-                "rounding-mode helper CFA matches both independent unwind proofs", path);
+                "rounding-mode helper CFA matches the records' unwind proof", path);
             sized_code.frame_size = 0;
             UnwindFunction wrong = { 0 };
             const UnwindError wrong_frame = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &wrong);
-            result = cbuiltin_rounds_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &scalar_frame, sizeof(wrong)) != 0,
+            result = cbuiltin_rounds_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &proven_frame, sizeof(wrong)) != 0,
                 "missing rounding-mode reservation disagrees with the record proof", path) && result;
         }
         if (result && caller != NULL)

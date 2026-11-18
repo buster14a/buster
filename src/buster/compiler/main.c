@@ -1308,7 +1308,6 @@ static __attribute__((unused)) void main_checker_consumer_interfaces(void)
     (void)&check_builtin_float_strict;
     (void)&check_builtin_float;
     (void)&tier0_inline;
-    (void)&tier0_inline_scalar;
     (void)&tier0_inline_code;
     (void)&cbuiltin_x86_helper_kind;
     (void)&cbuiltin_x86_helper;

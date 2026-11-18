@@ -29,16 +29,15 @@
 // callee, after that one's first binding, takes the next level's copy, since both sites' locals are live at once.
 // Its calls' rows are appended once per site, its operations and constants once per caller.
 //
-// Two paths make the same bytes in every column: tier0_inline (the vector path: the sites from a compare of 64 kinds at
-// a time, the starts by an in-register prefix sum, the caller's segments copied 64 kinds and 8 values at a time with
-// their branch targets remapped lane by lane, and the callee's entries rebased by a vpermb of their kinds to meanings, a
-// vpermq of the bases by meaning and an add) and tier0_inline_scalar, its twin and the tests' oracle, an entry at a
-// time with a switch over the kinds. The plan between them (the sites' arguments, levels and insertions) is per site,
-// not per entry, and shared.
+// tier0_inline is AVX-512 throughout the entries: the sites from a compare of 64 kinds at a time, the starts by an
+// in-register prefix sum, the caller's segments copied 64 kinds and 8 values at a time with their branch targets
+// remapped lane by lane, and the callee's entries rebased by a vpermb of their kinds to meanings, a vpermq of the bases
+// by meaning and an add. The plan's other parts (the sites' arguments, levels and insertions) are per site, not per
+// entry (#2924: the scalar twin went with the 9700X's gate, 1.09 to 1.23 times the vector path's ticks at every size).
 //
 // Layout: the meanings (tier0_inline_meaning), the callees' rule (tier0_inline_callee_valid), the plan
-// (Tier0InlinePlan, tier0_inline_plan), the fill (tier0_inline_fill_scalar, tier0_inline_fill_vector) and the drivers
-// (tier0_inline, tier0_inline_scalar).
+// (Tier0InlinePlan, tier0_inline_plan), the fill (tier0_inline_segment, tier0_inline_body) and the driver
+// (tier0_inline).
 
 // A site's levels at most: a deeper nesting of one callee's calls in its own arguments keeps the deeper calls.
 #define BUSTER_TIER0_INLINE_LEVELS 8
@@ -96,7 +95,7 @@ static const uint8_t tier0_inline_meanings[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_ATOMIC_CAS] = BUSTER_TIER0_INLINE_CAS,
 };
 
-// The meaning of an entry of kind `kind` and class `class` (the scalar path's, by a switch).
+// The meaning of an entry of kind `kind` and class `class`, by a switch, for the forwarding check and pass (the fill reads the table).
 static uint32_t tier0_inline_meaning(uint32_t kind, uint32_t class)
 {
     uint32_t meaning = BUSTER_TIER0_INLINE_NONE;
@@ -145,7 +144,7 @@ static bool tier0_inline_branch(uint32_t kind)
 // a realigned stack, labels (an asm body's too), ALLOCA and the stack's kinds, FRAME_ADDRESS, tail calls, JUMP_INDIRECT).
 // Its entries are its body, but its last entry where that is a RETURN (`*body`). Without `shapes` it has no result
 // through memory and at most one RETURN, its last entry; with them (step 5, --tier0-inline-shapes) a RETURN before it
-// goes to the copy's end (tier0_inline_body_scalar), and a result through memory is the site's to bind
+// goes to the copy's end (tier0_inline_body), and a result through memory is the site's to bind
 // (tier0_inline_site_valid). They are off by default: on the 9700X the vector lexer's spliced loops lost their locals'
 // registers to their large caller's (docs/tier0-inlining.md, "Several returns and results in memory").
 static bool tier0_inline_callee_valid(const Tier0Function* function, bool shapes, uint32_t* body)
@@ -500,9 +499,8 @@ static bool tier0_inline_site_valid(const Tier0Function* caller, const Tier0Func
 // Pushes `count` elements of `Type` on `arena`, or null.
 #define BUSTER_TIER0_INLINE_PUSH(arena, Type, count) BUSTER_ARENA_PUSH_ARRAY((arena), Type, (uint64_t)(count) + 1)
 
-// The plan of the splice of `input` (Tier0InlinePlan), its sites found by `vector`'s path or its twin's, in `arena`:
-// false where there is no site, or no room.
-static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena* arena, Tier0InlinePlan* plan)
+// The plan of the splice of `input` (Tier0InlinePlan), in `arena`: false where there is no site, or no room.
+static bool tier0_inline_plan(const Tier0InlineInput* input, Arena* arena, Tier0InlinePlan* plan)
 {
     const Tier0Function* caller = input->caller;
     const uint32_t count = caller->count;
@@ -511,7 +509,7 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
     uint32_t candidates = 0;
     uint32_t* calls = BUSTER_TIER0_INLINE_PUSH(arena, uint32_t, count);
     bool valid = calls != 0 && input->row_callees != 0 && caller->call_count != 0;
-    if (valid && vector)
+    if (valid)
     {
         const __m512i call = _mm512_set1_epi8(BUSTER_TYPED_CALL);
         for (uint32_t e = 0; e < count; e += 64)
@@ -529,12 +527,6 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
                 found &= found - 1;
             }
         }
-    }
-    for (uint32_t e = 0; valid && !vector && e < count; e += 1)
-    {
-        const uint64_t row = caller->values[e];
-        calls[candidates] = e;
-        candidates += caller->kinds[e] == BUSTER_TYPED_CALL && row < caller->call_count && input->row_callees[row] != 0 ? 1u : 0u;
     }
     valid = valid && candidates != 0;
     // The sites and their arguments' starts.
@@ -733,7 +725,7 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
     plan->positions = valid ? BUSTER_TIER0_INLINE_PUSH(arena, uint32_t, plan->insertion_count) : 0;
     valid = valid && plan->positions != 0;
     uint32_t sum = 0;
-    if (valid && vector)
+    if (valid)
     {
         const __m512i iota = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
         const __m512i zero = _mm512_setzero_si512();
@@ -756,14 +748,6 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
             sum += (uint32_t)_mm512_reduce_add_epi32(own);
             _mm512_mask_storeu_epi32(plan->starts + e, lanes, starts);
         }
-    }
-    for (uint32_t e = 0; valid && !vector && e <= count; e += 1)
-    {
-        plan->positions[plan->position_count] = e;
-        plan->position_count += plan->heads[e] != 0 ? 1u : 0u;
-        const uint32_t own = growth[e];
-        plan->starts[e] = e + sum;
-        sum += own;
     }
     plan->count = (uint64_t)count + sum;
     plan->count &= UINT32_MAX;
@@ -1174,46 +1158,10 @@ static bool tier0_inline_labels(const Tier0Function* caller, const Tier0InlinePl
     return valid;
 }
 
-// The caller's entries [from, to) at G's `at`, a branch's target remapped (the scalar path); returns G's entry after them.
-static uint32_t tier0_inline_segment_scalar(const Tier0Function* caller, const Tier0InlinePlan* plan, uint32_t from, uint32_t to, Tier0InlineColumns* g, uint32_t at)
-{
-    const uint32_t count = caller->count;
-    for (uint32_t e = from; e < to; e += 1)
-    {
-        const uint32_t kind = caller->kinds[e];
-        const uint64_t value = caller->values[e];
-        tier0_inline_put(g, at, kind, caller->classes[e], tier0_inline_branch(kind) && value <= count ? plan->starts[value] : value);
-        at += 1;
-    }
-    return at;
-}
-
-// Site `site`'s copy of its callee's body at G's `at`, rebased (the scalar path); returns G's entry after it. A RETURN
-// in the body, before its last entry, goes to the copy's end (step 5): a JUMP, or with a value a JUMP_VALUE, whose value
-// the end finds on the stack where the last RETURN's operand falls through to it, as an arm of ?: leaves its own.
-static uint32_t tier0_inline_body_scalar(const Tier0Function* callee, const Tier0InlinePlan* plan, const Tier0InlineSite* site, Tier0InlineColumns* g, uint32_t at)
-{
-    const uint32_t body = plan->distinct[site->callee].body;
-    uint64_t bases[BUSTER_TIER0_INLINE_MEANINGS];
-    tier0_inline_bases(plan, site, bases);
-    for (uint32_t e = tier0_inline_skipped(site); e < body; e += 1)
-    {
-        const bool returns = callee->kinds[e] == BUSTER_TYPED_RETURN;
-        const uint32_t class = callee->classes[e];
-        const uint32_t kind = !returns ? callee->kinds[e] : class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE;
-        const uint32_t meaning = tier0_inline_meaning(kind, class);
-        uint64_t value = returns ? body : callee->values[e];
-        value = meaning == BUSTER_TIER0_INLINE_ENTRY && value > body ? body : value;
-        tier0_inline_put(g, at, kind, class, value + bases[meaning]);
-        at += 1;
-    }
-    return at;
-}
-
-// The caller's entries [from, to) at G's `at` (the vector path): 64 kinds and classes at a time, and their values 8 at
+// The caller's entries [from, to) at G's `at`: 64 kinds and classes at a time, and their values 8 at
 // a time, the branches' targets remapped lane by lane (a stream's branches are a small share of it); returns G's entry
 // after them. Every load and store is masked to the segment.
-static uint32_t tier0_inline_segment_vector(const Tier0Function* caller, const Tier0InlinePlan* plan, uint32_t from, uint32_t to, Tier0InlineColumns* g, uint32_t at)
+static uint32_t tier0_inline_segment(const Tier0Function* caller, const Tier0InlinePlan* plan, uint32_t from, uint32_t to, Tier0InlineColumns* g, uint32_t at)
 {
     const uint32_t count = caller->count;
     const __m512i first = _mm512_set1_epi8(BUSTER_TYPED_BRANCH_FALSE);
@@ -1247,7 +1195,7 @@ static uint32_t tier0_inline_segment_vector(const Tier0Function* caller, const T
 // JUMP_VALUE to the end by masked moves of their kinds and values (step 5), each lane's meaning a vpermb of its kind (a
 // CONST's by a compare of its class), its base a vpermq of the bases by meaning, a target past the body clamped to it,
 // and an add; returns G's entry after it.
-static uint32_t tier0_inline_body_vector(const Tier0Function* callee, const Tier0InlinePlan* plan, const Tier0InlineSite* site, Tier0InlineColumns* g, uint32_t at)
+static uint32_t tier0_inline_body(const Tier0Function* callee, const Tier0InlinePlan* plan, const Tier0InlineSite* site, Tier0InlineColumns* g, uint32_t at)
 {
     const uint32_t body = plan->distinct[site->callee].body;
     uint64_t base_words[BUSTER_TIER0_INLINE_MEANINGS];
@@ -1292,9 +1240,8 @@ static uint32_t tier0_inline_body_vector(const Tier0Function* callee, const Tier
     return at;
 }
 
-// G's entries from the plan, by `vector`'s path or its twin's: each position's segment of the caller and its
-// insertions. Returns G's count.
-static uint32_t tier0_inline_entries(const Tier0InlineInput* input, const Tier0InlinePlan* plan, bool vector, Tier0InlineColumns* g)
+// G's entries from the plan: each position's segment of the caller and its insertions. Returns G's count.
+static uint32_t tier0_inline_entries(const Tier0InlineInput* input, const Tier0InlinePlan* plan, Tier0InlineColumns* g)
 {
     const Tier0Function* caller = input->caller;
     uint32_t at = 0;
@@ -1302,7 +1249,7 @@ static uint32_t tier0_inline_entries(const Tier0InlineInput* input, const Tier0I
     for (uint32_t p = 0; p < plan->position_count; p += 1)
     {
         const uint32_t position = plan->positions[p];
-        at = vector ? tier0_inline_segment_vector(caller, plan, cursor, position, g, at) : tier0_inline_segment_scalar(caller, plan, cursor, position, g, at);
+        at = tier0_inline_segment(caller, plan, cursor, position, g, at);
         cursor = position;
         for (uint32_t i = plan->heads[position]; i != 0; i = plan->insertions[i - 1].next)
         {
@@ -1323,13 +1270,13 @@ static uint32_t tier0_inline_entries(const Tier0InlineInput* input, const Tier0I
                     tier0_inline_put(g, at + 1, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, site->local_base);
                     at += 2;
                 }
-                at = vector ? tier0_inline_body_vector(callee, plan, site, g, at) : tier0_inline_body_scalar(callee, plan, site, g, at);
+                at = tier0_inline_body(callee, plan, site, g, at);
                 at = tier0_inline_result(caller, callee, plan, site, g, at);
                 cursor = position + 1;
             }
         }
     }
-    at = vector ? tier0_inline_segment_vector(caller, plan, cursor, caller->count, g, at) : tier0_inline_segment_scalar(caller, plan, cursor, caller->count, g, at);
+    at = tier0_inline_segment(caller, plan, cursor, caller->count, g, at);
     return at;
 }
 
@@ -1482,15 +1429,15 @@ struct Tier0Inlined
     uint32_t sites;
 };
 
-// The splice of `input` by `vector`'s path or its twin's, into *result in `arena` (G's columns, which the result's
-// function points into, and the starts), and tier0_validate's check of G: false, and `arena` as it was, where there is
-// no site, no room, or G breaks the stream's rules (the caller then keeps its calls).
-static bool tier0_inline_path(const Tier0InlineInput* input, bool vector, Arena* arena, Tier0Inlined* result)
+// The splice of `input` into *result in `arena` (G's columns, which the result's function points into, and the starts),
+// and tier0_validate's check of G: false, and `arena` as it was, where there is no site, no room, or G breaks the
+// stream's rules (the caller then keeps its calls).
+static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlined* result)
 {
     const uint64_t mark = arena->length;
     const Tier0Function* caller = input->caller;
     Tier0InlinePlan plan;
-    bool valid = tier0_inline_plan(input, vector, arena, &plan);
+    bool valid = tier0_inline_plan(input, arena, &plan);
     Tier0Function g = valid ? *caller : (Tier0Function){ 0 };
     uint8_t* kinds = valid ? BUSTER_TIER0_INLINE_PUSH(arena, uint8_t, plan.count) : 0;
     uint8_t* classes = valid ? BUSTER_TIER0_INLINE_PUSH(arena, uint8_t, plan.count) : 0;
@@ -1499,7 +1446,7 @@ static bool tier0_inline_path(const Tier0InlineInput* input, bool vector, Arena*
     if (valid)
     {
         Tier0InlineColumns columns = { .kinds = kinds, .classes = classes, .values = values };
-        const uint32_t written = tier0_inline_entries(input, &plan, vector, &columns);
+        const uint32_t written = tier0_inline_entries(input, &plan, &columns);
         g.kinds = kinds;
         g.classes = classes;
         g.values = values;
@@ -1527,18 +1474,6 @@ static bool tier0_inline_path(const Tier0InlineInput* input, bool vector, Arena*
         arena_pop_to(arena, mark);
     }
     return valid;
-}
-
-// The splice (the vector path, or the scalar one on a host without AVX-512).
-static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlined* result)
-{
-    return tier0_inline_path(input, true, arena, result);
-}
-
-// The splice's scalar twin, the tests' oracle.
-static bool tier0_inline_scalar(const Tier0InlineInput* input, Arena* arena, Tier0Inlined* result)
-{
-    return tier0_inline_path(input, false, arena, result);
 }
 
 // Tier 0's code `code` of a splice's G, with its entries' first records (Tier0Code.entry_records, G's count + 1 of

@@ -17,8 +17,10 @@ The offsets have no trailing sentinel. The consumer does not decode bytes,
 remeasure lengths, or independently verify branch displacements and symbolic
 references supplied by the producer.
 
-Both `unwind_tier0` and `unwind_tier0_scalar` write one `UnwindFunction`, only on
-success. They recognize an ordered subset of pushes of RBX, RBP, R12–R15, an
+`unwind_tier0` writes one `UnwindFunction`, only on
+success. It resolves the records' effects in batches (`x86_instructions_effects`);
+its scalar twin, which resolved them a record at a time, took 1.11 to 2.54 times
+its ticks at every size on the 9700X and went (#2924, [the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-tier0-gate)). They recognize an ordered subset of pushes of RBX, RBP, R12–R15, an
 optional fixed positive stack allocation, and the matching final release,
 reverse pops and return. The body must keep that frame. Every direct branch must
 appear exactly once in the ordered branch columns, and its target must be in the
@@ -399,8 +401,8 @@ Per-function allocation and cleanup are inside timing. Program generation,
 signature assignment, initialization and byte-identity preflight are outside.
 It reports 21-pass median and range, nanoseconds and user cycles per typed entry,
 whole-unit time, code/CFI bytes and temporary arena use. Options are
-`--functions N`, `--only baseline|scalar|vector|published` and `--after-scalar MS`.
-The latter runs the scalar CFI emitter alone before every timed path, with the
+`--functions N`, `--only baseline|vector|published` and `--after-scalar MS`.
+The latter runs the exact CFI writer alone before every timed path, with the
 same duration for each; it does not condition with the vector backend chain.
 
 All builds, tests and measurements use the approved 9700X through the shared
