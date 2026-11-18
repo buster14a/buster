@@ -7,7 +7,8 @@
 // first to a call, the second stored in the first), calls and fences, in straight blocks, diamonds and bounded loops,
 // every loaded value added to an accumulator in a fourth slot (private) that the function returns. Some addresses
 // wrap around int64_t's range back to their slot, which no forwarding may follow. The pass runs by both twins, which
-// must give the same function, alone with dead-code removal and in Tier 1's set; an independent interpreter runs the
+// must give the same function, alone with dead-code removal and in Tier 1's set, and every result folds into a digest
+// frozen where they agreed (IrOptimizeTest.memory_digest, #2924); an independent interpreter runs the
 // program before and after it, where each call writes every byte of the escaped slots anew, so a load that took a
 // value across a call, a store of its bytes or another write would return something else.
 
@@ -402,6 +403,8 @@ static void ir_memory_test_check(IrOptimizeTest* test, const IrFunction* f, uint
         ir_optimize_test_expect(test, ir_optimize_test_equal(&vector_result.function, &scalar_result.function) && vector_result.forwarded_loads == scalar_result.forwarded_loads,
                                 "memory: the twins give the same function");
         *forwarded += vector_result.forwarded_loads;
+        ir_optimize_test_fold_function(&test->memory_digest, &vector_result.function);
+        ir_optimize_test_fold(&test->memory_digest, vector_result.forwarded_loads);
         for (uint32_t trial = 0; trial < 6; trial += 1)
         {
             const uint64_t first = ir_optimize_test_random(test);
@@ -464,9 +467,168 @@ static void ir_memory_test_overflows(IrOptimizeTest* test, Arena* input, Arena* 
         // Only %19 takes %18's value: the wrapped addresses keep their roots where an offset overflowed (%7 and %12, and
         // %4 for %5, whose constant index's product overflows), so none meets the store at offset 0 or another's key.
         ir_optimize_test_expect(test, check.error == IR_OK && result.forwarded_loads == 1, "memory: an overflowing offset stops the address there");
+        if (check.error == IR_OK && path == 0)
+        {
+            ir_optimize_test_fold_function(&test->memory_digest, &result.function);
+        }
         arena_pop_to(output, output_mark);
     }
     arena_pop_to(input, mark);
+}
+
+// Value numbering with memory's shapes that the generated programs miss (#2924, found by mutants of its vector phases):
+// an address added to a constant that comes first; a slot whose address reaches a call three steps down, or from a
+// batch's last lane, which escapes it; and two slots whose only addresses are in a batch's last lane, which stay apart.
+// Each runs through the pass with its forwarded loads counted by the pass's definition, the last on the interpreter too,
+// and folds into the digest.
+static void ir_memory_test_shapes(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch, uint64_t* values)
+{
+    static const char added[] =
+        "function (i64) -> i64 {\n"
+        "  slot $0 size=16 align=8 type=void flags=0x00\n"
+        "b0:\n"
+        "  %0 = param.i64 0\n"
+        "  %1 = stack_addr.ptr $0\n"
+        "  %2 = ptrtoint.i64 %1\n"
+        "  %3 = const.i64 0x00000000000000000000000000000008\n"
+        "  %4 = add.i64 %3, %2\n"
+        "  %5 = inttoptr.ptr %4\n"
+        "  %6 = store.void %5, %0 align=8\n"
+        "  %7 = add.i64 %2, %3\n"
+        "  %8 = inttoptr.ptr %7\n"
+        "  %9 = load.i64 %8 align=8\n"
+        "  %10 = ret.void %9\n"
+        "}\n";
+    static const char chained[] =
+        "function (i64) -> i64 {\n"
+        "  slot $0 size=64 align=8 type=void flags=0x00\n"
+        "b0:\n"
+        "  %0 = param.i64 0\n"
+        "  %1 = stack_addr.ptr $0\n"
+        "  %2 = address.ptr %1 offset=8\n"
+        "  %3 = address.ptr %2 offset=8\n"
+        "  %4 = address.ptr %3 offset=8\n"
+        "  %5 = store.void %1, %0 align=8\n"
+        "  %6 = call.void @1(%4) fixed=(ptr) variadic=0\n"
+        "  %7 = load.i64 %1 align=8\n"
+        "  %8 = ret.void %7\n"
+        "}\n";
+    static const char escaped[] =
+        "function (i64) -> i64 {\n"
+        "  slot $0 size=16 align=8 type=void flags=0x00\n"
+        "b0:\n"
+        "  %0 = param.i64 0\n"
+        "  %1 = stack_addr.ptr $0\n"
+        "  %2 = const.i64 0x00000000000000000000000000000002\n"
+        "  %3 = const.i64 0x00000000000000000000000000000003\n"
+        "  %4 = const.i64 0x00000000000000000000000000000004\n"
+        "  %5 = const.i64 0x00000000000000000000000000000005\n"
+        "  %6 = const.i64 0x00000000000000000000000000000006\n"
+        "  %7 = const.i64 0x00000000000000000000000000000007\n"
+        "  %8 = const.i64 0x00000000000000000000000000000008\n"
+        "  %9 = const.i64 0x00000000000000000000000000000009\n"
+        "  %10 = const.i64 0x0000000000000000000000000000000a\n"
+        "  %11 = const.i64 0x0000000000000000000000000000000b\n"
+        "  %12 = const.i64 0x0000000000000000000000000000000c\n"
+        "  %13 = const.i64 0x0000000000000000000000000000000d\n"
+        "  %14 = const.i64 0x0000000000000000000000000000000e\n"
+        "  %15 = address.ptr %1 offset=8\n"
+        "  %16 = store.void %1, %0 align=8\n"
+        "  %17 = call.void @1(%15) fixed=(ptr) variadic=0\n"
+        "  %18 = load.i64 %1 align=8\n"
+        "  %19 = ret.void %18\n"
+        "}\n";
+    static const char apart[] =
+        "function (i64, i64) -> i64 {\n"
+        "  slot $0 size=16 align=8 type=void flags=0x00\n"
+        "  slot $1 size=16 align=8 type=void flags=0x00\n"
+        "b0:\n"
+        "  %0 = param.i64 0\n"
+        "  %1 = param.i64 1\n"
+        "  %2 = const.i64 0x00000000000000000000000000000002\n"
+        "  %3 = const.i64 0x00000000000000000000000000000003\n"
+        "  %4 = const.i64 0x00000000000000000000000000000004\n"
+        "  %5 = const.i64 0x00000000000000000000000000000005\n"
+        "  %6 = const.i64 0x00000000000000000000000000000006\n"
+        "  %7 = const.i64 0x00000000000000000000000000000007\n"
+        "  %8 = const.i64 0x00000000000000000000000000000008\n"
+        "  %9 = const.i64 0x00000000000000000000000000000009\n"
+        "  %10 = const.i64 0x0000000000000000000000000000000a\n"
+        "  %11 = const.i64 0x0000000000000000000000000000000b\n"
+        "  %12 = const.i64 0x0000000000000000000000000000000c\n"
+        "  %13 = const.i64 0x0000000000000000000000000000000d\n"
+        "  %14 = const.i64 0x0000000000000000000000000000000e\n"
+        "  %15 = stack_addr.ptr $0\n"
+        "  %16 = store.void %15, %0 align=8\n"
+        "  %17 = const.i64 0x00000000000000000000000000000011\n"
+        "  %18 = const.i64 0x00000000000000000000000000000012\n"
+        "  %19 = const.i64 0x00000000000000000000000000000013\n"
+        "  %20 = const.i64 0x00000000000000000000000000000014\n"
+        "  %21 = const.i64 0x00000000000000000000000000000015\n"
+        "  %22 = const.i64 0x00000000000000000000000000000016\n"
+        "  %23 = const.i64 0x00000000000000000000000000000017\n"
+        "  %24 = const.i64 0x00000000000000000000000000000018\n"
+        "  %25 = const.i64 0x00000000000000000000000000000019\n"
+        "  %26 = const.i64 0x0000000000000000000000000000001a\n"
+        "  %27 = const.i64 0x0000000000000000000000000000001b\n"
+        "  %28 = const.i64 0x0000000000000000000000000000001c\n"
+        "  %29 = const.i64 0x0000000000000000000000000000001d\n"
+        "  %30 = const.i64 0x0000000000000000000000000000001e\n"
+        "  %31 = stack_addr.ptr $1\n"
+        "  %32 = store.void %31, %1 align=8\n"
+        "  %33 = load.i64 %15 align=8\n"
+        "  %34 = ret.void %33\n"
+        "}\n";
+    const char* const texts[] = {
+        added,
+        chained,
+        escaped,
+        apart,
+    };
+    const uint32_t expected[] = {
+        1,
+        0,
+        0,
+        1,
+    };
+    static const char* const descriptions[] = {
+        "memory: an address added to a constant that comes first meets the same address",
+        "memory: a slot whose address reaches a call three steps down escapes",
+        "memory: a slot whose address escapes from a batch's last lane escapes",
+        "memory: two slots whose only addresses are in a batch's last lane stay apart",
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(texts); k += 1)
+    {
+        const uint64_t mark = input->length;
+        const uint64_t output_mark = output->length;
+        IrFunction f = { 0 };
+        const String8 source = { .pointer = (char*)texts[k], .length = strlen(texts[k]) };
+        const IrParseResult parsed = ir_parse(source, input, scratch, &f);
+        ir_optimize_test_expect(test, parsed.error == IR_PARSE_OK, "memory: a shape's fixture parses");
+        if (parsed.error == IR_PARSE_OK)
+        {
+            IrOptimizeOptions options = ir_optimize_options();
+            options.passes = BUSTER_IR_OPTIMIZE_MEMORY;
+            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
+            IrOptimizeResult result = { 0 };
+            const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
+            bool same = check.error == IR_OK && result.forwarded_loads == expected[k];
+            if (same && k == 3)
+            {
+                const IrMemoryTestRun before = ir_memory_test_run(&f, 5, 9, values);
+                const IrMemoryTestRun after = ir_memory_test_run(&result.function, 5, 9, values);
+                same = before.status == 1 && after.status == 1 && before.value == 5 && after.value == 5;
+            }
+            ir_optimize_test_expect(test, same, descriptions[k]);
+            if (check.error == IR_OK)
+            {
+                ir_optimize_test_fold_function(&test->memory_digest, &result.function);
+                ir_optimize_test_fold(&test->memory_digest, result.forwarded_loads);
+            }
+        }
+        arena_pop_to(output, output_mark);
+        arena_pop_to(input, mark);
+    }
 }
 
 static void ir_optimize_memory_tests(IrOptimizeTest* test)
@@ -509,6 +671,7 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test)
     if (ready)
     {
         ir_memory_test_overflows(test, &input, &vector, &scalar, &scratch);
+        ir_memory_test_shapes(test, &input, &vector, &scratch, values);
     }
     free(values);
     free(text);
