@@ -1079,6 +1079,12 @@ struct CheckInput
     CheckInputMarkedMember* marked_members;
     uint32_t marked_member_count;
     uint32_t marked_member_capacity;
+    // The members of a function pointer type (or an array of them) that GNU's noreturn makes noreturn, on their own
+    // declaration or the typedef their type's specifiers name (check_input_fallthrough_noreturn_object), in ascending order
+    // of their indexes, for a call's reachability through one (check_input_fallthrough_noreturn_value, #1844).
+    uint32_t* noreturn_members;
+    uint32_t noreturn_member_count;
+    uint32_t noreturn_member_capacity;
     // The overloadable functions' declarations a deprecated attribute marks (by them or an earlier redeclaration), in
     // ascending order of their tokens (CheckInputMarkedMember.member), for their calls' warnings after checking
     // (check_input_overload_uses, #147).
@@ -9645,6 +9651,9 @@ struct CheckTagMember
     uint32_t mark_attribute;
     uint32_t mark_message;
     const CheckNoderefType* noderef;
+    // GNU's noreturn among its declaration's attributes, which makes its function pointer type noreturn (#1844,
+    // check_input_noreturn_member_add).
+    bool noreturn;
 };
 
 // A marked member's record (#147): CheckInput.marked_members grows by doubling, in the output arena, and stays ascending,
@@ -9677,6 +9686,43 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
             .message = member->mark_message,
             .unavailable = member->mark == CHECK_ATTRIBUTE_UNAVAILABLE + 1,
         };
+    }
+}
+
+static bool check_input_fallthrough_noreturn_object(const CheckInputReader* reader, uint32_t declaration);
+
+// A completed record's member `index` (#1844), declared at `token` of type `type`: recorded in CheckInput.noreturn_members
+// where its type is a function pointer's (or an array's of them) that GNU's noreturn marks: on the member's own declaration
+// (`marked`) or the typedef its specifiers name. Ascending as marked members are.
+static void check_input_noreturn_member_add(CheckInputReader* reader, uint32_t index, uint32_t token, TypeId type, bool marked)
+{
+    const TypeTable* types = reader->types;
+    TypeId level = type_strip_aligned(types, type);
+    for (uint32_t steps = 0; type_kind_is_array(type_kind(types, level)) && steps < 64; steps += 1)
+    {
+        level = type_strip_aligned(types, type_element(types, level));
+    }
+    const bool pointer = type_kind(types, level) == BUSTER_TYPE_KIND_POINTER &&
+                         type_kind(types, type_strip_aligned(types, type_element(types, level))) == BUSTER_TYPE_KIND_FUNCTION;
+    CheckInput* input = reader->output;
+    if (pointer && (marked || (token < reader->parser->tokens.count && check_input_fallthrough_noreturn_object(reader, token))) && !input->resource)
+    {
+        if (input->noreturn_member_count == input->noreturn_member_capacity)
+        {
+            const uint32_t capacity = input->noreturn_member_capacity != 0 ? input->noreturn_member_capacity * 2 : 16;
+            uint32_t* grown = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity);
+            input->resource |= grown == NULL;
+            if (grown != NULL && input->noreturn_member_count != 0)
+            {
+                memcpy(grown, input->noreturn_members, (uint64_t)input->noreturn_member_count * sizeof(*grown));
+            }
+            input->noreturn_members = grown != NULL ? grown : input->noreturn_members;
+            input->noreturn_member_capacity = grown != NULL ? capacity : input->noreturn_member_capacity;
+        }
+        if (input->noreturn_member_count < input->noreturn_member_capacity)
+        {
+            input->noreturn_members[input->noreturn_member_count++] = index;
+        }
     }
 }
 
@@ -10049,6 +10095,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         check_input_mark_member(reader, position, members + member);
                     }
                     check_input_noderef_member_add(reader, position, members[member].token, members[member].noderef);
+                    check_input_noreturn_member_add(reader, position, members[member].token, members[member].member.type, members[member].noreturn);
                     position += 1;
                 }
                 bool variable_sized = false;
@@ -10439,6 +10486,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                                 .mark_attribute = mark != NULL ? mark->first : 0,
                                 .mark_message = message ? mark->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE,
                                 .noderef = noderef,
+                                .noreturn = check_input_noreturn_attribute(attributes),
                             };
                             if (identifier != 0)
                             {
