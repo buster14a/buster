@@ -29,7 +29,12 @@ struct IrVectorizeTest
     // Per mutant, whether the oracle rejected it on some fixture.
     bool killed[BUSTER_IR_VECTORIZE_MUTATIONS];
     const char* print;
+    // An FNV-1a digest of every fixture's result and counts at every target, in order (#2924): frozen where the pass's
+    // vector path and its scalar twin agreed. The fixtures don't depend on the seed, which picks execution inputs alone.
+    uint64_t digest;
 };
+
+#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0xfb32ed4f02706f46)
 
 typedef struct IrVectorizeTestFixture IrVectorizeTestFixture;
 struct IrVectorizeTestFixture
@@ -247,6 +252,29 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
         char what[256];
         snprintf(what, sizeof(what), "both paths accept it, restore scratch and agree at %u bytes", 64u >> t);
         ir_vectorize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == tm && ir_vectorize_test_same(&a, &b), fixture->name, what);
+        if (ac.error == IR_OK)
+        {
+            ir_optimize_test_fold_function(&test->digest, &a.function);
+            const uint64_t counts[] = {
+                a.changed,
+                a.loops,
+                a.vectorized,
+                a.reductions,
+                a.guards,
+            };
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(counts); k += 1)
+            {
+                ir_optimize_test_fold(&test->digest, counts[k]);
+            }
+            for (uint32_t k = 0; k < BUSTER_IR_VECTORIZE_WIDTHS; k += 1)
+            {
+                ir_optimize_test_fold(&test->digest, a.widths[k]);
+            }
+            for (uint32_t k = 0; k < IR_VECTORIZE_REFUSALS; k += 1)
+            {
+                ir_optimize_test_fold(&test->digest, a.refused[k]);
+            }
+        }
         const uint32_t expected = fixture->refusal == IR_VECTORIZE_REFUSALS ? fixture->vectorized[t] : 0;
         snprintf(what, sizeof(what), "%u loops vectorized at %u bytes, %u expected", a.vectorized, 64u >> t, expected);
         ir_vectorize_test_expect(test, ac.error == IR_OK && a.vectorized == expected && a.changed == (expected != 0), fixture->name, what);
@@ -294,9 +322,62 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
     arena_pop_to(source, 0);
 }
 
+// #2924: the rows' admission kinds and the refusing kinds' scan against their definitions, on random columns: every length
+// to 200 (the kinds) and every range of up to 130 rows at several places (the scan).
+static void ir_vectorize_test_scans(IrVectorizeTest* test)
+{
+    IrOptimizeTest columns = { .random = test->random };
+    IrOptimizeTestScan scan;
+    uint8_t kinds[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    bool classified = true;
+    bool forbidden = true;
+    uint32_t refusals = 0;
+    for (uint32_t round = 0; round < 32; round += 1)
+    {
+        ir_optimize_test_scan_fill(&columns, &scan);
+        IrFunction f = scan.function;
+        for (uint32_t length = round % 7; length <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; length += 11)
+        {
+            f.instruction_count = length;
+            memset(kinds, 0xa5, sizeof(kinds));
+            ir_vectorize_kinds_vector(&f, kinds);
+            bool same = true;
+            for (uint32_t i = 0; i < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; i += 1)
+            {
+                const uint32_t kind = ir_vectorize_kind_table[f.op[i]];
+                const uint32_t base = kind & 7;
+                const bool flagged = (base == BUSTER_IR_VECTORIZE_KIND_LOAD || base == BUSTER_IR_VECTORIZE_KIND_STORE) && (f.flags[i] & BUSTER_IR_ACCESS_FLAGS) != 0;
+                const uint32_t expected = i >= length ? 0xa5 : flagged ? BUSTER_IR_VECTORIZE_KIND_FORBID : kind;
+                same = same && kinds[i] == expected;
+            }
+            classified &= same;
+        }
+        f.instruction_count = BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS;
+        ir_vectorize_kinds_vector(&f, kinds);
+        for (uint32_t first = round % 5; first < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; first += 23)
+        {
+            for (uint32_t end = first; end <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS && end - first <= 130; end += 1)
+            {
+                bool expected = false;
+                for (uint32_t at = first; at < end; at += 1)
+                {
+                    expected = expected || (kinds[at] & 7) == BUSTER_IR_VECTORIZE_KIND_FORBID;
+                }
+                forbidden &= ir_vectorize_forbidden(kinds, first, end, false) == expected;
+                refusals += expected;
+            }
+        }
+    }
+    ir_vectorize_test_expect(test, classified, "scans", "the rows' admission kinds, against their definition");
+    ir_vectorize_test_expect(test, forbidden && refusals != 0, "scans", "the refusing kinds' scan, against its definition");
+}
+
 static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
 {
-    IrVectorizeTest test = { .random = 2743 };
+    IrVectorizeTest test = {
+        .random = 2743,
+        .digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
+    };
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
     {
@@ -332,6 +413,12 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
         {
             ir_vectorize_test_fixture(&test, &ir_vectorize_test_fixtures[k], &source, &input, &vector, &scalar, &scratch, &execution, buffers);
         }
+        ir_vectorize_test_expect(&test, test.digest == BUSTER_IR_VECTORIZE_TEST_DIGEST, "fixtures", "every result and its counts have their frozen digest");
+        if (test.digest != BUSTER_IR_VECTORIZE_TEST_DIGEST)
+        {
+            fprintf(stderr, "ir-vectorize: digest %#018" PRIx64 "\n", test.digest);
+        }
+        ir_vectorize_test_scans(&test);
         static const char* const mutants[BUSTER_IR_VECTORIZE_MUTATIONS] = { "none", "no overlap test", "an unrounded tail", "a reduction's identity", "the lanes' width" };
         for (uint32_t mutation = 1; ready && mutation < BUSTER_IR_VECTORIZE_MUTATIONS; mutation += 1)
         {
