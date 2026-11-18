@@ -13,9 +13,9 @@
 // (_mm256_mask_add_epi32's), intrinsics of 16, 32 and 64 bytes, and a callee that calls a runtime function (an __int128
 // division's __divti3), which a caller in another part, with no runtime call of its own, takes by its final symbol (the
 // default windows lower each callee as a part of its own: its provisional symbol named no symbol, #1398). Built at
-// x86-64-v4 by the vector path, the scalar twin, --tier0-no-inline and --tier0-inline-shapes by both paths: each runs as
-// clang -O0's build does where the host has x86-64-v4, the two paths' objects are the same bytes, and the control's
-// differs. The object leaves out the callees spliced at every call (#1398 step 3) and keeps those a call or an address
+// x86-64-v4 by default, with --scalar (Tier 0's compile and validation twins, #2972; the splice has one path, #2924),
+// --tier0-no-inline and --tier0-inline-shapes with and without --scalar: each runs as clang -O0's build does where the
+// host has x86-64-v4, the builds with and without --scalar make the same bytes, and the control's differ. The object leaves out the callees spliced at every call (#1398 step 3) and keeps those a call or an address
 // still refers to (the cycle's, the variable-length array's, the one whose address is taken, and by default the two
 // returns' and the result in memory's), as the control keeps every one; and it is the same bytes by 4 lanes and without
 // holding the callees' code for the last pass (--tier0-no-hold).
@@ -303,7 +303,7 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
     char expected[256] = { 0 };
     const bool ran = referenced && (!host || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
     check_test_expect(test, ran, "clang's build of Tier 0's inlining fixture runs");
-    // Builds 0 and 1 inline, by the vector path and the scalar twin; build 2 keeps every call (--tier0-no-inline); builds
+    // Builds 0 and 1 inline, without and with --scalar; build 2 keeps every call (--tier0-no-inline); builds
     // 3 and 4 are 0 and 1 by windows of one token (#2536, --emit-window=1: every body a window); builds 5 and 6 are 0 and
     // 1 with step 5's shapes (--tier0-inline-shapes). Each makes an object and an executable.
     char objects[7][512];
@@ -364,12 +364,12 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
             }
         }
     }
-    check_test_expect(test, made[0] && made[1] && check_test_driver_same_files(objects[0], objects[1]), "the splice's vector path and its scalar twin make the same object");
+    check_test_expect(test, made[0] && made[1] && check_test_driver_same_files(objects[0], objects[1]), "the inlining build and --scalar's make the same object");
     check_test_expect(test, made[0] && made[2] && !check_test_driver_same_files(objects[0], objects[2]), "--tier0-no-inline keeps the calls the splice inlines");
     check_test_expect(test, made[0] && made[3] && made[4] && check_test_driver_same_files(objects[0], objects[3]) && check_test_driver_same_files(objects[0], objects[4]),
-                      "windows of one token make the object of one window, by both paths");
+                      "windows of one token make the object of one window, with and without --scalar");
     check_test_expect(test, made[5] && made[6] && check_test_driver_same_files(objects[5], objects[6]) && !check_test_driver_same_files(objects[0], objects[5]),
-                      "--tier0-inline-shapes splices more calls, by both paths the same object");
+                      "--tier0-inline-shapes splices more calls, the same object with and without --scalar");
     // The callees left out (#1398 step 3): those spliced at every call, wrappers among them, and with step 5's shapes
     // (build 5) the two returns' and the result in memory's; the others a kept call or an address refers to, and the
     // noinline function. The control defines them all.
