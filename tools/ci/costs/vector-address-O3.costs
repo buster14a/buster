@@ -25,6 +25,7 @@
 #: cpu 7 0.60 AMD EPYC 9V45 96-Core Processor
 #: cpu 10 0.80 AMD EPYC 9V74 80-Core Processor
 #: cpu 7 0.81 INTEL(R) XEON(R) PLATINUM 8573C
+#: unmeasured Test -S of c-testsuite's programs against -c and GNU as
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
@@ -211,6 +212,7 @@
 62.4 Test mixed-tier single- and multi-file determinism [8 CPUs]
 155.2 Test c-testsuite's programs end to end [4 CPUs]
 226.6 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+15.0 Test -S of c-testsuite's programs against -c and GNU as
 36.4 Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 115.3 Promote and run random C programs of structured and unstructured control flow [4 CPUs]
 41.6 Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]

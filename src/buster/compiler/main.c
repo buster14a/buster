@@ -455,10 +455,13 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/assembler_benchmark.c"
 #endif
 // The assembly sink (#1362): a unit of the link representation as GNU as's AT&T source, from the emission's symbolic view
-// (the link and each function's sized records), and its tests, for the test-assembly-output command, which take the
-// assembler's matcher for their fixtures' records and its tests' GNU as comparison.
-#if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
+// (the link and each function's sized records), which -S writes (the emission keeps the records for it), and its
+// tests, for the test-assembly-output command, which take the assembler's matcher for their fixtures' records and its
+// tests' GNU as comparison.
+#if BUSTER_BACKEND_CONSUMER || BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
 #include "buster/compiler/assembly_output.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
 #include "buster/compiler/assembly_output_test.c"
 #endif
 

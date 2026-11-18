@@ -108,6 +108,7 @@
     ENTRY(MT, "-MT") \
     ENTRY(O0, "-O0") \
     ENTRY(P, "-P") \
+    ENTRY(S, "-S") \
     ENTRY(U, "-U") \
     ENTRY(WALL, "-Wall") \
     ENTRY(WERROR, "-Werror") \

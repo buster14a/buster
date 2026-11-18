@@ -165,6 +165,11 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 # The declared subset must pass. #1116 also reports all Tier 1 function bytes against clang -O0's matching bytes;
 # --code-size implies the object/Clang cross-check and validates the evidence. Lua below is the required size corpus.
 "$BUSTER_COMPILER" test-c-testsuite --tier1 --code-size --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Test -S of c-testsuite's programs against -c and GNU as
+# #1362: each program's -S at Tier 0 and with --tier1, assembled by GNU as into -c's object but for the form contract's
+# normalizations (docs/commands/driver.md's "-S"), then linked from GNU as's object and run. The declared subset must
+# pass.
+"$BUSTER_COMPILER" test-assembly-output --c-testsuite build/c-testsuite --subset tests/c-testsuite/subset.txt
 == Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
 # native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
