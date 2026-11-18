@@ -1468,12 +1468,17 @@ static inline __attribute__((always_inline)) bool node_facts_dereference(NodeFac
     const bool taken = node_facts_operand(records, row, a, &pointer, &converted, &conversion_flags) && pointer.kind == BUSTER_TYPE_KIND_POINTER;
     if (taken)
     {
-        const TypeId type = node_facts_pointee(records, a, row);
-        const CheckCategory category = (uint8_t)(row->element_word >> 16) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
+        // What the converted pointer points at: a pointer's and an array's row's element; a function's designator decayed
+        // to a pointer to its own type (node_facts_decays; a function type has no qualifier: type_qualify adds none), and a
+        // function type's row has no element.
+        const bool designator = (uint8_t)(records[a].word >> 16) == BUSTER_TYPE_KIND_FUNCTION;
+        const TypeId type = designator ? records[a].type : node_facts_pointee(records, a, row);
+        const uint32_t word = designator ? row->word : row->element_word;
+        const CheckCategory category = (uint8_t)(word >> 16) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
         uint32_t flags = pointer.flags;
         flags |= (flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
         flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
-        node_facts_from(records, w, a, type, row->element_word, category, check_value_source_flags(CHECK_OP_DEREFERENCE, flags), pointer.constant_kind);
+        node_facts_from(records, w, a, type, word, category, check_value_source_flags(CHECK_OP_DEREFERENCE, flags), pointer.constant_kind);
         node_facts_conversions(records, w, converted, conversion_flags, 0, 0, 0);
     }
     return taken;

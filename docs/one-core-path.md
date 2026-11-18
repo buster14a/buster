@@ -1672,9 +1672,12 @@ ran on:
 | with the piece | 69% | 53% | 62% |
 
 - **Exact,** on the three corpora and the compiler's own source, with the
-  default warnings and with every warning. The compiler's own source has
-  no call at reader time, before this piece as with it:
-  [#2968](https://github.com/buster14a/buster/issues/2968).
+  default warnings and with every warning. The compiler's own source had
+  no call at reader time, before this piece as with it
+  ([#2968](https://github.com/buster14a/buster/issues/2968): one
+  `no_builtin` function, and the fronts left every call of such a unit).
+  With that lifted it has 12,484 calls left out, each checked, and no
+  expression differs.
 - **The gate (40.0 on `sqlite3.c`, refuted at 41.0) is met.** Its inputs'
   line (a tick a record) is not: the records' bytes and the loop read 1.5
   more, and the kernel in place 0.8 more (16.4 for 15.6), where its call
@@ -1682,11 +1685,11 @@ ran on:
 - **In one executable, the rule on and off** (its inputs made either way):
   35.8 for 44.5 on `sqlite3.c`, 54.3 for 62.5 on Lua, 102.5 for 111.4 on
   musl.
-- **The front with the window read a third more in this build** (71.7 for
-  52.8 on `sqlite3.c`), with main's code at main's addresses, and main's
-  reading in a build of the same sources with 64 bytes of text more before
-  the fixtures', and in their build on the main the pull request was opened
-  on: [#2967](https://github.com/buster14a/buster/issues/2967).
+- **The front with the window read a third more from this build's file**
+  (71.7 for 52.8 on `sqlite3.c`) **and main's from fresh copies of it,**
+  and from the file once its pages were dropped from the page cache: one
+  file's pages, not the build
+  ([#2967](https://github.com/buster14a/buster/issues/2967)).
 - **musl gains least:** its 43,415 expressions come in 2,975 chunks of two
   blocks, each after another unit's compile, and each sweep reads twice
   `sqlite3.c`'s ticks a record there.

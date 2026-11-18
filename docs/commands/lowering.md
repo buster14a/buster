@@ -877,7 +877,13 @@ the reach, a braced initializer of four values (one's consumer over 255
 records after it, one's four records after it) and 9,000 adjacent strings.
 Their near values have a consumer in the lean front alone, which the
 comparison takes for no difference where that consumer is a record only the
-lean front made.
+lean front made. And the fronts run over the twelfth tests' fixture, a unit
+with clang's `no_builtin` on two functions (`node_front_test_builtins`; whole
+after the walk and before it, lean with the flat front beside it, the flat
+one first): each makes the unit's calls (their 38 arguments), every record is
+the walk's node, the whole front's call with the walk's library mark, which
+is asked by the function that holds the call, and the flat front's records
+are the lean one's.
 C and X run at
 reader time too (`BUSTER_NODE_FRONT_SWEEPS`) in the `--scalar` and the
 `-funsigned-char` runs, in a fourth run of the fixture without warnings (where
@@ -888,7 +894,7 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's eleven fixtures run again with its tests at reader time
+The census's twelve fixtures run again with its tests at reader time
 (`node_tests_test_fixture`: `--front-tests` with `--verify`, then the same
 with the lean front's window and `--window-tests`, the machine's own form
 beside the census's code, whose bits, root's kinds and spans must be its;
@@ -939,7 +945,8 @@ expression refused, one with nothing listed too), the seventh's function
 `calls` and the eleventh fixture (the calls with no test to make: a call
 left out with no constant, with zero and 1 to 126, as a statement, under an
 assignment, as a condition, in a return and as a `for`'s last clause,
-through a pointer's name, a dereference and a member, with six arguments,
+through a pointer's name, a dereference (a pointer's, and a function's
+designator's, once and twice) and a member, with six arguments,
 under a cast to another type and as a comma's first operand; a call kept
 for a constant past 126 or under zero, for one a cast or a conditional
 makes, for a floating, a narrow or an enumeration's parameter, the first of
@@ -950,7 +957,11 @@ type, a call whose callee asks for its result, at its declaration's first
 such statement and at a later one, and a `for`'s last clause whose discard
 is in its block, in the one before and further back; seventy statements
 that are a call left out and seventy whose callee asks, a cast to void at
-each place of a block; and, with `-Wtype-safety`, every call kept), and
+each place of a block; and, with `-Wtype-safety`, every call kept), the
+twelfth (two functions with clang's `no_builtin`, one naming `memset` and one
+naming nothing, between three without it: the unit's calls are made, and a
+plain library builtin is its declaration's call in the function whose
+attribute covers it and has its own semantics in the others), and
 each fixture's counts of the
 operators listed for the tree's tests, of the records those tests read that
 no listed operator has as an operand, each checked, of the calls left out,
@@ -1650,7 +1661,7 @@ record left to no listed operator with a tree's test, a list's bit past its
 expression, or an expression with nothing listed and another verdict fails
 the command.
 
-`test-checker` runs it on the census's eleven fixtures, as "The shadow" above
+`test-checker` runs it on the census's twelve fixtures, as "The shadow" above
 has, and on the window's test of values without room at a chunk's end: the
 tests run on the 8,259 expressions the kernel makes in place there, and on
 none of the 64 that the ends cut. [The

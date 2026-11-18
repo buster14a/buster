@@ -515,6 +515,8 @@ static const char node_census_test_defaults[] =
     "    kp(a, b); // take\n"
     "    (*kp)(a, b); // take\n"
     "    h->fn(a); // take\n"
+    "    x = (*k0)(a, b); // take\n"
+    "    x = (**k0)(a, b); // take\n"
     "    (void)a; // take\n"
     "    (void)0; // take\n"
     "    (int)a; // refuse: unused-value\n"
@@ -581,6 +583,49 @@ static const char node_census_test_tagged[] =
     "    take(p, 42); // refuse: callee\n"
     "    plain(a); // refuse: callee\n"
     "    return plain(a); // refuse: callee\n"
+    "}\n";
+
+// A unit with clang's no_builtin on two functions (#2968): its calls are made as any unit's. A plain library builtin is the
+// declaration's call in the function whose attribute names it, or names none (#1958), and has its own semantics in the
+// others, before, between and after them: each is asked by the function that holds it.
+static const char node_census_test_builtins[] =
+    "typedef unsigned long size_t;\n"
+    "void* memset(void*, int, size_t);\n"
+    "void* memcpy(void*, const void*, size_t);\n"
+    "size_t strlen(const char*);\n"
+    "int k0(int, int);\n"
+    "int before(char* p, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // refuse: callee\n"
+    "    k0(a, a); // take\n"
+    "    return (int)strlen(\"abc\"); // refuse: callee\n"
+    "}\n"
+    "__attribute__((no_builtin(\"memset\"))) int named(char* p, const char* q, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // take\n"
+    "    memcpy(p, q, 8); // refuse: callee\n"
+    "    k0(a, a); // take\n"
+    "    return (int)strlen(\"abc\"); // refuse: callee\n"
+    "}\n"
+    "int between(char* p, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // refuse: callee\n"
+    "    k0(a, a); // take\n"
+    "    return a; // take\n"
+    "}\n"
+    "__attribute__((no_builtin)) int every(char* p, const char* q, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // take\n"
+    "    memcpy(p, q, 8); // take\n"
+    "    (&memset)(p, 0, 8); // take\n"
+    "    k0(a, a); // take\n"
+    "    return (int)strlen(\"abc\"); // take\n"
+    "}\n"
+    "int after(char* p, int a)\n"
+    "{\n"
+    "    memset(p, 0, 8); // refuse: callee\n"
+    "    k0(a, a); // take\n"
+    "    return (int)strlen(p); // refuse: callee\n"
     "}\n";
 
 static const char node_census_test_atomic[] =
@@ -1380,7 +1425,8 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
 // parameter, a static object, a function, enumerators) and each lookup the fact words' rules take: `->` and `.`, chained
 // and through a const record; a static record's member, an address constant; `*p`; subscripts of a pointer, of an
 // automatic and a static array, at a variable index and at constant ones (a static array's element's address is folded),
-// and of a member array; calls of a function, a variadic one, a pointer and a member; and discards, written and an
+// and of a member array; calls of a function, a variadic one, a pointer and a member, and of a function's designator and
+// a pointer to one dereferenced (`*f` is the function again, #2970); and discards, written and an
 // expression statement's. Two the rules leave to T's: the members of a record whose type has an aligned typedef's
 // wrapper, through a pointer and of an element (the subscript of a pointer to one they take).
 static const char node_facts_test_text[] =
@@ -1414,6 +1460,7 @@ static const char node_facts_test_text[] =
     "    x = la[1];\n"
     "    x = p->a[3];\n"
     "    x = f(a) + v(a, x, y) + fp(a) + p->cb(a);\n"
+    "    x = (*f)(a) + (**f)(a) + (*fp)(a);\n"
     "    (void)f(a);\n"
     "    w();\n"
     "    y = wp->m;\n"
@@ -1439,8 +1486,8 @@ static bool node_facts_test_fixture(const char* directory, uint32_t mode, uint32
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     // Its leaves by what they name (enumerators, functions, static and automatic objects), its lookups by operator (`->`,
     // `.`, `*`, a subscript, a call, a discard), and those the rules leave.
-    static const uint64_t named[4] = { 2, 4, 6, 46 };
-    static const uint64_t lookups[BUSTER_NODE_FACTS_LOOKUPS] = { 8, 6, 1, 10, 6, 21 };
+    static const uint64_t named[4] = { 2, 6, 6, 51 };
+    static const uint64_t lookups[BUSTER_NODE_FACTS_LOOKUPS] = { 8, 6, 5, 10, 9, 22 };
     static const uint64_t left[BUSTER_NODE_FACTS_LOOKUPS] = { 1, 1, 0, 0, 0, 0 };
     bool held = shadow.facts_differences == 0 && shadow.facts_list_differences == 0 && shadow.facts_failures == 0 && shadow.value_differences == 0 &&
                 shadow.facts_left_identifiers == 0;
@@ -1452,14 +1499,15 @@ static bool node_facts_test_fixture(const char* directory, uint32_t mode, uint32
     {
         held = held && shadow.facts_lookups[lookup] == lookups[lookup] && shadow.facts_left_lookups[lookup] == left[lookup];
     }
-    // The fixture's 21 discards, which a lean kernel doesn't make: each T's record by the discard's rule. Its other 31
-    // lookups less the two left: each one's conversions' entries by its rule. Two more go by their rule in any variant
-    // (a member through an array's pointer, a constant index of an address constant). `p[1].n` is its one taken member
-    // of an operand that is no address constant, at an offset: the record a dot's choices by masks would get wrong.
+    // The fixture's 22 discards, which a lean kernel doesn't make: each T's record by the discard's rule. Its other 38
+    // lookups less the two left: each one's conversions' entries by its rule. Five go by their rule in any variant (a
+    // member through an array's pointer, a constant index of an address constant, and the three dereferences of a
+    // function's designator, which is no pointer's value). `p[1].n` is its one taken member of an operand that is no
+    // address constant, at an offset: the record a dot's choices by masks would get wrong.
     const bool lean = mode != BUSTER_NODE_FACTS_WHOLE;
-    held = held && shadow.facts_discards == (lean ? 21u : 0u) && shadow.facts_discards_derived == shadow.facts_discards &&
-           shadow.facts_conversions == (lean ? 29u : 0u) && shadow.facts_conversions_derived == shadow.facts_conversions &&
-           shadow.facts_taken_lookups - shadow.facts_short_lookups == 2 && (mode != BUSTER_NODE_FACTS_LOADS || shadow.facts_loads == shadow.facts_short_lookups);
+    held = held && shadow.facts_discards == (lean ? 22u : 0u) && shadow.facts_discards_derived == shadow.facts_discards &&
+           shadow.facts_conversions == (lean ? 36u : 0u) && shadow.facts_conversions_derived == shadow.facts_conversions &&
+           shadow.facts_taken_lookups - shadow.facts_short_lookups == 5 && (mode != BUSTER_NODE_FACTS_LOADS || shadow.facts_loads == shadow.facts_short_lookups);
     if (!valid || !held)
     {
         fprintf(stderr, "test-checker: node-facts: variant %u window %u%s: %s: %" PRIu64 " records differ, %" PRIu64 " lists differ, %" PRIu64 " leaves left; named %" PRIu64
@@ -2401,6 +2449,41 @@ static bool node_flat_test_reach(const char* directory, bool first, char** optio
     return valid && same;
 }
 
+// The fronts on the no_builtin fixture (#2968), read with `options`: the front `front` makes the unit's calls, their
+// `arguments` arguments, though two of its functions have the attribute; each record is the walk's node, the whole
+// front's with its call's library mark, which the walk gives by the function that holds the call; and the flat front's
+// records beside the lean one's are the lean one's, neither with a record the other lacks.
+static bool node_front_test_builtins(const char* directory, uint8_t front, uint64_t arguments, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/front-builtins.c", directory);
+    bool valid = parse_test_write(path, node_census_test_builtins, strlen(node_census_test_builtins));
+    NodeShadow shadow = {
+        .front = front,
+        .passes = 1,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const bool flat = (front & BUSTER_NODE_FRONT_FLAT) != 0;
+    const bool same = shadow.front_differences == 0 && shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_checked == shadow.front_records &&
+                      shadow.front_arguments == arguments &&
+                      (flat ? shadow.flat_differences == 0 && shadow.flat_compared == shadow.front_records && shadow.flat_only == 0 && shadow.flat_lean_only == 0 &&
+                                  shadow.flat_unread == 0 :
+                              shadow.flat_compared == 0 && shadow.flat_records == 0);
+    if (!valid || !same)
+    {
+        fprintf(stderr, "test-checker: node-front builtins (front %u): %s: the front's records %" PRIu64 ", checked %" PRIu64 ", %" PRIu64 " differ, its calls' arguments %" PRIu64
+                        " (%" PRIu64 " expected); the flat front's %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " only its own, %" PRIu64
+                        " only the lean front's\n",
+                front, valid ? "read" : "NOT READ", shadow.front_records, shadow.front_checked, shadow.front_differences, shadow.front_arguments, arguments, shadow.flat_records,
+                shadow.flat_compared, shadow.flat_differences, shadow.flat_only, shadow.flat_lean_only);
+    }
+    unlink(path);
+    return valid && same;
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
     char directory[] = "/tmp/buster-node-census-XXXXXX";
@@ -2446,6 +2529,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     char* tagged[] = { "-nostdinc", "-Wtype-safety" };
     check_test_expect(test, ready && node_census_test_fixture(directory, "tagged.c", node_census_test_tagged, tagged, BUSTER_ARRAY_LENGTH(tagged), &system),
                       "node-census refuses every call of a unit with type tags");
+    check_test_expect(test, ready && node_census_test_fixture(directory, "builtins.c", node_census_test_builtins, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
+                      "node-census asks a library call's own semantics by the function that holds it, in a unit with no_builtin");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
@@ -2514,20 +2599,20 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .values = 1,
     };
     static const NodeTestsWindowed windowed_defaults = {
-        .expressions = 385,
+        .expressions = 387,
         .trees = 29,
         .operators = 84,
         .sent = 27,
         .walks = 11,
         .far = 34,
         .quiet = 52,
-        .calls = 171,
-        .calls_checked = 171,
+        .calls = 173,
+        .calls_checked = 173,
         .casts = 157,
         .asks = 5,
         .values = 170,
-        .spared = 213,
-        .direct = 178,
+        .spared = 215,
+        .direct = 180,
         .apart = 19,
     };
     static const NodeTestsWindowed windowed_enums = {
@@ -2556,6 +2641,16 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .expressions = 4,
         .operators = 3,
         .values = 2,
+    };
+    static const NodeTestsWindowed windowed_builtins = {
+        .expressions = 11,
+        .operators = 4,
+        .calls = 10,
+        .calls_checked = 10,
+        .casts = 9,
+        .asks = 3,
+        .values = 7,
+        .direct = 6,
     };
     static const NodeTestsWindowed windowed_system = {
         .expressions = 3,
@@ -2596,6 +2691,9 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_tests_test_fixture(directory, "tagged.c", node_census_test_tagged, tagged, BUSTER_ARRAY_LENGTH(tagged), BUSTER_NODE_FRONT_AFTER, 3,
                                                              1, windowed_tagged),
                       "node-tests: at reader time a unit with type tags has every call's test, and its loop leaves no call out");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "builtins.c", node_census_test_builtins, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER,
+                                                             0, 0, windowed_builtins),
+                      "node-tests: at reader time a unit with no_builtin has its calls made, and each library call's semantics by its own function");
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
                                                                BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
@@ -2708,6 +2806,14 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-flat: the flat front's records are the lean front's on the shadow's fixture, the left tokens' places empty");
     check_test_expect(test, ready && node_shadow_test_fixture(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, 0, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-flat before the walk: the same records");
+    check_test_expect(test, ready && node_front_test_builtins(directory, BUSTER_NODE_FRONT_AFTER, 38, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-front: in a unit with no_builtin the front makes the calls, each one's library mark the walk's");
+    check_test_expect(test, ready && node_front_test_builtins(directory, BUSTER_NODE_FRONT_BEFORE, 38, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-front before the walk: the same calls and marks");
+    check_test_expect(test, ready && node_front_test_builtins(directory, flat, 38, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-flat: in a unit with no_builtin the flat front makes the calls the lean front makes");
+    check_test_expect(test, ready && node_front_test_builtins(directory, flat | BUSTER_NODE_FRONT_FLAT_FIRST, 38, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-flat before the walk: the same calls");
     check_test_expect(test, ready && node_front_test_limits(directory, true, flat, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat: a value whose consumer is in the next chunk is found there by its position");
     check_test_expect(test, ready && node_front_test_limits(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, 0, loud, BUSTER_ARRAY_LENGTH(loud)),

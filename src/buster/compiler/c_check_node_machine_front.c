@@ -1391,7 +1391,7 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                 case CHECK_INPUT_CODE_CALL:
                 {
                     const uint32_t count = node_front_values(front, mine, values);
-                    left = count == BUSTER_NODE_FRONT_UNKNOWN || count == 0 || input->kr_parameter_count != 0 || input->no_builtin ||
+                    left = count == BUSTER_NODE_FRONT_UNKNOWN || count == 0 || input->kr_parameter_count != 0 ||
                            (!lean && front->argument_count + count > BUSTER_NODE_FRONT_RECORDS);
                     value = true;
                     if (!left)
