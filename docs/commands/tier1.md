@@ -41,7 +41,7 @@ requirements. [Command index](README.md).
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. The preference's crossing test counts the calls before each
   position with a vector prefix sum, which `test-tier1-emit` checks against its
-  scalar twin. A straight line whose allocation can't place a value (an evicted
+  definition. A straight line whose allocation can't place a value (an evicted
   parameter whose incoming register another operand holds) goes through the CFG
   consumer too. The 128-bit integers are split into 64-bit halves before the
   optimizer (`ir_wide.c`, #141): `test-tier1-wide [--seed N] [--programs N]

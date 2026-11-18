@@ -955,10 +955,7 @@ The immediates' forms are the shared form choice's (#221). Expansion leaves
 each record with an immediate empty, with its request (the operation's row,
 the value, the live flags and the destination); both emitters collect a
 function's requests and choose their forms 32 at a time, one pass of
-`x86_choose_forms`'s lanes, before checking the records; on the scalar path
-(the plan's, `Tier1SelectPlan.vector`, for this emitter; the options' for
-`tier1_emit_function`) each request's form is its scalar twin's, chosen as
-the request comes, and none is held (#141). This emitter
+`x86_choose_forms`'s lanes, before checking the records (#141). This emitter
 checks them in order after the batch, so a node's invalid record or a form
 the target refuses is reported before a later node's allocation failure, as
 when each node's records were checked as it was selected. Every record either
