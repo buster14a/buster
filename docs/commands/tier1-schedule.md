@@ -12,7 +12,7 @@ requirements. [Command index](README.md).
   selection, on each block's IR instructions (`tier1_schedule_ir.c`). Both are
   measurement options, off by default; `--tier1-report`'s `schedule_blocks` and
   `schedule_moved` count what they did, and `--verify` checks every scheduled
-  block against its scalar reference. [The scheduling guide](../../docs/tier1-scheduling.md)
+  block against the independent verifier. [The scheduling guide](../../docs/tier1-scheduling.md)
   has the contracts, the 9700X's measurements and #172's decision.
 - The operand sink (#2592, `tier1_schedule_ir_sink`) runs on every `--tier1`
   function: a phi's next value moves past the last reader of the value it comes
@@ -24,8 +24,9 @@ requirements. [Command index](README.md).
   with refusals; `tests/driver/tier1_patterns.c`'s fetch checks Lua's
   `i = *(pc++)` natively. [The allocation guide](../../docs/tier1-allocation.md)
   has the rule and its measurements.
-- `test-tier1-schedule [--seed N]` checks the postallocation scheduler's
-  scalar/vector twins, dependencies, barriers, flags and the verifier;
+- `test-tier1-schedule [--seed N]` checks the postallocation scheduler's graph,
+  heights, levels, statistics and order against their definitions (#2924), and
+  its dependencies, barriers, flags and verifier;
   `benchmark-tier1-schedule` times scheduling plus encoding and a synthetic
   generated loop. `test-checker-driver`'s scheduling fixture compiles a program
   by both paths with each variant under `--verify` and runs it against clang's
