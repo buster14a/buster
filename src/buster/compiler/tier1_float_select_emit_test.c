@@ -223,7 +223,7 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
                         IrFunction function;
                         uint32_t root = BUSTER_IR_NONE;
                         const bool created = tier1_float_select_function(test, source_width, width, predicate, shape, summed, branch, &function, &root);
-                        const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+                        const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
                         tier1_emit_test_expect(test, valid, "a floating select's fixture is valid IR");
                         IrDominance dominance;
                         const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);

@@ -725,7 +725,7 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
     {
         const Tier0Function* entry = &functions->functions[function_index];
         const uint32_t symbols = program->global_count + program->function_count + 1;
-        const IrCheck check = test->vector ? ir_lower_typed(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered) : ir_lower_typed_scalar(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
+        const IrCheck check = ir_lower_typed(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real typed-stream lowering succeeds");
         if (!ok)
         {
@@ -780,9 +780,8 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
                 .leave = result.subtree_end,
                 .block_count = result.block_count,
             };
-            const IrCheck vector = ir_verify(optimized, scratch, dominance);
-            const IrCheck scalar = ir_verify_scalar(optimized, scratch, dominance);
-            ok = tier1_pipeline_expect(test, vector.error == IR_OK && scalar.error == IR_OK && vector.dominance_checked && scalar.dominance_checked, "both IR verifiers accept the optimized dominance handoff");
+            const IrCheck verified = ir_verify(optimized, scratch, dominance);
+            ok = tier1_pipeline_expect(test, verified.error == IR_OK && verified.dominance_checked, "the IR verifier accepts the optimized dominance handoff");
         }
     }
     tier1_pipeline_expect(test, scratch->length == 0, "upstream stages return scratch");

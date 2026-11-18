@@ -547,9 +547,9 @@ static bool ssa_ir_test_promote(SsaIrTestTally* tally, const IrFunction* input, 
     if (ok)
     {
         ok = ssa_ir_test_expect(tally, vector.dominance_checked && scalar.dominance_checked, "both promotion paths check real dominance");
-        ok = ssa_ir_test_expect(tally, ir_verify(result, scratch, 0).error == IR_OK && ir_verify_scalar(result, scratch, 0).error == IR_OK &&
-                                      ir_verify(twin, scratch, 0).error == IR_OK && ir_verify_scalar(twin, scratch, 0).error == IR_OK,
-                                 "both IR verifiers accept both outputs") && ok;
+        ok = ssa_ir_test_expect(tally, ir_verify(result, scratch, 0).error == IR_OK &&
+                                      ir_verify(twin, scratch, 0).error == IR_OK,
+                                 "the IR verifier accepts both outputs") && ok;
     }
     return ok;
 }

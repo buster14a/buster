@@ -111,7 +111,7 @@ static void tier1_address_sink_tests(Tier1EmitTest* test)
         const bool pointer = (variant & 4) != 0;
         IrFunction function;
         const bool created = tier1_address_sink_function(test, escapes, &function);
-        const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+        const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
         tier1_emit_test_expect(test, valid, "cross-block address fixture is valid IR");
         IrDominance dominance;
         const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);

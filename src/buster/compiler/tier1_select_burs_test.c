@@ -147,7 +147,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         .barriers = barriers,
         .canonical = canonical,
         .known_bits = known_bits,
-        .vectors = ir_function_has_vectors_path(function, false),
+        .vectors = ir_function_has_vectors(function),
     };
     if (valid)
     {
@@ -172,7 +172,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
         .barriers = barriers,
         .canonical = canonical,
         .known_bits = known_bits,
-        .vectors = ir_function_has_vectors_path(function, false),
+        .vectors = ir_function_has_vectors(function),
     };
     for (uint32_t node = 0; valid && node < count; node += 1)
     {
@@ -373,7 +373,7 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
                 arena_pop_to(&input, 0);
                 String8 text = { 0 };
                 IrFunction function = { 0 };
-                if (ir_parse_test_read(path, &source, &text) && ir_parse(text, &input, &scratch, &function).error == IR_PARSE_OK && ir_verify_scalar(&function, &scratch, 0).error == IR_OK)
+                if (ir_parse_test_read(path, &source, &text) && ir_parse(text, &input, &scratch, &function).error == IR_PARSE_OK && ir_verify(&function, &scratch, 0).error == IR_OK)
                 {
                     tier1_burs_check_function(&check, &function, 0, &scratch);
                     files += 1;
@@ -441,7 +441,7 @@ static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
         valid = length < room;
     }
     IrFunction function = { 0 };
-    valid = valid && ir_parse((String8){ .pointer = source, .length = length }, &input, &scratch, &function).error == IR_PARSE_OK && ir_verify_scalar(&function, &scratch, 0).error == IR_OK;
+    valid = valid && ir_parse((String8){ .pointer = source, .length = length }, &input, &scratch, &function).error == IR_PARSE_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
     tier1_select_test_expect(test, valid, "the addresses' fixture parses and verifies");
     Tier1BursCheck check = { 0 };
     uint32_t covered = 0;

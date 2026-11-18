@@ -391,7 +391,7 @@ static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
         const uint32_t at = (variant & 2) != 0 ? 62 : 0;
         IrFunction function;
         const bool created = tier1_symbol_fold_repeated_function(test, &function, at);
-        const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+        const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
         tier1_emit_test_expect(test, valid, "the repeated indexed accesses' fixture is valid IR");
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
@@ -491,7 +491,7 @@ static void tier1_symbol_fold_addition_tests(Tier1EmitTest* test)
             function.block_offsets[1] = next;
             ready = next == function.instruction_count;
         }
-        const bool valid = ready && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+        const bool valid = ready && ir_verify(&function, &test->scratch, 0).error == IR_OK;
         tier1_emit_test_expect(test, valid, "the symbol addition's fixture is valid IR");
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
@@ -559,7 +559,7 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         const bool pointer = (variant & 2) != 0;
         IrFunction function;
         const bool created = tier1_symbol_fold_function(test, &function);
-        const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+        const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
         tier1_emit_test_expect(test, valid, "the folded symbols' fixture is valid IR");
         IrDominance dominance;
         const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);

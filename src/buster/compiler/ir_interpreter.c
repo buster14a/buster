@@ -263,7 +263,7 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     IrCheck verified = { .error = IR_ERROR_STRUCTURE };
     if (function != 0)
     {
-        verified = checked[function_index] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(function, arena, false);
+        verified = checked[function_index] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(function, arena);
         checked[function_index] = verified.error == IR_OK;
     }
     const bool simd = verified.error == IR_OK && ir_function_has_simd(function);
@@ -1420,7 +1420,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         };
                         if (target != 0)
                         {
-                            target_check = checked[callee] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(target, arena, false);
+                            target_check = checked[callee] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(target, arena);
                             checked[callee] = target_check.error == IR_OK;
                         }
                         if (target_check.error == IR_ERROR_MEMORY)

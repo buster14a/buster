@@ -47,13 +47,12 @@ static void ir_simd_lower_splats(IrLowerTestTally* tally)
     static const uint64_t bits[] = { 0x81, 0x8001, UINT32_C(0x800000a1), UINT64_C(0x80000001000000a1), UINT32_C(0x7f800031), UINT64_C(0x7ff0000000000031), UINT32_C(0xdead8001) };
     TypeTestTable table = {0};
     Arena output = arena_reserve(UINT64_C(1) << 24);
-    Arena twin = arena_reserve(UINT64_C(1) << 24);
     Arena scratch = arena_reserve(UINT64_C(1) << 26);
     Arena execution = arena_reserve(UINT64_C(1) << 26);
     Arena native_arena = arena_reserve(UINT64_C(1) << 26);
     Tier0TestVectorShared* shared = mmap(0, sizeof(*shared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     uint8_t* images = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
-    const bool ready = type_test_table_open(&table, 256) && output.base != 0 && twin.base != 0 && scratch.base != 0 && execution.base != 0 && native_arena.base != 0 && shared != MAP_FAILED && images != 0;
+    const bool ready = type_test_table_open(&table, 256) && output.base != 0 && scratch.base != 0 && execution.base != 0 && native_arena.base != 0 && shared != MAP_FAILED && images != 0;
     ir_lower_test_expect(tally, ready, "scalar splat lowering storage", 0, 0);
     const uint64_t features = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW);
     const X86Target target = { .features = features };
@@ -93,11 +92,13 @@ static void ir_simd_lower_splats(IrLowerTestTally* tally)
                 .vectors = true,
             };
             IrFunction a = {0};
-            IrFunction b = {0};
             const IrCheck ca = ir_lower_typed_target(&source, IR_VOID, 3, features, &output, &scratch, &a);
-            const IrCheck cb = ir_lower_typed_target_scalar(&source, IR_VOID, 3, features, &twin, &scratch, &b);
-            const bool lowered = reason == NULL && ca.error == IR_OK && cb.error == IR_OK && ir_lower_test_equal(&a, &b);
-            ir_lower_test_expect(tally, lowered, "both typed adapters lower scalar splats identically", width, scalar);
+            const bool lowered = reason == NULL && ca.error == IR_OK;
+            ir_lower_test_expect(tally, lowered, "the typed adapter lowers scalar splats", width, scalar);
+            if (ca.error == IR_OK)
+            {
+                ir_lower_test_fold_function(&tally->lowered, &a);
+            }
             uint32_t splats = 0;
             uint32_t narrowed = 0;
             for (uint32_t i = 0; lowered && i < a.instruction_count; i += 1)
@@ -105,7 +106,7 @@ static void ir_simd_lower_splats(IrLowerTestTally* tally)
                 splats += a.op[i] == IR_INTRINSIC && a.c[i] == BUSTER_IR_INTRINSIC_SPLAT;
                 narrowed += a.op[i] == IR_TRUNC;
             }
-            ir_lower_test_expect(tally, lowered && a.row_count == 0 && b.row_count == 0 && a.call_count == 0 && splats == 1 && narrowed == (scalar < 2 || scalar == 6),
+            ir_lower_test_expect(tally, lowered && a.row_count == 0 && a.call_count == 0 && splats == 1 && narrowed == (scalar < 2 || scalar == 6),
                                  "one pure splat replaces its machine row and narrows wider bit carriers explicitly", width, scalar);
             uint8_t expected[80];
             memset(expected, 0xa5, sizeof(expected));
@@ -113,13 +114,13 @@ static void ir_simd_lower_splats(IrLowerTestTally* tally)
             {
                 expected[8 + byte] = (uint8_t)(bits[scalar] >> (8 * (byte % lane_bytes)));
             }
-            for (uint32_t path = 0; lowered && path < 2; path += 1)
+            if (lowered)
             {
                 uint8_t actual[80];
                 memset(actual, 0xa5, sizeof(actual));
                 memcpy(actual + 8, bits + scalar, tier0_class_bytes(classes[scalar]));
                 const InterpreterBinding binding = { .symbol = 2, .bytes = actual, .size = sizeof(actual), .writable = true };
-                const IrInterpreterFunction function = { .symbol = 1, .function = path == 0 ? &a : &b };
+                const IrInterpreterFunction function = { .symbol = 1, .function = &a };
                 const IrInterpreterProgram program = { .functions = &function, .function_count = 1, .bindings = &binding, .binding_count = 1 };
                 const InterpreterValue argument = { .low = (uintptr_t)(actual + 8) };
                 const InterpreterResult result = ir_interpret(&program, 1, &argument, 1, 0, &execution);
@@ -143,7 +144,6 @@ static void ir_simd_lower_splats(IrLowerTestTally* tally)
                 cases += 1;
             }
             arena_pop_to(&output, 0);
-            arena_pop_to(&twin, 0);
             arena_pop_to(&native_arena, 0);
         }
     }
@@ -158,7 +158,6 @@ static void ir_simd_lower_splats(IrLowerTestTally* tally)
     arena_release(&native_arena);
     arena_release(&execution);
     arena_release(&scratch);
-    arena_release(&twin);
     arena_release(&output);
 }
 
@@ -167,13 +166,12 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
     ir_simd_lower_splats(tally);
     TypeTestTable table = {0};
     Arena output = arena_reserve(UINT64_C(1) << 24);
-    Arena twin = arena_reserve(UINT64_C(1) << 24);
     Arena scratch = arena_reserve(UINT64_C(1) << 26);
     Arena execution = arena_reserve(UINT64_C(1) << 26);
     Arena native_arena = arena_reserve(UINT64_C(1) << 26);
     Tier0TestVectorShared* shared = mmap(0, sizeof(*shared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     uint8_t* images = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
-    const bool ready = type_test_table_open(&table, 256) && output.base != 0 && twin.base != 0 && scratch.base != 0 && execution.base != 0 && native_arena.base != 0 && shared != MAP_FAILED && images != 0;
+    const bool ready = type_test_table_open(&table, 256) && output.base != 0 && scratch.base != 0 && execution.base != 0 && native_arena.base != 0 && shared != MAP_FAILED && images != 0;
     ir_lower_test_expect(tally, ready, "SIMD producer integration storage", 0, 0);
     const uint64_t features = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512DQ);
     const X86Target target = { .features = features };
@@ -259,14 +257,16 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
                         .vectors = true,
                     };
                     IrFunction a = {0};
-                    IrFunction b = {0};
                     const IrCheck ca = ir_lower_typed_target(&source, IR_VOID, 3, features, &output, &scratch, &a);
-                    const IrCheck cb = ir_lower_typed_target_scalar(&source, IR_VOID, 3, features, &twin, &scratch, &b);
-                    const bool lowered = ca.error == IR_OK && cb.error == IR_OK && ir_lower_test_equal(&a, &b);
-                    ir_lower_test_expect(tally, lowered, "whole VECTOR/X86 functions lower identically with width-qualified edge spills", width, operation);
+                    const bool lowered = ca.error == IR_OK;
+                    ir_lower_test_expect(tally, lowered, "whole VECTOR/X86 functions lower with width-qualified edge spills", width, operation);
+                    if (ca.error == IR_OK)
+                    {
+                        ir_lower_test_fold_function(&tally->lowered, &a);
+                    }
                     if (!lowered)
                     {
-                        fprintf(stderr, "  SIMD lowering: errors %u/%u entry %u detail %u; typed %u at %u (%s)\n", ca.error, cb.error, ca.instruction, ca.detail, tier0_validate(&source).error, tier0_validate(&source).node, tier0_validate(&source).rule);
+                        fprintf(stderr, "  SIMD lowering: error %u entry %u detail %u; typed %u at %u (%s)\n", ca.error, ca.instruction, ca.detail, tier0_validate(&source).error, tier0_validate(&source).node, tier0_validate(&source).rule);
                     }
                     uint8_t expected[80];
                     memset(expected, 0xa5, sizeof(expected));
@@ -275,12 +275,12 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
                         const uint32_t value = ir_simd_lower_expected(ops[operation], lanes[0][lane], lanes[condition][lane], unsigned_lanes != 0);
                         memcpy(expected + 8 + lane * 4, &value, 4);
                     }
-                    for (uint32_t path = 0; lowered && path < 2; path += 1)
+                    if (lowered)
                     {
                         uint8_t actual[80];
                         memset(actual, 0xa5, sizeof(actual));
                         const InterpreterBinding binding = { .symbol = 2, .bytes = actual, .size = sizeof(actual), .writable = true };
-                        const IrInterpreterFunction function = { .symbol = 1, .function = path == 0 ? &a : &b };
+                        const IrInterpreterFunction function = { .symbol = 1, .function = &a };
                         const IrInterpreterProgram program = { .functions = &function, .function_count = 1, .bindings = &binding, .binding_count = 1 };
                         const InterpreterValue argument = { .low = (uintptr_t)(actual + 8) };
                         const InterpreterResult result = ir_interpret(&program, 1, &argument, 1, 0, &execution);
@@ -315,7 +315,6 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
                                                memcmp(&a, &before, sizeof(a)) == 0 && output.length == mark && scratch.length == 0,
                                          "bad target features refuse transactionally before execution", width, operation);
                     arena_pop_to(&output, 0);
-                    arena_pop_to(&twin, 0);
                     arena_pop_to(&native_arena, 0);
                 }
             }
@@ -332,6 +331,5 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
     arena_release(&native_arena);
     arena_release(&execution);
     arena_release(&scratch);
-    arena_release(&twin);
     arena_release(&output);
 }

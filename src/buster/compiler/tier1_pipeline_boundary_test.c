@@ -262,8 +262,7 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
     IrFunction lowered;
     IrFunction promoted;
     IrOptimizeResult optimized;
-    IrCheck check = test->vector ? ir_lower_typed(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered) :
-                                  ir_lower_typed_scalar(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
+    IrCheck check = ir_lower_typed(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
     bool ok = tier1_pipeline_expect(test, check.error == IR_OK, "boundary typed stream lowers");
     if (ok)
     {
@@ -306,9 +305,8 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
                 .leave = result.subtree_end,
                 .block_count = result.block_count,
             };
-            const IrCheck vector = ir_verify(&optimized.function, scratch, &dominance);
-            const IrCheck scalar = ir_verify_scalar(&optimized.function, scratch, &dominance);
-            ok = tier1_pipeline_expect(test, vector.error == IR_OK && scalar.error == IR_OK && vector.dominance_checked && scalar.dominance_checked, "both verifiers accept boundary optimized SSA");
+            const IrCheck verified = ir_verify(&optimized.function, scratch, &dominance);
+            ok = tier1_pipeline_expect(test, verified.error == IR_OK && verified.dominance_checked, "the verifier accepts boundary optimized SSA");
         }
     }
     Tier1SelectPlan plan;

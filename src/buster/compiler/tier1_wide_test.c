@@ -9,7 +9,7 @@
 // that loads 128-bit integers from the buffer's first half, computes, and stores into its second half. It is parsed by
 // both of ir_parse.c's paths into the same function and run by the interpreter on random buffers: the expected buffers.
 // Then it is split by both of ir_wide.c's paths, which must make the same function, without an I128 instruction, that
-// both verifiers take with its dominance, and that the interpreter runs into the same buffers; optimized (ir_optimize's
+// the verifier takes with its dominance, and that the interpreter runs into the same buffers; optimized (ir_optimize's
 // SCCP, dead code and CFG cleanup, as --tier1 runs it) and run again; then planned and emitted by both of Tier 1's paths
 // for the x86-64 baseline, with rematerialization and without, its allocation certified (#939), encoded by both
 // encoders into the same bytes, and run natively in a child process on every buffer, which must leave the expected
@@ -839,8 +839,7 @@ static void tier1_wide_test_program(Tier1WideTest* test, const char* name, const
         ok = tier1_wide_test_expect(test, narrow, "the split leaves no I128 instruction");
         ok = ok && tier1_wide_test_dominance(test, &vector.function, &dominance);
         const IrCheck verified = ok ? ir_verify(&vector.function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-        const IrCheck twin = ok ? ir_verify_scalar(&vector.function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-        ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK && twin.error == IR_OK, "both verifiers take the split function with its dominance");
+        ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK, "the verifier takes the split function with its dominance");
         if (!ok)
         {
             printf("test-tier1-wide: %s: verifier error %u at %u (%u)\n", name, (unsigned)verified.error, verified.instruction, verified.detail);
@@ -1463,7 +1462,7 @@ static void tier1_wide_test_x87_phis(Tier1WideTest* test, char* text)
 // first word, its predecessor block, which is also the argument's value. The split remaps phis' values and calls'
 // arguments into slices of their own; a remap in the source's place made one reader's rewrite the other's (the phi's
 // predecessor became the argument's remapped value). One case's phi is an i64 the split copies, the other's an I128 the
-// split halves. Each must verify as built, and split by both paths into a function that both verifiers take and that
+// split halves. Each must verify as built, and split by both paths into a function that the verifier takes and that
 // the interpreter runs to the source's buffers; the call is on a branch never taken, the interpreter runs no callee.
 static const char* const tier1_wide_test_shared[2] = {
     "function (ptr) -> void {\n"
@@ -1533,8 +1532,7 @@ static void tier1_wide_test_shared_slices(Tier1WideTest* test)
         }
         ok = ok && tier1_wide_test_dominance(test, &function, &dominance);
         const IrCheck verified = ok ? ir_verify(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-        const IrCheck twin = ok ? ir_verify_scalar(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-        ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK && twin.error == IR_OK, "both verifiers take a call's arguments sharing a phi's words");
+        ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK, "the verifier takes a call's arguments sharing a phi's words");
         for (uint32_t input = 0; ok && input < BUSTER_TIER1_WIDE_TEST_INPUTS; input += 1)
         {
             uint8_t* bytes = inputs + (uint64_t)input * BUSTER_TIER1_WIDE_TEST_BUFFER;
@@ -1553,8 +1551,7 @@ static void tier1_wide_test_shared_slices(Tier1WideTest* test)
             IrDominance split_dominance = { 0 };
             fine = fine && tier1_wide_test_dominance(test, &result.function, &split_dominance);
             const IrCheck checked = fine ? ir_verify(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-            const IrCheck scalar = fine ? ir_verify_scalar(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-            fine = fine && tier1_wide_test_expect(test, checked.error == IR_OK && scalar.error == IR_OK, "the split of overlapping slices verifies: each reader keeps its own entries");
+            fine = fine && tier1_wide_test_expect(test, checked.error == IR_OK, "the split of overlapping slices verifies: each reader keeps its own entries");
             if (!fine)
             {
                 printf("test-tier1-wide: %s, %s path: split error %u, verifier error %u at %u\n", name, path == 0 ? "vector" : "scalar", (unsigned)split.error, (unsigned)checked.error, checked.instruction);
@@ -1637,7 +1634,7 @@ static bool tier1_wide_test_shared_phis(Tier1WideTest* test, uint32_t phis, uint
 
 // The split's counts past a u32's (#1204's review): phis that share a predecessor list append a list of their own for
 // each half whatever the source's table holds. A small instance must verify, and split by both paths into a function
-// both verifiers take. At 32,768 phis of 32,768 predecessors the halves' lists are 2^32 words past the source's
+// the verifier takes. At 32,768 phis of 32,768 predecessors the halves' lists are 2^32 words past the source's
 // 65,536, which a u32 count wrapped back to the source's own: both paths refuse it as IR_ERROR_LIMIT before they
 // allocate. One phi fewer, 65,536 words short of 2^32, is counted as it is and fails only for the test's output arena,
 // whose 256 MB can't hold 16 GB of extra words.
@@ -1655,8 +1652,7 @@ static void tier1_wide_test_limit(Tier1WideTest* test)
             IrDominance dominance = { 0 };
             ok = tier1_wide_test_dominance(test, &function, &dominance);
             const IrCheck verified = ok ? ir_verify(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-            const IrCheck twin = ok ? ir_verify_scalar(&function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-            ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK && twin.error == IR_OK, "both verifiers take I128 phis that share one predecessor list");
+            ok = ok && tier1_wide_test_expect(test, verified.error == IR_OK, "the verifier takes I128 phis that share one predecessor list");
         }
         for (uint32_t path = 0; ok && path < 2; path += 1)
         {
@@ -1669,8 +1665,7 @@ static void tier1_wide_test_limit(Tier1WideTest* test)
                 IrDominance split_dominance = { 0 };
                 fine = fine && tier1_wide_test_dominance(test, &result.function, &split_dominance);
                 const IrCheck checked = fine ? ir_verify(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-                const IrCheck scalar = fine ? ir_verify_scalar(&result.function, &test->scratch, &split_dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-                tier1_wide_test_expect(test, checked.error == IR_OK && scalar.error == IR_OK, "the split of phis that share a predecessor list verifies");
+                tier1_wide_test_expect(test, checked.error == IR_OK, "the split of phis that share a predecessor list verifies");
             }
             else
             {

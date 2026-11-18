@@ -12,7 +12,31 @@ struct IrLowerTestTally
 {
     uint64_t checks;
     uint64_t failures;
+    // An FNV-1a digest of every function ir_lower_test_lower lowers, in order (#2924): with the default seed and count it
+    // must equal the frozen one, taken where the vector and scalar lowerings agreed. The long double programs' functions
+    // aren't in it (ir_lower_test_lower_unfolded): their constants hold host addresses.
+    uint64_t lowered;
 };
+
+// The lowered functions' digest of a default run (seed 131, count 32).
+#define BUSTER_IR_LOWER_TEST_DIGEST UINT64_C(0xfa8a6114710fa332)
+
+static void ir_lower_test_fold(uint64_t* digest, uint64_t value)
+{
+    for (uint32_t byte = 0; byte < 8; byte += 1)
+    {
+        *digest = (*digest ^ ((value >> (byte * 8)) & 0xff)) * UINT64_C(0x100000001b3);
+    }
+}
+
+static void ir_lower_test_fold_bytes(uint64_t* digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* at = bytes;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        *digest = (*digest ^ at[i]) * UINT64_C(0x100000001b3);
+    }
+}
 
 static bool ir_lower_test_expect(IrLowerTestTally* tally, bool condition, const char* name, uint64_t seed, uint32_t function)
 {
@@ -623,25 +647,126 @@ static bool ir_lower_test_equal(const IrFunction* a, const IrFunction* b)
     return equal;
 }
 
-static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, uint32_t symbols, Arena* output, Arena* twin_output, Arena* scratch, IrFunction* function, uint64_t seed, uint32_t index)
+// Every field ir_lower_test_equal compares, in its order.
+static void ir_lower_test_fold_function(uint64_t* digest, const IrFunction* f)
 {
-    IrFunction twin =
-    {
-        0
+    const uint64_t counts[] = {
+        f->instruction_count,
+        f->block_count,
+        f->slot_count,
+        f->constant_count,
+        f->vector_constant_count,
+        f->address_count,
+        f->call_count,
+        f->extra_count,
+        f->call_type_count,
+        f->parameter_count,
+        f->result_type,
+        f->symbol_count,
+        f->label_count,
+        f->abi_call_count,
+        f->passed_count,
+        f->parameter_passed,
+        f->result_size,
+        f->variadic,
     };
-    const IrCheck vector = ir_lower_typed(source, result_type, symbols, output, scratch, function);
-    const IrCheck scalar = ir_lower_typed_scalar(source, result_type, symbols, twin_output, scratch, &twin);
-    bool ok = ir_lower_test_expect(tally, vector.error == IR_OK && scalar.error == IR_OK, "both lowering paths accept", seed, index);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(counts); i += 1)
+    {
+        ir_lower_test_fold(digest, counts[i]);
+    }
+    ir_lower_test_fold_bytes(digest, &f->result_abi, sizeof(AbiReturn));
+    ir_lower_test_fold_bytes(digest, &f->incoming, sizeof(AbiCall));
+    const uint64_t count = f->instruction_count;
+    ir_lower_test_fold_bytes(digest, f->op, count);
+    ir_lower_test_fold_bytes(digest, f->type, count);
+    ir_lower_test_fold_bytes(digest, f->flags, count);
+    ir_lower_test_fold_bytes(digest, f->alignment_log2, count);
+    ir_lower_test_fold_bytes(digest, f->a, count * 4);
+    ir_lower_test_fold_bytes(digest, f->b, count * 4);
+    ir_lower_test_fold_bytes(digest, f->c, count * 4);
+    ir_lower_test_fold_bytes(digest, f->block_offsets, ((uint64_t)f->block_count + 1) * 4);
+    ir_lower_test_fold_bytes(digest, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
+    for (uint32_t k = 0; k < f->constant_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->constants[k].low);
+        ir_lower_test_fold(digest, f->constants[k].high);
+    }
+    for (uint32_t k = 0; k < f->slot_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->slots[k].size);
+        ir_lower_test_fold(digest, f->slots[k].alignment);
+        ir_lower_test_fold(digest, f->slots[k].type);
+        ir_lower_test_fold(digest, f->slots[k].flags);
+    }
+    for (uint32_t k = 0; k < f->address_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->addresses[k].offset);
+        ir_lower_test_fold(digest, f->addresses[k].scale);
+    }
+    for (uint32_t k = 0; k < f->call_count; k += 1)
+    {
+        const IrCall call = f->calls[k];
+        ir_lower_test_fold(digest, call.argument_first);
+        ir_lower_test_fold(digest, call.argument_count);
+        ir_lower_test_fold(digest, call.type_first);
+        ir_lower_test_fold(digest, call.parameter_count);
+        ir_lower_test_fold(digest, call.result_type);
+        ir_lower_test_fold(digest, call.variadic);
+        ir_lower_test_fold(digest, call.abi);
+    }
+    for (uint32_t k = 0; k < f->label_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->labels[k]);
+    }
+    for (uint32_t k = 0; k < f->abi_call_count; k += 1)
+    {
+        ir_lower_test_fold_bytes(digest, &f->abi_calls[k].call, sizeof(AbiCall));
+        ir_lower_test_fold(digest, f->abi_calls[k].passed);
+        ir_lower_test_fold(digest, f->abi_calls[k].result_size);
+    }
+    for (uint32_t k = 0; k < f->passed_count; k += 1)
+    {
+        ir_lower_test_fold_bytes(digest, &f->passed[k].location, sizeof(AbiLocation));
+        ir_lower_test_fold(digest, f->passed[k].size);
+    }
+    for (uint32_t k = 0; k < f->extra_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->extra[k]);
+    }
+    for (uint32_t k = 0; k < f->call_type_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->call_types[k]);
+    }
+    for (uint32_t k = 0; k < f->parameter_count; k += 1)
+    {
+        ir_lower_test_fold(digest, f->parameter_types[k]);
+    }
+}
+
+// The lowering of `source`, which the verifier must accept, outside the digest: for the long double programs, whose
+// calls of C functions go through their addresses, which are the host's and move with its build.
+static bool ir_lower_test_lower_unfolded(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, uint32_t symbols, Arena* output, Arena* scratch, IrFunction* function, uint64_t seed, uint32_t index)
+{
+    const IrCheck lowered = ir_lower_typed(source, result_type, symbols, output, scratch, function);
+    bool ok = ir_lower_test_expect(tally, lowered.error == IR_OK, "the lowering accepts", seed, index);
     if (!ok && tally->failures < 20)
     {
-        fprintf(stderr, "  vector error %u at %u, scalar error %u at %u\n", vector.error, vector.instruction, scalar.error, scalar.instruction);
+        fprintf(stderr, "  lowering error %u at %u\n", lowered.error, lowered.instruction);
     }
     if (ok)
     {
-        ok = ir_lower_test_expect(tally, ir_lower_test_equal(function, &twin), "identical IR columns and side tables", seed, index);
-        ok = ir_lower_test_expect(tally, ir_verify(function, scratch, 0).error == IR_OK && ir_verify_scalar(function, scratch, 0).error == IR_OK &&
-                                       ir_verify(&twin, scratch, 0).error == IR_OK && ir_verify_scalar(&twin, scratch, 0).error == IR_OK,
-                                  "both verifiers accept both lowerings", seed, index) && ok;
+        ok = ir_lower_test_expect(tally, ir_verify(function, scratch, 0).error == IR_OK, "the verifier accepts the lowering", seed, index);
+    }
+    return ok;
+}
+
+// ir_lower_test_lower_unfolded, its function folded into the frozen digest (BUSTER_IR_LOWER_TEST_DIGEST).
+static bool ir_lower_test_lower(IrLowerTestTally* tally, const Tier0Function* source, IrType result_type, uint32_t symbols, Arena* output, Arena* scratch, IrFunction* function, uint64_t seed, uint32_t index)
+{
+    const bool ok = ir_lower_test_lower_unfolded(tally, source, result_type, symbols, output, scratch, function, seed, index);
+    if (ok)
+    {
+        ir_lower_test_fold_function(&tally->lowered, function);
     }
     return ok;
 }
@@ -670,7 +795,7 @@ static bool ir_lower_test_objects_kept(const IrFunction* lowered, const IrFuncti
 }
 
 // #134's promotion of a lowered function, by both paths, which may order their output differently (test-ssa-ir checks
-// their semantics): each must accept it with real dominance, pass both verifiers and keep every object's slot.
+// their semantics): each must accept it with real dominance, pass the verifier and keep every object's slot.
 static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* lowered, Arena* output, Arena* twin_output, Arena* scratch, uint64_t seed, uint32_t index)
 {
     const uint64_t output_mark = output->length;
@@ -687,9 +812,9 @@ static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* low
     const IrCheck scalar_check = ssa_ir_promote_scalar(lowered, twin_output, scratch, &scalar);
     bool ok = ir_lower_test_expect(tally, vector_check.error == IR_OK && scalar_check.error == IR_OK && vector_check.dominance_checked && scalar_check.dominance_checked,
                                    "both SSA promotion paths accept the lowering", seed, index);
-    ok = ok && ir_lower_test_expect(tally, ir_verify(&vector, scratch, 0).error == IR_OK && ir_verify_scalar(&vector, scratch, 0).error == IR_OK &&
-                                               ir_verify(&scalar, scratch, 0).error == IR_OK && ir_verify_scalar(&scalar, scratch, 0).error == IR_OK,
-                                    "both verifiers accept both promotions", seed, index);
+    ok = ok && ir_lower_test_expect(tally, ir_verify(&vector, scratch, 0).error == IR_OK &&
+                                               ir_verify(&scalar, scratch, 0).error == IR_OK,
+                                    "the verifier accepts both promotions", seed, index);
     if (ok)
     {
         ir_lower_test_expect(tally, ir_lower_test_objects_kept(lowered, &vector) && ir_lower_test_objects_kept(lowered, &scalar), "promotion keeps every object's slot", seed, index);
@@ -698,7 +823,7 @@ static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* low
     arena_pop_to(twin_output, twin_mark);
 }
 
-// Generated programs, lowered by both paths and executed as IR, against the typed-stream interpreter and Tier 0's
+// Generated programs, lowered and executed as IR, against the typed-stream interpreter and Tier 0's
 // native code of the same streams (test-tier0's harness, which checks the two of them against each other too): their
 // results and global bytes; and each lowered function promoted to SSA by both paths. `options` choose the shapes;
 // `name` labels the report.
@@ -825,7 +950,7 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
         for (uint32_t f = 0; ok && f < sources->count; f += 1)
         {
             const IrType result_type = ir_lower_test_result_type(&sources->functions[f], program->functions[f].result_class);
-            ok = ir_lower_test_lower(tally, &sources->functions[f], result_type, program->global_count + program->function_count + 1, &output, &twin_output, &scratch, &functions[f], program_seed, f);
+            ok = ir_lower_test_lower(tally, &sources->functions[f], result_type, program->global_count + program->function_count + 1, &output, &scratch, &functions[f], program_seed, f);
             if (ok)
             {
                 const Tier0Function* source = &sources->functions[f];
@@ -998,7 +1123,7 @@ static bool ir_lower_test_wide_typed_run(const Tier0Function* function, uint8_t*
 }
 
 // Long double and the 128-bit integers (#131): Tier 0's own random programs of each class (tier0_x87_test.c and
-// tier0_int128_test.c, their inputs drawn as those tests draw them) lowered by both paths and promoted, then run by the
+// tier0_int128_test.c, their inputs drawn as those tests draw them) lowered and promoted, then run by the
 // shared IR's interpreter, every output slot they write compared with their stack machines': the x87 programs' calls of C
 // functions through their addresses, NaNs alike, conversions both ways, and the wide integers' arithmetic, shifts,
 // compares and conversions, in frame objects and across ?:'s blocks.
@@ -1031,7 +1156,7 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
         {
             0
         };
-        if (!wide->overflow && ir_lower_test_lower(tally, &source, IR_VOID, 1, &output, &twin_output, &scratch, &function, seed, p))
+        if (!wide->overflow && ir_lower_test_lower(tally, &source, IR_VOID, 1, &output, &scratch, &function, seed, p))
         {
             ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, seed, p);
             Tier0TestWide in[BUSTER_TIER0_TEST_INT128_IN];
@@ -1074,7 +1199,7 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
         state = seed ^ (0x87ull << 32) ^ p;
         tier0_test_x87_program(x87, &x87_abi, &state);
         const Tier0Function long_double = tier0_test_x87_function(x87, &x87_abi);
-        if (!x87->overflow && ir_lower_test_lower(tally, &long_double, IR_VOID, 1, &output, &twin_output, &scratch, &function, seed, p))
+        if (!x87->overflow && ir_lower_test_lower_unfolded(tally, &long_double, IR_VOID, 1, &output, &scratch, &function, seed, p))
         {
             ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, seed, p);
             long double in[BUSTER_TIER0_TEST_X87_IN];
@@ -1149,7 +1274,7 @@ static void ir_lower_test_fixture(IrLowerTestTally* tally, const char* name, con
     {
         0
     };
-    if (ir_lower_test_lower(tally, source, result_type, 1, &output, &twin_output, &scratch, &function, 0, 0))
+    if (ir_lower_test_lower(tally, source, result_type, 1, &output, &scratch, &function, 0, 0))
     {
         Tier0TestData data =
         {
@@ -1306,7 +1431,7 @@ static void ir_lower_test_cas_parameter(IrLowerTestTally* tally)
         }
         ir_lower_test_expect(tally, same && object == 9, "the typed interpreter's compare-exchange reads its address from a parameter used only so", 0, f);
         IrFunction lowered = { 0 };
-        if (ir_lower_test_lower(tally, &function, IR_I32, 1, &output, &twin_output, &arena, &lowered, 0, f))
+        if (ir_lower_test_lower(tally, &function, IR_I32, 1, &output, &arena, &lowered, 0, f))
         {
             object = 5;
             const IrInterpreterFunction code = { .symbol = symbol, .function = &lowered };
@@ -1412,7 +1537,7 @@ static void ir_lower_test_chain(IrLowerTestTally* tally)
     const bool interpreted = interpreter_typed_run(&typed, symbol, 0, 0, &execution, 0, &typed_result);
     ir_lower_test_expect(tally, interpreted && typed_result.value.low == 42, "the typed interpreter passes a static chain in r10", 0, 0);
     IrFunction lowered = { 0 };
-    if (ir_lower_test_lower(tally, &function, IR_I64, 3, &output, &twin_output, &scratch, &lowered, 0, 0))
+    if (ir_lower_test_lower(tally, &function, IR_I64, 3, &output, &scratch, &lowered, 0, 0))
     {
         const IrCall* lowered_call = lowered.call_count == 1 ? &lowered.calls[0] : 0;
         const bool recorded = lowered_call != 0 && lowered_call->abi != 0 && lowered.passed[lowered.abi_calls[lowered_call->abi - 1].passed].location.registers[0] == BUSTER_ABI_R10;
@@ -1464,7 +1589,7 @@ static void ir_lower_test_chain(IrLowerTestTally* tally)
     bytes.argument_locations = byte_locations;
     const InterpreterNativeBinding byte_native = { .symbol = native_symbol, .address = (void*)ir_lower_test_chain_byte };
     IrFunction byte_lowered = { 0 };
-    if (ir_lower_test_lower(tally, &bytes, IR_I64, 3, &output, &twin_output, &scratch, &byte_lowered, 0, 1))
+    if (ir_lower_test_lower(tally, &bytes, IR_I64, 3, &output, &scratch, &byte_lowered, 0, 1))
     {
         const IrInterpreterFunction code = { .symbol = symbol, .function = &byte_lowered };
         const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .natives = &byte_native, .native_count = 1 };
@@ -1542,7 +1667,7 @@ static void ir_lower_test_empty_stack(IrLowerTestTally* tally)
     Arena twin_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
     IrFunction lowered = { 0 };
-    if (ir_lower_test_lower(tally, &function, IR_I64, 3, &output, &twin_output, &scratch, &lowered, 0, 0))
+    if (ir_lower_test_lower(tally, &function, IR_I64, 3, &output, &scratch, &lowered, 0, 0))
     {
         const IrCall* lowered_call = lowered.call_count == 1 ? &lowered.calls[0] : 0;
         const IrPassed* passed = lowered_call != 0 && lowered_call->abi != 0 ? &lowered.passed[lowered.abi_calls[lowered_call->abi - 1].passed] : 0;
@@ -1590,7 +1715,7 @@ static void ir_lower_test_empty_stack(IrLowerTestTally* tally)
     longs.argument_sizes = long_sizes;
     longs.argument_count = 7;
     IrFunction long_lowered = { 0 };
-    if (ir_lower_test_lower(tally, &longs, IR_I64, 3, &output, &twin_output, &scratch, &long_lowered, 0, 1))
+    if (ir_lower_test_lower(tally, &longs, IR_I64, 3, &output, &scratch, &long_lowered, 0, 1))
     {
         ir_lower_test_expect(tally, long_lowered.call_count == 1 && long_lowered.calls[0].abi == 0, "a seventh long on the stack keeps no records", 0, 1);
     }
@@ -1836,71 +1961,68 @@ static void ir_lower_test_failures(IrLowerTestTally* tally)
         .instruction_count = 123,
         .block_count = 17,
     };
-    for (uint32_t vector = 0; vector < 2; vector += 1)
+    IrFunction result = preserved;
+    const uint64_t output_mark = output.length;
+    const uint64_t scratch_mark = scratch.length;
+    IrFunction measured =
     {
-        IrFunction result = preserved;
-        const uint64_t output_mark = output.length;
-        const uint64_t scratch_mark = scratch.length;
-        IrFunction measured =
-        {
-            0
-        };
-        IrCheck check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &measured, vector != 0);
-        const uint64_t required = output.length - output_mark;
-        ir_lower_test_expect(tally, check.error == IR_OK && required != 0, "measure allocation before exhaustion", 0, vector);
-        arena_pop_to(&output, output_mark);
-        Arena no_output = output;
-        no_output.capacity = no_output.length;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &no_output, &scratch, &result, vector != 0);
+        0
+    };
+    IrCheck check = ir_lower_typed(&source, IR_I64, 1, &output, &scratch, &measured);
+    const uint64_t required = output.length - output_mark;
+    ir_lower_test_expect(tally, check.error == IR_OK && required != 0, "measure allocation before exhaustion", 0, 1);
+    arena_pop_to(&output, output_mark);
+    Arena no_output = output;
+    no_output.capacity = no_output.length;
+    check = ir_lower_typed(&source, IR_I64, 1, &no_output, &scratch, &result);
+    ir_lower_test_expect(tally, check.error == IR_ERROR_MEMORY && no_output.length == output_mark && scratch.length == scratch_mark &&
+                              result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                         "output exhaustion rolls back and preserves result", 0, 1);
+    if (required != 0)
+    {
+        no_output.capacity = output_mark + required - 1;
+        check = ir_lower_typed(&source, IR_I64, 1, &no_output, &scratch, &result);
         ir_lower_test_expect(tally, check.error == IR_ERROR_MEMORY && no_output.length == output_mark && scratch.length == scratch_mark &&
                                   result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                             "output exhaustion rolls back and preserves result", 0, vector);
-        if (required != 0)
-        {
-            no_output.capacity = output_mark + required - 1;
-            check = ir_lower_typed_path(&source, IR_I64, 1, &no_output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_MEMORY && no_output.length == output_mark && scratch.length == scratch_mark &&
-                                      result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                 "partial output allocation rolls back and preserves result", 0, vector);
-        }
-        Arena no_scratch = scratch;
-        no_scratch.capacity = no_scratch.length;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &no_scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_ERROR_MEMORY && output.length == output_mark && no_scratch.length == scratch_mark &&
-                                  result.instruction_count == preserved.instruction_count,
-                             "scratch exhaustion rolls back and preserves result", 0, vector);
-        no_scratch.capacity = scratch_mark + 32;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &no_scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_ERROR_MEMORY && output.length == output_mark && no_scratch.length == scratch_mark &&
-                                  result.instruction_count == preserved.instruction_count,
-                             "partial scratch allocation rolls back and preserves result", 0, vector);
-        check = ir_lower_typed_path(&source, IR_I32, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error != IR_OK && output.length == output_mark && scratch.length == scratch_mark,
-                             "explicit result type mismatch rejected", 0, vector);
-        source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT && output.length == output_mark && scratch.length == scratch_mark,
-                             "oversized count rejected before reading columns", 0, vector);
-        source.count = 2;
-        source.kinds = 0;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark,
-                             "missing source column rejected", 0, vector);
-        source.kinds = good_kinds;
-        const uint8_t bad_kinds[] =
-        {
-            BUSTER_TYPED_ADD,
-            BUSTER_TYPED_RETURN
-        };
-        source.kinds = bad_kinds;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error != IR_OK && output.length == output_mark && scratch.length == scratch_mark,
-                             "source operand underflow rejected", 0, vector);
-        source.kinds = good_kinds;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &output, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark,
-                             "aliased output and scratch rejected", 0, vector);
+                             "partial output allocation rolls back and preserves result", 0, 1);
     }
+    Arena no_scratch = scratch;
+    no_scratch.capacity = no_scratch.length;
+    check = ir_lower_typed(&source, IR_I64, 1, &output, &no_scratch, &result);
+    ir_lower_test_expect(tally, check.error == IR_ERROR_MEMORY && output.length == output_mark && no_scratch.length == scratch_mark &&
+                              result.instruction_count == preserved.instruction_count,
+                         "scratch exhaustion rolls back and preserves result", 0, 1);
+    no_scratch.capacity = scratch_mark + 32;
+    check = ir_lower_typed(&source, IR_I64, 1, &output, &no_scratch, &result);
+    ir_lower_test_expect(tally, check.error == IR_ERROR_MEMORY && output.length == output_mark && no_scratch.length == scratch_mark &&
+                              result.instruction_count == preserved.instruction_count,
+                         "partial scratch allocation rolls back and preserves result", 0, 1);
+    check = ir_lower_typed(&source, IR_I32, 1, &output, &scratch, &result);
+    ir_lower_test_expect(tally, check.error != IR_OK && output.length == output_mark && scratch.length == scratch_mark,
+                         "explicit result type mismatch rejected", 0, 1);
+    source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
+    check = ir_lower_typed(&source, IR_I64, 1, &output, &scratch, &result);
+    ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT && output.length == output_mark && scratch.length == scratch_mark,
+                         "oversized count rejected before reading columns", 0, 1);
+    source.count = 2;
+    source.kinds = 0;
+    check = ir_lower_typed(&source, IR_I64, 1, &output, &scratch, &result);
+    ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark,
+                         "missing source column rejected", 0, 1);
+    source.kinds = good_kinds;
+    const uint8_t bad_kinds[] =
+    {
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_RETURN
+    };
+    source.kinds = bad_kinds;
+    check = ir_lower_typed(&source, IR_I64, 1, &output, &scratch, &result);
+    ir_lower_test_expect(tally, check.error != IR_OK && output.length == output_mark && scratch.length == scratch_mark,
+                         "source operand underflow rejected", 0, 1);
+    source.kinds = good_kinds;
+    check = ir_lower_typed(&source, IR_I64, 1, &output, &output, &result);
+    ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark,
+                         "aliased output and scratch rejected", 0, 1);
     arena_release(&output);
     arena_release(&scratch);
 }
@@ -2026,7 +2148,7 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
     {
         0
     };
-    if (ready && ir_lower_test_lower(tally, &source, IR_I64, 1, &output, &twin_output, &scratch, &function, 0, 0))
+    if (ready && ir_lower_test_lower(tally, &source, IR_I64, 1, &output, &scratch, &function, 0, 0))
     {
         const IrSlot list = function.slots[1];
         const IrSlot save = function.slots[2];
@@ -2067,7 +2189,7 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
     }
     // Each break of the roles' rules: a role on a parameter, without ADDRESS_TAKEN, two roles at once, an anchor without
     // the incoming frame, a role on a local of another class.
-    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    if (ready)
     {
         for (uint32_t breach = 0; breach < 5; breach += 1)
         {
@@ -2082,10 +2204,10 @@ static void ir_lower_test_local_roles(IrLowerTestTally* tally)
             const uint64_t output_mark = output.length;
             const uint64_t scratch_mark = scratch.length;
             IrFunction result = preserved;
-            const IrCheck check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            const IrCheck check = ir_lower_typed(&source, IR_I64, 1, &output, &scratch, &result);
             ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
                                             result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                 "a break of the frame roles' rules refused without allocation", breach, vector);
+                                 "a break of the frame roles' rules refused without allocation", breach, 1);
         }
         source.incoming_variadic = &incoming;
         local_classes[3] = BUSTER_TYPED_CLASS_U64;
@@ -2265,7 +2387,7 @@ static void ir_lower_test_aggregates(IrLowerTestTally* tally)
     {
         0
     };
-    if (ready && ir_lower_test_lower(tally, &source, IR_I64, 2, &output, &twin_output, &scratch, &function, 0, 0))
+    if (ready && ir_lower_test_lower(tally, &source, IR_I64, 2, &output, &scratch, &function, 0, 0))
     {
         const IrPassed* own = function.parameter_passed != 0 ? &function.passed[function.parameter_passed - 1] : 0;
         ir_lower_test_expect(tally, own != 0 && function.parameter_types[0] == IR_PTR && function.parameter_types[1] == IR_I64 && own[0].size == 16 &&
@@ -2289,15 +2411,15 @@ static void ir_lower_test_aggregates(IrLowerTestTally* tally)
         // Two pieces of s's bytes, and x's value.
         ir_lower_test_expect(tally, copies == 3 && function.slots[0].size == 16 && function.slots[2].size == 16, "the parameter's 16 bytes copied in two pieces into its object", 0, 0);
     }
-    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    if (ready)
     {
         const uint64_t output_mark = output.length;
         const uint64_t scratch_mark = scratch.length;
         IrFunction result = preserved;
-        IrCheck check = ir_lower_typed_path(0, IR_I64, 1, &output, &scratch, &result, vector != 0);
+        IrCheck check = ir_lower_typed(0, IR_I64, 1, &output, &scratch, &result);
         ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
                                         result.instruction_count == preserved.instruction_count,
-                             "null input refused as a structural error", 0, vector);
+                             "null input refused as a structural error", 0, 1);
         // A result object that isn't an object, an argument past its call's stack area, a result in registers without
         // their result, and aggregates without the calls' totals.
         for (uint32_t breach = 0; breach < 4; breach += 1)
@@ -2307,10 +2429,10 @@ static void ir_lower_test_aggregates(IrLowerTestTally* tally)
             source.result.kind = breach == 2 ? BUSTER_ABI_RESULT_MEMORY : BUSTER_ABI_RESULT_REGISTERS;
             source.calls = breach == 3 ? 0 : calls;
             result = preserved;
-            check = ir_lower_typed_path(&source, IR_I64, 2, &output, &scratch, &result, vector != 0);
+            check = ir_lower_typed(&source, IR_I64, 2, &output, &scratch, &result);
             ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
                                             result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                 "a break of the aggregates' rules refused without allocation", breach, vector);
+                                 "a break of the aggregates' rules refused without allocation", breach, 1);
         }
         call_result_objects[0] = 3;
         argument_locations[0] = pair;
@@ -2338,9 +2460,9 @@ struct IrLowerTestStream
 
 // Narrow integers at a call's boundary (#141): f(signed char a, unsigned short b) returns g(a, b, (unsigned char)200,
 // (short)-3). Each narrow parameter arrives as an i32, truncated to its type before its slot's store, and each narrow
-// argument crosses its call as an i32, sign- or zero-extended by its class, with i32 call types, by both lowering paths.
-// ir_typed_ignored_arguments' twins (#141): random call argument locations of every kind, none, one or several of them
-// IGNORE, at every count from 0 to 40 and so at each of the vector path's 8 lanes and its partial tails, must agree.
+// argument crosses its call as an i32, sign- or zero-extended by its class, with i32 call types.
+// ir_typed_ignored_arguments (#141) against its definition: random call argument locations of every kind, none, one or
+// several of them IGNORE, at every count from 0 to 40 and so at each of the scan's 8 lanes and its partial tails.
 static void ir_lower_test_ignored_scan(IrLowerTestTally* tally)
 {
     AbiLocation locations[40];
@@ -2376,9 +2498,9 @@ static void ir_lower_test_ignored_scan(IrLowerTestTally* tally)
         }
         const Tier0Function function = { .argument_locations = count != 0 ? locations : NULL, .argument_count = count };
         const bool expected = (count != 0 && shape != 0) || chained;
-        agreed += ir_typed_ignored_arguments(&function, true) == expected && ir_typed_ignored_arguments(&function, false) == expected;
+        agreed += ir_typed_ignored_arguments(&function) == expected;
     }
-    ir_lower_test_expect(tally, agreed == 2000, "ir_typed_ignored_arguments' paths find an ignored argument or a static chain where there is one", 141, 0);
+    ir_lower_test_expect(tally, agreed == 2000, "ir_typed_ignored_arguments finds an ignored argument or a static chain where there is one", 141, 0);
 }
 
 static void ir_lower_test_narrow(IrLowerTestTally* tally)
@@ -2506,7 +2628,7 @@ static void ir_lower_test_narrow(IrLowerTestTally* tally)
     {
         0
     };
-    if (ready && ir_lower_test_lower(tally, &source, IR_I32, 2, &output, &twin_output, &scratch, &function, 0, 0))
+    if (ready && ir_lower_test_lower(tally, &source, IR_I32, 2, &output, &scratch, &function, 0, 0))
     {
         // Each parameter's i32, the truncation its store reads, and that store.
         uint32_t truncated = 0;
@@ -2647,89 +2769,86 @@ static void ir_lower_test_sources(IrLowerTestTally* tally)
     Arena output = arena_reserve(1ull << 20);
     Arena plain_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    IrFunction plain = { 0 };
+    IrFunction described = { 0 };
+    const IrCheck plain_check = ir_lower_typed_target_pieces(&source, IR_I64, 1, 0, &plain_output, &scratch, &plain);
+    const uint64_t poisoned_bytes = 1ull << 18;
+    const uint64_t reused = scratch.length;
+    uint8_t* poison = arena_push(&scratch, poisoned_bytes, 1);
+    if (poison != NULL)
     {
-        IrFunction plain = { 0 };
-        IrFunction described = { 0 };
-        const IrCheck plain_check = ir_lower_typed_target_pieces(&source, IR_I64, 1, 0, &plain_output, &scratch, &plain, scalar != 0);
-        const uint64_t poisoned_bytes = 1ull << 18;
-        const uint64_t reused = scratch.length;
-        uint8_t* poison = arena_push(&scratch, poisoned_bytes, 1);
-        if (poison != NULL)
-        {
-            memset(poison, 0xa5, poisoned_bytes);
-        }
-        arena_pop_to(&scratch, reused);
-        const IrCheck debug_check = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &described, scalar != 0);
-        bool valid = ir_lower_test_expect(tally, poison != NULL && plain_check.error == IR_OK && debug_check.error == IR_OK && described.debug != NULL,
-                                          "source-aware lowering accepts the scalar admission fixture with poisoned reused scratch", 0, scalar);
-        if (valid)
-        {
-            valid = ir_lower_test_equal(&plain, &described) && plain.debug == NULL && described.debug->scalar_count == 4;
-            const IrDebugScalar expected[] = {
-                { .local = 0, .entry = BUSTER_IR_NONE, .kind = IR_DEBUG_PARAMETER, .bytes = 8 },
-                { .value = 29, .local = 2, .entry = 1, .kind = IR_DEBUG_CONSTANT, .bytes = 4 },
-                { .value = 0xfb, .local = 6, .entry = 5, .kind = IR_DEBUG_CONSTANT, .bytes = 1 },
-                { .value = UINT64_C(0x400c000000000000), .local = 7, .entry = 7, .kind = IR_DEBUG_CONSTANT, .bytes = 8 },
-            };
-            for (uint32_t k = 0; valid && k < BUSTER_ARRAY_LENGTH(expected); k += 1)
-            {
-                const IrDebugScalar actual = described.debug->scalars[k];
-                valid = actual.local == expected[k].local && actual.entry == expected[k].entry && actual.kind == expected[k].kind &&
-                        actual.bytes == expected[k].bytes && actual.value == expected[k].value;
-            }
-            for (uint32_t local = 0; valid && local < source.local_count; local += 1)
-            {
-                valid = described.debug->locals[local] == local;
-            }
-            ir_lower_test_expect(tally, valid, "debug admission changed IR, lost exact literal bits, or admitted a reassigned/addressed/conditional local", 0, scalar);
-            const IrDebugInfo* debug = described.debug;
-            bool bindings = debug->binding_count == 11 && debug->first_block_end == branch + 1 &&
-                            debug->bindings[0].local == 0 && debug->bindings[0].entry == BUSTER_IR_NONE && debug->bindings[0].kind == IR_DEBUG_BIND_VALUE &&
-                            described.op[debug->bindings[0].value] == IR_PARAM && described.a[debug->bindings[0].value] == 0 &&
-                            debug->bindings[3].local == 3 && debug->bindings[3].entry == 3 && debug->bindings[3].kind == IR_DEBUG_BIND_CONSTANT && debug->bindings[3].literal == 11 &&
-                            debug->bindings[8].local == 3 && debug->bindings[8].entry == 14 && debug->bindings[8].kind == IR_DEBUG_BIND_VALUE &&
-                            described.op[debug->bindings[8].value] == IR_TRUNC;
-            for (uint32_t local = 0; bindings && local < source.local_count; local += 1)
-            {
-                const uint8_t admitted = local == 4 ? 0 : local == 5 || local == 8 ? BUSTER_IR_DEBUG_BIND_REGIONS : BUSTER_IR_DEBUG_BIND_ENTRY;
-                bindings = debug->binding_flags[local] == admitted;
-            }
-            ir_lower_test_expect(tally, bindings, "assignment events lost an initial parameter, a later unknown write, or the branch/loop admission distinction", 0, scalar);
-            const bool regions = debug->region_count == 2 && debug->regions[0].local == 5 && debug->regions[0].block == 2 &&
-                                 debug->regions[0].begin == branch + 3 && debug->regions[0].end == loop &&
-                                 debug->regions[0].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[0].literal == 23 &&
-                                 debug->regions[1].local == 8 && debug->regions[1].block == 3 && debug->regions[1].begin == loop + 2 &&
-                                 debug->regions[1].end == loop + 4 && debug->regions[1].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[1].literal == 5;
-            ir_lower_test_expect(tally, regions, "branch/loop assignments have disjoint block windows and repeated real reads share one witness", 0, scalar);
-            const uint64_t required = plain_output.length;
-            arena_pop_to(&output, 0);
-            Arena bounded = output;
-            bounded.capacity = required;
-            IrFunction sentinel = { .instruction_count = 123, .block_count = 17 };
-            const IrFunction before = sentinel;
-            const uint64_t scratch_mark = scratch.length;
-            const IrCheck refused = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &bounded, &scratch, &sentinel, scalar != 0);
-            ir_lower_test_expect(tally, refused.error == IR_ERROR_MEMORY && bounded.length == 0 && scratch.length == scratch_mark &&
-                                       memcmp(&before, &sentinel, sizeof(sentinel)) == 0,
-                                 "source sidecar exhaustion did not roll back the whole lowering", 0, scalar);
-        }
-        arena_pop_to(&output, 0);
-        arena_pop_to(&plain_output, 0);
-        // The first typed block can itself be a loop header. Its assignments are not one-time definitions merely
-        // because their entry numbers precede the first control transfer; an unchanged incoming parameter still is.
-        stream.values[loop + 3] = 0;
-        IrFunction reentered = { 0 };
-        const IrCheck reentered_check = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &reentered, scalar != 0);
-        bool excluded = reentered_check.error == IR_OK && reentered.debug != NULL && reentered.debug->binding_count == 11;
-        for (uint32_t local = 0; excluded && local < source.local_count; local += 1)
-        {
-            excluded = reentered.debug->binding_flags[local] == (local == 0 ? BUSTER_IR_DEBUG_BIND_ENTRY : local == 4 ? 0 : BUSTER_IR_DEBUG_BIND_REGIONS);
-        }
-        ir_lower_test_expect(tally, excluded, "a backedge into the first source block restricts written locals to witnessed regions", 0, scalar);
-        stream.values[loop + 3] = loop;
-        arena_pop_to(&output, 0);
+        memset(poison, 0xa5, poisoned_bytes);
     }
+    arena_pop_to(&scratch, reused);
+    const IrCheck debug_check = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &described);
+    bool valid = ir_lower_test_expect(tally, poison != NULL && plain_check.error == IR_OK && debug_check.error == IR_OK && described.debug != NULL,
+                                      "source-aware lowering accepts the 0 admission fixture with poisoned reused scratch", 0, 0);
+    if (valid)
+    {
+        valid = ir_lower_test_equal(&plain, &described) && plain.debug == NULL && described.debug->scalar_count == 4;
+        const IrDebugScalar expected[] = {
+            { .local = 0, .entry = BUSTER_IR_NONE, .kind = IR_DEBUG_PARAMETER, .bytes = 8 },
+            { .value = 29, .local = 2, .entry = 1, .kind = IR_DEBUG_CONSTANT, .bytes = 4 },
+            { .value = 0xfb, .local = 6, .entry = 5, .kind = IR_DEBUG_CONSTANT, .bytes = 1 },
+            { .value = UINT64_C(0x400c000000000000), .local = 7, .entry = 7, .kind = IR_DEBUG_CONSTANT, .bytes = 8 },
+        };
+        for (uint32_t k = 0; valid && k < BUSTER_ARRAY_LENGTH(expected); k += 1)
+        {
+            const IrDebugScalar actual = described.debug->scalars[k];
+            valid = actual.local == expected[k].local && actual.entry == expected[k].entry && actual.kind == expected[k].kind &&
+                    actual.bytes == expected[k].bytes && actual.value == expected[k].value;
+        }
+        for (uint32_t local = 0; valid && local < source.local_count; local += 1)
+        {
+            valid = described.debug->locals[local] == local;
+        }
+        ir_lower_test_expect(tally, valid, "debug admission changed IR, lost exact literal bits, or admitted a reassigned/addressed/conditional local", 0, 0);
+        const IrDebugInfo* debug = described.debug;
+        bool bindings = debug->binding_count == 11 && debug->first_block_end == branch + 1 &&
+                        debug->bindings[0].local == 0 && debug->bindings[0].entry == BUSTER_IR_NONE && debug->bindings[0].kind == IR_DEBUG_BIND_VALUE &&
+                        described.op[debug->bindings[0].value] == IR_PARAM && described.a[debug->bindings[0].value] == 0 &&
+                        debug->bindings[3].local == 3 && debug->bindings[3].entry == 3 && debug->bindings[3].kind == IR_DEBUG_BIND_CONSTANT && debug->bindings[3].literal == 11 &&
+                        debug->bindings[8].local == 3 && debug->bindings[8].entry == 14 && debug->bindings[8].kind == IR_DEBUG_BIND_VALUE &&
+                        described.op[debug->bindings[8].value] == IR_TRUNC;
+        for (uint32_t local = 0; bindings && local < source.local_count; local += 1)
+        {
+            const uint8_t admitted = local == 4 ? 0 : local == 5 || local == 8 ? BUSTER_IR_DEBUG_BIND_REGIONS : BUSTER_IR_DEBUG_BIND_ENTRY;
+            bindings = debug->binding_flags[local] == admitted;
+        }
+        ir_lower_test_expect(tally, bindings, "assignment events lost an initial parameter, a later unknown write, or the branch/loop admission distinction", 0, 0);
+        const bool regions = debug->region_count == 2 && debug->regions[0].local == 5 && debug->regions[0].block == 2 &&
+                             debug->regions[0].begin == branch + 3 && debug->regions[0].end == loop &&
+                             debug->regions[0].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[0].literal == 23 &&
+                             debug->regions[1].local == 8 && debug->regions[1].block == 3 && debug->regions[1].begin == loop + 2 &&
+                             debug->regions[1].end == loop + 4 && debug->regions[1].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[1].literal == 5;
+        ir_lower_test_expect(tally, regions, "branch/loop assignments have disjoint block windows and repeated real reads share one witness", 0, 0);
+        const uint64_t required = plain_output.length;
+        arena_pop_to(&output, 0);
+        Arena bounded = output;
+        bounded.capacity = required;
+        IrFunction sentinel = { .instruction_count = 123, .block_count = 17 };
+        const IrFunction before = sentinel;
+        const uint64_t scratch_mark = scratch.length;
+        const IrCheck refused = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &bounded, &scratch, &sentinel);
+        ir_lower_test_expect(tally, refused.error == IR_ERROR_MEMORY && bounded.length == 0 && scratch.length == scratch_mark &&
+                                   memcmp(&before, &sentinel, sizeof(sentinel)) == 0,
+                             "source sidecar exhaustion did not roll back the whole lowering", 0, 0);
+    }
+    arena_pop_to(&output, 0);
+    arena_pop_to(&plain_output, 0);
+    // The first typed block can itself be a loop header. Its assignments are not one-time definitions merely
+    // because their entry numbers precede the first control transfer; an unchanged incoming parameter still is.
+    stream.values[loop + 3] = 0;
+    IrFunction reentered = { 0 };
+    const IrCheck reentered_check = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &reentered);
+    bool excluded = reentered_check.error == IR_OK && reentered.debug != NULL && reentered.debug->binding_count == 11;
+    for (uint32_t local = 0; excluded && local < source.local_count; local += 1)
+    {
+        excluded = reentered.debug->binding_flags[local] == (local == 0 ? BUSTER_IR_DEBUG_BIND_ENTRY : local == 4 ? 0 : BUSTER_IR_DEBUG_BIND_REGIONS);
+    }
+    ir_lower_test_expect(tally, excluded, "a backedge into the first source block restricts written locals to witnessed regions", 0, 0);
+    stream.values[loop + 3] = loop;
+    arena_pop_to(&output, 0);
     arena_release(&scratch);
     arena_release(&plain_output);
     arena_release(&output);
@@ -2774,31 +2893,28 @@ static void ir_lower_test_region_lifetimes(IrLowerTestTally* tally)
     Arena output = arena_reserve(1ull << 20);
     Arena plain_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    IrFunction function = { 0 };
+    IrFunction plain = { 0 };
+    const IrCheck described = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &function);
+    const IrCheck control = ir_lower_typed_target_pieces(&source, IR_I64, 1, 0, &plain_output, &scratch, &plain);
+    bool exact = described.error == IR_OK && control.error == IR_OK && ir_lower_test_equal(&function, &plain) && function.debug != NULL &&
+                 function.debug->region_count == 4 && function.debug->binding_flags[0] == BUSTER_IR_DEBUG_BIND_ENTRY &&
+                 function.debug->binding_flags[1] == BUSTER_IR_DEBUG_BIND_REGIONS;
+    const uint32_t begins[] = { 2, 4, 10, 16 };
+    const uint32_t ends[] = { 4, 9, 12, 18 };
+    const uint64_t literals[] = { 11, 0, 22, 33 };
+    for (uint32_t k = 0; exact && k < BUSTER_ARRAY_LENGTH(begins); k += 1)
     {
-        IrFunction function = { 0 };
-        IrFunction plain = { 0 };
-        const IrCheck described = ir_lower_typed_target_pieces_sources(&source, IR_I64, 1, 0, &output, &scratch, &function, scalar != 0);
-        const IrCheck control = ir_lower_typed_target_pieces(&source, IR_I64, 1, 0, &plain_output, &scratch, &plain, scalar != 0);
-        bool exact = described.error == IR_OK && control.error == IR_OK && ir_lower_test_equal(&function, &plain) && function.debug != NULL &&
-                     function.debug->region_count == 4 && function.debug->binding_flags[0] == BUSTER_IR_DEBUG_BIND_ENTRY &&
-                     function.debug->binding_flags[1] == BUSTER_IR_DEBUG_BIND_REGIONS;
-        const uint32_t begins[] = { 2, 4, 10, 16 };
-        const uint32_t ends[] = { 4, 9, 12, 18 };
-        const uint64_t literals[] = { 11, 0, 22, 33 };
-        for (uint32_t k = 0; exact && k < BUSTER_ARRAY_LENGTH(begins); k += 1)
-        {
-            const IrDebugRegion region = function.debug->regions[k];
-            exact = region.local == 1 && region.block == (k == 0 ? 1u : 2u) && region.begin == begins[k] && region.end == ends[k] &&
-                    region.bytes == 8 && region.type == IR_I64 && region.next == (k == 1 ? 2u : k == 2 ? 3u : BUSTER_IR_NONE);
-            exact = exact && (k == 1 ? region.kind == IR_DEBUG_BIND_VALUE && region.value < function.instruction_count &&
-                             function.op[region.value] == IR_LOAD && function.debug->origins[region.value] == 4 :
-                             region.kind == IR_DEBUG_BIND_CONSTANT && region.literal == literals[k]);
-        }
-        ir_lower_test_expect(tally, exact, "source regions preserve read witnesses, exact next-assignment kills and lifetime gaps without changing IR", 0, scalar);
-        arena_pop_to(&plain_output, 0);
-        arena_pop_to(&output, 0);
+        const IrDebugRegion region = function.debug->regions[k];
+        exact = region.local == 1 && region.block == (k == 0 ? 1u : 2u) && region.begin == begins[k] && region.end == ends[k] &&
+                region.bytes == 8 && region.type == IR_I64 && region.next == (k == 1 ? 2u : k == 2 ? 3u : BUSTER_IR_NONE);
+        exact = exact && (k == 1 ? region.kind == IR_DEBUG_BIND_VALUE && region.value < function.instruction_count &&
+                         function.op[region.value] == IR_LOAD && function.debug->origins[region.value] == 4 :
+                         region.kind == IR_DEBUG_BIND_CONSTANT && region.literal == literals[k]);
     }
+    ir_lower_test_expect(tally, exact, "source regions preserve read witnesses, exact next-assignment kills and lifetime gaps without changing IR", 0, 0);
+    arena_pop_to(&plain_output, 0);
+    arena_pop_to(&output, 0);
     arena_release(&scratch);
     arena_release(&plain_output);
     arena_release(&output);
@@ -2915,7 +3031,7 @@ static void ir_lower_test_objects(IrLowerTestTally* tally)
     {
         0
     };
-    if (valid && ir_lower_test_lower(tally, &source, IR_I64, 1, &output, &twin_output, &scratch, &function, 0, 0))
+    if (valid && ir_lower_test_lower(tally, &source, IR_I64, 1, &output, &scratch, &function, 0, 0))
     {
         bool slots = function.slot_count >= 2;
         for (uint32_t l = 0; slots && l < 2; l += 1)
@@ -2943,18 +3059,15 @@ static void ir_lower_test_objects(IrLowerTestTally* tally)
         {
             malformed.local_classes = classed;
         }
-        for (uint32_t vector = 0; vector < 2; vector += 1)
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        IrFunction result =
         {
-            const uint64_t output_mark = output.length;
-            const uint64_t scratch_mark = scratch.length;
-            IrFunction result =
-            {
-                .instruction_count = 123,
-            };
-            const IrCheck check = ir_lower_typed_path(&malformed, IR_I64, 1, &output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark && result.instruction_count == 123,
-                                 "malformed objects refused without allocation", broken, vector);
-        }
+            .instruction_count = 123,
+        };
+        const IrCheck check = ir_lower_typed(&malformed, IR_I64, 1, &output, &scratch, &result);
+        ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark && result.instruction_count == 123,
+                             "malformed objects refused without allocation", broken, 1);
     }
     arena_release(&output);
     arena_release(&twin_output);
@@ -3031,7 +3144,7 @@ static void ir_lower_test_copies(IrLowerTestTally* tally)
             {
                 0
             };
-            bool ok = ir_lower_test_lower(tally, &source, IR_VOID, 3, &output, &twin_output, &scratch, &function, size, same);
+            bool ok = ir_lower_test_lower(tally, &source, IR_VOID, 3, &output, &scratch, &function, size, same);
             if (ok)
             {
                 uint32_t loads = 0;
@@ -3253,7 +3366,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     {
         0
     };
-    if (ready && ir_lower_test_lower(tally, &source, IR_VOID, 1, &output, &twin_output, &scratch, &function, 0, 0))
+    if (ready && ir_lower_test_lower(tally, &source, IR_VOID, 1, &output, &scratch, &function, 0, 0))
     {
         uint32_t jumps = 0;
         for (uint32_t i = 0; i < function.instruction_count; i += 1)
@@ -3266,7 +3379,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     }
     arena_pop_to(&output, 0);
     arena_pop_to(&twin_output, 0);
-    if (ready && ir_lower_test_lower(tally, &computed, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 1))
+    if (ready && ir_lower_test_lower(tally, &computed, IR_I32, 4, &output, &scratch, &function, 0, 1))
     {
         for (uint64_t p = 0; p < 2; p += 1)
         {
@@ -3302,7 +3415,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_pop_to(&twin_output, 0);
     arena_pop_to(&promoted, 0);
     arena_pop_to(&twin_promoted, 0);
-    if (ready && ir_lower_test_lower(tally, &twice, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 2))
+    if (ready && ir_lower_test_lower(tally, &twice, IR_I32, 4, &output, &scratch, &function, 0, 2))
     {
         // The dispatch block is the last: each jump's block branches to it, and its br_indirect goes to the two labels.
         const uint32_t last = function.block_count - 1;
@@ -3390,7 +3503,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         tabled.symbol_count = 4;
         ir_lower_test_expect(tally, tier0_validate(&tabled).error == TIER0_OK && tier0_validate_scalar(&tabled).error == TIER0_OK,
                              "Tier 0 takes the jump tables' columns", 0, 3 + variant);
-        if (ir_lower_test_lower(tally, &tabled, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 3 + variant))
+        if (ir_lower_test_lower(tally, &tabled, IR_I32, 4, &output, &scratch, &function, 0, 3 + variant))
         {
             // Each br_indirect lists one label, its one successor: label 0 the goto *'s (mixed) or table 0's, label 1
             // the last table's.
@@ -3475,7 +3588,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     loop.table_jumps = loop_jumps;
     loop.table_addresses = loop_addresses;
     loop.table_count = 2;
-    if (ready && ir_lower_test_lower(tally, &loop, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 7))
+    if (ready && ir_lower_test_lower(tally, &loop, IR_I32, 4, &output, &scratch, &function, 0, 7))
     {
         uint32_t addresses = 0;
         uint32_t symbols = 0;
@@ -3584,31 +3697,28 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         const Tier0Check scalar = tier0_validate_scalar(&broken);
         ir_lower_test_expect(tally, vector.error == TIER0_ERROR_INVALID && scalar.error == TIER0_ERROR_INVALID && vector.node == scalar.node,
                              address_breaks[b].name, 0, b);
-        for (uint32_t path = 0; path < 2; path += 1)
-        {
-            const uint64_t output_mark = output.length;
-            const uint64_t scratch_mark = scratch.length;
-            IrFunction result = preserved;
-            const IrCheck check = ir_lower_typed_path(&broken, IR_I32, 4, &output, &scratch, &result, path != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
-                                            result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                 address_breaks[b].name, path, b);
-        }
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        IrFunction result = preserved;
+        const IrCheck check = ir_lower_typed(&broken, IR_I32, 4, &output, &scratch, &result);
+        ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
+                                        result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                             address_breaks[b].name, 1, b);
     }
-    for (uint32_t vector = 0; marked && vector < 2; vector += 1)
+    if (marked)
     {
         const uint64_t output_mark = output.length;
         const uint64_t scratch_mark = scratch.length;
         IrFunction result = preserved;
-        const IrCheck check = ir_lower_typed_path(&frame, IR_VOID, 1, &output, &scratch, &result, vector != 0);
+        const IrCheck check = ir_lower_typed(&frame, IR_VOID, 1, &output, &scratch, &result);
         uint32_t saves = 0;
         for (uint32_t i = 0; check.error == IR_OK && i < result.instruction_count; i += 1)
         {
             saves += result.op[i] == IR_STACK_SAVE && result.type[i] == IR_I64 && result.flags[i] == BUSTER_IR_STACK_SAVE_FRAME;
         }
         ir_lower_test_expect(tally, tier0_validate(&frame).error == TIER0_OK && check.error == IR_OK && saves == 1 &&
-                                        ir_verify(&result, &scratch, 0).error == IR_OK && ir_verify_scalar(&result, &scratch, 0).error == IR_OK,
-                             "the frame address lowered to a frame's stack save", 0, vector);
+                                        ir_verify(&result, &scratch, 0).error == IR_OK,
+                             "the frame address lowered to a frame's stack save", 0, 1);
         arena_pop_to(&output, output_mark);
         arena_pop_to(&scratch, scratch_mark);
     }
@@ -3666,7 +3776,7 @@ static void ir_lower_test_hoisted_symbols(IrLowerTestTally* tally)
         };
         IrFunction function = { 0 };
         ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && tier0_validate_scalar(&source).error == TIER0_OK, "Tier 0 takes the symbols' function", 0, variant);
-        if (ir_lower_test_lower(tally, &source, IR_I64, 4, &output, &twin_output, &scratch, &function, 0, variant))
+        if (ir_lower_test_lower(tally, &source, IR_I64, 4, &output, &scratch, &function, 0, variant))
         {
             uint32_t addresses = 0;
             uint32_t preheader = 0;
@@ -3859,7 +3969,7 @@ static void ir_lower_test_hoisted_places(IrLowerTestTally* tally)
         const Tier0Function* source = &sources[which];
         IrFunction function = { 0 };
         ir_lower_test_expect(tally, tier0_validate(source).error == TIER0_OK && tier0_validate_scalar(source).error == TIER0_OK, "Tier 0 takes the hoisted places' functions", 0, which);
-        if (ir_lower_test_lower(tally, source, IR_I64, 6, &output, &twin_output, &scratch, &function, 0, which))
+        if (ir_lower_test_lower(tally, source, IR_I64, 6, &output, &scratch, &function, 0, which))
         {
             uint32_t counts[6] = { 0 };
             uint32_t blocks[6] = { 0 };
@@ -4076,8 +4186,8 @@ static void ir_lower_test_hoisted_loops(IrLowerTestTally* tally)
     {
         IrFunction functions[2] = { 0 };
         ir_lower_test_expect(tally, tier0_validate(&sources[which]).error == TIER0_OK && tier0_validate_scalar(&sources[which]).error == TIER0_OK, "Tier 0 takes the hoisted loops' functions", 0, which);
-        if (ir_lower_test_lower(tally, &sources[which], IR_I64, 6, &output, &twin_output, &scratch, &functions[0], 0, which) &&
-            ir_lower_test_lower(tally, &callee, IR_I64, 6, &output, &twin_output, &scratch, &functions[1], 0, which))
+        if (ir_lower_test_lower(tally, &sources[which], IR_I64, 6, &output, &scratch, &functions[0], 0, which) &&
+            ir_lower_test_lower(tally, &callee, IR_I64, 6, &output, &scratch, &functions[1], 0, which))
         {
             uint32_t taken = 0;
             const uint32_t blocks = ir_lower_test_symbol_blocks(&functions[0], symbols[which], &taken);
@@ -4220,7 +4330,7 @@ static void ir_lower_test_hoisted_folds(IrLowerTestTally* tally)
     {
         IrFunction function = { 0 };
         ir_lower_test_expect(tally, tier0_validate(&sources[which]).error == TIER0_OK && tier0_validate_scalar(&sources[which]).error == TIER0_OK, "Tier 0 takes the folded takes' functions", 0, which);
-        if (ir_lower_test_lower(tally, &sources[which], IR_I64, 4, &output, &twin_output, &scratch, &function, 0, which))
+        if (ir_lower_test_lower(tally, &sources[which], IR_I64, 4, &output, &scratch, &function, 0, which))
         {
             uint32_t taken = 0;
             const uint32_t blocks = ir_lower_test_symbol_blocks(&function, symbols[which], &taken);
@@ -4504,7 +4614,7 @@ static void ir_lower_test_hoisted_split(IrLowerTestTally* tally)
     {
         IrFunction function = { 0 };
         ir_lower_test_expect(tally, tier0_validate(&sources[which]).error == TIER0_OK && tier0_validate_scalar(&sources[which]).error == TIER0_OK, "Tier 0 takes the hoisted splits' functions", 0, which);
-        if (ir_lower_test_lower(tally, &sources[which], IR_I64, 5, &output, &twin_output, &scratch, &function, 0, which))
+        if (ir_lower_test_lower(tally, &sources[which], IR_I64, 5, &output, &scratch, &function, 0, which))
         {
             uint32_t taken = 0;
             const uint32_t blocks = ir_lower_test_symbol_blocks(&function, symbols[which], &taken);
@@ -4583,7 +4693,7 @@ static void ir_lower_test_depth_check(IrLowerTestTally* tally, const Tier0Functi
     {
         0
     };
-    if (ready && ir_lower_test_lower(tally, source, result_type, 1, &output, &twin_output, &scratch, &function, 0, index))
+    if (ready && ir_lower_test_lower(tally, source, result_type, 1, &output, &scratch, &function, 0, index))
     {
         // Each temporary slot's access types, a bit per IR type, by the loads' types and the stored values'.
         uint32_t types[16] =
@@ -4993,7 +5103,7 @@ static void ir_lower_test_guarded(IrLowerTestTally* tally)
             {
                 0
             };
-            ir_lower_test_lower(tally, &source, count > 1 ? IR_I64 : IR_VOID, 1, &output, &twin_output, &scratch, &function, 0, count);
+            ir_lower_test_lower(tally, &source, count > 1 ? IR_I64 : IR_VOID, 1, &output, &scratch, &function, 0, count);
             arena_pop_to(&output, 0);
             arena_pop_to(&twin_output, 0);
         }
@@ -5107,7 +5217,7 @@ static void ir_lower_test_variadic_frames(IrLowerTestTally* tally)
         };
         bool ok = tier0_vf_fixture(&vf, stream, &tables, kind, false) && tier0_vf_build(&vf, &tables, &arena, kind, &native);
         ok = ir_lower_test_expect(tally, ok && vf.failures == 0, "Tier 0's variadic callee and its native code", kind, 0);
-        ok = ok && ir_lower_test_lower(tally, &stream->function, IR_I64, 2, &output, &twin_output, &scratch, &callee, kind, 0);
+        ok = ok && ir_lower_test_lower(tally, &stream->function, IR_I64, 2, &output, &scratch, &callee, kind, 0);
         // Natively, from clang's caller, in a child: the output and then the result on the shared page.
         Tier0VfOutput* native_output = (Tier0VfOutput*)(void*)page;
         uint64_t native_result = 0;
@@ -5372,7 +5482,7 @@ static int run_ir_lower_tests(int argc, char** argv)
     {
         IrLowerTestTally tally =
         {
-            0
+            .lowered = UINT64_C(0xcbf29ce484222325),
         };
         ir_simd_lower_tests(&tally);
         ir_lower_test_fixtures(&tally);
@@ -5432,6 +5542,11 @@ static int run_ir_lower_tests(int argc, char** argv)
         dynamic.floating = false;
         ir_lower_test_programs(&tally, seed, count, dynamic, false, "dynamic stack (strict shared IR / Tier 0 native)");
         ir_lower_test_wide(&tally, seed, 4 * count);
+        printf("test-ir-lowering: lowered digest 0x%016" PRIx64 "\n", tally.lowered);
+        if (seed == 131 && count == 32)
+        {
+            ir_lower_test_expect(&tally, tally.lowered == BUSTER_IR_LOWER_TEST_DIGEST, "the lowered functions' digest is the frozen one", seed, 0);
+        }
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
         result = tally.failures != 0;
     }

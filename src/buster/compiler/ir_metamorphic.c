@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Bounded, deterministic IR metamorphic testing. Generated scalar programs have an independent arithmetic/memory
-// model. Rebuilding changes representation through public IR columns, never a compiler implementation. Both
-// complete verifiers, text consumers, checked execution and each admitted optimizer must retain the observations.
+// model. Rebuilding changes representation through public IR columns, never a compiler implementation. The
+// complete verifier, text consumers, checked execution and each admitted optimizer must retain the observations.
 // Layout: generation/model; scalar/SIMD ID remapping and transformations; consumer checks; artifacts/replay; CLI.
 
 #include <errno.h>
@@ -295,7 +295,7 @@ static IrMetaFailure ir_meta_transform(const IrFunction* source, uint32_t varian
         failure = IR_META_TRANSFORM;
     }
     bool valid = failure == IR_META_OK;
-    const IrCheck verified = valid ? ir_verify_complete(source, scratch, !scalar) : (IrCheck){ .error = IR_ERROR_LIMIT };
+    const IrCheck verified = valid ? ir_verify_complete(source, scratch) : (IrCheck){ .error = IR_ERROR_LIMIT };
     if (valid && verified.error != IR_OK)
     {
         failure = verified.error == IR_ERROR_MEMORY || verified.error == IR_ERROR_LIMIT ? IR_META_RESOURCE : IR_META_VERIFY;
@@ -500,7 +500,7 @@ static IrMetaFailure ir_meta_transform(const IrFunction* source, uint32_t varian
         }
         if (valid)
         {
-            const IrCheck check = ir_verify_complete(&built, scratch, !scalar);
+            const IrCheck check = ir_verify_complete(&built, scratch);
             failure = check.error == IR_OK ? IR_META_OK : check.error == IR_ERROR_MEMORY || check.error == IR_ERROR_LIMIT ? IR_META_RESOURCE : IR_META_TRANSFORM;
             valid = failure == IR_META_OK;
         }
@@ -552,23 +552,19 @@ static bool ir_meta_same_text(String8 left, String8 right)
     return same;
 }
 
-static IrMetaFailure ir_meta_verification_result(IrCheck vector, IrCheck scalar, bool scratch_preserved)
+static IrMetaFailure ir_meta_verification_result(IrCheck check, bool scratch_preserved)
 {
-    const bool same = vector.error == scalar.error && vector.instruction == scalar.instruction && vector.detail == scalar.detail &&
-                      vector.dominance_checked == scalar.dominance_checked;
-    const bool resource = vector.error == IR_ERROR_MEMORY || vector.error == IR_ERROR_LIMIT ||
-                          scalar.error == IR_ERROR_MEMORY || scalar.error == IR_ERROR_LIMIT;
+    const bool resource = check.error == IR_ERROR_MEMORY || check.error == IR_ERROR_LIMIT;
     const IrMetaFailure failure = !scratch_preserved ? IR_META_VERIFY : resource ? IR_META_RESOURCE :
-                                 !same || vector.error != IR_OK ? IR_META_VERIFY : IR_META_OK;
+                                 check.error != IR_OK ? IR_META_VERIFY : IR_META_OK;
     return failure;
 }
 
 static IrMetaFailure ir_meta_validate(const IrFunction* function, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
-    const IrCheck vector = ir_verify_complete(function, scratch, true);
-    const IrCheck scalar = ir_verify_complete(function, scratch, false);
-    const IrMetaFailure failure = ir_meta_verification_result(vector, scalar, scratch->length == mark);
+    const IrCheck check = ir_verify_complete(function, scratch);
+    const IrMetaFailure failure = ir_meta_verification_result(check, scratch->length == mark);
     return failure;
 }
 

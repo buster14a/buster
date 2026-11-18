@@ -641,7 +641,7 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     const String8 parsed = { .pointer = (char*)text, .length = strlen(text) };
     const bool created = fixture == 0 ? tier1_float_mixed_function(&test->input, &function) : fixture == 1 ? tier1_float_loop_function(&test->input, &function) :
                                                                                             ir_parse(parsed, &test->input, &test->scratch, &function).error == IR_PARSE_OK;
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the floating fixture is valid IR");
     IrDominance dominance;
     const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);

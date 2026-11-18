@@ -3999,9 +3999,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
                                   const uint64_t* counts, const uint8_t* expected)
 {
     const uint64_t output_mark = test->output.length;
-    // The scans for vectors that selection and the CFG consumer make, which must take the requested path (#141's review):
-    // a scalar run none by the vector path.
-    const uint64_t scans = ir_scan_vector_paths;
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
     const Tier1SelectError selected = tier1_select_plan(function, dominance, &test->output, &test->scratch, &plan, &node);
@@ -4025,8 +4022,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         {
             printf("test-tier1-masks: %s, %s path: emission error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)error, node);
         }
-        tier1_masks_test_expect(test, vector ? ir_scan_vector_paths > scans : ir_scan_vector_paths == scans,
-                                "selection's and the CFG consumer's scans for vectors take the requested path: none the vector path on a scalar run");
     }
     if (ok)
     {
@@ -4338,7 +4333,7 @@ static void tier1_masks_test_scan(Tier1MasksTest* test)
             type[i] = masks[i % 4];
         }
         const IrFunction function = { .op = op, .type = type, .instruction_count = count };
-        tier1_masks_test_expect(test, !ir_function_has_vectors_path(&function, true) && !ir_function_has_vectors_path(&function, false), "masks' operations hold no vector");
+        tier1_masks_test_expect(test, !ir_function_has_vectors(&function), "masks' operations hold no vector");
         for (uint32_t place = 0; place < count; place += 1)
         {
             const uint8_t saved_op = op[place];
@@ -4347,7 +4342,7 @@ static void tier1_masks_test_scan(Tier1MasksTest* test)
             {
                 op[place] = vectors[v][0];
                 type[place] = vectors[v][1];
-                tier1_masks_test_expect(test, ir_function_has_vectors_path(&function, true) && ir_function_has_vectors_path(&function, false), "a vector type or operation at any place, the tail's last among them");
+                tier1_masks_test_expect(test, ir_function_has_vectors(&function), "a vector type or operation at any place, the tail's last among them");
             }
             op[place] = saved_op;
             type[place] = saved_type;
@@ -4488,17 +4483,6 @@ static bool tier1_masks_test_typed_interpret(Tier1MasksTest* test, const IrFunct
     return result.status == INTERPRETER_OK;
 }
 
-// Whether two lowerings made the same function, column for column.
-static bool tier1_masks_test_same_ir(const IrFunction* a, const IrFunction* b)
-{
-    const uint32_t count = a->instruction_count;
-    return count == b->instruction_count && a->block_count == b->block_count && a->slot_count == b->slot_count && a->constant_count == b->constant_count &&
-           memcmp(a->op, b->op, count) == 0 && memcmp(a->type, b->type, count) == 0 && memcmp(a->a, b->a, (uint64_t)count * sizeof(uint32_t)) == 0 &&
-           memcmp(a->b, b->b, (uint64_t)count * sizeof(uint32_t)) == 0 && memcmp(a->c, b->c, (uint64_t)count * sizeof(uint32_t)) == 0 &&
-           memcmp(a->block_offsets, b->block_offsets, ((uint64_t)a->block_count + 1) * sizeof(uint32_t)) == 0 &&
-           memcmp(a->constants, b->constants, (uint64_t)a->constant_count * sizeof(IrConstant)) == 0;
-}
-
 typedef void (*Tier1MasksTestTypedEntry)(const uint64_t*, uint8_t*);
 
 static __attribute__((no_sanitize("function"))) void tier1_masks_test_typed_call(const uint8_t* code, const uint64_t* in, uint8_t* out)
@@ -4603,7 +4587,7 @@ static void tier1_masks_test_typed_native(Tier1MasksTest* test, const char* name
 // the same functions; the all-in-memory IR run by the IR's interpreter on each input; promoted by both SSA paths and run
 // again; optimized (ir_optimize's SCCP, dead code and CFG cleanup) and run again; then planned and emitted by both of
 // Tier 1's paths (with rematerialization, as --tier1 compiles), its allocation checked by tier1_cfg_verify, and run
-// natively. A program that isn't `decodable` has a row the IR's decoders don't take, which both paths lower as a machine
+// natively. A program that isn't `decodable` has a row the IR's decoders don't take, which the lowering takes as a machine
 // row (#141, a row call): the interpreter refuses it at every stage, having no model of x86 records, and Tier 1's native
 // runs alone check it against the model, the row's records placed by tier1_emit_cfg_row. Each stage's output in an arena
 // of its own (`arenas`: the promotions', the optimizer's and Tier 1's), which owns none of its input (ssa_ir_promote's and
@@ -4616,41 +4600,34 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
     bool ok = tier1_masks_test_expect(test, outputs != 0, "the typed pipeline's outputs");
     static const IrType results[2] = { IR_VOID, IR_I64 };
     *machine = false;
-    // Lowered by both paths: the vector path's functions in lowered[0], the scalar twin's in lowered[1].
-    IrFunction lowered[2][2];
-    IrCheck checks[2][2];
-    for (uint32_t path = 0; ok && path < 2; path += 1)
+    IrFunction lowered[2];
+    IrCheck checks[2];
+    for (uint32_t f = 0; ok && f < 2; f += 1)
     {
-        for (uint32_t f = 0; f < 2; f += 1)
-        {
-            checks[path][f] = path == 0 ? ir_lower_typed_target(&functions[f], results[f], 3, test->v4_features, &test->output, &test->scratch, &lowered[path][f])
-                                        : ir_lower_typed_target_scalar(&functions[f], results[f], 3, test->v4_features, &test->output, &test->scratch, &lowered[path][f]);
-        }
+        checks[f] = ir_lower_typed_target(&functions[f], results[f], 3, test->v4_features, &test->output, &test->scratch, &lowered[f]);
     }
     if (ok && !decodable)
     {
-        *machine = checks[0][0].error == IR_OK && checks[1][0].error == IR_OK && lowered[0][0].row_count != 0 && lowered[1][0].row_count == lowered[0][0].row_count;
+        *machine = checks[0].error == IR_OK && lowered[0].row_count != 0;
         tier1_masks_test_expect(test, *machine, "a row the IR's decoders don't take is the typed program's machine row,");
     }
     for (uint32_t f = 0; ok && f < 2; f += 1)
     {
-        ok = tier1_masks_test_expect(test, checks[0][f].error == IR_OK && checks[1][f].error == IR_OK, "both paths lower the typed program") &&
-             tier1_masks_test_expect(test, tier1_masks_test_same_ir(&lowered[0][f], &lowered[1][f]), "both paths lower it into the same function");
+        ok = tier1_masks_test_expect(test, checks[f].error == IR_OK, "the lowering takes the typed program");
         if (!ok)
         {
-            printf("test-tier1-masks: %s, function %u: lowering errors %u at %u and %u at %u\n", name, f, (unsigned)checks[0][f].error, checks[0][f].instruction, (unsigned)checks[1][f].error,
-                   checks[1][f].instruction);
+            printf("test-tier1-masks: %s, function %u: lowering error %u at %u\n", name, f, (unsigned)checks[f].error, checks[f].instruction);
         }
     }
     // The IR's interpreter on each stage: all in memory, promoted by each path, optimized.
     IrFunction promoted[2][2];
     IrFunction optimized[2];
-    const IrFunction* stages[4] = { lowered[0], promoted[0], promoted[1], optimized };
+    const IrFunction* stages[4] = { lowered, promoted[0], promoted[1], optimized };
     for (uint32_t path = 0; ok && path < 2; path += 1)
     {
         for (uint32_t f = 0; ok && f < 2; f += 1)
         {
-            const IrCheck check = path == 0 ? ssa_ir_promote(&lowered[0][f], &arenas[0], &test->scratch, &promoted[path][f]) : ssa_ir_promote_scalar(&lowered[0][f], &arenas[0], &test->scratch, &promoted[path][f]);
+            const IrCheck check = path == 0 ? ssa_ir_promote(&lowered[f], &arenas[0], &test->scratch, &promoted[path][f]) : ssa_ir_promote_scalar(&lowered[f], &arenas[0], &test->scratch, &promoted[path][f]);
             ok = tier1_masks_test_expect(test, check.error == IR_OK, "both SSA paths promote the typed program's masks");
             if (!ok)
             {

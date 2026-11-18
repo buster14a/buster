@@ -88,7 +88,7 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
     chain &= function->label_count == 0 && !function->variadic && function->parameter_passed == 0;
     // A vector (#141) needs the vector class's allocation at its width: a function with one is the CFG consumer's, which
     // one scan of it says, by the path that planned it.
-    chain &= !ir_function_has_vectors_path(function, true);
+    chain &= !ir_function_has_vectors(function);
     bool prefix = true;
     for (uint32_t node = 0; chain && node < function->instruction_count; node += 1)
     {
@@ -536,7 +536,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     prepared->function = function;
     // Whether the function has vectors (#141): one scan of it, by the requested path, so that a function without one pays no
     // node's vector checks.
-    const bool vectors = ir_function_has_vectors_path(function, true);
+    const bool vectors = ir_function_has_vectors(function);
     for (uint32_t node = 0; ok && node < count; node += 1)
     {
         const bool x87 = function->type[node] == IR_F80;
@@ -3511,7 +3511,7 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
     const uint32_t nodes = function->instruction_count;
     const uint64_t mark = scratch->length;
     IrUses uses = { 0 };
-    bool ok = emitted->prepared.x87_count != 0 && ir_uses_path(function, scratch, output, &uses, true) == IR_OK;
+    bool ok = emitted->prepared.x87_count != 0 && ir_uses_validated(function, scratch, output, &uses) == IR_OK;
     uint32_t* tokens = ok ? ir_allocate(scratch, (uint64_t)records + 1, 4, &ok) : 0;
     uint8_t* eligible = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
     uint8_t* boundaries = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;

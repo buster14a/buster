@@ -12,8 +12,8 @@ BUSTER_COMPILER=/absolute/path/to/compiler sh reduction/replay.sh
 
 Replace `COMMIT` with the complete 40- or 64-digit source revision. Use a new
 output directory. The memory example uses `--demo memory --inject memory-store`;
-`--demo phi --inject verify-phi` injects a disagreement after both real verifiers
-approve the graph. These injections change the test observer, never a compiler
+`--demo phi --inject verify-phi` injects a consumer's disagreement with the
+verifier after the real verifier approves the graph. These injections change the test observer, never a compiler
 implementation. For a real optimizer mismatch, replace `--demo` and `--inject`
 with a `.ir` input path and suitable `--arg LOW[:HIGH]` values.
 
@@ -21,14 +21,13 @@ The predicate compares the actual optimizer's scalar and SIMD paths with the
 original function through the checked interpreter. It compares the returned
 bits and all bytes of one registered 32-byte global, symbol 2. The function is
 symbol 1. Unbound calls and other unsupported interpreter forms are unavailable
-observations. `--verify` instead rechecks the two verifiers on admitted functions
+observations. `--verify` instead rechecks the verifier on admitted functions
 and supports the explicit `verify-phi` observer injection.
-Both input admission and every replacement require both complete verifiers to
+Both input admission and every replacement require the complete verifier to
 accept the function before this observer runs. Consequently, this hook cannot
-reduce an ordinary input on which those deterministic verifiers disagree;
-reduction of input-verifier disagreements remains separate future work. The
-injected fixture qualifies the classified reduction/replay path within that
-admission boundary, not that deferred capability.
+reduce an ordinary input the verifier rejects; that remains separate future
+work. The injected fixture qualifies the classified reduction/replay path within
+that admission boundary, not that deferred capability.
 `--passes 0..7` chooses the existing SCCP/DCE/CFG pass mask.
 
 The reducer rebuilds selected blocks and instructions into fresh columns, with
@@ -36,7 +35,7 @@ compact value/block IDs, remapped phi predecessors, call/signature/operand
 slices, addresses and the slots that addresses and `lifetime` markers refer to
 (a slot only markers refer to stays, renumbered with them; #177). Symbol
 identities and ABI stay stable.
-Both complete verifiers, including reachable SSA dominance, approve every
+The complete verifier, including reachable SSA dominance, approves every
 candidate before the predicate runs. Candidate order is stable. The objective
 orders block count, instruction count, side-record count, then constant bit
 width and population. This finds a useful local reduction, with no claim of a
@@ -118,6 +117,6 @@ aggregates' ABI records (the function's own and its calls') and a variadic
 definition's incoming frame. `ir_rebuild` returns `IR_ERROR_METADATA` and
 `ir_reduce` `IR_REDUCE_INVALID` for such a function, before the predicate
 sees it, rather than copying it without them; `test-ir-reduce` checks a
-fixture of each that both verifiers accept.
+fixture of each that the verifier accepts.
 The later #731 adapter and native/backend process predicates remain separate
 integration work under #733.

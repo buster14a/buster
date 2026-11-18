@@ -397,7 +397,7 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
     };
     const IrParseResult parsed = ir_parse(text, input, scratch, &f);
     snprintf(message, sizeof(message), "threading %s: the fixture parses as complete SSA", fixture->name);
-    const bool valid = parsed.error == IR_PARSE_OK && ir_verify_complete(&f, scratch, false).error == IR_OK;
+    const bool valid = parsed.error == IR_PARSE_OK && ir_verify_complete(&f, scratch).error == IR_OK;
     ir_optimize_test_expect(test, valid, message);
     if (valid)
     {
@@ -416,8 +416,8 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
             snprintf(message, sizeof(message), "threading %s: scalar/vector exact columns and side tables", fixture->name);
             ir_optimize_test_expect(test, ir_optimize_test_equal(&v.function, &s.function), message);
             snprintf(message, sizeof(message), "threading %s: the result is complete SSA", fixture->name);
-            const IrCheck complete = ir_verify_complete(&v.function, scratch, true);
-            ir_optimize_test_expect(test, complete.error == IR_OK && ir_verify_complete(&s.function, scratch, false).error == IR_OK, message);
+            const IrCheck complete = ir_verify_complete(&v.function, scratch);
+            ir_optimize_test_expect(test, complete.error == IR_OK && ir_verify_complete(&s.function, scratch).error == IR_OK, message);
             if (complete.error != IR_OK)
             {
                 fprintf(stderr, "  threading %s: error=%u instruction=%u detail=%u\n", fixture->name, complete.error, complete.instruction, complete.detail);

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Bounded structural IR delta debugging, separate from production optimization. Candidate order is deterministic;
-// every candidate passes both complete verifiers before a bounded built-in predicate sees it. Only an identical
+// every candidate passes the complete verifier before a bounded built-in predicate sees it. Only an identical
 // classified failure is accepted. Returned faults, limits, unsupported observations and unrelated failures differ.
 // Four disjoint scratch views own best/candidate/work/cache storage; only the final function escapes into output.
 // Include after ir_rebuild.c. Callbacks are a test-tool boundary, never a compiler execution-path dispatcher.
@@ -403,11 +403,7 @@ static bool ir_reduce_try(IrReduceWork* work, IrFunction* candidate)
     if (ir_reduce_budget(work))
     {
         work->result.candidates += 1;
-        IrCheck check = ir_verify_complete(candidate, &work->scratch, true);
-        if (check.error == IR_OK)
-        {
-            check = ir_verify_complete(candidate, &work->scratch, false);
-        }
+        const IrCheck check = ir_verify_complete(candidate, &work->scratch);
         if (ir_reduce_resource(check.error))
         {
             work->result.status = IR_REDUCE_RESOURCE;
@@ -627,15 +623,14 @@ static __attribute__((unused)) IrReduceStatus ir_reduce(const IrFunction* source
     {
         work.limits = *requested;
         work.started = ir_reduce_milliseconds();
-        const IrCheck vector = ir_verify_complete(source, scratch, true);
-        const IrCheck scalar = vector.error == IR_OK ? ir_verify_complete(source, scratch, false) : vector;
-        if (ir_reduce_resource(vector.error) || ir_reduce_resource(scalar.error))
+        const IrCheck verified = ir_verify_complete(source, scratch);
+        if (ir_reduce_resource(verified.error))
         {
             status = IR_REDUCE_RESOURCE;
         }
         // Scalar-only copies carry no vector payloads, labels, ABI records or variadic frame: refuse the whole
         // function before a copy can drop them, including an unused vector-constant pool.
-        bool supported = vector.error == IR_OK && scalar.error == IR_OK && source->block_count != 0 && source->result_type <= IR_PTR &&
+        bool supported = verified.error == IR_OK && source->block_count != 0 && source->result_type <= IR_PTR &&
                          !ir_function_has_simd(source) && ir_rebuild_plain(source);
         for (uint32_t i = 0; supported && i < source->instruction_count; i += 1)
         {

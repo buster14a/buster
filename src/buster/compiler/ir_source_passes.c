@@ -216,6 +216,8 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         IrLicmResult vector = { 0 };
         IrLicmResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize_licm(promoted, output, scratch, options, &vector);
+        // The per-loop walk against its whole-function oracle, the worklist's fixed point (#2979).
+        options.whole = true;
         options.scalar = true;
         const IrCheck scalar_check = ir_optimize_licm(promoted, twin, scratch, options, &scalar);
         const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function);
@@ -436,12 +438,11 @@ static int run_ir_source_passes_tests(int count, char** arguments)
     Arena lowered_arena = arena_reserve(UINT64_C(1) << 36);
     Arena arena = arena_reserve(UINT64_C(1) << 32);
     Arena functions_arena = arena_reserve(UINT64_C(1) << 36);
-    Arena twin_lowering = arena_reserve(UINT64_C(1) << 34);
     Arena promotion = arena_reserve(UINT64_C(1) << 34);
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena twin = arena_reserve(UINT64_C(1) << 34);
     Arena scratch = arena_reserve(UINT64_C(1) << 35);
-    valid = valid && lowered_arena.base != 0 && arena.base != 0 && functions_arena.base != 0 && twin_lowering.base != 0 && promotion.base != 0 && output.base != 0 &&
+    valid = valid && lowered_arena.base != 0 && arena.base != 0 && functions_arena.base != 0 && promotion.base != 0 && output.base != 0 &&
             twin.base != 0 && scratch.base != 0;
     IrSourcePassTotals totals = { 0 };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
@@ -450,31 +451,27 @@ static int run_ir_source_passes_tests(int count, char** arguments)
         ir_source_prepare(&file, files[i], options, option_count, &lowered_arena, &arena, false, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
-            // Every function lowered by both paths, which must agree, the vector one's kept for the unit's inlining.
+            // Every function lowered, and kept for the unit's inlining.
             IrFunction* functions = BUSTER_ARENA_PUSH_ARRAY(&arena, IrFunction, (uint64_t)file.count + 1);
             bool* prepared = BUSTER_ARENA_PUSH_ARRAY(&arena, bool, (uint64_t)file.count + 1);
             const uint64_t before = totals.functions;
             for (uint32_t f = 0; functions != 0 && prepared != 0 && f < file.count; f += 1)
             {
                 const IrSourceFunction* source = &file.functions[f];
-                IrFunction scalar = { 0 };
                 IrFunction promoted = { 0 };
-                const IrCheck vector_check = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, &functions_arena, &scratch, &functions[f]);
-                const IrCheck scalar_check = ir_lower_typed_target_scalar(source->function, source->result_type, source->symbol_count, source->target_features, &twin_lowering, &scratch, &scalar);
-                const bool agree = vector_check.error == IR_OK && scalar_check.error == IR_OK && ir_lower_test_equal(&functions[f], &scalar);
-                const bool promotes = agree && ssa_ir_promote(&functions[f], &promotion, &scratch, &promoted).error == IR_OK;
+                const IrCheck lowered = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, &functions_arena, &scratch, &functions[f]);
+                const bool promotes = lowered.error == IR_OK && ssa_ir_promote(&functions[f], &promotion, &scratch, &promoted).error == IR_OK;
                 prepared[f] = promotes;
                 totals.unprepared += !promotes;
                 if (!promotes)
                 {
-                    printf("ir-source-passes: file=%s function=%s unprepared (lowerings disagree, or no promotion)\n", files[i], (const char*)source->name);
+                    printf("ir-source-passes: file=%s function=%s unprepared (no lowering, or no promotion)\n", files[i], (const char*)source->name);
                 }
                 else
                 {
                     ir_source_passes_function(&totals, files[i], source, &functions[f], &promoted, &output, &twin, &promotion, &scratch);
                 }
                 totals.functions += 1;
-                arena_pop_to(&twin_lowering, 0);
                 arena_pop_to(&promotion, 0);
             }
             if (functions != 0 && prepared != 0)
@@ -523,7 +520,6 @@ static int run_ir_source_passes_tests(int count, char** arguments)
     arena_release(&twin);
     arena_release(&output);
     arena_release(&promotion);
-    arena_release(&twin_lowering);
     arena_release(&functions_arena);
     arena_release(&arena);
     arena_release(&lowered_arena);
