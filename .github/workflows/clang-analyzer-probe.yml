@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-name: Compiler Clang analyzer timing probe
+name: Compiler Clang analyzer strict probe
 on:
   push:
     branches: [codex/clang-analyzer-probe-6afd4b54]
@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        replica: [1, 2, 3]
+        replica: [1]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -92,7 +92,11 @@ jobs:
           ' _ "$workers" | tee -a "$report/units.tsv" || status=$?
           printf 'Analyzer wall seconds %s\n' "$(cat "$report/sweep.time")"
           test "$(wc -l < "$report/units.tsv")" -eq "$(( $(wc -l < "$report/sources.txt") + 1 ))"
-          awk '/: warning: / { print }' "$report/"*.c.log | sort -u | tee "$report/warnings.txt"
+          awk '/^.+:[0-9]+:[0-9]+: warning: / { print }' "$report/"*.c.log | sort -u | tee "$report/warnings.txt"
+          if [[ -s "$report/warnings.txt" ]]; then
+            printf '::error::Clang analysis reported %s unique warning(s)\n' "$(wc -l < "$report/warnings.txt")"
+            exit 1
+          fi
           exit "$status"
       - name: Preserve runner, timings and analyzer diagnostics
         if: always()
