@@ -648,6 +648,163 @@ static void ir_test_entry_phi(IrTestTally* tally, Arena* memory, Arena* scratch)
     arena_pop_to(memory, mark);
 }
 
+// #2924's C9a: what the verifier's twin comparison used to check and no other fixture did, each found by a mutant
+// that survived it (the record's mutation/). The diagnostics are exact and checked here, outside the frozen digests:
+// - a select's false value of a narrower type than its result (the row check takes it as its result's);
+// - an access aligned to 2^32 bytes, one past the largest;
+// - a select's false value from the other arm of a diamond: with the tree supplied, the operand c of an earlier block
+//   whose block doesn't dominate the use's, and, by the complete verifier's own tree, a use in a sibling of the
+//   definition's block, whose interval starts after the definition's and ends after it, in the last partial batch of
+//   the reachable uses;
+// - a switch of duplicate cases as the last operation of the graph check's tail.
+static void ir_test_survivors(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const uint64_t scratch_mark = scratch->length;
+    IrFunction function = { 0 };
+    const IrSizes rows = {
+        .instruction_count = 6,
+        .block_count = 1,
+        .constant_count = 2,
+        .parameter_count = 2,
+    };
+    bool created = ir_create(memory, &rows, &function) == IR_OK;
+    ir_test_expect(tally, created, "survivors' row fixture allocation failed");
+    if (created)
+    {
+        function.block_offsets[1] = 6;
+        function.parameter_types[0] = IR_I1;
+        function.parameter_types[1] = IR_PTR;
+        function.result_type = IR_I64;
+        function.constants[0].low = 5;
+        function.constants[1].low = 7;
+        ir_test_instruction(&function, 0, IR_PARAM, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_PARAM, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 4, IR_SELECT, IR_I64, 0, 2, 2);
+        ir_test_instruction(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        IrCheck check = ir_verify(&function, scratch, 0);
+        ir_test_expect(tally, check.error == IR_OK, "a select of its result's type was refused");
+        function.c[4] = 3;
+        check = ir_verify(&function, scratch, 0);
+        ir_test_expect(tally, check.error == IR_ERROR_TYPE && check.instruction == 4, "a select's false value of a narrower type was accepted");
+        function.c[4] = 2;
+        ir_test_instruction(&function, 4, IR_LOAD, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function.alignment_log2[4] = 31;
+        check = ir_verify(&function, scratch, 0);
+        ir_test_expect(tally, check.error == IR_OK, "a load aligned to 2^31 bytes was refused");
+        function.alignment_log2[4] = 32;
+        check = ir_verify(&function, scratch, 0);
+        ir_test_expect(tally, check.error == IR_ERROR_METADATA && check.instruction == 4, "a load aligned to 2^32 bytes was accepted");
+    }
+    arena_pop_to(memory, mark);
+    // Block 0 branches on its parameter to blocks 1 and 2, which join at block 3. Block 2's select reads block 1's
+    // constant as its false value.
+    const IrSizes diamond = {
+        .instruction_count = 8,
+        .block_count = 4,
+        .constant_count = 2,
+        .parameter_count = 1,
+    };
+    created = ir_create(memory, &diamond, &function) == IR_OK;
+    ir_test_expect(tally, created, "survivors' diamond fixture allocation failed");
+    if (created)
+    {
+        const uint32_t offsets[] = {
+            0,
+            3,
+            5,
+            7,
+            8,
+        };
+        memcpy(function.block_offsets, offsets, sizeof(offsets));
+        function.parameter_types[0] = IR_I1;
+        function.result_type = IR_I64;
+        function.constants[0].low = 11;
+        function.constants[1].low = 23;
+        ir_test_instruction(&function, 0, IR_PARAM, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 2, IR_CBR, IR_VOID, 0, 1, 2);
+        ir_test_instruction(&function, 3, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 4, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 5, IR_SELECT, IR_I64, 0, 1, 1);
+        ir_test_instruction(&function, 6, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 7, IR_RET, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        static const uint32_t enter[] = { 0, 1, 2, 3 };
+        static const uint32_t leave[] = { 4, 2, 3, 4 };
+        const IrDominance dominance = {
+            .enter = enter,
+            .leave = leave,
+            .block_count = 4,
+        };
+        IrCheck check = ir_verify(&function, scratch, &dominance);
+        ir_test_expect(tally, check.error == IR_OK && check.dominance_checked, "a select of the entry block's values was refused");
+        check = ir_verify_complete(&function, scratch);
+        ir_test_expect(tally, check.error == IR_OK && check.dominance_checked, "the complete verifier refused a select of the entry block's values");
+        function.c[5] = 3;
+        check = ir_verify(&function, scratch, 0);
+        ir_test_expect(tally, check.error == IR_OK, "without a tree, a use of another block's value was refused");
+        check = ir_verify(&function, scratch, &dominance);
+        ir_test_expect(tally, check.error == IR_ERROR_DOMINANCE && check.instruction == 5 && check.detail == 2,
+                       "a select's false value from the other arm was accepted with the tree supplied");
+        check = ir_verify_complete(&function, scratch);
+        ir_test_expect(tally, check.error == IR_ERROR_DOMINANCE && check.instruction == 5 && check.detail == 2,
+                       "the complete verifier accepted a select's false value from the other arm");
+        // With the arms' order swapped, the tree's preorder puts the other arm first: one of the two orders has the
+        // definition's interval start before the use's, which the interval's end alone refuses.
+        function.b[2] = 2;
+        function.c[2] = 1;
+        check = ir_verify_complete(&function, scratch);
+        ir_test_expect(tally, check.error == IR_ERROR_DOMINANCE && check.instruction == 5 && check.detail == 2,
+                       "the complete verifier accepted a select's false value from the other arm, the arms swapped");
+    }
+    arena_pop_to(memory, mark);
+    // A switch of duplicate cases as the function's last operation, the last lane of the graph check's 64-operation
+    // tail: block 0 branches to block 2's switch, whose every destination is block 1's return.
+    const IrSizes last = {
+        .instruction_count = 4,
+        .block_count = 3,
+        .extra_count = 5,
+        .constant_count = 2,
+        .parameter_count = 1,
+    };
+    created = ir_create(memory, &last, &function) == IR_OK;
+    ir_test_expect(tally, created, "survivors' switch fixture allocation failed");
+    if (created)
+    {
+        const uint32_t offsets[] = {
+            0,
+            2,
+            3,
+            4,
+        };
+        const uint32_t extra[] = {
+            1,
+            0,
+            1,
+            1,
+            1,
+        };
+        memcpy(function.block_offsets, offsets, sizeof(offsets));
+        memcpy(function.extra, extra, sizeof(extra));
+        function.parameter_types[0] = IR_I64;
+        function.constants[0].low = 3;
+        function.constants[1].low = 9;
+        ir_test_instruction(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 3, IR_SWITCH, IR_VOID, 0, 0, 2);
+        IrCheck check = ir_verify(&function, scratch, 0);
+        ir_test_expect(tally, check.error == IR_OK, "a last switch of distinct cases was refused");
+        function.constants[1].low = 3;
+        check = ir_verify(&function, scratch, 0);
+        ir_test_expect(tally, check.error == IR_ERROR_METADATA && check.instruction == 3, "a last switch of duplicate cases was accepted");
+    }
+    ir_test_expect(tally, scratch->length == scratch_mark, "the survivors' fixtures retained scratch");
+    arena_pop_to(memory, mark);
+}
+
 static void ir_test_switch(IrTestTally* tally, Arena* memory, Arena* scratch)
 {
     const uint64_t mark = memory->length;
@@ -2451,6 +2608,7 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_complete_memory(&tally, &memory);
             ir_test_phi(&tally, &memory, &scratch);
             ir_test_entry_phi(&tally, &memory, &scratch);
+            ir_test_survivors(&tally, &memory, &scratch);
             ir_test_switch(&tally, &memory, &scratch);
             ir_test_switch_collision_family(&tally, &memory, &scratch);
             ir_test_calls_memory(&tally, &memory, &scratch);

@@ -97,7 +97,7 @@ static void ir_test_simd_rows(IrTestTally* test, Arena* output, Arena* scratch)
         ir_test_instruction(&function, 5, IR_CALL, IR_VOID, 0, 1, BUSTER_IR_NONE);
         ir_test_instruction(&function, 6, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_pair(test, &function, scratch, NULL, true, "row calls of a vector result and of none verify");
-        ir_test_expect(test, ir_function_has_simd(&function) && ir_function_has_vectors(&function), "a function with machine rows has SIMD values on both scans' paths");
+        ir_test_expect(test, ir_function_has_simd(&function) && ir_function_has_vectors(&function), "a function with machine rows has SIMD values and vectors");
         ir_test_expect(test, !ir_interpreter_simd_supported(&function), "the interpreter refuses a machine row, which it has no model of");
         ir_test_printer(test, &function, output, scratch);
         function.a[4] = 1;

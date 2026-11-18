@@ -25,8 +25,11 @@ static void ir_simd_scan_test(IrTestTally* tally)
         ready = ready && columns[k] != MAP_FAILED && mprotect(columns[k] + page, page, PROT_NONE) == 0;
     }
     ir_test_expect(tally, ready, "guarded SIMD scan columns");
-    static const uint8_t markers[4][2] = {
+    // Every vector type (#2924's C9a: the scans' bounds), and each vector operation of a scalar type.
+    static const uint8_t markers[6][2] = {
+        { IR_ADD, IR_V4I32 },
         { IR_ADD, IR_V8I32 },
+        { IR_ADD, IR_V16I32 },
         { IR_VCONST, IR_I32 },
         { IR_VCMP, IR_I32 },
         { IR_VSELECT, IR_I32 },
@@ -42,13 +45,13 @@ static void ir_simd_scan_test(IrTestTally* tally)
         ir_test_expect(tally, !ir_function_has_vectors(&function), "a scalar function's columns hold no vector");
         for (uint32_t place = 0; place < count; place += 1)
         {
-            for (uint32_t m = 0; m < 4; m += 1)
+            for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(markers); m += 1)
             {
                 op[place] = markers[m][0];
                 type[place] = markers[m][1];
                 ir_test_expect(tally, ir_function_has_simd(&function), "a vector type or operation at any place, the tail's last among them");
                 ir_test_expect(tally, ir_function_has_vectors(&function),
-                               "a vector type or operation at any place is a vector, by both paths");
+                               "a vector type or operation at any place is a vector");
                 op[place] = IR_ADD;
                 type[place] = IR_I32;
             }
@@ -57,7 +60,7 @@ static void ir_simd_scan_test(IrTestTally* tally)
                 op[place] = IR_NOT;
                 type[place] = (uint8_t)(IR_M8 + w);
                 ir_test_expect(tally, ir_function_has_simd(&function) && !ir_function_has_vectors(&function),
-                               "a mask at any place is SIMD but no vector, by both paths");
+                               "a mask at any place is SIMD but no vector");
                 op[place] = IR_ADD;
                 type[place] = IR_I32;
             }
@@ -70,7 +73,7 @@ static void ir_simd_scan_test(IrTestTally* tally)
             munmap(columns[k], page * 2);
         }
     }
-    // The metadata: each place a type can be outside the columns, a mask's (no vector) and a vector's (one), by both paths.
+    // The metadata: each place a type can be outside the columns, a mask's (no vector) and a vector's (one).
     static const uint8_t metadata_types[2] = { IR_M16, IR_V8I32 };
     for (uint32_t t = 0; t < 2; t += 1)
     {
@@ -136,7 +139,7 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
             ir_test_instruction(&function, 3, IR_STORE, IR_VOID, 0, 2, BUSTER_IR_NONE);
             ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_test_expect(tally, ir_function_has_simd(&function) && !ir_function_has_vectors(&function),
-                           "a function of masks alone has SIMD values but no vectors, by both paths");
+                           "a function of masks alone has SIMD values but no vectors");
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
                 IrFunction promoted = { 0 };
