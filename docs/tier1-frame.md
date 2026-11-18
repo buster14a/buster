@@ -61,9 +61,9 @@ The C driver's `--tier1` gives each block's objects its block's lifetime and
 the CFG consumer passes them so ("Slot sharing between objects" below). The
 frame module introduces no parallel IR.
 
-`AbiCall[]`, produced by `abi_assign` or its scalar twin in
-`calling_convention.c`, supplies each call's outgoing byte count and required
-alignment. The planner keeps their maxima and rejects malformed totals.
+`AbiCall[]`, produced by `abi_assign` in `calling_convention.c`, supplies
+each call's outgoing byte count and required alignment. The planner keeps
+their maxima and rejects malformed totals.
 `used_callee_saved` is the union of callee-saved general registers actually
 used by allocation. All SysV vector registers are caller-saved. Flags request
 variadic saves, dynamic stack storage, a frame pointer, red-zone exclusion and
