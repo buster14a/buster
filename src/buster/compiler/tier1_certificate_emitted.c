@@ -3787,6 +3787,30 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
                 }
             }
         }
+        // The slots a run of blocks carries in beside the values' registers (#2870, Tier1EmitResult.entry_slots), whose
+        // stores the emitter left out: each asserted, and proved on the block's one incoming edge.
+        for (uint32_t b = 1; valid && emitted->entry_slots != 0 && b < blocks; b += 1)
+        {
+            for (uint32_t k = emitted->entry_slot_offsets[b]; valid && numbers[b] != BUSTER_CERT_NONE && k < emitted->entry_slot_offsets[b + 1]; k += 1)
+            {
+                if (pass == 0)
+                {
+                    fact_offsets[b + 1] += 1;
+                }
+                else
+                {
+                    const uint32_t v = emitted->entry_slots[k];
+                    int32_t offset = 0;
+                    const bool slot = v < values && tier1_emit_cfg_slot(emitted, BUSTER_TIER1_CFG_SPILL + cfg->allocation.spill_ids[v], &offset);
+                    const uint32_t location = slot ? tier1_cert_emitted_frame(&build, offset, tier1_cert_emitted_width(emitted, v)) : BUSTER_CERT_NONE;
+                    facts[fill[b]++] = (Tier1CertFact){
+                        .value = v,
+                        .location = location,
+                    };
+                    valid = location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX);
+                }
+            }
+        }
     }
     tally.facts = valid ? fact_offsets[blocks] : 0;
     // The streams, block by block in layout order.

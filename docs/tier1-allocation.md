@@ -2025,7 +2025,10 @@ header registers, and each iteration swapped them back.
   stamps, in the CFG consumer). An SSA value never changes, and slots are
   shared only by values never live at once. A range that waits and is evicted
   again after its reload otherwise stored the value back where it had just read
-  it: `str_gsub`'s pattern and `max_s` at its loop's head.
+  it: `str_gsub`'s pattern and `max_s` at its loop's head. The code's
+  certificate asserts such a slot at each later block of the run, besides the
+  value's register (`Tier1EmitResult.entry_slots`, #2870): without it, a store
+  left out in a block after the run's first was unprovable, and refused.
 
 By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed) at main
 `20cd8e54`:

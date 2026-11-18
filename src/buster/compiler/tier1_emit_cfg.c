@@ -3743,6 +3743,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 block_first[b] = entry_offsets[b];
             }
             entries = ir_allocate(scratch, (uint64_t)entry_offsets[blocks] + 1, 4, &ok);
+            emitted->entry_slots = ok && certify ? ir_allocate(output, (uint64_t)entry_offsets[blocks] + 1, 4, &ok) : 0;
+            emitted->entry_slot_offsets = ok && certify ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
             error = ok ? error : TIER1_EMIT_MEMORY;
         }
         for (uint32_t i = 0; error == TIER1_EMIT_OK && i < cfg->intervals.count; i += 1)
@@ -3835,6 +3837,11 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         error = tier1_emit_cfg_entry(plan, emitted, scratch, &buffer);
         tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_ENTRY, 0), BUSTER_IR_NONE);
     }
+    uint32_t slot_count = 0;
+    if (error == TIER1_EMIT_OK && emitted->entry_slot_offsets != 0)
+    {
+        emitted->entry_slot_offsets[0] = 0;
+    }
     for (uint32_t b = 0; error == TIER1_EMIT_OK && b < blocks; b += 1)
     {
         block_first[b] = b == 0 ? 0 : buffer.count;
@@ -3842,7 +3849,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
         const uint32_t only = degree == 1 ? input->predecessors[input->predecessor_offsets[b]] : UINT32_MAX;
         // A block whose only predecessor is the one before it continues that block's run of slot stamps (tier1_emit_phase).
-        transitions.stamp = b != 0 && only == b - 1 ? transitions.stamp : b + 1;
+        const bool run = b != 0 && only == b - 1;
+        transitions.stamp = run ? transitions.stamp : b + 1;
         // The single incoming edge's moves, where tier1_cfg placed them at this block's start.
         if (only != UINT32_MAX)
         {
@@ -3870,6 +3878,16 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             {
                 transitions.owners[location] = node;
             }
+            // A slot the run carries in holds the value too: its store may be left out in this block (#2870).
+            if (emitted->entry_slots != 0 && held && run && transitions.slot_stamps[node] == transitions.stamp)
+            {
+                emitted->entry_slots[slot_count] = v;
+                slot_count += 1;
+            }
+        }
+        if (emitted->entry_slot_offsets != 0)
+        {
+            emitted->entry_slot_offsets[b + 1] = slot_count;
         }
         const uint32_t first = b < added ? 0 : function->block_offsets[b - added];
         const uint32_t end = b < added ? 0 : function->block_offsets[b - added + 1];

@@ -127,5 +127,7 @@ options] file...` times the emitted code's certificate, its decoding, its check
 and both, per IR instruction and per record, beside the emission it certifies,
 on every function whose code it certifies, with the certificates' sizes and the
 uncertified functions by reason. A refusal, or a step out of memory or past a
-limit, fails it with no report. The 9700X job runs it on
+limit, fails it with no report, naming the function by its index in the corpus
+and the emission's cause and error (a code certificate's reason by name,
+#2870). The 9700X job runs it on
 the frozen `sqlite3.c` where `changes`' `tier1-code-certificate` entry says.
