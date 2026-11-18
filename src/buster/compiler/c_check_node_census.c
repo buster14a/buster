@@ -2303,6 +2303,10 @@ _Static_assert(CHECK_OP_COUNT <= 128, "the own form's tables have an entry an op
 // take.
 #define BUSTER_NODE_TESTS_QUIET_NONE 0u
 // `+`, `-`, `*`, `&`, `|`, `^` and their assignments, of two plain integers: the usual conversions narrow no integer.
+// And of a plain pointer and a plain integer, which `+`, `-` and their assignments alone take, and a subscript: the
+// integer is promoted, which narrows none either (check_action_pointer_arithmetic), and no other test of a constant
+// is a sum's. A subscript's other tests are a null constant pointer's dereference, which the loop keeps listed, and an
+// array's bound: an array is no plain pointer.
 #define BUSTER_NODE_TESTS_QUIET_BINARY 0x01u
 // Unary `+`, `-`, `~` of a plain integer: the promotions narrow none.
 #define BUSTER_NODE_TESTS_QUIET_UNARY 0x02u
@@ -2355,9 +2359,10 @@ static void node_tests_quiet_pairs(uint8_t* pairs)
         const bool stored = zero_right || small_right;
         const bool converted = zero_left || small_left;
         const bool null = (left == BUSTER_NODE_TESTS_KIND_POINTER && zero_right) || (right == BUSTER_NODE_TESTS_KIND_POINTER && zero_left);
+        const bool pointed = (left == BUSTER_NODE_TESTS_KIND_POINTER && integer_right) || (integer_left && right == BUSTER_NODE_TESTS_KIND_POINTER);
         // An operator with one operand (a unary one, a return's conversion) has no second: its pair's second kind is
         // none, and its class's bit is the first's alone.
-        pairs[pair] = (uint8_t)((both ? BUSTER_NODE_TESTS_QUIET_BINARY : 0) | (integer_left ? BUSTER_NODE_TESTS_QUIET_UNARY : 0) |
+        pairs[pair] = (uint8_t)((both || pointed ? BUSTER_NODE_TESTS_QUIET_BINARY : 0) | (integer_left ? BUSTER_NODE_TESTS_QUIET_UNARY : 0) |
                                 ((both && equal) || null ? BUSTER_NODE_TESTS_QUIET_EQUALITY : 0) | (both && ordered ? BUSTER_NODE_TESTS_QUIET_RELATIONAL : 0) |
                                 (both && shifted ? BUSTER_NODE_TESTS_QUIET_SHIFT : 0) | (both && divided ? BUSTER_NODE_TESTS_QUIET_DIVISION : 0) |
                                 (both && stored ? BUSTER_NODE_TESTS_QUIET_ASSIGN : 0) | (converted ? BUSTER_NODE_TESTS_QUIET_CONVERT : 0));
@@ -2404,9 +2409,11 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
                             (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN);
         s->own_always[code] = !leaf && always ? 1 : 0;
         // A constant operand's tests are no cast's (it converts nothing implicitly, and no other constant's test is a
-        // cast's).
+        // cast's), and nor are an enumeration's: those read two operands' types, a conditional's arms' or a
+        // conversion's, and a cast has one operand and converts by its own word.
         s->own_sends[code] = leaf ? 0 :
-                             (uint8_t)((op != CHECK_OP_CAST ? BUSTER_NODE_TESTS_OPERAND_CONSTANT : 0) | (policy->enums ? BUSTER_NODE_TESTS_OPERAND_ENUM : 0) |
+                             (uint8_t)((op != CHECK_OP_CAST ? BUSTER_NODE_TESTS_OPERAND_CONSTANT : 0) |
+                                       (op != CHECK_OP_CAST && policy->enums ? BUSTER_NODE_TESTS_OPERAND_ENUM : 0) |
                                        (op == CHECK_OP_CAST && policy->pointer_casts ? BUSTER_NODE_TESTS_OPERAND_POINTER : 0) |
                                        ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference ? BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE : 0) |
                                        (op == CHECK_OP_ADD && policy->string_plus_int ? BUSTER_NODE_TESTS_OPERAND_ARRAY : 0) |
@@ -2417,7 +2424,7 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
                           op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_SUBTRACT_ASSIGN || op == CHECK_OP_MULTIPLY_ASSIGN || op == CHECK_OP_BIT_AND_ASSIGN ||
                           op == CHECK_OP_BIT_OR_ASSIGN || op == CHECK_OP_BIT_XOR_ASSIGN;
         const bool equality = op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL;
-        s->own_quiets[code] = (uint8_t)(sums ? BUSTER_NODE_TESTS_QUIET_BINARY :
+        s->own_quiets[code] = (uint8_t)(sums || op == CHECK_OP_SUBSCRIPT ? BUSTER_NODE_TESTS_QUIET_BINARY :
                                         op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT ? BUSTER_NODE_TESTS_QUIET_UNARY :
                                         equality ? BUSTER_NODE_TESTS_QUIET_EQUALITY : comparison ? BUSTER_NODE_TESTS_QUIET_RELATIONAL :
                                         shift && !policy->shift_sign_overflow ? BUSTER_NODE_TESTS_QUIET_SHIFT :
@@ -2843,10 +2850,13 @@ static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeC
                 uint32_t sends = 0;
                 const uint32_t node = r + 1 == count ? root : first + r;
                 const bool call = (CheckOp)codes[r] == CHECK_OP_CALL;
+                const bool cast = (CheckOp)codes[r] == CHECK_OP_CAST;
                 const uint64_t found = node_tests_operator(s, r, node, loop->operands[r], unsent, &sends, counts);
                 const bool wrong = found != 0 || sends != 0;
-                counts->own_quiet_checked += !call;
-                counts->own_quiet_wrong += !call && wrong;
+                counts->own_quiet_checked += !call && !cast;
+                counts->own_quiet_wrong += !call && !cast && wrong;
+                counts->own_quiet_casts_checked += cast;
+                counts->own_quiet_casts_wrong += cast && wrong;
                 // A call left out has no constant the rule doesn't take, by its own list of arguments.
                 counts->own_quiet_calls_checked += call;
                 counts->own_quiet_calls_wrong += call && wrong;
@@ -3663,10 +3673,11 @@ static inline __attribute__((always_inline)) __m512i node_tests_window_operands(
 // type's bits and its operator's), its operands' such bytes together, its part of the set's tests, and a block's masks:
 // the operators listed for their operands' tree's tests, the operators with tests of their own, the writes, the records
 // that as a statement's top leave its test nothing, and the operators left out of the second: the quiet rule's, which
-// `quiet_count` counts, and the calls with no test to make, which `call_count` counts. And the chunk's casts over a call
-// left out, their records' numbers compressed into the asks' list: how many into `ask_count`.
+// `quiet_count` counts, the calls with no test to make, which `call_count` counts, and the casts with none, which
+// `cast_count` counts. And the chunk's casts over a call left out, their records' numbers compressed into the asks'
+// list: how many into `ask_count`.
 static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* front, uint32_t count, uint64_t* far_count, uint64_t* quiet_count, uint64_t* call_count,
-                                   uint32_t* ask_count)
+                                   uint64_t* cast_count, uint32_t* ask_count)
 {
     const NodeCensusScratch* s = &tests->scratch;
     const __m512i quiet_pairs = _mm512_loadu_si512(s->own_quiet_pairs);
@@ -3681,6 +3692,11 @@ static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* fro
     uint64_t far_total = 0;
     uint64_t quiet_total = 0;
     uint64_t call_total = 0;
+    uint64_t cast_total = 0;
+    // A plain pointer that is a constant a test may read: its kind and its constant's bit, among a value's byte's
+    // kind's three bits and that bit.
+    const __m512i pointer_bits = _mm512_set1_epi8((char)((BUSTER_NODE_TESTS_KINDS - 1) << BUSTER_NODE_TESTS_KIND_SHIFT | BUSTER_NODE_TESTS_VALUE_CONSTANT));
+    const __m512i constant_pointer = _mm512_set1_epi8((char)(BUSTER_NODE_TESTS_KIND_POINTER << BUSTER_NODE_TESTS_KIND_SHIFT | BUSTER_NODE_TESTS_VALUE_CONSTANT));
     for (uint32_t x = 0; x < count; x += 64)
     {
         const __m512i codes = _mm512_and_si512(_mm512_loadu_si512(front->ops + x), _mm512_set1_epi8(0x7f));
@@ -3765,7 +3781,12 @@ static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* fro
         const __mmask64 quiet_class = _mm512_test_epi8_mask(_mm512_and_si512(paired, own_bit), quiets);
         const __mmask64 alone = _mm512_testn_epi8_mask(always, always) &
                                 _mm512_cmpeq_epi8_mask(_mm512_and_si512(sends, operands), _mm512_set1_epi8(BUSTER_NODE_TESTS_OPERAND_CONSTANT));
-        const __mmask64 quiet = quiet_class & alone;
+        // A subscript of the class's pairs has one test more, a null constant pointer's dereference: one whose pointer
+        // is a constant a test may read stays listed.
+        const __mmask64 subscripts = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8((char)CHECK_OP_SUBSCRIPT));
+        const __mmask64 pointer_read = _mm512_cmpeq_epi8_mask(_mm512_and_si512(kind_left, pointer_bits), constant_pointer) |
+                                       _mm512_cmpeq_epi8_mask(_mm512_and_si512(kind_right, pointer_bits), constant_pointer);
+        const __mmask64 quiet = quiet_class & alone & ~(subscripts & pointer_read);
         // The calls' rule: a call has no test to make where its own type is no aggregate's, its callee is a name whose
         // declaration gives a call no semantics of its own, or no name (its first operand's value's byte), its operands'
         // properties send it nothing, and its arguments are quiet: no aggregate, no constant but an address's or an
@@ -3785,6 +3806,12 @@ static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* fro
         const __mmask64 writes = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_TESTS_CLASS_WRITE));
         const __mmask64 voids = _mm512_test_epi8_mask(own, _mm512_set1_epi8(BUSTER_NODE_TESTS_TYPE_VOID));
         const __mmask64 casts = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8((char)CHECK_OP_CAST));
+        // The casts' rule: a cast is sent to its test by a pointer operand alone (the table's), and that test asks
+        // whether its own type is an integer narrower than a pointer or an enumeration: none where its own type is
+        // void (a statement's discard of a pointer's top) or a pointer. A cast to an integer stays listed, whatever
+        // its width: the byte says none.
+        const __mmask64 quiet_casts = casts & _mm512_test_epi8_mask(sends, operands) &
+                                      _mm512_test_epi8_mask(own, _mm512_set1_epi8((char)(BUSTER_NODE_TESTS_TYPE_VOID | BUSTER_NODE_CENSUS_TYPE_POINTER)));
         const __m512i left_out = _mm512_movm_epi8(quiet_calls);
         const __m512i top_left_out = node_tests_window_operands(at_left, near_left, previous_left_out, left_out);
         const uint64_t asks = _cvtmask64_u64(casts & voids & _mm512_test_epi8_mask(top_left_out, top_left_out));
@@ -3797,10 +3824,11 @@ static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* fro
         const __m512i sent = _mm512_or_si512(always, _mm512_and_si512(sends, operands));
         uint64_t* masks = tests->window_masks + BUSTER_NODE_TESTS_MASKS * (uint64_t)(x / 64);
         masks[BUSTER_NODE_TESTS_MASK_TREE] = tree_first | _mm512_test_epi8_mask(tree_sends, operands);
-        masks[BUSTER_NODE_TESTS_MASK_QUIET] = quiet | quiet_calls;
+        masks[BUSTER_NODE_TESTS_MASK_QUIET] = quiet | quiet_calls | quiet_casts;
         quiet_total += (uint64_t)_mm_popcnt_u64(quiet);
         call_total += (uint64_t)_mm_popcnt_u64(quiet_calls);
-        masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = _mm512_test_epi8_mask(sent, sent) & ~quiet & ~quiet_calls;
+        cast_total += (uint64_t)_mm_popcnt_u64(quiet_casts);
+        masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = _mm512_test_epi8_mask(sent, sent) & ~quiet & ~quiet_calls & ~quiet_casts;
         masks[BUSTER_NODE_TESTS_MASK_WRITES] = writes;
         masks[BUSTER_NODE_TESTS_MASK_DISCARDS] = writes | voids | quiet_calls;
         previous = property;
@@ -3811,6 +3839,7 @@ static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* fro
     *far_count += far_total;
     *quiet_count += quiet_total;
     *call_count += call_total;
+    *cast_count += cast_total;
     *ask_count = ask_total;
 }
 
@@ -3929,7 +3958,7 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
     node_tests_window_bytes(tests, state, front, &counts[NODE_FACTS_COUNT_TESTS_LINES]);
     const uint64_t t1 = __rdtsc();
     uint32_t ask_count = 0;
-    node_tests_window_loop(tests, front, front->count, &counts[NODE_FACTS_COUNT_TESTS_FAR], &types->own_quiet, &types->own_quiet_calls, &ask_count);
+    node_tests_window_loop(tests, front, front->count, &counts[NODE_FACTS_COUNT_TESTS_FAR], &types->own_quiet, &types->own_quiet_calls, &types->own_quiet_casts, &ask_count);
     types->own_result_asks += node_tests_window_asks(tests, front, ask_count);
     const uint64_t t2 = __rdtsc();
     types->own_result_casts += ask_count;
@@ -4458,6 +4487,9 @@ struct NodeShadow
     uint64_t own_quiet_calls_checked;
     uint64_t own_quiet_calls_wrong;
     uint64_t own_quiet_calls_loud;
+    uint64_t own_quiet_casts;
+    uint64_t own_quiet_casts_checked;
+    uint64_t own_quiet_casts_wrong;
     uint64_t own_result_casts;
     uint64_t own_result_asks;
     uint64_t own_quiet_checked;
@@ -6304,6 +6336,8 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                    " casts-over-one=%" PRIu64 " callees-asked-for-their-result=%" PRIu64 "\n",
                    shadow->own_quiet_calls, shadow->own_quiet_calls_checked, shadow->own_quiet_calls_wrong, shadow->own_quiet_calls_loud, shadow->own_result_casts,
                    shadow->own_result_asks);
+            printf("node-shadow: own tests casts-left-out=%" PRIu64 " checked=%" PRIu64 " of-them-with-a-test=%" PRIu64 "\n", shadow->own_quiet_casts,
+                   shadow->own_quiet_casts_checked, shadow->own_quiet_casts_wrong);
             printf("node-shadow: own tests tree's-tests'-records-no-listed-operator-has checked=%" PRIu64 " of-them-with-a-test=%" PRIu64
                    " lists'-words-with-a-bit-past-their-expression=%" PRIu64 "\n",
                    shadow->own_tree_checked, shadow->own_tree_wrong, shadow->own_lists_past);
@@ -6710,6 +6744,9 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->own_quiet_calls_checked += typed->own_quiet_calls_checked;
                     shadow->own_quiet_calls_wrong += typed->own_quiet_calls_wrong;
                     shadow->own_quiet_calls_loud += typed->own_quiet_calls_loud;
+                    shadow->own_quiet_casts += typed->own_quiet_casts;
+                    shadow->own_quiet_casts_checked += typed->own_quiet_casts_checked;
+                    shadow->own_quiet_casts_wrong += typed->own_quiet_casts_wrong;
                     shadow->own_result_casts += typed->own_result_casts;
                     shadow->own_result_asks += typed->own_result_asks;
                     shadow->own_quiet_checked += typed->own_quiet_checked;
@@ -7118,6 +7155,7 @@ static int run_node_census(int count, char** arguments)
                                           shadow.tested_unsound != 0 || shadow.tested_differences != 0 || shadow.tested_kind_differences != 0 ||
                                           shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0 ||
                                           shadow.own_count_differences != 0 || shadow.own_quiet_wrong != 0 || shadow.own_quiet_calls_wrong != 0 || shadow.own_quiet_calls_loud != 0 ||
+                                          shadow.own_quiet_casts_wrong != 0 ||
                                           shadow.own_values_wrong != 0 || shadow.own_tree_wrong != 0 ||
                                           shadow.own_direct_wrong != 0 || shadow.own_lists_past != 0 ||
                                           shadow.flat_differences != 0 ||

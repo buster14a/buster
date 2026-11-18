@@ -961,12 +961,24 @@ each place of a block; and, with `-Wtype-safety`, every call kept), the
 twelfth (two functions with clang's `no_builtin`, one naming `memset` and one
 naming nothing, between three without it: the unit's calls are made, and a
 plain library builtin is its declaration's call in the function whose
-attribute covers it and has its own semantics in the others), and
+attribute covers it and has its own semantics in the others), the seventh's
+function `v` (the loop's rules of a pointer: its cast to void, as a
+statement's discard and written, to a pointer and to a pointer to void,
+left out; to a 64-bit integer, listed with nothing; to a 32-bit one, a bool
+and an enumeration, which fire; an enumeration's cast, which nothing sends;
+its subscript by zero, a small, a large and a negative constant, with the
+constant first and of an address constant, left out; an array's, a null
+constant pointer's on each side and one by a bool's constant, listed; its
+sum with a constant on each side, each compound assignment and one whose
+pointer is the constant, left out; a string's, two pointers' difference and
+one whose constant is further back than the block before, listed) with a
+pointer's cast to an integer in the ninth under `-Wno-pointer-to-int-cast`
+(nothing sends it), and
 each fixture's counts of the
 operators listed for the tree's tests, of the records those tests read that
 no listed operator has as an operand, each checked, of the calls left out,
 each checked, of the casts in the asks' list and the declarations asked
-whether they want their result, of
+whether they want their result, of the casts left out, each checked, of
 the expressions with nothing listed, each run through the tests all the
 same, and of the roots' records apart from their operand's.
 The fact words' kernel runs at reader time on the fixture twice
@@ -1579,6 +1591,17 @@ kernel's run in place (`node_facts_window_run`).
   call. With `--verify`, each call left out has its test run all the same
   and must have none, and has no other constant among its arguments by T's
   records and its own list (`node_tests_call_loud`).
+- **The casts, a pointer's subscripts and its sums.** A cast is sent to its
+  test by a pointer operand alone (the table's entry sends no enumeration:
+  the enumerations' test reads two operands' types), and is left out where
+  its own type's byte says void or a pointer: the pointer cast's test fires
+  for an integer under 64 bits or an enumeration. A subscript's operator is
+  of the class of `+`, whose pairs of kinds take a plain pointer with a
+  plain integer (`node_tests_quiet_pairs`): the integer is promoted, which
+  narrows none. A subscript whose pointer is a constant a test may read
+  stays listed for its null dereference's test, by one mask of each side's
+  value's byte. With `--verify`, each cast left out has its test run all
+  the same and must have none, counted apart from the constants'.
 - **A statement's top, and the asks.** A statement is listed for its own
   test where its top is no write, has a type that is not void, and is no
   call left out whose callee asks for no result: a bit a record of a block's
@@ -1644,6 +1667,10 @@ The report adds:
   record the loop swept; with `--verify`, those of them in an expression the
   tests ran on, each checked twice; the casts to void in the asks' list;
   and the declarations asked whether they want their result;
+- `node-shadow: own tests casts-left-out=N checked=N of-them-with-a-test=0`:
+  the casts the loop left out for their own type, of every record it swept;
+  with `--verify`, those of them in an expression the tests ran on, each
+  checked;
 - `node-shadow: own tests tree's-tests'-records-no-listed-operator-has
   checked=N of-them-with-a-test=0
   lists'-words-with-a-bit-past-their-expression=0`: with `--verify`, the
@@ -1656,7 +1683,8 @@ The report adds:
 
 `--list N` lists the first differences (`node-tests: window difference`),
 and a difference, an operator left out with a test, a call left out with a
-test or with a loud argument, a value said that is not its payload's, a
+test or with a loud argument, a cast left out with a test, a value said that
+is not its payload's, a
 record left to no listed operator with a tree's test, a list's bit past its
 expression, or an expression with nothing listed and another verdict fails
 the command.
