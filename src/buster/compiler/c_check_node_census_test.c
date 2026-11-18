@@ -191,6 +191,11 @@ static const char node_census_test_quiet[] =
 // Seventy of one name summed: 139 records, so that the other operand of what is above them is further back than the
 // block before.
 #define BUSTER_NODE_CENSUS_TEST_TEN(name) name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name
+// Ten of a statement, and seventy: more of them than a block of the loop's has records.
+#define BUSTER_NODE_CENSUS_TEST_TEN_OF(text) text " " text " " text " " text " " text " " text " " text " " text " " text " " text
+#define BUSTER_NODE_CENSUS_TEST_SEVENTY_OF(text)                                                                                                                              \
+    BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " "        \
+    BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text) " " BUSTER_NODE_CENSUS_TEST_TEN_OF(text)
 #define BUSTER_NODE_CENSUS_TEST_SEVENTY(name)                                                                                                                                 \
     BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + "             \
     BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name)
@@ -421,6 +426,102 @@ static const char node_census_test_defaults[] =
     "    p = &x; // take\n"
     "    \"a\\q\"[a] = 1; // refuse: warning-event\n"
     "    return x + y + z; // take\n"
+    "}\n"
+    // For the calls with no test to make and a statement that discards nothing. A call the loop leaves out: no
+    // constant, a zero and 1 to 126, a null pointer's zero, a static object's address; as a statement, under an
+    // assignment, under a cast to another type, as a comma's first operand, as a condition and in a return; through a
+    // pointer's name, a dereference and a member. A call it keeps, whose test has nothing: a
+    // constant past 126 or under zero, one that fits a narrow parameter, a floating constant to a variable argument, an
+    // integer one to a floating parameter, a callee with an enumeration's parameter or one that asks for its result, a
+    // constant a cast or a conditional makes, whose record says no value, a callee before the block before. A call
+    // whose test has something: a constant its parameter's type changes, the first of two parameters' too, an
+    // aggregate result or argument, a printf-family name, near and before the block before, a pointer whose
+    // declaration has a format. A call of six arguments, left out, and kept for its fifth and for its sixth. A loud
+    // constant whose
+    // consumer is no call, and a call's that is no argument of the call above. A statement's top: a cast to void, a cast
+    // to another type, a call whose callee asks for its result, at its declaration's first such statement and at a
+    // later one, and as a `for`'s last clause, whose discard comes after its body: in the same block, in the block
+    // before, and further back, where the call stays listed and a write does not. Seventy statements that are a call
+    // left out, and seventy whose callee asks for its result: a cast over one at each place of a block.
+    "struct G { int a; int b; };\n"
+    "struct H { int (*fn)(int); };\n"
+    "int k0(int, int);\n"
+    "void k1(int*, unsigned char, long);\n"
+    "double k2(double);\n"
+    "int k3(_Bool);\n"
+    "int k4(enum A);\n"
+    "int k5(int, ...);\n"
+    "struct G k6(int);\n"
+    "int k7(struct G);\n"
+    "__attribute__((warn_unused_result)) int k8(int);\n"
+    "__attribute__((pure)) int k9(int);\n"
+    "int printf(const char*, ...);\n"
+    "int (*kp)(int, int);\n"
+    "int k10(_Bool, int);\n"
+    "static int gx;\n"
+    "int k11(int, int, int, int, int, int);\n"
+    "int (*kf)(const char*, ...) __attribute__((format(printf, 1, 2)));\n"
+    "int calls(int a, int b, int* p, struct G sg, struct H* h, double d)\n"
+    "{\n"
+    "    int x = 0;\n"
+    "    k0(a, b); // take\n"
+    "    k0(a, 0); // take\n"
+    "    k0(a, 126); // take\n"
+    "    k0(a, 127); // take\n"
+    "    k0(a, -1); // take\n"
+    "    k1(p, 200, 5); // take\n"
+    "    k1(p, 300, 5); // refuse: constant\n"
+    "    k1(0, 1, 2); // take\n"
+    "    k1(&gx, 1, 2); // take\n"
+    "    x = k0(a, b); // take\n"
+    "    x = (int)k0(a, b); // take\n"
+    "    k0(a, b), k1(p, 1, 2); // take\n"
+    "    if (k0(a, b)) x = 1; // take\n"
+    "    x = k0(k0(a, 1000), b); // take\n"
+    "    x = k0(a + 1000, b); // take\n"
+    "    d = k2(1); // take\n"
+    "    d = k2(d); // take\n"
+    "    x = k3(2); // refuse: constant\n"
+    "    x = k3(1); // take\n"
+    "    x = k10(2, 1); // refuse: constant\n"
+    "    x = k0(a, (int)1000); // take\n"
+    "    x = k0(a, 1 ? 1000 : 3); // take\n"
+    "    x = k11(a, b, a, b, a, 1); // take\n"
+    "    x = k11(a, b, a, b, a, 1000); // take\n"
+    "    x = k11(a, b, a, b, 1000, a); // take\n"
+    "    kf(\"%d\", a); // refuse: callee\n"
+    "    x = ((int (*)(int, int))0)(a, b); // take\n"
+    "    x = k4(1); // take\n"
+    "    x = k5(a, 1.5); // take\n"
+    "    x = k5(a, 3); // take\n"
+    "    sg = k6(a); // refuse: aggregate-value\n"
+    "    x = k7(sg); // refuse: aggregate-value\n"
+    "    k8(a); // refuse: unused-value\n"
+    "    x = k8(a); // take\n"
+    "    k9(a); // refuse: unused-value\n"
+    "    k8(b); // refuse: unused-value\n"
+    "    for (x = 0; x < a; k0(x, b)) x += 2; // take\n"
+    "    for (x = 0; x < a; k8(x)) x += 2; // refuse: unused-value\n"
+    "    for (x = 0; x < a; k0(x, b)) x += " BUSTER_NODE_CENSUS_TEST_TEN("a") " + " BUSTER_NODE_CENSUS_TEST_TEN("b") "; // take\n"
+    "    for (x = 0; x < a; k8(x)) x += " BUSTER_NODE_CENSUS_TEST_TEN("a") " + " BUSTER_NODE_CENSUS_TEST_TEN("b") "; // refuse: unused-value\n"
+    "    for (x = 0; x < a; k0(x, b)) x += " BUSTER_NODE_CENSUS_TEST_TEN("a") " + " BUSTER_NODE_CENSUS_TEST_TEN("b") " + " BUSTER_NODE_CENSUS_TEST_TEN("a") "; // take\n"
+    "    for (x = 0; x < a; k8(x)) x += " BUSTER_NODE_CENSUS_TEST_TEN("a") " + " BUSTER_NODE_CENSUS_TEST_TEN("b") " + " BUSTER_NODE_CENSUS_TEST_TEN("a") "; // refuse: unused-value\n"
+    "    for (x = 0; x < a; k0(x, b)) x += " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "; // take\n"
+    "    for (x = 0; x < a; k8(x)) x += " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "; // refuse: unused-value\n"
+    "    for (x = 0; x < a; x++) x += " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "; // take\n"
+    "    " BUSTER_NODE_CENSUS_TEST_SEVENTY_OF("k0(a, b);") " // take\n"
+    "    " BUSTER_NODE_CENSUS_TEST_SEVENTY_OF("k8(a);") " // refuse: unused-value\n"
+    "    printf(\"%d\", a); // refuse: callee\n"
+    "    kp(a, b); // take\n"
+    "    (*kp)(a, b); // take\n"
+    "    h->fn(a); // take\n"
+    "    (void)a; // take\n"
+    "    (void)0; // take\n"
+    "    (int)a; // refuse: unused-value\n"
+    "    a; // refuse: unused-value\n"
+    "    x = k0(" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") ", b); // take\n"
+    "    printf(\"%d\", " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "); // refuse: callee\n"
+    "    return k0(a, b); // take\n"
     "}\n";
 
 // With no warning of a mix of enumerations and -Wassign-enum: an operator with an operand of an enumeration's type is
@@ -468,6 +569,18 @@ static const char node_census_test_whole[] =
     "{\n"
     "    a = a + b; // refuse: unmodeled-warning\n"
     "    return a; // refuse: unmodeled-warning\n"
+    "}\n";
+
+// A unit with -Wtype-safety's type tags: its calls' test has something for every call, and the loop leaves none out.
+static const char node_census_test_tagged[] =
+    "static const int tag_long __attribute__((type_tag_for_datatype(magic, long))) = 42;\n"
+    "void take(void* buffer, int tag) __attribute__((pointer_with_type_tag(magic, 1, 2)));\n"
+    "int plain(int);\n"
+    "int w(long* p, int a)\n"
+    "{\n"
+    "    take(p, 42); // refuse: callee\n"
+    "    plain(a); // refuse: callee\n"
+    "    return plain(a); // refuse: callee\n"
     "}\n";
 
 static const char node_census_test_atomic[] =
@@ -1114,6 +1227,10 @@ struct NodeTestsWindowed
     uint32_t walks;
     uint32_t far;
     uint32_t quiet;
+    uint32_t calls;
+    uint32_t calls_checked;
+    uint32_t casts;
+    uint32_t asks;
     uint32_t values;
     uint32_t spared;
     uint32_t direct;
@@ -1168,6 +1285,9 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                                                  shadow.own_visits == windowed->sent && shadow.own_walks == windowed->walks &&
                                                  shadow.reader_facts[NODE_FACTS_COUNT_TESTS_FAR] == windowed->far &&
                                                  shadow.own_quiet == windowed->quiet && shadow.own_quiet_checked == windowed->quiet && shadow.own_quiet_wrong == 0 &&
+                                                 shadow.own_quiet_calls == windowed->calls && shadow.own_quiet_calls_checked == windowed->calls_checked &&
+                                                 shadow.own_quiet_calls_wrong == 0 && shadow.own_quiet_calls_loud == 0 && shadow.own_result_asks == windowed->asks &&
+                                                 shadow.own_result_casts == windowed->casts &&
                                                  shadow.own_values_checked == windowed->values && shadow.own_values_wrong == 0 &&
                                                  shadow.own_tree_checked == windowed->spared && shadow.own_tree_wrong == 0 && shadow.own_lists_past == 0 &&
                                                  shadow.own_direct == windowed->direct && shadow.own_direct_checked == windowed->direct && shadow.own_direct_wrong == 0 &&
@@ -1179,7 +1299,9 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                 " not the census's code's, %" PRIu64 " walks of another count; their loop listed %" PRIu64 " records for the tree's tests (%u) and %" PRIu64
                 " operators (%u), %" PRIu64 " records went to the census's code (%u) after %" PRIu64 " walks (%u), %" PRIu64
                 " operands were before the block before (%u), and it left %" PRIu64 " operators out for their constants (%u): %" PRIu64 " of them checked, %" PRIu64
-                " with a test; %" PRIu64 " constants' records say their value (%u), %" PRIu64 " of them not their payload's; %" PRIu64
+                " with a test; it left %" PRIu64 " calls out (%u): %" PRIu64 " of them checked (%u), %" PRIu64 " with a test, %" PRIu64 " with a loud argument, and asked %" PRIu64
+                " callees for their result (%u) at %" PRIu64 " casts over one (%u); %" PRIu64 " constants' records say their value (%u), %" PRIu64
+                " of them not their payload's; %" PRIu64
                 " records the tree's tests read were no listed operator's operand (%u), %" PRIu64 " of them with a test, and %" PRIu64
                 " lists' words had a bit past their expression; %" PRIu64
                 " expressions had nothing listed (%u), %" PRIu64 " of them checked, %" PRIu64 " with another verdict; the tests' own form counted %" PRIu64
@@ -1188,7 +1310,10 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                 window ? windowed->expressions : 0, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES], shadow.own_count_differences, shadow.own_trees,
                 window ? windowed->trees : 0, shadow.own_operators, window ? windowed->operators : 0, shadow.own_visits, window ? windowed->sent : 0, shadow.own_walks,
                 window ? windowed->walks : 0, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_FAR], window ? windowed->far : 0, shadow.own_quiet, window ? windowed->quiet : 0,
-                shadow.own_quiet_checked, shadow.own_quiet_wrong, shadow.own_values_checked, window ? windowed->values : 0, shadow.own_values_wrong,
+                shadow.own_quiet_checked, shadow.own_quiet_wrong, shadow.own_quiet_calls, window ? windowed->calls : 0, shadow.own_quiet_calls_checked,
+                window ? windowed->calls_checked : 0, shadow.own_quiet_calls_wrong, shadow.own_quiet_calls_loud, shadow.own_result_asks, window ? windowed->asks : 0,
+                shadow.own_result_casts, window ? windowed->casts : 0, shadow.own_values_checked,
+                window ? windowed->values : 0, shadow.own_values_wrong,
                 shadow.own_tree_checked, window ? windowed->spared : 0, shadow.own_tree_wrong, shadow.own_lists_past, shadow.own_direct, window ? windowed->direct : 0,
                 shadow.own_direct_checked,
                 shadow.own_direct_wrong, shadow.own_records, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_RECORDS], shadow.reader_facts[NODE_FACTS_COUNT_TESTS_APART],
@@ -2318,6 +2443,9 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     char* whole[] = { "-nostdinc", "-Wc++-compat" };
     check_test_expect(test, ready && node_census_test_fixture(directory, "whole.c", node_census_test_whole, whole, BUSTER_ARRAY_LENGTH(whole), &system),
                       "node-census refuses every expression of a unit with a warning no test stands for");
+    char* tagged[] = { "-nostdinc", "-Wtype-safety" };
+    check_test_expect(test, ready && node_census_test_fixture(directory, "tagged.c", node_census_test_tagged, tagged, BUSTER_ARRAY_LENGTH(tagged), &system),
+                      "node-census refuses every call of a unit with type tags");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
@@ -2332,10 +2460,14 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     static const NodeTestsWindowed windowed_warnings = {
         .expressions = 45,
         .trees = 4,
-        .operators = 63,
+        .operators = 62,
         .sent = 23,
         .walks = 4,
         .quiet = 6,
+        .calls = 1,
+        .calls_checked = 1,
+        .casts = 1,
+        .asks = 1,
         .values = 45,
         .spared = 34,
         .direct = 2,
@@ -2344,13 +2476,17 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     static const NodeTestsWindowed windowed_clean = {
         .expressions = 23,
         .trees = 1,
-        .operators = 26,
+        .operators = 25,
         .sent = 10,
         .walks = 4,
         .quiet = 3,
+        .calls = 1,
+        .calls_checked = 1,
+        .casts = 1,
+        .asks = 1,
         .values = 26,
         .spared = 17,
-        .direct = 1,
+        .direct = 2,
         .apart = 2,
     };
     static const NodeTestsWindowed windowed_set = {
@@ -2378,17 +2514,21 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .values = 1,
     };
     static const NodeTestsWindowed windowed_defaults = {
-        .expressions = 160,
+        .expressions = 385,
         .trees = 29,
-        .operators = 60,
-        .sent = 26,
+        .operators = 84,
+        .sent = 27,
         .walks = 11,
-        .far = 25,
-        .quiet = 38,
-        .values = 113,
-        .spared = 172,
-        .direct = 57,
-        .apart = 9,
+        .far = 34,
+        .quiet = 52,
+        .calls = 171,
+        .calls_checked = 171,
+        .casts = 157,
+        .asks = 5,
+        .values = 170,
+        .spared = 213,
+        .direct = 178,
+        .apart = 19,
     };
     static const NodeTestsWindowed windowed_enums = {
         .expressions = 5,
@@ -2412,13 +2552,18 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .spared = 1,
         .direct = 2,
     };
+    static const NodeTestsWindowed windowed_tagged = {
+        .expressions = 4,
+        .operators = 3,
+        .values = 2,
+    };
     static const NodeTestsWindowed windowed_system = {
         .expressions = 3,
         .operators = 1,
         .quiet = 1,
         .values = 2,
         .spared = 1,
-        .direct = 1,
+        .direct = 2,
     };
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
@@ -2438,7 +2583,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                                                              BUSTER_NODE_FRONT_AFTER, 2, 0, windowed_atomic),
                       "node-tests: at reader time atomic record accesses are refused by type");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet),
-                                                             BUSTER_NODE_FRONT_AFTER, 77, 14, windowed_defaults),
+                                                             BUSTER_NODE_FRONT_AFTER, 164, 15, windowed_defaults),
                       "node-tests: at reader time the tests refuse what warns without an option, with the default warnings alone");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "enums.c", node_census_test_enums, enums, BUSTER_ARRAY_LENGTH(enums),
                                                              BUSTER_NODE_FRONT_AFTER, 1, 1, windowed_enums),
@@ -2448,6 +2593,9 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_tests_test_fixture(directory, "whole.c", node_census_test_whole, whole, BUSTER_ARRAY_LENGTH(whole), BUSTER_NODE_FRONT_AFTER, 2, 0,
                                                              windowed_whole),
                       "node-tests: at reader time a warning no test stands for refuses every expression");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "tagged.c", node_census_test_tagged, tagged, BUSTER_ARRAY_LENGTH(tagged), BUSTER_NODE_FRONT_AFTER, 3,
+                                                             1, windowed_tagged),
+                      "node-tests: at reader time a unit with type tags has every call's test, and its loop leaves no call out");
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
                                                                BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");

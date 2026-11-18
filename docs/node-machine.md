@@ -3662,6 +3662,360 @@ code:
 - **What is left on T's records** is 23.2: the calls' tests first, 12,918
   of the 27,750 operators still listed.
 
+### The calls with no test to make, and a statement that discards nothing
+
+"The operator above, and an expression with nothing listed" left 23.2 of the
+window's 42.0 ticks a record on `sqlite3.c` to the tests that read T's
+records, on the 59% of its expressions that were listed for them. This piece
+takes out the calls, and the statements listed for their top alone. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/window-tests-calls-2850-2026-11-18)
+has each form's patch and readings.
+
+**What was listed, counted.** Before any code, on the piece before's sources
+(default warnings; with every warning in parentheses):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions the tests run on | 50,996 | 10,839 | 43,415 |
+| listed for the tests that read T's records | 29,839 (42,203) | 7,770 (9,537) | 21,490 (28,269) |
+| listed calls | 12,921 | 4,182 | 8,586 |
+| of them, with a test that finds nothing and sends nothing | 12,904 | 3,971 | 8,541 |
+| statements listed because their top is no write | 12,769 | 3,233 | 2,746 |
+| of them, the top a cast to void | 5,667 | 573 | 31 |
+| of them, the top a call | 6,619 | 2,186 | 2,069 |
+| of those calls, the callee asks for its result | 0 | 1 | 0 |
+
+A call was listed whatever it was, and `sqlite3.c`'s `assert`s are
+`((void)0)`, three records listed because a statement whose top is no write
+may be a value without an effect.
+
+**The rule.** A call's test has four things to find: an aggregate result or
+argument, its callee's own semantics, a constant argument its parameter's
+type changes, and an enumeration under the mix's warnings. The loop leaves a
+call out of its list where:
+
+| | the call is left out where |
+| --- | --- |
+| its own type | is no aggregate's |
+| its callee | is a name whose declaration gives a call no semantics of its own (no printf-family name, none of the attributes the call's test asks about), or no name at all |
+| its arguments | have no aggregate among them, and no constant but an address's or an integer's of zero or 1 to 126 |
+| its callee's type | takes such an integer unchanged in each parameter: none is an enumeration's, a floating type's, or an integer's but a plain one of 8 to 64 bits |
+| its operands' properties | send it nothing |
+
+A unit with `-Wtype-safety` keeps every call listed: its test has something
+for each. And a statement is listed for its own test where its top is no
+write, has a type that is not void, and is no call left out whose callee asks
+for no result. The census's code asks the same of a discarded value: one of
+type void is none, a cast or not.
+
+**Where its inputs are.** Each is made where its record is read already:
+
+- **The arguments, in the kernel's call rule's short path.** It reads each
+  argument's record for its flags and standing, and gathers three more
+  words there (`node_facts_argument`): the kinds of constant among them, a
+  bit each; whether an integer constant among them is not zero or 1 to 126,
+  by what its record says of its value; and their types' words together,
+  for an aggregate's bit. The call's record then says 1 in its exponent
+  (`BUSTER_NODE_FACTS_QUIET_CALL`); a call's record says 0 or 1 there. The
+  first four arguments are read with no branch, as they were. A call the
+  rule makes after its short path refused it says nothing, and stays
+  listed: seven on Lua, none on the two others.
+- **What each parameter takes, a bit of the callee's type's row**
+  (`BUSTER_NODE_FACTS_TAKES`), made with the row, once a function type.
+- **The callee's own semantics, a bit of its declaration's line's byte,**
+  made at the line's first leaf where the leaf's type's row says it calls,
+  from the census's code's fact of the declaration. A name's leaf has it in
+  its value's byte, and a call reads its first operand's byte, as the quiet
+  rule reads its operands' kinds.
+- **The calls' rule in the loop** is then masks of a block's bytes: the
+  call's operator, its type's byte's two bits, its first operand's byte's
+  bit, and what its operands send it.
+- **A statement's top, a mask a block:** the records that as a statement's
+  top leave its test nothing, a write, a record of type void and a call
+  left out. An expression's listing reads its top's bit.
+- **Whether a callee asks for its result: the asks.** That is its
+  declaration's fact too (`warn_unused_result`, `const`, `pure`, or a
+  builtin's name), and it is asked only of a call a statement may discard. A
+  statement's discard is a cast to void over its top: the loop compresses
+  the numbers of the casts to void whose first operand is a call left out,
+  in its block or the one before, into a list, a half block a step, and one
+  counted pass reads each one's callee's line's byte
+  (`node_tests_window_asks`). The fact is made at the line's first ask and
+  kept in the byte. A call whose callee asks is cleared from the top's
+  mask: one call in the three corpora. So is a call whose discard is
+  further back than the block before, a `for`'s last clause's after a long
+  body: no ask reaches it, and its statement stays listed.
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| calls the loop leaves out | 12,064 | 3,509 | 7,227 |
+| calls still listed | 854 | 673 | 1,359 |
+| casts to void over a call left out, the asks' list | 6,145 | 1,721 | 1,974 |
+| declarations asked whether they want their result | 1,144 | 740 | 1,361 |
+| operators listed, before | 27,750 | 9,486 | 21,783 |
+| with the piece | 15,686 | 5,977 | 14,556 |
+| expressions with nothing listed, before | 21,157 | 3,069 | 21,925 |
+| with the piece | 35,069 | 5,731 | 26,760 |
+| share | 69% | 53% | 62% |
+| with every warning, before | 8,793 | 1,302 | 15,146 |
+| with the piece | 20,333 | 3,594 | 17,622 |
+| share | 40% | 33% | 41% |
+
+**Checked where the reader verifies.** With `--verify` a call left out has
+its test run all the same, and must find nothing and send nothing; and it is
+asked again, from T's records and its own list of arguments, whether an
+argument is a constant the rule doesn't take (`node_tests_call_loud`: the
+test finds an aggregate, and finds nothing at 127), and must have none. An
+expression with nothing listed is run through the tests all the same, as
+before, which checks a statement's top. Either fails the command.
+
+**Measured.** The 9700X, CPU 2, under the lock a run, Release; main
+`8d4025fbf` and this piece on it, in turn. TSC ticks a record of the
+expressions the tests ran on; medians of seven readings, musl's of fifteen;
+with every warning of five, musl's of fifteen.
+
+| | `sqlite3.c` | | Lua | | musl | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| | before | the piece | before | the piece | before | the piece |
+| **the tests on the window** | 41.8 | **35.8** | 58.0 | **53.0** | 98.0 | **96.4** |
+| of which the records' bytes | 8.5 | 9.3 | 9.4 | 10.7 | 16.2 | 18.6 |
+| the loop, with the asks | 0.9 | 1.7 | 1.1 | 2.3 | 2.3 | 4.4 |
+| an expression's part | 9.3 | 9.7 | 9.6 | 9.7 | 16.6 | 16.6 |
+| the tests on T's records | 23.1 | 15.1 | 37.8 | 30.2 | 63.1 | 55.9 |
+| with every warning | 67.7 | 63.8 | 73.9 | 70.8 | 120.6 | 121.1 |
+| beside `--verify` (one reading) | | 85.5 | | 103.4 | | 172.5 |
+
+- **6.0 ticks a record less on `sqlite3.c`, 5.0 on Lua, 1.6 on musl:** 14%,
+  9% and 2% of the tests.
+- **A second build of the same sources** (64 bytes of text more before the
+  fixtures', below) read 35.6 for 42.0, 53.2 for 58.0 and 96.3 for 100.0.
+- **A third, on the main the pull request was opened on** (`5fa4e76c3`, two
+  merges of Tier 1's certificate later; that main and the piece in turn):
+  35.6 for 42.2, 53.0 for 58.1 and 97.7 for 104.5; with every warning 63.0
+  for 67.4, 70.6 for 74.2 and 124.9 for 128.3.
+- **musl is read with its spread, and by its chunks.** Its fifteen readings
+  run from 92.6 to 105.5, and main's from 95.6 to 106.6. Its 43,415
+  expressions come in 2,975 chunks of two blocks, each after another unit's
+  compile, and each sweep reads twice `sqlite3.c`'s ticks a record there
+  (the records' bytes 18.6 for 9.3). In one executable, with the rule on
+  and off and its inputs made either way, the tests read 35.8 for 44.5 on
+  `sqlite3.c`, 54.3 for 62.5 on Lua and 102.5 for 111.4 on musl.
+- **With every warning: 3.9 and 3.1 less, and nothing on musl.**
+  `-Wsign-compare` and `-Wself-assign` list every comparison and
+  assignment: two fifths of `sqlite3.c`'s expressions are then left with
+  nothing listed, for one sixth before.
+
+Not this piece's to change, and read beside it (main, then the piece):
+
+- **The window's kernel in place, without the tests: 15.6 and 16.4** on
+  `sqlite3.c`, 20.2 and 20.9 on Lua, 18.7 and 19.2 on musl: the arguments'
+  part of its call rule's short path. An earlier build of this form read
+  16.0 for 15.7.
+- **The names' pass:** 22.6 and 22.6 ticks a name, 93.1 and 94.5, 68.3 and
+  67.8.
+- **`-c sqlite3.c` as whole processes** (21 runs of each of three copies,
+  twice): wall -0.08% and -0.10%, user cycles -0.05% and -0.03%, where main
+  against itself reads -0.10% and -0.02%, +0.01% and +0.04%.
+- **The front with the window read 71.7 for 52.8 in this build,** 91.9 for
+  71.2 on Lua and 102.0 for 90.8 on musl, **and 52.8 in the second and in
+  the third** (70.9 for 70.7 and 90.9 for 88.2 there). Its
+  functions are main's, byte for byte and at main's addresses; in two of
+  its four counted runs no counter of mispredicted branches, pipeline
+  restarts, op cache or first-level misses differs from the second
+  build's (the two others read the whole process 8% and 10% higher); and
+  the stack's place doesn't move it. What moved is the read-only data
+  after this piece's fixture lines, 3,008 bytes of text, with the front's
+  four `switch` tables among it: the only data of the program's image
+  that its function reads. Sixty-four bytes more of text put it back.
+  [#2967](https://github.com/buster14a/buster/issues/2967) has the builds
+  and the samples.
+
+**What moved it, and what didn't.** Ticks a record; each form in turn with
+the piece before (#2960's sources on main `aa09d1a04`), `sqlite3.c` by its
+sweeps:
+
+| the form | `sqlite3.c` | the records' bytes | the loop | an expression's part | the tests on T's records | Lua | musl |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| the piece before | 41.7 to 42.1 | 8.5 | 0.8 | 9.4 | 23.0 to 23.2 | 58.4 to 58.7 | 96.3 to 99.9 |
+| as specified: the callee's facts with its parameters a line's bit, a loud argument marking its consumer | 37.8 | 11.6 | 1.8 | 9.4 | 15.0 | 59.7 | 112.5 |
+| the arguments in the kernel's call rule; a callee's result asked in the loop, a call from it | 36.5 | 9.3 | 3.2 | 9.7 | 14.3 | 55.7 | 104.2 |
+| asked in the listing, of every expression's top, with a branch on the callee's kind | 37.5 | 9.1 | 1.0 | 12.1 | 15.1 | 55.8 | 99.2 |
+| the same with no branch | 37.2 | 9.2 | 1.0 | 12.0 | 14.9 | 54.3 | 94.4 |
+| the loop marks the casts over a call left out; a pass over each block's marks | 36.0 | 9.3 | 2.2 | 9.4 | 15.2 | 54.0 | 102.4 |
+| the marks compressed into a list, one counted pass | 35.2 | 9.2 | 1.7 | 9.4 | 15.0 | 53.4 | 94.1 |
+| its mask written for a callee that asks alone | 35.4 | 9.2 | 1.6 | 9.6 | 14.8 | 53.4 | 95.8 |
+| a record of type void discards nothing; the asks' list is the casts to void near their call; the rule's own path says nothing: this piece, against main `8d4025fbf`, which read 41.8, 58.0 and 98.0 | 35.8 | 9.3 | 1.7 | 9.7 | 15.1 | 53.0 | 96.4 |
+
+- **As specified, its inputs cost more than the rule saved on Lua and
+  musl.** The specification put the callee's facts and its parameters'
+  types in its declaration's line's byte, and had each loud argument mark
+  its consumer by the front's distances. One executable with each part
+  behind a switch read, in ticks a record on `sqlite3.c`, Lua and musl: the
+  fact of a result asked for, made for every function's line, 0.8, 3.6 and
+  7.8 in the records' bytes; the parameters' scan 0.6, 1.8 and 4.0; the
+  line's type's row 0.5, 1.1 and 2.0; the marking 0.8, 1.1 and 2.3 in the
+  loop. The rule itself took the tests on T's records from 22.3, 37.5 and
+  61.5 to 14.8, 30.3 and 52.1.
+- **So each input moved to where its record is read.** The arguments to the
+  kernel's call rule, which reads each one's record; the parameters to the
+  callee's type's row, once a type; and the result's fact to the statements
+  that may discard a call, made when one asks.
+- **A call from inside the loop cost every block.** With the ask called
+  from the loop, at the calls a cast follows, the loop read 3.2 ticks a
+  record on `sqlite3.c`, 5.5 on Lua and 10.5 on musl, for 1.0, 1.3 and 3.1
+  without it.
+- **Asked of every expression, it cost every expression.** Four loads at
+  each expression's top's first operand, with a branch on what it is or
+  with none: 2.7 ticks a record more in an expression's part, where the
+  facts' making was 0.1 (1,130 asks at 28 ticks each on `sqlite3.c`, 31 on
+  Lua, 60 on musl).
+- **A pass over each block's marks mispredicts its own loops:** 47 ticks a
+  cast on `sqlite3.c`, 6,471 casts in 5,000 blocks. The same casts as one
+  list read 27, and 0.6 ticks a record.
+- **musl moves between builds that list the same expressions.** The four
+  forms before the last list the same ones, and their tests on T's records
+  read 49.6, 60.0, 52.3 and 52.5 there, where the piece before read 96.9 to
+  99.9 in all in the same jobs.
+- **The campaign's faults took code out** (below): the rule's own path's
+  verdict, a cast's test of a top's type, the asks of a cast further back
+  than the block before, and the masks' sixth word. The form before them
+  read 35.4 against the piece before; with the first of them 34.9 against
+  main, and this one 35.8. The last ones changed the asks and the far
+  path alone, and what reads more is an expression's part (9.7 for 9.3)
+  and the tests on T's records (15.1 for 14.6): the tests' functions are
+  the same bytes 576 further on, and the function the sweeps are inlined
+  in is 62 bytes longer.
+
+**What stays scalar, and why:**
+
+- **The asks,** a cast at a time: its first operand, that call's first
+  operand, its kind, its line's number and the line's byte, five loads in a
+  chain. 6,145 casts on `sqlite3.c`, 2% of its records; a form with 6,471
+  read them at 27 ticks each with the facts' making, 0.6 ticks a record. As
+  gathers of sixteen casts, at the 1.3 to 1.5 ticks an element "The
+  constants with no test to make" measured, the five loads are 7 ticks a
+  cast in a full step; a chunk has ten casts on `sqlite3.c` and fewer than
+  one on musl.
+- **A declaration's fact of its result,** the census's code, once a
+  declaration's line: 1,144, 740 and 1,361 asks; a form with 1,130, 741 and
+  1,361 read them at 28, 31 and 60 ticks.
+- **A call whose discard is further back than the block before:** one load
+  and one store where the loop reads that operand, as it reads the others
+  that far.
+- **The arguments' part of the kernel's call rule,** three ORs an argument
+  where the rule reads its record, the first four with no branch.
+- **A row's parameters,** once a function's type.
+- **The check of what is left out:** the tests' own code and a call's own
+  list of arguments, under `--verify` alone.
+
+**Faults.** 155 were put into the first complete form, one at a time, in a
+copy of the tree: 98 failed the node machine's tests, 32 changed no result,
+and 25 of the texts didn't compile. What the 32 showed, each from the code
+that makes the value it reads:
+
+- **Code that did nothing, taken out.**
+  - The rule's own path's verdict: it makes seven of Lua's calls and no
+    fixture's, and they stay listed.
+  - A parameter's type's word's valid bit: a prototype's parameters' types
+    are valid.
+  - A cast's operator beside a top's void type: the census's code asks the
+    type of any discarded value.
+  - A record's standing and the rest of its exponent, where the records'
+    bytes read a call's bit: a call's record says 0 or 1.
+  - A leaf without a line's declaration's fact: such a leaf is loud as a
+    callee without asking.
+  - A word of a block's masks for the calls left out, and the asks' reads
+    of it.
+  - The asks of a cast further back than the block before: its call stays
+    listed.
+  - An aggregate, a missing record and a wide value in the verify's own
+    list of arguments: the call's test finds the first, and a call left out
+    has neither of the others.
+- **New fixture lines** (the seventh fixture's function `calls`): the first
+  of two parameters that takes no constant; a constant a cast or a
+  conditional makes, whose record says no value; a static object's address;
+  six arguments, the fifth and the sixth loud; a pointer whose declaration
+  has a format; a null callee; a cast to another type and a comma over a
+  call left out; a `for`'s last clause whose discard is in the block
+  before, and further back, with a callee that asks, one that doesn't and a
+  write; and seventy statements of each kind, a cast to void at each place
+  of a block.
+- **A pinned count:** the casts in the asks' list.
+
+139 were then put into the final code, the 25 texts corrected: 137 fail the
+tests. The other two change no result a test can read:
+
+- **The far path's test of a record's place in its chunk.** A record past
+  the chunk's count is read there as the others that far are, and without
+  the test a stale one could keep a call listed: another listing, the same
+  verdicts.
+- **A leaf without a line, loud as a callee.** No call has one for a
+  callee: a name's leaf has no line where its value is past the columns, an
+  enumerator's, or where the lines are full, and their room is half the
+  unit's tokens and 64.
+
+The verify's own two counts of a call left out are not among the faults: a
+fault there shows only beside one in the rule.
+
+**Against its gates.** The piece was specified on the issue before its code:
+
+- **Exact: met.** No expression differs on the three corpora and the
+  compiler's own source, with the default warnings and with every warning;
+  beside `--verify` no call left out has a test or a loud argument, and no
+  expression with nothing listed has another verdict.
+- **The tests on the window under 40.0 on `sqlite3.c`, refuted at 41.0:
+  met.** 35.8, and 35.6 in the second build.
+- **The rule's inputs under 1.0 tick a record (the records' bytes and the
+  loop together, 9.4 before): missed.** They read 10.9: 0.8 more in the
+  bytes, where a line's byte has the callee's fact, and 0.7 in the loop, of
+  which the asks were 0.6 where they were timed.
+- **What is not this piece's reads the same: the names' pass and
+  `-c sqlite3.c` do; the kernel in place does not,** by the form that
+  replaced the specification's: its call rule gathers the arguments' part,
+  and it reads 16.4 for 15.6 on `sqlite3.c`. The front with the window
+  read main's in the second build and a third more in this one, by the
+  read-only data's place, above.
+- **Where it left the specification.** The arguments' part is the kernel's
+  call rule's, not a mark by the front's distances; the parameters' part is
+  the callee's type's row's, not its declaration's line's; a callee's result
+  is asked where a cast is over its call, not at its line's first leaf; and
+  a constant argument is quiet where its record says a value of zero or 1
+  to 126, so a constant a cast or a conditional makes, whose record says
+  none, keeps its call listed.
+
+**What is left, counted.** With the piece, by what its tests find (default
+warnings):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions listed for the tests that read T's records | 15,926 | 5,108 | 16,655 |
+| for a listed operator alone | 10,453 | 2,150 | 8,640 |
+| for an initialization's root alone | 3,310 | 1,155 | 5,780 |
+| for writes out of sequence alone | 600 | 137 | 420 |
+| for a returned address alone | 76 | 129 | 316 |
+| for a statement's top alone | 0 | 0 | 0 |
+| operators listed | 15,688 | 5,970 | 14,556 |
+| of them, with a test that finds nothing and sends nothing | 14,770 | 4,858 | 12,734 |
+| casts | 7,370 | 1,995 | 3,849 |
+| of them, with nothing | 7,370 | 1,919 | 3,824 |
+| subscripts, by a constant | 3,181 | 87 | 1,586 |
+| assignments of a constant | 1,250 | 223 | 1,112 |
+| calls | 854 | 666 | 1,359 |
+| conditionals and commas, listed whatever their operands | 988 | 925 | 816 |
+| comparisons with a constant | 1,041 | 466 | 2,153 |
+| shifts by a constant | 282 | 1,094 | 823 |
+
+- **No statement is listed for its top alone any more.**
+- **Half of what is listed on `sqlite3.c` is a cast,** and every one of its
+  casts' tests finds nothing: a third of Lua's listed operators and a
+  quarter of musl's.
+- **An initialization is listed for its root alone** at a fifth of
+  `sqlite3.c`'s listed expressions and a third of musl's, 5,235 of musl's
+  5,780 with a plain name's value for an initializer.
+- **With every warning** `-Wself-assign` and `-Wsign-compare` list every
+  assignment and comparison: 16,165 assignments on `sqlite3.c`, 12,136 with
+  nothing, and 10,830 comparisons, each sent to the census's code.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -3691,16 +4045,20 @@ tests in the machine's own form" made the same bits from T's records at 62:
 step and its leaves' bits a byte a declaration's line: 65% of the own form's
 ticks on `sqlite3.c`, which at the same share is about 40 cycles a body
 token and 1.21. "The constants with no test to make" took it to 59%, about
-36 cycles and the same 1.21. The sum stands only with the tests at a third
-of the own form's. What would move it:
+36 cycles and the same 1.21. "The operator above, and an expression with
+nothing listed" and "The calls with no test to make, and a statement that
+discards nothing" took it to 51% and 43%: about 31 and 27 cycles,
+and 1.22. The sum stands only with the tests at a third of the own form's.
+What would move it:
 
-- **The rest of the tests where their inputs are:** a call's from the
-  window, the tree's from a byte the front writes, an expression's fixed
-  part, and a comparison's signs under `-Wsign-compare`: 31 of the window's
-  49 ticks a record are tests on T's records still, after "The constants
-  with no test to make" took the operators a constant sends for nothing out
-  of the list. The census's code is their oracle. They are the sum's
-  largest open term.
+- **The rest of the tests where their inputs are:** a cast's and a
+  subscript's from the window, an initialization's root's, an assignment's
+  of a constant, and a comparison's signs under `-Wsign-compare`: 15 of the
+  window's 36 ticks a record are tests on T's records still,
+  after the calls and the statements that discard nothing left the list.
+  "The calls with no test to make, and a statement that discards nothing"
+  counts what is listed still. The census's code is their oracle. They are
+  the sum's largest open term.
 
 - **The front's walk:** over a hundred instructions an acting token for a
   stack walk, lean or not. The structure it derives (counts, distances,

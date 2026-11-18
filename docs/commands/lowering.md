@@ -888,7 +888,7 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's ten fixtures run again with its tests at reader time
+The census's eleven fixtures run again with its tests at reader time
 (`node_tests_test_fixture`: `--front-tests` with `--verify`, then the same
 with the lean front's window and `--window-tests`, the machine's own form
 beside the census's code, whose bits, root's kinds and spans must be its;
@@ -935,11 +935,29 @@ expression, off: what they would refuse is taken, and two writes or a
 returned address list nothing; its first function's return has nothing
 listed and ends at the unit's first warning event, the events' lower bound
 at its equality), the tenth (`-Wc++-compat`, a warning no test stands for: every
-expression refused, one with nothing listed too), and each fixture's counts
-of the operators listed for the tree's tests, of the records those tests
-read that no listed operator has as an operand, each checked, of the
-expressions with nothing listed, each run through the tests all the same,
-and of the roots' records apart from their operand's.
+expression refused, one with nothing listed too), the seventh's function
+`calls` and the eleventh fixture (the calls with no test to make: a call
+left out with no constant, with zero and 1 to 126, as a statement, under an
+assignment, as a condition, in a return and as a `for`'s last clause,
+through a pointer's name, a dereference and a member, with six arguments,
+under a cast to another type and as a comma's first operand; a call kept
+for a constant past 126 or under zero, for one a cast or a conditional
+makes, for a floating, a narrow or an enumeration's parameter, the first of
+two too, for a variable argument, an aggregate, a printf-family name, a
+pointer whose declaration has a format, a null callee, a callee before the
+block before; a statement whose top is a cast to void, a cast to another
+type, a call whose callee asks for its result, at its declaration's first
+such statement and at a later one, and a `for`'s last clause whose discard
+is in its block, in the one before and further back; seventy statements
+that are a call left out and seventy whose callee asks, a cast to void at
+each place of a block; and, with `-Wtype-safety`, every call kept), and
+each fixture's counts of the
+operators listed for the tree's tests, of the records those tests read that
+no listed operator has as an operand, each checked, of the calls left out,
+each checked, of the casts in the asks' list and the declarations asked
+whether they want their result, of
+the expressions with nothing listed, each run through the tests all the
+same, and of the roots' records apart from their operand's.
 The fact words' kernel runs at reader time on the fixture twice
 (`node_shadow_test_kernel`: after T alone, and in the `--scalar` run with the
 census's tests and C and X beside it) and on the two generated texts: no
@@ -1499,10 +1517,11 @@ kernel's run in place (`node_facts_window_run`).
   byte comes by its distance, from this block's bytes and the block
   before's, one permute a side; an operand further back is read by a load,
   and counted. It writes what each record is as an operand, its operands'
-  bytes together, its part of the set's tests, and four masks a block: the
-  operators listed for their operands' tree's tests, the operators with
-  tests of their own, the writes, and the operators the rule below left
-  out.
+  bytes together, its part of the set's tests, and five masks a block, one
+  line of the cache: the operators listed for their operands' tree's tests,
+  the operators with tests of their own, the writes, the operators the two
+  rules below left out, and the records that as a statement's top leave its
+  test nothing.
 - **The tree's tests, by the operator above.** A test of the parser's tree
   (`node_tests_tree`) reads its record's token's parent's role, and fires
   only where that parent is the record's consumer's token. So the loop
@@ -1528,6 +1547,40 @@ kernel's run in place (`node_facts_window_run`).
   it makes a constant's record, and T's own record says none. With
   `--verify`, each operator left out has its tests run all the same and
   must have none, and each value said is compared with its payload.
+- **The calls with no test to make.** A call is left out of the list where
+  its own type is no aggregate's, its callee gives a call no semantics of
+  its own, its operands' properties send it nothing, and its arguments are
+  quiet. The last is the kernel's: its call rule's short path
+  (`node_facts_call_fast` in `c_check_node_machine_facts.c`) gathers, where
+  it reads each argument's record, the kinds of constant among them, whether
+  an integer constant is not zero or 1 to 126, and their types' words
+  (`node_facts_argument`), and the call's record's exponent says 1
+  (`BUSTER_NODE_FACTS_QUIET_CALL`; a call the rule itself makes says 0) where
+  they have no aggregate and no constant but an address's or such an
+  integer's, which the callee's type's row says each parameter takes
+  unchanged (`BUSTER_NODE_FACTS_TAKES`: no enumeration's type, no floating
+  one, no integer's but a plain one of 8 to 64 bits). The callee's part is a
+  bit of its declaration's line's byte (`BUSTER_NODE_TESTS_LINE_LOUD`, the
+  census's code's fact of the declaration, made at the line's first leaf
+  where the leaf's type's row says it calls), which a name's leaf has in its
+  value's byte and the call reads of its first operand (a leaf without a
+  line is loud whatever it names). A unit with `-Wtype-safety` keeps every
+  call. With `--verify`, each call left out has its test run all the same
+  and must have none, and has no other constant among its arguments by T's
+  records and its own list (`node_tests_call_loud`).
+- **A statement's top, and the asks.** A statement is listed for its own
+  test where its top is no write, has a type that is not void, and is no
+  call left out whose callee asks for no result: a bit a record of a block's
+  mask. Whether a callee asks for its result is its declaration's other
+  fact (`BUSTER_NODE_TESTS_LINE_RESULT`), made only where a statement may
+  discard a call of it. A statement's discard is a cast to void over its
+  top: the loop compresses the numbers of the casts to void whose first
+  operand is a call left out, in its block or the one before, into a list
+  (`NodeCensusReader.window_asks`), and `node_tests_window_asks` reads each
+  one's callee's line's byte, asks the census's code at the line's first ask
+  (`node_tests_window_wants`), and clears from the mask a call whose callee
+  asks. A call whose discard is further back is cleared from it where the
+  loop reads that operand, and its statement stays listed.
 - **An expression's part** (`node_tests_window_chunk`'s first sweep). The
   set is an OR of its records' bytes. Its lists are the masks' words aligned
   at its first record (`node_tests_window_word`), its root's bits last. Its
@@ -1535,8 +1588,9 @@ kernel's run in place (`node_facts_window_run`).
 - **An expression with nothing listed** has its verdict there, from the
   window alone, and neither T nor the tests below run on it. It is listed
   for them where it has an operator in a list, two writes or one under its
-  top (`-Wunsequenced`), an initialization's root, a statement whose top is
-  no write, a return of an address (`-Wreturn-stack-address`), or a warning
+  top (`-Wunsequenced`), an initialization's root, a statement whose top
+  discards something (above), a return of an address
+  (`-Wreturn-stack-address`), or a warning
   of T's actions (`BUSTER_NODE_FACTS_PLACED_WARNED`, a bit of the kernel's
   reader's byte an expression). Its verdict is its set's bits, the
   control's bit of a root inside a statement expression, the bit of a
@@ -1559,7 +1613,7 @@ The report adds:
 
 - `node-shadow: window tests expressions=N records=N differences=0
   operands-before-the-block-before=N lines'-bytes-made=N records-swept=N
-  roots-apart-from-their-operand=N`;
+  roots-apart-from-their-operand=N chunks=N`;
 - `node-shadow: window tests ticks=N (N a record)`, then by sweep: `the
   records' bytes`, `the loop`, `an expression's part`, `the tests on T's
   records`, and `T again for them, not counted`;
@@ -1573,6 +1627,12 @@ The report adds:
   the loop swept; with `--verify`, those of them in an expression the tests
   ran on, each checked (a swept record of an expression without tests has
   none to check), and the integer constants whose record says its value;
+- `node-shadow: own tests calls-left-out=N checked=N of-them-with-a-test=0
+  of-them-with-a-loud-argument=0 casts-over-one=N
+  callees-asked-for-their-result=N`: the calls the rule left out, of every
+  record the loop swept; with `--verify`, those of them in an expression the
+  tests ran on, each checked twice; the casts to void in the asks' list;
+  and the declarations asked whether they want their result;
 - `node-shadow: own tests tree's-tests'-records-no-listed-operator-has
   checked=N of-them-with-a-test=0
   lists'-words-with-a-bit-past-their-expression=0`: with `--verify`, the
@@ -1584,12 +1644,13 @@ The report adds:
   records and compared.
 
 `--list N` lists the first differences (`node-tests: window difference`),
-and a difference, an operator left out with a test, a value said that is
-not its payload's, a record left to no listed operator with a tree's test,
-a list's bit past its expression, or an expression with nothing listed and
-another verdict fails the command.
+and a difference, an operator left out with a test, a call left out with a
+test or with a loud argument, a value said that is not its payload's, a
+record left to no listed operator with a tree's test, a list's bit past its
+expression, or an expression with nothing listed and another verdict fails
+the command.
 
-`test-checker` runs it on the census's ten fixtures, as "The shadow" above
+`test-checker` runs it on the census's eleven fixtures, as "The shadow" above
 has, and on the window's test of values without room at a chunk's end: the
 tests run on the 8,259 expressions the kernel makes in place there, and on
 none of the 64 that the ends cut. [The
