@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+name: Compiler Clang analyzer timing probe
+on:
+  push:
+    branches: [codex/clang-analyzer-probe-6afd4b54]
+permissions:
+  contents: read
+jobs:
+  analyze:
+    name: Analyze compiler (replica ${{ matrix.replica }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Restore pinned release inputs
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-release-inputs
+          key: hosted-inputs-v1-linux-x64-${{ hashFiles('tools/ci/hosted-tools.lock') }}
+      - name: Stage the pinned tools
+        run: |
+          set -euo pipefail
+          export BUSTER_HOSTED_RELEASES="$RUNNER_TEMP/hosted-release-inputs"
+          bash tools/ci/hosted-release.sh verify "$BUSTER_HOSTED_RELEASES" ||
+            bash tools/ci/hosted-release.sh prepare "$BUSTER_HOSTED_RELEASES"
+          root="$RUNNER_TEMP/buster-hosted-tools"
+          bash tools/ci/install-hosted-tools.sh "$root"
+          version=$(bash tools/ci/hosted-release.sh version llvm)
+          printf '%s\n' "$root/llvm-$version/bin" "$root/bin" "$root/build-tools/bin" >> "$GITHUB_PATH"
+          bash tools/ci/setup-build-tools.sh "$root/build-tools" >> "$GITHUB_PATH"
+      - name: Analyze all Release compiler translation units
+        env:
+          BUSTER_TOOLCHAIN: path
+          BUSTER_HOST_ARCH: vector
+          BUSTER_DEBUG_INFO: 0
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          export report="$RUNNER_TEMP/clang-analysis"
+          mkdir -p "$report"
+          workers=$(nproc)
+          head_sha=$(git rev-parse HEAD)
+          compiler_sha=$(git rev-parse HEAD^)
+          {
+            printf 'Workflow commit %s\nCompiler commit %s\n' "$head_sha" "$compiler_sha"
+            printf 'Available logical CPUs %s\n' "$workers"
+            lscpu
+            free -m
+            clang --version
+            cmake --version
+          } | tee "$report/runner.txt"
+          ./build.sh print-compile-flags --config Release > "$report/flags.nul"
+          ./build.sh print-sources > "$report/sources.nul"
+          tr '\0' '\n' < "$report/flags.nul" | tee "$report/flags.txt"
+          tr '\0' '\n' < "$report/sources.nul" > "$report/sources.txt"
+          test -s "$report/flags.txt"
+          test -s "$report/sources.txt"
+          # Start the longest unity units first to apply the available CPU budget promptly.
+          {
+            sed -n '/\/main_unit_checker\.c$/p; /\/main_unit_backend\.c$/p; /\/main_unit_frontend\.c$/p' "$report/sources.txt"
+            sed '/\/main_unit_\(checker\|backend\|frontend\)\.c$/d' "$report/sources.txt"
+          } > "$report/order.txt"
+          analyze() {
+            local source=$1 unit status=0
+            local -a flags
+            unit=${source##*/}
+            mapfile -d '' -t flags < "$report/flags.nul"
+            /usr/bin/time -o "$report/$unit.time" -f '%e\t%U\t%S\t%M\t%x' \
+              timeout 25m clang "${flags[@]}" --analyze -Wno-error -fno-color-diagnostics \
+              -Xanalyzer -analyzer-output=text "$source" > "$report/$unit.log" 2>&1 || status=$?
+            printf '%s\t%s\t%s\n' "$source" "$status" "$(tail -n 1 "$report/$unit.time")"
+            if (( status != 0 )); then
+              tail -n 25 "$report/$unit.log" >&2
+            fi
+            return "$status"
+          }
+          export -f analyze
+          printf 'unit\tstatus\twall_seconds\tuser_seconds\tsystem_seconds\tpeak_rss_KiB\ttime_exit\n' > "$report/units.tsv"
+          status=0
+          /usr/bin/time -o "$report/sweep.time" -f '%e' bash -o pipefail -c '
+            tr "\n" "\0" < "$report/order.txt" |
+              xargs -0 -r -n 1 -P "$1" bash -c '\''analyze "$1"'\'' _
+          ' _ "$workers" | tee -a "$report/units.tsv" || status=$?
+          printf 'Analyzer wall seconds %s\n' "$(cat "$report/sweep.time")"
+          test "$(wc -l < "$report/units.tsv")" -eq "$(( $(wc -l < "$report/sources.txt") + 1 ))"
+          awk '/: warning: / { print }' "$report/"*.c.log | sort -u | tee "$report/warnings.txt"
+          exit "$status"
+      - name: Preserve runner, timings and analyzer diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: clang-analyzer-${{ matrix.replica }}
+          path: ${{ runner.temp }}/clang-analysis/
+          if-no-files-found: warn
+          retention-days: 14
