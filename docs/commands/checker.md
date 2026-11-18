@@ -127,7 +127,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   runs the driver's parts in these modes, with `--differential` in the native
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
-  `target_clones` section alone, #1838; `--asm-definitions-only` runs what
+  `target_clones` section alone, #1838 (inline assembly in `target_clones` copies at both tiers among it, #2247); `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
   the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
   diagnostics for invalid record and atomic operators, statement conditions, assertions and

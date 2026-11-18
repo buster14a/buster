@@ -101,25 +101,61 @@ static bool check_asm_text_equal(CheckAsmText text, const char* expected)
     return text.length == strlen(expected) && (text.length == 0 || memcmp(text.bytes, expected, text.length) == 0);
 }
 
+// The first version of target_clones attribute `clones` (its versions joined by commas, check_input_target_clones), or
+// none where its list has no "default": clang drops such an attribute after its error, and the function has the unit's
+// features.
+static String8 check_input_asm_clones_first(const CheckInputAttribute* clones)
+{
+    const String8 text = clones->text;
+    String8 first = { 0 };
+    bool has_default = false;
+    for (uint64_t cursor = 0; text.pointer != NULL && cursor <= text.length;)
+    {
+        uint64_t end = cursor;
+        while (end < text.length && text.pointer[end] != ',')
+        {
+            end += 1;
+        }
+        const String8 item = { text.pointer + cursor, end - cursor };
+        first = cursor == 0 ? item : first;
+        has_default |= check_input_attribute_equal(item, "default");
+        cursor = end + 1;
+    }
+    return has_default ? first : (String8){ 0 };
+}
+
 // The widest vector register of the current function's features (#2231, CheckInputAsm.vector_bits), as clang's
-// validateOperandSize reads its feature map (ASTContext::getFunctionFeatureMap): the unit's, or those a target attribute
-// on the function's definition gives (predefines_function_target). Once a body: its statements share it.
+// validateOperandSize reads its feature map (ASTContext::getFunctionFeatureMap): those a target attribute on the
+// function's definition gives (predefines_function_target); else a target_clones function's first version's (#2247), of
+// the definition's attribute or the declaration that made the function multiversioned (its list is every declaration's),
+// as Sema asks for the GlobalDecl's version index 0, whichever clone later can't place an operand: its CPU's features and
+// the version's alone (predefines_clone_target); else the unit's. A multiversioned function's unit is read in source
+// order (check_deferred_bodies), whose records check_target_versions_since reads. Once a body: its statements share it.
 static uint16_t check_input_asm_vector_bits(CheckInputReader* reader)
 {
     const uint32_t body = reader->function_body;
     if (reader->asm_vector_bits == 0 || reader->asm_vector_body != body)
     {
         X86Target target = reader->pp->options.target;
-        const uint32_t function = body < reader->parser->tokens.count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
-        const CheckInputAttribute* attribute = function < reader->parser->tokens.count ?
-            check_input_attribute_of(check_input_attributes_at(reader->output, function), CHECK_ATTRIBUTE_TARGET) : NULL;
+        const uint32_t count = reader->parser->tokens.count;
+        const uint32_t function = body < count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
+        const CheckInputAttribute* attribute = function < count ? check_input_attribute_of(check_input_attributes_at(reader->output, function), CHECK_ATTRIBUTE_TARGET) : NULL;
+        const CheckInputAttribute* clones = attribute == NULL && function < count ?
+            check_target_versions_own(check_input_attributes_at(reader->output, function), CHECK_ATTRIBUTE_TARGET_CLONES) : NULL;
+        const bool inherited = attribute == NULL && clones == NULL && function < count && reader->output->target_multiversion && !reader->lane;
+        const uint32_t since = inherited ? check_target_versions_since(reader, reader->objects[function]) : BUSTER_CHECK_NONE;
+        clones = since < count ? check_target_versions_own(check_input_attributes_at(reader->output, since), CHECK_ATTRIBUTE_TARGET_CLONES) : clones;
+        const String8 first = clones != NULL ? check_input_asm_clones_first(clones) : (String8){ 0 };
+        const String8 text = attribute != NULL ? attribute->text : first;
         int32_t cpu = -1;
-        const bool version = attribute != NULL && attribute->text.length < UINT32_MAX &&
-                             predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+        const bool is_default = first.length != 0 && check_input_attribute_equal(first, "default");
+        const bool version = text.length != 0 && text.length < UINT32_MAX &&
+                             (is_default || predefines_target_attribute(text.pointer, (uint32_t)text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION);
         if (version)
         {
             const PredefinesHost host = predefines_host_of(&reader->pp->options.predefines);
-            target = predefines_function_target(&reader->pp->options.predefines, &host, target, attribute->text.pointer, (uint32_t)attribute->text.length, cpu);
+            target = attribute != NULL ? predefines_function_target(&reader->pp->options.predefines, &host, target, text.pointer, (uint32_t)text.length, cpu) :
+                                         predefines_clone_target(&reader->pp->options.predefines, &host, target, text.pointer, is_default ? 0 : (uint32_t)text.length, cpu);
         }
         reader->asm_vector_bits = (target.features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 512 : (target.features & BUSTER_X86_FEATURE(AVX)) != 0 ? 256 : 128;
         reader->asm_vector_body = body;

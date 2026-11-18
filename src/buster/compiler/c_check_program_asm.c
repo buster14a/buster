@@ -3751,6 +3751,8 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
     {
         const CheckControl control = controls[i];
         const uint32_t s = control.target;
+        // A target_clones copy's statement has a plan of its own (#2247), whose index gives %= its number.
+        CheckProgramAsm* plan = control.kind == CHECK_CONTROL_ASM ? check_program_asm_plan_of(result, b, s, input->asm_count) : 0;
         if (control.kind == CHECK_CONTROL_END)
         {
             // The body's closing brace.
@@ -3759,7 +3761,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
         {
             reason = "statements other than asm statements in naked functions";
         }
-        else if (s >= input->asm_count || result->plans == 0 || result->plans[s].planned)
+        else if (plan == 0 || plan->planned)
         {
             result->status = CHECK_PROGRAM_INVALID;
             result->token = control.token;
@@ -3771,7 +3773,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
             const uint32_t count = statement->output_count + statement->input_count;
             CheckAsmPlace* places = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmPlace, count) : 0;
             valid = count == 0 || places != 0;
-            result->plans[s] = (CheckProgramAsm){ .helper = BUSTER_CHECK_NONE, .planned = true };
+            *plan = (CheckProgramAsm){ .helper = BUSTER_CHECK_NONE, .planned = true };
             reason = statement->is_goto ? "asm goto" : count > BUSTER_CHECK_ASM_OPERANDS ? "inline assembly statements of more than 64 operands" : NULL;
             for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
             {
@@ -3800,7 +3802,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
             }
             if (valid && reason == NULL)
             {
-                reason = check_asm_substitute(statement, places, program->identifiers, s, scratch, texts + statements, &valid);
+                reason = check_asm_substitute(statement, places, program->identifiers, (uint32_t)(plan - result->plans), scratch, texts + statements, &valid);
                 length += texts[statements].length + 1 + (statements != 0 ? sizeof(att) - 1 : 0);
                 statements += 1;
             }

@@ -3714,8 +3714,13 @@ What the lowering covers past scalars (#145's programs):
     versions that aren't `default`, which takes their count (`f.avx2.0`,
     `f.default.2`). A repeated version has no copy of its own.
     `f.ifunc` is another IFUNC at the resolver.
-    - `check_program_target_copies` makes each version's target. The
-      selection puts the copies after their body
+    - `check_program_target_copies` makes each version's target: its CPU's
+      features (`arch=`'s, or `-march`'s) and the version's own, without the
+      command line's `-m` features or `-march=native`'s list, `default`'s its
+      CPU's alone (`predefines_clone_target`, #2247), as clang's
+      `getFunctionFeatureMap` gives a clone (so a unit built with `-mavx2` has
+      clones without AVX2, and one built with `-march=haswell -mno-avx` has
+      them with AVX). The selection puts the copies after their body
       (`CheckProgram.body_options`), at symbols numbered after the program's
       (`check_program_target_number`).
     - A copy shares its body's locals in the lowering
@@ -3737,9 +3742,19 @@ What the lowering covers past scalars (#145's programs):
       naming its statement (`CheckProgramAsm.statement`), whose index gives
       `%=` its number and an asm goto's local labels and a helper's symbol
       their names, so that the copies' differ. A label a template defines by
-      name is defined once per copy, a duplicate refused as in clang. A naked
-      function's body is still compiled once (`check_program_target_copy_refused`):
-      its templates are its whole code. A group with a reference, or a
+      name is defined once per copy, a duplicate refused as in clang. Sema
+      checks an operand's size against the first version's features, as
+      clang's does for the function's version index 0, whichever clone later
+      fails (`check_input_asm_vector_bits`, of the definition's
+      `target_clones` or the declaration that made the function
+      multiversioned): a 32-byte `"x"` operand passes after `avx2` and is
+      "invalid output size" after `default`. A copy whose version can't place
+      an operand (32 bytes without AVX, 64 without AVX-512F, an opmask without
+      its moves' features) is refused by name at its statement, where clang's
+      code generation fails for that clone. A naked function, whose versions
+      another declaration gives (clang refuses both attributes on one), has
+      its code once per copy too (`check_program_asm_plan_naked`, by body,
+      each copy's plans its own). A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
@@ -3781,9 +3796,21 @@ What the lowering covers past scalars (#145's programs):
     and `target_clones`' by calling the resolver of a unit of their
     declaration, linked before clang's object of their definition. The
     resolver's result is named among clang's versions' distinct addresses.
-  - *Differences from clang's code.* A naked `target_clones` body is
-    compiled once, with the unit's features, where clang compiles a copy per
-    version (each is valid there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
+    Inline assembly in copies (#2247): a program of a body of asm statements
+    (general, XMM, memory, constant and matching operands, clobbers, an AVX2
+    template, an asm goto) and a naked function whose versions another
+    declaration gives runs at Tier 0 and Tier 1 as clang's build, through the
+    IFUNCs and at each copy's symbol, each call naming the copy whose code
+    ran; Tier 0's object has clang's symbols and places of code. Units of
+    vector and opmask operands some copies can't place have clang's
+    `-fsyntax-only` output under `-mavx2`, `-march=haswell -mno-avx`,
+    `-march=x86-64-v4` and `-mavx512bw`, and their `-c` builds at both tiers
+    succeed where clang's do and fail at the line of clang's first error.
+  - *Differences from clang's code.* A copy whose version can't place an
+    asm operand is refused by name ("inline assembly vector operands of 32
+    bytes without AVX"), once, where clang's code generation reports "could
+    not allocate output register for constraint" (or "input reg") for each
+    such clone and statement. A copy's debug subprogram has no `DW_AT_linkage_name`. The
     resolver is `.text`'s, not a COMDAT section's. Its
     unwind entry is clang's CFI for its frame: the CFA at `rsp + 16` after
     its push, at `rsp + 8` after each return's pop, and at `rsp + 16` again
