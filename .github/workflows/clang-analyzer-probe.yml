@@ -19,6 +19,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+          fetch-depth: 2
       - name: Restore pinned release inputs
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         continue-on-error: true
@@ -34,7 +35,7 @@ jobs:
           root="$RUNNER_TEMP/buster-hosted-tools"
           bash tools/ci/install-hosted-tools.sh "$root"
           version=$(bash tools/ci/hosted-release.sh version llvm)
-          printf '%s\n' "$root/llvm-$version/bin" "$root/bin" "$root/build-tools/bin" >> "$GITHUB_PATH"
+          printf '%s\n' "$root/llvm-$version/bin" "$root/bin" >> "$GITHUB_PATH"
           bash tools/ci/setup-build-tools.sh "$root/build-tools" >> "$GITHUB_PATH"
       - name: Analyze all Release compiler translation units
         env:
@@ -48,7 +49,7 @@ jobs:
           mkdir -p "$report"
           workers=$(nproc)
           head_sha=$(git rev-parse HEAD)
-          compiler_sha=$(git rev-parse HEAD^)
+          compiler_sha=6eaf73cfd889f866015cdcaaf08f86cfc702ce66
           {
             printf 'Workflow commit %s\nCompiler commit %s\n' "$head_sha" "$compiler_sha"
             printf 'Available logical CPUs %s\n' "$workers"
