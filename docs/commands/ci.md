@@ -339,10 +339,11 @@ Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
   companion artifact `ARTIFACT-NAME-offline`. It holds:
   - the apt closure of `setup-hosted.sh`'s packages, resolved on the
     preparation's runner image, with a manifest of every package and version;
+    it carries the image's packages that it pins exactly (#2974);
   - the corpus and Lua's archive (`downloads/DIGEST`);
   - bare mirrors of c-testsuite and SQLite at `refs/pinned/COMMIT`.
 
-  The preparation keeps them in two caches. `hosted-apt-v1-…` is keyed by the
+  The preparation keeps them in two caches. `hosted-apt-v2-…` is keyed by the
   package list and the image (`ImageOS`, `ImageVersion`). `hosted-ci-v1-…` is
   keyed by the scripts that pin the rest. On a hit it contacts no external
   host. On a miss it fetches each input once, with retries, and checks it as
@@ -356,7 +357,10 @@ Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
 - **Summaries:** each job's step summary lists the installed package versions,
   and the preparation's lists every input's source.
 - **Image rollouts:** a shard on another image installs the same `.deb`s and
-  warns where the image's own packages differ.
+  warns where the image's own packages differ. A carried package moves to the
+  bundle's version, up or down. Before this, an exactly pinned image package
+  that had moved failed the job. In the merge queue, that dropped the
+  candidate (#2974).
 
 Run `bash tests/ci/hosted-offline.sh` after changing any of these scripts. It
 is network-free, and the preparation job runs it. `hosted-inputs-drill.yml`
