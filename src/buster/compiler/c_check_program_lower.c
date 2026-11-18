@@ -18308,10 +18308,11 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     }
 }
 
-// A cleanup's call (CHECK_CONTROL_CLEANUP, #147): its function's, of its variable's address, the result dropped. The
-// one parameter other than a pointer that clang's Sema takes is a _Bool (an address converts to one), which clang's
-// code bit-casts the address to (invalid IR, which leaves the address's low bit): that bit, as its code passes it. An
-// _Atomic _Bool's crashes clang's instruction selection and is refused by name. A result that comes back in memory or
+// A cleanup's call (CHECK_CONTROL_CLEANUP, #147): its function's, of its variable's address, the result dropped. An
+// _Atomic pointer's is the address too, which clang's code passes as the pointer it is (#1844). The one parameter other
+// than a pointer that clang's Sema takes is a _Bool (an address converts to one), which clang's code bit-casts the
+// address to (invalid IR, which leaves the address's low bit): that bit, as its code passes it. An _Atomic _Bool's
+// crashes clang's instruction selection ("Cannot select: bitcast FrameIndex") and is refused by name. A result that comes back in memory or
 // in a result object (an aggregate, a 128-bit integer, a vector) lands in a frame object of its own, as a source call's
 // does (check_lower_call_body), which nothing reads; a variadic function takes one parameter and no vector registers.
 static void check_lower_cleanup(CheckLowerWriter* writer, CheckControl control)
@@ -18329,7 +18330,7 @@ static void check_lower_cleanup(CheckLowerWriter* writer, CheckControl control)
     const TypeId result = parameter_types != NULL ? type_return(types, type) : 0;
     const uint8_t class = result != 0 ? check_lower_class(writer, result) : UINT8_MAX;
     const uint8_t parameter_facts = parameters == 1 ? check_lower_facts(writer, parameter_types[0]) : 0;
-    const bool pointer = (parameter_facts & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0 && (parameter_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0;
+    const bool pointer = (parameter_facts & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
     const bool low_bit = (parameter_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_ATOMIC)) == BUSTER_CHECK_LOWER_TYPE_BOOL;
     const bool aggregate = result != 0 && check_lower_aggregate(writer, result);
     const bool object_result = aggregate || (result != 0 && (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0));
@@ -18340,7 +18341,7 @@ static void check_lower_cleanup(CheckLowerWriter* writer, CheckControl control)
     }
     else if (!pointer && !low_bit)
     {
-        check_lower_unsupported(writer, "cleanup functions of an _Atomic parameter");
+        check_lower_unsupported(writer, "cleanup functions of an _Atomic _Bool parameter");
     }
     else if (returned != NULL)
     {

@@ -4242,8 +4242,10 @@ What the lowering covers past scalars (#145's programs):
   after it isn't reported. The function has a prototype of one parameter
   ("'cleanup' function 'f' must take 1 parameter"), to which the variable's
   address converts as clang's `IsAssignConvertCompatible` takes it: `void *`,
-  `_Bool`, or a pointer to a compatible type whatever either's qualifiers
-  ("'cleanup' function 'f' parameter has incompatible type", the spelling of
+  `_Bool`, or a pointer to a compatible type whatever either's qualifiers, or
+  an `_Atomic` one of those, which clang's `CheckAssignmentConstraints` checks
+  as its value's type (`_Atomic(int *)`, `_Atomic(void *)`, `_Atomic _Bool`:
+  #1844) ("'cleanup' function 'f' parameter has incompatible type", the spelling of
   clang's message without its two types). A pointer of another signedness or
   to a pointer of other qualifiers, which an assignment only warns about, is
   an error here. An `__auto_type` variable's parameter type is checked once
@@ -4338,13 +4340,14 @@ What the lowering covers past scalars (#145's programs):
   lowering's call (`check_lower_cleanup`) takes the variable's address,
   which makes its local a frame slot, and drops the result: an aggregate's
   (in memory or in registers), a 128-bit integer's or a vector's lands in a
-  frame object of its own, as a source call's does. The one parameter other
-  than a pointer that clang's Sema takes, a `_Bool`, gets the address's low
-  bit, as clang's code passes it (it bit-casts the address to the `_Bool`);
-  an `_Atomic _Bool`'s, which clang's instruction selection can't take, is
-  refused by name. The body's selection references
+  frame object of its own, as a source call's does. An `_Atomic` pointer
+  parameter gets the address, as a pointer's does (#1844). The one parameter
+  other than a pointer that clang's Sema takes, a `_Bool`, gets the address's
+  low bit, as clang's code passes it (it bit-casts the address to the
+  `_Bool`); an `_Atomic _Bool`'s, which clang's instruction selection can't
+  take ("Cannot select: bitcast FrameIndex"), is refused by name. The body's selection references
   the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare
-  54 fixtures' acceptance and first errors with clang's, and run programs of
+  78 fixtures' acceptance and first errors with clang's, and run programs of
   each exit, each class of returned value, the named return value's cases,
   statement expressions, switches and the functions' kinds (their parameters
   and results among them) natively against
