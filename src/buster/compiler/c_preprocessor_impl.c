@@ -16131,7 +16131,6 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                     const __m512i length = _mm512_maskz_loadu_epi32(lanes, lengths + 16 * q);
                     longs |= (uint64_t)_mm512_mask_cmpge_epu32_mask(lanes, _mm512_sub_epi32(length, _mm512_set1_epi32(1)), _mm512_set1_epi32(64)) << (16 * q);
                 }
-                stale = false;
             }
             // 3. Copies. A batch of the tokens from `from` without a branch per token, their output offsets by a prefix
             // sum (pp_print_offsets), up to the first spelling past 64 bytes: with -P, of a chunk without a pragma end

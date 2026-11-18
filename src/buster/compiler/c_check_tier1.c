@@ -393,7 +393,6 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < function->instruction_count ? function->op[check.instruction] : IR_OP_COUNT;
-        stage = outcome.stage;
     }
     return outcome;
 }
@@ -620,7 +619,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED)
     {
         outcome = check_tier1_sink_optimize(lane, &wide.function, scalar, certify, fault, output, analyses, revision, passes);
-        stage = outcome.stage;
     }
     return outcome;
 }
@@ -1036,7 +1034,6 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             arena_pop_to(output, mark);
             *code = (EmittedCode){ 0 };
             *counts = (CheckTier1Counts){ 0 };
-            stage = outcome.stage;
         }
     }
     const bool success = outcome.category == CHECK_TIER1_SUCCESS;

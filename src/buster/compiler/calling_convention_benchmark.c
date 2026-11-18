@@ -613,12 +613,15 @@ static bool abi_benchmark_measure(const AbiBenchmarkCase* benchmark, AbiBenchmar
     for (uint32_t pass = 0; valid && pass < BUSTER_ABI_BENCHMARK_PASSES; pass += 1)
     {
         valid = abi_benchmark_sample(benchmark, counters, &total, &runs);
-        const double items = (double)runs * (double)benchmark->items;
-        samples->nanoseconds[pass] = (double)total.nanoseconds / items;
-        samples->cycles[pass] = (double)total.cycles / items;
-        samples->instructions[pass] = (double)total.instructions / items;
-        samples->branch_misses[pass] = (double)total.branch_misses / items;
-        samples->throttle[pass] = (double)total.throttle / items;
+        if (valid)
+        {
+            const double items = (double)runs * (double)benchmark->items;
+            samples->nanoseconds[pass] = (double)total.nanoseconds / items;
+            samples->cycles[pass] = (double)total.cycles / items;
+            samples->instructions[pass] = (double)total.instructions / items;
+            samples->branch_misses[pass] = (double)total.branch_misses / items;
+            samples->throttle[pass] = (double)total.throttle / items;
+        }
     }
     return valid;
 }

@@ -690,7 +690,10 @@ static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* low
     ok = ok && ir_lower_test_expect(tally, ir_verify(&vector, scratch, 0).error == IR_OK && ir_verify_scalar(&vector, scratch, 0).error == IR_OK &&
                                                ir_verify(&scalar, scratch, 0).error == IR_OK && ir_verify_scalar(&scalar, scratch, 0).error == IR_OK,
                                     "both verifiers accept both promotions", seed, index);
-    ok = ok && ir_lower_test_expect(tally, ir_lower_test_objects_kept(lowered, &vector) && ir_lower_test_objects_kept(lowered, &scalar), "promotion keeps every object's slot", seed, index);
+    if (ok)
+    {
+        ir_lower_test_expect(tally, ir_lower_test_objects_kept(lowered, &vector) && ir_lower_test_objects_kept(lowered, &scalar), "promotion keeps every object's slot", seed, index);
+    }
     arena_pop_to(output, output_mark);
     arena_pop_to(twin_output, twin_mark);
 }

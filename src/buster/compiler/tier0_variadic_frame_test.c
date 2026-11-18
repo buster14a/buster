@@ -951,7 +951,7 @@ static void tier0_vf_null(Tier0VfTally* tally, Arena* arena)
         uint8_t bytes[2][BUSTER_X86_ENCODER_CAPACITY(1)] = { 0 };
         const int64_t a = x86_encode_scalar(scalar.records, 1, bytes[0], sizeof(bytes[0]), NULL, NULL);
         const int64_t b = x86_encode(vector.records, 1, bytes[1], sizeof(bytes[1]), NULL, NULL);
-        ready = tier0_vf_expect(tally, a == 1 && b == 1 && bytes[0][0] == 0xc3 && bytes[1][0] == 0xc3,
+        tier0_vf_expect(tally, a == 1 && b == 1 && bytes[0][0] == 0xc3 && bytes[1][0] == 0xc3,
             "default ordinary frame remains exactly its independent original C3 byte", 0);
     }
     // Independently specified old ordinary frame: reserve one eight-byte address-taken local, form its address,

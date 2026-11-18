@@ -754,7 +754,6 @@ int run_import_benchmark(int argc, char** argv)
             valid = false;
         }
     }
-    bool result = valid;
     if (!valid)
     {
         printf("usage: benchmark-import [--units N] [--functions N] [--seed N] [--library PATH]... [--archive PATH]...\n");
@@ -765,7 +764,8 @@ int run_import_benchmark(int argc, char** argv)
     Runtime static_runtime;
     bool runtime_started = false;
     bool static_started = false;
-    if (cases != 0)
+    bool result = cases != NULL;
+    if (result)
     {
         memset(cases, 0, BUSTER_IMPORT_BENCHMARK_CASES * sizeof(ImportBenchmarkCase));
         LinkProgramOptions options = link_program_default_options();

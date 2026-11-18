@@ -516,11 +516,12 @@ static uint32_t type_benchmark_records(TypeTable* table, uint64_t seed, uint32_t
             {
                 type = records[type_benchmark_skewed(&random, made)];
             }
-            const bool bit_field = bit_fields && type_integer_width(table, type) != 0 && type_benchmark_below(&random, 2) == 0;
+            const uint32_t width = bit_fields ? type_integer_width(table, type) : 0;
+            const bool bit_field = width != 0 && type_benchmark_below(&random, 2) == 0;
             list[m] = (TypeMember){
                 .name = m + 1,
                 .type = type,
-                .bit_width = bit_field ? (uint32_t)(1 + type_benchmark_below(&random, type_integer_width(table, type))) : BUSTER_TYPE_NOT_BIT_FIELD,
+                .bit_width = bit_field ? (uint32_t)(1 + type_benchmark_below(&random, width)) : BUSTER_TYPE_NOT_BIT_FIELD,
                 .alignment_log2 = 0,
                 .packed = false,
             };
