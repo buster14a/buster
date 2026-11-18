@@ -599,11 +599,10 @@ struct CheckTier1Inline
     uint32_t* sites;
     // Per body (#2541 step 2), whether the unit stage holds its code back for the last pass (check_tier1_inline_stage), and
     // whether the last pass let it go on (check_program_emit_last); whether the run holds any back (`holding`, which the
-    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm). And the scalar twins' choice.
+    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm).
     uint8_t* held;
     uint8_t* released;
     bool holding;
-    bool scalar;
     // Whether the run writes -g's source rows: summaries then carry their source identities, which their expansions
     // keep as instances (IrDebugInline, #2541 step 3).
     bool sources;

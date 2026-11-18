@@ -76,7 +76,7 @@ static void ir_inline_cfg_callee(IrInlineCfgText* text, uint32_t shape, uint64_t
     }
     if (shape == 7)
     {
-        // Its parameters don't begin it: the vector splice leaves it to the scalar twin.
+        // Its parameters don't begin it: the vector splice leaves it to the node-at-a-time splice.
         ir_inline_cfg_line(text, "b0:\n  %%0 = const.%s %s\n  %%1 = param.%s 0\n  %%2 = param.%s 1\n", t, k, t, t);
     }
     else

@@ -19,7 +19,7 @@ struct IrInlineTest
     uint64_t random;
     uint64_t executions;
     // An FNV-1a digest of every unit's result by ir_inline_test_run, in order (#2924): frozen where the vector path and
-    // its scalar twin agreed. The units come from the fixed seed.
+    // its scalar twin, since deleted, agreed. The units come from the fixed seed.
     uint64_t digest;
 };
 
@@ -697,18 +697,18 @@ static void ir_inline_test_compare(IrInlineTest* test, const IrInlineUnit* input
     ir_inline_test_compare_loads(test, input, result, entry, scratch, trials, true);
 }
 
-// Whether a vector run's result is the scalar twin's, column for column.
-static void ir_inline_test_same_result(IrInlineTest* test, const IrInlineUnit* input, const IrInlineResult* result, const IrInlineResult* scalar)
+// Whether one caller-run form's result is the other's (IrInlineOptions.add_sites), column for column.
+static void ir_inline_test_same_result(IrInlineTest* test, const IrInlineUnit* input, const IrInlineResult* result, const IrInlineResult* other)
 {
-    ir_inline_test_expect(test, result->function_count == scalar->function_count && result->call_count == scalar->call_count && result->inlined_calls == scalar->inlined_calls && result->component_count == scalar->component_count && result->input_instructions == scalar->input_instructions && result->output_instructions == scalar->output_instructions, "scalar/vector result counts");
+    ir_inline_test_expect(test, result->function_count == other->function_count && result->call_count == other->call_count && result->inlined_calls == other->inlined_calls && result->component_count == other->component_count && result->input_instructions == other->input_instructions && result->output_instructions == other->output_instructions, "caller-run forms' result counts");
     for (uint32_t f = 0; f < input->count; f += 1)
     {
-        ir_inline_test_expect(test, ir_inline_test_same_function(&result->functions[f], &scalar->functions[f]), "scalar/vector exact function columns");
-        ir_inline_test_expect(test, result->components[f] == scalar->components[f] && result->recursive[f] == scalar->recursive[f] && result->call_offsets[f] == scalar->call_offsets[f], "scalar/vector graph columns");
+        ir_inline_test_expect(test, ir_inline_test_same_function(&result->functions[f], &other->functions[f]), "caller-run forms' exact function columns");
+        ir_inline_test_expect(test, result->components[f] == other->components[f] && result->recursive[f] == other->recursive[f] && result->call_offsets[f] == other->call_offsets[f], "caller-run forms' graph columns");
     }
     for (uint32_t c = 0; c < result->call_count; c += 1)
     {
-        ir_inline_test_expect(test, result->call_nodes[c] == scalar->call_nodes[c] && result->callees[c] == scalar->callees[c] && result->costs[c] == scalar->costs[c] && result->expanded_sizes[c] == scalar->expanded_sizes[c] && result->decisions[c] == scalar->decisions[c], "scalar/vector exact call decisions");
+        ir_inline_test_expect(test, result->call_nodes[c] == other->call_nodes[c] && result->callees[c] == other->callees[c] && result->costs[c] == other->costs[c] && result->expanded_sizes[c] == other->expanded_sizes[c] && result->decisions[c] == other->decisions[c], "caller-run forms' exact call decisions");
     }
 }
 
@@ -784,40 +784,28 @@ static void ir_inline_test_fold_result(IrInlineTest* test, const IrInlineUnit* i
     }
 }
 
-// The unit by the scalar twin, and by the vector path twice: its caller's runs by the other form first (the masked adds
-// where `options` gathers, or the gathers where it adds: IrInlineOptions.add_sites, #2541 step 3), then by `options`'s,
-// whose result the caller reads; each column for column the twin's.
-static bool ir_inline_test_run(IrInlineTest* test, const IrInlineUnit* input, IrInlineOptions options, Arena* output, Arena* scalar_output, Arena* scratch, IrInlineResult* result)
+// The unit twice: its caller's runs by the other form first, into `other_output` (the masked adds where `options` gathers,
+// or the gathers where it adds: IrInlineOptions.add_sites, #2541 step 3), then by `options`'s, whose result the caller
+// reads; the two column for column alike, and the result folded into the digest.
+static bool ir_inline_test_run(IrInlineTest* test, const IrInlineUnit* input, IrInlineOptions options, Arena* output, Arena* other_output, Arena* scratch, IrInlineResult* result)
 {
-    IrInlineResult scalar = { 0 };
     uint32_t failed = 123;
     const uint64_t mark = scratch->length;
-    const uint64_t output_mark = output->length;
-    options.scalar = true;
-    const IrCheck scalar_check = ir_optimize_inline(input, scalar_output, scratch, options, &scalar, &failed);
-    ir_inline_test_expect(test, scalar_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "scalar inline and scratch restoration");
     IrInlineOptions other = options;
-    other.scalar = false;
     other.add_sites = options.add_sites != 0 ? 0 : BUSTER_IR_INLINE_ADD_SITES;
     IrInlineResult alternative = { 0 };
-    const IrCheck other_check = ir_optimize_inline(input, output, scratch, other, &alternative, &failed);
-    ir_inline_test_expect(test, other_check.error == scalar_check.error && scratch->length == mark, "the other caller-run form's inline and scratch restoration");
-    if (other_check.error == IR_OK && scalar_check.error == IR_OK)
+    const IrCheck other_check = ir_optimize_inline(input, other_output, scratch, other, &alternative, &failed);
+    ir_inline_test_expect(test, other_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "the other caller-run form's inline and scratch restoration");
+    const IrCheck check = ir_optimize_inline(input, output, scratch, options, result, &failed);
+    ir_inline_test_expect(test, check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "inline and scratch restoration");
+    if (check.error != IR_OK)
     {
-        ir_inline_test_same_result(test, input, &alternative, &scalar);
+        fprintf(stderr, "ir-inline diagnostic error=%u function=%u node=%u detail=%u\n", check.error, failed, check.instruction, check.detail);
     }
-    arena_pop_to(output, output_mark);
-    options.scalar = false;
-    const IrCheck vector_check = ir_optimize_inline(input, output, scratch, options, result, &failed);
-    ir_inline_test_expect(test, vector_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "vector inline and scratch restoration");
-    if (vector_check.error != IR_OK)
-    {
-        fprintf(stderr, "ir-inline diagnostic error=%u function=%u node=%u detail=%u\n", vector_check.error, failed, vector_check.instruction, vector_check.detail);
-    }
-    const bool success = vector_check.error == IR_OK && scalar_check.error == IR_OK;
+    const bool success = check.error == IR_OK && other_check.error == IR_OK;
     if (success)
     {
-        ir_inline_test_same_result(test, input, result, &scalar);
+        ir_inline_test_same_result(test, input, result, &alternative);
         ir_inline_test_fold_result(test, input, result);
     }
     return success;
@@ -1761,7 +1749,6 @@ static void ir_inline_test_threshold_guards(IrInlineTest* test)
     {
         uint32_t* costs = (uint32_t*)((uint8_t*)mapping + page - count * 4);
         uint8_t* result = (uint8_t*)mapping + page * 3 - count;
-        uint8_t expected[65];
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint32_t choices[] = {
@@ -1784,12 +1771,10 @@ static void ir_inline_test_threshold_guards(IrInlineTest* test)
         };
         for (uint32_t l = 0; l < sizeof(limits) / sizeof(limits[0]); l += 1)
         {
-            ir_inline_threshold(costs, count, limits[l], true, expected);
-            ir_inline_threshold(costs, count, limits[l], false, result);
-            ir_inline_test_expect(test, count == 0 || memcmp(expected, result, count) == 0, "guarded unsigned cost comparison scalar/vector twin");
+            ir_inline_threshold(costs, count, limits[l], result);
             for (uint32_t i = 0; i < count; i += 1)
             {
-                ir_inline_test_expect(test, result[i] == (costs[i] <= limits[l]), "cost threshold independent scalar expression");
+                ir_inline_test_expect(test, result[i] == (costs[i] <= limits[l]), "cost threshold against its definition");
             }
         }
         // The sweep against a limit per call (#2924): every cost against every limit, rotated through the calls.
@@ -1800,7 +1785,7 @@ static void ir_inline_test_threshold_guards(IrInlineTest* test)
             {
                 maxima[i] = limits[(i + shift) % (sizeof(limits) / sizeof(limits[0]))];
             }
-            ir_inline_threshold_limits(costs, maxima, count, false, result);
+            ir_inline_threshold_limits(costs, maxima, count, result);
             bool fits = true;
             for (uint32_t i = 0; i < count; i += 1)
             {
