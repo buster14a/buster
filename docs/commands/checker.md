@@ -711,6 +711,12 @@ as the tables' own loops did. There are no generated cases.
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
 | `transparent-types` | 17 | the end of `check_test_transparent_types` (`c_check_transparent_type_test.c`) |
 
+`tests/checker/overload-placeholders` (#2935) is a warning catalog of
+`test-checker-driver`'s (`check_test_driver_warning_catalog`, as
+`initializer-comma` is: `buster-fixtures v1 checker-warnings`, then FILE,
+WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
+compared with clang's in every policy, mode, lane request and reader.
+
 `tests/checker/constant-conversions` (#2678) is in the same format, three
 programs that `check_test_constant_conversions`
 (`c_check_constant_conversion_test.c`) runs natively against clang by
