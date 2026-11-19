@@ -350,6 +350,14 @@ static void pp_spellings_add(PPSpellings* spellings, const uint8_t* bytes, uint3
     }
 }
 
+// Whether -E spells an output token of `kind` at place `state` (pp_pragma_state) as written: an identifier of a pragma
+// line after its name. The printer's own test of it is its step 0 (pp_print_vector_mode); the tests read the rule here.
+static bool pp_spelled_as_written(uint32_t state, uint8_t kind)
+{
+    const bool identifier = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT);
+    return state == BUSTER_PP_PRAGMA_TOKENS && identifier;
+}
+
 // The spellings of a preprocessor's output stream (without the pragmas' end markers), as -E spells them: a pragma
 // line's identifiers as written (pp_spelled_as_written), and an #embed's data as its values and the commas between them.
 static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
@@ -430,12 +438,24 @@ static uint32_t pp_test_lex_flags(const Preprocessor* pp)
     return (pp->refine_flags & ~(uint32_t)C_TOKENIZER_TRIGRAPHS) | (pp_dollar_punctuation(&pp->options) ? C_TOKENIZER_NO_DOLLARS : 0);
 }
 
+// The tokens of `count` that `split` (pp_split_kinds) splits, a token at a time: the rule pp_count_splits_vector keeps,
+// which the expected and clang's texts are lexed by, apart from the stream's preparation.
+static uint32_t pp_test_count_splits(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint64_t split)
+{
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        result += pp_splits_kind(split, kinds[i]) || ((kinds[i] & 0x7F) == C_TOKEN_UNKNOWN && pp_splits_unknown(bytes, starts[i], ends[i], split));
+    }
+    return result;
+}
+
 // Lexes a text as the language mode does: c_tokenize with the mode's `flags` (pp_test_lex_flags), then the prefixed
 // literals the mode doesn't have split, by `split` (pp_split_kinds). Returns the count, or -1.
 static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, uint32_t flags, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
 {
     int64_t result = c_tokenize(text, length, kinds, starts, ends, flags);
-    const uint32_t splits = result > 0 ? pp_count_splits_scalar(text, kinds, starts, ends, (uint32_t)result, split) : 0;
+    const uint32_t splits = result > 0 ? pp_test_count_splits(text, kinds, starts, ends, (uint32_t)result, split) : 0;
     result = splits != 0 ? pp_split_prefixes(text, kinds, starts, ends, (uint32_t)result, splits, split) : result;
     return result;
 }
@@ -1019,13 +1039,13 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
     return result && pp_test_deferred_history(options, path, label);
 }
 
-// The text one of the printers gives for a run, in memory (null if it fails); `free` it.
-static char* pp_test_print(Preprocessor* pp, bool vector, bool markers, size_t* length)
+// The text -E prints for a run, in memory (null if it fails); `free` it.
+static char* pp_test_print(Preprocessor* pp, bool markers, size_t* length)
 {
     char* result = 0;
     *length = 0;
     FILE* stream = open_memstream(&result, length);
-    const bool printed = stream != 0 && (vector ? pp_print_vector(pp, stream, markers) : pp_print_scalar(pp, stream, markers));
+    const bool printed = stream != 0 && pp_print(pp, stream, markers);
     if (stream != 0)
     {
         fclose(stream);
@@ -1063,33 +1083,21 @@ static bool pp_compare_printed_spellings(Preprocessor* pp, const PPSpellings* ou
 }
 
 // The text -E prints for a run, which must lex into the stream's spellings (with the EOF boundary above), and with a
-// built-in case's `key` give its recorded digest; the vectorized printer's must be the scalar printer's byte for byte,
-// with line markers and without.
+// built-in case's `key` give its recorded digest; the text with line markers must print too (clang checks the markers:
+// pp_test_markers).
 static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name, const char* key)
 {
     size_t length = 0;
-    char* text = pp_test_print(pp, true, false, &length);
-    bool result = text != 0;
-    for (uint32_t markers = 0; result && markers < 2; markers += 1)
+    char* text = pp_test_print(pp, false, &length);
+    size_t marked_length = 0;
+    char* marked = pp_test_print(pp, true, &marked_length);
+    bool result = text != 0 && marked != 0;
+    if (!result && !pp_test_quiet)
     {
-        size_t vector_length = 0;
-        size_t scalar_length = 0;
-        char* vector_text = pp_test_print(pp, true, markers != 0, &vector_length);
-        char* scalar_text = pp_test_print(pp, false, markers != 0, &scalar_length);
-        result = vector_text != 0 && scalar_text != 0 && vector_length == scalar_length && memcmp(vector_text, scalar_text, vector_length) == 0;
-        if (!result && !pp_test_quiet)
-        {
-            size_t at = 0;
-            while (vector_text != 0 && scalar_text != 0 && at < vector_length && at < scalar_length && vector_text[at] == scalar_text[at])
-            {
-                at += 1;
-            }
-            printf("%s: the printers differ%s at byte %zu of %zu/%zu\n", name, markers ? " with line markers" : "", at, vector_length, scalar_length);
-        }
-        free(vector_text);
-        free(scalar_text);
+        printf("%s: -E can't print the run%s\n", name, text != 0 ? " with line markers" : "");
     }
     result = result && (key == 0 || pp_kernel_digest_matches(pp_kernel_fold(0xcbf29ce484222325ull, text, length), "print", key));
+    free(marked);
     PPSpellings printed = { 0 };
     result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &printed);
     if (result)
@@ -1479,7 +1487,7 @@ static bool pp_compare_placed(const PPPlaced* ours, const PPPlaced* theirs, cons
 static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char* name)
 {
     size_t length = 0;
-    char* text = pp_test_print(pp, true, true, &length);
+    char* text = pp_test_print(pp, true, &length);
     PPPlaced ours = { 0 };
     const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
@@ -3149,7 +3157,7 @@ static int pp_test_arguments(const PPTestCase* test, const char* directory, cons
 static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char* directory)
 {
     size_t length = 0;
-    char* text = pp_test_print(pp, true, true, &length);
+    char* text = pp_test_print(pp, true, &length);
     char* wanted = 0;
     size_t wanted_length = 0;
     FILE* stream = open_memstream(&wanted, &wanted_length);
@@ -4625,153 +4633,6 @@ static bool pp_test_trailing_splices(void)
     return failures == 0;
 }
 
-// The scalar loop must not need the vector path's cached macro-name bits. Prepare every identifier first, define the
-// macros, then make every known name's bit disagree with macro_of before each use file. Repeating this after undef
-// and redefine prevents their normal bit updates from hiding a lookup through the cache. The third run selects the
-// scalar kernel directly, as the benchmarks do, without changing PPOptions.scalar.
-static bool pp_test_scalar_reference(const char* directory)
-{
-    static const char* const names[] =
-    {
-        "scalar-definitions.c",
-        "scalar-use.c",
-        "scalar-changed.c",
-    };
-    static const char* const sources[] =
-    {
-        "#define A 7\n#define ALIAS A\n#define ID(x) x\n#define SELF SELF\n#define F(x) x + F(x)\n"
-        "#define PLAIN ordinary\n#define ATTR noreturn\n#define CHANGE 1\n#define GONE 2\n#define EMPTY\n"
-        "#define POISONED bad\n#pragma GCC poison bad\n",
-        "ordinary A ALIAS ID(A) ID(SELF) F(A) PLAIN\n__COUNTER__ __LINE__\n"
-        "#if defined(A) && !defined(ordinary) && __has_attribute(ATTR)\ncondition\n#endif\nPOISONED\n"
-        "#undef GONE\n#undef CHANGE\n#define CHANGE 3\n#define NEW 4\nGONE CHANGE NEW\n"
-        "#embed <scalar-reference.bin> limit(1) prefix(A,) suffix(,ID(CHANGE))\n",
-        "A ALIAS ID(CHANGE) GONE NEW SELF __COUNTER__\n#if !defined(GONE) && defined(CHANGE)\nchanged\n#endif\n"
-        "#pragma GCC poison later\n__has_c_attribute(x EMPTY)\nbad later\n",
-    };
-    static const char expected[] =
-        "ordinary 7 7 7 SELF 7 + F(7) ordinary 0 2 condition bad GONE 3 4 7, 65, 3\n"
-        "7 7 3 GONE 4 SELF 1 changed 0 bad later\n";
-    char bytes[4096];
-    snprintf(bytes, sizeof(bytes), "%s/scalar-reference.bin", directory);
-    const char* directories[] =
-    {
-        directory,
-    };
-    static InternTable tables[3];
-    static Preprocessor runs[3];
-    char* diagnostics[3] = { 0 };
-    bool result = pp_test_write_file(bytes, "AB");
-    for (uint32_t k = 0; result && k < 3; k += 1)
-    {
-        size_t length = 0;
-        FILE* stream = open_memstream(&diagnostics[k], &length);
-        const PPOptions options =
-        {
-            .language =
-            {
-                .standard = 2023,
-                .gnu = true,
-            },
-            .scalar = k == 1,
-            .no_standard_includes = true,
-            .clang_features = true,
-            .embed_directories = directories,
-            .embed_directory_count = BUSTER_ARRAY_LENGTH(directories),
-            .expansion_starts = true,
-            .diagnostics = stream,
-        };
-        Preprocessor* pp = &runs[k];
-        result = stream != 0 && intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
-        if (result)
-        {
-            const bool vectorized = !options.scalar;
-            result = pp_prepare_options(&options).vectorized == vectorized && pp->vectorized == vectorized &&
-                     pp->cache->prepare.vectorized == vectorized;
-            if (!result)
-            {
-                printf("scalar reference: run %u: preparation does not follow host and scalar option\n", k);
-            }
-        }
-        uint32_t files[BUSTER_ARRAY_LENGTH(sources)];
-        if (result)
-        {
-            pp->vectorized = k == 0;
-        }
-        for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
-        {
-            files[s] = pp_virtual_file(pp, names[s], sources[s], (uint32_t)strlen(sources[s]), BUSTER_PP_USER_FILE);
-            result = files[s] != BUSTER_PP_NONE && pp_prepare_data(pp, &pp->datas[pp->files[files[s]].data], names[s]);
-        }
-        result = result && pp_run_prelude(pp);
-        if (result)
-        {
-            pp_run_file(pp, files[0]);
-            result = pp->errors == 0 && pp->warnings == 0 && !pp->fatal;
-        }
-        for (uint32_t s = 1; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
-        {
-            if (!pp->vectorized)
-            {
-                for (IdentId id = 0; id < pp->table->count; id += 1)
-                {
-                    const uint64_t bit = 1ull << (id % 64);
-                    if (pp->macro_of[id] != 0)
-                    {
-                        pp->is_macro[id / 64] &= ~bit;
-                    }
-                    else
-                    {
-                        pp->is_macro[id / 64] |= bit;
-                    }
-                }
-            }
-            const bool ran = pp_run_main(pp, files[s]);
-            // EMPTY must remain unexpanded after the scoped query's first name, making its operand invalid. The
-            // preexisting poisoned sentinel `bad` and newly poisoned `later` each diagnose one use on the last line.
-            result = ran == (s == 1) && pp->errors == (s == 1 ? 0u : 3u) && pp->warnings == 0 && !pp->fatal;
-            if (!result)
-            {
-                printf("scalar reference: run %u file %u: ran %u, errors %u, warnings %u, fatal %u\n", k, s, ran, pp->errors, pp->warnings, pp->fatal);
-            }
-        }
-        if (stream != 0)
-        {
-            fclose(stream);
-        }
-        result = result && diagnostics[k] != 0 && strstr(diagnostics[k], "builtin feature check macro requires a parenthesized identifier") != 0 &&
-                 strstr(diagnostics[k], "attempt to use a poisoned identifier") != 0;
-        if (result && k != 0)
-        {
-            result = pp_same_streams(&runs[0], pp, "scalar reference") && pp_same_directive_tables(&runs[0], pp, "scalar reference") &&
-                     strcmp(diagnostics[0], diagnostics[k]) == 0 && pp_kernel_digest_check(&runs[0], "scalar-reference", "runs");
-        }
-    }
-    if (result)
-    {
-        PPSpellings ours = { 0 };
-        PPSpellings wanted = { 0 };
-        result = pp_stream_spellings(&runs[0], &ours) &&
-                 pp_text_spellings((const uint8_t*)expected, sizeof(expected) - 1, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &wanted) &&
-                 pp_compare_spellings(&runs[0], &ours, &wanted, "scalar reference", "wanted");
-        arena_release(&ours.arena);
-        arena_release(&wanted.arena);
-    }
-    for (uint32_t k = 0; k < 3; k += 1)
-    {
-        if (!result && diagnostics[k] != 0)
-        {
-            printf("scalar reference run %u diagnostics:\n%s", k, diagnostics[k]);
-        }
-        free(diagnostics[k]);
-        pp_release(&runs[k]);
-        intern_release(&tables[k]);
-    }
-    unlink(bytes);
-    printf("scalar reference: %s (inverted macro-name bits, definitions, captures, builtins, poison and kernel override)\n", result ? "as expected" : "WRONG");
-    return result;
-}
-
 // c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
 static void predefines_test_drop_versions(char* text);
 
@@ -4958,11 +4819,8 @@ static bool pp_test_assembly_printing(const char* directory)
             for (uint32_t marking = 0; passed && marking < 2; marking += 1)
             {
                 size_t vector_length = 0;
-                size_t scalar_length = 0;
-                char* vector_text = pp_test_print(&runs[kernel], true, marking != 0, &vector_length);
-                char* scalar_text = pp_test_print(&runs[kernel], false, marking != 0, &scalar_length);
-                passed = vector_text != 0 && scalar_text != 0 && vector_length == scalar_length && memcmp(vector_text, scalar_text, vector_length) == 0;
-                passed = passed && (marking != 0 || (vector_length == strlen(expected) && memcmp(vector_text, expected, vector_length) == 0));
+                char* vector_text = pp_test_print(&runs[kernel], marking != 0, &vector_length);
+                passed = vector_text != 0 && (marking != 0 || (vector_length == strlen(expected) && memcmp(vector_text, expected, vector_length) == 0));
                 if (!passed)
                 {
                     printf("%s: dollar-printing case %u (%u leading tokens), %s kernels%s differs\n", name, i, prefix,
@@ -4973,7 +4831,6 @@ static bool pp_test_assembly_printing(const char* directory)
                     }
                 }
                 free(vector_text);
-                free(scalar_text);
             }
         }
         failures += !passed;
@@ -6951,8 +6808,7 @@ struct PPFuzzOptions
     uint32_t jobs;
 };
 
-// The text of an #embed's data: pp_embed_text_vector must write pp_embed_text_scalar's bytes, which must be the values
-// in decimal separated by ", " (from snprintf), for every count to 300 of random bytes and of every value in turn, with
+// The text of an #embed's data: pp_embed_text_vector must write the values in decimal separated by ", " (from snprintf), for every count to 300 of random bytes and of every value in turn, with
 // and without a separator first; and at the end of a readable page before a PROT_NONE one, where a read past the bytes
 // faults. The output has the vector kernel's 64 bytes of slack.
 static bool pp_test_embed_text(uint64_t seed)
@@ -6961,7 +6817,6 @@ static bool pp_test_embed_text(uint64_t seed)
     uint8_t* mapping = mmap(0, 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     bool result = mapping != MAP_FAILED && mprotect(mapping + page_bytes, page_bytes, PROT_NONE) == 0;
     static uint8_t vector[5 * 300 + 64];
-    static uint8_t scalar[5 * 300 + 64];
     static char reference[5 * 300 + 64];
     uint32_t checks = 0;
     uint32_t failures = 0;
@@ -6979,18 +6834,16 @@ static bool pp_test_embed_text(uint64_t seed)
             for (uint32_t separated = 0; separated < 2; separated += 1)
             {
                 const uint64_t vector_length = pp_embed_text_vector(bytes, count, separated != 0, vector);
-                const uint64_t scalar_length = pp_embed_text_scalar(bytes, count, separated != 0, scalar);
                 uint64_t reference_length = 0;
                 for (uint32_t i = 0; i < count; i += 1)
                 {
                     reference_length += (uint64_t)snprintf(reference + reference_length, sizeof(reference) - reference_length, "%s%u", separated || i != 0 ? ", " : "", bytes[i]);
                 }
-                const bool same = vector_length == scalar_length && scalar_length == reference_length && memcmp(vector, scalar, scalar_length) == 0 &&
-                                  memcmp(scalar, reference, reference_length) == 0;
+                const bool same = vector_length == reference_length && memcmp(vector, reference, reference_length) == 0;
                 if (!same && failures < 5)
                 {
-                    printf("embed text: %u bytes (%s, %s): vector %.*s\n  scalar %.*s\n  wanted %.*s\n", count, pattern == 0 ? "random" : "in turn",
-                           separated ? "separated" : "first", (int)vector_length, (const char*)vector, (int)scalar_length, (const char*)scalar, (int)reference_length, reference);
+                    printf("embed text: %u bytes (%s, %s): ours %.*s\n  wanted %.*s\n", count, pattern == 0 ? "random" : "in turn",
+                           separated ? "separated" : "first", (int)vector_length, (const char*)vector, (int)reference_length, reference);
                 }
                 failures += !same;
                 checks += 1;
@@ -7342,14 +7195,14 @@ static bool pp_test_parameter_index(void)
     Scratch descriptor = scratch_begin(0);
     const uint64_t descriptor_capacity = descriptor.arena->capacity;
     descriptor.arena->capacity = descriptor.arena->length;
-    PPParameterIndex* allocated = pp_parameter_index_allocate(true);
+    PPParameterIndex* allocated = pp_parameter_index_allocate();
     result = result && allocated == 0 && descriptor.arena->length == descriptor.length;
     descriptor.arena->capacity = descriptor_capacity;
     scratch_end(descriptor);
     if (result)
     {
         Scratch outer = scratch_begin(0);
-        allocated = pp_parameter_index_allocate(true);
+        allocated = pp_parameter_index_allocate();
         result = allocated != 0;
         for (uint32_t p = 0; result && p < BUSTER_PP_SMALL_PARAMETERS; p += 1)
         {
@@ -7378,46 +7231,43 @@ static bool pp_test_parameter_index(void)
         }
         const uint64_t capacity = outer.arena->capacity;
         outer.arena->capacity = outer.arena->length + sizeof(PPParameterIndex) + _Alignof(PPParameterIndex);
-        allocated = pp_parameter_index_build(names, BUSTER_ARRAY_LENGTH(names), true);
+        allocated = pp_parameter_index_build(names, BUSTER_ARRAY_LENGTH(names));
         result = allocated == 0 && outer.arena->length == outer.length;
         outer.arena->capacity = capacity;
         scratch_end(outer);
     }
-    for (uint32_t mode = 0; mode < 2; mode += 1)
+    PPParameterIndex index = { 0 };
+    for (uint32_t p = 0; result && p < BUSTER_PP_MAX_PARAMETERS; p += 1)
     {
-        PPParameterIndex index = { .vectorized = mode == 0 };
-        for (uint32_t p = 0; result && p < BUSTER_PP_MAX_PARAMETERS; p += 1)
+        const IdentId id = p * 8192;
+        uint32_t previous;
+        result = pp_parameter_insert(&index, id, p, &previous) && previous == BUSTER_PP_NONE;
+        for (uint32_t q = 0; result && q <= p; q += 1)
         {
-            const IdentId id = p * 8192;
-            uint32_t previous;
-            result = pp_parameter_insert(&index, id, p, &previous) && previous == BUSTER_PP_NONE;
-            for (uint32_t q = 0; result && q <= p; q += 1)
-            {
-                result = pp_parameter_index(&index, q * 8192) == q && pp_parameter_index(&index, q * 8192 + 1) == BUSTER_PP_NONE;
-            }
-            result = result && pp_parameter_insert(&index, id, p + 1, &previous) && previous == p && index.count == p + 1;
+            result = pp_parameter_index(&index, q * 8192) == q && pp_parameter_index(&index, q * 8192 + 1) == BUSTER_PP_NONE;
         }
-        pp_parameter_index_end(&index);
+        result = result && pp_parameter_insert(&index, id, p + 1, &previous) && previous == p && index.count == p + 1;
     }
+    pp_parameter_index_end(&index);
     for (uint32_t count = BUSTER_PP_SMALL_PARAMETERS; result && count <= 2 * BUSTER_PP_SMALL_PARAMETERS; count *= 2)
     {
-        PPParameterIndex index = { .vectorized = true };
+        PPParameterIndex grown = { 0 };
         uint32_t previous;
         for (uint32_t p = 0; result && p < count; p += 1)
         {
-            result = pp_parameter_insert(&index, p, p, &previous);
+            result = pp_parameter_insert(&grown, p, p, &previous);
         }
         Scratch scratch = scratch_begin(0);
         const uint64_t capacity = scratch.arena->capacity;
         scratch.arena->capacity = scratch.arena->length;
-        result = result && !pp_parameter_insert(&index, count, count, &previous) && index.count == count;
+        result = result && !pp_parameter_insert(&grown, count, count, &previous) && grown.count == count;
         scratch.arena->capacity = capacity;
         for (uint32_t p = 0; result && p < count; p += 1)
         {
-            result = pp_parameter_index(&index, p) == p;
+            result = pp_parameter_index(&grown, p) == p;
         }
         scratch_end(scratch);
-        pp_parameter_index_end(&index);
+        pp_parameter_index_end(&grown);
     }
     printf("macro parameter index: %s (guarded small views, sparse ids, first ordinals, misses and failed growth)\n", result ? "pass" : "FAIL");
     return result;
@@ -9777,7 +9627,6 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_listing_descriptors(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_final_copy_accounting());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_trailing_splices());
-    passed &= PP_TEST_SECTION(deal, 1, pp_test_scalar_reference(directory));
     passed &= PP_TEST_SECTION(deal, 19, pp_test_windows(fuzz->seed));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_line_ends());
     passed &= PP_TEST_SECTION(deal, 5, pp_test_window_units(directory, fuzz->seed));

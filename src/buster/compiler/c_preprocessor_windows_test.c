@@ -8,11 +8,11 @@
 // literals over many lines, line splices inside tokens and between them, "\r\n", lines longer than a window, literals
 // left open at a line's end, a byte order mark, and a comment or raw string left open at the file's end; with
 // identifiers that share long prefixes, so that refinement's candidates and new spellings come in every block. Each is
-// prepared whole by the vectorized kernels and by their scalar twins, which must agree too, and in windows of 1 byte to
-// 8 KB, in five language modes; sources of up to 96 KB give refinement many blocks of BUSTER_REFINE_BLOCK_TOKENS, which
-// the windows complete at every place. Each windowed preparation's line pages are checked against a count a byte at a
-// time; and sources with __LINE__ around the pages' starts are preprocessed as units (pp_test_window_units), which must
-// count from the pages and give the scalar twins' output. Files made by hand check the line ends at a query's end
+// prepared whole and in windows of 1 byte to 8 KB, in five language modes; sources of up to 96 KB give refinement many
+// blocks of BUSTER_REFINE_BLOCK_TOKENS, which the windows complete at every place. Each windowed preparation's line
+// pages are checked against a count a byte at a time; and sources with __LINE__ around the pages' starts are
+// preprocessed as units (pp_test_window_units), which must count from the pages and give the output of the unit
+// prepared whole, which counts from a cursor. Files made by hand check the line ends at a query's end
 // (pp_test_line_ends, #441): a "\r\n" counts at its '\n', so a query that ends at the '\n' counts no line end there.
 //
 // Layout: the random sources, the preparations and their comparison, the line pages, lines in units, the windows' cut
@@ -451,10 +451,10 @@ static void pp_window_test_unit_source(PPWindowTestText* text, uint64_t* random,
     pp_window_test_append(text, "\n");
 }
 
-// One run of pp_test_window_units: `path` preprocessed as a unit by the scalar twins, whole, or by the vectorized kernels
-// in windows of `window` bytes (0 for the default), printed with line markers by its kernels' printer into `*printed`
-// (`free` it). Leaves the run to release in `pp` (which `*ready` says) and its options' memory in `arena`.
-static bool pp_window_test_unit(const char* path, bool scalar, uint32_t window, InternTable* table, Preprocessor* pp, bool* ready, Arena* arena, char** printed,
+// One run of pp_test_window_units: `path` preprocessed as a unit, its file prepared in windows of `window` bytes (0 for
+// the default; UINT32_MAX prepares it whole), printed with line markers into `*printed` (`free` it). Leaves the run to
+// release in `pp` (which `*ready` says) and its options' memory in `arena`.
+static bool pp_window_test_unit(const char* path, uint32_t window, InternTable* table, Preprocessor* pp, bool* ready, Arena* arena, char** printed,
                                 size_t* printed_length)
 {
     char* arguments[] = { (char*)"-std=c17", (char*)path };
@@ -464,18 +464,10 @@ static bool pp_window_test_unit(const char* path, bool scalar, uint32_t window, 
     bool markers;
     *arena = arena_reserve(1ull << 20);
     bool result = arena->base != 0 && pp_parse_options(2, arguments, &options, arena, &input, &output, &markers);
-    options.scalar = scalar;
     options.window_bytes = window;
     *ready = result && intern_initialize(table) && pp_initialize(pp, &options, table);
-    if (*ready)
-    {
-        result = pp->vectorized == !scalar && pp->cache->prepare.vectorized == pp->vectorized;
-        // Exercise the window kernels by the request explicitly; production defaults are checked above.
-        pp->vectorized = !scalar;
-        pp->cache->prepare.vectorized = !scalar;
-    }
     result = *ready && result && pp_run(pp, path) && pp->errors == 0;
-    *printed = result ? pp_test_print(pp, !scalar, true, printed_length) : 0;
+    *printed = result ? pp_test_print(pp, true, printed_length) : 0;
     return *printed != 0;
 }
 
@@ -483,8 +475,8 @@ static bool pp_window_test_unit(const char* path, bool scalar, uint32_t window, 
 // `directory`. The file cache prepares its file and the unit's data copies the record (pp_copy_prepared). The vectorized
 // kernels prepare it in windows of several sizes: smaller than a line page, a page, a byte past one, and larger, and the
 // last source in the default windows. __LINE__, #line and -E's line markers then count from its line pages, which each
-// run's data of the file must have. The scalar twins prepare it whole and count from a cursor. Each run's output and the
-// text -E prints with line markers must be the scalar twins', byte for byte. Returns whether every run's are.
+// run's data of the file must have. A run that prepares it whole counts from a cursor, and each windowed run's output
+// and the text -E prints with line markers must be its, byte for byte. Returns whether every run's are.
 static bool pp_test_window_units(const char* directory, uint64_t seed)
 {
     static const uint32_t windows[] = { 1000, BUSTER_PP_LINE_PAGE_BYTES, BUSTER_PP_LINE_PAGE_BYTES + 1, 10000 };
@@ -511,13 +503,13 @@ static bool pp_test_window_units(const char* directory, uint64_t seed)
         char* printed[2] = { 0, 0 };
         size_t lengths[2] = { 0, 0 };
         const bool written = pp_test_write_file(path, (const char*)text.bytes);
-        const bool twin = written && pp_window_test_unit(path, true, 0, &tables[0], &runs[0], &ready[0], &arenas[0], &printed[0], &lengths[0]);
-        bool same = twin;
-        for (uint32_t w = 0; twin && w < (large ? 1u : BUSTER_ARRAY_LENGTH(windows)); w += 1)
+        const bool whole = written && pp_window_test_unit(path, UINT32_MAX, &tables[0], &runs[0], &ready[0], &arenas[0], &printed[0], &lengths[0]);
+        bool same = whole;
+        for (uint32_t w = 0; whole && w < (large ? 1u : BUSTER_ARRAY_LENGTH(windows)); w += 1)
         {
             const uint32_t window = large ? 0 : windows[w];
             const uint32_t bytes = window != 0 ? window : BUSTER_PP_WINDOW_BYTES;
-            bool ran = pp_window_test_unit(path, false, window, &tables[1], &runs[1], &ready[1], &arenas[1], &printed[1], &lengths[1]);
+            bool ran = pp_window_test_unit(path, window, &tables[1], &runs[1], &ready[1], &arenas[1], &printed[1], &lengths[1]);
             // The file's data in the run: its bytes are the source's, and windows prepared it.
             bool paged = false;
             for (uint32_t d = 0; ran && d < runs[1].data_count; d += 1)
@@ -531,7 +523,7 @@ static bool pp_test_window_units(const char* directory, uint64_t seed)
                                 pp_kernel_digest_check(&runs[1], "windows", label);
             if (!agrees && !pp_test_quiet)
             {
-                printf("%s: %s\n", label, !ran ? "the run fails" : !paged ? "the file's data has no line pages" : "the output or its text with line markers isn't the scalar twins'");
+                printf("%s: %s\n", label, !ran ? "the run fails" : !paged ? "the file's data has no line pages" : "the output or its text with line markers isn't the whole file's");
             }
             same &= agrees;
             units += 1;
@@ -545,13 +537,13 @@ static bool pp_test_window_units(const char* directory, uint64_t seed)
             printed[1] = 0;
         }
         // The numbers that __LINE__ gave (pp_number_token's, which a macro made).
-        for (uint32_t t = 0; twin && t < runs[0].output.count; t += 1)
+        for (uint32_t t = 0; whole && t < runs[0].output.count; t += 1)
         {
             questions += runs[0].output.kinds[t] == C_TOKEN_NUMERIC_CONSTANT && (runs[0].output.flags[t] & BUSTER_PP_FROM_MACRO) != 0;
         }
-        if (!twin && !pp_test_quiet)
+        if (!whole && !pp_test_quiet)
         {
-            printf("windows: unit %u: the scalar twins' run fails\n", s);
+            printf("windows: unit %u: the run that prepares it whole fails\n", s);
         }
         failures += !same;
         if (ready[0])
@@ -564,7 +556,7 @@ static bool pp_test_window_units(const char* directory, uint64_t seed)
     }
     unlink(path);
     free(text.bytes);
-    printf("windows: %lu of %u sources differ as units (%lu windowed units; %lu __LINE__s in the scalar twins' outputs)\n", (unsigned long)failures,
+    printf("windows: %lu of %u sources differ as units (%lu windowed units; %lu __LINE__s in the whole files' outputs)\n", (unsigned long)failures,
            BUSTER_PP_WINDOW_UNIT_SOURCES, (unsigned long)units, (unsigned long)questions);
     return allocated && failures == 0;
 }
@@ -1035,10 +1027,10 @@ static bool pp_test_windows(uint64_t seed)
         { .standard = 1989, .gnu = false },
         { .standard = 1999, .gnu = true },
     };
-    static PPWindowTestRun runs[3];
+    static PPWindowTestRun runs[2];
     PPWindowTestText text = { .bytes = malloc(BUSTER_PP_WINDOW_TEST_CAPACITY), .capacity = BUSTER_PP_WINDOW_TEST_CAPACITY };
     bool initialized = text.bytes != 0;
-    for (uint32_t k = 0; k < 3; k += 1)
+    for (uint32_t k = 0; k < 2; k += 1)
     {
         initialized &= pp_window_test_initialize(&runs[k]);
     }
@@ -1055,16 +1047,10 @@ static bool pp_test_windows(uint64_t seed)
         const uint32_t target = 1 + (uint32_t)(pp_window_test_random(&random) % BUSTER_PP_WINDOW_TEST_MAX_BYTES);
         pp_window_test_source(&text, &random, target);
         const PPOptions options = { .language = languages[s % BUSTER_ARRAY_LENGTH(languages)] };
-        PPPrepare prepare = pp_prepare_options(&options);
-        // The kernel comparison runs both requests, the vector one and its scalar twin.
-        prepare.vectorized = true;
-        PPPrepare scalar = prepare;
-        scalar.vectorized = false;
+        const PPPrepare prepare = pp_prepare_options(&options);
         PPFileData whole;
-        PPFileData twin;
         const PPPrepareStatus whole_status = pp_window_test_prepare(&runs[0], &prepare, &text, 0, &whole);
-        const PPPrepareStatus twin_status = pp_window_test_prepare(&runs[1], &scalar, &text, 0, &twin);
-        bool same = pp_window_test_same(whole_status, &whole, twin_status, &twin, "the scalar twins", s, 0);
+        bool same = true;
         tokens += whole.token_count;
         // c_tokenize_lines is not for a source that the scalar lexer takes whole (pp_prepare_into never gives it one).
         const bool windows_apply = !c_tokenize_scalar_only(text.bytes, text.length, prepare.refine_flags);
@@ -1074,7 +1060,7 @@ static bool pp_test_windows(uint64_t seed)
             if (windows[w] <= 100 || (uint64_t)windows[w] * 4 <= text.length)
             {
                 PPFileData data;
-                const PPPrepareStatus status = pp_window_test_prepare(&runs[2], &prepare, &text, windows[w], &data);
+                const PPPrepareStatus status = pp_window_test_prepare(&runs[1], &prepare, &text, windows[w], &data);
                 same &= pp_window_test_same(whole_status, &whole, status, &data, "windows", s, windows[w]);
                 same &= status != PP_PREPARE_DONE || pp_window_test_line_pages(&data, s, windows[w]);
                 windowed += 1;
@@ -1082,7 +1068,7 @@ static bool pp_test_windows(uint64_t seed)
         }
         failures += !same;
     }
-    for (uint32_t k = 0; k < 3; k += 1)
+    for (uint32_t k = 0; k < 2; k += 1)
     {
         pp_window_test_release(&runs[k]);
     }

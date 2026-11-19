@@ -1764,7 +1764,6 @@ print/x86-64-v2 #e3bcc4268dcc0470	f52f6820a5bad4b3
 print/x86-64-v3 #1476261eaef6467b	bba34814e0dfa4ff
 print/x86-64-v4 #08150ff754c990b2	b03f1d9f04600cc3
 print/znver5 #ff192039a772ff56	b03bbb9f045d3066
-scalar-reference/runs	0573bcbd17bdb578
 semantic-pragma/case 0	b01cf752d046e060
 semantic-pragma/case 1	44d15d44f17ad0e1
 semantic-pragma/case 2	701774fdcfce7542

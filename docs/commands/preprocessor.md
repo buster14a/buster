@@ -108,8 +108,9 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 [--keep] [--seed N] [--count N] [--part K/N] [options] [file...]`, or
 `test-preprocessor --tables path...`:
 
-- without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
-  the vectorized kernels and their scalar twins. They run in 32 parts, the
+- without files, the 320 built-in cases (`pp_test_cases`), each preprocessed
+  twice, the second time with `PPOptions.scalar` (since #2924 it selects
+  `pp_define`'s scalar body scan alone). They run in 32 parts, the
   header sets below (`--clang`) in 16 and the files (below) a part each (a
   range each past 64), each part in a child process with a directory of its
   own, at most `test_process_cpus()` at once, the output in their order
@@ -121,9 +122,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   expansion history, the directive tables and the diagnostics' counts), a line
   per kernel comparison of the built-in cases (`test-x86-target`'s `-march`
   cases among them) and the fuzz batch's sum at its default seed and count,
-  recorded where the scalar twins gave the same outputs (#2924).
-  `BUSTER_PP_RECORD_DIGESTS=FILE` writes the lines instead; record twice, with
-  `$TMPDIR` of two lengths, and mark a case whose digests differ `-` (its
+  recorded where the scalar twins gave the same outputs before #2924 deleted
+  them. The `print/` lines are the digests of the text `-E -P` prints for each
+  built-in case and the printer tests' runs, recorded where both printers gave
+  it. `BUSTER_PP_RECORD_DIGESTS=FILE` writes the lines instead; record twice,
+  with `$TMPDIR` of two lengths, and mark a case whose digests differ `-` (its
   outputs hold its directory's name, or follow the host's CPU, as
   `-march=native`'s do). The
   cases are of our own:
@@ -174,7 +177,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   refused, its message naming the option, or taken without one: the `-f`
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
-  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's text (against `snprintf`) and lookup checks;
   the search directories' listings (`pp_test_directory_listings`, #653): the opens a listed directory saves after its
   32nd failed probe, the names it can't rule out still opened (another case, a subdirectory, a dangling link,
   `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
@@ -254,7 +257,8 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   a time, on random bytes ending at a `PROT_NONE` page and starting at the end
   of one, and on 9 windows worked out by hand, one faulting if the scan passes
   its last line end; and the directives' places (`pp_directive_places`) against
-  their bit-at-a-time twin, each output ending at a `PROT_NONE` page; and 11 files
+  the bit-at-a-time loop it takes for a word of more than 16, each output ending
+  at a `PROT_NONE` page; and 11 files
   made by hand ending at a `PROT_NONE` page (#441: a `\r\n` in a block, across
   64-byte blocks, inside a 4 KB line page and across pages, a `\r` and a `\n`
   alone, a `\r` last), whose line ends `pp_count_lines` must count from many
@@ -269,12 +273,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   two windows or more through windows of N bytes, so that the vectorized side's
   windowed preparation of a whole unit is compared too;
 - with `--tables`, the directive tables of every `.c` and `.h` file under each
-  path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
-  the C library corpus).
+  path, with `PPOptions.scalar` off and on, against the oracle (about 0.02 s for
+  `src`, 0.6 s for the C library corpus).
 
-In both, the vectorized printer's text must be the scalar printer's byte for
-byte, with line markers and without, and must lex back into the stream's
-spellings.
+In both, the printed text, with line markers and without, must lex back into
+the stream's spellings, and a built-in case's `-P` text must give its recorded
+digest.
 
 Every case and file runs with clang's answers to the feature queries
 (`--clang-features`, the oracle's mode), and a check runs a line of queries both
@@ -483,8 +487,9 @@ Its invocation scripts take a separate normal shared-host lock for each command.
 
 `./build/compiler benchmark-preprocessor [--clang] [--markers] [--only
 vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] [options] file...` preprocesses each file from nothing per
-run (a new intern table and preprocessor), with the vectorized kernels and their
-scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
+run (a new intern table and preprocessor), with the vectorized kernels and again
+with `pp_define`'s scalar body scan (`--only scalar`, the one twin #2924 left in
+the preprocessor), 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
 and time (read, lex, refine, directive tables, main loop/setup), the release after the
 run (the files' mappings among it), `-E -P`'s throughput with its printing
@@ -534,13 +539,13 @@ others, its measurements are informational.
 path...` times definitions and lookups alone (#121): every `.c` and `.h` file
 under the paths is read and prepared once, then each of 21 passes after a
 warm-up, file by file, defines its `#define`s, compiles its macros and looks up
-its identifiers as the main loop's runs test them, by each kernel, which must
-make the same macros. It reports the medians in cycles per `#define`, per macro
+its identifiers as the main loop's runs test them, with the body scan's vector
+and scalar arms, which must make the same macros. It reports the medians in cycles per `#define`, per macro
 compiled and per lookup. `docs/c-preprocessor.md` has the numbers for the C
 library corpus.
 
 `--guard-cost` times the vectorized kernels with the skip of guarded files and
-without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
+without it (`PPOptions.no_guard_skip`), in place of the scalar body scan: the
 output's tokens must be the same (#120).
 
 `--markers` runs and prints as `-E` without `-P` does: with the expansion starts
@@ -550,7 +555,7 @@ markers and reported as `-E with printing`; of the controls it takes
 `--spelling-cost` alone, and refuses `--clang`. `--spelling-cost` times the
 vectorized kernels with the printer's spellings by `pp_print_spellings`
 (`spellings`) and by its general loop for every chunk (`per-token`,
-`PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
+`PPOptions.print_per_token`), in place of the scalar body scan (#649). Every run's
 warm-up print, with markers or without, must give the same bytes, whatever the
 implementation and the read limit. Both take the printer's own copies, its
 line markers' batches among them, so the two rows differ in the spellings
@@ -558,10 +563,10 @@ alone, and each row's history in the job is its before. The 9700X job runs
 both, with and without `--markers`, on `main.c` and the frozen `sqlite3.c`
 where it measures the preprocessor, about 13 s.
 
-`./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
-path...` times the directive tables alone (#118): every `.c` and `.h` file under
-the paths is read and prepared once, then each of 21 passes after a warm-up
-builds every file's table by each kernel, whose tables must be the same, and it
+`./build/compiler benchmark-preprocessor --tables path...` times the directive
+tables alone (#118): every `.c` and `.h` file under the paths is read and
+prepared once, then each of 21 passes after a warm-up builds every file's
+table, which must be the same in every pass, and it
 reports the medians per input token and per directive, IPC, and the scan's
 share. Run it under the 9700X's lock with `taskset -c 2`;
 `docs/c-preprocessor.md` has the numbers for the C library corpus. The default
@@ -569,17 +574,17 @@ share. Run it under the 9700X's lock with `taskset -c 2`;
 
 `./build/compiler benchmark-preprocessor --embed N` measures instead the text
 `-E` prints for an `#embed`'s N bytes (random, from a fixed seed), by
-`pp_embed_text_vector` and its scalar twin in the printers' pieces, 21 passes
-after a warm-up: medians per input byte, and the text's throughput. The two
-texts must be the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
+`pp_embed_text_vector` in the printers' pieces, 21 passes after a warm-up:
+medians per input byte, and the text's throughput. Every pass's text must be
+the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
 the 9700X's numbers.
 
 ## Preparation's request (#1369)
 
-Production preparation chooses the vector kernels unless the caller has
-requested scalar execution, which selects whole-file scalar refinement instead
-of the 512-bit chunk/window refinement. Shared file caches inherit the same
-preparation policy. Explicit low-level window tests exercise both kernel
-protocols; the scalar-reference and window-unit fixtures check the default
-option policy before those test-only overrides. The scalar host, whose builds
-took the scalar preparation always, went with #2924.
+Preparation always runs the vector kernels: the lexer and the 512-bit
+chunk/window refinement. A caller's request for scalar execution selected
+whole-file scalar refinement until #2924 deleted it, and the scalar host, whose
+builds took the scalar preparation always, went with #2924 too. Shared file
+caches share one preparation. The window tests compare each windowed
+preparation with the whole file's, and each windowed unit with the unit
+prepared whole.

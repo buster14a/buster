@@ -59,8 +59,8 @@ the guard spelled the same, and the walk must do what it did:
   and a macro redefined. The counts are exact: 13 files prepared (each identity
   once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), the units'
   errors and warnings, and their system calls after the walk (only the
-  computed include's). It runs with the vectorized kernels and with their
-  scalar twins, cut into parts and split once, on every lane
+  computed include's). It runs with `PPOptions.scalar` off and on (the
+  scalar body scan alone, #2924), cut into parts and split once, on every lane
   (`FilesRun.lane_bytes` 0);
 - spellings: 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, long names, line splices and UCNs) prepared

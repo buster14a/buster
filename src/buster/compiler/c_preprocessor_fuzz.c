@@ -905,26 +905,23 @@ static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char
     for (uint32_t markers = 0; result == BUSTER_PPF_EQUAL && markers < 2; markers += 1)
     {
         size_t vector_length = 0;
-        size_t scalar_length = 0;
-        char* vector_text = pp_test_print(&runs[0], true, markers != 0, &vector_length);
-        char* scalar_text = pp_test_print(&runs[0], false, markers != 0, &scalar_length);
-        if (vector_text == 0 || scalar_text == 0 || vector_length != scalar_length || memcmp(vector_text, scalar_text, vector_length) != 0)
+        char* vector_text = pp_test_print(&runs[0], markers != 0, &vector_length);
+        if (vector_text == 0)
         {
             result = BUSTER_PPF_KERNEL_PRINTERS;
             if (!pp_test_quiet)
             {
-                printf("%s: the printers differ%s (%zu and %zu bytes)\n", name, markers ? " with line markers" : "", vector_length, scalar_length);
+                printf("%s: -E can't print the run%s\n", name, markers ? " with line markers" : "");
             }
         }
         free(vector_text);
-        free(scalar_text);
     }
     if (result == BUSTER_PPF_EQUAL && !pp_fuzz_unprintable(&runs[0], state))
     {
         PPSpellings ours = { 0 };
         PPSpellings printed = { 0 };
         size_t length = 0;
-        char* text = pp_test_print(&runs[0], true, false, &length);
+        char* text = pp_test_print(&runs[0], false, &length);
         const bool lexed = text != 0 && pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &printed);
         char label[160];
         snprintf(label, sizeof(label), "%s (printed)", name);
