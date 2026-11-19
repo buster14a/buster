@@ -22,12 +22,17 @@ int main(void)
     for (unsigned long n = 0; n <= 65; n += 1)
     {
         // All ties, mixed signedness and extrema, then a unique winner in every possible lane and scalar tail.
-        for (unsigned pattern = 0; pattern < n + 2; pattern += 1)
+        for (unsigned pattern = 0; pattern < 2 * n + 2; pattern += 1)
         {
             for (unsigned i = 0; i < n; i += 1)
             {
-                u[i] = pattern == 0 ? 17 : pattern == 1 ? extremes[i % 6] : i == pattern - 2 ? UINT_MAX : 17;
+                u[i] = pattern == 1 ? extremes[i % 6] : 17;
                 s[i] = (int)u[i];
+                if (pattern >= 2 && i == (pattern - 2) / 2)
+                {
+                    u[i] = (pattern & 1) ? UINT_MAX : 0;
+                    s[i] = (pattern & 1) ? INT_MAX : INT_MIN;
+                }
             }
             for (unsigned k = 0; k < sizeof(seeds) / sizeof(*seeds); k += 1)
             {

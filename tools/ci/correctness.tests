@@ -960,8 +960,25 @@ objects=$(mktemp -d)
 kernels=tests/ir/vectorize/minmax.c
 "$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict --tier1-report --verify -march=x86-64-v4 -c "$kernels" -o "$objects/buster.o"
 objdump -d -M intel --no-show-raw-insn --disassemble=max_if_i32 "$objects/buster.o"
-"$BUSTER_COMPILER" test-ir-source --print max_if_i32 "$kernels"
-"$BUSTER_COMPILER" test-ir-source --print min_cond_i32 "$kernels"
+for kind in min max; do
+    for spelling in if cond; do
+        for sign in i32 u32; do
+            symbol=${kind}_${spelling}_${sign}
+            op=vp${kind}sd
+            if [ "$sign" = u32 ]; then op=vp${kind}ud; fi
+            objdump -d -M intel --no-show-raw-insn --disassemble="$symbol" "$objects/buster.o" > "$objects/$symbol.s"
+            grep -E "[[:space:]]$op[[:space:]]+zmm" "$objects/$symbol.s"
+            grep -E "[[:space:]]$op[[:space:]]+xmm" "$objects/$symbol.s"
+        done
+    done
+done
+objdump -d -M intel --no-show-raw-insn --disassemble=max_volatile "$objects/buster.o" > "$objects/volatile.s"
+if grep -E '[xyz]mm[0-9]+' "$objects/volatile.s"; then exit 1; fi
+# The pass is opt-in, and the available horizontal reductions require EVEX.
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64-v4 -c "$kernels" -o "$objects/default.o"
+"$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict -march=x86-64-v3 -c "$kernels" -o "$objects/v3.o"
+objdump -d "$objects/default.o" "$objects/v3.o" > "$objects/scalar.s"
+if grep -E 'v?p(min|max)[su]d' "$objects/scalar.s"; then exit 1; fi
 clang -O2 -march=x86-64-v4 -c "$kernels" -o "$objects/clang.o"
 for impl in buster clang; do
     clang -O2 tests/ir/vectorize/minmax-main.c "$objects/$impl.o" -o "$objects/$impl"

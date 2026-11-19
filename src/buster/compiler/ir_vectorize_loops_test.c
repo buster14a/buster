@@ -406,6 +406,16 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
         {
             fprintf(stderr, "ir-vectorize: digest %#018" PRIx64 "\n", test.digest);
         }
+        // These cases postdate the frozen digest from #2924. Check their admission and execution at each width.
+        static const IrVectorizeTestFixture minmax[] = {
+            { .name = "minmax-select", .roles = "pnk", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
+            { .name = "refuse-minmax-clobber", .roles = "pnk", .refusal = IR_VECTORIZE_REFUSE_SHAPE },
+            { .name = "refuse-minmax-partial", .roles = "ppnk", .refusal = IR_VECTORIZE_REFUSE_USE },
+        };
+        for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(minmax); k += 1)
+        {
+            ir_vectorize_test_fixture(&test, &minmax[k], &source, &input, &vector, &cleanup, &scratch, &execution, buffers);
+        }
         ir_vectorize_test_scans(&test);
         static const char* const mutants[BUSTER_IR_VECTORIZE_MUTATIONS] = { "none", "no overlap test", "an unrounded tail", "a reduction's identity", "the lanes' width" };
         for (uint32_t mutation = 1; ready && mutation < BUSTER_IR_VECTORIZE_MUTATIONS; mutation += 1)

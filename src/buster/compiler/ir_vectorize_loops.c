@@ -9,7 +9,7 @@
 // A loop is taken where it has this shape after promotion, truth simplification and if-conversion: a header whose
 // only phis are an induction (i32 or i64, from an invariant start, `+ 1` on the back edge) and integer reductions, whose
 // only other needed row is the exit test `iv < n` (unsigned, or signed) on which it branches into the loop or out; then
-// a chain of blocks, each its predecessor's only successor, back to the header; and one preheader, whose only successor
+// a chain of blocks optionally containing min/max reduction diamonds, back to the header; and one preheader, whose only successor
 // is the header. Every needed row of the chain is classified in order (IrVectorizeClass): uniform (no lane depends on
 // the induction), an index or a pointer that is affine in the induction, or a vector value of one lane per iteration.
 // A row nothing needs is ignored. Loads and stores must be consecutive: their pointer advances by its access's bytes.
@@ -102,7 +102,7 @@ struct IrVectorizeTarget
     uint8_t extend[4][4][2];
     // A wrapping truncation from 1 << from bytes to 1 << to, at the source's width.
     uint8_t truncate[4][4];
-    // A reduction of lanes of 1 << size bytes by BUSTER_IR_REDUCE_* at the source's width, then lane_extract of lane 0.
+    // A horizontal reduction and lane_extract of lane 0. For min/max this also covers lane_op at the full width.
     uint8_t reduce[4][BUSTER_IR_REDUCE_OPERATIONS];
     // A population count of lanes of 1 << size bytes.
     uint8_t popcount[4];
@@ -166,6 +166,14 @@ typedef enum IrVectorizeClass
     // The exit test, the induction's increment and the terminators.
     IR_VECTORIZE_CLASS_CONTROL,
 } IrVectorizeClass;
+
+typedef struct IrVectorizeReduction IrVectorizeReduction;
+struct IrVectorizeReduction
+{
+    uint32_t phi;
+    uint32_t lane;
+    uint32_t operation;
+};
 
 // One loop's plan, from ir_vectorize_plan, for ir_vectorize_emit.
 typedef struct IrVectorizeLoop IrVectorizeLoop;
@@ -234,6 +242,9 @@ struct IrVectorizeWork
     // guards' pointer clone with the induction at its start, and its splat), and the extension's two constants.
     uint8_t* kinds;
     uint8_t* classes;
+    // Valid for UPDATE rows only: the reduction whose partial result they produce.
+    uint8_t* reduction_index;
+    IrVectorizeReduction reduction[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT];
     uint8_t* needed;
     uint8_t* sizes;
     uint8_t* floating;
@@ -569,9 +580,115 @@ static bool ir_vectorize_in_g(const IrVectorizeWork* work, uint32_t loop, uint32
     return result;
 }
 
-// The loop's blocks: the header, then the chain from one of its branch's targets back to it, each block of it reached
-// from the previous one alone and ending in a `br` to the next. Such a loop is a natural loop whose header dominates it,
-// reducible and innermost by its shape: no chain block can head another loop, having one predecessor. The header's
+static void ir_vectorize_set(IrVectorizeWork* work, uint32_t i, uint32_t class, int64_t coefficient, uint32_t size, bool floating)
+{
+    work->classes[i] = (uint8_t)class;
+    work->coefficients[i] = coefficient;
+    work->sizes[i] = (uint8_t)size;
+    work->floating[i] = floating ? 1 : 0;
+    ir_vectorize_touch(work, i);
+}
+
+// A branch's condition past the lowering's truth chains, `icmp ne (zext c), 0`, which truth simplification removes in
+// Tier 1's pipeline but other clients may leave: c.
+static uint32_t ir_vectorize_truth(const IrFunction* f, uint32_t value)
+{
+    uint32_t at = value;
+    uint64_t zero = 1;
+    uint32_t depth = 0;
+    while (depth < BUSTER_IR_VECTORIZE_DEPTH && at < f->instruction_count && f->op[at] == IR_ICMP && f->c[at] == IR_NE && f->a[at] < f->instruction_count && f->op[f->a[at]] == IR_ZEXT &&
+           f->type[f->a[f->a[at]]] == IR_I1 && ir_vectorize_constant(f, f->b[at], &zero) && zero == 0)
+    {
+        at = f->a[f->a[at]];
+        depth += 1;
+    }
+    return at;
+}
+
+// Meet the branch's two edges at one join, directly or through a private block ending in br. Both
+// predecessors of the join are accounted for. In particular an early exit or a second loop cannot be an arm.
+static uint32_t ir_vectorize_join(const IrVectorizeWork* work, uint32_t header, uint32_t head, uint32_t from[2])
+{
+    const IrFunction* f = work->function;
+    const uint32_t branch = f->block_offsets[(uint64_t)head + 1] - 1;
+    uint32_t ends[2] = { f->b[branch], f->c[branch] };
+    bool valid = ends[0] != ends[1];
+    for (uint32_t side = 0; valid && side < 2; side += 1)
+    {
+        const uint32_t arm = ends[side];
+        from[side] = head;
+        valid = arm != 0 && arm != head && arm != header;
+        if (valid && work->predecessor_count[arm] == 1)
+        {
+            const uint32_t end = f->block_offsets[(uint64_t)arm + 1] - 1;
+            valid = work->predecessor_first[arm] == head && f->op[end] == IR_BR;
+            ends[side] = f->a[end];
+            from[side] = arm;
+        }
+    }
+    const uint32_t join = ends[0];
+    valid = valid && join == ends[1] && join != 0 && join != head && join != header && work->predecessor_count[join] == 2;
+    return valid ? join : BUSTER_IR_NONE;
+}
+
+static bool ir_vectorize_record_reduction(IrVectorizeWork* work, IrVectorizeLoop* plan, uint32_t update, IrVectorizeReduction reduction)
+{
+    const uint32_t index = plan->reductions;
+    const bool valid = index < BUSTER_IR_VECTORIZE_REDUCTION_LIMIT && work->classes[update] != IR_VECTORIZE_CLASS_UPDATE;
+    if (valid)
+    {
+        work->reduction[index] = reduction;
+        plan->reductions = index + 1;
+        work->reduction_index[update] = (uint8_t)index;
+        ir_vectorize_set(work, update, IR_VECTORIZE_CLASS_UPDATE, 0, ir_vectorize_size(work->function->type[update]), false);
+    }
+    return valid;
+}
+
+// Match both values selected by the comparison. Ties have the same bits in either arm. A distinct reload
+// must be the head's own plain load with no intervening writer. The arm check below excludes any write there.
+static bool ir_vectorize_minmax(IrVectorizeWork* work, IrVectorizeLoop* plan, uint32_t update, uint32_t condition, uint32_t yes, uint32_t no, uint32_t head, const uint32_t from[2])
+{
+    const IrFunction* f = work->function;
+    const uint32_t cmp = ir_vectorize_truth(f, condition);
+    const bool keep_true = ir_vectorize_in_block(f, plan->header, yes) && f->op[yes] == IR_PHI && ir_vectorize_incoming(f, yes, plan->latch) == update;
+    const uint32_t phi = keep_true ? yes : no;
+    const uint32_t chosen = keep_true ? no : yes;
+    bool valid = ir_vectorize_in_block(f, plan->header, phi) && f->op[phi] == IR_PHI && f->type[phi] == IR_I32 && f->type[update] == IR_I32 &&
+                 chosen < f->instruction_count && cmp < f->instruction_count && f->op[cmp] == IR_ICMP && ir_vectorize_incoming(f, phi, plan->latch) == update;
+    if (valid)
+    {
+        const uint32_t pred = f->c[cmp];
+        const bool left = f->a[cmp] == phi;
+        const uint32_t lane = left ? f->b[cmp] : f->a[cmp];
+        valid = (left != (f->b[cmp] == phi)) && pred >= IR_LT && pred <= IR_UGE;
+        if (valid && chosen != lane)
+        {
+            const uint32_t arm = from != NULL ? from[keep_true ? 1 : 0] : head;
+            valid = arm != head && ir_vectorize_in_block(f, arm, chosen) && ir_vectorize_in_block(f, head, lane) && f->op[lane] == IR_LOAD && f->op[chosen] == IR_LOAD &&
+                    f->flags[lane] == 0 && f->flags[chosen] == 0 && f->type[chosen] == IR_I32 && ir_vectorize_same(f, f->a[lane], f->a[chosen], BUSTER_IR_VECTORIZE_DEPTH);
+            const uint32_t end = valid ? f->block_offsets[(uint64_t)head + 1] - 1 : 0;
+            for (uint32_t i = lane + 1; valid && i < end; i += 1)
+            {
+                const uint32_t kind = work->kinds[i] & 7;
+                valid = kind == BUSTER_IR_VECTORIZE_KIND_PURE || kind == BUSTER_IR_VECTORIZE_KIND_LOAD || kind == BUSTER_IR_VECTORIZE_KIND_FLOAT;
+            }
+        }
+        if (valid)
+        {
+            const bool greater = pred == IR_GT || pred == IR_GE || pred == IR_UGT || pred == IR_UGE;
+            const bool true_selects_left = left == keep_true;
+            const bool maximum = greater == true_selects_left;
+            // lane_op and reduce share 0/1 for unsigned/signed min and 2/3 for unsigned/signed max.
+            const IrVectorizeReduction reduction = { .phi = phi, .lane = lane, .operation = (maximum ? 2u : 0u) + (pred < IR_ULT) };
+            valid = ir_vectorize_record_reduction(work, plan, update, reduction);
+        }
+    }
+    return valid;
+}
+
+// Follow each header edge through single-entry blocks and two-edge joins back to the header. Each internal
+// conditional must close at a private join (ir_vectorize_join), so the header dominates the entire body. The header's
 // reachable predecessors must be the chain's last block (the latch) and one other, the preheader, which ends in a
 // `br` to it. Fills the plan's blocks and returns the chain's first block, or BUSTER_IR_NONE where the blocks aren't
 // the admitted shape. Reads the blocks alone: a function none of whose loops has it needs no row of the pass's.
@@ -595,12 +712,24 @@ static uint32_t ir_vectorize_chain(const IrVectorizeWork* work, uint32_t loop, I
         uint32_t block = target;
         uint32_t steps = 0;
         bool chain = true;
+        bool join = false;
         while (chain && block != header && steps < f->block_count)
         {
             const uint32_t end = f->block_offsets[(uint64_t)block + 1] - 1;
-            chain = block != 0 && work->reached[block] != 0 && work->predecessor_count[block] == 1 && work->predecessor_first[block] == previous && f->op[end] == IR_BR;
+            chain = block != 0 && work->reached[block] != 0 && (join || (work->predecessor_count[block] == 1 && work->predecessor_first[block] == previous));
             previous = block;
-            block = chain ? f->a[end] : block;
+            join = chain && f->op[end] == IR_CBR;
+            if (join)
+            {
+                uint32_t from[2];
+                block = ir_vectorize_join(work, header, block, from);
+                chain = block != BUSTER_IR_NONE;
+            }
+            else
+            {
+                chain = chain && f->op[end] == IR_BR;
+                block = chain ? f->a[end] : block;
+            }
             steps += 1;
         }
         const bool closes = chain && block == header;
@@ -621,7 +750,7 @@ static uint32_t ir_vectorize_chain(const IrVectorizeWork* work, uint32_t loop, I
 }
 
 // The loop's shape (ir_vectorize_chain), then its blocks' and rows' marks and the plan's rows: the header's non-phi
-// rows, then each chain block's, whose phis must be copies. Returns whether the shape is the admitted one.
+// rows, then each unconditional block's. A private arm contributes only its winning value to a matched update.
 static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
@@ -645,6 +774,7 @@ static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorize
         }
     }
     plan->header_rows = count;
+    uint32_t join_phi = BUSTER_IR_NONE;
     for (uint32_t block = first; valid && block != header;)
     {
         const uint32_t end = f->block_offsets[(uint64_t)block + 1] - 1;
@@ -652,15 +782,46 @@ static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorize
         for (uint32_t i = f->block_offsets[block]; i <= end; i += 1)
         {
             work->row_marks[i] = mark;
-            // A chain block's phi has its predecessor's value alone: a copy.
-            valid = valid && (f->op[i] != IR_PHI || f->b[i] == 1);
+            // The matched join's first phi is the update. Every other phi on the chain must be a copy.
+            valid = valid && (f->op[i] != IR_PHI || f->b[i] == 1 || i == join_phi);
             if (i < end)
             {
                 work->rows[count] = i;
                 count += 1;
             }
         }
-        block = f->a[end];
+        if (f->op[end] == IR_CBR)
+        {
+            uint32_t from[2];
+            const uint32_t join = ir_vectorize_join(work, header, block, from);
+            // ir_vectorize_chain already proved both edges meet here.
+            join_phi = f->block_offsets[join];
+            valid = valid && f->op[join_phi] == IR_PHI && f->b[join_phi] == 2;
+            const uint32_t yes = valid ? ir_vectorize_incoming(f, join_phi, from[0]) : BUSTER_IR_NONE;
+            const uint32_t no = valid ? ir_vectorize_incoming(f, join_phi, from[1]) : BUSTER_IR_NONE;
+            valid = valid && ir_vectorize_minmax(work, plan, join_phi, f->a[end], yes, no, block, from);
+            for (uint32_t side = 0; valid && side < 2; side += 1)
+            {
+                const uint32_t arm = from[side];
+                if (arm != block)
+                {
+                    work->block_marks[arm] = mark;
+                    const uint32_t stop = f->block_offsets[(uint64_t)arm + 1] - 1;
+                    for (uint32_t i = f->block_offsets[arm]; valid && i < stop; i += 1)
+                    {
+                        work->row_marks[i] = mark;
+                        // These rows disappear only from the vector path. Its only arm load may be the matched reload.
+                        valid = (work->kinds[i] & BUSTER_IR_VECTORIZE_KIND_SAFE) != 0 ||
+                                (work->kinds[i] == BUSTER_IR_VECTORIZE_KIND_LOAD && i == (side == 0 ? yes : no));
+                    }
+                }
+            }
+            block = join;
+        }
+        else
+        {
+            block = f->a[end];
+        }
     }
     plan->row_count = valid ? count : 0;
     return valid;
@@ -767,22 +928,6 @@ static bool ir_vectorize_graph(IrVectorizeWork* work, Arena* scratch)
     return ok;
 }
 
-// A branch's condition past the lowering's truth chains, `icmp ne (zext c), 0`, which truth simplification removes in
-// Tier 1's pipeline but other clients may leave: c.
-static uint32_t ir_vectorize_truth(const IrFunction* f, uint32_t value)
-{
-    uint32_t at = value;
-    uint64_t zero = 1;
-    uint32_t depth = 0;
-    while (depth < BUSTER_IR_VECTORIZE_DEPTH && at < f->instruction_count && f->op[at] == IR_ICMP && f->c[at] == IR_NE && f->a[at] < f->instruction_count && f->op[f->a[at]] == IR_ZEXT &&
-           f->type[f->a[f->a[at]]] == IR_I1 && ir_vectorize_constant(f, f->b[at], &zero) && zero == 0)
-    {
-        at = f->a[f->a[at]];
-        depth += 1;
-    }
-    return at;
-}
-
 // Whether `value` is a header phi, or a header row adding a constant to one (the exit test's `i + 1 < n`): its phi.
 static uint32_t ir_vectorize_tested(const IrFunction* f, const IrVectorizeLoop* plan, uint32_t value, uint64_t* offset)
 {
@@ -879,8 +1024,10 @@ static void ir_vectorize_needed(IrVectorizeWork* work, uint32_t loop, const IrVe
         }
         if (work->needed[i] != 0)
         {
-            const uint32_t mask = f->op[i] == IR_PHI ? 1u : ir_value_mask3(f, i);
-            const uint32_t operands[3] = { f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], f->b[i], ir_value_third(f, i) };
+            const bool update = work->classes[i] == IR_VECTORIZE_CLASS_UPDATE;
+            const uint32_t mask = update || f->op[i] == IR_PHI ? 1u : ir_value_mask3(f, i);
+            const uint32_t first = update ? work->reduction[work->reduction_index[i]].lane : f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i];
+            const uint32_t operands[3] = { first, f->b[i], ir_value_third(f, i) };
             for (uint32_t k2 = 0; k2 < 3; k2 += 1)
             {
                 const uint32_t v = operands[k2];
@@ -892,15 +1039,6 @@ static void ir_vectorize_needed(IrVectorizeWork* work, uint32_t loop, const IrVe
             }
         }
     }
-}
-
-static void ir_vectorize_set(IrVectorizeWork* work, uint32_t i, uint32_t class, int64_t coefficient, uint32_t size, bool floating)
-{
-    work->classes[i] = (uint8_t)class;
-    work->coefficients[i] = coefficient;
-    work->sizes[i] = (uint8_t)size;
-    work->floating[i] = floating ? 1 : 0;
-    ir_vectorize_touch(work, i);
 }
 
 // Whether a vector row's operand is admitted: a vector of the row's lanes' size, or a uniform scalar (which G or VB
@@ -1121,13 +1259,12 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
     return refusal;
 }
 
-// The header's phis: the induction, and reductions (an i32 or i64 phi whose back edge value is one wrapping addition,
-// multiplication or bitwise operation of it and another value, and which nothing else in the loop reads).
+// The header phis are the induction and independent integer reductions. A min/max diamond's update was
+// recorded at its join; a select or an arithmetic update is recognized here, before tracing the needed operands.
 static uint32_t ir_vectorize_phis(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
     uint32_t refusal = IR_VECTORIZE_REFUSALS;
-    plan->reductions = 0;
     for (uint32_t i = f->block_offsets[plan->header]; refusal == IR_VECTORIZE_REFUSALS && f->op[i] == IR_PHI; i += 1)
     {
         if (i == plan->induction)
@@ -1138,13 +1275,28 @@ static uint32_t ir_vectorize_phis(IrVectorizeWork* work, uint32_t loop, IrVector
         {
             const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
             const uint32_t op = update < f->instruction_count ? f->op[update] : IR_INVALID;
-            const bool admitted = f->b[i] == 2 && (f->type[i] == IR_I32 || f->type[i] == IR_I64) && ir_vectorize_inside(work, loop, update) && f->type[update] == f->type[i] &&
-                                  (op == IR_ADD || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR) && (f->a[update] == i) != (f->b[update] == i);
-            refusal = admitted && plan->reductions < BUSTER_IR_VECTORIZE_REDUCTION_LIMIT ? refusal : IR_VECTORIZE_REFUSE_PHI;
-            if (refusal == IR_VECTORIZE_REFUSALS)
+            bool admitted = f->b[i] == 2 && (f->type[i] == IR_I32 || f->type[i] == IR_I64) && ir_vectorize_inside(work, loop, update) && f->type[update] == f->type[i];
+            if (admitted && work->classes[update] == IR_VECTORIZE_CLASS_UPDATE)
+            {
+                admitted = work->reduction[work->reduction_index[update]].phi == i;
+            }
+            else if (admitted && op == IR_SELECT)
+            {
+                admitted = ir_vectorize_minmax(work, plan, update, f->a[update], f->b[update], f->c[update], BUSTER_IR_NONE, NULL) &&
+                           work->reduction[work->reduction_index[update]].phi == i;
+            }
+            else if (admitted)
+            {
+                static const uint8_t operations[IR_OP_COUNT] = { [IR_ADD] = BUSTER_IR_REDUCE_ADD, [IR_MUL] = BUSTER_IR_REDUCE_MUL, [IR_AND] = BUSTER_IR_REDUCE_AND, [IR_OR] = BUSTER_IR_REDUCE_OR, [IR_XOR] = BUSTER_IR_REDUCE_XOR };
+                const uint32_t operation = operations[op];
+                const uint32_t other = f->a[update] == i ? f->b[update] : f->a[update];
+                const IrVectorizeReduction reduction = { .phi = i, .lane = other, .operation = operation };
+                admitted = operation != 0 && (f->a[update] == i) != (f->b[update] == i) && ir_vectorize_record_reduction(work, plan, update, reduction);
+            }
+            refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_PHI;
+            if (admitted)
             {
                 ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_REDUCTION, 0, ir_vectorize_size(f->type[i]), false);
-                plan->reductions += 1;
             }
         }
     }
@@ -1165,38 +1317,25 @@ static uint32_t ir_vectorize_rows(IrVectorizeWork* work, uint32_t loop, IrVector
             work->classes[i] = IR_VECTORIZE_CLASS_DEAD;
             ir_vectorize_touch(work, i);
         }
+        else if (work->classes[i] == IR_VECTORIZE_CLASS_UPDATE)
+        {
+            const uint32_t lane = work->reduction[work->reduction_index[i]].lane;
+            refusal = ir_vectorize_lane_operand(work, loop, lane, f->type[i]) ? refusal : IR_VECTORIZE_REFUSE_USE;
+        }
         else
         {
-            // A reduction's update: the phi's lanes combined with the other operand's.
             const uint32_t mask = f->op[i] == IR_PHI ? 1u : ir_value_mask3(f, i);
             const uint32_t operands[3] = { f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], f->b[i], ir_value_third(f, i) };
-            uint32_t reductions = 0;
-            uint32_t phi = BUSTER_IR_NONE;
             for (uint32_t k2 = 0; k2 < 3; k2 += 1)
             {
                 const uint32_t v = operands[k2];
-                const bool present = ((mask >> k2) & 1) != 0 && ir_vectorize_inside(work, loop, v);
-                const uint32_t class = present ? work->classes[v] : IR_VECTORIZE_CLASS_NONE;
-                reductions += class == IR_VECTORIZE_CLASS_REDUCTION ? 1 : 0;
-                phi = class == IR_VECTORIZE_CLASS_REDUCTION ? v : phi;
-                refusal = class == IR_VECTORIZE_CLASS_UPDATE ? IR_VECTORIZE_REFUSE_USE : refusal;
-            }
-            const bool update = reductions == 1 && ir_vectorize_incoming(f, phi, plan->latch) == i;
-            if (refusal == IR_VECTORIZE_REFUSALS && update)
-            {
-                const uint32_t other = f->a[i] == phi ? f->b[i] : f->a[i];
-                const bool admitted = ir_vectorize_lane_operand(work, loop, other, f->type[i]);
-                refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
-                if (admitted)
+                if (((mask >> k2) & 1) != 0 && ir_vectorize_inside(work, loop, v) &&
+                    (work->classes[v] == IR_VECTORIZE_CLASS_REDUCTION || work->classes[v] == IR_VECTORIZE_CLASS_UPDATE))
                 {
-                    ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_UPDATE, 0, ir_vectorize_size(f->type[i]), false);
+                    refusal = IR_VECTORIZE_REFUSE_USE;
                 }
             }
-            else if (refusal == IR_VECTORIZE_REFUSALS && reductions != 0)
-            {
-                refusal = IR_VECTORIZE_REFUSE_USE;
-            }
-            else if (refusal == IR_VECTORIZE_REFUSALS)
+            if (refusal == IR_VECTORIZE_REFUSALS)
             {
                 refusal = ir_vectorize_classify(work, loop, plan, i);
             }
@@ -1234,7 +1373,13 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
         const uint32_t size = work->sizes[i];
         const uint32_t bytes = lanes << size;
         const uint32_t lane = ir_vectorize_lane(size, work->floating[i] != 0);
-        if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_UPDATE)
+        if (class == IR_VECTORIZE_CLASS_UPDATE)
+        {
+            const uint32_t operation = work->reduction[work->reduction_index[i]].operation;
+            legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->moves, bytes) && ir_vectorize_has(t->splat[lane], bytes) && ir_vectorize_has(t->reduce[size][operation], bytes);
+            legal = legal && (operation < BUSTER_IR_REDUCE_ADD || ir_vectorize_has(t->binary[op][lane], bytes));
+        }
+        else if (class == IR_VECTORIZE_CLASS_VECTOR)
         {
             legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->moves, bytes);
             if (op == IR_LOAD || op == IR_STORE || op == IR_COPY || op == IR_PHI)
@@ -1291,18 +1436,6 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
                 const uint32_t v = k2 == 0 ? f->a[i] : f->b[i];
                 legal = work->classes[v] == IR_VECTORIZE_CLASS_VECTOR || ir_vectorize_has(t->splat[lane], bytes);
             }
-        }
-    }
-    for (uint32_t i = f->block_offsets[plan->header]; legal && f->op[i] == IR_PHI; i += 1)
-    {
-        if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
-        {
-            static const uint8_t operations[IR_OP_COUNT] = { [IR_ADD] = BUSTER_IR_REDUCE_ADD, [IR_MUL] = BUSTER_IR_REDUCE_MUL, [IR_AND] = BUSTER_IR_REDUCE_AND, [IR_OR] = BUSTER_IR_REDUCE_OR, [IR_XOR] = BUSTER_IR_REDUCE_XOR };
-            const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
-            const uint32_t size = work->sizes[i];
-            const uint32_t bytes = lanes << size;
-            const uint32_t lane = ir_vectorize_lane(size, false);
-            legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->moves, bytes) && ir_vectorize_has(t->reduce[size][operations[f->op[update]]], bytes) && ir_vectorize_has(t->splat[lane], bytes);
         }
     }
     return legal;
@@ -1474,8 +1607,11 @@ static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVector
     refusal = refusal == IR_VECTORIZE_REFUSALS && !ir_vectorize_induction(work, loop, plan) ? IR_VECTORIZE_REFUSE_INDUCTION : refusal;
     if (refusal == IR_VECTORIZE_REFUSALS)
     {
-        ir_vectorize_needed(work, loop, plan);
         refusal = ir_vectorize_phis(work, loop, plan);
+    }
+    if (refusal == IR_VECTORIZE_REFUSALS)
+    {
+        ir_vectorize_needed(work, loop, plan);
     }
     refusal = refusal == IR_VECTORIZE_REFUSALS ? ir_vectorize_rows(work, loop, plan) : refusal;
     refusal = refusal == IR_VECTORIZE_REFUSALS ? ir_vectorize_dependences(work, loop, plan) : refusal;
@@ -1673,7 +1809,15 @@ static void ir_vectorize_g_splats(IrVectorizeWork* work, IrVectorizeBuild* build
         const uint32_t i = work->rows[k];
         const uint32_t class = work->classes[i];
         const uint32_t op = f->op[i];
-        if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_MASK || class == IR_VECTORIZE_CLASS_UPDATE)
+        if (class == IR_VECTORIZE_CLASS_UPDATE)
+        {
+            const uint32_t lane = work->reduction[work->reduction_index[i]].lane;
+            if (ir_vectorize_class(work, loop, lane) == IR_VECTORIZE_CLASS_UNIFORM && ir_vectorize_in_g(work, loop, lane))
+            {
+                ir_vectorize_splat(work, build, loop, lane, lanes);
+            }
+        }
+        else if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_MASK)
         {
             const uint32_t mask = ir_value_mask(f, i);
             const uint32_t operands[3] = { f->a[i], f->b[i], f->c[i] };
@@ -1711,7 +1855,13 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
     const uint32_t lane = ir_vectorize_lane(size, work->floating[i] != 0);
     const uint32_t origin = ir_vectorize_origin(f, i);
     uint32_t value = BUSTER_IR_NONE;
-    if (op == IR_PHI || op == IR_COPY)
+    if (work->classes[i] == IR_VECTORIZE_CLASS_UPDATE && work->reduction[work->reduction_index[i]].operation < BUSTER_IR_REDUCE_ADD)
+    {
+        const IrVectorizeReduction reduction = work->reduction[work->reduction_index[i]];
+        const uint32_t other = ir_vectorize_lanes_of(work, build, loop, reduction.lane, lanes);
+        value = ir_vectorize_row(build, IR_INTRINSIC, vtype, size | reduction.operation << 2, 0, work->values[reduction.phi], other, BUSTER_IR_INTRINSIC_LANE_OP, origin);
+    }
+    else if (op == IR_PHI || op == IR_COPY)
     {
         value = work->values[op == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i]];
     }
@@ -1852,17 +2002,23 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         enter = ir_vectorize_row(build, IR_SELECT, IR_I1, 0, 0, enter, apart, enter, BUSTER_IR_NONE);
     }
     ir_vectorize_g_splats(work, build, loop, plan);
-    // The accumulators' identities: 0, 1 for a product, all ones for an and.
-    uint32_t identities[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
+    // Arithmetic identities and the min/max accumulators' incoming values.
+    uint32_t seeds[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
     uint32_t count = 0;
     for (uint32_t i = f->block_offsets[plan->header]; f->op[i] == IR_PHI; i += 1)
     {
         if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
         {
-            const uint32_t op = f->op[ir_vectorize_incoming(f, i, plan->latch)];
-            const uint64_t bits = (op == IR_MUL ? 1 : op == IR_AND ? UINT64_MAX : 0) + (work->mutation == BUSTER_IR_VECTORIZE_MUTATE_IDENTITY ? 1 : 0);
-            const uint32_t identity = ir_vectorize_const(build, f->type[i], bits);
-            identities[count] = ir_vectorize_row(build, IR_INTRINSIC, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, identity, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
+            const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
+            const uint32_t operation = work->reduction[work->reduction_index[update]].operation;
+            // Min/max is idempotent: seeding every lane includes the incoming accumulator in the horizontal result.
+            uint32_t seed = ir_vectorize_incoming(f, i, plan->preheader);
+            if (operation >= BUSTER_IR_REDUCE_ADD)
+            {
+                const uint64_t bits = (operation == BUSTER_IR_REDUCE_MUL ? 1 : operation == BUSTER_IR_REDUCE_AND ? UINT64_MAX : 0) + (work->mutation == BUSTER_IR_VECTORIZE_MUTATE_IDENTITY ? 1 : 0);
+                seed = ir_vectorize_const(build, f->type[i], bits);
+            }
+            seeds[count] = ir_vectorize_row(build, IR_INTRINSIC, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, seed, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
             count += 1;
         }
     }
@@ -1904,7 +2060,7 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
     const uint32_t next = ir_vectorize_row(build, IR_ADD, itype, 0, 0, induction, step, BUSTER_IR_NONE, BUSTER_IR_NONE);
     const uint32_t more = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, next, end, plan->predicate, BUSTER_IR_NONE);
     ir_vectorize_row(build, IR_CBR, IR_VOID, 0, 0, more, body, exit, BUSTER_IR_NONE);
-    // VX: each accumulator reduced, combined with its initial value.
+    // VX: reduce each accumulator, combining arithmetic reductions with their incoming scalar.
     ir_vectorize_block(build);
     uint32_t finals[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
     count = 0;
@@ -1912,13 +2068,13 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
     {
         if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
         {
-            static const uint8_t operations[IR_OP_COUNT] = { [IR_ADD] = BUSTER_IR_REDUCE_ADD, [IR_MUL] = BUSTER_IR_REDUCE_MUL, [IR_AND] = BUSTER_IR_REDUCE_AND, [IR_OR] = BUSTER_IR_REDUCE_OR, [IR_XOR] = BUSTER_IR_REDUCE_XOR };
             const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
+            const uint32_t operation = work->reduction[work->reduction_index[update]].operation;
             const uint32_t size = work->sizes[i];
-            const uint32_t reduced = ir_vectorize_row(build, IR_INTRINSIC, IR_V4I32, size | (uint32_t)operations[f->op[update]] << 2, 0, work->values[update], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_REDUCE, BUSTER_IR_NONE);
+            const uint32_t reduced = ir_vectorize_row(build, IR_INTRINSIC, IR_V4I32, size | operation << 2, 0, work->values[update], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_REDUCE, BUSTER_IR_NONE);
             const uint32_t lane = ir_vectorize_row(build, IR_INTRINSIC, f->type[i], size, 0, reduced, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, BUSTER_IR_NONE);
             const uint32_t initial = ir_vectorize_incoming(f, i, plan->preheader);
-            finals[count] = ir_vectorize_row(build, f->op[update], f->type[i], 0, 0, initial, lane, BUSTER_IR_NONE, ir_vectorize_origin(f, update));
+            finals[count] = operation < BUSTER_IR_REDUCE_ADD ? lane : ir_vectorize_row(build, f->op[update], f->type[i], 0, 0, initial, lane, BUSTER_IR_NONE, ir_vectorize_origin(f, update));
             count += 1;
         }
     }
@@ -1939,7 +2095,7 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         const uint32_t back = ir_vectorize_incoming(f, i, plan->latch);
         if (reduction)
         {
-            const uint32_t pairs[4] = { g, identities[count], body, work->values[back] };
+            const uint32_t pairs[4] = { g, seeds[count], body, work->values[back] };
             const uint32_t offset = ir_vectorize_pairs(build, pairs, 2);
             if (!build->counting)
             {
@@ -2039,10 +2195,10 @@ static __attribute__((unused)) void ir_vectorize_target_ir(IrVectorizeTarget* ta
         }
         target->popcount[from] = 7;
     }
-    for (uint32_t operation = BUSTER_IR_REDUCE_ADD; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
+    for (uint32_t operation = 0; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
     {
         target->reduce[2][operation] = 7;
-        target->reduce[3][operation] = 7;
+        target->reduce[3][operation] = operation >= BUSTER_IR_REDUCE_ADD ? 7 : 0;
     }
 }
 
@@ -2073,6 +2229,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         bool ok = true;
         work.kinds = ir_allocate(scratch, n, 1, &ok);
         work.classes = ir_allocate(scratch, n, 1, &ok);
+        work.reduction_index = ir_allocate(scratch, n, 1, &ok);
         work.needed = ir_allocate(scratch, n, 1, &ok);
         work.sizes = ir_allocate(scratch, n, 1, &ok);
         work.floating = ir_allocate(scratch, n, 1, &ok);
