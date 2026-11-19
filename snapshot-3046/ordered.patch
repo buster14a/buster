@@ -1,0 +1,72 @@
+--- a/src/buster/compiler/snapshot.c
++++ b/src/buster/compiler/snapshot.c
+@@ -945,6 +945,25 @@
+     return result;
+ }
+ 
++// Write the gaps and copied columns of a successive range of regions.
++static void snapshot_copy_columns(uint8_t* image, const SnapshotHeader* header, const SnapshotColumn* columns, uint32_t first, uint32_t limit, uint64_t previous_end)
++{
++    // The header and each region have writers of their own. Only the alignment gaps have no writer.
++    for (uint32_t r = first; r < limit; r += 1)
++    {
++        const SnapshotPlace place = header->regions[r];
++        if (place.offset != previous_end)
++        {
++            memset(image + previous_end, 0, place.offset - previous_end);
++        }
++        if (snapshot_region_copied(r) && place.bytes != 0)
++        {
++            memcpy(image + place.offset, (const uint8_t*)*columns[r].column + columns[r].first * columns[r].element, place.bytes);
++        }
++        previous_end = place.offset + place.bytes;
++    }
++}
++
+ // The file's image of the runtime, from `arena`: its bytes and size, or 0 if the arena has no room, a pointer of the
+ // runtime's isn't in what it should point into, or its pieces' records aren't one after another
+ // (snapshot_pieces_contiguous). The pieces' hashes come last, over the image as a loaded runtime sees it
+@@ -979,21 +998,7 @@
+     bool fits = image != 0 && snapshot_pieces_contiguous(runtime);
+     if (fits)
+     {
+-        // The header and each region have writers of their own. Only the alignment gaps have no writer.
+-        uint64_t previous_end = sizeof(header);
+-        for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
+-        {
+-            const SnapshotPlace place = header.regions[r];
+-            if (place.offset != previous_end)
+-            {
+-                memset(image + previous_end, 0, place.offset - previous_end);
+-            }
+-            if (snapshot_region_copied(r) && place.bytes != 0)
+-            {
+-                memcpy(image + place.offset, (const uint8_t*)*columns[r].column + columns[r].first * columns[r].element, place.bytes);
+-            }
+-            previous_end = place.offset + place.bytes;
+-        }
++        snapshot_copy_columns(image, &header, columns, 0, SNAPSHOT_REGION_DATA + 1, sizeof(header));
+         // The strings: the global names' first, so that their offset is the counts', then the paths, then the records'
+         // strings, each written in its record as it goes in.
+         SnapshotStrings strings = {
+@@ -1075,7 +1080,6 @@
+         if (fits)
+         {
+             memcpy(data, runtime->names.base, object_name_bytes);
+-            memcpy(data + header.counts.member_names_run, runtime->names.base + object_name_bytes, names_length - object_name_bytes);
+         }
+         const Link* link = &runtime->link;
+         const uint32_t object_names = header.counts.object_names;
+@@ -1133,6 +1137,12 @@
+         }
+         piece_data[header.counts.pieces] = at;
+         fits = fits && at == header.counts.member_names_run;
++        if (fits)
++        {
++            memcpy(data + header.counts.member_names_run, runtime->names.base + object_name_bytes, names_length - object_name_bytes);
++            const SnapshotPlace payload = header.regions[SNAPSHOT_REGION_DATA];
++            snapshot_copy_columns(image, &header, columns, SNAPSHOT_REGION_DATA + 1, SNAPSHOT_REGIONS, payload.offset + payload.bytes);
++        }
+     }
+     if (fits)
+     {
