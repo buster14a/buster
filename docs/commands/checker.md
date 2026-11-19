@@ -716,9 +716,10 @@ programs that `check_test_constant_conversions`
 (`c_check_constant_conversion_test.c`) runs natively against clang by
 `check_test_program_source`, whose catalog names select the checks of their
 entries and code ([the lowering guide](lowering.md#node-templates-1048)).
-`tests/checker/branch-conditions` (#2883) is too: two programs that
+`tests/checker/branch-conditions` (#2883) is too: three programs that
 `check_test_branch_conditions` (`c_check_branch_condition_test.c`) runs the same
-way ([the lowering guide](lowering.md#conditions-as-branches-2883)).
+way ([the lowering guide](lowering.md#conditions-as-branches-2883)), the third
+for a condition on an lvalue at an absolute address (#3028).
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
