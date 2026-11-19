@@ -167,13 +167,13 @@ static void check_test_literal_table_shapes(CheckTest* test)
             kinds[i] = i % 3 == 0 ? PARSE_KIND_MINUS : i % 3 == 1 ? PARSE_KIND_NUMBER : PARSE_KIND_COMMA;
         }
         const uint32_t expected = count % 3 == 1 ? 0 : (count + 1) / 3;
-        check_test_expect(test, check_literal_table_shape(kinds, 0, count, true) == expected && check_literal_table_shape(kinds, 0, count, false) == expected,
+        check_test_expect(test, check_literal_table_shape(kinds, 0, count) == expected,
                           "literal grammar carries minus/number/comma state across every guarded tail");
         for (uint32_t at = 0; at < count; at += 17)
         {
             const uint8_t saved = kinds[at];
             kinds[at] = PARSE_KIND_PLUS;
-            check_test_expect(test, check_literal_table_shape(kinds, 0, count, true) == 0 && check_literal_table_shape(kinds, 0, count, false) == 0,
+            check_test_expect(test, check_literal_table_shape(kinds, 0, count) == 0,
                               "nonliteral operators make the whole table retain general checking");
             kinds[at] = saved;
         }
@@ -294,23 +294,20 @@ static void check_test_literal_table_rows_shapes(CheckTest* test)
         uint8_t* kinds = mapping + page - length;
         memcpy(kinds, stream, length);
         const uint32_t expected = check_test_literal_rows_reference(kinds, length, columns);
-        const uint32_t vector = check_literal_table_rows(kinds, 0, length, columns, false);
-        const uint32_t scalar = check_literal_table_rows(kinds, 0, length, columns, true);
-        same = same && vector == scalar && scalar == expected;
+        same = same && check_literal_table_rows(kinds, 0, length, columns) == expected;
         counted = counted && (mutation != 0 || expected == rows * columns);
         mutated = mutated || (mutation != 0 && expected == 0);
         for (uint32_t prefix = length > 192 ? length - 192 : 0; same && trial % 16 == 0 && prefix < length; prefix += 1)
         {
             uint8_t* tail = mapping + page - prefix;
             memmove(tail, kinds, prefix);
-            same = check_literal_table_rows(tail, 0, prefix, columns, false) == check_literal_table_rows(tail, 0, prefix, columns, true) &&
-                   check_literal_table_rows(tail, 0, prefix, columns, true) == check_test_literal_rows_reference(tail, prefix, columns);
+            same = check_literal_table_rows(tail, 0, prefix, columns) == check_test_literal_rows_reference(tail, prefix, columns);
             memcpy(kinds, stream, length);
         }
     }
-    check_test_expect(test, same, "rows grammar: SIMD blocks, scalar twin and the recursive reading agree on tables, mutations and every guarded tail");
+    check_test_expect(test, same, "rows grammar: SIMD blocks and the recursive reading agree on tables, mutations and every guarded tail");
     check_test_expect(test, counted && mutated, "rows grammar: unmutated tables count rows times columns, and mutations reach refusals");
-    check_test_expect(test, check_literal_table_rows(stream, 0, 0, 4, false) == 0 && check_literal_table_rows(stream, 0, 0, 4, true) == 0,
+    check_test_expect(test, check_literal_table_rows(stream, 0, 0, 4) == 0,
                       "rows grammar: an empty table is ineligible");
     if (mapping != MAP_FAILED)
     {

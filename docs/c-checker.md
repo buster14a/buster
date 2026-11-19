@@ -7498,8 +7498,7 @@ they do per token where little of it was per declaration or expression:
   a list of n elements took about n²/2 steps: on the frozen `sqlite3.c`, 4.05%
   of the whole `-c`'s cycles. Each token now keeps its chain's length beside
   its first and last values (`CheckInputReader.value_counts`), and a parent
-  adds its children's. The scalar path, `--scalar`, walks the chains: the
-  tests that compare the two paths compare the counts with the walks.
+  adds its children's.
 - **One pass before reading.** `check_input_count_tokens` makes every count
   `check_input_run` sizes its tables by (`[`, `asm`, `sizeof`, member
   operators, operands and calls, and the names of the builtin constants, the
@@ -7512,8 +7511,7 @@ they do per token where little of it was per declaration or expression:
   builtins the walk prepares, an attribute's start, and a string or
   `__func__`. The walk in source order tests a bit where it compared the
   token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
-  instructions fewer, about 70 a token. The scalar path computes each bit with
-  the walk's own tests (`check_input_syntax_of`).
+  instructions fewer, about 70 a token.
 - **Comma contexts.** `check_input_expression_commas` classifies 64 contiguous
   roles at a time, then visits only separators and statement terminators.
   Non-separators' contexts depend directly on their roles; separators inherit
@@ -7791,9 +7789,10 @@ integration, not a new measurement of that combination.
 
 The expressions' walk still took each token it visited through its action's
 chain of about 25 tests of the token's role, kind and columns before it acted,
-every step loading at the token the postorder had reached. Its vector path is
-now the coded walk (`c_check_expression_input.c`); `--scalar` keeps the walk,
-the oracle.
+every step loading at the token the postorder had reached. It is now the coded
+walk (`c_check_expression_input.c`); the walk that visited every token, the
+scalar twin, is gone (#2924), and `test-checker`'s source fixtures check the
+graphs against their recorded digests.
 
 - **Classes.** The classes' pass gives each token the walk acts at a class too
   (`CheckInputExpressionCode`, in the visits byte's bits 2 to 6): which branch
@@ -7819,11 +7818,8 @@ the oracle.
   The actions test none of these as the walk reaches each token. An intrinsic's
   id was the walk's hottest load: a column no other pass reads, so a miss at
   nearly every call.
-  `check_input_expression_code` is the scalar twin, by the walk's tests in their
-  order. The scalar classes' pass computes the codes only for the coded walk:
-  `--scalar`'s walk reads a token's `ACTS` and `SPARSE` bits alone, so it gets
-  no code, and doesn't pay for the code's tests. Baseline builds run the coded
-  walk through the twins, codes and all.
+  The scan test checks the classes against its own reading of the columns
+  (`check_test_expression_class`).
 - **Compaction.** The postorder is read 1,024 positions at a time
   (`check_input_expression_compact`), 16 tokens' bytes gathered from `visits`
   and compressed with their tokens into two arrays on the stack. The column has
@@ -7865,8 +7861,8 @@ the oracle.
     isn't on;
   - the identifier's action only adds the node and writes the words.
 
-  `check_input_identifier_entry` is the scalar twin. Unlike the batch measured
-  below, this needs no flush: the node ids still come from the walk, and only
+  `check_input_identifier_entry` makes an entry a token at a time, for a unit
+  past the gathers' signed 32-bit offsets. Unlike the batch measured below, this needs no flush: the node ids still come from the walk, and only
   the leaves' contents are made ahead.
 
   An action doesn't write its node to the graph: it numbers it into a batch,
@@ -7889,8 +7885,7 @@ the oracle.
   coded walk counts, by class, the tokens it acted at by
   the class's action and those it left to the walk's visit
   (`CheckInput.expression_acted` and `expression_left`). `test-checker` requires
-  it to act by class at tokens of every fixture whose features it takes, and
-  the scalar walk at none. Over its fixtures, each class's action must act and,
+  it to act by class at tokens of every fixture whose features it takes. Over its fixtures, each class's action must act and,
   where it can decline, leave a token; a full run prints both counts per class.
   `benchmark-checker-bindings` prints a file's tokens acted at by class
   (`expression_classed`), declined by their classes' actions
@@ -8081,11 +8076,11 @@ the oracle.
   of the two the last numbers were in, else `pp_find_range`'s search, which
   all lanes take in step); then the two aligned words that hold each
   spelling, four tokens a vector, whose digits one shuffle right-aligns and
-  pairs, quads and lanes multiply out. `check_input_literal_plain` is its
-  scalar twin. The scan test checks both paths on random chunks over three
-  guarded ranges of spellings, and every plain value against
-  `check_literal_number`; `test-checker`'s graph comparisons check the walk's
-  literals against the scalar walk's, which parses every literal.
+  pairs, quads and lanes multiply out; a unit past the gathers' signed 32-bit
+  offsets takes `check_input_literal_plain` for every literal. The scan test
+  checks random chunks over three guarded ranges of spellings, every plain
+  value against `check_literal_number`; `test-checker`'s source fixtures check
+  the graphs the literals make against their recorded digests.
   - **What it costs, on the 9700X.** Most of a literal's cost is the first
     read since the parser of its preprocessor columns and its source: on the
     VM the pass takes 1.7 to 1.9 ms of `sqlite3.c` cold and 0.45 to 0.72 ms
@@ -8225,11 +8220,10 @@ the oracle.
   - **The twins.** The scan test writes random batches of up to 200 nodes,
     after up to 40 a visit made, over random token columns of up to 200 tokens,
     each ending at a `PROT_NONE` page and the byte columns at every alignment,
-    by both paths: the two graphs must agree column for column, the gathered
-    columns must be their tokens', and the records alike. A deliberate one-node
-    difference in the scalar path made it report 1,842 of 38,098 nodes.
-    `test-checker`'s graph comparisons, `test-checker-corpus` and c-testsuite's
-    objects compare the batch's graphs with `--scalar`'s walk.
+    against the batch's definition (`check_test_flush_definition`): the two
+    graphs must agree column for column, the gathered columns must be their
+    tokens', and the records alike. `test-checker`'s source fixtures check the
+    graphs against their recorded digests.
 
   Measured on the 9700X, the frozen corpus's `sqlite3.c` (`-c`, CPU 2, under
   the lock), against `main` at `0eca996a`; the objects are byte-identical by
@@ -8544,10 +8538,9 @@ ancestors are checked only up to the first subtree containing the source: every
 region above that ancestor also contains the source. A case therefore stops at
 its switch instead of revisiting every enclosing switch. The subtree test uses
 the reader's `postorder_positions` and shared `subtree_sizes`; it allocates no
-new token column and does not require the parser's optional size metadata.
-The scalar reader keeps the full ancestor walk as an independent diagnostic
-oracle. Both use the same strict region-boundary rules, including jumps out of
-nested regions and refusals when entering sibling regions.
+new token column and does not require the parser's optional size metadata. It
+uses strict region-boundary rules, including jumps out of nested regions and
+refusals when entering sibling regions.
 
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump

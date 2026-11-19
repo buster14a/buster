@@ -228,8 +228,8 @@ Eleven entries, the ones the tasks write today (the inventory's patterns
 
 ### Where it sits
 
-The machine is the reader's third way to read an expression, beside the
-scalar walk and the coded walk, and it runs where they run: after the reader's
+The machine is the reader's second way to read an expression, beside the
+coded walk, and it runs where it runs: after the reader's
 walk in source order has bound the range's names and made its declarations'
 types (`check_input_resolve_range`, the binding answers, the controls and the
 constant contexts), and before `check_input_expressions_coded_range` acts on

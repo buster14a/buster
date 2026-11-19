@@ -2581,19 +2581,17 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             if (p == 1 && adapted && !rejected[0] && input[0].token_count >= 16)
             {
                 // The selected walks skip tokens (#529), independently of the host's classification kernels.
-                snprintf(resource_message, sizeof(resource_message), "%s: the selected walks visit %u and %u of %u tokens, the scalar path's %u and %u",
-                         fixture->name, input[1].resolve_visits, input[1].expression_visits, input[1].token_count, input[0].resolve_visits, input[0].expression_visits);
-                const bool visits = input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits;
+                snprintf(resource_message, sizeof(resource_message), "%s: the selected walks visit %u and %u of %u tokens", fixture->name,
+                         input[1].resolve_visits, input[1].expression_visits, input[1].token_count);
+                const bool visits = input[1].resolve_visits < input[1].token_count && input[1].expression_visits < input[1].token_count;
                 check_test_expect(test, visits, resource_message);
-                // The coded walk acts by class (#1038) at tokens of every unit whose features it takes, and the scalar walk at none.
+                // The coded walk acts by class (#1038) at tokens of every unit whose features it takes.
                 const uint32_t classed = check_input_expression_classed(&input[1]);
-                const uint32_t scalar_counted = check_input_expression_classed(&input[0]) + check_input_expression_declined(&input[0]) +
-                                                input[0].expression_left[CHECK_INPUT_CODE_SCALAR];
-                snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits, the scalar walk at %u",
-                         fixture->name, classed, input[1].expression_visits, scalar_counted);
+                snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits",
+                         fixture->name, classed, input[1].expression_visits);
                 const bool coded = input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
                                    (classed != 0 && classed <= input[1].expression_visits);
-                check_test_expect(test, coded && scalar_counted == 0, resource_message);
+                check_test_expect(test, coded, resource_message);
             }
             if (fixture->overload_tables != 0)
             {
@@ -3691,12 +3689,10 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
             builtins[i] = draw < 2 ? recorded[pick % BUSTER_ARRAY_LENGTH(recorded)] : draw < 4 ? unrecorded[pick % BUSTER_ARRAY_LENGTH(unrecorded)] : 0;
             expected += draw < 2;
         }
-        const uint32_t vector = check_input_builtin_capacity(NULL, builtins, count, false);
-        const uint32_t scalar = check_input_builtin_capacity(NULL, builtins, count, true);
+        const uint32_t found = check_input_builtin_capacity(NULL, builtins, count);
         char description[160];
-        snprintf(description, sizeof(description), "builtin call records of %u tokens: %u by the vector path and %u by the scalar one, for %u", count,
-                 vector, scalar, expected);
-        check_test_expect(test, vector == expected && scalar == expected, description);
+        snprintf(description, sizeof(description), "builtin call records of %u tokens: %u, for %u", count, found, expected);
+        check_test_expect(test, found == expected, description);
     }
     if (mapping != MAP_FAILED)
     {

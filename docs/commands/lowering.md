@@ -635,10 +635,8 @@ takes its entries.
     compact=N identifiers=N literals=N`: the lean front reads the first and
     the last). `--list N` lists the first differences and the taken
     expressions the front missed. A difference fails the command.
-  - **Where it runs:** beside the coded walk over a whole unit, which is the
-    reader's vector path. A unit the scalar walk reads (a build without the
-    vector paths, `BUSTER_HOST_ARCH=x86-64`; the parser's scalar option) or
-    that is read by parts has no front, and the report says so: `node-shadow:
+  - **Where it runs:** beside the coded walk over a whole unit. A unit that is
+    read by parts has no front, and the report says so: `node-shadow:
     front not run in N of M units`. `test-checker` then expects it to have
     made nothing.
   - Every shadow run prints `node-shadow: walk ticks classes=N prepare=N
