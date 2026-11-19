@@ -405,6 +405,9 @@ struct NodeCensusRecord
     uint32_t line;
     NodeCensusRoot root;
     uint64_t tests;
+    // Where an event refuses it (NODE_CENSUS_EVENT), the event's warning: CHECK_WARNING_ID_COUNT for one that is none of
+    // its tokens' span's.
+    uint32_t event;
 };
 
 // The totals over the files.
@@ -1454,9 +1457,27 @@ static bool node_census_constant_changes(const NodeCensusScratch* s, uint32_t op
     return result;
 }
 
+// Whether the compiler warns of node `source`'s value converted to `destination` as a null pointer constant that is no
+// literal (-Wnon-literal-null-conversion, #3012): check_warning_null_event's own test of the value, called and not
+// restated (a pointer's destination; an integer constant expression of an integer type that is no bool, of value zero,
+// with no fault; and no literal's flag). Its test of the tokens, by which a lone number in parentheses is a literal, is
+// not asked: a number's leaf has the literal's flag (check_input_literal_value) and parentheses make no node. An
+// unevaluated operand's warning, which the compiler drops, is refused all the same.
+static bool node_census_null_warned(const NodeCensusScratch* s, uint32_t source, TypeId destination)
+{
+    bool result = false;
+    if (node_view_has(s, source))
+    {
+        const CheckValue value = node_view_value(s, source);
+        result = check_warning_null_integer(s->program->types, destination, &value) && (value.flags & BUSTER_CHECK_LITERAL_ZERO) == 0;
+    }
+    return result;
+}
+
 // The silence test of constants at node `node`: its operands' conversions, a division by zero, a shift's constant count or
 // negative operand, a null dereference, a constant subscript outside its array, a comparison with a constant outside or at
-// the bound of its other operand's type, a non-literal null converted to a pointer.
+// the bound of its other operand's type, a non-literal null converted to a pointer (an assignment's, an initialization's
+// or a conversion's source, and a call's argument, each to the type its node converts it to).
 static bool node_census_constant_tests(const NodeCensusScratch* s, uint32_t node)
 {
     const CheckProgram* program = s->program;
@@ -1567,10 +1588,13 @@ static bool node_census_constant_tests(const NodeCensusScratch* s, uint32_t node
     }
     if (policy->non_literal_null && (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT) && !result)
     {
-        const uint32_t source = op == CHECK_OP_ASSIGN ? b : a;
-        const bool to_pointer = node_census_pointer(types, node_view_type(s, node));
-        result = to_pointer && source < graph->count && graph->ops[source] != CHECK_OP_VALUE && graph->ops[source] != CHECK_OP_CAST &&
-                 node_census_integer_constant(s, source, &value) && value == 0;
+        // The source's slot and its conversion's type, as the compiler's pass is given them (check_input_warning_graph).
+        const uint32_t slot = op == CHECK_OP_ASSIGN ? 1 : 0;
+        result = node_census_null_warned(s, slot == 1 ? b : a, node_view_converted(s, node, slot));
+    }
+    for (uint32_t i = 0; policy->non_literal_null && op == CHECK_OP_CALL && !result && i < graph->argument_counts[node]; i += 1)
+    {
+        result = node_census_null_warned(s, graph->argument_nodes[graph->argument_offsets[node] + i], node_view_argument_converted(s, node, i));
     }
     return result;
 }
@@ -1813,13 +1837,32 @@ static bool node_census_for_clause(const Parser* parser, uint32_t token)
     return result;
 }
 
-// The declared type of the object whose initializer's whole value is node `root`, by its INITIALIZE control.
+// The declaration's token of the object whose initializer's whole value is node `root`, by its INITIALIZE control:
+// BUSTER_CHECK_NONE for none.
+static uint32_t node_census_initialized_token(const NodeCensusScratch* s, uint32_t root)
+{
+    const uint32_t control = s->node_controls[root];
+    return control != BUSTER_CHECK_NONE ? s->program->controls[control].token : BUSTER_CHECK_NONE;
+}
+
+// The declared type of the object whose initializer's whole value is node `root`.
 static TypeId node_census_initialized_type(const NodeCensusScratch* s, uint32_t root)
 {
-    const CheckProgram* program = s->program;
-    const uint32_t control = s->node_controls[root];
-    const uint32_t declaration = control != BUSTER_CHECK_NONE ? program->controls[control].token : BUSTER_CHECK_NONE;
-    return declaration < program->input->token_count ? program->input->declared_types[declaration] : 0;
+    const uint32_t declaration = node_census_initialized_token(s, root);
+    return declaration < s->program->input->token_count ? s->program->input->declared_types[declaration] : 0;
+}
+
+// The low end of an initializer's root's tokens' span after the pipeline, its nodes' tokens' least being `lowest` and
+// its object's declaration's token `declaration` (BUSTER_CHECK_NONE for none): the token after the object's name
+// (#3017). The compiler puts a warning of a whole initializer at its source's first token, which is no node's where it
+// is a parenthesis (a cast's, a group's) or a keyword (check_warning_null_event), and an initializer's root is the
+// bare expression, with no node before it as an assignment's, a call's or a return's has. What stands between the name
+// and the source (the declarator's rest, its `=`) is the declaration's, whose events refuse its initializer too.
+// Reader time's span stays its nodes': the events the reader has when it pops a root are at tokens it has read as
+// nodes, and a warning the pipeline puts before them has a test of its own there (the null pointer constant's).
+static inline uint32_t node_census_initializer_low(uint32_t lowest, uint32_t declaration)
+{
+    return declaration != BUSTER_CHECK_NONE ? declaration + 1 : lowest;
 }
 
 // The walk of the expression whose root is node `root`: its graph subtree's nodes into the scratch's list, each with its
@@ -1897,20 +1940,24 @@ static uint64_t node_census_root_tests(NodeCensusScratch* s, uint32_t root, uint
     tests |= s->policy.loops && node_census_for_clause(parser, graph->tokens[root]) ? UINT64_C(1) << NODE_CENSUS_LOOP : 0;
     tests |= s->policy.unmodeled ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
     // A scalar object's initializer converts its value to the object's type in its plan, not at a node.
-    const TypeId declared = context != NODE_CENSUS_ROOT_INITIALIZER ? 0 : s->given_declared != 0 || s->records != NULL ? s->given_declared : node_census_initialized_type(s, root);
+    const bool given = s->given_declared != 0 || s->records != NULL;
+    const TypeId declared = context != NODE_CENSUS_ROOT_INITIALIZER ? 0 : given ? s->given_declared : node_census_initialized_type(s, root);
+    const uint32_t low = node_census_initializer_low(lowest, context != NODE_CENSUS_ROOT_INITIALIZER || given ? BUSTER_CHECK_NONE : node_census_initialized_token(s, root));
     tests |= (s->policy.constant_conversion || s->policy.assign_enum) && declared != 0 && node_census_constant_changes(s, root, declared) ?
              UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+    // And a null pointer constant that is no literal, which the initializer's walker warns of there (#3012).
+    tests |= s->policy.non_literal_null && node_census_null_warned(s, root, declared) ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
     tests |= declared != 0 && node_census_special_type(program->types, declared) ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
     tests |= s->policy.return_address && context == NODE_CENSUS_ROOT_RETURN && node_census_returns_address(s, root) ?
              UINT64_C(1) << NODE_CENSUS_RETURN_ADDRESS : 0;
     tests |= s->policy.unsequenced && unsequenced && node_census_unsequenced(s, walked, root) ? UINT64_C(1) << NODE_CENSUS_UNSEQUENCED : 0;
-    const bool events = s->event_prefix != NULL && lowest <= highest && s->event_prefix[highest + 1] != s->event_prefix[lowest];
+    const bool events = s->event_prefix != NULL && low <= highest && s->event_prefix[highest + 1] != s->event_prefix[low];
     tests |= events ? UINT64_C(1) << NODE_CENSUS_EVENT : 0;
     // T's actions' warnings for the expression's nodes, those the unit's nodes suppress aside: at least the ones the
     // graph run keeps a node (it drops an unevaluated operand's folds').
     const uint32_t actions = s->records != NULL ? s->records->action_warnings & 0x01ffffffu : 0;
     tests |= (actions & s->policy.action_bits) != 0 ? UINT64_C(1) << NODE_CENSUS_ACTION_WARNING : 0;
-    s->span_low = lowest;
+    s->span_low = low;
     s->span_high = highest;
     return tests;
 }
@@ -2118,6 +2165,14 @@ static inline __attribute__((always_inline)) uint32_t node_tests_conversion(cons
     return result;
 }
 
+// Whether the census's code is asked for a null pointer constant that is no literal (node_census_null_warned), of an
+// integer constant's record `o` converted to a type whose byte is `target_bits`: where that is a pointer's and the
+// record has no literal's flag. What the test asks beside (the constant's type, its value, its form) is its own to read.
+static inline bool node_tests_null_asked(const NodeCensusScratch* s, uint32_t o, uint8_t target_bits)
+{
+    return (target_bits & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0 && (s->records->columns->value_flags[o] & BUSTER_CHECK_LITERAL_ZERO) == 0;
+}
+
 // The constants' tests (node_census_constant_tests) at record `r`, operator `op` at node `node`, whose operands'
 // records are `o` (UINT32_MAX for none), one of them a constant: whether one fires, into `fires`, where the columns
 // hold what it reads; and otherwise the trigger for the census's code, or NODE_TESTS_TRIGGERS for none. A comparison's
@@ -2230,14 +2285,13 @@ static inline NodeTestsTrigger node_tests_constants(const NodeCensusScratch* s, 
     }
     else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)
     {
-        // A constant zero that is no literal converted to a pointer.
+        // An integer constant that is no literal converted to a pointer (#3012): the census's code's, which asks the
+        // compiler's own test of its value (node_census_null_warned). Here only what that test can't pass without: the
+        // record's own type a pointer's (an assignment's destination's, a conversion's target), the source an integer
+        // constant, its record without the literal's flag.
         const uint32_t side = op == CHECK_OP_ASSIGN ? 1 : 0;
-        const uint32_t source = side == 1 ? graph->operand1[node] : graph->operand0[node];
-        const bool computed = source < graph->count && graph->ops[source] != CHECK_OP_VALUE && graph->ops[source] != CHECK_OP_CAST;
-        const bool asked = policy->non_literal_null && (kept[r] & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0 && kinds[side] == CHECK_CONSTANT_INTEGER && computed;
-        const bool known = asked && node_tests_integer(s, o[side], &value, &wide);
-        fired |= known && value == 0;
-        trigger = asked && wide ? NODE_TESTS_TRIGGER_NULL_CONSTANT : trigger;
+        const bool asked = policy->non_literal_null && kinds[side] == CHECK_CONSTANT_INTEGER && node_tests_null_asked(s, o[side], kept[r]);
+        trigger = asked ? NODE_TESTS_TRIGGER_NULL_CONSTANT : trigger;
     }
     *fires = fired;
     return trigger;
@@ -2532,13 +2586,17 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
         const bool conversions = policy->constant_conversion || policy->assign_enum;
         bool aggregate = (own & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0;
         uint32_t changes = BUSTER_NODE_TESTS_CONVERSION_NONE;
+        // An argument that may be a null pointer constant that is no literal (node_tests_null_asked): the census's code's.
+        bool nulls = false;
         const uint32_t first_argument = graph->argument_offsets[node];
         for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
         {
             const uint32_t argument = node_tests_record(machine, graph->argument_nodes[first_argument + i]);
             const uint32_t kind = argument != UINT32_MAX ? (columns->standings[argument] >> 2) & 0x07u : 0;
             aggregate |= argument != UINT32_MAX && (kept[argument] & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0;
-            changes |= conversions && kind != CHECK_CONSTANT_NONE ? node_tests_conversion(s, argument, kind, node_view_argument_converted(s, node, i)) : 0;
+            const TypeId target = kind != CHECK_CONSTANT_NONE ? node_view_argument_converted(s, node, i) : 0;
+            changes |= conversions && kind != CHECK_CONSTANT_NONE ? node_tests_conversion(s, argument, kind, target) : 0;
+            nulls |= policy->non_literal_null && kind == CHECK_CONSTANT_INTEGER && node_tests_null_asked(s, argument, node_census_type_bits(s, target));
         }
         for (uint32_t i = 0; i < 3; i += 1)
         {
@@ -2560,7 +2618,8 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
         }
         tests |= callee || policy->type_safety ? UINT64_C(1) << NODE_CENSUS_CALLEE : 0;
         const bool enums = policy->enums && (all & BUSTER_NODE_TESTS_OPERAND_ENUM) != 0;
-        trigger = (changes & BUSTER_NODE_TESTS_CONVERSION_ASKED) != 0 ? NODE_TESTS_TRIGGER_CONVERSION : enums ? NODE_TESTS_TRIGGER_ENUM : trigger;
+        trigger = (changes & BUSTER_NODE_TESTS_CONVERSION_ASKED) != 0 ? NODE_TESTS_TRIGGER_CONVERSION : nulls ? NODE_TESTS_TRIGGER_NULL_CONSTANT :
+                  enums ? NODE_TESTS_TRIGGER_ENUM : trigger;
     }
     else
     {
@@ -2627,7 +2686,8 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
 // Whether the call at node `node` has an argument the calls' rule doesn't take though the call's test may find nothing:
 // a constant but an address's or an integer's of zero or 1 to 126, read from T's records and the call's own list of
 // arguments. The reader's verify asks it of each call the loop left out, beside the call's test, which finds an
-// aggregate's type or a constant its parameter's type changes.
+// aggregate's type or a constant its parameter's type changes, and sends a call with an argument that may be a null
+// pointer constant that is no literal.
 static bool node_tests_call_loud(const NodeCensusScratch* s, uint32_t node)
 {
     const NodeMachine* machine = s->records;
@@ -2651,7 +2711,7 @@ static bool node_tests_call_loud(const NodeCensusScratch* s, uint32_t node)
 // `type_bits` are the pass's, over all records). The unsequenced test reads the walk's `walked` nodes where
 // `unsequenced` says.
 static inline uint64_t node_tests_root(NodeCensusScratch* s, uint32_t root, NodeCensusRoot context, uint32_t count, uint32_t lowest, uint32_t highest, bool unsequenced,
-                                       uint32_t walked, uint32_t class_bits, uint32_t type_bits)
+                                       uint32_t walked, uint32_t class_bits, uint32_t type_bits, NodeFrontTypes* counts)
 {
     const NodeMachine* machine = s->records;
     const CheckProgram* program = s->program;
@@ -2684,6 +2744,11 @@ static inline uint64_t node_tests_root(NodeCensusScratch* s, uint32_t root, Node
                                  BUSTER_NODE_TESTS_CONVERSION_NONE;
         const bool changed = changes == BUSTER_NODE_TESTS_CONVERSION_CHANGES || (changes == BUSTER_NODE_TESTS_CONVERSION_ASKED && node_census_constant_changes(s, root, declared));
         tests |= changed ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+        // And a null pointer constant that is no literal (node_census_root_tests'), asked of the census's code where it
+        // can be one.
+        const bool asked = policy->non_literal_null && kind == CHECK_CONSTANT_INTEGER && node_tests_null_asked(s, count - 1, node_census_type_bits(s, declared));
+        counts->own_root_nulls += asked;
+        tests |= asked && node_census_null_warned(s, root, declared) ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
         tests |= (node_census_type_bits(s, declared) & BUSTER_NODE_CENSUS_TYPE_SPECIAL) != 0 ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
     }
     const bool addresses = (class_bits & BUSTER_NODE_TESTS_CLASS_ADDRESS) != 0 || (type_bits & BUSTER_NODE_CENSUS_TYPE_ARRAY) != 0;
@@ -2914,7 +2979,7 @@ static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeC
     counts->own_operators += operators;
     counts->own_visited += visits != 0;
     counts->own_visits += visits;
-    tests |= node_tests_root(s, root, context, count, loop->lowest, loop->highest, unsequenced, walk_count, loop->class_bits, loop->type_bits);
+    tests |= node_tests_root(s, root, context, count, loop->lowest, loop->highest, unsequenced, walk_count, loop->class_bits, loop->type_bits, counts);
     *walked = count;
     return tests;
 }
@@ -2977,15 +3042,22 @@ static void node_census_count(NodeCensus* census, NodeCensusScratch* s, uint64_t
     census->system_expressions += s->mixed_system;
     census->system_nodes += s->mixed_system ? nodes : 0;
     census->system_taken_nodes += s->mixed_system && tests == 0 ? nodes : 0;
+    // The warning whose event refuses it, the first in its tokens' span: CHECK_WARNING_ID_COUNT for none found there.
+    const uint32_t found = (tests >> NODE_CENSUS_EVENT & 1) != 0 ? node_census_event_id(s) : UINT32_MAX;
+    const uint32_t event = found < CHECK_WARNING_ID_COUNT ? found : CHECK_WARNING_ID_COUNT;
     if (census->records != NULL && census->record_count < census->record_capacity)
     {
         const uint32_t token = s->program->input->graph.tokens[root];
-        census->records[census->record_count++] = (NodeCensusRecord){ .line = node_census_line(s->pp, s->program->parser, token), .root = context, .tests = tests };
+        census->records[census->record_count++] = (NodeCensusRecord){
+            .line = node_census_line(s->pp, s->program->parser, token),
+            .root = context,
+            .tests = tests,
+            .event = event,
+        };
     }
     if ((tests >> NODE_CENSUS_EVENT & 1) != 0)
     {
-        const uint32_t id = node_census_event_id(s);
-        census->event_ids[id < CHECK_WARNING_ID_COUNT ? id : CHECK_WARNING_ID_COUNT] += 1;
+        census->event_ids[event] += 1;
     }
 }
 
@@ -3610,7 +3682,8 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
             // three bytes, the unsigned classes the odd ones from its first. An integer constant's value is what its
             // record says (node_facts_small): the payload and one, in its exponent, which the standing's gather has. A
             // constant of such a type has its value whole in its payload. One that says none (T's own record) reads as
-            // past every value, and its operator stays listed where the rule asks for a small one.
+            // past every value, and its operator stays listed where the rule asks for a small one. (An integer constant
+            // whose payload would be another storage's is no record of the columns': node_machine_whole, #3014.)
             const __m512i plain_words = _mm512_sub_epi32(_mm512_and_si512(words, _mm512_set1_epi32(0x00ffffff)),
                                                          _mm512_set1_epi32((int32_t)((uint32_t)BUSTER_TYPE_KIND_INTEGER << 16 | BUSTER_TYPED_CLASS_I8)));
             const __mmask16 integer = (__mmask16)(placed & ~bit_field) & _mm512_cmple_epu32_mask(plain_words, _mm512_set1_epi32(BUSTER_TYPED_CLASS_U64 - BUSTER_TYPED_CLASS_I8));
@@ -4527,6 +4600,7 @@ struct NodeShadow
     uint64_t own_quiet_casts_wrong;
     uint64_t own_result_casts;
     uint64_t own_result_asks;
+    uint64_t own_root_nulls;
     uint64_t own_quiet_checked;
     uint64_t own_quiet_wrong;
     uint64_t own_values_checked;
@@ -6418,9 +6492,9 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                    " constants'-said-values-checked=%" PRIu64 " not-their-payloads'=%" PRIu64 "\n",
                    shadow->own_quiet, shadow->own_quiet_checked, shadow->own_quiet_wrong, shadow->own_values_checked, shadow->own_values_wrong);
             printf("node-shadow: own tests calls-left-out=%" PRIu64 " checked=%" PRIu64 " of-them-with-a-test=%" PRIu64 " of-them-with-a-loud-argument=%" PRIu64
-                   " casts-over-one=%" PRIu64 " callees-asked-for-their-result=%" PRIu64 "\n",
+                   " casts-over-one=%" PRIu64 " callees-asked-for-their-result=%" PRIu64 " initializers-asked-for-a-null-constant=%" PRIu64 "\n",
                    shadow->own_quiet_calls, shadow->own_quiet_calls_checked, shadow->own_quiet_calls_wrong, shadow->own_quiet_calls_loud, shadow->own_result_casts,
-                   shadow->own_result_asks);
+                   shadow->own_result_asks, shadow->own_root_nulls);
             printf("node-shadow: own tests casts-left-out=%" PRIu64 " checked=%" PRIu64 " of-them-with-a-test=%" PRIu64 "\n", shadow->own_quiet_casts,
                    shadow->own_quiet_casts_checked, shadow->own_quiet_casts_wrong);
             printf("node-shadow: own tests tree's-tests'-records-no-listed-operator-has checked=%" PRIu64 " of-them-with-a-test=%" PRIu64
@@ -6596,7 +6670,11 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 first = i;
             }
         }
-        NodeCensusScratch s = { .program = &selected.program, .pp = &source.pp, .file = file };
+        NodeCensusScratch s = {
+            .program = &selected.program,
+            .pp = &source.pp,
+            .file = file,
+        };
         s.policy = node_census_policy(&source.pp, selected.program.input);
         uint32_t** node_columns[] = { &s.marks, &s.parents, &s.depths, &s.node_controls, &s.list, &s.stack, &s.node_pop };
         bool room = node_census_events(&s, path, &scratch);
@@ -6834,6 +6912,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->own_quiet_casts_wrong += typed->own_quiet_casts_wrong;
                     shadow->own_result_casts += typed->own_result_casts;
                     shadow->own_result_asks += typed->own_result_asks;
+                    shadow->own_root_nulls += typed->own_root_nulls;
                     shadow->own_quiet_checked += typed->own_quiet_checked;
                     shadow->own_values_checked += typed->own_values_checked;
                     shadow->own_values_wrong += typed->own_values_wrong;

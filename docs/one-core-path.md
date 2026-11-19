@@ -1937,7 +1937,12 @@ it in turn; medians of seven readings, musl's of fifteen. TSC ticks:
   no literal passes the reader-time tests as a null pointer constant
   ([#3012](https://github.com/buster14a/buster/issues/3012)), and an
   integer constant made of a floating one says its exponent as its value
-  ([#3014](https://github.com/buster14a/buster/issues/3014)).
+  ([#3014](https://github.com/buster14a/buster/issues/3014)). Both are
+  fixed since, with a third the first one's rows showed
+  ([#3017](https://github.com/buster14a/buster/issues/3017)):
+  [the node machine's document](node-machine.md#a-null-pointer-constant-that-is-no-literal)
+  has what each was, and that a call's quiet arguments now have none that
+  may be such a constant to a pointer's parameter.
 - **What is listed still** is an update (3,535 expressions on `sqlite3.c`)
   and `&&`, `||` and `?:` (2,721). Those, then X on these answers: until X
   reads them the sum of step 2 does not move.

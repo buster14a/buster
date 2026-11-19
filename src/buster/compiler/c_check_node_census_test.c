@@ -3,7 +3,9 @@
 //
 // measure-node-machine's checks (#2524's steps 0 and 1), on original fixtures. Each fixture's line that ends with
 // `// refuse: TEST` must have an expression the census refuses by that test, and each that ends with `// take` an
-// expression the census takes and none it refuses. The first fixture gives one warning a line, which the compiler reports
+// expression the census takes and none it refuses. (A `// reader: TEST` before the `// refuse: TEST` names the test that
+// refuses the line at reader time, where the census after the pipeline refuses it by a warning's event too, which
+// comes after reader time.) The first fixture gives one warning a line, which the compiler reports
 // with -Wall -Wextra (its silence tests must refuse what warns); the second is clean idioms the tests once refused (they
 // must take them); the third the set's refusals; and with neither -Wall nor -Wextra, the warnings that are off by default
 // refuse nothing. Include after c_check_node_census.c; test-checker calls this through its forward declaration.
@@ -187,7 +189,15 @@ static const char node_census_test_quiet[] =
 // length; a bit-field compared; the front's one operator outside the census's set (`__extension__`, a selection there);
 // a comparison as a statement whose operand writes (no discarded value: the comparison's own test); a call's aggregate
 // argument; a write and a read of one object, as a subscript, an operand and an assignment's value; and a returned
-// array and a returned address.
+// array and a returned address. Its last function is a null pointer constant's (#3012, -Wnon-literal-null-conversion):
+// a zero that is no literal `0` assigned, initialized with, passed and returned as a pointer (an operator's value, an
+// enumerator, a cast, a cast of a floating constant), each beside what is no warning (a literal, in parentheses too, a
+// bool's zero, a pointer's); an argument and its own parameter (a zero that is no literal to an integer's parameter
+// beside a literal to a pointer's is quiet, and the other way round is not; past the parameters none is asked); an
+// initializer that starts with a parenthesis, whose warning's event is before its first node's token (#3017), beside
+// a for statement's clauses a line each, whose first one's event is no other's; an atomic pointer assigned, whose own
+// type is no pointer's where its conversion's is; and an integer constant folded from a floating one, whose record's
+// payload and exponent are the floating value's (#3014): it is no small divisor by that exponent.
 // Seventy of one name summed: 139 records, so that the other operand of what is above them is further back than the
 // block before.
 #define BUSTER_NODE_CENSUS_TEST_TEN(name) name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name
@@ -571,6 +581,66 @@ static const char node_census_test_defaults[] =
     "    x = k0(" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") ", b); // take\n"
     "    printf(\"%d\", " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "); // refuse: callee\n"
     "    return k0(a, b); // take\n"
+    "}\n"
+    "void np(const char*);\n"
+    "void n2(int, char*);\n"
+    "void np2(char*, int);\n"
+    "void nv(int, ...);\n"
+    "char* nulls(int* q, int a)\n"
+    "{\n"
+    "    _Atomic(int*) ap;\n"
+    "    int x = 0;\n"
+    "    q = 0; // take\n"
+    "    q = (0); // take\n"
+    "    q = 0L; // take\n"
+    "    q = (_Bool)0; // take\n"
+    "    q = (void*)0; // take\n"
+    "    q = 1 - 1; // refuse: constant\n"
+    "    q = A0; // refuse: constant\n"
+    "    q = (A0); // refuse: constant\n"
+    "    q = (char)0; // refuse: constant\n"
+    "    q = (int)0.0; // refuse: constant\n"
+    "    q = (int)0.5; // refuse: constant\n"
+    "    ap = A0; // refuse: constant\n"
+    "    int* n0 = 0; // take\n"
+    "    const char* lit = \"abc\"; // take\n"
+    "    int* n1 = (_Bool)0; // take\n"
+    "    int* n2a = 1 - 1; // refuse: constant\n"
+    "    int* n3 = A0; // refuse: constant\n"
+    "    int* n4 = (char)0; // refuse: constant\n"
+    "    int* n5 = (char)0; // reader: constant // refuse: warning-event\n"
+    "    int* n6 = (1 - 1); // reader: constant // refuse: warning-event\n"
+    "    int* n7 = (A0); // reader: constant // refuse: warning-event\n"
+    "    int* n8 = (int)1e-4900L; // refuse: constant\n"
+    "    np(0); // take\n"
+    "    np((0)); // take\n"
+    "    np((_Bool)0); // take\n"
+    "    np(1 - 1); // refuse: constant\n"
+    "    np(A0); // refuse: constant\n"
+    "    np((char)0); // refuse: constant\n"
+    "    np((int)0.5); // refuse: constant\n"
+    "    n2(A0, 0); // take\n"
+    "    n2(0, A0); // refuse: constant\n"
+    "    n2(a, (short)0); // refuse: constant\n"
+    "    np2(A0, a); // refuse: constant\n"
+    "    np2(0, A0); // take\n"
+    "    n2(1 - 1, (char*)q); // take\n"
+    "    nv(a, A0, 1 - 1); // take\n"
+    "    a = (int)0.5; // take\n"
+    "    a = a + (int)0.5; // take\n"
+    "    a = a << (int)1e-4900L; // take\n"
+    "    a = a / (int)1e-4900L; // refuse: constant\n"
+    "    a = a % (int)1e-4900L; // refuse: constant\n"
+    "    a /= (int)1e-4900L; // refuse: constant\n"
+    "    n2((int)1e-4900L, 0); // take\n"
+    "    nv((int)0.5, (int)1e-4900L); // take\n"
+    "    for (x = \"a\\q\"[0]; // refuse: warning-event\n"
+    "         x < a; // take\n"
+    "         x++) a += 2; // take\n"
+    "    if (a) return A0; // refuse: constant\n"
+    "    if (a > 1) return (char)0; // refuse: constant\n"
+    "    if (a > 2) return (int)0.5; // refuse: constant\n"
+    "    return 0; // take\n"
     "}\n";
 
 // With no warning of a mix of enumerations and -Wassign-enum: an operator with an operand of an enumeration's type is
@@ -589,7 +659,7 @@ static const char node_census_test_enums[] =
 
 // The warnings that list an expression for the tests that read T's records, off: what they would refuse is taken, and
 // an expression that only they list has nothing listed (two writes, a returned address; a pointer's cast to an integer,
-// which nothing sends to its test then). Its first function's return has nothing listed and ends at the unit's first
+// which nothing sends to its test then; a zero that is no literal made a pointer, in each place the warning has). Its first function's return has nothing listed and ends at the unit's first
 // warning event: the events' lower bound, at its equality.
 static const char node_census_test_off[] =
     "char e(void)\n"
@@ -612,6 +682,15 @@ static const char node_census_test_off[] =
     "{\n"
     "    int local = 0;\n"
     "    return &local; // take\n"
+    "}\n"
+    "void np(int*);\n"
+    "int* nul(int* q)\n"
+    "{\n"
+    "    q = (char)0; // take\n"
+    "    int* n = 1 - 1; // take\n"
+    "    np(1 - 1); // take\n"
+    "    np(n); // take\n"
+    "    return (short)0; // take\n"
     "}\n";
 
 // A warning no test stands for (-Wc++-compat): every expression is refused for it, one with nothing listed too.
@@ -1287,7 +1366,9 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
             const NodeCensusRecord* record = census.records + r;
             found += record->line == line;
             refused += record->line == line && record->tests != 0;
-            matched |= record->line == line && expected != NODE_CENSUS_TESTS && (record->tests >> expected & 1) != 0;
+            // (An expression an event refuses names the event's warning: one of its tokens' span's.)
+            matched |= record->line == line && expected != NODE_CENSUS_TESTS && (record->tests >> expected & 1) != 0 &&
+                       (expected != NODE_CENSUS_EVENT || record->event < CHECK_WARNING_ID_COUNT);
         }
         const bool held = refuse != NULL ? matched : take != NULL ? found != 0 && refused == 0 : true;
         if (!held)
@@ -1327,6 +1408,8 @@ struct NodeTestsWindowed
     uint32_t casts;
     uint32_t casts_left;
     uint32_t asks;
+    // The initializers' roots asked of the census's code for a null pointer constant that is no literal.
+    uint32_t nulls;
     uint32_t values;
     uint32_t spared;
     uint32_t direct;
@@ -1387,6 +1470,7 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                                                  shadow.own_quiet == windowed->quiet && shadow.own_quiet_checked == windowed->quiet && shadow.own_quiet_wrong == 0 &&
                                                  shadow.own_quiet_calls == windowed->calls && shadow.own_quiet_calls_checked == windowed->calls_checked &&
                                                  shadow.own_quiet_calls_wrong == 0 && shadow.own_quiet_calls_loud == 0 && shadow.own_result_asks == windowed->asks &&
+                                                 shadow.own_root_nulls == windowed->nulls &&
                                                  shadow.own_result_casts == windowed->casts &&
                                                  shadow.own_quiet_casts == windowed->casts_left && shadow.own_quiet_casts_checked == windowed->casts_left &&
                                                  shadow.own_quiet_casts_wrong == 0 &&
@@ -1431,6 +1515,8 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                 shadow.own_direct_checked,
                 shadow.own_direct_wrong, shadow.own_records, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_RECORDS], shadow.reader_facts[NODE_FACTS_COUNT_TESTS_APART],
                 window ? windowed->apart : 0);
+        fprintf(stderr, "test-checker: node-tests %s%s: %" PRIu64 " initializers' roots were asked of the census's code for a null pointer constant (%u)\n", name,
+                window ? " (on the window)" : "", shadow.own_root_nulls, window ? windowed->nulls : 0);
         fprintf(stderr, "test-checker: node-tests %s: %s: the tests ran on %" PRIu64 " expressions at reader time and refused %" PRIu64 " (%u expected); %" PRIu64
                 " compared and %" PRIu64 " never lowered; %" PRIu64 " taken there that the census refuses, %" PRIu64 " differ, %" PRIu64 " roots' kinds differ, %" PRIu64
                 " nodes outside the records, %" PRIu64 " units' enabled warnings differ; T's rows and rules there: %" PRIu64 " values not the action's, %" PRIu64
@@ -1446,11 +1532,21 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
         const char* end = strchr(at, '\n');
         end = end != NULL ? end : at + strlen(at);
         const char* refuse = NULL;
+        const char* reader = NULL;
         for (const char* c = at; c + 2 < end && refuse == NULL; c += 1)
         {
+            reader = reader == NULL && strncmp(c, "// reader: ", 11) == 0 ? c + 11 : reader;
             refuse = strncmp(c, "// refuse: ", 11) == 0 ? c + 11 : NULL;
         }
-        const uint32_t expected = refuse != NULL ? node_census_test_named(refuse, (uint32_t)(end - refuse)) : NODE_CENSUS_TESTS;
+        // A line's `// reader: TEST` before its `// refuse: TEST` names the test that refuses it here, where the census
+        // after the pipeline refuses it by a warning's event that comes after reader time: a name up to its space.
+        const char* named = reader != NULL ? reader : refuse;
+        uint32_t length = 0;
+        while (named != NULL && named + length < end && (reader == NULL || named[length] != ' '))
+        {
+            length += 1;
+        }
+        const uint32_t expected = named != NULL ? node_census_test_named(named, length) : NODE_CENSUS_TESTS;
         uint32_t found = 0;
         uint32_t taken = 0;
         uint32_t matched = 0;
@@ -1884,6 +1980,22 @@ static const char node_contexts_test_source[] =
     // call is on the first pass's list and its other argument on the second's. The two lists are run in the window's
     // order, each argument's rule before the call's, which then makes the call from T's records of both.
     "    a = callee(callee(o->inner.bits, b), callee(1e100, b));\n"
+    // An integer constant folded from a floating one (#3014): its record's payload is the floating value's, its integer
+    // zero. As an argument its conversion is T's (the rule takes an integer's value from a payload that is the
+    // integer's), and so is a null pointer made of it, whose value keeps the floating storage: an assignment's, and
+    // what reads the assignment after.
+    "    fl((int)0.5);\n"
+    "    fi((int)1e-4900L);\n"
+    "    vf(a, (int)0.5);\n"
+    "    p = (int)0.5;\n"
+    "    fip(p = (int)0.5);\n"
+    "    a = *(p = (long)0.5);\n"
+    // A null pointer constant that is no literal as an argument (#3012): its call is not quiet for the census's tests,
+    // whatever the call's short path said; a literal's is.
+    "    fip(RED);\n"
+    "    fcp((char)0);\n"
+    "    fv(1 - 1);\n"
+    "    fp(0);\n"
     // A consumer and an operand past two blocks: a call's callee and its first argument before a long second one.
     "    a = callee(a, " BUSTER_NODE_CONTEXTS_TEST_SUM ");\n"
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    v.inner.second = -b;\n")
@@ -3171,7 +3283,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                     "-Wno-unused-comparison",
                     "-Wno-parentheses",
                     "-Wno-logical-not-parentheses",
-                    "-Wno-pointer-to-int-cast" };
+                    "-Wno-pointer-to-int-cast",
+                    "-Wno-non-literal-null-conversion" };
     check_test_expect(test, ready && node_census_test_fixture(directory, "off.c", node_census_test_off, off, BUSTER_ARRAY_LENGTH(off), &system),
                       "node-census takes what a warning that is off would refuse");
     char* whole[] = { "-nostdinc", "-Wc++-compat" };
@@ -3197,7 +3310,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .expressions = 45,
         .trees = 4,
         .operators = 56,
-        .sent = 21,
+        .sent = 22,
         .walks = 4,
         .quiet = 6,
         .calls = 1,
@@ -3259,24 +3372,25 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .decided = 3,
     };
     static const NodeTestsWindowed windowed_defaults = {
-        .expressions = 419,
+        .expressions = 475,
         .trees = 29,
-        .operators = 95,
-        .sent = 29,
-        .walks = 11,
+        .operators = 127,
+        .sent = 52,
+        .walks = 12,
         .far = 37,
-        .quiet = 67,
-        .calls = 173,
-        .calls_checked = 173,
-        .casts = 157,
-        .casts_left = 17,
-        .asks = 5,
-        .values = 197,
-        .spared = 242,
-        .direct = 200,
-        .apart = 19,
-        .decided = 380,
-        .decided_refused = 8,
+        .quiet = 77,
+        .calls = 179,
+        .calls_checked = 179,
+        .casts = 163,
+        .casts_left = 30,
+        .asks = 9,
+        .nulls = 8,
+        .values = 253,
+        .spared = 263,
+        .direct = 213,
+        .apart = 22,
+        .decided = 421,
+        .decided_refused = 9,
     };
     static const NodeTestsWindowed windowed_enums = {
         .expressions = 5,
@@ -3288,14 +3402,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .decided = 5,
     };
     static const NodeTestsWindowed windowed_off = {
-        .expressions = 13,
+        .expressions = 18,
         .trees = 5,
-        .quiet = 1,
-        .values = 4,
-        .spared = 6,
-        .direct = 6,
+        .operators = 3,
+        .quiet = 3,
+        .calls = 1,
+        .calls_checked = 1,
+        .casts = 1,
+        .asks = 1,
+        .values = 12,
+        .spared = 7,
+        .direct = 7,
         .apart = 1,
-        .decided = 11,
+        .decided = 16,
     };
     static const NodeTestsWindowed windowed_whole = {
         .expressions = 2,
@@ -3347,12 +3466,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                                                              BUSTER_NODE_FRONT_AFTER, 2, 0, windowed_atomic),
                       "node-tests: at reader time atomic record accesses are refused by type");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet),
-                                                             BUSTER_NODE_FRONT_AFTER, 170, 17, windowed_defaults),
+                                                             BUSTER_NODE_FRONT_AFTER, 198, 28, windowed_defaults),
                       "node-tests: at reader time the tests refuse what warns without an option, with the default warnings alone");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "enums.c", node_census_test_enums, enums, BUSTER_ARRAY_LENGTH(enums),
                                                              BUSTER_NODE_FRONT_AFTER, 1, 1, windowed_enums),
                       "node-tests: at reader time an enumeration's constant is tested where no mix of enumerations is asked about");
-    check_test_expect(test, ready && node_tests_test_fixture(directory, "off.c", node_census_test_off, off, BUSTER_ARRAY_LENGTH(off), BUSTER_NODE_FRONT_AFTER, 1, 2, windowed_off),
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "off.c", node_census_test_off, off, BUSTER_ARRAY_LENGTH(off), BUSTER_NODE_FRONT_AFTER, 1, 3, windowed_off),
                       "node-tests: at reader time a warning that is off refuses nothing and lists no expression, and the unit's first warning event refuses its own");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "whole.c", node_census_test_whole, whole, BUSTER_ARRAY_LENGTH(whole), BUSTER_NODE_FRONT_AFTER, 2, 0,
                                                              windowed_whole),
@@ -3368,8 +3487,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
     // C on the window: its own fixture's counts, each rule on both sides.
     static const NodeContextsExpected contexts_expected = {
-        .expressions = 501,
-        .decided = 445,
+        .expressions = 511,
+        .decided = 449,
         .refused = 38,
         .strides = 20,
         .asked = 3,
@@ -3381,17 +3500,17 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
             [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 2,
             [BUSTER_NODE_CONTEXTS_REASON_COMMA] = 1,
             [BUSTER_NODE_CONTEXTS_REASON_DIVISION] = 2,
-            [BUSTER_NODE_CONTEXTS_REASON_WIDE] = 4,
+            [BUSTER_NODE_CONTEXTS_REASON_WIDE] = 10,
             [BUSTER_NODE_CONTEXTS_REASON_OPERATOR] = 2,
         },
-        .calls = 263,
-        .calls_made = 240,
-        .calls_converted = 216,
-        .calls_plain = 208,
+        .calls = 271,
+        .calls_made = 245,
+        .calls_converted = 221,
+        .calls_plain = 213,
         .calls_left = 21,
-        .calls_compared = 213,
-        .single_answers = 2307,
-        .single_timed = 330,
+        .calls_compared = 218,
+        .single_answers = 2342,
+        .single_timed = 335,
     };
     check_test_expect(test, ready && node_contexts_test_fixture(directory, "contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &contexts_expected),
                       "node-contexts: C on the window decides each expression of its rules as C does on T's columns, and lists the kinds it has no case for");
