@@ -5319,7 +5319,7 @@ and its consumer's class, and lists what one level cannot say:
 | a branch operator is a `!`, an `&&` or an `\|\|` | its operator's class's byte |
 | that is no constant without effects | `free`: its standing's and its flags' bytes |
 | whose value is an int's and no lvalue | no mask: the checker's, which takes no vector's `!`, `&&` or `\|\|` and gives any other an int |
-| and, for `&&` and `\|\|`, whose first operand's truth is not known | the first operand's standing (no constant, or an lvalue whose constant is an address) and its flags' object's bit (an lvalue at an absolute address has none, and C takes its truth for known: [#3028](https://github.com/buster14a/buster/issues/3028)) |
+| and, for `&&` and `\|\|`, whose first operand's truth is not known | the first operand's standing (no constant, or an lvalue whose constant is an address) and its flags' object's bit (an lvalue at an absolute address has none: C knows its truth only where it is an array's, since [#3028](https://github.com/buster14a/buster/issues/3028)'s fix, and the loop lists its expression either way) |
 | a statement's CONDITION is branches where, under its `!`s, there is a branch `&&` or `\|\|` | where its operand's code is `&&`'s or `\|\|`'s. One that is no branch operator lists the expression at its own record, and with a `!` between, the `!` does |
 | a branched operator branches each operand that is a branch operator | `&&` and `\|\|` under a CONDITION, an `&&`, an `\|\|` or a `!`, and `!` under an `&&` or an `\|\|`: by the consumer's class alone. A consumer that is not branched is a value: an `&&` or an `\|\|` lists the expression there, and a `!` does where its operand is `&&` or `\|\|` |
 | a `!` under a branched `!` is branched too | two levels away: the branched `!` over a `!` lists the expression |
@@ -5473,10 +5473,12 @@ keeps in the frame, and why, is the next thing to measure in this loop.
   CONDITION has a folded operand, which lists).
 
 **What the probes found beside it.** A condition on an lvalue at an absolute
-address (`if (*(int*)4096)`) is compiled as true, its load dropped:
+address (`if (*(int*)4096)`) was compiled as true, its load dropped:
 [#3028](https://github.com/buster14a/buster/issues/3028), a fault of the
-checker's truth rule, which C and this piece's mask read as it stands. The
-fix changes the rule under both.
+checker's truth rule, which C reads. Its fix makes such an lvalue's truth
+unknown unless it is an array's. This piece's mask takes a first operand
+that is an lvalue only where it has an object, and lists the expression of
+one at an absolute address before the fix and after it.
 
 **What is listed still.** `&&` and `||` as values and `?:` are 674 of the
 1,683 expressions listed on `sqlite3.c`, 290 of 760 on Lua, 964 of 1,656 on

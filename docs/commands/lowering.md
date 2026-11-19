@@ -281,6 +281,15 @@ and values whose first operand is an `&&` or `||`, of every scalar type (NaN
 among the doubles), a first operand the program knows, and chains of 17
 operands. The node templates' entries are the tasks' there.
 
+A third program is for a condition the program must not know (#3028): an
+lvalue at an absolute address (`if (*(int *)4096)`), whose truth is its
+value's, which the program loads. Its address says nothing of it
+(`check_action_truth`). Twenty forms each keep the lvalue's load in their
+entries: an `if`'s condition, the first operand of `&&` and of `||`, a
+conditional's condition, of each scalar class, through a member and a
+subscript, and the forms that read before the fix too. Two keep none: an
+array at an absolute address decays to it, and `&` of the lvalue is it.
+
 ## Node machine census (#2524)
 
 `./build/compiler measure-node-machine [--list N] [preprocessor options] file...`

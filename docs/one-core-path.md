@@ -2082,8 +2082,9 @@ build before (#3025's code) against the piece's, medians of seven readings
   the switch's executable reads the loop above the build before with the
   block skipped, 5.03 for 4.82, as the update's did.
 - **The probes found a fault that is not this piece's:** a condition on an
-  lvalue at an absolute address is compiled as true
-  ([#3028](https://github.com/buster14a/buster/issues/3028)).
+  lvalue at an absolute address was compiled as true
+  ([#3028](https://github.com/buster14a/buster/issues/3028), fixed in the
+  checker's truth rule). The loop lists such an expression still.
 - **What is listed still** is `&&` and `||` as values and `?:`: 674 of 1,683
   expressions on `sqlite3.c`. Those, a comma, then X on these answers: until
   X reads them the sum of step 2 does not move.
