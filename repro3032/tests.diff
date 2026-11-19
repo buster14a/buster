@@ -1,0 +1,80 @@
+diff --git a/src/buster/compiler/interpreter_link_test.c b/src/buster/compiler/interpreter_link_test.c
+index ab9e78e50..f98d3cc96 100644
+--- a/src/buster/compiler/interpreter_link_test.c
++++ b/src/buster/compiler/interpreter_link_test.c
+@@ -206,6 +206,67 @@ static void interpreter_link_test_names(InterpreterLinkTest* tally)
+     arena_release(&arena);
+ }
+ 
++static void interpreter_link_test_resolution_order(InterpreterLinkTest* tally)
++{
++    InterpreterLinkTestInput first = { 0 };
++    InterpreterLinkTestInput second = { 0 };
++    Arena arena = arena_reserve(64ull << 10);
++    const bool ready = interpreter_link_test_input(&first) && interpreter_link_test_input(&second) && arena.base != 0;
++    interpreter_link_test_expect(tally, ready, "resolution order fixture arenas");
++    if (ready)
++    {
++        uint8_t bytes[16] = { 0 };
++        const uint8_t global = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT;
++        const uint8_t weak = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_OBJECT;
++        const AtomId a = link_add_atom(&first.link, BUSTER_LINK_CLASS_DATA, 3, sizeof(bytes), bytes, 1);
++        const AtomId b = link_add_atom(&second.link, BUSTER_LINK_CLASS_RODATA, 3, sizeof(bytes), bytes, 1);
++        const SymbolId missing = link_add_symbol(&first.link, interpreter_link_test_name(&first.link, "missing"), 0, 0, 0, global, BUSTER_LINK_SOURCE_NONE);
++        const SymbolId x = link_add_symbol(&first.link, interpreter_link_test_name(&first.link, "x"), 0, 0, 0, global, BUSTER_LINK_SOURCE_NONE);
++        link_add_symbol(&first.link, interpreter_link_test_name(&first.link, "y"), a, 0, 4, global, BUSTER_LINK_SOURCE_PROGRAM);
++        // The later input conflicts for y before x, but the earlier input asks for x before y.
++        const SymbolId y_conflict = link_add_symbol(&second.link, interpreter_link_test_name(&second.link, "y"), b, 0, 4, global, BUSTER_LINK_SOURCE_PROGRAM);
++        const NameId name = interpreter_link_test_name(&second.link, "x");
++        const SymbolId winner = link_add_symbol(&second.link, name, b, 0, 4, global, BUSTER_LINK_SOURCE_PROGRAM);
++        const SymbolId alias = link_add_symbol(&second.link, name, b, 0, 8, global, BUSTER_LINK_SOURCE_PROGRAM);
++        const SymbolId x_conflict = link_add_symbol(&second.link, name, b, 4, 4, global, BUSTER_LINK_SOURCE_PROGRAM);
++        const NameId first_fn = interpreter_link_test_name(&first.link, "fn");
++        const NameId second_fn = interpreter_link_test_name(&second.link, "fn");
++        const SymbolId weak_fn = link_add_symbol(&first.link, first_fn, 0, 0, 0, BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE);
++        const AtomId code = link_add_atom(&second.link, BUSTER_LINK_CLASS_TEXT, 0, 1, bytes, 1);
++        link_add_symbol(&second.link, second_fn, code, 0, 1, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM);
++        const Link* inputs[] = {
++            &first.link,
++            &second.link,
++        };
++        InterpreterLink image = { 0 };
++        InterpreterLinkResult result = interpreter_link_materialize(&image, inputs, 2, 0, 0, &arena);
++        interpreter_link_test_expect(tally, result.status == INTERPRETER_LINK_UNDEFINED && result.input == 0 && result.symbol == missing && result.atom == 0 && result.fixup == 0, "earlier undefined object precedes both conflicts");
++
++        first.link.symbols.flags[missing] = weak;
++        result = interpreter_link_materialize(&image, inputs, 2, 0, 0, &arena);
++        interpreter_link_test_expect(tally, result.status == INTERPRETER_LINK_DUPLICATE && result.input == 1 && result.symbol == x_conflict && result.atom == b && result.fixup == 0, "first requested spelling reports its first distinct strong definition");
++
++        second.link.symbols.value[x_conflict] = 0;
++        result = interpreter_link_materialize(&image, inputs, 2, 0, 0, &arena);
++        interpreter_link_test_expect(tally, result.status == INTERPRETER_LINK_DUPLICATE && result.input == 1 && result.symbol == y_conflict && result.atom == b && result.fixup == 0, "strong aliases of one definition expose the next spelling's conflict");
++
++        second.link.symbols.flags[y_conflict] = weak;
++        const InterpreterLinkExternal external = {
++            .input = 0,
++            .symbol = weak_fn,
++            .address = 0x1000,
++        };
++        result = interpreter_link_materialize(&image, inputs, 2, &external, 1, &arena);
++        interpreter_link_test_expect(tally, result.status == INTERPRETER_LINK_OK && image.units[0].addresses[x] == image.units[1].addresses[winner] &&
++                                     image.units[0].sizes[x] == 4 && image.units[1].sizes[alias] == 4 && image.units[0].writable[x] == 0, "same-definition aliases retain the first strong symbol's metadata");
++        interpreter_link_test_expect(tally, result.status == INTERPRETER_LINK_OK && image.units[0].resolved[weak_fn] == 0 && image.units[0].addresses[weak_fn] == 0,
++                                     "a strong code atom without a callable token wins over a bound weak function");
++    }
++    interpreter_link_test_release(&first);
++    interpreter_link_test_release(&second);
++    arena_release(&arena);
++}
++
+ static void interpreter_link_test_failures(InterpreterLinkTest* tally)
+ {
+     InterpreterLinkTestInput input = { 0 };
+@@ -298,6 +359,7 @@ static int run_interpreter_link_tests(int argc, char** argv)
+         InterpreterLinkTest tally = { 0 };
+         interpreter_link_test_data(&tally);
+         interpreter_link_test_names(&tally);
++        interpreter_link_test_resolution_order(&tally);
+         interpreter_link_test_failures(&tally);
+         printf("interpreter-link: %u passed, %u failed\n", tally.passed, tally.failed);
+         result = tally.failed != 0;

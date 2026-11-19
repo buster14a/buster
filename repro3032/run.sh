@@ -39,3 +39,20 @@ sources=("$here/musl-main.c" "$p/__rand48_step.c" "$p/__seed48.c" "$p/lrand48.c"
 "$out/musl-native" > "$out/musl.clang"
 run_case musl "$compiler" interpret-c -Dhidden= "${sources[@]}"
 cmp "$out/musl.clang" "$out/musl.out"
+for source in "${sources[@]}"; do
+    name=$(basename "$source" .c)
+    "$compiler" -Dhidden= -c "$source" -o "$out/$name.o"
+    llvm-objcopy --dump-section=".text=$out/$name.text" "$out/$name.o"
+    sha256sum "$out/$name.text"
+done
+
+"$CC" -O2 "$here/generate.c" -o "$out/generate"
+for n in 8 32 128; do
+    dir="$RUNNER_TEMP/units-$n"
+    mkdir -p "$dir"
+    "$out/generate" "$n" "$dir"
+    run_case "c$n" "$compiler" interpret-c "$dir"/unit-*.c
+    "$CC" "$dir"/unit-*.c -o "$out/c$n-native"
+    "$out/c$n-native" > "$out/c$n.clang"
+    cmp "$out/c$n.clang" "$out/c$n.out"
+done

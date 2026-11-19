@@ -27,13 +27,36 @@ jobs:
           dirs=$(bash tools/ci/session-toolchain.sh stage)
           IFS=: read -ra paths <<< "$dirs"
           for path in "${paths[@]}"; do echo "$path" >> "$GITHUB_PATH"; done
-      - name: Measure the baseline
+      - name: Compare instrumented base and candidate
         run: |
           set -euo pipefail
           export CC=clang
           clang --version
           cmake --version | head -1
           ninja --version
-          python3 repro3032/probes.py base
-          ./build.sh --config Release > "$RUNNER_TEMP/build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build.log"; exit 1; }
-          bash repro3032/run.sh "$RUNNER_TEMP/base"
+          for mode in base head; do
+            git restore -- src/buster/compiler/interpreter_link{,_test}.c
+            git apply repro3032/tests.diff
+            if [[ "$mode" == head ]]; then git apply repro3032/owner.diff; fi
+            python3 repro3032/probes.py "$mode"
+            ./build.sh --config Release > "$RUNNER_TEMP/build-$mode.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build-$mode.log"; exit 1; }
+            bash repro3032/run.sh "$RUNNER_TEMP/$mode"
+          done
+          for name in link units musl c8 c32 c128; do
+            cmp "$RUNNER_TEMP/base/$name.out" "$RUNNER_TEMP/head/$name.out"
+            cmp "$RUNNER_TEMP/base/$name.trace" "$RUNNER_TEMP/head/$name.trace"
+            echo "$name stdout, winners, maps, relocations and diagnostics match"
+          done
+          for text in "$RUNNER_TEMP/base"/*.text; do
+            cmp "$text" "$RUNNER_TEMP/head/${text##*/}"
+          done
+          echo "All six generated .text sections match"
+      - name: Run the clean candidate through the published entry point
+        run: |
+          set -euo pipefail
+          export CC=clang
+          git restore -- src/buster/compiler/interpreter_link{,_test}.c
+          git apply repro3032/tests.diff repro3032/owner.diff
+          ./build.sh --config Release > "$RUNNER_TEMP/build-clean.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build-clean.log"; exit 1; }
+          ./build/compiler test-interpreter-link
+          ./build/compiler interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c
