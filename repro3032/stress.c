@@ -18,7 +18,7 @@ static void interpreter_link_test_stress(InterpreterLinkTest* tally, uint32_t co
             snprintf(next, sizeof(next), "data_%u", (u + 1) % count);
             snprintf(fn, sizeof(fn), "fn_%u", u);
             data[u][0] = 100 + u;
-            const AtomId atom = link_add_atom(link, BUSTER_LINK_CLASS_DATA, 3, sizeof(data[u]), (const uint8_t*)data[u], 1);
+            const AtomId atom = link_add_atom(link, BUSTER_LINK_CLASS_DATA, 3, sizeof(data[u]), (uint8_t*)data[u], 1);
             link_add_symbol(link, interpreter_link_test_name(link, own), atom, 0, 8, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_PROGRAM);
             const SymbolId ref = link_add_symbol(link, interpreter_link_test_name(link, next), 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_NONE);
             const SymbolId function = link_add_symbol(link, interpreter_link_test_name(link, fn), 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE);
