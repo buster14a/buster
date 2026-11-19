@@ -21,44 +21,5 @@ jobs:
           lscpu | grep 'Model name'
           cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o /tmp/probe
           /tmp/probe
-      - name: Trace the private pass entry and exit
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("src/buster/compiler/ir_if_convert.c")
-          s = path.read_text()
-          at = s.index("    const uint64_t om = output->length;", s.index("static IrCheck ir_if_convert(const IrFunction* function, Arena* output"))
-          s = s[:at] + '    if (getenv("BUSTER_3049_TRACE")) { fputs("BEGIN IFCONVERT INPUT\\n", stderr); ir_print(function, scratch, stderr); fputs("END IFCONVERT INPUT\\n", stderr); }\n' + s[at:]
-          path.write_text(s)
-          PY
-      - name: Build the vector Release compiler
-        run: |
-          ./build.sh --config Release
-      - name: Compare a pure update with qualified and unqualified arm reloads
-        run: |
-          set -euo pipefail
-          for shape in saved plain volatile; do
-            case "$shape" in
-              saved) qualifier=; arm='x';;
-              plain) qualifier=; arm='p[i]';;
-              volatile) qualifier=volatile; arm='p[i]';;
-            esac
-            cat > /tmp/conditional.c <<SOURCE
-          unsigned mask(const $qualifier unsigned *p, unsigned n, unsigned s)
-          {
-              for (unsigned i = 0; i < n; ++i) {
-                  unsigned x = p[i];
-                  if (x & 2u) s &= $arm;
-              }
-              return s;
-          }
-          SOURCE
-            echo "$shape"
-            BUSTER_3049_TRACE=1 build/compiler --tier1 --tier1-strict --verify -O2 -march=x86-64-v4 -c /tmp/conditional.c -o "/tmp/$shape.o" 2> "/tmp/$shape.ir"
-            cat "/tmp/$shape.ir"
-            objdump -drw -Mintel "/tmp/$shape.o"
-            sha256sum "/tmp/$shape.ir"
-          done
-          cmp /tmp/plain.ir /tmp/volatile.ir && echo "Plain and volatile reloads have identical pass input"
-      - name: Run optimizer tests
-        run: build/compiler test-ir-optimize
+      - name: Compare the pinned base and head on this runner
+        run: bash evidence/3049/compare.sh 6427879e1143026a12fb0388a20bdea1fe4b2bc5 bc7e1a5dff5808d2262d4e217b58253de2c5a6d4
