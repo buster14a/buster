@@ -397,6 +397,38 @@ static SnapshotStatus snapshot_test_load(Runtime* runtime, const char* directory
     return snapshot_load(runtime, path, kind, compiler, 0);
 }
 
+// Loading rebases pointers in the private mapping. Compare the raw file, including the directory and piece hashes,
+// against the same import written over dirty memory.
+static void snapshot_test_image(SnapshotTestTally* tally, const char* path, const Runtime* imported, const RuntimeProbe* compiler)
+{
+    Scratch scratch = scratch_begin(0);
+    const String8 file = executable_test_read(scratch.arena, path);
+    uint8_t* buffer = file.length > sizeof(SnapshotHeader) ? arena_push(scratch.arena, file.length, BUSTER_SNAPSHOT_ALIGNMENT) : 0;
+    snapshot_test_expect(tally, buffer != 0, "room for the raw snapshot", 0);
+    if (buffer != 0)
+    {
+        Arena arena = {
+            .base = buffer,
+            .capacity = file.length - 1,
+        };
+        uint64_t bytes = UINT64_MAX;
+        snapshot_test_expect(tally, snapshot_image(imported, compiler, &arena, &bytes) == 0 && bytes == 0, "one byte short refuses the image", 0);
+        arena.capacity = file.length;
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            arena.length = 0;
+            memset(buffer, pass == 0 ? 0xa5 : 0x5a, file.length);
+            const uint8_t* image = snapshot_image(imported, compiler, &arena, &bytes);
+            snapshot_test_expect(tally, image == buffer && bytes == file.length && memcmp(buffer, file.pointer, bytes) == 0, "every raw byte over poison", pass);
+        }
+        Runtime missing = *imported;
+        missing.global_names.strings = 0;
+        arena.length = 0;
+        snapshot_test_expect(tally, snapshot_image(&missing, compiler, &arena, &bytes) == 0 && bytes == 0, "incomplete strings refuse the image", 0);
+    }
+    scratch_end(scratch);
+}
+
 // The runtime written as a snapshot in a directory of its own, `name`, and loaded back, as the check `check`.
 static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler, const char* check, const char* name)
 {
@@ -404,9 +436,15 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
         .check = check,
     };
     char place[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     snapshot_test_path(place, directory->path, name);
+    snapshot_test_path(path, place, snapshot_name(imported->kind));
     const bool written = snapshot_test_write(imported, place, compiler);
     snapshot_test_expect(&tally, written, "the snapshot written", 0);
+    if (written)
+    {
+        snapshot_test_image(&tally, path, imported, compiler);
+    }
     Runtime loaded;
     const SnapshotStatus status = written ? snapshot_test_load(&loaded, place, imported->kind, compiler) : SNAPSHOT_STATUS_MISSING;
     snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_LOADED, "the snapshot loaded", status);
@@ -430,8 +468,6 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
         }
         runtime_release(&loaded);
     }
-    char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
-    snapshot_test_path(path, place, snapshot_name(imported->kind));
     if (!directory->keep)
     {
         unlink(path);
