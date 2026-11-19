@@ -4110,8 +4110,12 @@ What the lowering covers past scalars (#145's programs):
   unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
   `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,
   initializer parts with a bit width and `__builtin_dump_struct`'s reads take
-  the bytes that hold the field's bits. A field whose bits are spread over more
-  than 8 bytes (a packed one) is refused. `c_check_program_bit_unit_test.c`
+  the bytes that hold the field's bits. A packed field of up to 64 bits off a
+  byte boundary may lie in 9 bytes (#2999): its read and its store take the
+  first 8 as an integer and the ninth as a byte, joined by shifts on a read and
+  split on a store, as clang's -O0 code does its `i72` (`check_lower_bit_wide`,
+  out of line, apart from the tasks' always-inlined store). A field wider than
+  64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
