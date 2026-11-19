@@ -265,7 +265,6 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
             .sites = sites,
             .held = held,
             .released = released,
-            .scalar = scalar,
             .body_count = count,
         };
     }
@@ -325,41 +324,36 @@ static uint32_t check_tier1_inline_callee(const CheckTier1Inline* inlining, cons
     return candidate != 0 && candidate - 1 != self && inlining->ready[candidate - 1] != 0 ? candidate : 0;
 }
 
-// The candidates whose address a body's code takes (a BUSTER_TYPED_GLOBAL_ADDRESS entry of its typed stream, whose value
-// is the symbol), marked in `addressed` (cleared, a byte a body): 64 kinds a vector by a compare, then each match's
-// value; the scalar path, its twin, reads every entry.
-static void check_tier1_inline_addressed(const CheckTier1Inline* inlining, bool scalar, uint8_t* addressed)
+// One body's typed entries (`count` of `kinds` and `values`) that take an address (BUSTER_TYPED_GLOBAL_ADDRESS, whose value
+// is the symbol), each marking the candidate its symbol is in `addressed` (`candidates` of `symbol_count` symbols), or the
+// byte past the `body_count` bodies where it names none: 64 kinds a vector by a compare, then each match's value.
+static void check_tier1_inline_addressed_entries(const uint8_t* kinds, const uint64_t* values, uint32_t count, const uint32_t* candidates, uint32_t symbol_count, uint32_t body_count,
+                                                 uint8_t* addressed)
 {
-    (void)scalar;
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const uint32_t n = count - first < 64 ? count - first : 64;
+        const __mmask64 mask = n == 64 ? UINT64_MAX : (UINT64_C(1) << n) - 1;
+        const __m512i loaded = _mm512_maskz_loadu_epi8(mask, kinds + first);
+        for (__mmask64 hits = _mm512_mask_cmpeq_epi8_mask(mask, loaded, _mm512_set1_epi8(BUSTER_TYPED_GLOBAL_ADDRESS)); hits != 0; hits &= hits - 1)
+        {
+            const uint64_t symbol = values[first + (uint32_t)__builtin_ctzll(hits)];
+            const uint32_t candidate = symbol != 0 && symbol < symbol_count ? candidates[symbol] : 0;
+            addressed[candidate != 0 ? candidate - 1 : body_count] = 1;
+        }
+    }
+}
+
+// The candidates whose address a body's code takes, marked in `addressed` (cleared, a byte a body), by each ready body's
+// entries (check_tier1_inline_addressed_entries).
+static void check_tier1_inline_addressed(const CheckTier1Inline* inlining, uint8_t* addressed)
+{
     const Tier0Function* functions = inlining->lowered->functions;
     for (uint32_t b = 0; b < inlining->body_count; b += 1)
     {
         const Tier0Function* function = &functions[b];
         const uint32_t count = inlining->ready[b] != 0 ? function->count : 0;
-        if (BUSTER_SCALAR_PATH(scalar))
-        {
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint64_t symbol = function->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS ? function->values[i] : 0;
-                const uint32_t candidate = symbol != 0 && symbol < inlining->symbol_count ? inlining->candidates[symbol] : 0;
-                addressed[candidate != 0 ? candidate - 1 : inlining->body_count] = 1;
-            }
-        }
-        else
-        {
-            for (uint32_t first = 0; first < count; first += 64)
-            {
-                const uint32_t n = count - first < 64 ? count - first : 64;
-                const __mmask64 mask = n == 64 ? UINT64_MAX : (UINT64_C(1) << n) - 1;
-                const __m512i kinds = _mm512_maskz_loadu_epi8(mask, function->kinds + first);
-                for (__mmask64 hits = _mm512_mask_cmpeq_epi8_mask(mask, kinds, _mm512_set1_epi8(BUSTER_TYPED_GLOBAL_ADDRESS)); hits != 0; hits &= hits - 1)
-                {
-                    const uint64_t symbol = function->values[first + (uint32_t)__builtin_ctzll(hits)];
-                    const uint32_t candidate = symbol != 0 && symbol < inlining->symbol_count ? inlining->candidates[symbol] : 0;
-                    addressed[candidate != 0 ? candidate - 1 : inlining->body_count] = 1;
-                }
-            }
-        }
+        check_tier1_inline_addressed_entries(function->kinds, function->values, count, inlining->candidates, inlining->symbol_count, inlining->body_count, addressed);
     }
 }
 
@@ -487,7 +481,7 @@ static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inl
         if (addressed != 0)
         {
             memset(addressed, 0, (uint64_t)count + 1);
-            check_tier1_inline_addressed(inlining, inlining->scalar, addressed);
+            check_tier1_inline_addressed(inlining, addressed);
         }
         for (uint32_t b = 0; b < count; b += 1)
         {
@@ -666,7 +660,6 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         // The growth bounds keep a pathological unit's; an always_inline callee's size is no reason to keep its call.
         IrInlineOptions options = ir_inline_options();
         options.maximum_function_growth = BUSTER_IR_INLINE_MAX_ITEMS / 4;
-        options.scalar = scalar;
         // Whatever its control flow (#2541): its blocks spliced at the call, as clang expands an always_inline function.
         options.control_flow = true;
         // The lowering and the summaries are verified, and the expansion is by SROA below where it runs, else by

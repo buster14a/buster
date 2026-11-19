@@ -25,7 +25,8 @@
 //   whose final verification checks dominance.
 // For each caller among them, the inliner on a unit of it and its direct callees among the file's functions, as the C
 // driver's expansion takes one (every function of internal linkage and #2541's general splice on, so that every such call is
-// a candidate), vector and scalar: the same decisions and the same caller, whose expansion must promote.
+// a candidate), by both forms of the caller's runs (IrInlineOptions.add_sites: masked adds, or gathers; #2924: its scalar
+// twin is gone): the same decisions and the same caller, whose expansion must promote.
 //
 // A refusal both versions give alike (IR_ERROR_UNSUPPORTED: vectors for GVN and LICM, labels and the dynamic stack for
 // some) is counted, not failed; any other error, a disagreement, or a result that doesn't promote fails the command (the
@@ -292,7 +293,8 @@ static int ir_source_passes_member_order(const void* left, const void* right)
 // The inliner on each caller of `file`'s functions as the C driver's expansion takes it (c_check_tier1_inline.c): a unit
 // of the caller and its direct callees among the file's functions (those of `prepared`), at most
 // BUSTER_IR_SOURCE_PASSES_CALLEES of them, the caller alone rewritten (IrInlineUnit.only), every function of internal
-// linkage and #2541's general splice on; vector and scalar: the same decisions and functions. A caller with no such
+// linkage and #2541's general splice on; by the default options and with the caller's runs by gathers alone
+// (IrInlineOptions.add_sites 0): the same decisions and functions. A caller with no such
 // callee isn't run. The units' tables go to `tables`, which the inliner requires apart from its output's tail and its
 // scratch.
 #define BUSTER_IR_SOURCE_PASSES_CALLEES 64u
@@ -384,22 +386,22 @@ static void ir_source_passes_unit(IrSourcePassTotals* totals, const char* file, 
             IrInlineOptions options = ir_inline_options();
             options.control_flow = true;
             IrInlineResult vector = { 0 };
-            IrInlineResult scalar = { 0 };
+            IrInlineResult gathered = { 0 };
             uint32_t vector_failed = BUSTER_IR_NONE;
-            uint32_t scalar_failed = BUSTER_IR_NONE;
+            uint32_t gathered_failed = BUSTER_IR_NONE;
             const IrCheck vector_check = ir_optimize_inline(&unit, output, scratch, options, &vector, &vector_failed);
-            options.scalar = true;
-            const IrCheck scalar_check = ir_optimize_inline(&unit, twin, scratch, options, &scalar, &scalar_failed);
-            bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.function_count == scalar.function_count && vector.call_count == scalar.call_count &&
-                        vector.inlined_calls == scalar.inlined_calls &&
-                        (vector.call_count == 0 || (memcmp(vector.decisions, scalar.decisions, vector.call_count) == 0 &&
-                                                    memcmp(vector.callees, scalar.callees, (uint64_t)vector.call_count * sizeof(uint32_t)) == 0 &&
-                                                    memcmp(vector.costs, scalar.costs, (uint64_t)vector.call_count * sizeof(uint32_t)) == 0));
-            same = same && ir_source_passes_equal(&vector.functions[position], &scalar.functions[position]);
+            options.add_sites = 0;
+            const IrCheck gathered_check = ir_optimize_inline(&unit, twin, scratch, options, &gathered, &gathered_failed);
+            bool same = vector_check.error == IR_OK && gathered_check.error == IR_OK && vector.function_count == gathered.function_count && vector.call_count == gathered.call_count &&
+                        vector.inlined_calls == gathered.inlined_calls &&
+                        (vector.call_count == 0 || (memcmp(vector.decisions, gathered.decisions, vector.call_count) == 0 &&
+                                                    memcmp(vector.callees, gathered.callees, (uint64_t)vector.call_count * sizeof(uint32_t)) == 0 &&
+                                                    memcmp(vector.costs, gathered.costs, (uint64_t)vector.call_count * sizeof(uint32_t)) == 0));
+            same = same && ir_source_passes_equal(&vector.functions[position], &gathered.functions[position]);
             // An expansion promotes, as the driver's promotion takes it.
             IrFunction promoted = { 0 };
             const bool promotes = !same || vector.inlined_calls == 0 || ssa_ir_promote(&vector.functions[position], twin, scratch, &promoted).error == IR_OK;
-            const IrCheck refusal = vector_failed == scalar_failed ? scalar_check : vector_check;
+            const IrCheck refusal = vector_failed == gathered_failed ? gathered_check : vector_check;
             ir_source_passes_record(totals, IR_SOURCE_PASS_INLINE, file, source->functions[caller].name, vector_check, refusal, same, promotes, vector.inlined_calls != 0,
                                     vector.inlined_calls);
             arena_pop_to(output, output_mark);
@@ -529,7 +531,8 @@ static int run_ir_source_passes_tests(int count, char** arguments)
 
 // #139's compile time per pass for both versions (benchmark-ir-source --passes): the files' functions prepared as
 // test-ir-source --passes prepares them, each lowered (L) and promoted (P) once outside the time, and each caller's
-// inlining unit built once; then each pass by its vector and its scalar version over the whole corpus, in
+// inlining unit built once; then each pass by its vector and its scalar version over the whole corpus (by its one version,
+// where #2924 left one: the inliner, the unroller and the loop vectorizer), in
 // BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of the pair runs first, after a warm-up of each. The passes
 // take the inputs --tier1's pipeline gives them: SROA (Tier 1's options), #866's solver and the inliner the lowered form,
 // the optimizer's rows and LICM the promoted one (the driver's optimizer and LICM take it after the wide integers' halves,
@@ -563,7 +566,7 @@ struct IrSourcePassCorpus
 };
 
 // One run of `pass` by one version over the corpus; the output put back after each function. Returns its reading, with
-// the functions it refused (the preparation keeps only the inliner units that both versions take).
+// the functions it refused (the preparation keeps only the inliner units that the inliner takes).
 static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar, const IrSourcePassCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
 {
     uint32_t failures = 0;
@@ -615,7 +618,6 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
         {
             IrInlineOptions options = ir_inline_options();
             options.control_flow = true;
-            options.scalar = scalar;
             IrInlineResult result = { 0 };
             uint32_t failed = BUSTER_IR_NONE;
             check = ir_optimize_inline(&corpus->units[f].unit, output, scratch, options, &result, &failed);
@@ -642,8 +644,8 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
     return taken;
 }
 
-// Adds each caller of `source`'s functions (lowered in `functions`, from the corpus's `first`) whose unit both inliner
-// versions take, as ir_source_passes_unit builds it, the unit's tables in `tables`.
+// Adds each caller of `source`'s functions (lowered in `functions`, from the corpus's `first`) whose unit the inliner
+// takes, as ir_source_passes_unit builds it, the unit's tables in `tables`.
 static void ir_source_passes_corpus_units(IrSourcePassCorpus* corpus, const IrSourceFile* source, uint32_t first, Arena* tables, Arena* output, Arena* scratch)
 {
     const IrFunction* functions = corpus->lowered + first;
@@ -715,18 +717,15 @@ static void ir_source_passes_corpus_units(IrSourcePassCorpus* corpus, const IrSo
                 .symbol_count = symbol_count,
                 .only = position + 1,
             };
-            // Kept where both versions take it: a refusal is no unit's time.
+            // Kept where the inliner takes it: a refusal is no unit's time.
             const uint64_t mark = output->length;
             IrInlineOptions options = ir_inline_options();
             options.control_flow = true;
             IrInlineResult result = { 0 };
             uint32_t failed = BUSTER_IR_NONE;
-            const bool vector = ir_optimize_inline(&unit->unit, output, scratch, options, &result, &failed).error == IR_OK;
+            const bool taken = ir_optimize_inline(&unit->unit, output, scratch, options, &result, &failed).error == IR_OK;
             arena_pop_to(output, mark);
-            options.scalar = true;
-            const bool twin = ir_optimize_inline(&unit->unit, output, scratch, options, &result, &failed).error == IR_OK;
-            arena_pop_to(output, mark);
-            corpus->unit_count += vector && twin;
+            corpus->unit_count += taken;
         }
     }
 }
@@ -829,8 +828,8 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             }
             double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
             memset(values, 0, sizeof(values));
-            // The unroller and the loop vectorizer have one path (#2924): timed once.
-            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL ? 1 : 2;
+            // The inliner, the unroller and the loop vectorizer have one path (#2924): timed once.
+            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_INLINE ? 1 : 2;
             for (uint32_t version = 0; version < versions; version += 1)
             {
                 failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;

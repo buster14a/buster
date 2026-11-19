@@ -599,11 +599,10 @@ struct CheckTier1Inline
     uint32_t* sites;
     // Per body (#2541 step 2), whether the unit stage holds its code back for the last pass (check_tier1_inline_stage), and
     // whether the last pass let it go on (check_program_emit_last); whether the run holds any back (`holding`, which the
-    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm). And the scalar twins' choice.
+    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm).
     uint8_t* held;
     uint8_t* released;
     bool holding;
-    bool scalar;
     // Whether the run writes -g's source rows: summaries then carry their source identities, which their expansions
     // keep as instances (IrDebugInline, #2541 step 3).
     bool sources;
@@ -1034,6 +1033,10 @@ static void check_tier1_lane_release(CheckTier1Lane* lane);
 static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, bool scalar, Arena* arena,
                                      CheckTier1Inline* table);
 static void check_tier1_inline_release(CheckTier1Inline* table);
+// Defined in c_check_tier1_inline.c (#2541 step 2): one body's entries that take a candidate's address, marked in `addressed`
+// (test-tier0-inline checks it against its definition).
+static void check_tier1_inline_addressed_entries(const uint8_t* kinds, const uint64_t* values, uint32_t count, const uint32_t* candidates, uint32_t symbol_count, uint32_t body_count,
+                                                 uint8_t* addressed);
 // Gives `table` a new generation, which no lane's cache is valid for: its bodies are lowered again.
 static void check_tier1_inline_renew(CheckTier1Inline* table);
 // Defined in c_check_tier1_inline.c (#2541 step 2): the candidates the emission gives no code, once every body's is made.
