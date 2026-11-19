@@ -18,9 +18,8 @@
 // bytes (its 64-byte stores). Besides the machine code, x86_encode can store each instruction's offset, and the end of
 // each instruction marked with BUSTER_X86_FORM_FIXUP (one with a symbolic operand), from which x86_fixup_distance
 // locates the fields a fixup patches without decoding the machine code again. x86_encoder_initialize_address32,
-// x86_encode_address32, x86_encode_scalar_address32 and x86_validate_address32 are the same for 32-bit addresses (a
-// 67 on every memory operand), and x86_encoder_initialize_apx, x86_encode_apx, x86_encode_scalar_apx and
-// x86_validate_apx for APX's general registers 16 to 31 (a REX2 prefix in a legacy form of maps 0 and 1, and EVEX's B4
+// x86_encode_address32 and x86_validate_address32 are the same for 32-bit addresses (a 67 on every memory operand), and
+// x86_encoder_initialize_apx, x86_encode_apx and x86_validate_apx for APX's general registers 16 to 31 (a REX2 prefix in a legacy form of maps 0 and 1, and EVEX's B4
 // and X4 in an EVEX form), and x86_encoder_initialize_legacy, x86_encode_mode32, x86_validate_32, x86_encode_mode16 and
 // x86_validate_16 for 32-bit and 16-bit modes' instructions (the mode's
 // operand and address sizes, ModRM's 16-bit addresses, no REX, segment overrides in the decorations, and the
@@ -66,7 +65,7 @@
 //     x86_instruction_is_valid_32 and x86_instruction_is_valid_16) and x86_validate (and x86_validate_address32,
 //     x86_validate_apx, x86_validate_32 and x86_validate_16).
 //   - The scalar encoder: encode_one (which validation in 16- and 32-bit modes measures by, and the assembler's form
-//     matching), and x86_encode_scalar_address32 and x86_encode_scalar_apx.
+//     matching).
 //   - The vectorized encoder: X86Gather, X86Store and X86FixupStore (the variants the benchmark compares), X86Fields,
 //     the addressing mode tables (x86_mode_fields, x86_mode_constants and x86_mode_presence; for APX
 //     x86_mode_fields_apx; and for 16- and 32-bit modes x86_mode_fields_16, the
@@ -5054,20 +5053,18 @@ static __attribute__((unused)) int64_t x86_measure(const X86Instruction* instruc
 // template has no room for it among them: see x86_form_lacks_room). Requires x86_encoder_initialize.
 static __attribute__((unused)) uint64_t x86_validate(const X86Instruction* instructions, uint64_t count);
 
-// The same three for 32-bit addresses (the x32 ABI's), with templates of their own, which x86_encoder_initialize_address32
-// builds (and all three require, validation too): each memory operand has a 67, and its base and index are 32-bit
+// The same two for 32-bit addresses (the x32 ABI's), with templates of their own, which x86_encoder_initialize_address32
+// builds (and both require, validation too): each memory operand has a 67, and its base and index are 32-bit
 // registers (and RIP is EIP). Instructions without a memory operand encode as for 64-bit addresses.
 // x86_validate_address32 rejects too MPX's instructions with a memory operand, which are #UD with 67 in 64-bit mode,
 // and memory operands in the forms whose template has no room for the 67 (see x86_form_lacks_room).
 static __attribute__((unused)) bool x86_encoder_initialize_address32(void);
 static __attribute__((unused)) int64_t x86_encode_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
                                                             uint32_t* offsets, uint32_t* fixup_ends);
-static __attribute__((unused)) int64_t x86_encode_scalar_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
-                                                                   uint32_t* offsets, uint32_t* fixup_ends);
 static __attribute__((unused)) uint64_t x86_validate_address32(const X86Instruction* instructions, uint64_t count);
 
-// The same three for APX's 32 general registers (Intel's Advanced Performance Extensions), with templates of their own,
-// which x86_encoder_initialize_apx builds (and all three require): in a legacy form of maps 0 and 1 (an opcode without
+// The same two for APX's 32 general registers (Intel's Advanced Performance Extensions), with templates of their own,
+// which x86_encoder_initialize_apx builds (and both require): in a legacy form of maps 0 and 1 (an opcode without
 // 0F, or 0F and one byte), a general register operand, base or index can be 16 to 31, which a REX2 prefix encodes in
 // REX's place: D5, then a payload of M0, R4, X4, B4, W, R3, X3 and B3, where M0 replaces map 1's 0F; and in an EVEX
 // form, a general register operand, base or general index can be too, which EVEX's R', V', B4 (P0's bit 3) and X4 (P1's
@@ -5080,13 +5077,11 @@ static __attribute__((unused)) uint64_t x86_validate_address32(const X86Instruct
 static __attribute__((unused)) bool x86_encoder_initialize_apx(void);
 static __attribute__((unused)) int64_t x86_encode_apx(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                       uint32_t* fixup_ends);
-static __attribute__((unused)) int64_t x86_encode_scalar_apx(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
-                                                             uint32_t* offsets, uint32_t* fixup_ends);
 static __attribute__((unused)) uint64_t x86_validate_apx(const X86Instruction* instructions, uint64_t count);
 
-// The same three for 32-bit mode (protected and compatibility mode with a 32-bit code segment) and for 16-bit mode
+// The same two for 32-bit mode (protected and compatibility mode with a 32-bit code segment) and for 16-bit mode
 // (real mode, virtual-8086 mode and protected mode with a 16-bit code segment), with templates of their own, which
-// x86_encoder_initialize_legacy builds with the forms' properties there (x86_form_legacy), and all six require. An
+// x86_encoder_initialize_legacy builds with the forms' properties there (x86_form_legacy), and all four require. An
 // instruction is the same as in 64-bit mode, its operand sizes those of its form, but without REX: registers 0 to 7 (AH
 // to BH with BUSTER_X86_REGISTER_HIGH_BYTE, as there's no SPL to DIL), no 64-bit operands and no RIP, so that
 // [displacement] is ModRM's own absolute address. The mode decides the prefixes: a 16-bit form's 66 is the operand
@@ -6886,56 +6881,6 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
         }
     }
     return length;
-}
-
-static int64_t encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends,
-                             X86EncoderMode encoder)
-{
-    int64_t result;
-    if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
-    {
-        result = X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
-    }
-    else if (capacity < BUSTER_X86_ENCODER_CAPACITY(count))
-    {
-        result = X86_ENCODER_ERROR_OUTPUT_TOO_SMALL;
-    }
-    else if (validate_instructions(instructions, count, encoder) != count)
-    {
-        result = X86_ENCODER_ERROR_INVALID_INSTRUCTION;
-    }
-    else
-    {
-        uint64_t length = 0;
-        uint64_t marked = 0;
-        for (uint64_t i = 0; i < count; i += 1)
-        {
-            if (offsets != 0)
-            {
-                offsets[i] = (uint32_t)length;
-            }
-            length += encode_one(&instructions[i], output + length, encoder);
-            if (fixup_ends != 0 && (instructions[i].form & BUSTER_X86_FORM_FIXUP))
-            {
-                fixup_ends[marked] = (uint32_t)length;
-                marked += 1;
-            }
-        }
-        result = (int64_t)length;
-    }
-    return result;
-}
-
-static int64_t x86_encode_scalar_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                           uint32_t* fixup_ends)
-{
-    return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, X86_ENCODER_MODE_ADDRESS32);
-}
-
-static int64_t x86_encode_scalar_apx(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                     uint32_t* fixup_ends)
-{
-    return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, X86_ENCODER_MODE_APX);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

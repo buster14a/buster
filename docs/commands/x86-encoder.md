@@ -50,13 +50,13 @@ among them). `x86_encode` checks nothing: it takes what `x86_validate` accepts,
 as the code generator makes it (an immediate or rel8 outside its field's range,
 for one, gets its low bytes). Then it runs those checks again with 32-bit
 addresses, but the known fixups: 34 known encodings, a digest of their own,
-`x86_encode_16_address32` and `x86_encode_64_address32` against the scalar
+`x86_encode_16_address32` and `x86_encode_64_address32` against the reference
 encoder on the random streams (and their digest) and at page edges, and invalid operands, among
 them MPX memory operands and memory operands in the 312 FS and GS forms and the
 116 forms without room for the `67`. And again for APX, but the known fixups:
 153 known encodings, 31 known invalid instructions (as GNU as rejects them), a
 digest of their own, `x86_encode_16_apx` and `x86_encode_64_apx` against the
-scalar encoder on random streams in which half the forms have REX2 and a quarter
+reference encoder on random streams (and their digest) in which half the forms have REX2 and a quarter
 are EVEX ones, and at page edges, and invalid operands, among them a high byte
 register with REX2, registers 16 to 31 in forms without REX2 or EVEX and XMM16
 to XMM31 in SSE's forms. And in 32-bit and 16-bit modes: 159 and 150 known
@@ -113,8 +113,7 @@ GNU as writes zeros and a relocation for them, and `--compare-object` reads
 relocation's offset, type, addend and symbol with the ones the fixup ends and
 `x86_fixup_distance` give, and the mode's vectorized encoder's bytes and fixup
 ends with the reference encoder's (in 64-bit mode `x86_encode` after
-`x86_validate`, and in 32-bit and 16-bit modes `x86_encode_mode32` and `x86_encode_mode16` after theirs; for 32-bit
-addresses and APX, their scalar encoders). With `--address32`, the printer adds `addr32`
+`x86_validate`, and in the other modes each entry point after its own validation). With `--address32`, the printer adds `addr32`
 where no general register gives the address size, and the relocations of
 displacements other than RIP-relative ones are R_X86_64_32; with `--apx`, it
 names registers 16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`); and with
@@ -130,8 +129,8 @@ each of 32-bit and 16-bit mode, with 135,563 and 136,322).
 ## x86-64 encoder benchmark
 
 `./build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform |
---vector] [--mode32 | --mode16] [--offsets] [--fixups] [--after-scalar MS]
-[--only NAME]` checks every implementation against the scalar loop, then
+--vector] [--mode32 | --mode16 | --apx | --address32] [--offsets] [--fixups]
+[--after-scalar MS] [--only NAME]` checks every implementation against the scalar loop, then
 reports 21 interleaved-pass medians per encoded instruction (time, cycles,
 instructions, IPC, and the throttle: PMCx1A0's undocumented umask 0x08, raw
 event `0x1000008a0`, which #199 reads as the dispatch slots Zen 5's power cap
@@ -166,7 +165,10 @@ numbers). `--mode32` and `--mode16`
 time the mode's loops at 64 and 16 per iteration (`x86_encode_64_mode32` and
 `x86_encode_16_mode32`, or the 16-bit ones) and its scalar loop instead, on a
 mix like 32-bit compiler output or like real-mode code (or with `--uniform`, the
-mode's forms). Decide them, and any other performance question, with
+mode's forms). `--apx` and `--address32` do the same for APX's registers and 32-bit
+addresses (`x86_encode_16_apx`, `x86_encode_16_address32` and the 64 ones), on the
+compiler mix with registers 16 to 31 in the forms that can have them, or with
+32-bit addresses. Decide them, and any other performance question, with
 measurements on the 9700X (not Zen 4, and not llvm-mca, whose predictions are
 well off), using uops.info's Zen 5 port data to explain them;
 `docs/x86-64-encoder.md` has the current numbers. Clang's code for the loop

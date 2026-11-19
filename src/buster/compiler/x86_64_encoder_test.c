@@ -57,13 +57,13 @@
 //   - Entry errors: a capacity a byte short of BUSTER_X86_ENCODER_CAPACITY(count), and a count past
 //     BUSTER_X86_ENCODER_MAX_INSTRUCTIONS, which x86_encode must refuse, and the exact capacity, which it must take.
 // Then the same again with 32-bit addresses (x86_test_mode, from the seed's first state again), but the known fixups:
-// x86_encode_address32 and x86_encode_scalar_address32 on x86_known_encodings_address32, a digest of their own
+// x86_encode_address32 on x86_known_encodings_address32, a digest of its own
 // (BUSTER_X86_TEST_DIGEST_ADDRESS32), x86_encode_16_address32 and x86_encode_64_address32 on the random streams and at
 // page edges, and the invalid instructions, with two more breaks: an MPX memory operand and a memory operand in a form
 // without room for the 67. --address32 runs only this pass.
-// And again for APX, but the known fixups, which is all --apx runs: x86_encode_apx and x86_encode_scalar_apx on
-// x86_known_encodings_apx, the instructions of x86_known_invalid_apx, which x86_validate_apx and x86_encode_scalar_apx
-// must reject (as GNU as does), a digest of their own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_16_apx and
+// And again for APX, but the known fixups, which is all --apx runs: x86_encode_apx on x86_known_encodings_apx, the
+// instructions of x86_known_invalid_apx, which x86_validate_apx and so the reference encoder must reject (as GNU as
+// does), a digest of its own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_16_apx and
 // x86_encode_64_apx on the random streams (in which half the forms have REX2 and a quarter are EVEX ones, whose general
 // registers, bases and general indexes are 16 to 31 half the time) and at page edges, and the invalid instructions, with
 // three more breaks: a high byte register with REX2, a general register, base or index from 16 to 31 in a form without
@@ -163,9 +163,9 @@
 
 // The entry point the instructions are for, which --address32, --apx, --mode32 and --mode16 and the passes of
 // x86_encode_address32, x86_encode_apx, x86_encode_mode32 and x86_encode_mode16 set: with 32-bit addresses, which
-// x86_validate_address32 checks, x86_encode_scalar_address32 encodes and the printer writes with 32-bit registers; with
-// APX's general registers 16 to 31 in the forms with REX2 (x86_form_has_rex2), which x86_validate_apx checks and
-// x86_encode_scalar_apx encodes; or in 32-bit or 16-bit mode, without REX, which x86_validate_32 and x86_validate_16
+// x86_validate_address32 checks, x86_encode_address32 encodes and the printer writes with 32-bit registers; with APX's
+// general registers 16 to 31 in the forms with REX2 (x86_form_has_rex2), which x86_validate_apx checks and
+// x86_encode_apx encodes; or in 32-bit or 16-bit mode, without REX, which x86_validate_32 and x86_validate_16
 // check and x86_encode_mode32 and x86_encode_mode16 encode.
 static X86EncoderMode x86_test_mode;
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
@@ -291,23 +291,24 @@ static uint32_t x86_form_opcode(const X86FormDescription* form)
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
-// The mode's reference encoder, which validates the instructions first (see x86_test_mode): in 64-bit, 32-bit and
-// 16-bit modes the mode's vectorized entry point after its validation, the encoder's one implementation (#2924), which
-// the known encodings, the reference digests and GNU as check; for 32-bit addresses and APX, their scalar encoders.
+// The mode's reference encoder, which validates the instructions first (see x86_test_mode): the mode's vectorized entry
+// point after its validation, the encoder's one implementation (#2924), which the known encodings, the reference digests
+// and GNU as check.
 static int64_t x86_test_encode_reference(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
     const bool checked = count <= BUSTER_X86_ENCODER_MAX_INSTRUCTIONS && capacity >= BUSTER_X86_ENCODER_CAPACITY(count);
-    const uint64_t valid = !checked                                 ? count
-                           : x86_test_mode == X86_ENCODER_MODE_32 ? x86_validate_32(instructions, count)
-                           : x86_test_mode == X86_ENCODER_MODE_16 ? x86_validate_16(instructions, count)
-                           : x86_test_mode == X86_ENCODER_MODE_64 ? x86_validate(instructions, count)
-                                                                  : count;
-    return x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_encode_scalar_address32(instructions, count, output, capacity, offsets, fixup_ends)
-           : x86_test_mode == X86_ENCODER_MODE_APX     ? x86_encode_scalar_apx(instructions, count, output, capacity, offsets, fixup_ends)
-           : valid != count                            ? X86_ENCODER_ERROR_INVALID_INSTRUCTION
-           : x86_test_mode == X86_ENCODER_MODE_32      ? x86_encode_mode32(instructions, count, output, capacity, offsets, fixup_ends)
-           : x86_test_mode == X86_ENCODER_MODE_16      ? x86_encode_mode16(instructions, count, output, capacity, offsets, fixup_ends)
-                                                       : x86_encode(instructions, count, output, capacity, offsets, fixup_ends);
+    const uint64_t valid = !checked                                        ? count
+                           : x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_validate_address32(instructions, count)
+                           : x86_test_mode == X86_ENCODER_MODE_APX       ? x86_validate_apx(instructions, count)
+                           : x86_test_mode == X86_ENCODER_MODE_32        ? x86_validate_32(instructions, count)
+                           : x86_test_mode == X86_ENCODER_MODE_16        ? x86_validate_16(instructions, count)
+                                                                         : x86_validate(instructions, count);
+    return valid != count                                ? X86_ENCODER_ERROR_INVALID_INSTRUCTION
+           : x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_encode_address32(instructions, count, output, capacity, offsets, fixup_ends)
+           : x86_test_mode == X86_ENCODER_MODE_APX       ? x86_encode_apx(instructions, count, output, capacity, offsets, fixup_ends)
+           : x86_test_mode == X86_ENCODER_MODE_32        ? x86_encode_mode32(instructions, count, output, capacity, offsets, fixup_ends)
+           : x86_test_mode == X86_ENCODER_MODE_16        ? x86_encode_mode16(instructions, count, output, capacity, offsets, fixup_ends)
+                                                         : x86_encode(instructions, count, output, capacity, offsets, fixup_ends);
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
@@ -318,16 +319,6 @@ static int64_t x86_test_encode(const X86Instruction* instructions, uint64_t coun
            : x86_test_mode == X86_ENCODER_MODE_32      ? x86_encode_mode32(instructions, count, output, capacity, offsets, fixup_ends)
            : x86_test_mode == X86_ENCODER_MODE_16      ? x86_encode_mode16(instructions, count, output, capacity, offsets, fixup_ends)
                                                        : x86_encode(instructions, count, output, capacity, offsets, fixup_ends);
-}
-
-// The name of the mode's reference encoder (x86_test_encode_reference's).
-static const char* x86_test_reference_name(void)
-{
-    return x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? "x86_encode_scalar_address32"
-           : x86_test_mode == X86_ENCODER_MODE_APX     ? "x86_encode_scalar_apx"
-           : x86_test_mode == X86_ENCODER_MODE_32      ? "x86_validate_32 and x86_encode_mode32"
-           : x86_test_mode == X86_ENCODER_MODE_16      ? "x86_validate_16 and x86_encode_mode16"
-                                                       : "x86_validate and x86_encode";
 }
 
 // The name of the mode's vectorized encoder (x86_test_encode's).
@@ -3501,9 +3492,9 @@ static const KnownEncoding* x86_mode_known_encodings(uint64_t* count)
                                                        : x86_known_encodings;
 }
 
-// Checks one encoder of the mode on its known encodings, encoding each alone, and again with the fixup flag, whose end
-// it must report.
-static uint64_t x86_check_known_with(const char* name, bool vectorized)
+// Checks the mode's vectorized entry point on its known encodings, encoding each alone, and again with the fixup flag,
+// whose end it must report.
+static uint64_t x86_check_known_with(const char* name)
 {
     static uint8_t output[BUSTER_X86_ENCODER_CAPACITY(1)];
     uint32_t fixup_ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)];
@@ -3518,8 +3509,7 @@ static uint64_t x86_check_known_with(const char* name, bool vectorized)
             X86Instruction instruction = known->instruction;
             instruction.form |= marked ? BUSTER_X86_FORM_FIXUP : 0;
             fixup_ends[0] = UINT32_MAX;
-            const int64_t length = vectorized ? x86_test_encode(&instruction, 1, output, sizeof(output), 0, fixup_ends)
-                                              : x86_test_encode_reference(&instruction, 1, output, sizeof(output), 0, fixup_ends);
+            const int64_t length = x86_test_encode(&instruction, 1, output, sizeof(output), 0, fixup_ends);
             if (length != known->length || memcmp(output, known->bytes, known->length) != 0 || (marked && fixup_ends[0] != known->length))
             {
                 if (failures < BUSTER_X86_TEST_REPORTED)
@@ -3544,29 +3534,18 @@ static uint64_t x86_check_known_with(const char* name, bool vectorized)
     return failures;
 }
 
-// Checks the mode's encoders on its known encodings: its vectorized one, and for 32-bit addresses and APX, their scalar
-// ones (in the other modes the reference is the vectorized one itself).
+// Checks the mode's vectorized entry point on its known encodings.
 static bool x86_check_known(void)
 {
-    const bool twin = x86_test_mode == X86_ENCODER_MODE_ADDRESS32 || x86_test_mode == X86_ENCODER_MODE_APX;
-    const uint64_t scalar = twin ? x86_check_known_with(x86_test_reference_name(), false) : 0;
-    const uint64_t vectorized = x86_check_known_with(x86_test_vectorized_name(), true);
+    const uint64_t failures = x86_check_known_with(x86_test_vectorized_name());
     uint64_t count = 0;
     x86_mode_known_encodings(&count);
-    if (twin)
-    {
-        printf("known encodings%s: %lu instructions, %lu wrong (scalar), %lu wrong (vectorized)\n", x86_test_mode_words(), (unsigned long)count, (unsigned long)scalar,
-               (unsigned long)vectorized);
-    }
-    else
-    {
-        printf("known encodings%s: %lu instructions, %lu wrong\n", x86_test_mode_words(), (unsigned long)count, (unsigned long)vectorized);
-    }
-    return scalar == 0 && vectorized == 0;
+    printf("known encodings%s: %lu instructions, %lu wrong\n", x86_test_mode_words(), (unsigned long)count, (unsigned long)failures);
+    return failures == 0;
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
-// Instructions that x86_validate_apx and x86_encode_scalar_apx must reject, as GNU as does: the XSAVE
+// Instructions that x86_validate_apx and so the reference encoder must reject, as GNU as does: the XSAVE
 // family with a base or index from 16 to 31 (REX2 is #UD with it), a high byte register with REX2, XMM16 to XMM31 in
 // SSE's forms (which only EVEX has), and registers 16 to 31 in VEX forms that have no EVEX one.
 static const X86Instruction x86_known_invalid_apx[] = {
@@ -3624,7 +3603,7 @@ static bool x86_check_known_invalid_apx(void)
     {
         const X86Instruction* instruction = &x86_known_invalid_apx[i];
         const bool rejected = x86_validate_apx(instruction, 1) == 0 &&
-                              x86_encode_scalar_apx(instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+                              x86_test_encode_reference(instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
         if (!rejected && failures < BUSTER_X86_TEST_REPORTED)
         {
             printf("  accepted: ");
@@ -3771,23 +3750,19 @@ static bool x86_check_known_fixups(void)
     {
         const KnownFixup* known = &fixups[i];
         const bool address16 = x86_test_address16(&known->instruction) && (known->instruction.mode & BUSTER_X86_MODE_MEMORY);
-        for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+        fixup_ends[0] = UINT32_MAX;
+        const int64_t length = x86_test_encode(&known->instruction, 1, output, sizeof(output), 0, fixup_ends);
+        const uint32_t distance = address16 ? x86_fixup_distance_address16(known->instruction.form, known->field) : x86_fixup_distance(known->instruction.form, known->field);
+        if (length != known->length || fixup_ends[0] != known->length || fixup_ends[0] - distance != known->offset)
         {
-            fixup_ends[0] = UINT32_MAX;
-            const int64_t length = vectorized ? x86_test_encode(&known->instruction, 1, output, sizeof(output), 0, fixup_ends)
-                                              : x86_test_encode_reference(&known->instruction, 1, output, sizeof(output), 0, fixup_ends);
-            const uint32_t distance = address16 ? x86_fixup_distance_address16(known->instruction.form, known->field) : x86_fixup_distance(known->instruction.form, known->field);
-            if (length != known->length || fixup_ends[0] != known->length || fixup_ends[0] - distance != known->offset)
+            if (failures < BUSTER_X86_TEST_REPORTED)
             {
-                if (failures < BUSTER_X86_TEST_REPORTED)
-                {
-                    printf("  %s: ", vectorized ? x86_test_vectorized_name() : x86_test_reference_name());
-                    x86_print_instruction(stdout, &known->instruction, 1u << known->field);
-                    printf(": %lld bytes, end %u, field at %d; expected %u bytes, field at %u\n", (long long)length, fixup_ends[0],
-                           (int)fixup_ends[0] - (int)distance, known->length, known->offset);
-                }
-                failures += 1;
+                printf("  %s: ", x86_test_vectorized_name());
+                x86_print_instruction(stdout, &known->instruction, 1u << known->field);
+                printf(": %lld bytes, end %u, field at %d; expected %u bytes, field at %u\n", (long long)length, fixup_ends[0],
+                       (int)fixup_ends[0] - (int)distance, known->length, known->offset);
             }
+            failures += 1;
         }
     }
     printf("known fixups%s: %lu fields, %lu wrong\n", x86_test_mode_words(), (unsigned long)count, (unsigned long)failures);
@@ -4327,7 +4302,7 @@ static bool x86_check_measure_bounds(uint64_t* state, X86Instruction* scratch, X
         action.sa_handler = x86_test_report_fault;
         sigaction(SIGSEGV, &action, &previous_segv);
         sigaction(SIGBUS, &action, &previous_bus);
-        x86_test_page_edge_variant = "x86_measure/scalar";
+        x86_test_page_edge_variant = "x86_measure";
         x86_test_page_edge_outputs = BUSTER_X86_TEST_WITH_OFFSETS;
         for (uint32_t test = 0; test < BUSTER_X86_TEST_SHORT_COUNTS + 3; test += 1)
         {
