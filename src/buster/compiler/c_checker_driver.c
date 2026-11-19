@@ -13819,6 +13819,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool dump_static = false;
     bool emit_object = false;
     RuntimeKind runtime_kind = RUNTIME_KIND_DYNAMIC;
+    // The link kind's options (#1503), which decide runtime_kind after the loop as clang's driver decides it (its
+    // getStaticPIE, getStatic and getPIE): -static-pie over -static, either over -pie and -no-pie whatever their order,
+    // the last of -pie and -no-pie between those two, and -no-pie with -static-pie refused.
+    bool static_pie_requested = false;
+    bool static_requested = false;
+    bool no_pie_requested = false;
+    bool no_pie_last = false;
     bool syntax_only = false;
     bool quiet = false;
     bool return_warning = true;
@@ -14070,18 +14077,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 }
             }
         }
-        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE)
+        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE || match.exact == C_OPTION_NO_PIE)
         {
-            // Clang gives -static-pie priority over -static, and either static request priority over -pie,
+            // Clang gives -static-pie priority over -static, and either static request priority over -pie and -no-pie,
             // irrespective of their argv order. Never downgrade a static request to shared-library resolution.
-            if (match.exact == C_OPTION_STATIC_PIE)
-            {
-                runtime_kind = RUNTIME_KIND_STATIC_PIE;
-            }
-            else if (match.exact == C_OPTION_STATIC && runtime_kind != RUNTIME_KIND_STATIC_PIE)
-            {
-                runtime_kind = RUNTIME_KIND_STATIC;
-            }
+            static_pie_requested |= match.exact == C_OPTION_STATIC_PIE;
+            static_requested |= match.exact == C_OPTION_STATIC;
+            no_pie_requested |= match.exact == C_OPTION_NO_PIE;
+            no_pie_last = match.exact == C_OPTION_NO_PIE || (no_pie_last && match.exact != C_OPTION_PIE);
+            runtime_kind = static_pie_requested ? RUNTIME_KIND_STATIC_PIE
+                           : static_requested   ? RUNTIME_KIND_STATIC
+                           : no_pie_last        ? RUNTIME_KIND_NO_PIE
+                                                : RUNTIME_KIND_DYNAMIC;
         }
         else if (!check_request_scan_match(&request, arguments[i], match))
         {
@@ -14410,7 +14417,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
     }
     const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
-    const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && runtime_kind != RUNTIME_KIND_DYNAMIC;
+    const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && !runtime_kind_is_dynamic_executable(runtime_kind);
+    // Clang refuses -no-pie beside -static-pie in either order when it links ("cannot specify 'nopie' along with
+    // 'static-pie'"); -c and -fsyntax-only leave both unused.
+    const bool pie_conflict = link && static_pie_requested && no_pie_requested;
     // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
     // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested, else,
     // where it emits code, the object and linkage options its producer doesn't implement (#1124: a command line's
@@ -14423,7 +14433,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
-    bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
+    bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && !pie_conflict && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
                   !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_helper_forms && !invalid_tier1_schedule && !invalid_tier1_passes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || invalid_stdin))
     {
@@ -14575,6 +14585,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (runtime_path_refused)
     {
         fprintf(stderr, "error: runtime search paths require dynamic output\n");
+    }
+    else if (pie_conflict)
+    {
+        fprintf(stderr, "error: cannot specify '-no-pie' along with '-static-pie'\n");
     }
     else if (codegen.error != CHECK_REQUEST_ACCEPTED)
     {
