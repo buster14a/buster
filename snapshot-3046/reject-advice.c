@@ -11,7 +11,10 @@ int madvise(void* address, size_t bytes, int advice)
     if (advice == 23)
     {
         static const char message[] = "declined writable snapshot advice\n";
-        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+        if (write(STDERR_FILENO, message, sizeof(message) - 1) != (ssize_t)(sizeof(message) - 1))
+        {
+            _exit(125);
+        }
         errno = EINVAL;
         return -1;
     }
