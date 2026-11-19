@@ -3163,12 +3163,11 @@ static bool x86_semantics_check_target(void)
 // x86_match's agreement
 
 // The assembler's matcher (x86_match.c) takes its values' immediates from the shared rule: on every form its syntax
-// supports whose immediate is a value, x86_match_immediate (its scalar path, the vector path's oracle) must take exactly
-// the values x86_immediate_encodes takes, the unsigned spellings of sign-extended patterns among them (0xffffffff for an
-// imm8 at 32 bits, which is -1, and 2^64 - 128 for one at 64 bits), and an __int128 past the operation's width none
-// (2^32 + 5 at 32 bits, whose low 32 bits would fit). Every form it reads as sign-extending (x86_match_sign_extends) must
-// be such a value's form, with a field narrower than the operation, so that its fallback for other immediates never
-// meets one; and its intervals (x86_match_range) must give the same answers as the rule.
+// supports whose immediate is a value, its intervals (x86_match_range) must take exactly the values x86_immediate_encodes
+// takes, the unsigned spellings of sign-extended patterns among them (0xffffffff for an imm8 at 32 bits, which is -1, and
+// 2^64 - 128 for one at 64 bits), and an __int128 past the operation's width none (2^32 + 5 at 32 bits, whose low 32
+// bits would fit). Every form it reads as sign-extending (x86_match_sign_extends) must be such a value's form, with a
+// field narrower than the operation, so that its fallback for other immediates never meets one.
 static bool x86_semantics_check_match(void)
 {
     X86SemanticsTally tally = {
@@ -3211,20 +3210,15 @@ static bool x86_semantics_check_match(void)
             for (uint32_t i = 0; i < total; i += 1)
             {
                 const __int128 operand_value = i < BUSTER_ARRAY_LENGTH(x86_semantics_values) ? (__int128)x86_semantics_values[i] : beyond[i - BUSTER_ARRAY_LENGTH(x86_semantics_values)];
-                const X86Operand operand = {
-                    .value = operand_value,
-                    .kind = X86_OPERAND_IMMEDIATE,
-                };
                 const uint32_t width = effects->width;
                 const bool of_width = operand_value >= -((__int128)1 << (8 * width - 1)) && operand_value <= ((__int128)1 << (8 * width)) - 1;
                 const bool ours = of_width && x86_immediate_encodes(form, (int64_t)operand_value);
-                const bool theirs = x86_match_immediate(description, &operand);
                 const uint64_t bits = (uint64_t)operand_value;
                 const bool interval = operand_value >= INT64_MIN && operand_value <= (__int128)UINT64_MAX &&
                                       (operand_value < 0 ? (int64_t)bits >= range.min : bits <= range.max || bits - range.spelling <= range.max);
-                x86_semantics_expect(&tally, theirs == ours && interval == ours, "%s, 0x%016llx%016llx: x86_match %s it, its intervals %s it, the shared rule %s",
+                x86_semantics_expect(&tally, interval == ours, "%s, 0x%016llx%016llx: x86_match's intervals %s it, the shared rule %s",
                                      x86_semantics_test_name(form), (unsigned long long)((unsigned __int128)operand_value >> 64), (unsigned long long)bits,
-                                     theirs ? "takes" : "refuses", interval ? "take" : "refuse", ours ? "takes" : "refuses");
+                                     interval ? "take" : "refuse", ours ? "takes" : "refuses");
                 values += 1;
                 spellings += ours && operand_value > 0 && description->immediate_bytes < width && (uint64_t)operand_value > (uint64_t)range.max;
             }

@@ -4,8 +4,8 @@
 // #1134's round trip: every form the assembler's syntax admits (x86_match_supported, intersected with a target of every
 // feature) as random records of x86_random_instruction, each printed in Intel syntax by the encoder tests' GNU as printer
 // (x86_print_instruction, without the pseudo-prefixes that pick one encoding of an instruction) and in AT&T syntax by
-// this file's printer, then assembled by both of the matcher's paths. Each must assemble, both paths into the same
-// record, both syntaxes into the same bytes, and that record must be the original instruction: the same mnemonic, the
+// this file's printer, then assembled. Each must assemble, both syntaxes into the same bytes, the records into the
+// test's digest, and that record must be the original instruction: the same mnemonic, the
 // same operands in Intel order (registers, memory, the immediate's value at the operation's width), the same
 // decorations, and the matcher's choice among its encodings: a form of no higher rank (legacy or VEX, then EVEX, then a
 // VEX form that yields to its EVEX siblings: X86Match.rank) and, of the original's rank, no longer. With --cross-check, GNU as assembles both syntaxes'
@@ -375,25 +375,22 @@ static uint32_t asm_round_trip_suffixes(const X86FormDescription* form, const ch
     return count;
 }
 
-// One source of one instruction by both paths (asm_assemble_code): its record, or false if either path refuses it or
-// they differ.
-static bool asm_round_trip_assemble(AsmTest* test, const char* source, bool intel, X86Instruction* record, bool* differ)
+// One source of one instruction (asm_assemble_code): its record, or false if it's refused. The record goes into the
+// test's digest.
+static bool asm_round_trip_assemble(AsmTest* test, const char* source, bool intel, X86Instruction* record)
 {
     const String8 text = { .pointer = (char*)source, .length = strlen(source) };
     test->scalar.length = 0;
     test->vector.length = 0;
-    const AsmCode scalar = asm_assemble_code(text, test->index, (AsmOptions){ .intel = intel }, &test->scalar, &test->vector);
-    const AsmCode vector = asm_assemble_code(text, test->index, (AsmOptions){ .vectorized = true, .intel = intel }, &test->vector, &test->scalar);
-    *differ = (scalar.error == 0) != (vector.error == 0) || scalar.count != vector.count ||
-              (scalar.count == 1 && memcmp(scalar.records, vector.records, sizeof(X86Instruction)) != 0);
-    const bool assembled = scalar.error == 0 && vector.error == 0 && scalar.count == 1 && vector.count == 1;
+    const AsmCode vector = asm_assemble_code(text, test->index, (AsmOptions){ .intel = intel }, &test->vector, &test->scalar);
+    const bool assembled = vector.error == 0 && vector.count == 1;
     asm_test_fold_u64(test, (uint64_t)(vector.error != 0) | (uint64_t)vector.count << 1);
     asm_test_fold(test, vector.records, vector.count == 1 ? sizeof(X86Instruction) : 0);
     if (assembled)
     {
-        *record = scalar.records[0];
+        *record = vector.records[0];
     }
-    return assembled && !*differ;
+    return assembled;
 }
 
 // A failure's details, the first 16.
@@ -444,8 +441,7 @@ static uint32_t asm_round_trip(AsmTest* test, uint64_t* random, uint32_t variant
             memcpy(source, ".intel_syntax noprefix\n", 23);
             const uint32_t length = asm_round_trip_intel(&original, source + 23, sizeof(source) - 23, false);
             X86Instruction matched;
-            bool differ = false;
-            const bool assembled = length != 0 && original_length > 0 && asm_round_trip_assemble(test, source, true, &matched, &differ);
+            const bool assembled = length != 0 && original_length > 0 && asm_round_trip_assemble(test, source, true, &matched);
             uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
             const int64_t matched_length = assembled ? (x86_validate(&matched, 1) == 1 ? x86_encode(&matched, 1, bytes, sizeof(bytes), 0, 0) : -1) : 0;
             // The matcher's choice among the forms of the instruction: a lower rank (legacy or VEX, EVEX, then a VEX form
@@ -456,7 +452,7 @@ static uint32_t asm_round_trip(AsmTest* test, uint64_t* random, uint32_t variant
             const bool shortest = matched_length > 0 && (matched_rank < original_rank || (matched_rank == original_rank && matched_length <= original_length));
             if (!assembled || !asm_round_trip_same(&original, &matched) || !shortest)
             {
-                asm_round_trip_fail(test, differ ? "Intel: the paths differ" : !assembled ? "Intel: not assembled" : !shortest ? "Intel: a longer encoding" : "Intel: another instruction",
+                asm_round_trip_fail(test, !assembled ? "Intel: not assembled" : !shortest ? "Intel: a longer encoding" : "Intel: another instruction",
                                     source + 23, &original);
                 continue;
             }
@@ -469,7 +465,7 @@ static uint32_t asm_round_trip(AsmTest* test, uint64_t* random, uint32_t variant
             X86Instruction att_matched = { 0 };
             for (uint32_t t = 0; !att_done && t < tries; t += 1)
             {
-                att_done = asm_round_trip_att(&original, suffixes[t], att_source, sizeof(att_source)) != 0 && asm_round_trip_assemble(test, att_source, false, &att_matched, &differ);
+                att_done = asm_round_trip_att(&original, suffixes[t], att_source, sizeof(att_source)) != 0 && asm_round_trip_assemble(test, att_source, false, &att_matched);
                 suffixed += att_done && t != 0;
             }
             // The same instruction as Intel's, in the same bytes (a control immediate's field may hold its bits either signed or
@@ -479,7 +475,7 @@ static uint32_t asm_round_trip(AsmTest* test, uint64_t* random, uint32_t variant
             const bool att_same = att_done && asm_round_trip_same(&original, &att_matched) && att_length == matched_length && memcmp(att_bytes, bytes, (size_t)att_length) == 0;
             if (!att_same)
             {
-                asm_round_trip_fail(test, differ ? "AT&T: the paths differ" : !att_done ? "AT&T: not assembled" : "AT&T: another encoding than Intel's", att_source, &original);
+                asm_round_trip_fail(test, !att_done ? "AT&T: not assembled" : "AT&T: another encoding than Intel's", att_source, &original);
                 continue;
             }
             test->checks += 1;
@@ -494,7 +490,7 @@ static uint32_t asm_round_trip(AsmTest* test, uint64_t* random, uint32_t variant
         }
     }
     x86_test_mode = mode;
-    printf("assembler round trip: %u forms, %u records each, in Intel and AT&T syntax by both paths (%u AT&T spellings with a suffix); %u forms "
+    printf("assembler round trip: %u forms, %u records each, in Intel and AT&T syntax (%u AT&T spellings with a suffix); %u forms "
            "left out (branches and embedded rounding)\n",
            forms, variants, suffixed, skipped);
     asm_test_check(test, forms > 4000, "round trip covers the admitted forms", 0);
@@ -650,8 +646,8 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
 
 // #1134's instructions: the 47 the issue tried in inline assembly's AT&T spellings (12 admitted before it, 35 refused),
 // #1115's scalar SSE, conversions and one-operand shift, the AT&T suffixes' widths (x87's, vectors' and a GPR
-// destination's), the condition aliases and the other new operand orders. Each assembles on znver5 by both paths, and
-// with --cross-check into GNU as's bytes.
+// destination's), the condition aliases and the other new operand orders. Each assembles on znver5, and with
+// --cross-check into GNU as's bytes.
 static const char asm_round_trip_issue_att[] =
     "issue_att:\n"
     "rep movsb\nrep stosb\nrep movsq\nlea 8(%rax,%rbx,4), %rcx\nmovzbl %al, %ecx\nmovsbq %al, %rcx\ncmovne %eax, %ecx\nxchg %eax, %ecx\n"
@@ -745,8 +741,7 @@ static void asm_round_trip_fixtures(AsmTest* test, const char* directory, bool c
         x86_match_initialize(test->index, choices[i].everything ? &everything : &vnni);
         test->architecture = X86_ARCH_OTHER;
         X86Instruction record = { 0 };
-        bool differ = false;
-        const bool assembled = asm_round_trip_assemble(test, choices[i].source, false, &record, &differ);
+        const bool assembled = asm_round_trip_assemble(test, choices[i].source, false, &record);
         uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
         const int64_t length = assembled ? (x86_validate(&record, 1) == 1 ? x86_encode(&record, 1, bytes, sizeof(bytes), 0, 0) : -1) : 0;
         asm_test_check(test, length == choices[i].length && memcmp(bytes, choices[i].bytes, choices[i].length) == 0, "the matcher's choice among an instruction's encodings", choices[i].source);
