@@ -1,78 +1,21 @@
-name: Interpreter image resolver verification 3032
+name: Preserve resolver comparison traces 3032
 on:
   push:
     branches: ["codex/3032-resolver-hosted"]
 permissions:
+  actions: read
   contents: read
 jobs:
-  resolver:
+  traces:
     runs-on: ubuntu-26.04
-    timeout-minutes: 48
-    env:
-      BUSTER_HOST_ARCH: vector
-      BUSTER_DEBUG_INFO: '0'
+    timeout-minutes: 4
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: false
-      - name: Check hosted ISA
+      - name: Read the verified hosted job's observation archive
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          lscpu | grep 'Model name'
-          cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/isa"
-          "$RUNNER_TEMP/isa"
-      - name: Stage pinned toolchain
-        run: |
-          set -euo pipefail
-          dirs=$(bash tools/ci/session-toolchain.sh stage)
-          IFS=: read -ra paths <<< "$dirs"
-          for path in "${paths[@]}"; do echo "$path" >> "$GITHUB_PATH"; done
-      - name: Compare instrumented base and candidate
-        run: |
-          set -euo pipefail
-          export CC=clang
-          clang --version
-          cmake --version | head -1
-          ninja --version
-          for mode in base head; do
-            git restore -- src/buster/compiler/interpreter_link{,_test}.c
-            git apply repro3032/tests.diff
-            if [[ "$mode" == head ]]; then git apply repro3032/owner.diff; fi
-            python3 repro3032/probes.py "$mode"
-            ./build.sh --config Release > "$RUNNER_TEMP/build-$mode.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build-$mode.log"; exit 1; }
-            bash repro3032/run.sh "$RUNNER_TEMP/$mode"
-          done
-          for name in link units musl c8 c32 c128; do
-            cmp "$RUNNER_TEMP/base/$name.out" "$RUNNER_TEMP/head/$name.out"
-            cmp "$RUNNER_TEMP/base/$name.trace" "$RUNNER_TEMP/head/$name.trace"
-            echo "$name stdout, winners, maps, relocations and diagnostics match"
-          done
-          for object in "$RUNNER_TEMP/base"/*.o; do
-            cmp "$object" "$RUNNER_TEMP/head/${object##*/}"
-          done
-          echo "All six generated ELF objects match byte for byte"
-      - name: Run the clean candidate through the published entry point
-        run: |
-          set -euo pipefail
-          export CC=clang
-          git restore -- src/buster/compiler/interpreter_link{,_test}.c
-          git apply repro3032/tests.diff repro3032/owner.diff
-          ./build.sh --config Release > "$RUNNER_TEMP/build-clean.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build-clean.log"; exit 1; }
-          ./build/compiler test-interpreter-link
-          ./build/compiler interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c
-      - name: Retain the base and candidate observations
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: interpreter-link-observations
-          path: |
-            ${{ runner.temp }}/base/*.out
-            ${{ runner.temp }}/base/*.err
-            ${{ runner.temp }}/base/*.trace
-            ${{ runner.temp }}/base/*.clang
-            ${{ runner.temp }}/head/*.out
-            ${{ runner.temp }}/head/*.err
-            ${{ runner.temp }}/head/*.trace
-            ${{ runner.temp }}/head/*.clang
-          if-no-files-found: ignore
-          retention-days: 14
+          gh api repos/buster14a/buster/actions/artifacts/14570685050/zip > "$RUNNER_TEMP/observations.zip"
+          printf '%s  %s\n' 1196d10b4c086a73a0885ac1424439978e643b00bae2800b5a82503c13825ecd "$RUNNER_TEMP/observations.zip" | sha256sum -c -
+          unzip -Z1 "$RUNNER_TEMP/observations.zip"
+          base64 -w 1024 "$RUNNER_TEMP/observations.zip" | sed 's/^/OBS3032 /'
