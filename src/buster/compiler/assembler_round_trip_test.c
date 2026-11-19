@@ -387,6 +387,8 @@ static bool asm_round_trip_assemble(AsmTest* test, const char* source, bool inte
     *differ = (scalar.error == 0) != (vector.error == 0) || scalar.count != vector.count ||
               (scalar.count == 1 && memcmp(scalar.records, vector.records, sizeof(X86Instruction)) != 0);
     const bool assembled = scalar.error == 0 && vector.error == 0 && scalar.count == 1 && vector.count == 1;
+    asm_test_fold_u64(test, (uint64_t)(vector.error != 0) | (uint64_t)vector.count << 1);
+    asm_test_fold(test, vector.records, vector.count == 1 ? sizeof(X86Instruction) : 0);
     if (assembled)
     {
         *record = scalar.records[0];
@@ -713,7 +715,8 @@ static void asm_round_trip_fixtures(AsmTest* test, const char* directory, bool c
     // EVEX's compressed displacement is shorter (an AVX instruction isn't AVX-512's), EVEX's vpdpbusd before AVX-VNNI's,
     // which a processor with AVX512-VNNI may lack, and VEX's where the target has no EVEX one; the accumulator's xchg
     // (90+r), but 87's for EAX with itself (90 is NOP, which keeps RAX's upper half), and 48 90 for RAX with itself (a
-    // NOP either way, which GNU as writes 90); and a shift of one operand, D1's.
+    // NOP either way, which GNU as writes 90); and a shift of one operand, D1's. In Intel syntax too, where the batch
+    // parser leaves both to asm_instruction: the accumulator written first, and the shift's implicit 1.
     const X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
     const X86Target vnni = { .features = BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(AVXVNNI), .architecture = X86_ARCH_OTHER };
     static const struct
@@ -732,6 +735,10 @@ static void asm_round_trip_fixtures(AsmTest* test, const char* directory, bool c
         { "xchg %ax, %ax\n", true, 2, { 0x66, 0x90 } },
         { "xchg %ecx, %eax\n", true, 1, { 0x91 } },
         { "shrl %ecx\n", true, 2, { 0xd1, 0xe9 } },
+        { ".intel_syntax noprefix\nxchg rax, rcx\n", true, 2, { 0x48, 0x91 } },
+        { ".intel_syntax noprefix\nxchg eax, ecx\n", true, 1, { 0x91 } },
+        { ".intel_syntax noprefix\nxchg ax, cx\n", true, 2, { 0x66, 0x91 } },
+        { ".intel_syntax noprefix\nshr ecx\n", true, 2, { 0xd1, 0xe9 } },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(choices); i += 1)
     {
