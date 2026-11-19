@@ -341,6 +341,27 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
     arena_pop_to(source, source_mark);
 }
 
+// The truth pass edits verified columns in place. The expected function specifies every comparison, including
+// those whose constant has the wrong bits, or whose producer is a truncation, a floating comparison or a parameter.
+static void ir_optimize_text_truth(IrOptimizeTest* test, Arena* source, Arena* output, Arena* scratch)
+{
+    String8 before = { 0 };
+    String8 after = { 0 };
+    IrFunction function = { 0 };
+    IrFunction expected = { 0 };
+    const bool parsed = ir_optimize_text_read("tests/ir/optimize/truth-encoding-before.ir", source, &before) &&
+                        ir_optimize_text_read("tests/ir/optimize/truth-encoding-after.ir", source, &after) &&
+                        ir_parse(before, output, scratch, &function).error == IR_PARSE_OK && ir_parse(after, output, scratch, &expected).error == IR_PARSE_OK;
+    const bool verified = parsed && ir_verify_complete(&function, scratch).error == IR_OK && ir_verify_complete(&expected, scratch).error == IR_OK;
+    ir_optimize_test_expect(test, verified, "truth encoding: the input and expected result verify as complete SSA");
+    if (verified)
+    {
+        const uint32_t changed = ir_truth_simplify(&function);
+        ir_optimize_test_expect(test, changed == 7 && ir_optimize_test_equal(&function, &expected), "truth encoding: exactly the matching integer comparisons fold");
+        ir_optimize_test_expect(test, ir_verify_complete(&function, scratch).error == IR_OK, "truth encoding: the rewritten function verifies as complete SSA");
+    }
+}
+
 static void ir_optimize_text_tests(IrOptimizeTest* test)
 {
     ir_verified_tests(test);
@@ -356,6 +377,10 @@ static void ir_optimize_text_tests(IrOptimizeTest* test)
         ir_optimize_text_expect(test, scratch.length == 0, ir_optimize_text_fixtures[index].name, "the parser, printer or pass retained scratch memory");
         arena_pop_to(&output, 0);
         arena_pop_to(&twin, 0);
+    }
+    if (ready)
+    {
+        ir_optimize_text_truth(test, &source, &output, &scratch);
     }
     arena_release(&scratch);
     arena_release(&twin);
