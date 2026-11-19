@@ -1,0 +1,46 @@
+name: Integer truth evidence for 3036
+on:
+  push:
+    branches: [codex/3036-hosted-evidence]
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_HOST_ARCH: vector
+      BUSTER_DEBUG_INFO: '0'
+      BUSTER_SANITIZER: none
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+          ref: 6427879e1143026a12fb0388a20bdea1fe4b2bc5
+      - name: Check hosted CPU
+        run: |
+          lscpu | grep 'Model name'
+          cc -O2 tools/ci/vector-probe.c -o "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/probe"
+      - name: Build the pinned compiler
+        run: |
+          dirs=$(bash tools/ci/session-toolchain.sh stage)
+          export PATH="$dirs:$PATH"
+          clang --version
+          cmake --version
+          ./build.sh --config Release
+          tr ':' '\n' <<< "$dirs" >> "$GITHUB_PATH"
+      - name: Ordinary strict Tier 1 C compile
+        run: |
+          cat > "$RUNNER_TEMP/probe.c" <<'SRC'
+          int truth_eq(int x, int y) { return (x < y) == 1; }
+          int truth_ne(unsigned x, unsigned y) { return 1L != (long)(x < y); }
+          SRC
+          ./build/compiler --tier1 --tier1-strict --verify --lanes 1 -O2 -march=x86-64 -std=c17 -c "$RUNNER_TEMP/probe.c" -o "$RUNNER_TEMP/probe.o"
+          objdump -d "$RUNNER_TEMP/probe.o"
+          nm -S --defined-only "$RUNNER_TEMP/probe.o"
+      - name: Optimizer and native truth regressions
+        run: |
+          ./build/compiler test-ir-optimize
+          clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_truth.c -o build/test-driver-tier1-truth
+          ./build/test-driver-tier1-truth build/compiler "$(command -v clang)"
