@@ -34,8 +34,10 @@ jobs:
           for source in tools/codegen/unreferenced.c tools/ci/rerun.c; do
             name=$(basename "$source" .c)
             build/compiler -g -c "$source" -o "$RUNNER_TEMP/$name.o"
-            llvm-size -A "$RUNNER_TEMP/$name.o" | awk '$1==".debug_line" || $1==".text"'
+            size -A -d "$RUNNER_TEMP/$name.o" | awk '$1==".debug_line" || $1==".text"'
             llvm-dwarfdump --debug-line "$RUNNER_TEMP/$name.o" | awk '$1 ~ /^0x[0-9a-f]+$/ {print}' > "$RUNNER_TEMP/$name.matrix"
+            test -s "$RUNNER_TEMP/$name.matrix"
+            readelf -wl "$RUNNER_TEMP/$name.o" | awk '/Extended opcode 2: set Address to/ && ++n <= 2 {print}; /Special opcode/{s++} END{print "special opcodes", s+0}'
             wc -l "$RUNNER_TEMP/$name.matrix"
             sha256sum "$RUNNER_TEMP/$name.matrix"
           done
