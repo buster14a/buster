@@ -1,0 +1,174 @@
+name: Hosted inclusive induction probe 3050
+on:
+  push:
+    branches: [codex/3050-hosted-check]
+permissions:
+  contents: read
+jobs:
+  induction:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_HOST_ARCH: vector
+      BUSTER_DEBUG_INFO: '0'
+      BUSTER_SANITIZER: none
+      BUSTER_TOOLCHAIN: path
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: b847801169f2b73aed6496c8fa23e9a5499c94e7
+          persist-credentials: false
+      - name: Check the runner and print the revision
+        shell: bash
+        run: |
+          set -eu
+          git rev-parse HEAD
+          lscpu | grep -E '(Model name|Hypervisor vendor)'
+          cc -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/vector-probe"
+          "$RUNNER_TEMP/vector-probe"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-release-inputs
+          key: hosted-inputs-v1-linux-x64-${{ hashFiles('tools/ci/hosted-tools.lock') }}
+      - name: Stage pinned tools
+        shell: bash
+        run: |
+          set -eu
+          export BUSTER_HOSTED_RELEASES="$RUNNER_TEMP/hosted-release-inputs"
+          bash tools/ci/hosted-release.sh verify "$BUSTER_HOSTED_RELEASES" || bash tools/ci/hosted-release.sh prepare "$BUSTER_HOSTED_RELEASES"
+          root="$RUNNER_TEMP/induction-tools"
+          bash tools/ci/install-hosted-tools.sh "$root"
+          version=$(bash tools/ci/hosted-release.sh version llvm)
+          printf '%s\n' "$root/bin" "$root/llvm-$version/bin" >> "$GITHUB_PATH"
+          bash tools/ci/setup-build-tools.sh "$root/build-tools" >> "$GITHUB_PATH"
+      - name: Build the compiler
+        run: |
+          set -eu
+          clang --version
+          ./build.sh --config Release
+      - name: Compile, certify, disassemble and run the array loops
+        run: |
+          set -euo pipefail
+          probe="$RUNNER_TEMP/induction"
+          mkdir -p "$probe"
+          cat > "$probe/kernel.c" <<'END_KERNEL'
+          unsigned sum1(const unsigned *a, unsigned n)
+          {
+              unsigned sum = 0;
+              for (int i = 0; i <= (int)(n & 65535u); i += 1)
+                  sum += a[i];
+              return sum;
+          }
+          
+          unsigned sum3(const unsigned *a, unsigned n)
+          {
+              unsigned sum = 0;
+              for (int i = 0; i <= (int)(n & 65535u); i += 3)
+                  sum += a[i];
+              return sum;
+          }
+          
+          unsigned swap1(const unsigned *a, unsigned n)
+          {
+              unsigned sum = 0;
+              for (int i = 0; (int)(n & 65535u) >= i; i += 1)
+                  sum += a[i];
+              return sum;
+          }
+          
+          unsigned swap3(const unsigned *a, unsigned n)
+          {
+              unsigned sum = 0;
+              for (int i = 0; (int)(n & 65535u) >= i; i += 3)
+                  sum += a[i];
+              return sum;
+          }
+          
+          unsigned strict1(const unsigned *a, unsigned n)
+          {
+              unsigned sum = 0;
+              for (int i = 0; i < (int)(n & 65535u); i += 1)
+                  sum += a[i];
+              return sum;
+          }
+          END_KERNEL
+          cat > "$probe/oracle.c" <<'END_ORACLE'
+          #include <limits.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          
+          typedef unsigned (*Kernel)(const unsigned *, unsigned);
+          unsigned sum1(const unsigned *, unsigned);
+          unsigned sum3(const unsigned *, unsigned);
+          unsigned swap1(const unsigned *, unsigned);
+          unsigned swap3(const unsigned *, unsigned);
+          unsigned strict1(const unsigned *, unsigned);
+          
+          int main(int argc, char **argv)
+          {
+              static unsigned data[65536];
+              static const unsigned inputs[] = {0, 1, 2, 3, 4, 7, 15, 16, 17, 1023,
+                                               65533, 65534, 65535, 65536, 65537, 0x80000000u, UINT_MAX};
+              static const Kernel kernel[] = {sum1, sum3, swap1, swap3, strict1};
+              FILE *source = argc == 2 ? fopen(argv[1], "rb") : NULL;
+              if (!source)
+                  return 2;
+              unsigned read = 0;
+              int byte;
+              while (read < 65536 && (byte = fgetc(source)) != EOF)
+                  data[read++] = (unsigned)byte;
+              if (ferror(source) || read == 0 || fclose(source) != 0)
+                  return 2;
+              for (unsigned i = read; i < 65536; ++i)
+                  data[i] = data[i % read];
+              uint64_t digest = 0;
+              unsigned checks = 0;
+              for (unsigned dataset = 0; dataset < 2; ++dataset)
+              {
+                  for (unsigned k = 0; k < sizeof(kernel) / sizeof(kernel[0]); ++k)
+                  {
+                      unsigned stride = k == 1 || k == 3 ? 3 : 1;
+                      for (unsigned s = 0; s < sizeof(inputs) / sizeof(inputs[0]); ++s)
+                      {
+                          unsigned count = (inputs[s] & 65535u) + (k != 4);
+                          unsigned expected = 0;
+                          for (unsigned j = 0; j < count; j += stride)
+                              expected += data[j];
+                          unsigned result = kernel[k](data, inputs[s]);
+                          if (result != expected)
+                          {
+                              fprintf(stderr, "dataset=%u kernel=%u n=%u expected=%u actual=%u\n",
+                                      dataset, k, inputs[s], expected, result);
+                              return 1;
+                          }
+                          digest = (digest ^ result) * UINT64_C(1099511628211);
+                          ++checks;
+                      }
+                  }
+                  if (dataset == 0)
+                      for (unsigned i = 0; i < 65536; ++i)
+                          data[i] = 0xa5a55a5au ^ i * 2654435761u;
+              }
+              printf("source-bytes=%u checks=%u digest=%016llx\n", read, checks, (unsigned long long)digest);
+              return 0;
+          }
+          END_ORACLE
+          git show b847801169f2b73aed6496c8fa23e9a5499c94e7:src/buster/compiler/tier1_select_ranges.c > "$probe/input.c"
+          clang -std=c17 -O2 "$probe/kernel.c" "$probe/oracle.c" -o "$probe/clang-oracle"
+          "$probe/clang-oracle" "$probe/input.c" | tee "$probe/clang.run"
+          ./build/compiler --tier1 -c "$probe/kernel.c" -o "$probe/normal.o"
+          ./build/compiler --tier1-strict --verify --tier1-report -c "$probe/kernel.c" -o "$probe/verified.o" 2>&1 | tee "$probe/cert.txt"
+          grep -E 'code_certified=5([[:space:]]|$)' "$probe/cert.txt"
+          grep -E 'code_uncertified=0([[:space:]]|$)' "$probe/cert.txt"
+          for v in normal verified; do
+              objcopy -O binary --only-section=.text "$probe/$v.o" "$probe/$v.text"
+              clang -std=c17 -O2 -no-pie "$probe/oracle.c" "$probe/$v.o" -o "$probe/$v.exe"
+              "$probe/$v.exe" "$probe/input.c" | tee "$probe/$v.run"
+              cmp "$probe/clang.run" "$probe/$v.run"
+          done
+          cmp "$probe/normal.text" "$probe/verified.text"
+          objdump -d "$probe/normal.o"
+          nm -S --size-sort "$probe/normal.o"
+      - name: Run the induction fixtures
+        run: ./build/compiler test-tier1-emit
