@@ -17,7 +17,7 @@ if sys.argv[1] == 'instrument':
     for site in (first, image, last):
         assert text.count(site)==1,site
     text = text.replace(first, '    const uint64_t write_start = executable_now();\n'+first)
-    text = text.replace(image,'    struct rusage before_faults;\n    struct rusage after_faults;\n    if (getrusage(RUSAGE_THREAD, &before_faults) != 0) abort();\n    const uint64_t image_start = executable_now();\n'+image+'\n    const uint64_t image_end = executable_now();\n    if (getrusage(RUSAGE_THREAD, &after_faults) != 0) abort();')
+    text = text.replace(image,'    struct rusage before_faults;\n    struct rusage after_faults;\n    if (getrusage(RUSAGE_SELF, &before_faults) != 0) abort();\n    const uint64_t image_start = executable_now();\n'+image+'\n    const uint64_t image_end = executable_now();\n    if (getrusage(RUSAGE_SELF, &after_faults) != 0) abort();')
     text = text.replace(last, '''    arena_release(&arena);
     const uint64_t write_end = executable_now();
     fprintf(stderr, "PHASE kind=%s bytes=%llu image_ns=%llu write_ns=%llu minor=%ld\\n", snapshot_name(runtime->kind),
