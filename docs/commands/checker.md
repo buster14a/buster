@@ -696,13 +696,14 @@ enumerations (what its two paths' comparison reads: every node's columns and
 leaf, the arguments, the overload calls, the tokens' nodes and the enumeration
 records) against `tests/checker/source-digests.tsv`, from the repository's
 root, keyed by the case's name and its source's hash (#2924). The digests were
-recorded where the reader's vector path and its scalar twin agreed. A case that
-means to change them (a new case, an edited source, a reader change that
-changes a graph) records again: run every part of `test-checker` with
-`BUSTER_CHECK_RECORD_DIGESTS=FILE`, sort FILE's lines unique, and put them
-after the table's three comment lines; the PR says what vouches for the new
-graphs (clang for the cases' acceptance and first errors, the checker's typed
-streams).
+recorded where the reader's vector path and its scalar twin agreed. A case
+with no line passes: a new case, or an edited source (a new key), has no such
+agreement to record, and clang's acceptance and first error and the checker's
+typed streams check it. Each run prints how many cases had a line and how many
+had none. A reader change that changes a recorded case's graph records again:
+run every part of `test-checker` with `BUSTER_CHECK_RECORD_DIGESTS=FILE`, sort
+FILE's lines unique, and put them after the table's three comment lines; the
+PR says what vouches for the changed graphs.
 
 Ten test files' own source tables, 596 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`

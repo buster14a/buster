@@ -316,7 +316,10 @@ static uint64_t pp_kernel_fold_u64(uint64_t digest, uint64_t value)
 // (#2924). With the environment variable `record` set to a file, each comparison appends its line there instead, and the
 // lines, sorted, make the table again. A case whose outputs hold its temporary directory's name (an interned path) has
 // '-' for its digest, which any digest matches: two recordings with $TMPDIR of other lengths find them. The
-// preprocessor's (pp_kernel_digests) and the parser's (parse_kernel_digests) share this.
+// preprocessor's (pp_kernel_digests), the parser's (parse_kernel_digests) and the checker's (check_source_digests)
+// share this. A table with `unrecorded` set lets a case it has no line for pass, once it has loaded lines: the
+// checker's, whose cases added after the twins went have no agreement to record; `matched` and `unlisted` count its
+// cases with and without a line.
 typedef struct TestDigests TestDigests;
 struct TestDigests
 {
@@ -327,7 +330,10 @@ struct TestDigests
     uint64_t* digests;
     bool* any;
     uint32_t count;
+    uint32_t matched;
+    uint32_t unlisted;
     bool loaded;
+    bool unrecorded;
 };
 
 static void test_digests_load(TestDigests* table)
@@ -383,7 +389,8 @@ static void test_digests_load(TestDigests* table)
 }
 
 // Whether `digest`, the comparison `site`'s on the case `name`, is the one `table` recorded (or, recording, whether its
-// line was written). A case without a recorded digest fails; unless `quiet`, a failure says why.
+// line was written). A case without a recorded digest fails, unless the table lets it pass (`unrecorded`) and has
+// loaded lines; unless `quiet`, a failure says why.
 static bool test_digest_matches(TestDigests* table, uint64_t digest, const char* site, const char* name, bool quiet)
 {
     char key[4400];
@@ -411,7 +418,9 @@ static bool test_digest_matches(TestDigests* table, uint64_t digest, const char*
         {
             found = strcmp(table->keys[i], key) == 0 ? i : found;
         }
-        result = found != UINT32_MAX && (table->any[found] || table->digests[found] == digest);
+        table->matched += found != UINT32_MAX;
+        table->unlisted += found == UINT32_MAX;
+        result = found != UINT32_MAX ? table->any[found] || table->digests[found] == digest : table->unrecorded && table->count != 0;
         if (!result && !quiet)
         {
             printf("%s: %s %016llx (%s)\n", key, found == UINT32_MAX ? "no recorded digest for the vectorized kernels' outputs, which are" : "the vectorized kernels' outputs aren't their recorded digest, but",

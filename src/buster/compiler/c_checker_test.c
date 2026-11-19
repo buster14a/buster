@@ -2411,7 +2411,8 @@ static bool check_test_source_enums_equal(const CheckInput* a, const CheckInput*
 // overload heads, and the enumerations. No field is an address: a wide number is folded by its limbs, the trailing
 // zeros dropped, and a long double by its ten bytes, a NaN as any NaN.
 #define BUSTER_CHECK_SOURCE_DIGESTS "tests/checker/source-digests.tsv"
-static TestDigests check_source_digests = { .path = BUSTER_CHECK_SOURCE_DIGESTS, .record = "BUSTER_CHECK_RECORD_DIGESTS" };
+// A case with no line passes (TestDigests.unrecorded): a case added after the twin went has no agreement to record.
+static TestDigests check_source_digests = { .path = BUSTER_CHECK_SOURCE_DIGESTS, .record = "BUSTER_CHECK_RECORD_DIGESTS", .unrecorded = true };
 
 static uint64_t check_test_fold_float(uint64_t digest, const uint64_t* storage, long double value)
 {
@@ -4468,6 +4469,10 @@ static int run_checker_tests(int argc, char** argv)
     {
         printf("test-checker: part %u of %u: %u of the %u units dealt\n", check_test_part.index + 1, check_test_part.count, check_test_part.taken,
                check_test_part.dealt);
+    }
+    if (check_source_digests.matched + check_source_digests.unlisted != 0)
+    {
+        printf("test-checker: the reader's recorded digests: %u cases with a line, %u without\n", check_source_digests.matched, check_source_digests.unlisted);
     }
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int returned = test.failures != 0;
