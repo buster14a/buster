@@ -1250,7 +1250,7 @@ static bool pp_directive_test_guard(const PPDirectiveTestGuard* fixture, const c
             result = false;
         }
     }
-    result = result && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], fixture->name);
+    result = result && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], fixture->name) && pp_kernel_digest_check(&runs[0], "guards", fixture->name);
     if (result && with_clang)
     {
         char* const argv[] = { "clang", "-E", "-P", "-std=gnu17", path, 0 };

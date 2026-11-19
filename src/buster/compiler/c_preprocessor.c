@@ -43,13 +43,15 @@
 // space: each inclusion of a file gets a range of its own, as do the scratch spellings that pasting and stringizing
 // make (PPRange), so that any token's spelling is the bytes from its location to its end.
 //
-// The vectorized kernels, each with a scalar twin that PPOptions.scalar selects (test-preprocessor compares them):
-// the directive scan (pp_scan_directives_vector) and the conditionals' pairing (pp_pair_conditionals_vector), the file
-// and buffer runs (pp_copy_file_run_vector, pp_copy_buffer_run_vector), the argument scan (pp_collect_arguments) and
-// the copies of whole token ranges (pp_append_file_tokens, pp_append_stack_tokens: a function-like macro's arguments,
-// a body's runs of tokens, an object-like macro's body), identifier pastes interned without lexing (pp_paste), line
-// counts (pp_count_lines), the keyword pass over the output (pp_resolve_keywords_range) and -E's printer
-// (pp_print_vector). docs/c-preprocessor.md ("Data-parallel design, piece by piece") has each one's 9700X comparison.
+// The vectorized kernels, each its piece's one implementation (#2924; test-preprocessor checks their outputs against
+// tests/preprocessor-kernels/digests.tsv, recorded where their scalar twins agreed, and against clang's): the directive
+// scan (pp_scan_directives_vector) and the conditionals' pairing (pp_pair_conditionals_vector), the file and buffer
+// runs (pp_copy_file_run_vector, pp_copy_buffer_run_vector), the argument scan (pp_collect_arguments) and the copies of
+// whole token ranges (pp_append_file_tokens, pp_append_stack_tokens: a function-like macro's arguments, a body's runs
+// of tokens, an object-like macro's body), identifier pastes interned without lexing (pp_paste), line counts
+// (pp_count_lines), the keyword pass over the output (pp_resolve_keywords_range) and -E's printer (pp_print). Only
+// pp_define's body scan keeps a scalar twin (pp_scan_body_scalar), which PPOptions.scalar selects.
+// docs/c-preprocessor.md ("Data-parallel design, piece by piece") has each one's 9700X comparison.
 //
 // main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c; every function is static, but for the
 // entry points that take BUSTER_PREPROCESSOR_ENTRY, which main.c's units compile in one unit alone. Shared state,
@@ -317,7 +319,7 @@ struct PPOptions
     // The target's and the other options' predefined macros (c_predefines.c): -march, the -m feature flags, -O, -f...,
     // -g. All zero is clang's defaults with no option.
     PredefinesOptions predefines;
-    // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
+    // pp_define's body scan by its scalar twin (pp_scan_body_scalar), the one the preprocessor keeps (#2924).
     bool scalar;
     bool no_standard_includes;
     // In-memory consumers can refuse every external include/embed lookup,
@@ -797,16 +799,14 @@ struct FileCacheArenas
 };
 
 // How files are prepared: the lexer's and refinement's flags (trigraphs, and raw strings: pp_raw_strings), the literal
-// prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), whether by the
-// vectorized kernels or by their scalar twins, which prepare the same records, and the bytes of the windows a large file
-// is lexed and refined in (pp_prepare_windows; 0 for BUSTER_PP_WINDOW_BYTES).
+// prefixes the language mode splits (pp_split_kinds), whether '$' is punctuation (pp_dollar_punctuation), and the bytes
+// of the windows a large file is lexed and refined in (pp_prepare_windows; 0 for BUSTER_PP_WINDOW_BYTES).
 typedef struct PPPrepare PPPrepare;
 struct PPPrepare
 {
     uint32_t refine_flags;
     uint64_t split_kinds;
     bool dollar_punctuation;
-    bool vectorized;
     uint32_t window_bytes;
 };
 
@@ -1487,6 +1487,7 @@ struct Preprocessor
     uint32_t capacity_shift;
     PPOptions options;
     InternTable* table;
+    // pp_define's body scan by its vectorized arm (pp_scan_body_vector), else by its scalar twin (PPOptions.scalar).
     bool vectorized;
     uint32_t refine_flags;
     // The prefixed literals the language mode doesn't have, by kind (pp_split_kinds).
@@ -1955,20 +1956,10 @@ static uint32_t pp_clean_splices(const uint8_t* bytes, uint32_t length, bool tri
 // Whether `length` bytes may hold a line splice or, with `trigraphs`, a trigraph, so that pp_remove_splices_by cleans
 // them. A splice is a backslash, whitespace and a line break (get_char), so a backslash may start one only when a byte
 // up to ' ' follows it or it ends the bytes; a backslash before anything else, as an escape sequence's, may not, and
-// cleaning such bytes gives back the same bytes. The scalar twin of pp_splice_possible_vector, and its oracle.
-static bool pp_splice_possible_scalar(const uint8_t* bytes, uint32_t length, bool trigraphs)
-{
-    bool result = false;
-    for (uint32_t i = 0; !result && i < length; i += 1)
-    {
-        result = (bytes[i] == '\\' && (i + 1 == length || bytes[i + 1] <= ' ')) || (trigraphs && bytes[i] == '?');
-    }
-    return result;
-}
-
-// pp_splice_possible_scalar 64 bytes at a time, in masked loads that read no byte past `length`: a backslash's lane
-// shifted up one against the blanks (every byte up to ' '; the zeros past the bytes count, so a final backslash does),
-// a block's backslash in its last lane carried to the next block's first, or past the last block to its end.
+// cleaning such bytes gives back the same bytes. 64 bytes at a time, in masked loads that read no byte past `length`: a
+// backslash's lane shifted up one against the blanks (every byte up to ' '; the zeros past the bytes count, so a final
+// backslash does), a block's backslash in its last lane carried to the next block's first, or past the last block to
+// its end.
 static bool pp_splice_possible_vector(const uint8_t* bytes, uint32_t length, bool trigraphs)
 {
     const __mmask64 questions = trigraphs ? ~0ull : 0;
@@ -1989,16 +1980,16 @@ static bool pp_splice_possible_vector(const uint8_t* bytes, uint32_t length, boo
 // `length` bytes of source of a token of kind `kind`, without the line splices in them (and trigraphs, with
 // C_TOKENIZER_TRIGRAPHS in `refine_flags`): the bytes themselves if they have none, else a copy in `buffer`, which
 // needs room for `length` bytes. Bytes have none to remove when no backslash in them may start a splice nor, with
-// trigraphs, a '?' a trigraph (pp_splice_possible_vector, or its scalar twin with `scalar`). A raw string literal's
+// trigraphs, a '?' a trigraph (pp_splice_possible_vector). A raw string literal's
 // characters undo translation phases 1 and 2, as clang's getSpelling keeps them: a raw string literal keeps what
 // follows its opening quote as written, and so does an unknown token the lexer read as one (its delimiter invalid, or
 // unterminated) whose prefix and quote are as written, which clang reads byte by byte (a token that needs cleaning
 // anywhere, as one with a line splice in its prefix, clang cleans whole). Returns the length.
-static uint32_t pp_remove_splices_by(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, bool scalar, uint8_t* buffer, const uint8_t** spelling)
+static uint32_t pp_remove_splices_by(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, uint8_t* buffer, const uint8_t** spelling)
 {
     const bool trigraphs = (refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
     const bool string = pp_is_string_literal(kind);
-    bool cleaned = BUSTER_SCALAR_PATH(scalar) ? pp_splice_possible_scalar(bytes, length, trigraphs) : pp_splice_possible_vector(bytes, length, trigraphs);
+    bool cleaned = pp_splice_possible_vector(bytes, length, trigraphs);
     cleaned = cleaned && !(kind == C_TOKEN_UNKNOWN && pp_raw_string_start(bytes, length));
     uint32_t result = length;
     *spelling = bytes;
@@ -2010,10 +2001,9 @@ static uint32_t pp_remove_splices_by(const uint8_t* bytes, uint32_t length, uint
     return result;
 }
 
-// pp_remove_splices_by with the vectorized check.
 static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_t refine_flags, uint8_t kind, uint8_t* buffer, const uint8_t** spelling)
 {
-    return pp_remove_splices_by(bytes, length, refine_flags, kind, false, buffer, spelling);
+    return pp_remove_splices_by(bytes, length, refine_flags, kind, buffer, spelling);
 }
 
 // `length` bytes of a token of kind `kind` without the line splices in them (pp_remove_splices), unless they are a
@@ -2026,7 +2016,7 @@ static uint32_t pp_without_splices(const Preprocessor* pp, uint8_t kind, const u
     *spelling = bytes;
     if (!final)
     {
-        result = pp_remove_splices_by(bytes, length, pp->refine_flags, kind, pp->options.scalar, buffer, spelling);
+        result = pp_remove_splices_by(bytes, length, pp->refine_flags, kind, buffer, spelling);
     }
     return result;
 }
@@ -2173,7 +2163,6 @@ static uint8_t pp_directive_kind_of(IdentId name)
 // The directives of a file, 64 kinds at a time: each '#' that starts a line (one compare of the kinds with the hash
 // kind and the start-of-line bit), and the start-of-line bits, from which pp_finish_directives finds where each
 // directive's line ends. Writes the '#' tokens to `hashes` (if it isn't null) and returns how many there are.
-static uint32_t pp_scan_directives_scalar(const uint8_t* kinds, uint32_t count, uint32_t* hashes, uint64_t* lines);
 
 static uint32_t pp_scan_directives_vector(const uint8_t* kinds, uint32_t count, uint32_t* hashes, uint64_t* lines)
 {
@@ -2200,29 +2189,6 @@ static uint32_t pp_scan_directives_vector(const uint8_t* kinds, uint32_t count, 
     return result;
 }
 
-// The same, a token at a time.
-static uint32_t pp_scan_directives_scalar(const uint8_t* kinds, uint32_t count, uint32_t* hashes, uint64_t* lines)
-{
-    uint32_t result = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        if (i % 64 == 0)
-        {
-            lines[i / 64] = 0;
-        }
-        lines[i / 64] |= (uint64_t)((kinds[i] & BUSTER_C_TOKEN_START_OF_LINE) != 0) << (i % 64);
-        if (kinds[i] == (C_TOKEN_HASH | BUSTER_C_TOKEN_START_OF_LINE))
-        {
-            if (hashes != 0)
-            {
-                hashes[result] = i;
-            }
-            result += 1;
-        }
-    }
-    return result;
-}
-
 // The first start of a line after token `after`, or `count`.
 static uint32_t pp_next_line(const uint64_t* lines, uint32_t count, uint32_t after)
 {
@@ -2244,7 +2210,8 @@ static uint32_t pp_next_line(const uint64_t* lines, uint32_t count, uint32_t aft
 
 // Pairs a file's conditional directives with an explicit stack of the open groups' last directives: each points to the
 // next directive of its group (#elif, #else or #endif). An #elif, #else or #endif without an open group is left
-// unpaired (the directive reports it). The scalar kernels' pairing, and the oracle of pp_pair_conditionals_vector.
+// unpaired (the directive reports it). The pairing of the files pp_pair_conditionals_vector can't pair: their groups
+// nest deeper than its levels hold, or don't balance.
 static void pp_pair_conditionals_scalar(PPFileData* data, uint32_t* open)
 {
     uint32_t open_count = 0;
@@ -2418,9 +2385,9 @@ static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indi
 }
 
 // The file's notes (BUSTER_PP_NOTE_*), with an explicit stack of the open groups and whether each has had its #else,
-// which pairs the directives as pp_pair_conditionals_scalar does: the scalar kernels' notes, and the vectorized
-// kernels' for a file whose pairing found a group with a directive after its #else or without its #endif, or that has
-// an #elifdef or #elifndef. Returns false if memory runs out.
+// which pairs the directives as pp_pair_conditionals_scalar does: the notes of a file whose pairing found a group with a
+// directive after its #else or without its #endif, or that has an #elifdef or #elifndef. Returns false if memory runs
+// out.
 static bool pp_note_directives(Arena* arena, PPFileData* data)
 {
     const uint32_t count = data->directive_count;
@@ -2486,12 +2453,10 @@ static bool pp_note_directives(Arena* arena, PPFileData* data)
 }
 
 // Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
-// pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it), then the
-// notes (pp_note_directives) where there can be any, in `arena` with the rest of the table.
-static bool pp_finish_directives(bool vectorized, Arena* arena, PPFileData* data, const uint64_t* lines)
+// pp_pair_conditionals_scalar for the files it leaves), then the notes (pp_note_directives) where there can be any, in
+// `arena` with the rest of the table.
+static bool pp_finish_directives(Arena* arena, PPFileData* data, const uint64_t* lines)
 {
-    (void)vectorized;
-
     bool elifdef = false;
     for (uint32_t d = 0; d < data->directive_count; d += 1)
     {
@@ -2512,7 +2477,7 @@ static bool pp_finish_directives(bool vectorized, Arena* arena, PPFileData* data
     uint32_t* indices = arena_push_array(scratch.arena, (uint64_t)data->directive_count + 32, sizeof(uint32_t), 64);
     bool result = indices != 0;
     bool notable = true;
-    if (result && !(BUSTER_VECTOR_PATH(vectorized) && pp_pair_conditionals_vector(data, indices, &notable)))
+    if (result && !pp_pair_conditionals_vector(data, indices, &notable))
     {
         pp_pair_conditionals_scalar(data, indices);
         notable = true;
@@ -2626,7 +2591,6 @@ static bool pp_splits_unknown(const uint8_t* bytes, uint32_t start, uint32_t end
 
 // How many of `count` tokens a mode splits (`split`, pp_split_kinds), 64 kinds at a time: the mask spread to a byte per
 // kind is a vpermi2b table, which reads only a kind's low 7 bits, so the start-of-line bit doesn't matter.
-static uint32_t pp_count_splits_scalar(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint64_t split);
 
 static uint32_t pp_count_splits_vector(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint64_t split)
 {
@@ -2645,17 +2609,6 @@ static uint32_t pp_count_splits_vector(const uint8_t* bytes, const uint8_t* kind
             const uint32_t t = i + (uint32_t)__builtin_ctzll(unknown);
             result += pp_splits_unknown(bytes, starts[t], ends[t], split);
         }
-    }
-    return result;
-}
-
-// pp_count_splits_vector's scalar twin.
-static uint32_t pp_count_splits_scalar(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint64_t split)
-{
-    uint32_t result = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        result += pp_splits_kind(split, kinds[i]) || ((kinds[i] & 0x7F) == C_TOKEN_UNKNOWN && pp_splits_unknown(bytes, starts[i], ends[i], split));
     }
     return result;
 }
@@ -2802,25 +2755,21 @@ static int64_t pp_split_dollars(uint32_t refine_flags, const uint8_t* bytes, uin
 
 // The lexer's flags for a mode: refinement's (trigraphs, digraphs and "//" comments), and C_TOKENIZER_NO_DOLLARS where '$'
 // is punctuation.
-static uint32_t pp_lex_flags(const PPPrepare* mode)
+static __attribute__((unused)) uint32_t pp_lex_flags(const PPPrepare* mode)
 {
     return mode->refine_flags | (mode->dollar_punctuation ? C_TOKENIZER_NO_DOLLARS : 0);
 }
 
 // Splits, among `count` freshly lexed tokens of `length` bytes, '$' out of the identifiers and pp-numbers that the
-// vectorized lexer gave it to, where it is punctuation (pp_split_dollars: the scalar lexer, pp_lex_flags, lexes it so
-// itself, so `vectorized` says which made them), then the prefixed literals that `mode`'s language doesn't have (a
-// scan of the kinds, and the rare split: pp_split_prefixes), the literals pp_split_dollars makes among them. Returns
-// the new count, or -1 on allocation failure.
-static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
+// lexer gave it to, where it is punctuation (pp_split_dollars), then the prefixed literals that `mode`'s language
+// doesn't have (a scan of the kinds, and the rare split: pp_split_prefixes), the literals pp_split_dollars makes among
+// them. Returns the new count, or -1 on allocation failure.
+static int64_t pp_lex_for_mode(const PPPrepare* mode, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count)
 {
-    (void)vectorized;
-
-    int64_t result = mode->dollar_punctuation && BUSTER_VECTOR_PATH(vectorized) ? pp_split_dollars(mode->refine_flags, bytes, length, kinds, starts, ends, count) : count;
+    int64_t result = mode->dollar_punctuation ? pp_split_dollars(mode->refine_flags, bytes, length, kinds, starts, ends, count) : count;
     if (result > 0 && mode->split_kinds != 0)
     {
-        const uint32_t splits = BUSTER_VECTOR_PATH(vectorized) ? pp_count_splits_vector(bytes, kinds, starts, ends, (uint32_t)result, mode->split_kinds)
-                                          : pp_count_splits_scalar(bytes, kinds, starts, ends, (uint32_t)result, mode->split_kinds);
+        const uint32_t splits = pp_count_splits_vector(bytes, kinds, starts, ends, (uint32_t)result, mode->split_kinds);
         result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, (uint32_t)result, splits, mode->split_kinds) : result;
     }
     return result;
@@ -2844,33 +2793,23 @@ static bool pp_directive_arrays(Arena* arena, PPFileData* data, uint32_t count)
     return data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
 }
 
-// A file's directive table (#118) from its refined tokens, in `arena`, by the kernels `vectorized` picks: the
-// directives (pp_scan_directives_*), their kinds, line ends, pairing and notes (pp_finish_directives), and the include
-// guard. Returns false if memory runs out. benchmark-preprocessor --tables times it alone.
-static bool pp_directive_table(bool vectorized, Arena* arena, PPFileData* data)
+// A file's directive table (#118) from its refined tokens, in `arena`: the directives (pp_scan_directives_vector), their
+// kinds, line ends, pairing and notes (pp_finish_directives), and the include guard. Returns false if memory runs out.
+// benchmark-preprocessor --tables times it alone.
+static bool pp_directive_table(Arena* arena, PPFileData* data)
 {
-    (void)vectorized;
-
     Scratch scratch = scratch_begin(0);
     uint64_t* lines = arena_push_array(scratch.arena, data->token_count / 64 + 1, sizeof(uint64_t), 64);
     bool result = lines != 0;
     if (result)
     {
-        const uint32_t directive_count = BUSTER_VECTOR_PATH(vectorized) ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
-                                                    : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
+        const uint32_t directive_count = pp_scan_directives_vector(data->kinds, data->token_count, 0, lines);
         result = pp_directive_arrays(arena, data, directive_count);
     }
     if (result)
     {
-        if (BUSTER_VECTOR_PATH(vectorized))
-        {
-            pp_scan_directives_vector(data->kinds, data->token_count, data->directive_hash, lines);
-        }
-        else
-        {
-            pp_scan_directives_scalar(data->kinds, data->token_count, data->directive_hash, lines);
-        }
-        result = pp_finish_directives(BUSTER_VECTOR_PATH(vectorized), arena, data, lines);
+        pp_scan_directives_vector(data->kinds, data->token_count, data->directive_hash, lines);
+        result = pp_finish_directives(arena, data, lines);
     }
     scratch_end(scratch);
     data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
@@ -2901,8 +2840,8 @@ static uint32_t pp_scan_directives_window(const uint8_t* kinds, uint32_t begin, 
 _Static_assert(BUSTER_REFINE_BLOCK_TOKENS % 64 == 0, "pp_scan_directives_window takes whole words of 64 tokens");
 
 // The places of the tokens whose bits are set in `words`, a word per 64 tokens, `word_count` of them (the directives'
-// '#' tokens that pp_scan_directives_window found), into `places` in order, a bit at a time: pp_directive_places' exact
-// twin. Returns how many.
+// '#' tokens that pp_scan_directives_window found), into `places` in order, a bit at a time: what pp_directive_places
+// does for a word of more than 16, and its test's reference. Returns how many.
 static uint32_t pp_directive_places_scalar(const uint64_t* words, uint32_t word_count, uint32_t* places)
 {
     uint32_t count = 0;
@@ -2963,7 +2902,7 @@ static bool pp_directive_table_windowed(Arena* arena, PPFileData* data, const ui
     {
         pp_directive_places(directives, (data->token_count + 63) / 64, data->directive_hash);
     }
-    result = result && pp_finish_directives(true, arena, data, lines);
+    result = result && pp_finish_directives(arena, data, lines);
     data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
     return result;
 }
@@ -2980,8 +2919,8 @@ typedef enum PPPrepareStatus
     PP_PREPARE_NO_MEMORY,
 } PPPrepareStatus;
 
-// The UNKNOWN tokens among `count` kinds, where a raw string literal's error can be (raw strings on, or C++), by the
-// kernels `prepare` picks: 0 otherwise.
+// The UNKNOWN tokens among `count` kinds, where a raw string literal's error can be (raw strings on, or C++), 64 kinds at
+// a time: 0 otherwise.
 static uint32_t pp_count_raw_candidates(const PPPrepare* prepare, const uint8_t* kinds, uint64_t count)
 {
     uint32_t unknowns = 0;
@@ -2989,26 +2928,15 @@ static uint32_t pp_count_raw_candidates(const PPPrepare* prepare, const uint8_t*
     for (uint64_t t = 0; raw && t < count; t += 64)
     {
         const uint32_t chunk = count - t < 64 ? (uint32_t)(count - t) : 64;
-        if (BUSTER_VECTOR_PATH(prepare->vectorized))
-        {
-            const __mmask64 valid = _bzhi_u64(~0ull, chunk);
-            const __m512i chunk_kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
-            unknowns += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(valid, chunk_kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)));
-        }
-        else
-        {
-            for (uint32_t i = 0; i < chunk; i += 1)
-            {
-                unknowns += (kinds[t + i] & 0x7F) == C_TOKEN_UNKNOWN;
-            }
-        }
+        const __mmask64 valid = _bzhi_u64(~0ull, chunk);
+        const __m512i chunk_kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
+        unknowns += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(valid, chunk_kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)));
     }
     return unknowns;
 }
 
-// Keep only exceptional raw errors, never a per-token diagnostic column. Ordinary files allocate nothing. Both
-// preparation kernels use the same independent scalar delimiter check on the UNKNOWN candidates they produced, of which
-// the file has `unknowns` (pp_count_raw_candidates).
+// Keep only exceptional raw errors, never a per-token diagnostic column. Ordinary files allocate nothing. A scalar
+// delimiter check reads the UNKNOWN candidates, of which the file has `unknowns` (pp_count_raw_candidates).
 static bool pp_record_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileData* data, uint32_t unknowns)
 {
     data->raw_error_count = 0;
@@ -3077,67 +3005,34 @@ BUSTER_INLINE void pp_named_ucn_keep(PPNamedUcnScan* scan, uint64_t b, uint64_t 
 // clang reads as no UCN is -Wunicode's too), by a line splice's backslash and a
 // blank or a line break, or with trigraphs by a '?' (a ??/ that splices the line). A named UCN's backslash is always one,
 // since its N follows it after any line splices; pp_named_ucn_at decides which of them are. No byte past `length` is
-// read: the loads are masked. The vector path and its scalar twin give the same bits.
-BUSTER_INLINE uint64_t pp_named_ucn_candidates(const uint8_t* bytes, uint64_t length, uint64_t b, uint64_t end, bool trigraphs, bool vectorized)
+// read: the loads are masked.
+BUSTER_INLINE uint64_t pp_named_ucn_candidates(const uint8_t* bytes, uint64_t length, uint64_t b, uint64_t end, bool trigraphs)
 {
-    (void)vectorized;
-
     const uint32_t count = end - b < 64 ? (uint32_t)(end - b) : 64;
     uint64_t result = 0;
-    if (BUSTER_VECTOR_PATH(vectorized))
+    // A whole block before the source's last two bytes loads plainly; the others, masked.
+    const bool whole = count == 64 && length - b >= 66;
+    const __m512i bytes_0 = whole ? _mm512_loadu_si512(bytes + b) : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, count), bytes + b);
+    // With trigraphs, the '?' before each byte: the block's own, a lane up, and the byte before the block.
+    const __mmask64 question_before = trigraphs ? (_mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('?')) << 1) | (uint64_t)(b != 0 && bytes[b - 1] == '?') : 0;
+    const __mmask64 slash = _mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('\\')) | (_mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('/')) & question_before);
+    if (slash != 0)
     {
-        // A whole block before the source's last two bytes loads plainly; the others, masked.
-        const bool whole = count == 64 && length - b >= 66;
-        const __m512i bytes_0 = whole ? _mm512_loadu_si512(bytes + b) : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, count), bytes + b);
-        // With trigraphs, the '?' before each byte: the block's own, a lane up, and the byte before the block.
-        const __mmask64 question_before = trigraphs ? (_mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('?')) << 1) | (uint64_t)(b != 0 && bytes[b - 1] == '?') : 0;
-        const __mmask64 slash = _mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('\\')) | (_mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('/')) & question_before);
-        if (slash != 0)
-        {
-            const __mmask64 next_valid = length > b + 1 ? _bzhi_u64(~0ull, length - (b + 1) < 64 ? (uint32_t)(length - (b + 1)) : 64) : 0;
-            const __mmask64 after_valid = length > b + 2 ? _bzhi_u64(~0ull, length - (b + 2) < 64 ? (uint32_t)(length - (b + 2)) : 64) : 0;
-            const __m512i bytes_1 = whole ? _mm512_loadu_si512(bytes + b + 1) : _mm512_maskz_loadu_epi8(next_valid, bytes + b + 1);
-            const __m512i bytes_2 = whole ? _mm512_loadu_si512(bytes + b + 2) : _mm512_maskz_loadu_epi8(after_valid, bytes + b + 2);
-            // A blank or a line break: ' ', or '\t' to '\r'.
-            const __mmask64 blank = _mm512_cmpeq_epi8_mask(bytes_2, _mm512_set1_epi8(' ')) |
-                                    _mm512_cmple_epu8_mask(_mm512_sub_epi8(bytes_2, _mm512_set1_epi8('\t')), _mm512_set1_epi8('\r' - '\t'));
-            // ('u' and 'U' are one compare of the byte with bit 5 set.)
-            const __mmask64 letter = _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('N')) |
-                                     _mm512_cmpeq_epi8_mask(_mm512_or_si512(bytes_1, _mm512_set1_epi8(0x20)), _mm512_set1_epi8('u'));
-            const __mmask64 next = letter | (_mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('\\')) & blank) |
-                                   (trigraphs ? _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('?')) : 0);
-            result = slash & next;
-        }
-    }
-    else
-    {
-        for (uint32_t k = 0; k < count; k += 1)
-        {
-            const uint64_t i = b + k;
-            const uint8_t next = i + 1 < length ? bytes[i + 1] : 0;
-            const uint8_t after = i + 2 < length ? bytes[i + 2] : 0;
-            const bool slash = bytes[i] == '\\' || (trigraphs && bytes[i] == '/' && i != 0 && bytes[i - 1] == '?');
-            const bool blank = after == ' ' || (after >= '\t' && after <= '\r');
-            const bool candidate = slash && (next == 'N' || next == 'u' || next == 'U' || (next == '\\' && blank) || (trigraphs && next == '?'));
-            result |= (uint64_t)candidate << k;
-        }
+        const __mmask64 next_valid = length > b + 1 ? _bzhi_u64(~0ull, length - (b + 1) < 64 ? (uint32_t)(length - (b + 1)) : 64) : 0;
+        const __mmask64 after_valid = length > b + 2 ? _bzhi_u64(~0ull, length - (b + 2) < 64 ? (uint32_t)(length - (b + 2)) : 64) : 0;
+        const __m512i bytes_1 = whole ? _mm512_loadu_si512(bytes + b + 1) : _mm512_maskz_loadu_epi8(next_valid, bytes + b + 1);
+        const __m512i bytes_2 = whole ? _mm512_loadu_si512(bytes + b + 2) : _mm512_maskz_loadu_epi8(after_valid, bytes + b + 2);
+        // A blank or a line break: ' ', or '\t' to '\r'.
+        const __mmask64 blank = _mm512_cmpeq_epi8_mask(bytes_2, _mm512_set1_epi8(' ')) |
+                                _mm512_cmple_epu8_mask(_mm512_sub_epi8(bytes_2, _mm512_set1_epi8('\t')), _mm512_set1_epi8('\r' - '\t'));
+        // ('u' and 'U' are one compare of the byte with bit 5 set.)
+        const __mmask64 letter = _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('N')) |
+                                 _mm512_cmpeq_epi8_mask(_mm512_or_si512(bytes_1, _mm512_set1_epi8(0x20)), _mm512_set1_epi8('u'));
+        const __mmask64 next = letter | (_mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('\\')) & blank) |
+                               (trigraphs ? _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('?')) : 0);
+        result = slash & next;
     }
     return result;
-}
-
-// Adds the candidates among bytes [begin, end) of a source of `length` bytes (pp_named_ucn_candidates) to `scan`, a byte at
-// a time: the scalar kernels' search, which the vector kernels' (pp_scan_named_ucn_chunks) must find the same named UCNs
-// as.
-static void pp_scan_named_ucns(const uint8_t* bytes, uint64_t length, uint64_t begin, uint64_t end, bool trigraphs, PPNamedUcnScan* scan)
-{
-    for (uint64_t b = begin; b < end; b += 64)
-    {
-        const uint64_t bits = pp_named_ucn_candidates(bytes, length, b, end, trigraphs, false);
-        if (BUSTER_UNLIKELY(bits != 0))
-        {
-            pp_named_ucn_keep(scan, b, bits);
-        }
-    }
 }
 
 // Adds the candidates (pp_named_ucn_candidates) of a source's 64-byte chunks that refinement marked as holding a backslash
@@ -3157,7 +3052,7 @@ static void pp_scan_named_ucn_chunks(const uint8_t* bytes, uint64_t length, cons
         for (uint64_t chunk_bits = read; chunk_bits != 0; chunk_bits &= chunk_bits - 1)
         {
             const uint64_t b = (word * 64 + (uint64_t)__builtin_ctzll(chunk_bits)) * 64;
-            const uint64_t bits = b < length ? pp_named_ucn_candidates(bytes, length, b, length - b < 64 ? length : b + 64, trigraphs, true) : 0;
+            const uint64_t bits = b < length ? pp_named_ucn_candidates(bytes, length, b, length - b < 64 ? length : b + 64, trigraphs) : 0;
             if (BUSTER_UNLIKELY(bits != 0))
             {
                 pp_named_ucn_keep(scan, b, bits);
@@ -3271,7 +3166,7 @@ static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileD
         }
         for (uint64_t b = scan->first; result && !kept && b <= scan->last; b += 64)
         {
-            for (uint64_t bits = pp_named_ucn_candidates(data->bytes, data->length, b, scan->last + 1, trigraphs, BUSTER_VECTOR_PATH(prepare->vectorized)); bits != 0; bits &= bits - 1)
+            for (uint64_t bits = pp_named_ucn_candidates(data->bytes, data->length, b, scan->last + 1, trigraphs); bits != 0; bits &= bits - 1)
             {
                 uint32_t token = 0;
                 uint64_t position = 0;
@@ -3321,12 +3216,10 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
     int64_t count = -1;
     if (pushed)
     {
-        // The scalar kernels lex '$' as punctuation themselves, the twin of the vectorized lexer and pp_split_dollars.
-        count = prepare->dollar_punctuation && !BUSTER_VECTOR_PATH(prepare->vectorized) ? c_tokenize_scalar(data->bytes, data->length, data->kinds, data->starts, data->values, pp_lex_flags(prepare))
-                                                                    : c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
+        count = c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, prepare->refine_flags);
     }
     const bool lexed = count >= 0;
-    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, (uint32_t)count, BUSTER_VECTOR_PATH(prepare->vectorized)) : count;
+    count = count > 0 ? pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds, data->starts, data->values, (uint32_t)count) : count;
     if (ticks != 0)
     {
         const uint64_t now = __rdtsc();
@@ -3359,11 +3252,11 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
         data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
         bool refined = data->space != 0 && pp_record_raw_errors(prepare, arena, data, pp_count_raw_candidates(prepare, data->kinds, data->token_count));
-        // The named UCNs' candidates: from the chunks with a backslash that refinement marks (pp_scan_named_ucn_chunks), or
-        // a byte at a time by the scalar kernels (pp_scan_named_ucns), while the bytes just lexed are in the caches.
+        // The named UCNs' candidates: from the chunks with a backslash that refinement marks (pp_scan_named_ucn_chunks),
+        // while the bytes just lexed are in the caches.
         const bool trigraphs = (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
         PPNamedUcnScan named = { 0 };
-        if (refined && prepare->vectorized)
+        if (refined)
         {
             Scratch scratch = scratch_begin(0);
             uint64_t* chunks = arena_push_array(scratch.arena, refine_progress_words(data->length), sizeof(uint64_t), 64);
@@ -3377,12 +3270,6 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
             }
             scratch_end(scratch);
         }
-        else if (refined)
-        {
-            refined = refine_tokens_scalar(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values,
-                                           data->space, prepare->refine_flags);
-            pp_scan_named_ucns(data->bytes, data->length, 0, data->length, trigraphs, &named);
-        }
         refined = refined && pp_record_named_ucns(prepare, arena, data, &named);
         if (ticks != 0)
         {
@@ -3390,7 +3277,7 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
             ticks[PP_PHASE_REFINE] += now - tick;
             tick = now;
         }
-        const bool indexed = refined && pp_directive_table(BUSTER_VECTOR_PATH(prepare->vectorized), arena, data);
+        const bool indexed = refined && pp_directive_table(arena, data);
         if (indexed)
         {
             data->prepared = true;
@@ -3604,7 +3491,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
         }
         else
         {
-            kept = pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds + count, data->starts + count, data->values + count, (uint32_t)kept, true);
+            kept = pp_lex_for_mode(prepare, data->bytes, data->length, data->kinds + count, data->starts + count, data->values + count, (uint32_t)kept);
             result = kept < 0 ? PP_PREPARE_NO_MEMORY : PP_PREPARE_DONE;
             // An unterminated block comment (pp_is_unterminated_comment), reported when this inclusion reads it.
             if (last && kept > 0 && pp_is_unterminated_comment(data->bytes, data->kinds[count + kept - 1], data->starts[count + kept - 1]))
@@ -3707,7 +3594,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
 static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
 {
     const uint64_t window = prepare->window_bytes != 0 ? prepare->window_bytes : BUSTER_PP_WINDOW_BYTES;
-    const bool windows = prepare->vectorized && !prepare->dollar_punctuation && data->length >= 2 * window &&
+    const bool windows = !prepare->dollar_punctuation && data->length >= 2 * window &&
                          data->length <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK && !c_tokenize_scalar_only(data->bytes, data->length, prepare->refine_flags);
     return windows ? pp_prepare_windows(prepare, table, columns, arena, data, window, ticks) : pp_prepare_whole(prepare, table, columns, arena, data, ticks);
 }
@@ -3750,24 +3637,17 @@ static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range)
         {
             uint32_t used = 1;
             lines[0] = 0;
-            for (uint32_t i = 0; i < data->length; i += BUSTER_VECTOR_PATH(pp->vectorized) ? 64 : 1)
+            for (uint32_t i = 0; i < data->length; i += 64)
             {
-                if (BUSTER_VECTOR_PATH(pp->vectorized))
+                const uint32_t remaining = data->length - i;
+                const __mmask64 valid = _bzhi_u64(~0ull, remaining < 64 ? remaining : 64);
+                const __m512i bytes = _mm512_maskz_loadu_epi8(valid, data->bytes + i);
+                const uint64_t nl = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n'));
+                const uint64_t cr = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\r'));
+                const uint64_t next = remaining > 64 && data->bytes[i + 64] == '\n';
+                for (uint64_t bits = (nl | (cr & ~((nl >> 1) | (next << 63)))) & valid; bits != 0; bits &= bits - 1)
                 {
-                    const uint32_t remaining = data->length - i;
-                    const __mmask64 valid = _bzhi_u64(~0ull, remaining < 64 ? remaining : 64);
-                    const __m512i bytes = _mm512_maskz_loadu_epi8(valid, data->bytes + i);
-                    const uint64_t nl = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n'));
-                    const uint64_t cr = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\r'));
-                    const uint64_t next = remaining > 64 && data->bytes[i + 64] == '\n';
-                    for (uint64_t bits = (nl | (cr & ~((nl >> 1) | (next << 63)))) & valid; bits != 0; bits &= bits - 1)
-                    {
-                        lines[used++] = i + (uint32_t)__builtin_ctzll(bits) + 1;
-                    }
-                }
-                else if (data->bytes[i] == '\n' || (data->bytes[i] == '\r' && (i + 1 == data->length || data->bytes[i + 1] != '\n')))
-                {
-                    lines[used++] = i + 1;
+                    lines[used++] = i + (uint32_t)__builtin_ctzll(bits) + 1;
                 }
             }
             data->diagnostic_lines = lines;
@@ -4687,7 +4567,6 @@ static PPPrepare pp_prepare_options(const PPOptions* options)
                         (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
         .dollar_punctuation = pp_dollar_punctuation(options),
-        .vectorized = BUSTER_VECTOR_PATH(!options->scalar),
         .window_bytes = options->window_bytes,
     };
 }
@@ -4923,7 +4802,7 @@ BUSTER_INLINE bool pp_file_space(const PPFileData* data, uint32_t token)
 
 // A large definition's ordered validation and its # checks share this temporary name-to-ordinal index. First
 // expansion rebuilds it while retaining the parameter ids; later expansions use PPItems directly. Up to 16 names
-// fit inline and are compared in one vector (or by the scalar twin); further names use a half-full hash table,
+// fit inline and are compared in one vector (up to 4 a name at a time); further names use a half-full hash table,
 // grown geometrically even for invalid lists past the parameter limit, so the first diagnostic stays ordered.
 #define BUSTER_PP_SMALL_PARAMETERS 16
 
@@ -4935,7 +4814,6 @@ struct PPParameterIndex
     uint64_t* slots; // High half: IdentId; low half: ordinal + 1. Zero is empty.
     uint32_t capacity;
     uint32_t count;
-    bool vectorized;
     bool repeated; // The preceding large definition insertion found an earlier ordinal.
     Scratch scratch;
 };
@@ -6486,16 +6364,12 @@ static __attribute__((unused)) void pp_system_levels(const Preprocessor* pp, uin
 // conversion after it against pp_resolve_keywords_scalar.
 
 // Can `c` go on an identifier or a pp-number? '$' can unless it is punctuation (pp_dollar_punctuation).
-static bool pp_word_character(uint8_t c, bool dollar_punctuation)
+static __attribute__((unused)) bool pp_word_character(uint8_t c, bool dollar_punctuation)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || (c == '$' && !dollar_punctuation) || c >= 0x80 || c == '\\';
 }
 
-// Prints the output as `-E` does: tokens with a space where whitespace was before them (or where they would otherwise
-// lex as one), each line of the source on a line of its own, pragmas on lines of their own, and unless `-P`
-// (`markers` false) a line marker (`# 12 "file.h" 2`) wherever the output moves to another file or skips lines. A
-// token at a time through stdio: the scalar kernels' printer, and the oracle of pp_print_vector.
-// -E's line markers, kept the same way by both printers as clang's PrintPPOutputPPCallbacks keeps them: the include
+// -E's line markers, kept as clang's PrintPPOutputPPCallbacks keeps them: the include
 // stack's top (a range), and the presumed line, #line offset, name and system level of the output's current line. The
 // main file's range roots the stack, since clang includes its <built-in> buffer, and with it the forced includes, from
 // the main file. Per range, the latest of its line notes passed so far (`cursors`, BUSTER_PP_NONE before the first);
@@ -6538,7 +6412,7 @@ struct PPPresumed
 // separator and the three digits of each byte in an 8-byte slot of their own, by one vpermb per 8 bytes from the digits
 // in 16-byte quarters (hundreds, tens, ones, separator); then the slots' nonzero bytes packed together by vpcompressb and
 // stored whole. Writes at most 5 bytes per byte, and stores up to 64 bytes past them (the output needs that slack).
-// Returns how many it wrote. pp_embed_text_scalar is its twin.
+// Returns how many it wrote.
 
 // The input bytes of an #embed the printers format at a time: their text fits in the printers' buffers with the vector
 // kernel's slack.
@@ -6552,7 +6426,7 @@ struct PPPresumed
 #define BUSTER_PP_DIRECTORY_SHIFT 8
 
 
-// The classes pp_print_vector's separation table reads, of a token's first character (the token after) and of a
+// The classes pp_print's separation table reads, of a token's first character (the token after) and of a
 // token's last one (the token before), by character for ASCII; every byte past 0x7F is a word character. After: other,
 // word, digit, '.', '\'', '"', '+' or '-', another character that joins punctuators. Before: other, word (digits too),
 // '.', a joining character, and (from the kind, not the character) a pp-number.
@@ -6577,8 +6451,7 @@ struct PPPrintLines
 // count of bytes, at most BUSTER_PP_PRINT_GAP (with line markers, a line start's breaks). A gap ends where its spelling
 // starts. Two 32-word prefix sums remove the dependence between successive stores. Inactive input lanes are never read
 // and only `count` offsets are written. The bounded batch needs at most 64 * (64 + 1 + 8) bytes, so its word sums
-// cannot overflow. Returns the batch's bytes, or zero when a spelling needs the general printer; the scalar printer
-// remains the independent output oracle.
+// cannot overflow. Returns the batch's bytes, or zero when a spelling needs the general printer.
 #define BUSTER_PP_PRINT_GAP 8
 
 // The most ranges pp_print_spellings places a chunk's tokens in. On an AVX-512 Xeon, chunks of 64 tokens in 8 ranges took
@@ -6587,7 +6460,7 @@ struct PPPrintLines
 #define BUSTER_PP_PRINT_RANGES 8
 
 
-// Prints the output as `-E` does: pp_print_vector, or pp_print_scalar for the scalar kernels.
+// Prints the output as `-E` does.
 BUSTER_PREPROCESSOR_ENTRY bool pp_print(Preprocessor* pp, FILE* stream, bool markers);
 
 // Orders two macro names as clang's -dM does: bytewise, a prefix first.
