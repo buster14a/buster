@@ -1,0 +1,39 @@
+name: Interpreter image resolver verification 3032
+on:
+  push:
+    branches: ["codex/3032-resolver-hosted"]
+permissions:
+  contents: read
+jobs:
+  resolver:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 48
+    env:
+      BUSTER_HOST_ARCH: vector
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Check hosted ISA
+        run: |
+          set -euo pipefail
+          lscpu | grep 'Model name'
+          cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/isa"
+          "$RUNNER_TEMP/isa"
+      - name: Stage pinned toolchain
+        run: |
+          set -euo pipefail
+          dirs=$(bash tools/ci/session-toolchain.sh stage)
+          IFS=: read -ra paths <<< "$dirs"
+          for path in "${paths[@]}"; do echo "$path" >> "$GITHUB_PATH"; done
+      - name: Measure the baseline
+        run: |
+          set -euo pipefail
+          export CC=clang
+          clang --version
+          cmake --version | head -1
+          ninja --version
+          python3 repro3032/probes.py base
+          ./build.sh --config Release > "$RUNNER_TEMP/build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build.log"; exit 1; }
+          bash repro3032/run.sh "$RUNNER_TEMP/base"
