@@ -955,6 +955,21 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-ir-sroa
 # #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
 "$BUSTER_COMPILER" test-ir-vectorize
+# #2805: run the same nine C reductions built by the Tier 1 vectorizer and Clang.
+objects=$(mktemp -d)
+kernels=tests/ir/vectorize/minmax.c
+"$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict --tier1-report --verify -march=x86-64-v4 -c "$kernels" -o "$objects/buster.o"
+objdump -d -M intel --no-show-raw-insn --disassemble=max_if_i32 "$objects/buster.o"
+"$BUSTER_COMPILER" test-ir-source --print max_if_i32 "$kernels"
+"$BUSTER_COMPILER" test-ir-source --print min_cond_i32 "$kernels"
+clang -O2 -march=x86-64-v4 -c "$kernels" -o "$objects/clang.o"
+for impl in buster clang; do
+    clang -O2 tests/ir/vectorize/minmax-main.c "$objects/$impl.o" -o "$objects/$impl"
+    "$objects/$impl" > "$objects/$impl.out"
+done
+diff -u "$objects/clang.out" "$objects/buster.out"
+wc -l "$objects/buster.out"
+rm -r "$objects"
 "$BUSTER_COMPILER" test-ir-inline
 == Test dataflow bitsets
 "$BUSTER_COMPILER" test-dataflow
