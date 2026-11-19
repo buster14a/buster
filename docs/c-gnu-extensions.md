@@ -112,8 +112,8 @@ remain in the original tree and are not reported as GNU `__attribute__` lists.
 ### Batching, memory and failure
 
 Candidate discovery compares 64 one-byte token kinds at once with AVX-512;
-only set bits enter the bounded list reader. The scalar twin discovers those
-same candidates. The reader follows the parser's opener-to-matching-closer
+only set bits enter the bounded list reader (its scalar twin is gone, #2924).
+The reader follows the parser's opener-to-matching-closer
 relationship, so it does not rescan nested argument expressions or recurse.
 It preserves names whose meaning is unknown and distinguishes explicitly empty
 argument lists. Semantic evaluation must follow the original syntax/declaration
@@ -177,14 +177,14 @@ The existing executable exposes:
 ./build/compiler test-gnu --clang
 ./build/compiler test-types
 ./build.sh check-call-graph
-./build/compiler benchmark-gnu [--only collect-scalar|collect-vector|build-scalar|build-vector|parser-only|parser-with-gnu] [--after-scalar MS] [-E's options] file.c
+./build/compiler benchmark-gnu [--only collect|build|parser-only|parser-with-gnu] [--after-scalar MS] [-E's options] file.c
 ```
 
 `test-parser` covers the new grammar and keyword regressions with Clang's
-acceptance/rejection, scalar/vector trees and diagnostics, all 64 token-block
+acceptance/rejection, trees and diagnostics, all 64 token-block
 positions, generated inputs and deep nesting. `test-gnu` checks exact metadata
 and source ranges, nested/empty/unknown attributes, asm labels versus assembly
-statements, both producer/collector paths, guarded tails, capacity failures
+statements, the producer/collector path, guarded tails, capacity failures
 and arena rollback. `test-types` includes independent Clang checks for machine
 mode results, canonical type spellings and surrounding record layouts, along
 with invalid modes and names ending at protected pages.
@@ -192,8 +192,8 @@ with invalid modes and names ending at protected pages.
 `benchmark-gnu` preprocesses the requested real input once, then checks the
 metadata and runs 21 rotating measurement passes. It reports:
 
-- scalar/vector collection, including candidate discovery and group decoding;
-- scalar/vector build, including measurement and exact array allocation;
+- collection, including candidate discovery and group decoding;
+- build, including measurement and exact array allocation;
 - the parser pipeline with and without metadata, including token conversion,
   parsing and postorder;
 - time per input token, useful token throughput, retained metadata bytes and
