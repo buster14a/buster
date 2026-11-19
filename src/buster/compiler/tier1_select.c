@@ -5237,6 +5237,37 @@ struct Tier1SelectAddress
     bool rip;
 };
 
+// A register-register LEA can encode one operand's multiplication in its SIB byte (#2700). Both operations have
+// the addition's width, so wrapping the product before the addition gives the same low 32 or 64 bits.
+static void tier1_select_product_index(const Tier1SelectForest* forest, uint32_t node, Tier1SelectPattern* lea)
+{
+    const IrFunction* function = forest->function;
+    for (uint32_t side = 0; side < 2; side += 1)
+    {
+        const uint32_t product = lea->values[1 - side];
+        if (function->op[product] == IR_MUL && tier1_select_tree_child(forest, node, product))
+        {
+            uint32_t index = function->a[product];
+            uint32_t factor = function->b[product];
+            if (function->op[factor] != IR_CONST)
+            {
+                factor = index;
+                index = function->b[product];
+            }
+            uint64_t value = 0;
+            if (tier1_select_constant(function, factor, &value) && (value == 2 || value == 4 || value == 8))
+            {
+                lea->values[0] = lea->values[side];
+                lea->values[1] = index;
+                lea->scale = (uint8_t)tier1_select_log2(value);
+                tier1_select_fold(forest, node, product, lea);
+                tier1_select_fold(forest, node, factor, lea);
+                break;
+            }
+        }
+    }
+}
+
 // An address's index through single-use I64 arithmetic in its block, at most BUSTER_TIER1_SELECT_WALK nodes: additions
 // and subtractions of constants join the displacement at the current scale; shifts and power-of-two multiplies join
 // the SIB's log2 scale while it remains at most 3. Walk from the consumer: (i + c) << k scales c, but (i << k) + c does
@@ -6691,6 +6722,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             Tier1SelectPattern lea = base;
             lea.rule = TIER1_RULE_LEA_ADD;
             lea.intrinsic_cost = 1;
+            if (function->op[b] == IR_MUL || function->op[a] == IR_MUL)
+            {
+                tier1_select_product_index(forest, node, &lea);
+            }
             tier1_select_add_candidate(forest, node, &candidates, lea);
         }
         uint32_t constant = b;
