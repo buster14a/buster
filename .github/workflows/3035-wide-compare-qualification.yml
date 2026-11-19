@@ -1,0 +1,95 @@
+name: Wide comparison hosted qualification
+on:
+  push:
+    branches: [codex/3035-wide-compare-hosted]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_HOST_ARCH: vector
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Check hosted vector ISA
+        run: |
+          lscpu | grep 'Model name'
+          cc -std=c17 -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/vector-probe"
+          "$RUNNER_TEMP/vector-probe"
+      - name: Trace the normal Tier 1 C driver and run the wide suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          dirs=$(bash tools/ci/session-toolchain.sh stage)
+          export PATH="$dirs:$PATH"
+          clang --version
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/buster/compiler/ir_wide.c")
+          s = p.read_text()
+          start = s.index("static uint32_t ir_wide_compare(")
+          end = s.index("\n}", start)
+          part = s[start:end]
+          part = part.replace("    uint32_t result = 0;", "    const uint64_t before = work->instruction;\n    uint32_t result = 0;")
+          part = part.replace("    return result;", """    if (getenv("BUSTER_WIDE_SAMPLE") != NULL)
+              {
+                  fprintf(stderr, "wide-compare phase=%s predicate=%u lhs=%s:%s rhs=%s:%s rows=%llu\\n",
+                          work->output ? "write" : "count", predicate, ir_op_names[f->op[a]],
+                          f->op[a] == IR_SEXT || f->op[a] == IR_ZEXT ? ir_type_names[f->type[f->a[a]]] : "-",
+                          ir_op_names[f->op[b]], f->op[b] == IR_SEXT || f->op[b] == IR_ZEXT ? ir_type_names[f->type[f->a[b]]] : "-",
+                          (unsigned long long)(work->instruction - before));
+              }
+              return result;""")
+          s = s[:start] + part + s[end:]
+          needle = "            *result = (IrWideResult){ .function = split, .wide = wide, .split = true };"
+          assert s.count(needle) == 1
+          s = s.replace(needle, """            if (getenv("BUSTER_WIDE_SAMPLE") != NULL)
+                      {
+                          fprintf(stderr, "wide-function input=%u wide=%u output=%u\\n", count, wide, split.instruction_count);
+                      }
+          """ + needle)
+          p.write_text(s)
+          PY
+          ./build.sh --config Release > "$RUNNER_TEMP/wide-build.log" 2>&1 || { tail -100 "$RUNNER_TEMP/wide-build.log"; exit 1; }
+          cat > "$RUNNER_TEMP/zero.c" <<'C'
+          int u_before(unsigned long a, unsigned long b) { return (__int128)a < (__int128)b; }
+          C
+          cat > "$RUNNER_TEMP/sign.c" <<'C'
+          int s_before(long a, long b) { return (__int128)a < (__int128)b; }
+          C
+          cat > "$RUNNER_TEMP/unsigned-order.c" <<'C'
+          int s_bits_before(long a, long b) { return (unsigned __int128)a < (unsigned __int128)b; }
+          C
+          cat > "$RUNNER_TEMP/equality.c" <<'C'
+          int same_key(unsigned long a, unsigned long b) { return (__int128)a == (__int128)b; }
+          C
+          cat > "$RUNNER_TEMP/mixed.c" <<'C'
+          int mixed_before(long a, unsigned long b) { return (__int128)a < (__int128)b; }
+          C
+          cat > "$RUNNER_TEMP/lookup.c" <<'C'
+          /* Compare signed and unsigned timestamp formats in one integer domain. */
+          #define TICK_BEFORE(a, b) ((__int128)(a) < (__int128)(b))
+          unsigned long first_at_or_after(const long *ticks, unsigned long count, long cutoff)
+          {
+              unsigned long lo = 0;
+              while (lo < count)
+              {
+                  unsigned long mid = lo + (count - lo) / 2;
+                  if (TICK_BEFORE(ticks[mid], cutoff))
+                      lo = mid + 1;
+                  else
+                      count = mid;
+              }
+              return lo;
+          }
+          C
+          for unit in zero sign unsigned-order equality mixed lookup; do
+              echo "=== C driver $unit ==="
+              BUSTER_WIDE_SAMPLE=1 ./build/compiler --tier1 --tier1-strict --tier1-report -march=x86-64 -c "$RUNNER_TEMP/$unit.c" -o "$RUNNER_TEMP/$unit.o"
+              objdump -d -M intel --no-show-raw-insn "$RUNNER_TEMP/$unit.o"
+          done
+          ./build/compiler test-tier1-wide
