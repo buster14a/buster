@@ -175,6 +175,7 @@ The original section titles are retained in their owning guides.
 - [The node machine's shadow (step 1)](lowering.md#the-shadow-step-1).
 - [The fact words (#2850's step 1)](lowering.md#the-fact-words-2850s-step-1).
 - [C on the window (#2850)](lowering.md#c-on-the-window-2850).
+- [A call's arguments in the kernel, and C's call (#2850)](lowering.md#a-calls-arguments-in-the-kernel-and-cs-call-2850).
 - [Type tests](types.md#type-tests).
 - [Type benchmark](types.md#type-benchmark).
 - [Checker corpus and semantic mutations](checker-corpus.md#checker-corpus-and-semantic-mutations).

@@ -828,7 +828,8 @@ takes its entries.
 - `--window-contexts` makes **C's answers on that window** too
   (`PPOptions.node_reader`'s bit 4, with `--window-tests`' bits): each
   record's template, context and target, 64 records a step, beside C on T's
-  columns at reader time. [Its section](#c-on-the-window-2850) has it.
+  columns at reader time. [Its section](#c-on-the-window-2850) has it, and
+  [a call's](#a-calls-arguments-in-the-kernel-and-cs-call-2850).
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -1715,7 +1716,10 @@ tests' chunk (`node_facts_window_run`).
 
 - **What it decides.** An expression the kernel placed and the reference's C
   ran on is decided on the window unless one of its records is listed: a
-  call; `&&`, `||` or `?:`; an update (`++`, `--`, a compound assignment); a
+  call whose record doesn't say every argument's conversion is made, or
+  whose callee is no name's leaf and has an object ([a call's
+  arguments](#a-calls-arguments-in-the-kernel-and-cs-call-2850)); `&&`, `||`
+  or `?:`; an update (`++`, `--`, a compound assignment); a
   comma or a selection; a division or a remainder by an integer constant
   (the tasks' rule for a power of two reads the divisor's value); a record
   whose value the columns don't hold whole (a bit-field's, a faulted
@@ -1776,7 +1780,9 @@ tests' chunk (`node_facts_window_run`).
   operator's record's neighbour for every operator with a case).
 - **The targets** (`node_contexts_window_targets`), 16 records a step: the
   type a source names, one gather from the consumer's record's line, at its
-  conversion of the operand (by the operand's place) or at its own type.
+  conversion of the operand (by the operand's place) or at its own type; or,
+  for a call's argument, from the record's own line, at its conversion's
+  type (`BUSTER_NODE_CONTEXTS_SOURCE_OWN`).
 - **An expression's part** (`node_contexts_window_part`): whether any of its
   records is listed and whether any evaluated one has no template, each a
   range of a block's mask read as one word, and its root's target, which is
@@ -1820,3 +1826,80 @@ runs again with `BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT`
 answers is changed for each expression C takes, and the comparison has to
 count every one of them. [The design](../node-machine.md#c-on-the-window)
 has what it measured.
+
+### A call's arguments in the kernel, and C's call (#2850)
+
+The same command, `measure-node-machine --shadow --window-contexts`. The
+kernel in place makes each argument's conversion with its call's record, and
+C's answers for a call are made on the window from them. No compile takes
+any of it. [The design](../node-machine.md#a-call-on-the-window) has what it
+measured.
+
+- **The arguments' rule** (`node_facts_argument_made` in
+  `c_check_node_machine_facts.c`) is T's own (`node_machine_argument`) as
+  words of 0 or 1, with one branch (a pointer to another pointer type asks
+  that pair's slot, `node_facts_pair`). It asks the type table nothing: a
+  type's answers are made once with its row (`node_facts_argued`:
+  `NodeFacts.argued` by a value's type's index, with the type its value has
+  past the parameters above them; `NodeFacts.targets` by a parameter's place,
+  the conversion's target with its answers above it). Three answers
+  (`BUSTER_NODE_FACTS_ARGUMENT_*`): made (the conversion, T's type and flags,
+  in the argument's record's last quadword); kept (the conversion is T's and
+  changes nothing the call inherits, so the call's record is the kernel's);
+  neither (the call is T's).
+- **The answers' slots** (`NodeFactsArgumentSlot`, 4,096 of half a line, by
+  a hash of the key): the key is everything the rule reads of the record
+  (`node_facts_argument_standing`: its type, the target, the flags of
+  `BUSTER_NODE_FACTS_ARGUMENT_FLAGS`, its standing, and whether it is an
+  integer constant whose payload is zero). The calls' loop
+  (`node_facts_call_arguments`, a second pass over a batch's calls in
+  `node_facts_calls_of`) reads each argument's slot, and where the slot has
+  another key's answer or none the rule answers there and then
+  (`node_facts_argument_fill`, out of line).
+- **A call's record** says two bits more in its exponent, beside the tests'
+  quiet bit: every argument's conversion is made
+  (`BUSTER_NODE_FACTS_CONVERTED_CALL`), and the call is a plain one as C asks
+  (`BUSTER_NODE_FACTS_PLAIN_CALL`: its prototype's result, and its arguments'
+  conversions' types, are plain scalars). A call with an argument that is
+  neither made nor kept goes to the call's rule, which leaves it to T. The
+  loop marks it as a value the record doesn't hold whole first: a call of
+  its batch may have it as an argument (a call's code is not after a
+  call's), and that one then follows it to the rule, which makes it from
+  T's record of the first.
+- **C's call** (`node_contexts_window_loop`): the call's template
+  (`BUSTER_NODE_MACHINE_TEMPLATE_CALL`) where the record says a plain call
+  and its context is no address's; its callee evaluated unless the lowering
+  calls it directly, by its own bytes (no lvalue, an address constant with
+  an object that has a symbol, no offset, no effect); its arguments
+  evaluated, each to its own record's conversion's type. C sets a call's
+  depth too, which the window does not make.
+- **The comparison.** The shadow's check of the kernel in place
+  (`node_facts_same`) compares, for a call whose record says its arguments'
+  conversions are made, each one with T's (`argument_conversions`, type and
+  flags). Before each run every record's last quadword is poisoned
+  (`node_facts_given`), so that a reader of one that is no argument's reads
+  no conversion.
+
+The report adds:
+
+- `node-shadow: reader-time fact words the kernel in place's calls:
+  to-make=N made=N with-every-argument's-conversion=N (P% of the calls to
+  make) of-them-plain=N left-for-an-argument=N; the arguments' rule's
+  answers=N of-them-in-the-timed-run=N ticks=N (N an answer)`: the calls the
+  kernel is to make and those it made; those whose record says every
+  argument's conversion is made, and the plain ones among them; those the
+  rule left to T for an argument alone; and the rule's answers (the slots'
+  misses) over the unit's runs, with their ticks. The timed run has its
+  slots filled by the runs before it, so its answers are the keys that were
+  not at their slots; a unit's first answers are in no timed figure.
+
+`test-checker`'s fixture (`node_contexts_test_fixture`) has a call for each
+term of the rule and pins the calls' counts. Its control changes T's
+conversion of each call's arguments too, and the kernel's comparison has to
+count every converted call that has an argument, once over poison and once
+over decoys. And it runs once more with
+`BUSTER_NODE_READER_ONE_SLOT` (`PPOptions.node_reader`'s bit 256, the tests'
+alone): an answer is written to every slot, so a key's probe meets another
+key's answer wherever the last answer was another's; the records, the
+counts and C's answers have to be the same, and the rule's answers and
+those of the timed run are pinned.

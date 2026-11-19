@@ -358,7 +358,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     room = room && (!sweeps || (sweep_refusals != NULL && targets != NULL && root_objects != NULL && tape_firsts != NULL && tape_counts != NULL && side_digests != NULL &&
                                 tape_kinds != NULL && tape_classes != NULL && tape_values != NULL));
     // The census's tests' results by root node.
-    const uint8_t options = reader->pp->options.node_reader;
+    const uint16_t options = reader->pp->options.node_reader;
     const bool tested = (options & BUSTER_NODE_READER_TESTS) != 0;
     uint64_t* tests = tested ? arena_push_array(reader->arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
     uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
