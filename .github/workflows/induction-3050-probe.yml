@@ -47,6 +47,8 @@ jobs:
           set -eu
           clang --version
           ./build.sh --config Release
+      - name: Run the induction fixtures
+        run: ./build/compiler test-tier1-emit
       - name: Compile, certify, disassemble and run the array loops
         run: |
           set -euo pipefail
@@ -158,7 +160,9 @@ jobs:
           clang -std=c17 -O2 "$probe/kernel.c" "$probe/oracle.c" -o "$probe/clang-oracle"
           "$probe/clang-oracle" "$probe/input.c" | tee "$probe/clang.run"
           ./build/compiler --tier1 -c "$probe/kernel.c" -o "$probe/normal.o"
-          ./build/compiler --tier1-strict --verify --tier1-report -c "$probe/kernel.c" -o "$probe/verified.o" 2>&1 | tee "$probe/cert.txt"
+          objdump -d "$probe/normal.o"
+          nm -S --size-sort "$probe/normal.o"
+          ./build/compiler --tier1 --tier1-strict --verify --tier1-report -c "$probe/kernel.c" -o "$probe/verified.o" 2>&1 | tee "$probe/cert.txt"
           grep -E 'code_certified=5([[:space:]]|$)' "$probe/cert.txt"
           grep -E 'code_uncertified=0([[:space:]]|$)' "$probe/cert.txt"
           for v in normal verified; do
@@ -168,7 +172,3 @@ jobs:
               cmp "$probe/clang.run" "$probe/$v.run"
           done
           cmp "$probe/normal.text" "$probe/verified.text"
-          objdump -d "$probe/normal.o"
-          nm -S --size-sort "$probe/normal.o"
-      - name: Run the induction fixtures
-        run: ./build/compiler test-tier1-emit
