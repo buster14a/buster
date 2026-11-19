@@ -7,6 +7,13 @@ permissions:
   contents: read
 jobs:
   sample:
+    name: Four-CPU lookup comparison (${{ matrix.sanitizer }})
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [memory, address]
+    env:
+      BUSTER_SAMPLE_SANITIZER: ${{ matrix.sanitizer }}
     runs-on: ubuntu-26.04
     timeout-minutes: 110
     steps:
@@ -33,7 +40,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: memory-lookup-2758
+          name: memory-lookup-2758-${{ matrix.sanitizer }}
           path: ${{ runner.temp }}/lookup-results
           if-no-files-found: ignore
           retention-days: 7
