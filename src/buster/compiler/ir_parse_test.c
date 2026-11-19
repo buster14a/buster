@@ -519,6 +519,29 @@ static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* twi
     ir_parse_test_expect(test, verify_result.error == IR_PARSE_VERIFY && verify_result.line == 3 && verify_result.column == 3 &&
                          verify_result.offset == (uint64_t)(strstr(verify, "%0") - verify) && verify_result.check.instruction == 0,
                          "verification diagnostic lost the offending instruction location");
+    // The error points to the beginning of the complete name, including an empty name.
+    static const struct
+    {
+        const char* text;
+        const char* rejected;
+        uint32_t line;
+        uint32_t column;
+    } names[] = {
+        { "function (i12) -> void {\n", "i12", 1, 11 },
+        { "function () ->   {\n", "{", 1, 18 },
+        { "function () -> void {\nb0:\n  %0 = .i32\n", ".", 3, 8 },
+        { "function () -> void {\nb0:\n  %0 = call_indirec.void\n", "call_indirec", 3, 8 },
+        { "function () -> void {\nb0:\n  %0 = call_indirectx.void\n", "call_indirectx", 3, 8 },
+        { "function () -> void {\nb0:\n  %0 = fence.void acq_relaxed\n", "acq_relaxed", 3, 19 },
+    };
+    for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i += 1)
+    {
+        const String8 source = { (char*)names[i].text, strlen(names[i].text) };
+        const IrParseResult result = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+        const uint64_t offset = (uint64_t)(strstr(names[i].text, names[i].rejected) - names[i].text);
+        ir_parse_test_expect(test, result.error == IR_PARSE_SYNTAX && result.consumed == 0 && result.offset == offset &&
+                             result.line == names[i].line && result.column == names[i].column, "named token lost its syntax diagnostic");
+    }
     const uint64_t output_mark = output->length;
     memset(&function, 0x5a, sizeof(function));
     uint8_t saved[sizeof(function)];
