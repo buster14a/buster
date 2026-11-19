@@ -1,0 +1,170 @@
+diff --git a/src/buster/compiler/snapshot.c b/src/buster/compiler/snapshot.c
+index e1e38d451..a059ee4f2 100644
+--- a/src/buster/compiler/snapshot.c
++++ b/src/buster/compiler/snapshot.c
+@@ -866,9 +866,8 @@ static bool snapshot_pieces_contiguous(const Runtime* runtime)
+     return result;
+ }
+ 
+-// Whether the writer copies a region from the runtime's column as it is: every one but the records with pointers, the
+-// strings, the pieces' hashes and data, the names' and atoms' bytes (both regions of each) and the data, which it fills
+-// itself.
++// Whether the writer copies the whole region from the runtime. The loader's and libgcc_s's version records retain
++// their source padding; their name pointers are replaced with string offsets below.
+ static bool snapshot_region_copied(uint32_t region)
+ {
+     return region != SNAPSHOT_REGION_PROBES && region != SNAPSHOT_REGION_VERSIONS && region != SNAPSHOT_REGION_MEMBERS && region != SNAPSHOT_REGION_STRINGS &&
+@@ -980,13 +979,20 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
+     bool fits = image != 0 && snapshot_pieces_contiguous(runtime);
+     if (fits)
+     {
+-        memset(image, 0, end);
++        // The header and each region have writers of their own. Only the alignment gaps have no writer.
++        uint64_t previous_end = sizeof(header);
+         for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
+         {
+-            if (snapshot_region_copied(r) && header.regions[r].bytes != 0)
++            const SnapshotPlace place = header.regions[r];
++            if (place.offset != previous_end)
+             {
+-                memcpy(image + header.regions[r].offset, (const uint8_t*)*columns[r].column + columns[r].first * columns[r].element, header.regions[r].bytes);
++                memset(image + previous_end, 0, place.offset - previous_end);
+             }
++            if (snapshot_region_copied(r) && place.bytes != 0)
++            {
++                memcpy(image + place.offset, (const uint8_t*)*columns[r].column + columns[r].first * columns[r].element, place.bytes);
++            }
++            previous_end = place.offset + place.bytes;
+         }
+         // The strings: the global names' first, so that their offset is the counts', then the paths, then the records'
+         // strings, each written in its record as it goes in.
+@@ -1005,6 +1011,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
+             };
+         }
+         RuntimeProbe* probes = (RuntimeProbe*)(image + header.regions[SNAPSHOT_REGION_PROBES].offset);
++        const size_t flags_end = offsetof(RuntimeProbe, deferred) + sizeof(probes->deferred);
+         for (uint32_t p = 0; p < header.counts.probes; p += 1)
+         {
+             const RuntimeProbe* probe = &runtime->probes[p];
+@@ -1013,6 +1020,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
+             probes[p].directory = probe->directory;
+             probes[p].found = probe->found;
+             probes[p].deferred = probe->deferred;
++            memset((uint8_t*)&probes[p] + flags_end, 0, offsetof(RuntimeProbe, device) - flags_end);
+             probes[p].device = probe->device;
+             probes[p].inode = probe->inode;
+             probes[p].size = probe->size;
+@@ -1033,10 +1041,15 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
+             {
+                 const ImportVersion* version = &source->versions[v];
+                 versions[v].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, version->name.pointer, version->name.length, &fits);
+-                versions[v].name.length = version->name.length;
+-                versions[v].hash = version->hash;
+-                versions[v].index = version->index;
+-                versions[v].base = version->base;
++                if (region == SNAPSHOT_REGION_VERSIONS)
++                {
++                    versions[v].name.length = version->name.length;
++                    versions[v].hash = version->hash;
++                    versions[v].index = version->index;
++                    versions[v].base = version->base;
++                    const size_t fields_end = offsetof(ImportVersion, base) + sizeof(version->base);
++                    memset((uint8_t*)&versions[v] + fields_end, 0, sizeof(*version) - fields_end);
++                }
+             }
+         }
+         ImportMember* members = (ImportMember*)(image + header.regions[SNAPSHOT_REGION_MEMBERS].offset);
+@@ -1045,7 +1058,9 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
+             const String8 name = runtime_member_name(runtime, m);
+             members[m].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, name.pointer, name.length, &fits);
+             members[m].name.length = name.length;
++            members[m].bytes = (String8){ 0 };
+             members[m].offset = runtime->members[m].offset;
++            members[m].nested = 0;
+         }
+         fits = fits && strings.length == strings_bytes;
+         // The data: the crt objects' names (the names run's first object_name_bytes bytes), then each piece's atoms' bytes
+@@ -1066,6 +1081,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
+         const uint32_t object_names = header.counts.object_names;
+         uint64_t* object_name_column = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_NAME_BYTES].offset);
+         uint64_t* member_name_column = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_MEMBER_NAME_BYTES].offset);
++        object_name_column[0] = 0;
+         for (NameId name = 1; fits && name < header.counts.names; name += 1)
+         {
+             // A crt object's name is in the run's first part, a member's in the rest.
+@@ -1089,6 +1105,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
+         const uint32_t object_atoms = header.counts.object_atoms;
+         uint64_t* object_atom_column = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_ATOM_BYTES].offset);
+         uint64_t* member_atom_column = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_MEMBER_ATOM_BYTES].offset);
++        object_atom_column[0] = 0;
+         uint64_t* piece_data = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_PIECE_DATA].offset);
+         uint64_t at = object_name_bytes;
+         for (uint32_t p = 0; fits && p < header.counts.pieces; p += 1)
+diff --git a/src/buster/compiler/snapshot_test.c b/src/buster/compiler/snapshot_test.c
+index 874a4530b..2bbe0a2ea 100644
+--- a/src/buster/compiler/snapshot_test.c
++++ b/src/buster/compiler/snapshot_test.c
+@@ -397,6 +397,38 @@ static SnapshotStatus snapshot_test_load(Runtime* runtime, const char* directory
+     return snapshot_load(runtime, path, kind, compiler, 0);
+ }
+ 
++// Loading rebases pointers in the private mapping. Compare the raw file, including the directory and piece hashes,
++// against the same import written over dirty memory.
++static void snapshot_test_image(SnapshotTestTally* tally, const char* path, const Runtime* imported, const RuntimeProbe* compiler)
++{
++    Scratch scratch = scratch_begin(0);
++    const String8 file = executable_test_read(scratch.arena, path);
++    uint8_t* buffer = file.length > sizeof(SnapshotHeader) ? arena_push(scratch.arena, file.length, BUSTER_SNAPSHOT_ALIGNMENT) : 0;
++    snapshot_test_expect(tally, buffer != 0, "room for the raw snapshot", 0);
++    if (buffer != 0)
++    {
++        Arena arena = {
++            .base = buffer,
++            .capacity = file.length - 1,
++        };
++        uint64_t bytes = UINT64_MAX;
++        snapshot_test_expect(tally, snapshot_image(imported, compiler, &arena, &bytes) == 0 && bytes == 0, "one byte short refuses the image", 0);
++        arena.capacity = file.length;
++        for (uint32_t pass = 0; pass < 2; pass += 1)
++        {
++            arena.length = 0;
++            memset(buffer, pass == 0 ? 0xa5 : 0x5a, file.length);
++            const uint8_t* image = snapshot_image(imported, compiler, &arena, &bytes);
++            snapshot_test_expect(tally, image == buffer && bytes == file.length && memcmp(buffer, file.pointer, bytes) == 0, "every raw byte over poison", pass);
++        }
++        Runtime missing = *imported;
++        missing.global_names.strings = 0;
++        arena.length = 0;
++        snapshot_test_expect(tally, snapshot_image(&missing, compiler, &arena, &bytes) == 0 && bytes == 0, "incomplete strings refuse the image", 0);
++    }
++    scratch_end(scratch);
++}
++
+ // The runtime written as a snapshot in a directory of its own, `name`, and loaded back, as the check `check`.
+ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler, const char* check, const char* name)
+ {
+@@ -404,9 +436,15 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
+         .check = check,
+     };
+     char place[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
++    char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+     snapshot_test_path(place, directory->path, name);
++    snapshot_test_path(path, place, snapshot_name(imported->kind));
+     const bool written = snapshot_test_write(imported, place, compiler);
+     snapshot_test_expect(&tally, written, "the snapshot written", 0);
++    if (written)
++    {
++        snapshot_test_image(&tally, path, imported, compiler);
++    }
+     Runtime loaded;
+     const SnapshotStatus status = written ? snapshot_test_load(&loaded, place, imported->kind, compiler) : SNAPSHOT_STATUS_MISSING;
+     snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_LOADED, "the snapshot loaded", status);
+@@ -430,8 +468,6 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
+         }
+         runtime_release(&loaded);
+     }
+-    char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+-    snapshot_test_path(path, place, snapshot_name(imported->kind));
+     if (!directory->keep)
+     {
+         unlink(path);
