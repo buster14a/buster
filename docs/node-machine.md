@@ -3134,7 +3134,9 @@ readings each):
 
 - **The gathers stay.** A loop a record is slower on the 9700X in every form
   tried. Its four loads of a record's line are the gathers' loads; what it
-  adds is a record's work a turn.
+  adds is a record's work a turn. (Until "The records' bytes without their
+  four gathers", below: sixteen records a step still, their columns by loads
+  and permutes.)
 - **Lists as bits cost the same as lists.** With the tree's records and the
   operators compressed into lists, an expression's part read 9.1 and the
   tests on T's records 36.8. As words of the blocks' masks, read bit by bit
@@ -5485,6 +5487,93 @@ one at an absolute address before the fix and after it.
 musl; then a value the columns don't hold whole, a comma and a selection, and
 a division by a constant. The values are the piece after, with the loop's
 frame.
+
+### The records' bytes without their four gathers
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/the-records-bytes-without-gathers-2850-2026-11-19).
+Its [specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7020847483)
+had four gates: the same bytes (S1), what it costs (S2), that nothing else
+moves (S3) and faults (S4).
+
+The tests' loop and C's read a chunk's records as byte columns, which one
+sweep makes sixteen records a step (`node_tests_window_bytes_by`). It read
+four columns of the kernel's 64-byte records (a record's word, flags, object
+and standing) by four masked gathers of sixteen dwords. A gather of sixteen
+is 64 uops on Zen 5 ("SIMD and Zen 5" in [the coding style](coding-style.md)):
+256 a step, for what sixteen loads hold.
+
+**Loads and permutes.** A record's line's first half is its type, word,
+flags and object, its payload, and its standing with its exponent: eight
+dwords. The sweep reads that half whole, two records a register. One permute
+of two registers puts each column's four dwords of four records in one
+128-bit lane, and eight lane shuffles make the four columns, the last four
+masked by the placed records as the gathers were. Sixteen loads and twelve
+permutes a step. A step reads its sixteen lines whether placed or not: they
+are the window's own array, 4,096 lines.
+
+**What "The gathers stay" had measured** ("The tests on the window", above)
+was a loop a record, which lost to the gathers in every form. This is no loop
+a record: the same sixteen records a step, their columns by permutes.
+
+**What stays a gather:** the names' declarations' lines' bytes, whose indices
+are entries' numbers and no column, and the two of the reader's verify.
+
+**Measured.** The 9700X, CPU 2, Release, each run its own hold of the lock,
+TSC ticks a record, seven readings; a reading's own difference, its median
+and range. Build against build is the build before (#3030's code) and the
+piece in turn. The switch is one executable, an experiment's build, that
+reads the columns by the gathers where its environment says so: loads,
+gathers, gathers, loads in each reading.
+
+| the records' bytes | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| build against build: before, with | 9.16, 7.58 | 10.78, 9.33 | 19.67, 19.48 |
+| with less before | -1.65 (-1.72 to -1.35) | -1.49 (-1.86 to -0.64) | -0.48 (-3.57 to 6.54) |
+| **the switch: loads less gathers** | **-2.41 (-2.51 to -2.32)** | **-2.35 (-2.40 to -2.27)** | **-3.00 (-3.61 to -2.14)** |
+| the same where the sweep makes C's bytes too | -2.44 (-2.52 to -2.36) | -2.55 (-2.79 to -2.43) | -3.68 (-5.80 to -2.69) |
+
+| by the switch, loads less gathers | `sqlite3.c` | Lua |
+| --- | ---: | ---: |
+| the tests on the window, their sum | -2.52 (-2.66 to -2.35) | -2.26 (-2.48 to 0.84) |
+| the tests' loop | -0.03 (-0.15 to 0.04) | +0.07 (-0.03 to 0.10) |
+| an expression's part | -0.03 (-0.12 to 0.08) | +0.03 (0.02 to 2.86) |
+| the tests on T's records | -0.03 (-0.14 to 0.06) | +0.03 (-0.25 to 0.49) |
+| C's three sweeps, a record swept | -0.04 (-0.16 to 0.11) | +0.04 (-0.08 to 0.19) |
+
+The two measures are 0.8 apart on `sqlite3.c`. The switch's executable reads
+the gathers at 9.54 where the build before reads 9.16, and the loads at 7.15
+where their own build reads 7.58. By the switch the tests on the window are
+29.11 ticks a record on `sqlite3.c` for 31.56.
+
+**Against its gates.**
+
+- **S1, the same bytes: met.** No pin of `test-checker`'s fixtures moves.
+  On the 9700X's three corpora the shadow's count lines of the piece's build
+  are the build before's in each of 42 readings; in the cloud container the
+  three corpora and the compiler's own source, with the default warnings and
+  with `-Wall -Wextra`, read the counts of "A condition's branches on the
+  window" with no difference.
+- **S2, cost: met.** 1.65 and 1.49 ticks a record lower on `sqlite3.c` and
+  Lua build against build (1.2 asked, refuted under 1.0), 2.41 and 2.35 by
+  the switch (2.0 asked, refuted under 1.6); musl lower in both medians.
+- **S3, nothing else moves: met.** By the switch each other part reads
+  within 0.1 of itself in the median on `sqlite3.c` and Lua (0.3 asked).
+  Build against build an expression's part reads 0.27 and 0.34 higher in the
+  piece's build (0.05 to 0.37, and 0.27 to 0.60), which one executable's two
+  settings do not show: the tests' sum is 1.23 and 0.50 lower between the
+  two builds for the 2.52 and 2.26 of the switch.
+- **S4, faults: met.** 37 faults, one at a time in the piece's tree on the
+  9700X (each index of the permute, each shuffle's selection, each column's
+  mask, each load's place, the permute's registers swapped), each built and
+  run on `test-checker`'s part 5. The first round caught 34. The three it
+  passed dropped the placed records' mask of the flags', the objects' and the
+  standings' columns: a record the kernel didn't place then has bytes, which
+  no test read. The reader's verify now counts such a record
+  (`own_values_wrong`), and a second round with it caught those three and the
+  words' mask again.
+
+**What else the sweep spends** is not measured here: its one gather, and
+the declarations' lines' bytes' first making (18,295 lines on `sqlite3.c`).
 
 ### What it says of step 2
 
