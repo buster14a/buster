@@ -25,21 +25,25 @@ jobs:
           "$RUNNER_TEMP/probe"
       - uses: ./.github/actions/hosted-tools
       - run: bash tools/ci/setup-hosted.sh
-      - name: Establish ordinary -g object baselines
+      - name: Compare ordinary objects, linked programs, and the producer stress fixture
         run: |
           set -euo pipefail
-          ./build.sh --config Release
           clang --version
-          git rev-parse HEAD
-          for source in tools/codegen/unreferenced.c tools/ci/rerun.c; do
-            name=$(basename "$source" .c)
-            build/compiler -g -c "$source" -o "$RUNNER_TEMP/$name.o"
-            size -A -d "$RUNNER_TEMP/$name.o" | awk '$1==".debug_line" || $1==".text"'
-            llvm-dwarfdump --debug-line "$RUNNER_TEMP/$name.o" | awk '$1 ~ /^0x[0-9a-f]+$/ {print}' > "$RUNNER_TEMP/$name.matrix"
-            test -s "$RUNNER_TEMP/$name.matrix"
-            readelf -wl "$RUNNER_TEMP/$name.o" | awk '/Extended opcode 2: set Address to/ && ++n <= 2 {print}; /Special opcode/{s++} END{print "special opcodes", s+0}'
-            wc -l "$RUNNER_TEMP/$name.matrix"
-            sha256sum "$RUNNER_TEMP/$name.matrix"
-          done
-      - name: Exercise producer and external consumers
-        run: build/compiler test-debug --cross-check
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA" c069387bc2f00da4dce7683c32db99196340bfd1
+          harness="$RUNNER_TEMP/line-harness"
+          mkdir -p "$harness"
+          for f in compare.sh rows.c; do git show "$GITHUB_SHA:.verify-3031/$f" > "$harness/$f"; done
+          bash "$harness/compare.sh" 6427879e1143026a12fb0388a20bdea1fe4b2bc5 c069387bc2f00da4dce7683c32db99196340bfd1 "$RUNNER_TEMP/line-evidence"
+      - name: Preserve independent reader output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: decoded-lines-and-fixups
+          path: |
+            ${{ runner.temp }}/line-evidence/**/*.dump
+            ${{ runner.temp }}/line-evidence/**/*.program
+            ${{ runner.temp }}/line-evidence/**/*.matrix
+            ${{ runner.temp }}/line-evidence/**/*.verify
+            ${{ runner.temp }}/line-evidence/**/*.reloc
+          if-no-files-found: ignore
+          retention-days: 14
