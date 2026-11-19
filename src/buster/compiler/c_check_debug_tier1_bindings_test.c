@@ -3,7 +3,7 @@
 //
 // Sparse scalar proofs for test-check-debug (#1114), included after c_check_tier1.c. Each expected cell gives the
 // actual whole-value carrier before a record: register 0..31, one exact frame displacement, literal bytes or NONE.
-// The complete constructor, CFG fixed point and incremental count/fill publisher all run against these tables.
+// The complete constructor, CFG fixed point and incremental range publisher all run against these tables.
 // Final-order arrays include the driver's terminal record_order[count] == count sentinel.
 
 #define BUSTER_CHECK_DEBUG_VALUE_MEMORY(offset) (UINT32_C(0x40000000) | (uint16_t)(offset))
@@ -16,15 +16,15 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
     _Alignas(64) uint8_t storage[32768] = { 0 };
     Arena scratch = { .base = storage, .capacity = sizeof(storage) };
     CheckTier1DebugValues proof = { 0 };
-    EmittedLocalRange locations[128] = { 0 };
+    _Alignas(64) EmittedLocalRange locations[128] = { 0 };
+    Arena output = { .base = (uint8_t*)locations, .capacity = sizeof(locations) };
+    CheckTier1Debug result = { 0 };
     uint32_t actual[128];
     memset(actual, 0xff, sizeof(actual));
     const uint64_t cells = (uint64_t)function->local_count * emitted->code.count;
     bool valid = cells <= BUSTER_ARRAY_LENGTH(actual) && check_tier1_debug_values(function, ir, emitted, order, NULL, NULL, &scratch, &proof);
-    const uint64_t count = valid ? check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, NULL) : 0;
-    valid = valid && count <= BUSTER_ARRAY_LENGTH(locations);
-    valid = valid && check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, locations) == count;
-    for (uint64_t k = 0; valid && k < count; k += 1)
+    valid = valid && check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, &output, &result);
+    for (uint32_t k = 0; valid && k < result.local_range_count; k += 1)
     {
         const EmittedLocalRange location = locations[k];
         valid = location.local < function->local_count && location.begin < location.end && location.end <= emitted->code.count;
@@ -54,6 +54,23 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
     }
     check_debug_test_expect(tally, valid && memcmp(actual, expected, cells * sizeof(uint32_t)) == 0,
                             "sparse scalar ranges match independently specified whole-value carriers", description);
+    if (valid && result.local_range_count != 0 && result.local_range_count < BUSTER_ARRAY_LENGTH(locations))
+    {
+        // One existing range, followed by exactly enough room for this function's ranges.
+        const uint32_t count = result.local_range_count;
+        locations[0].local = UINT32_MAX;
+        output.length = sizeof(*locations);
+        output.capacity = (count + 1) * sizeof(*locations);
+        result.local_range_count = 1;
+        const bool exact = check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, &output, &result);
+        check_debug_test_expect(tally, exact && result.local_ranges == locations && locations[0].local == UINT32_MAX &&
+                                result.local_range_count == count + 1 && output.length == output.capacity, "debug range suffix fits exactly", description);
+        output.length = sizeof(*locations);
+        output.capacity -= 1;
+        result.local_range_count = 1;
+        const bool short_buffer = check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, &output, &result);
+        check_debug_test_expect(tally, !short_buffer && locations[0].local == UINT32_MAX && result.local_range_count == count, "short debug range suffix fails at the final row", description);
+    }
 }
 
 // The static CFG meet alone can hide a stale-iteration bug by discarding a first-trip-absent row. Walk the concrete
