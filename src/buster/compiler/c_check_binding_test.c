@@ -1069,7 +1069,7 @@ static void check_test_typo_prefilter(CheckTest* test)
                 .keys = keys,
                 .lengths = lengths,
             };
-            const uint32_t got = check_typo_prefilter(&scope, begin, end, name_capacity, length, true, candidates);
+            const uint32_t got = check_typo_prefilter(&scope, begin, end, name_capacity, length, candidates);
             same &= got == want;
             for (uint32_t i = 0; same && i < want; i += 1)
             {

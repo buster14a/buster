@@ -2002,12 +2002,12 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
             check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
-            // The return facts' vector path visits only the nodes that can have facts (check_program_return_sparse): every
+            // The return facts' walk visits only the nodes that can have facts (check_program_return_sparse): every
             // node's must be the definition's, check_program_return_node at every node in order.
             const uint64_t facts_mark = scratch.length;
             const uint8_t* exact = check_test_return_facts_definition(&program, &scratch);
             const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
-            snprintf(description, sizeof(description), "%s: the return facts' vector path gives every node the definition's facts", name);
+            snprintf(description, sizeof(description), "%s: the return facts' walk gives every node the definition's facts", name);
             check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
             arena_pop_to(&scratch, facts_mark);
         }
