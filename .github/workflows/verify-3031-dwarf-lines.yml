@@ -1,0 +1,43 @@
+name: DWARF line producer evidence for issue 3031
+on:
+  push:
+    branches: [verify/3031-dwarf-lines]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BUSTER_HOST_ARCH: vector
+      BUSTER_SANITIZER: none
+      BUSTER_SANITIZER_OPTIMIZATION: 3
+      BUSTER_DEBUG_INFO: 0
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 6427879e1143026a12fb0388a20bdea1fe4b2bc5
+          persist-credentials: false
+      - name: Check the runner against the repository's vector predicate
+        run: |
+          lscpu | sed -n '/Model name:/p'
+          cc -std=c17 -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/probe"
+      - uses: ./.github/actions/hosted-tools
+      - run: bash tools/ci/setup-hosted.sh
+      - name: Establish ordinary -g object baselines
+        run: |
+          set -euo pipefail
+          ./build.sh --config Release
+          clang --version
+          git rev-parse HEAD
+          for source in tools/codegen/unreferenced.c tools/ci/rerun.c; do
+            name=$(basename "$source" .c)
+            build/compiler -g -c "$source" -o "$RUNNER_TEMP/$name.o"
+            llvm-size -A "$RUNNER_TEMP/$name.o" | awk '$1==".debug_line" || $1==".text"'
+            llvm-dwarfdump --debug-line "$RUNNER_TEMP/$name.o" | awk '$1 ~ /^0x[0-9a-f]+$/ {print}' > "$RUNNER_TEMP/$name.matrix"
+            wc -l "$RUNNER_TEMP/$name.matrix"
+            sha256sum "$RUNNER_TEMP/$name.matrix"
+          done
+      - name: Exercise producer and external consumers
+        run: build/compiler test-debug --cross-check
