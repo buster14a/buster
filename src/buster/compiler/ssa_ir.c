@@ -120,12 +120,85 @@ static IrError ssa_ir_error(SsaError error)
     return result;
 }
 
+// Boundary uses collected while ordinary operands are first decoded. For a
+// phi, use_block is the incoming predecessor and the row belongs to the join.
+typedef struct SsaIrCrossUse SsaIrCrossUse;
+struct SsaIrCrossUse
+{
+    uint32_t row;
+    uint32_t position;
+    uint32_t origin;
+    uint32_t use_block;
+};
+
+typedef struct SsaIrUseChunk SsaIrUseChunk;
+struct SsaIrUseChunk
+{
+    struct SsaIrUseChunk* next;
+    uint32_t count;
+    SsaIrCrossUse uses[128];
+};
+
+typedef struct SsaIrCrossUses SsaIrCrossUses;
+struct SsaIrCrossUses
+{
+    SsaIrUseChunk* first;
+    SsaIrUseChunk* last;
+};
+
+static bool ssa_ir_append_cross_use(SsaIrCrossUses* ledger, Arena* scratch, SsaIrCrossUse use)
+{
+    SsaIrUseChunk* chunk = ledger->last;
+    if (chunk == NULL || chunk->count == BUSTER_ARRAY_LENGTH(chunk->uses))
+    {
+        chunk = BUSTER_ARENA_PUSH_ARRAY(scratch, SsaIrUseChunk, 1);
+        if (chunk != NULL)
+        {
+            chunk->next = NULL;
+            chunk->count = 0;
+            if (ledger->last != NULL)
+            {
+                ledger->last->next = chunk;
+            }
+            else
+            {
+                ledger->first = chunk;
+            }
+            ledger->last = chunk;
+        }
+    }
+    if (chunk != NULL)
+    {
+        chunk->uses[chunk->count++] = use;
+    }
+    return chunk != NULL;
+}
+
+static IrCheck ssa_ir_check_cross_uses(SsaIrWork* work, const SsaIrCrossUses* ledger)
+{
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+    const uint8_t* reachable = work->work.result.reachable;
+    for (const SsaIrUseChunk* chunk = ledger->first; check.error == IR_OK && chunk != NULL; chunk = chunk->next)
+    {
+        for (uint32_t n = 0; check.error == IR_OK && n < chunk->count; ++n)
+        {
+            const SsaIrCrossUse use = chunk->uses[n];
+            if (reachable[work->cfg.instruction_blocks[use.row]] && reachable[use.use_block] &&
+                !ssa_dominates(&work->work, use.origin, use.use_block))
+            {
+                check = ir_check(IR_ERROR_DOMINANCE, use.row, use.position);
+            }
+        }
+    }
+    return check;
+}
+
 // A stack address may have several definitions, and a later use may escape an address first used by a load.
 // Classify every use before exposing any READ/WRITE to SSA; an indirect, volatile or differently typed access excludes
 // the whole slot, unless the slot is an untyped temporary whose accesses so far agree on one scalar type, which the
 // first access adopts. No alias inference is needed: an address used through COPY, ADDRESS, a phi or a call stays
 // memory.
-static IrError ssa_ir_classify(SsaIrWork* work)
+static IrError ssa_ir_classify(SsaIrWork* work, SsaIrCrossUses* ledger)
 {
     const IrFunction* f = work->input;
     const uint32_t local_count = f->block_count == 0 ? 0 : f->slot_count;
@@ -158,12 +231,20 @@ static IrError ssa_ir_classify(SsaIrWork* work)
             work->local_types[slot] = temporary ? BUSTER_SSA_TYPE_VOID : local.type == IR_VOID ? BUSTER_SSA_TYPE_AGGREGATE : local.type;
             work->local_flags[slot] = !temporary && (local.type == IR_VOID || (local.flags & (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_VOLATILE)) != 0) ? BUSTER_SSA_LOCAL_ADDRESS_TAKEN : 0;
         }
-        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        for (uint32_t i = 0; error == IR_OK && i < f->instruction_count; i += 1)
         {
             const uint64_t count = ir_operand_count(f, i);
-            for (uint32_t p = 0; p < count; p += 1)
+            for (uint32_t p = 0; error == IR_OK && p < count; p += 1)
             {
                 const IrOperand operand = ir_operand(f, i, p, work->cfg.instruction_blocks[i]);
+                if (BUSTER_TIER1_PRIVATE_VALUES && ledger != NULL)
+                {
+                    const uint32_t origin = work->cfg.instruction_blocks[operand.value];
+                    if (origin != operand.block && !ssa_ir_append_cross_use(ledger, work->scratch, (SsaIrCrossUse){ .row = i, .position = operand.position, .origin = origin, .use_block = operand.block }))
+                    {
+                        error = IR_ERROR_MEMORY;
+                    }
+                }
                 if (f->op[operand.value] == IR_STACK_ADDR)
                 {
                     const uint32_t slot = f->a[operand.value];
@@ -817,6 +898,8 @@ static IrError ssa_ir_debug_regions(SsaIrWork* work, IrFunction* output)
     return error;
 }
 
+#include "ssa_ir_demand.c"
+
 // `input_verified`: the caller's input is a function a full verification has passed since its last change (the
 // lowering's or GVN's result, #1379), whose verification promotion then doesn't repeat; every other caller's is verified.
 static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector, SsaCheck* verified,
@@ -824,6 +907,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
 {
     (void)vector;
     const bool rename_vector = BUSTER_VECTOR_PATH(vector);
+    SsaIrCrossUses uses = { 0 };
     bool dense = false;
     const uint64_t output_length = output == 0 ? 0 : output->length;
     const uint64_t scratch_length = scratch == 0 ? 0 : scratch->length;
@@ -857,7 +941,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        check.error = ssa_ir_classify(&work);
+        check.error = ssa_ir_classify(&work, BUSTER_TIER1_PRIVATE_VALUES ? &uses : NULL);
     }
     if (check.error == IR_OK)
     {
@@ -866,7 +950,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         // cap use the bounded predecessor reader, with either host's renaming kernel. Verified promotion also
         // exercises dense vector construction past the crossover wherever the complete memory bound admits it.
         const uint64_t cells = (uint64_t)input->block_count * work.source.local_count;
-        dense = ssa_dense_fits(&work.source);
+        dense = !BUSTER_TIER1_PRIVATE_VALUES && ssa_dense_fits(&work.source);
         vector = dense && BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count) && (verified != 0 || cells <= BUSTER_SSA_IR_VECTOR_CELLS);
         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
@@ -874,7 +958,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        check = ssa_ir_check_dominance(&work);
+        check = BUSTER_TIER1_PRIVATE_VALUES ? ssa_ir_check_cross_uses(&work, &uses) : ssa_ir_check_dominance(&work);
     }
     if (check.error == IR_OK)
     {
@@ -886,7 +970,11 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        if (dense)
+        if (BUSTER_TIER1_PRIVATE_VALUES)
+        {
+            check.error = ssa_ir_error(ssa_ir_construct_demanded(&work.work));
+        }
+        else if (dense)
         {
             check.error = ssa_ir_error(BUSTER_VECTOR_PATH(vector) ? ssa_construct_vector(&work.work) : ssa_construct_scalar(&work.work));
         }

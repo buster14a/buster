@@ -146,7 +146,14 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         else
         {
             const uint32_t value = ir_typed_convert(&sink, parameter, arrival, class);
-            ir_typed_emit(&sink, IR_STORE, IR_VOID, p, value, BUSTER_IR_NONE, ir_typed_alignment(class));
+            if (BUSTER_TIER1_PRIVATE_VALUES && plan->direct_local != NULL && plan->direct_local[p])
+            {
+                plan->direct_value[p] = value;
+            }
+            else
+            {
+                ir_typed_emit(&sink, IR_STORE, IR_VOID, p, value, BUSTER_IR_NONE, ir_typed_alignment(class));
+            }
         }
     }
     // Only the producer's validated direct table addresses (#1217), each as one pointer and its stack's U64 value.
@@ -241,7 +248,14 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 depth += 1;
                 break;
             case BUSTER_TYPED_LOCAL:
-                stack[depth] = ir_typed_emit(&sink, IR_LOAD, type, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, class >= BUSTER_TYPED_CLASS_LIMIT ? input->local_alignments[value] : ir_typed_alignment(class));
+                if (BUSTER_TIER1_PRIVATE_VALUES && plan->direct_local != NULL && plan->direct_local[value])
+                {
+                    stack[depth] = plan->direct_value[value];
+                }
+                else
+                {
+                    stack[depth] = ir_typed_emit(&sink, IR_LOAD, type, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, class >= BUSTER_TYPED_CLASS_LIMIT ? input->local_alignments[value] : ir_typed_alignment(class));
+                }
                 classes[depth] = class;
                 depth += 1;
                 break;
@@ -344,7 +358,14 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             {
                 const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
                 const uint32_t address = local ? (uint32_t)value : ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                ir_typed_emit(&sink, IR_STORE, IR_VOID, address, stack[depth - 1], BUSTER_IR_NONE, local ? (class >= BUSTER_TYPED_CLASS_LIMIT ? input->local_alignments[value] : ir_typed_alignment(class)) : 0);
+                if (local && BUSTER_TIER1_PRIVATE_VALUES && plan->direct_local != NULL && plan->direct_local[value])
+                {
+                    plan->direct_value[value] = stack[depth - 1];
+                }
+                else
+                {
+                    ir_typed_emit(&sink, IR_STORE, IR_VOID, address, stack[depth - 1], BUSTER_IR_NONE, local ? (class >= BUSTER_TYPED_CLASS_LIMIT ? input->local_alignments[value] : ir_typed_alignment(class)) : 0);
+                }
                 if (kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL)
                 {
                     depth -= 1;
