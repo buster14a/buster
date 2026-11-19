@@ -220,15 +220,13 @@ static void tier1_liveness_test_emit(Tier1LivenessTest* test, const Tier1SelectP
         {
             const uint64_t capacity = 8192;
             uint8_t* machine = mmap(0, capacity, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            uint8_t scalar[8192];
             bool ready = machine != MAP_FAILED && code.branch_count == 0 && BUSTER_X86_ENCODER_CAPACITY(code.count) <= capacity;
             if (ready)
             {
                 const int64_t length = x86_encode(code.records, code.count, machine, capacity, 0, 0);
-                const int64_t reference_length = x86_encode_scalar(code.records, code.count, scalar, capacity, 0, 0);
-                ready = length > 0 && length == reference_length && memcmp(machine, scalar, (uint64_t)length) == 0 && mprotect(machine, capacity, PROT_READ | PROT_EXEC) == 0;
+                ready = length > 0 && mprotect(machine, capacity, PROT_READ | PROT_EXEC) == 0;
             }
-            tier1_liveness_test_expect(test, ready, "both encoders agree on the allocated folded function");
+            tier1_liveness_test_expect(test, ready, "the allocated folded function encodes");
             for (uint64_t i = 0; ready && i < 64; i += 1)
             {
                 const uint64_t a = UINT64_C(11939) * i;

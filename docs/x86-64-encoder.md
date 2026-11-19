@@ -20,9 +20,9 @@ and X4, see "APX's registers"), and 16- and 32-bit modes, with every
 instruction of theirs (see "16- and 32-bit modes").
 For the instructions with a symbolic operand it reports where each one ends,
 which locates the fields their fixups patch (see "Fixups").
-For layout before encoding, `x86_measure` and `x86_measure_scalar` give each
-instruction's offset and the total length in 64-bit mode without a
-machine-code buffer (see "Lengths without bytes").
+For layout before encoding, `x86_measure` gives each instruction's offset and
+the total length in 64-bit mode without a machine-code buffer (see "Lengths
+without bytes").
 This document records why it is built the way it is: the review of the
 historical `encode_wide` that it replaces, the design, the Zen 5 measurements
 behind each choice, and what comes next.
@@ -471,31 +471,30 @@ from memory).
 
 ```c
 static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, uint32_t* offsets);
-static int64_t x86_measure_scalar(const X86Instruction* instructions, uint64_t count, uint32_t* offsets);
 ```
 
-These internal entry points return the total byte length and write the same
+This internal entry point returns the total byte length and write the same
 instruction-start offsets as `x86_encode`, starting from zero on each call.
-They require `x86_encoder_initialize` and instructions accepted by
-`x86_validate`; they do not validate the records. They use the ordinary
+It requires `x86_encoder_initialize` and instructions accepted by
+`x86_validate`; it doesn't validate the records. It uses the ordinary
 64-bit-mode templates, not the address32, APX, mode32 or mode16 entry points.
 FS/GS overrides and `BUSTER_X86_FORM_FIXUP` markings have the same length
 semantics as in `x86_encode`; measuring does not produce fixup ends.
 
 For a nonzero count, `offsets` is required and has room for `count`
 u32 elements, disjoint from the input records. Neither array needs padding:
-the functions read only those records and write only those offsets, with no
+it reads only those records and writes only those offsets, with no
 extra end element. A zero count permits null input and output pointers and
 returns zero. Counts above `BUSTER_X86_ENCODER_MAX_INSTRUCTIONS` return
 `X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS` before either array is accessed.
 Other invalid inputs are outside the contract, as with `x86_encode`.
 
-The vector path takes 16 records at a time; the last partial group's records
-come by masked loads of their dwords, which read nothing past the last. A
-zeroed copy, which it took before, cost a call of one record 1.2 times the
-scalar twin's time (105.6 cycles against 88.0 on the 9700X): the copy's loads
-wait for its stores, which they can't forward from. With masked loads, a call
-of one record takes 41.9 (#2924, C10). It transposes their operand and
+It takes 16 records at a time; the last partial group's records come by masked
+loads of their dwords, which read nothing past the last. A zeroed copy, which
+it took before, cost a call of one record 1.2 times the scalar twin's time
+(105.6 cycles against 88.0 on the 9700X): the copy's loads wait for its
+stores, which they can't forward from. With masked loads, a call of one record
+takes 41.9 (#2924, C10). It transposes their operand and
 displacement fields as the encoder does, but loads only each template's
 32-bit flags with one dword-index gather. Its indices come from the form
 fields already in the transposed vectors. This explicit gather avoids

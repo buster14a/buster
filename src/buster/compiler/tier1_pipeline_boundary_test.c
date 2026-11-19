@@ -394,13 +394,11 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
     }
     *mapped = (capacity + 4095) & ~UINT64_C(4095);
     uint8_t* machine = capacity != 0 && capacity < INT32_MAX ? mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
-    uint8_t* scalar = malloc(capacity);
-    bool ok = tier1_pipeline_expect(test, machine != MAP_FAILED && scalar != 0, "boundary native buffers allocate");
+    bool ok = tier1_pipeline_expect(test, machine != MAP_FAILED, "boundary native buffers allocate");
     for (uint32_t f = 0; ok && f < count; f += 1)
     {
         Tier0Code* body = &bodies[f];
-        uint32_t* scalar_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(body->reference_count) * sizeof(uint32_t));
-        ok = offsets[f] != 0 && ends[f] != 0 && scalar_ends != 0;
+        ok = offsets[f] != 0 && ends[f] != 0;
         ok = ok && branch_sizing_validate(body->records, body->count, body->branches, body->targets, body->branch_count).error == BRANCH_SIZING_OK;
         ok = ok && size_branches(body->records, body->count, body->branches, body->targets, body->branch_count, offsets[f]).error == BRANCH_SIZING_OK;
         ok = ok && x86_target_validate(test->allowed, body->records, body->count) == body->count;
@@ -416,10 +414,8 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
         ok = ok && marked == body->reference_count;
         const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(body->count);
         const int64_t vector_size = ok ? x86_encode(body->records, body->count, machine + starts[f], room, 0, ends[f]) : -1;
-        const int64_t scalar_size = ok ? x86_encode_scalar(body->records, body->count, scalar + starts[f], room, 0, scalar_ends) : -1;
-        ok = ok && vector_size > 0 && (uint64_t)vector_size <= room && vector_size == scalar_size && memcmp(machine + starts[f], scalar + starts[f], (size_t)vector_size) == 0;
-        ok = ok && memcmp(ends[f], scalar_ends, (uint64_t)body->reference_count * sizeof(uint32_t)) == 0;
-        ok = tier1_pipeline_expect(test, ok, "boundary branches size and baseline encoders agree on bytes and fixup ends");
+        ok = ok && vector_size > 0 && (uint64_t)vector_size <= room;
+        ok = tier1_pipeline_expect(test, ok, "boundary branches size and the baseline records encode");
         if (ok)
         {
             sizes[f] = (uint64_t)vector_size;
@@ -440,7 +436,6 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
             }
             ok = tier1_pipeline_expect(test, ok, "boundary label symbols name their emitted records");
         }
-        free(scalar_ends);
     }
     for (uint32_t f = 0; ok && f < count; f += 1)
     {
@@ -474,7 +469,6 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
         free(offsets[f]);
         free(ends[f]);
     }
-    free(scalar);
     *entry = starts[count - 1];
     return machine;
 }

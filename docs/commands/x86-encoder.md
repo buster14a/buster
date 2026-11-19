@@ -7,7 +7,9 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
-  of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
+  of legacy, VEX and EVEX forms, the AVX-512 encoder, the other modes' scalar
+  encoders, and `encode_one`, which validation in 16- and 32-bit modes and the
+  assembler's form matching encode an instruction by,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
   symbolic operand, `x86_encode` reports each marked instruction's end, and
   `x86_fixup_distance` gives its fields' offsets and addends from that; and
@@ -16,14 +18,13 @@ requirements. [Command index](README.md).
   templates of its own; and `x86_encode_mode32` and `x86_encode_mode16` (and
   `x86_encode_scalar_32` and `x86_encode_scalar_16`), the same for 32-bit and
   16-bit modes, with their operand and address sizes, segment overrides and own
-  instructions, and templates of their own). `x86_measure` and
-  `x86_measure_scalar` return the offsets and total length for valid ordinary
-  64-bit-mode records without a machine-code buffer. They require initialized
-  templates and room for `count` u32 offsets, disjoint from the records, with no
-  padding, permit null pointers for zero count, and reject counts past
-  `BUSTER_X86_ENCODER_MAX_INSTRUCTIONS` before touching either array. The
-  scalar twin uses the independent scalar form rules. There are no measure
-  variants for the other modes or fixup-end output.
+  instructions, and templates of their own). `x86_measure` returns the offsets
+  and total length for valid ordinary 64-bit-mode records without a
+  machine-code buffer. It requires initialized templates and room for `count`
+  u32 offsets, disjoint from the records, with no padding, permits null
+  pointers for zero count, and rejects counts past
+  `BUSTER_X86_ENCODER_MAX_INSTRUCTIONS` before touching either array. There are
+  no measure variants for the other modes or fixup-end output.
   `docs/x86-64-encoder.md` explains its design and measurements.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
@@ -32,23 +33,26 @@ requirements. [Command index](README.md).
 
 `./build/compiler test-x86-encoder` (about 1.8 s) checks that every form fits a
 template (and that building each, in every mode, at a `PROT_NONE` page writes
-nothing past it), both encoders on 761 known encodings from GNU as (each also
-with the fixup flag, whose end they must report), a digest of the scalar
-encoder's output for 100,000 random instructions, every batch width and variant
-of `x86_encode` against the scalar encoder (bytes, offsets and fixup ends, in
-each of the four loops: with neither, either or both of offsets and fixup ends)
-on every count from 0 to 199 and on 300,000 random instructions of every form
+nothing past it), `x86_encode` on 761 known encodings from GNU as (each also
+with the fixup flag, whose end it must report), a digest of its output for
+100,000 random instructions, every batch width and variant of `x86_encode`
+against the reference encoder (`x86_validate` and `x86_encode`: bytes, offsets
+and fixup ends, in each of the four loops: with neither, either or both of
+offsets and fixup ends) on every count from 0 to 199 and on 300,000 random
+instructions of every form
 (legacy with x87 and MMX, VEX and EVEX, with opmasks, broadcasts, rounding,
 registers 16-31, gathers and scatters, FS and GS segment overrides, and one in
-eight marked with the fixup flag), the same between `PROT_NONE` guard pages, and
-that `x86_validate` finds every invalid operand and the scalar encoder rejects
+eight marked with the fixup flag), whose lengths, bytes, offsets and fixup ends
+with the default seed and count must hash to a recorded digest (recorded where
+the scalar twin agreed), the same between `PROT_NONE` guard pages, and
+that `x86_validate` finds every invalid operand and the reference rejects
 it (memory operands in the 232 FS and GS forms without room for the override
 among them). `x86_encode` checks nothing: it takes what `x86_validate` accepts,
 as the code generator makes it (an immediate or rel8 outside its field's range,
 for one, gets its low bytes). Then it runs those checks again with 32-bit
 addresses, but the known fixups: 34 known encodings, a digest of their own,
 `x86_encode_16_address32` and `x86_encode_64_address32` against the scalar
-encoder on the random streams and at page edges, and invalid operands, among
+encoder on the random streams (and their digest) and at page edges, and invalid operands, among
 them MPX memory operands and memory operands in the 312 FS and GS forms and the
 116 forms without room for the `67`. And again for APX, but the known fixups:
 153 known encodings, 31 known invalid instructions (as GNU as rejects them), a
@@ -67,15 +71,15 @@ of 64-bit mode alone, instructions past 15 bytes and segment overrides where an
 instruction takes none. `--address32`, `--apx`, `--mode32` and `--mode16` run
 only their pass, and `--count N` and `--seed N` change the random streams.
 
-The ordinary 64-bit pass also compares `x86_measure` and `x86_measure_scalar`
-with both encoders and the known encodings: total length and every start
+The ordinary 64-bit pass also compares `x86_measure` with the encoder and the
+known encodings: total length and every start
 offset, all admitted forms with valid FS/GS overrides and fixup markings,
 random streams, vector and former chunk boundaries, and rebased partitions.
 It checks empty and excessive counts without accessible arrays, and bounds
 with guard pages and offset canaries at every dword alignment.
 
 The digests were recorded when GNU as encoded the same streams to the same
-bytes. After changing the form table, the scalar encoder or the fixup interface,
+bytes. After changing the form table, the encoders or the fixup interface,
 cross-check with GNU as (binutils 2.47 for the recorded digests) for every entry
 point, then record the digests the test prints:
 
@@ -109,7 +113,8 @@ GNU as writes zeros and a relocation for them, and `--compare-object` reads
 (with those fields zeroed where the reported fixup ends put them) and each
 relocation's offset, type, addend and symbol with the ones the fixup ends and
 `x86_fixup_distance` give, and the mode's vectorized encoder's bytes and fixup
-ends with the scalar encoder's. With `--address32`, the printer adds `addr32`
+ends with the reference encoder's (in 64-bit mode `x86_encode` after
+`x86_validate`; in the others, their scalar encoders). With `--address32`, the printer adds `addr32`
 where no general register gives the address size, and the relocations of
 displacements other than RIP-relative ones are R_X86_64_32; with `--apx`, it
 names registers 16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`); and with

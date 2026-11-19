@@ -11,9 +11,8 @@
 //
 // Entry points: x86_encoder_initialize (builds the templates; call it once before encoding), x86_encode (the
 // vectorized encoder, the code generator's, which takes the valid instructions instruction selection and register
-// allocation make and checks nothing about them), x86_encode_scalar (a plain reference encoder, for testing),
-// x86_measure and x86_measure_scalar (the same offsets and length without retaining machine code),
-// x86_validate (which checks that every instruction is one x86_encode can take, for tests and debugging) and
+// allocation make and checks nothing about them), x86_measure (the same offsets and length without retaining machine
+// code), x86_validate (which checks that every instruction is one x86_encode can take, for tests and debugging) and
 // x86_form_descriptions (the form table, for tests and diagnostics). The output needs room for
 // BUSTER_X86_ENCODER_CAPACITY(count) bytes; x86_encode writes nothing past that, but may write past the instructions'
 // bytes (its 64-byte stores). Besides the machine code, x86_encode can store each instruction's offset, and the end of
@@ -66,8 +65,8 @@
 //     instruction_is_valid (x86_instruction_is_valid, x86_instruction_is_valid_address32, x86_instruction_is_valid_apx,
 //     x86_instruction_is_valid_32 and x86_instruction_is_valid_16) and x86_validate (and x86_validate_address32,
 //     x86_validate_apx, x86_validate_32 and x86_validate_16).
-//   - The scalar encoder: encode_one, and x86_encode_scalar, x86_encode_scalar_address32, x86_encode_scalar_apx,
-//     x86_encode_scalar_32 and x86_encode_scalar_16.
+//   - The scalar encoder: encode_one (which validation in 16- and 32-bit modes measures by, and the assembler's form
+//     matching), and x86_encode_scalar_address32, x86_encode_scalar_apx, x86_encode_scalar_32 and x86_encode_scalar_16.
 //   - The vectorized encoder: X86Gather, X86Store and X86FixupStore (the variants the benchmark compares), X86Fields,
 //     the addressing mode tables (x86_mode_fields, x86_mode_constants and x86_mode_presence; for APX
 //     x86_mode_fields_apx; and for 16- and 32-bit modes x86_mode_fields_16, the
@@ -5046,17 +5045,11 @@ static __attribute__((unused)) bool x86_encoder_initialize(void);
 // have 16 bytes, even past the capacity), as is a form number past the form table's, whose template it would read.
 static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                   uint32_t* fixup_ends);
-// The same, one instruction at a time from the form table, after x86_validate: the reference for testing. Its fixup
-// ends need room for the marked instructions' alone.
-static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                                         uint32_t* fixup_ends);
 // The offsets and length x86_encode would produce, without a machine-code buffer. Requires the same initialized
 // templates and validated 64-bit-mode instructions. The records and offsets are disjoint; offsets has room for count
 // uint32_t values, and no padding is read or written. A zero count permits null pointers. Counts past
 // BUSTER_X86_ENCODER_MAX_INSTRUCTIONS return X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS without accessing either array.
-// The scalar twin uses encode_one's independent form rules, with a bounded local buffer for one instruction.
 static __attribute__((unused)) int64_t x86_measure(const X86Instruction* instructions, uint64_t count, uint32_t* offsets);
-static __attribute__((unused)) int64_t x86_measure_scalar(const X86Instruction* instructions, uint64_t count, uint32_t* offsets);
 // The index of the first instruction that can't be encoded, or count if they all can (a memory operand in a form whose
 // template has no room for it among them: see x86_form_lacks_room). Requires x86_encoder_initialize.
 static __attribute__((unused)) uint64_t x86_validate(const X86Instruction* instructions, uint64_t count);
@@ -6933,33 +6926,6 @@ static int64_t encode_scalar(const X86Instruction* instructions, uint64_t count,
             }
         }
         result = (int64_t)length;
-    }
-    return result;
-}
-
-static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                 uint32_t* fixup_ends)
-{
-    return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, X86_ENCODER_MODE_64);
-}
-
-static int64_t x86_measure_scalar(const X86Instruction* instructions, uint64_t count, uint32_t* offsets)
-{
-    int64_t result;
-    if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
-    {
-        result = X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
-    }
-    else
-    {
-        uint32_t length = 0;
-        uint8_t bytes[BUSTER_X86_MAX_INSTRUCTION_BYTES];
-        for (uint64_t i = 0; i < count; i += 1)
-        {
-            offsets[i] = length;
-            length += encode_one(&instructions[i], bytes, X86_ENCODER_MODE_64);
-        }
-        result = length;
     }
     return result;
 }

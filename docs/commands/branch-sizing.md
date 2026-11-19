@@ -35,8 +35,8 @@ accepts, as the code generator's are, and so must the branch columns' check
 (`branch_sizing_validate_branches`). With one implementation (#2924), the
 oracles aren't a second path. Each result must be the test's reference's
 (relaxation over the records, as an assembler does it, with each record's
-length from `x86_encode_scalar`), pass `x86_validate`, have
-`x86_encode_scalar`'s offsets and length, aim every branch at its label's
+length from `x86_encode`), pass `x86_validate`, have
+`x86_encode`'s offsets and length, aim every branch at its label's
 record, and be long exactly where a rel8 can't reach:
 
 - forms: every form number as a branch's record, with and without a segment
@@ -86,7 +86,7 @@ record, and be long exactly where a rel8 can't reach:
 boundaries' probes and the chains as GNU as source, each in a section of its
 own with a label at every target, and GNU as's relaxation of them (every
 branch short at first, then growing the ones out of range) must give the same
-bytes as `x86_encode_scalar` of the sized records; an object that can't be read,
+bytes as `x86_encode` of the sized records; an object that can't be read,
 or a function left uncompared, fails the check. The files go in a directory
 under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure. `--seed N`
 changes the generated functions. The 9700X job's test step runs it with
