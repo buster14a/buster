@@ -133,12 +133,11 @@ page, RSP is its own stack, and a fault names the record. The checks:
   (`x86_target_forms`), every chosen record valid there
   (`x86_target_validate`);
 - `x86_match.c`'s immediates against the shared rule on the forms the
-  assembler's syntax supports with a value immediate: its scalar rule
-  (`x86_match_immediate`) and its vector path's intervals (`x86_match_range`)
-  must take exactly the values `x86_immediate_encodes` takes, the unsigned
-  spellings of sign-extended patterns among them (`add eax, 0xffffffff` is an
-  imm8's −1), and no `__int128` past the width; and every form it reads as
-  sign-extending must be such a form.
+  assembler's syntax supports with a value immediate: its intervals
+  (`x86_match_range`) must take exactly the values `x86_immediate_encodes`
+  takes, the unsigned spellings of sign-extended patterns among them (`add eax,
+  0xffffffff` is an imm8's −1), and no `__int128` past the width; and every form
+  it reads as sign-extending must be such a form.
 
 `--cross-check` also prints every chosen record with the encoder tests'
 printer: GNU as must assemble them to the chosen forms' bytes. `--keep` leaves

@@ -752,27 +752,16 @@ static void asm_lex_vector(AsmParser* parser)
 static void asm_lex(AsmParser* parser)
 {
     parser->instruction_capacity = 1;
-    if (BUSTER_VECTOR_PATH(parser->options.vectorized))
+    asm_lex_vector(parser);
+    // At most one instruction per statement. Count separators in the kind column without gathers, and reserve
+    // instruction records for statements instead of all operand tokens. Only the third word of each token counts.
+    for (uint32_t at = 0; at < parser->token_count; at += 4)
     {
-        asm_lex_vector(parser);
-        // At most one instruction per statement. Count separators in the kind column without gathers, and reserve
-        // instruction records for statements instead of all operand tokens. Only the third word of each token counts.
-        for (uint32_t at = 0; at < parser->token_count; at += 4)
-        {
-            const uint32_t left = parser->token_count - at;
-            const uint32_t count = left < 4 ? left : 4;
-            const __mmask16 valid = (1u << (count * 4)) - 1;
-            const __m512i records = _mm512_maskz_loadu_epi32(valid, parser->tokens + at);
-            parser->instruction_capacity += __builtin_popcount(_mm512_mask_cmpeq_epi32_mask(valid & 0x4444, records, _mm512_set1_epi32('\n')));
-        }
-    }
-    else
-    {
-        asm_lex_scalar(parser);
-        for (uint32_t at = 0; at < parser->token_count; at += 1)
-        {
-            parser->instruction_capacity += parser->tokens[at].kind == '\n';
-        }
+        const uint32_t left = parser->token_count - at;
+        const uint32_t count = left < 4 ? left : 4;
+        const __mmask16 valid = (1u << (count * 4)) - 1;
+        const __m512i records = _mm512_maskz_loadu_epi32(valid, parser->tokens + at);
+        parser->instruction_capacity += __builtin_popcount(_mm512_mask_cmpeq_epi32_mask(valid & 0x4444, records, _mm512_set1_epi32('\n')));
     }
 }
 
@@ -1613,7 +1602,7 @@ static bool asm_token_register(const AsmParser* parser, uint32_t at, X86Operand*
 {
     const uint32_t cached = parser->tokens[at].reserved;
     bool found;
-    if (BUSTER_VECTOR_PATH(parser->options.vectorized) && (cached & BUSTER_ASM_REGISTER_CACHED))
+    if (cached & BUSTER_ASM_REGISTER_CACHED)
     {
         found = (cached & 255) == X86_OPERAND_REGISTER;
         if (found)
@@ -3666,7 +3655,7 @@ static void asm_simple_words_vector(const uint64_t* keys, const uint64_t* length
 
 // Common Intel statements are classified in batches rather than calling the scalar operand grammar for every
 // register and integer. The first uncommon row is retried by asm_instruction; no source is consumed speculatively.
-// State-changing directives and labels delimit batches. Both paths produce exactly the same request/fragment stream.
+// State-changing directives and labels delimit batches. A batch gives the requests and fragments asm_instruction would.
 static bool asm_parse_vector_batch(AsmParser* parser)
 {
     uint32_t row_begin[16];
@@ -3798,7 +3787,7 @@ static void asm_parse(AsmParser* parser)
 {
     while (parser->at < parser->token_count && parser->result.error == 0)
     {
-        if (BUSTER_VECTOR_PATH(parser->options.vectorized) && parser->options.intel && !parser->prefix && asm_parse_vector_batch(parser))
+        if (parser->options.intel && !parser->prefix && asm_parse_vector_batch(parser))
         {
             continue;
         }
@@ -3977,7 +3966,7 @@ static const char* asm_unmatched(const AsmParser* parser, const AsmInstruction* 
     const bool target = (index->excluded[bucket] & BUSTER_X86_MATCH_EXCLUDED_TARGET) != 0;
     X86MatchRequest unsized = instruction->request;
     unsized.width = 0;
-    const bool suffix = forms && instruction->suffixed && x86_match(index, &unsized, BUSTER_VECTOR_PATH(parser->options.vectorized)).found;
+    const bool suffix = forms && instruction->suffixed && x86_match(index, &unsized).found;
     return !named || (!forms && !target) ? "instruction not supported"
            : !forms                       ? "instruction requires ISA features the target lacks (see -march)"
            : suffix                       ? "mnemonic suffix and register width disagree"
@@ -4036,13 +4025,13 @@ static void asm_match_instructions(AsmParser* parser)
                 asm_fail(parser, instruction->location, "instruction operands require an absolute value or symbol plus addend; use data directives for label differences");
             }
         }
-        X86Match match = x86_match(parser->index, &instruction->request, BUSTER_VECTOR_PATH(parser->options.vectorized));
+        X86Match match = x86_match(parser->index, &instruction->request);
         if (!match.found && !match.ambiguous && x86_match_name(instruction->request.mnemonic, "movsx"))
         {
             // GNU as reads movsx of a doubleword as movsxd (#1134: gcc -O2 -masm=intel writes `movsx r8, r8d`).
             X86MatchRequest doubleword = instruction->request;
             doubleword.mnemonic = BUSTER_S8("movsxd");
-            match = x86_match(parser->index, &doubleword, BUSTER_VECTOR_PATH(parser->options.vectorized));
+            match = x86_match(parser->index, &doubleword);
         }
         if (!match.found)
         {
@@ -5395,10 +5384,7 @@ static void asm_parse_source(AsmParser* parser)
     if (parser->result.error == 0)
     {
         parser->capacity = parser->token_count + 4;
-        if (BUSTER_VECTOR_PATH(parser->options.vectorized))
-        {
-            asm_cache_registers(parser);
-        }
+        asm_cache_registers(parser);
         uint32_t slots = 16;
         while (slots < parser->capacity * 2)
         {
@@ -5548,9 +5534,8 @@ struct AsmCode
 // labels (as data, a call's target, or with an addend), a label another source defines (a `.L` one among them), or any
 // other symbol. Its numeric labels and `.` are only its own jmp's and jcc's targets: another use of one, and a loop's or
 // a jrcxz's branch to a label, fail with `directive` set, for the caller to assemble the source whole. Matching is
-// asm_assemble's, by
-// options.vectorized's path; the parser's tables come from `scratch`, which is as it was after, and the result from
-// `output`, which a failure leaves as it was too.
+// asm_assemble's; the parser's tables come from `scratch`, which is as it was after, and the result from `output`, which
+// a failure leaves as it was too.
 static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, AsmOptions options, Arena* output, Arena* scratch)
 {
     AsmParser parser =
