@@ -249,6 +249,9 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_CONTEXTS_LATER_LOOP_TICKS,
     NODE_FACTS_COUNT_CONTEXTS_LATER_TARGET_TICKS,
     NODE_FACTS_COUNT_CONTEXTS_LATER_PART_TICKS,
+    // The updates C asks its plan of, and those of them the loop's masks took: another lists its expression.
+    NODE_FACTS_COUNT_CONTEXTS_UPDATES,
+    NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 

@@ -1947,6 +1947,74 @@ it in turn; medians of seven readings, musl's of fifteen. TSC ticks:
   and `&&`, `||` and `?:` (2,721). Those, then X on these answers: until X
   reads them the sum of step 2 does not move.
 
+## An update on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/an-update-on-the-window-2850-2026-11-19).
+`measure-node-machine --shadow --window-contexts`
+([the guide](commands/lowering.md#an-update-on-the-window-2850)).
+
+The largest part of what C on the window still listed was an update's:
+3,535 of 7,120 expressions on `sqlite3.c`. This piece makes C's answers for
+`++`, `--` and the compound assignments on the window, by the loop's masks.
+No compile takes any of it. [The node machine's
+page](node-machine.md#an-update-on-the-window) has it whole: C's plan term by
+term, the form that was refuted, the builds, the switch, the probes and the
+faults. [Its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7011006204)
+had four gates.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release; the build before (#3023's code)
+and the piece in turn; medians of seven readings, musl's of fifteen. TSC
+ticks:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| updates the masks take, of those C asks its plan of | 3,734 of 3,736 | 861 of 861 | 3,969 of 3,969 |
+| **expressions decided on the window: before, with** | **86.04%, 92.69%** | **84.28%, 91.12%** | **85.92%, 94.29%** |
+| **C's sweeps with the records' bytes, a record of the decided: before, with** | **9.12, 8.90** | **12.93, 13.39** | 30.42, 27.54 |
+| the reference's C on the same expressions | 38.4 | 36.8 | 41.0 |
+| the loop, a record swept: before, with | 2.66, 2.97 | 3.98, 4.77 | 8.03, 8.78 |
+| one executable, the update's block on less off | +0.19 | +0.26 | +0.14 |
+| the kernel in place, a record: before, with | 17.56, 17.41 | 22.43, 22.43 | 20.49, 20.37 |
+
+### Against its gates
+
+- **Exact: met.** The fixtures, 250 statements run one at a time, and the
+  three corpora and the compiler's own source with the default warnings and
+  with every warning.
+- **Decided: met.** 47,266, 9,877, 40,937 and 38,020 expressions on
+  `sqlite3.c`, Lua, musl and the compiler's own source, for 47,100, 9,800,
+  40,700 and 38,000 asked.
+- **C's cost: met on `sqlite3.c`, at its limit on Lua.** 8.90 ticks a record
+  of the decided for 9.1 asked; 13.39 for 13.3, below where it is refuted
+  (13.8).
+- **Nothing else moves: met.** The kernel in place and the tests on the
+  window read what they did.
+
+### What it means
+
+- **Nine in ten expressions the kernel places have C's answers from the
+  window** on each corpus, at 8 to 12 ticks a record of theirs on
+  `sqlite3.c` and Lua where C on T's columns reads 37 to 38.
+- **A rule a record was refuted, and masks were not.** The specified form
+  asked C's plan of each update by a rule: 75 ticks an update on
+  `sqlite3.c`, 10.14 and 14.60 at the gate for 9.1 and 13.3. The masks read
+  the same terms from bytes the loop has, and three new bits.
+- **Two builds did not measure the piece.** Build against build the loop
+  rose 0.79 ticks a record on Lua. One executable with the update's block on
+  and off reads 0.26, and with the block off it still reads half a tick over
+  the build before. What that half tick is was not established; the piece's
+  work is the 0.26.
+- **Most of the first masks' terms were not needed.** Trimming and three
+  rounds of faults left eight vector operations a step of the first masks'
+  nineteen: a term of C's plan that no accepted program separates is the
+  checker's, the front's or another byte's already, and a fault in it
+  survives.
+- **What is listed still** is `&&`, `||` and `?:`: 2,744 of 3,730
+  expressions on `sqlite3.c`. Those, a comma, then X on these answers: until
+  X reads them the sum of step 2 does not move.
+
 ## Step 4's first piece: a census of Tier 0's row
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-census-2874-2026-11-16)

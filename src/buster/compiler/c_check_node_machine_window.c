@@ -81,10 +81,13 @@
 // bits are its exponent's, for another reason: the loop reads them of calls alone.
 #define BUSTER_NODE_CONTEXTS_CONVERTED 0x20u
 #define BUSTER_NODE_CONTEXTS_PLAIN 0x40u
+// And a register object's flag (BUSTER_CHECK_REGISTER), which a name's use has where its declaration has the register's
+// bit (check_input_register_flags): C's update's plan takes no register variable by name.
+#define BUSTER_NODE_CONTEXTS_REGISTER 0x80u
 
 // An operator's class in the loop, by its code (NodeContextsTables.classes): the cases the loop has, the kinds it
 // lists, and whether the operator evaluates its first operand for its address (BUSTER_NODE_CONTEXTS_CLASS_PLACE).
-// An operator with no class reads as BUSTER_NODE_CONTEXTS_CLASS_OTHER, and the kinds from _CALL up are listed.
+// An operator with no class reads as BUSTER_NODE_CONTEXTS_CLASS_OTHER, and the kinds from _LOGICAL up are listed.
 #define BUSTER_NODE_CONTEXTS_CLASS_OTHER 0u
 #define BUSTER_NODE_CONTEXTS_CLASS_VALUE 1u
 #define BUSTER_NODE_CONTEXTS_CLASS_WRAP 2u
@@ -99,10 +102,14 @@
 #define BUSTER_NODE_CONTEXTS_CLASS_BINARY 11u
 #define BUSTER_NODE_CONTEXTS_CLASS_DIVIDE 12u
 #define BUSTER_NODE_CONTEXTS_CLASS_CALL 13u
-#define BUSTER_NODE_CONTEXTS_CLASS_LOGICAL 14u
-#define BUSTER_NODE_CONTEXTS_CLASS_UPDATE 15u
+#define BUSTER_NODE_CONTEXTS_CLASS_UPDATE 14u
+#define BUSTER_NODE_CONTEXTS_CLASS_LOGICAL 15u
 #define BUSTER_NODE_CONTEXTS_CLASS_COMMA 16u
 #define BUSTER_NODE_CONTEXTS_CLASS_KIND 0x1fu
+// An update's two bits: `++` and `--`, which have no second operand; and `/=` and `%=`, of whose divisor C's plan asks
+// a power of two (node_machine_power).
+#define BUSTER_NODE_CONTEXTS_CLASS_INCREMENT 0x20u
+#define BUSTER_NODE_CONTEXTS_CLASS_QUOTIENT 0x40u
 #define BUSTER_NODE_CONTEXTS_CLASS_PLACE 0x80u
 
 // Where an operand's target comes from (a row's low bits, NodeFactsReader.window_c_sources): none; T's conversion of
@@ -156,6 +163,12 @@ static const char* const node_contexts_reason_names[BUSTER_NODE_CONTEXTS_REASONS
 // operand's row by its consumer's template and its place, 64 bytes read as one (the template times two and the place,
 // one for a second operand or a later one: no operator with a case here has a third, and the operands of a consumer
 // with no template read one row wherever they are).
+//
+// A consumer's key is its template's number but for an update, whose operands' rows are four where its template is
+// one: its template's number and two bits, whether its destination is evaluated for its address and whether it is a
+// pointer's. The loop keeps the keys in a register for the block below; the column it stores is C's templates'.
+#define BUSTER_NODE_CONTEXTS_KEY_ADDRESS 2u
+#define BUSTER_NODE_CONTEXTS_KEY_POINTER 4u
 typedef struct NodeContextsTables NodeContextsTables;
 struct NodeContextsTables
 {
@@ -192,8 +205,10 @@ static void node_contexts_tables(NodeContextsTables* tables)
             default:
             {
                 const bool update = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN;
-                class = update ? BUSTER_NODE_CONTEXTS_CLASS_UPDATE : binary != BUSTER_TYPED_NONE && op < CHECK_OP_PRE_INCREMENT ? BUSTER_NODE_CONTEXTS_CLASS_BINARY :
-                                                                                                                                BUSTER_NODE_CONTEXTS_CLASS_OTHER;
+                const uint8_t increment = op <= CHECK_OP_POST_DECREMENT ? BUSTER_NODE_CONTEXTS_CLASS_INCREMENT : 0;
+                const uint8_t quotient = op == CHECK_OP_DIVIDE_ASSIGN || op == CHECK_OP_REMAINDER_ASSIGN ? BUSTER_NODE_CONTEXTS_CLASS_QUOTIENT : 0;
+                class = update ? BUSTER_NODE_CONTEXTS_CLASS_UPDATE | BUSTER_NODE_CONTEXTS_CLASS_PLACE | increment | quotient :
+                        binary != BUSTER_TYPED_NONE && op < CHECK_OP_PRE_INCREMENT ? BUSTER_NODE_CONTEXTS_CLASS_BINARY : BUSTER_NODE_CONTEXTS_CLASS_OTHER;
             } break;
         }
         tables->classes[op] = class;
@@ -225,13 +240,27 @@ static void node_contexts_tables(NodeContextsTables* tables)
     // that is called directly out), and each argument to its conversion's type, its own record's.
     tables->rows[BUSTER_NODE_MACHINE_TEMPLATE_CALL << 1] = BUSTER_NODE_CONTEXTS_EVALUATES | BUSTER_NODE_CONTEXTS_SOURCE_NONE;
     tables->rows[(BUSTER_NODE_MACHINE_TEMPLATE_CALL << 1) + 1] = BUSTER_NODE_CONTEXTS_EVALUATES | BUSTER_NODE_CONTEXTS_SOURCE_OWN;
+    // An update's (node_machine_classify_update), by its key (its template's number and its destination's bits): its
+    // destination for its address unless the update names it, and its second operand to T's conversion of it, or to
+    // long where the destination is a pointer.
+    for (uint32_t bits = 0; bits <= (BUSTER_NODE_CONTEXTS_KEY_ADDRESS | BUSTER_NODE_CONTEXTS_KEY_POINTER); bits += BUSTER_NODE_CONTEXTS_KEY_ADDRESS)
+    {
+        const uint32_t key = BUSTER_NODE_MACHINE_TEMPLATE_UPDATE + bits;
+        tables->rows[key << 1] = (bits & BUSTER_NODE_CONTEXTS_KEY_ADDRESS) != 0 ? BUSTER_NODE_CONTEXTS_EVALUATES | BUSTER_NODE_CONTEXTS_SOURCE_NONE : 0;
+        tables->rows[(key << 1) + 1] = BUSTER_NODE_CONTEXTS_EVALUATES | ((bits & BUSTER_NODE_CONTEXTS_KEY_POINTER) != 0 ? BUSTER_NODE_CONTEXTS_SOURCE_LONG : BUSTER_NODE_CONTEXTS_SOURCE_GIVEN);
+    }
 }
 
 _Static_assert(CHECK_LOWER_TEMPLATE_STORE < 16 && BUSTER_NODE_MACHINE_TEMPLATE_CALL < 32 && CHECK_OP_COUNT <= 128,
                "a row's place in the table is a template and a place in six bits, the loop's own templates' numbers are four, and an operator's code is seven");
+_Static_assert(BUSTER_NODE_MACHINE_TEMPLATE_UPDATE + BUSTER_NODE_CONTEXTS_KEY_ADDRESS > NODE_MACHINE_TEMPLATE_BRANCHES &&
+               BUSTER_NODE_CONTEXTS_KEY_POINTER == 2 * BUSTER_NODE_CONTEXTS_KEY_ADDRESS &&
+               BUSTER_NODE_MACHINE_TEMPLATE_UPDATE + BUSTER_NODE_CONTEXTS_KEY_ADDRESS + BUSTER_NODE_CONTEXTS_KEY_POINTER < 32,
+               "an update's keys with a bit are past every template's number and in the table");
 _Static_assert(CHECK_LOWER_TEMPLATE_GLOBAL == (CHECK_LOWER_TEMPLATE_LOCAL | 1), "a global's template's number is a local's and one bit");
 _Static_assert(BUSTER_NODE_CONTEXTS_CLASS_DIVIDE == BUSTER_NODE_CONTEXTS_CLASS_BINARY + 1 && BUSTER_NODE_CONTEXTS_CLASS_CALL == BUSTER_NODE_CONTEXTS_CLASS_DIVIDE + 1 &&
-               BUSTER_NODE_CONTEXTS_CLASS_LOGICAL == BUSTER_NODE_CONTEXTS_CLASS_CALL + 1 && BUSTER_NODE_CONTEXTS_CLASS_COMMA <= BUSTER_NODE_CONTEXTS_CLASS_KIND,
+               BUSTER_NODE_CONTEXTS_CLASS_UPDATE == BUSTER_NODE_CONTEXTS_CLASS_CALL + 1 && BUSTER_NODE_CONTEXTS_CLASS_LOGICAL == BUSTER_NODE_CONTEXTS_CLASS_UPDATE + 1 &&
+               BUSTER_NODE_CONTEXTS_CLASS_COMMA <= BUSTER_NODE_CONTEXTS_CLASS_KIND,
                "the loop reads the binary classes and the listed kinds as ranges");
 
 // A 128-entry byte table by a key of seven bits, as two registers: one byte permute of two registers.
@@ -287,9 +316,10 @@ static inline __attribute__((always_inline)) __m512i node_window_consumers(const
     return _mm512_add_epi8(lanes, ups);
 }
 
-// Whether a pointer's sum or a subscript at the window's record `x` has a stride (check_action_pointer_stride's of
-// its first operand's conversion's type, a pointer's, which its record holds): its type's row's, or the type table's
-// where the row doesn't hold it (an element past 4 GB), by a call the loop keeps out of its way.
+// Whether a pointer's sum, a subscript or a pointer's update at the window's record `x` has a stride
+// (check_action_pointer_stride's of its first operand's conversion's type, a pointer's, which its record holds): its
+// type's row's, or the type table's where the row doesn't hold it (an element past 4 GB), by a call the loop keeps out
+// of its way.
 static __attribute__((noinline, cold)) bool node_contexts_stride_asked(const NodeFacts* facts, TypeId pointer)
 {
     return pointer != 0 && check_action_pointer_stride(facts->machine->types, pointer) != 0;
@@ -349,6 +379,9 @@ struct NodeContextsLoopCounts
     uint64_t asked;
     uint64_t converted;
     uint64_t far;
+    // The updates C asks its plan of, and those of them the loop's masks took.
+    uint64_t updates;
+    uint64_t updates_taken;
 };
 
 // The loop over a chunk's `count` records, 64 a step, from its last block to its first: each record's template, its
@@ -367,7 +400,7 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     const __m512i zero = _mm512_setzero_si512();
     __m512i next_codes = zero;
     __m512i next_classes = zero;
-    __m512i next_templates = zero;
+    __m512i next_keys = zero;
     // The lowest record of a range that isn't evaluated and reaches below the block at hand (UINT32_MAX: none yet). A
     // range that ended in a block above reads as none too: its lowest record is at or above that block's first.
     uint32_t dead_low = UINT32_MAX;
@@ -375,6 +408,11 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     uint64_t asked = 0;
     uint64_t converted = 0;
     uint64_t far_count = 0;
+    uint64_t updates = 0;
+    uint64_t updates_taken = 0;
+    // Whether the unit's type table has extended qualifiers, an address space among them: no type of a table without
+    // any is in a segment's space (type_object_qualifiers, which check_lower_segment_override reads).
+    const bool extended = state->facts.machine->types->extended;
     // The far lanes' bytes, a row a column: written a byte a lane where a block has any, and read by one masked load a
     // column.
     _Alignas(64) uint8_t far_bytes[BUSTER_NODE_CONTEXTS_FAR_ROWS][64] = { 0 };
@@ -438,8 +476,16 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
                 const uint32_t lane = (uint32_t)_tzcnt_u64(pending);
                 const uint32_t consumer = x + lane + front->window_ups[x + lane];
                 const uint8_t code = front->ops[consumer] & 0x7f;
+                // Its key: its template's number, and for an update its destination's address's bit again, from the byte
+                // the masks read it in (the column has C's templates). The pointer's bit is read by an update's second
+                // operand alone, the record right before its own, which no load reads for. A placed record's first
+                // operand is a record of the window, and one that has none reads its own byte, for no one.
+                const uint8_t template = state->window_c_templates[consumer];
+                const uint32_t destination = consumer - front->window_left[consumer];
+                const uint32_t address_bit = (front->ops[destination] & 0x7f) != CHECK_OP_VALUE ? BUSTER_NODE_CONTEXTS_KEY_ADDRESS : 0u;
                 far_bytes[BUSTER_NODE_CONTEXTS_FAR_CONSUMER_CLASS][lane] = tables->classes[code];
-                far_bytes[BUSTER_NODE_CONTEXTS_FAR_TEMPLATE][lane] = state->window_c_templates[consumer];
+                far_bytes[BUSTER_NODE_CONTEXTS_FAR_TEMPLATE][lane] =
+                    template != BUSTER_NODE_MACHINE_TEMPLATE_UPDATE ? template : (uint8_t)(BUSTER_NODE_MACHINE_TEMPLATE_UPDATE + address_bit);
             }
             for (uint64_t pending = far_left; pending != 0; pending &= pending - 1)
             {
@@ -535,6 +581,7 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         const __mmask64 is_binary = _mm512_cmple_epu8_mask(_mm512_sub_epi8(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_BINARY)),
                                                            _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_DIVIDE - BUSTER_NODE_CONTEXTS_CLASS_BINARY));
         const __mmask64 is_call = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CALL));
+        const __mmask64 is_update = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_UPDATE));
         const __mmask64 is_uncased = _mm512_cmpge_epu8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_LOGICAL)) | _mm512_testn_epi8_mask(class_kinds, class_kinds);
         const __mmask64 both_scalar = left_scalar & right_scalar;
         // The templates, C's rules (node_machine_classify's) as a mask a template: what every operator shares comes
@@ -591,15 +638,49 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         const __mmask64 offset = _mm512_test_epi8_mask(standings, _mm512_set1_epi8(BUSTER_NODE_MACHINE_OFFSET));
         const __mmask64 called = callee & ~lvalue & address_constant & ~offset & has_object & ~effects;
         const __mmask64 direct = called & symbol;
-        // What lists its expression: an operator with no case here, and the records the cases don't take.
-        const __mmask64 divisor = is_divide & right_constant;
-        const __mmask64 listed = placed & (is_uncased | (is_wrap & union_type) | divisor | wide | odd_leaf | (is_call & ~converted_call) | (called & ~is_value));
+        // What lists its expression: an operator with no case here, and the records the cases don't take. A compound
+        // division or remainder by an integer constant is listed as a plain one is.
+        // (An integer's alone: C asks a power of two's shift or mask of a computation of an integer's class, which a
+        // destination of one and a divisor that is an integer constant have, and no other update.)
+        const __mmask64 update_divisor = integral & right_constant & _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_QUOTIENT));
+        const __mmask64 divisor = (is_divide & right_constant) | update_divisor;
         _mm512_storeu_si512(state->window_c_contexts + x, _mm512_maskz_mov_epi8(address, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS)));
         _mm512_storeu_si512(state->window_c_reasons + x, class_kinds);
-        // A pointer's sum and a subscript: its stride is its type's row's, a record at a time, here where the step's
-        // other bytes are masks.
+        // An update: C asks its plan (node_machine_update_plan) of a record of a number's class that is not read for its
+        // address (node_machine_classify's case). No update's record is read for its address: its value is no lvalue
+        // and no struct's, and each operator that takes its first operand's address asks for one. And a record the
+        // kernel didn't place has no class's byte. The masks take what the plan takes, each of its terms from a byte:
+        // - a destination that is no atomic's. That it is an lvalue is the checker's, which takes no update of anything
+        //   else. Its class and its other facts are the update's record's own, a number's with no _BitInt's and no
+        //   complex fact (`free` and `numeric`): an update's type is its destination's value's. A bit-field's record is
+        //   a value the columns don't hold whole, which lists the expression, and a vector's element has no template of
+        //   its own, which refuses it, whatever the update's is. A pointer's is by its type's fact, `left_pointer`'s:
+        //   an array's and a function's are no update's;
+        // - a destination that is a name's is no register variable's, by its use's flag (a name's leaf has its object,
+        //   which the unit knows: the flags' byte's comment);
+        // - a second operand whose own type is of a number's class, unless the update is `++`, `--` or a pointer's,
+        //   whose second operand C converts to long. T's conversions of the two, which the plan reads, are then of such
+        //   a class too, with none of the facts the plan excludes: the usual arithmetic conversions of two such types,
+        //   or an integer promotion's (a shift's), as the binary operators' masks take them above; and a pointer's
+        //   value's type is its own without its qualifiers. (Of those facts in the second operand's own type: a record
+        //   with a _BitInt's or the complex one has no template, and no more has an atomic lvalue's read, which refuses
+        //   the expression; the checker takes no atomic value that is no lvalue as an operand; and an aggregate's class
+        //   is no number's.)
+        // Its shape is the front's: a destination, and a second operand right before a compound's record. A pointer's
+        // stride and, in a unit with a type in a space of its own, the destination's type's space are a record at a
+        // time (below). A mask only takes: an update the masks don't take lists its expression, and what C's plan makes
+        // of it is the reference's to say.
+        const __mmask64 update_asked = free & is_update & numeric & ~update_divisor;
+        const __mmask64 increment = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_INCREMENT));
+        const __mmask64 left_register = _mm512_test_epi8_mask(left_flags, _mm512_set1_epi8((char)BUSTER_NODE_CONTEXTS_REGISTER));
+        const __mmask64 left_named = _mm512_cmpeq_epi8_mask(left_codes, _mm512_set1_epi8(CHECK_OP_VALUE));
+        const __mmask64 update_masked = update_asked & ~left_atomic & ~(left_named & left_register) & (increment | left_pointer | right_scalar);
+        // A pointer's sum, a subscript and a pointer's update: its stride is its type's row's, a record at a time, here
+        // where the step's other bytes are masks. An update's pointer's type is its destination's
+        // (node_machine_update_plan's `stored`), and T's conversion of it, which the update's record holds as a sum's
+        // does its first operand's, is that type without its qualifiers: the same element's.
         const __mmask64 sums = (is_sum | is_subscript) & free & placed & ~vector & (~is_subscript | placed_value | numeric);
-        uint64_t pointed = sums & left_pointer & ~right_pointer;
+        uint64_t pointed = (sums & left_pointer & ~right_pointer) | (update_masked & left_pointer);
         for (uint64_t pending = pointed; pending != 0; pending &= pending - 1)
         {
             const uint32_t lane = (uint32_t)_tzcnt_u64(pending);
@@ -618,6 +699,23 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         }
         const __mmask64 made_pointer = _cvtu64_mask64(pointed);
         const __mmask64 made_binary = own_binary | _cvtu64_mask64(asked_binary);
+        // The destination's type's space (check_lower_segment_override), in a unit that has one at all: a record at a
+        // time too. None of the corpora's units has.
+        uint64_t spaced = 0;
+        if (__builtin_expect(extended, 0))
+        {
+            for (uint64_t pending = update_masked; pending != 0; pending &= pending - 1)
+            {
+                const uint32_t lane = (uint32_t)_tzcnt_u64(pending);
+                const TypeId stored = state->facts.records[x + lane - front->window_left[x + lane]].type;
+                spaced |= (uint64_t)(check_lower_segment_override(state->facts.machine->types, stored) != 0 ? 1 : 0) << lane;
+            }
+        }
+        const __mmask64 made_update = _cvtu64_mask64(update_masked & ~spaced & (~(uint64_t)left_pointer | pointed));
+        updates += (uint64_t)_mm_popcnt_u64(update_asked);
+        updates_taken += (uint64_t)_mm_popcnt_u64(made_update);
+        const __mmask64 listed = placed & (is_uncased | (is_wrap & union_type) | divisor | wide | odd_leaf | (is_call & ~converted_call) | (called & ~is_value) |
+                                           (update_asked & ~made_update));
         // A template's number is four bits: each bit's records, one mask a bit.
         const __mmask64 bit0 = made_constant | made_global | made_dereference | made_unary | made_binary | made_store_local | made_store;
         const __mmask64 bit1 = made_pass | made_dereference | made_truth | made_binary | made_store_global | made_store;
@@ -625,12 +723,18 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         const __mmask64 bit3 = made_member | made_unary | made_truth | made_binary | made_pointer | made_store_local | made_store_global | made_store;
         const __m512i own_templates = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(bit0, _mm512_set1_epi8(1)), _mm512_maskz_mov_epi8(bit1, _mm512_set1_epi8(2))),
                                                       _mm512_or_si512(_mm512_maskz_mov_epi8(bit2, _mm512_set1_epi8(4)), _mm512_maskz_mov_epi8(bit3, _mm512_set1_epi8(8))));
-        // A call's template's number is past those four bits, and no other mask has a call's record.
-        const __m512i templates = _mm512_mask_mov_epi8(own_templates, made_call, _mm512_set1_epi8(BUSTER_NODE_MACHINE_TEMPLATE_CALL));
-        // What its consumer's template gives it: whether it is evaluated, and its target's source.
-        const __m512i near_templates = _mm512_maskz_permutex2var_epi8(near_up, templates, at_up, next_templates);
-        const __m512i consumer_templates = _mm512_mask_loadu_epi8(near_templates, far_up, far_bytes[BUSTER_NODE_CONTEXTS_FAR_TEMPLATE]);
-        const __m512i rows = _mm512_permutexvar_epi8(_mm512_or_si512(_mm512_slli_epi16(consumer_templates, 1), places), _mm512_load_si512(tables->rows));
+        // A call's template's number and an update's are past those four bits. No other mask has a call's record, and
+        // a pointer's update's, which `made_pointer` has too, takes its own number here.
+        const __m512i called_templates = _mm512_mask_mov_epi8(own_templates, made_call, _mm512_set1_epi8(BUSTER_NODE_MACHINE_TEMPLATE_CALL));
+        const __m512i templates = _mm512_mask_mov_epi8(called_templates, made_update, _mm512_set1_epi8(BUSTER_NODE_MACHINE_TEMPLATE_UPDATE));
+        // Its key, which its operands' rows are read by: its template's number, and for an update its destination's two
+        // bits: one that is no name's is evaluated for its address, and a pointer's second operand is made a long.
+        const __m512i placed_keys = _mm512_mask_add_epi8(templates, made_update & ~left_named, templates, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_KEY_ADDRESS));
+        const __m512i keys = _mm512_mask_add_epi8(placed_keys, made_update & left_pointer, placed_keys, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_KEY_POINTER));
+        // What its consumer's key gives it: whether it is evaluated, and its target's source.
+        const __m512i near_keys = _mm512_maskz_permutex2var_epi8(near_up, keys, at_up, next_keys);
+        const __m512i consumer_keys = _mm512_mask_loadu_epi8(near_keys, far_up, far_bytes[BUSTER_NODE_CONTEXTS_FAR_TEMPLATE]);
+        const __m512i rows = _mm512_permutexvar_epi8(_mm512_or_si512(_mm512_slli_epi16(consumer_keys, 1), places), _mm512_load_si512(tables->rows));
         const __mmask64 evaluates = _mm512_test_epi8_mask(rows, _mm512_set1_epi8((char)BUSTER_NODE_CONTEXTS_EVALUATES)) & ~direct;
         const __m512i sources = _mm512_maskz_mov_epi8(~addressed, _mm512_and_si512(rows, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_SOURCE)));
         _mm512_storeu_si512(state->window_c_templates + x, templates);
@@ -656,12 +760,14 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         masks[BUSTER_NODE_CONTEXTS_MASK_WIDE] = placed & wide;
         next_codes = codes;
         next_classes = classes;
-        next_templates = templates;
+        next_keys = keys;
     }
     counts->strides += strides;
     counts->asked += asked;
     counts->converted += converted;
     counts->far += far_count;
+    counts->updates += updates;
+    counts->updates_taken += updates_taken;
 }
 
 // The targets of a chunk's `count` records, 16 a step: the type each evaluated record's source names. T's conversion of
@@ -878,6 +984,8 @@ static void node_contexts_window_chunk(struct NodeFactsReader* state, const Node
     counts[NODE_FACTS_COUNT_CONTEXTS_STRIDES_ASKED] += loop_counts.asked;
     counts[NODE_FACTS_COUNT_CONTEXTS_CONVERTED] += loop_counts.converted;
     counts[NODE_FACTS_COUNT_CONTEXTS_FAR] += loop_counts.far;
+    counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES] += loop_counts.updates;
+    counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN] += loop_counts.updates_taken;
     counts[NODE_FACTS_COUNT_CONTEXTS_LOOP_TICKS] += t1 - t0;
     counts[NODE_FACTS_COUNT_CONTEXTS_TARGET_TICKS] += t2 - t1;
     counts[NODE_FACTS_COUNT_CONTEXTS_PART_TICKS] += t3 - t2;

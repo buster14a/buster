@@ -1694,6 +1694,9 @@ static const char node_contexts_test_source[] =
     "    static int still;\n"
     "    volatile int vol = a;\n"
     "    register int reg = a;\n"
+    "    register struct pair regs = v.inner;\n"
+    "    register int* regp = p;\n"
+    "    int* volatile vptr = p;\n"
     "    const int fixed = 3;\n"
     "    int arr[4];\n"
     "    spaced apart = a;\n"
@@ -1996,6 +1999,124 @@ static const char node_contexts_test_source[] =
     "    fcp((char)0);\n"
     "    fv(1 - 1);\n"
     "    fp(0);\n"
+    // An update (C's plan, node_machine_update_plan's, as the loop's masks). By name, which C doesn't evaluate: a
+    // local's, a parameter's, a global's, a static's, a thread's and a file's.
+    "    local++;\n"
+    "    --a;\n"
+    "    global--;\n"
+    "    ++still;\n"
+    "    thread_scope++;\n"
+    "    file_scope -= b;\n"
+    "    wide <<= 2;\n"
+    // Through an address: a member's, a subscript's and a dereference's.
+    "    v.inner.first++;\n"
+    "    o->inner.second -= b;\n"
+    "    o->link->first |= a;\n"
+    "    arr[a] ^= n;\n"
+    "    o->list[2]++;\n"
+    "    (*p)--;\n"
+    "    *p += a;\n"
+    "    p[a] *= 2;\n"
+    "    shorts[1] >>= 1;\n"
+    "    un.whole++;\n"
+    "    wp->small += a;\n"
+    // A pointer's: its second operand to long, by name and through an address. One to a variable-length array has no
+    // stride, and one to an element past 4 GB has one its type's row doesn't hold.
+    "    p++;\n"
+    "    p += a;\n"
+    "    p -= b;\n"
+    "    o->link++;\n"
+    "    o->link += n;\n"
+    "    q++;\n"
+    "    q += a;\n"
+    "    h++;\n"
+    "    h += a;\n"
+    // The classes: a char's and a short's computed as int, a float's with a double, a double's, an enumeration's, a
+    // volatile one's and an aligned one's.
+    "    c += 1;\n"
+    "    c++;\n"
+    "    f *= 2;\n"
+    "    f += d;\n"
+    "    d -= f;\n"
+    "    d++;\n"
+    "    a += d;\n"
+    "    sh++;\n"
+    "    sh |= a;\n"
+    "    vol++;\n"
+    "    va[1] |= 2;\n"
+    "    vsp.first--;\n"
+    "    apart++;\n"
+    // What C's plan refuses, which the masks don't take (the expression is listed, unless its record's class is no
+    // number's, which has no template): a long double's, a 128-bit integer's, a _BitInt's, a __float128's and a complex
+    // destination; a computation or a second operand of such a type; an atomic, a vector's element and a vector; a
+    // register variable's by name (as a second operand it is read like any other).
+    "    e += 1;\n"
+    "    a += e;\n"
+    "    w++;\n"
+    "    a |= w;\n"
+    "    a <<= w;\n"
+    "    bi++;\n"
+    "    q128 += 1;\n"
+    "    zed += 1;\n"
+    "    shared++;\n"
+    "    shared += a;\n"
+    "    vec[1]++;\n"
+    "    vec += other;\n"
+    "    reg++;\n"
+    "    reg += a;\n"
+    "    a += reg;\n"
+    // A register variable's use has its flag in parentheses too. A register struct's member and what a register
+    // pointer points to are no names: C's plan takes them.
+    "    (reg)--;\n"
+    "    regp++;\n"
+    "    regs.first++;\n"
+    "    regs.second += b;\n"
+    "    (*regp)++;\n"
+    "    regp[1] -= a;\n"
+    // A pointer with a qualifier: T's conversion of it, whose stride the loop reads, is its type without the qualifier.
+    "    vptr++;\n"
+    "    vptr -= a;\n"
+    // A second operand that is a wrapper's record of a long double: it has a template, and the update's plan refuses
+    // the computation's class.
+    "    a += (long double)b;\n"
+    // A pointer's second operand is of any class, which C converts to long: a wrapper's record of a 128-bit integer.
+    "    p += (__int128)b;\n"
+    // A bit-field's is a value the columns don't hold whole, which lists its expression.
+    "    v.inner.bits++;\n"
+    "    o->inner.bits |= 1;\n"
+    // A division and a remainder: by a value, the update's; by an integer constant listed as the plain ones are, an
+    // integer's alone (a floating one's has no power of two's shift).
+    "    a /= n;\n"
+    "    a %= n;\n"
+    "    a /= 4;\n"
+    "    a %= 8;\n"
+    "    b /= 3;\n"
+    "    d /= 2;\n"
+    "    f /= 4;\n"
+    // An update's value used, and one below another operator: its record is an operand like any other.
+    "    a = local++;\n"
+    "    a = ++local + n;\n"
+    "    b = (wide += a);\n"
+    "    a = arr[local++];\n"
+    "    arr[local++] += arr[a--];\n"
+    "    fi(a++);\n"
+    "    fl(wide -= 1);\n"
+    "    a = *p++;\n"
+    "    *p++ = a;\n"
+    "    a += local += n;\n"
+    // A consumer past two blocks: an update's destination before a long second operand, by name (not evaluated),
+    // through an address (evaluated for it) and a pointer's both ways, whose key the far lanes ask the rule for again.
+    "    a += " BUSTER_NODE_CONTEXTS_TEST_SUM ";\n"
+    "    o->inner.first += " BUSTER_NODE_CONTEXTS_TEST_SUM ";\n"
+    "    p += " BUSTER_NODE_CONTEXTS_TEST_SUM ";\n"
+    "    o->link += " BUSTER_NODE_CONTEXTS_TEST_SUM ";\n"
+    // An update's five records, a block's end between every two in turn: by name, through an address, a pointer's
+    // both ways, and a subscript's `++`.
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    local += -n;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    *p += a;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    p -= -n;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    o->link += n;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    arr[a]++;\n")
     // A consumer and an operand past two blocks: a call's callee and its first argument before a long second one.
     "    a = callee(a, " BUSTER_NODE_CONTEXTS_TEST_SUM ");\n"
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    v.inner.second = -b;\n")
@@ -2004,6 +2125,42 @@ static const char node_contexts_test_source[] =
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    callee(a, b);\n")
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    (void)fptr(a);\n")
     "    return a + c;\n"
+    "}\n";
+
+// C on the window's fixture for a unit with a type in a space of its own (TypeTable.extended: here `__seg_gs`'s and
+// `__seg_fs`'s): the loop asks the space of the destination of each update its masks take, a record at a time, and
+// lists the expression of one in a segment's, which C's plan refuses (check_lower_segment_override).
+// - In the flat space, taken: by name, through an address, and a pointer's both ways. A pointer to an int in a
+//   segment's space is itself in the flat one.
+// - In a segment's space, listed: through a pointer to it, by name, and a member's through a pointer to a struct in
+//   one.
+// - An update's five records in each space in turn, a block's end between every two: every block has lanes of both.
+static const char node_contexts_test_spaced_source[] =
+    "struct pair { int first; long second; };\n"
+    "extern int __seg_gs* segmented;\n"
+    "extern int __seg_gs slot;\n"
+    "extern struct pair __seg_fs* shared_pair;\n"
+    "extern int global;\n"
+    "int spaced(int a, long b, int* p, struct pair* o)\n"
+    "{\n"
+    "    int local = a;\n"
+    "    local++;\n"
+    "    global += a;\n"
+    "    *p += a;\n"
+    "    o->first--;\n"
+    "    o->second += b;\n"
+    "    p++;\n"
+    "    p += a;\n"
+    "    (*segmented)++;\n"
+    "    *segmented += a;\n"
+    "    slot++;\n"
+    "    slot -= a;\n"
+    "    shared_pair->first++;\n"
+    "    shared_pair->second += b;\n"
+    "    segmented++;\n"
+    "    segmented += a;\n"
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    *segmented += a;\n    *p += a;\n")
+    "    return local;\n"
     "}\n";
 
 // What C on the window makes of a fixture: the expressions it runs on, those it decides and those of them it refuses
@@ -2019,6 +2176,9 @@ struct NodeContextsExpected
     uint32_t asked;
     uint32_t converted;
     uint32_t far;
+    // The updates C asks its plan of, and those of them the loop's masks took: another lists its expression.
+    uint32_t updates;
+    uint32_t updates_taken;
     uint32_t listed[BUSTER_NODE_CONTEXTS_REASONS];
     // The kernel in place's calls: those it is to make, those it made, those of them with every argument's conversion
     // made and the plain ones among those, and those its rule left to T for an argument alone.
@@ -2058,6 +2218,7 @@ static bool node_contexts_test_fixture(const char* directory, const char* name, 
                 counts[NODE_FACTS_COUNT_CONTEXTS_REFUSED] == expected->refused && counts[NODE_FACTS_COUNT_CONTEXTS_STRIDES] == expected->strides &&
                 counts[NODE_FACTS_COUNT_CONTEXTS_STRIDES_ASKED] == expected->asked && counts[NODE_FACTS_COUNT_CONTEXTS_CONVERTED] == expected->converted &&
                 counts[NODE_FACTS_COUNT_CONTEXTS_FAR] == expected->far &&
+                counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES] == expected->updates && counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN] == expected->updates_taken &&
                 counts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_CONTEXTS_RECORD_DIFFERENCES] == 0 &&
                 counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0 &&
                 counts[NODE_FACTS_COUNT_WINDOW_CALLS] == expected->calls && counts[NODE_FACTS_COUNT_WINDOW_CALLS_MADE] == expected->calls_made &&
@@ -2074,12 +2235,13 @@ static bool node_contexts_test_fixture(const char* directory, const char* name, 
     {
         fprintf(stderr, "test-checker: node-contexts %s: %s: C on the window ran on %" PRIu64 " expressions (%u expected), decided %" PRIu64 " (%u) and refused %" PRIu64
                 " of them (%u), read %" PRIu64 " strides (%u), %" PRIu64 " of the type table (%u), %" PRIu64 " rules by T's conversions (%u), and %" PRIu64
-                " consumers and operands by loads (%u); %" PRIu64
+                " consumers and operands by loads (%u); of the %" PRIu64 " updates C asks its plan of (%u) the masks took %" PRIu64 " (%u); %" PRIu64
                 " expressions differ from C on T's columns, in %" PRIu64 " records; listed:",
                 name, valid ? "read" : "NOT READ", counts[NODE_FACTS_COUNT_CONTEXTS_EXPRESSIONS], expected->expressions, counts[NODE_FACTS_COUNT_CONTEXTS_DECIDED],
                 expected->decided, counts[NODE_FACTS_COUNT_CONTEXTS_REFUSED], expected->refused, counts[NODE_FACTS_COUNT_CONTEXTS_STRIDES], expected->strides,
                 counts[NODE_FACTS_COUNT_CONTEXTS_STRIDES_ASKED], expected->asked, counts[NODE_FACTS_COUNT_CONTEXTS_CONVERTED], expected->converted,
-                counts[NODE_FACTS_COUNT_CONTEXTS_FAR], expected->far,
+                counts[NODE_FACTS_COUNT_CONTEXTS_FAR], expected->far, counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES], expected->updates,
+                counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN], expected->updates_taken,
                 counts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES], counts[NODE_FACTS_COUNT_CONTEXTS_RECORD_DIFFERENCES]);
         for (uint32_t reason = 1; reason < BUSTER_NODE_CONTEXTS_REASONS; reason += 1)
         {
@@ -2760,7 +2922,8 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
 // with the tests on the window ("The tests on the window"): they run on the 8,259 expressions the kernel makes in place
 // and on none of the 64 the chunks' ends cut, whose records are not the window's, and none differs. And with C on the
 // window beside them ("C on the window"), whose consumers' distances the kept values' records keep: it decides the
-// expressions with no update, call or conditional among those, as C does on T's columns.
+// expressions with no conditional among those (four of the seven statements' updates, and the first one's condition),
+// as C does on T's columns.
 static bool node_facts_test_window_room(const char* directory, char** options, uint32_t option_count)
 {
     char path[512];
@@ -2840,7 +3003,7 @@ static bool node_facts_test_window_room(const char* directory, char** options, u
                 tested.reader_facts[NODE_FACTS_COUNT_TESTS_EXPRESSIONS], placed, tested.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES], tested.own_count_differences);
     }
     const uint64_t contexts_expressions = placed;
-    const uint64_t contexts_decided = 1033;
+    const uint64_t contexts_decided = 5166;
     // Its expressions are short: none has a consumer or an operand out of a block's reach, placed or not.
     const uint64_t contexts_far = 0;
     const bool contexts = read && tested.reader_facts[NODE_FACTS_COUNT_CONTEXTS_EXPRESSIONS] == contexts_expressions &&
@@ -3322,7 +3485,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .spared = 34,
         .direct = 2,
         .apart = 3,
-        .decided = 37,
+        .decided = 40,
         .decided_refused = 1,
     };
     static const NodeTestsWindowed windowed_clean = {
@@ -3389,7 +3552,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .spared = 263,
         .direct = 213,
         .apart = 22,
-        .decided = 421,
+        .decided = 443,
         .decided_refused = 9,
     };
     static const NodeTestsWindowed windowed_enums = {
@@ -3414,7 +3577,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .spared = 7,
         .direct = 7,
         .apart = 1,
-        .decided = 16,
+        .decided = 18,
     };
     static const NodeTestsWindowed windowed_whole = {
         .expressions = 2,
@@ -3487,33 +3650,47 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
     // C on the window: its own fixture's counts, each rule on both sides.
     static const NodeContextsExpected contexts_expected = {
-        .expressions = 511,
-        .decided = 449,
-        .refused = 38,
-        .strides = 20,
-        .asked = 3,
+        .expressions = 921,
+        .decided = 844,
+        .refused = 45,
+        .strides = 237,
+        .asked = 7,
         .converted = 7,
-        .far = 21,
+        .far = 29,
+        .updates = 404,
+        .updates_taken = 392,
         .listed = {
             [BUSTER_NODE_CONTEXTS_REASON_CALL] = 43,
             [BUSTER_NODE_CONTEXTS_REASON_LOGICAL] = 2,
-            [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 2,
+            [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 15,
             [BUSTER_NODE_CONTEXTS_REASON_COMMA] = 1,
             [BUSTER_NODE_CONTEXTS_REASON_DIVISION] = 2,
-            [BUSTER_NODE_CONTEXTS_REASON_WIDE] = 10,
+            [BUSTER_NODE_CONTEXTS_REASON_WIDE] = 12,
             [BUSTER_NODE_CONTEXTS_REASON_OPERATOR] = 2,
         },
-        .calls = 271,
-        .calls_made = 245,
-        .calls_converted = 221,
-        .calls_plain = 213,
+        .calls = 273,
+        .calls_made = 247,
+        .calls_converted = 223,
+        .calls_plain = 215,
         .calls_left = 21,
-        .calls_compared = 218,
-        .single_answers = 2342,
-        .single_timed = 335,
+        .calls_compared = 220,
+        .single_answers = 2356,
+        .single_timed = 337,
     };
     check_test_expect(test, ready && node_contexts_test_fixture(directory, "contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &contexts_expected),
                       "node-contexts: C on the window decides each expression of its rules as C does on T's columns, and lists the kinds it has no case for");
+    static const NodeContextsExpected spaced_expected = {
+        .expressions = 145,
+        .decided = 75,
+        .strides = 4,
+        .updates = 143,
+        .updates_taken = 73,
+        .listed = {
+            [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 70,
+        },
+    };
+    check_test_expect(test, ready && node_contexts_test_fixture(directory, "spaced.c", node_contexts_test_spaced_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &spaced_expected),
+                      "node-contexts: in a unit with a type in a space of its own, C on the window lists an update whose destination is in a segment's and takes the others");
     if (written)
     {
         unlink(header);

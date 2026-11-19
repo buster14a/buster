@@ -3713,6 +3713,7 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                 const __mmask16 symbolled = _mm512_mask_test_epi32_mask(named, line, _mm512_set1_epi32(BUSTER_NODE_TESTS_LINE_SYMBOL));
                 const __mmask16 effects = _mm512_test_epi32_mask(flags, _mm512_set1_epi32((int32_t)(BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)));
                 const __mmask16 element = _mm512_test_epi32_mask(flags, _mm512_set1_epi32((int32_t)BUSTER_CHECK_VECTOR_ELEMENT));
+                const __mmask16 register_object = _mm512_test_epi32_mask(flags, _mm512_set1_epi32((int32_t)BUSTER_CHECK_REGISTER));
                 class_bytes = _mm512_cvtepi32_epi8(words);
                 fact_bytes = _mm512_cvtepi32_epi8(_mm512_srli_epi32(words, 8));
                 type_kind_bytes = _mm512_cvtepi32_epi8(_mm512_srli_epi32(words, 16));
@@ -3723,7 +3724,8 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                 standing_bytes = _mm_or_si128(standing_bytes, _mm_maskz_set1_epi8(stray, (char)BUSTER_NODE_MACHINE_WIDE));
                 flag_bytes = _mm_or_si128(_mm_or_si128(_mm_maskz_set1_epi8(effects, BUSTER_NODE_CONTEXTS_EFFECTS), _mm_maskz_set1_epi8(element, BUSTER_NODE_CONTEXTS_VECTOR)),
                                           _mm_or_si128(_mm_maskz_set1_epi8(objected, BUSTER_NODE_CONTEXTS_OBJECT), _mm_maskz_set1_epi8(symbolled, BUSTER_NODE_CONTEXTS_SYMBOL)));
-                flag_bytes = _mm_or_si128(flag_bytes, _mm_maskz_set1_epi8(placed, BUSTER_NODE_CONTEXTS_PLACED));
+                flag_bytes = _mm_or_si128(flag_bytes, _mm_or_si128(_mm_maskz_set1_epi8(placed, BUSTER_NODE_CONTEXTS_PLACED),
+                                                                   _mm_maskz_set1_epi8(register_object, (char)BUSTER_NODE_CONTEXTS_REGISTER)));
                 // What a call's record says of its arguments' conversions (the kernel's call rule's two bits of its
                 // exponent, which the standing's gather has).
                 const __mmask16 converted_call = _mm512_test_epi32_mask(standings, _mm512_set1_epi32((int32_t)((uint32_t)BUSTER_NODE_FACTS_CONVERTED_CALL << 16)));
@@ -6281,6 +6283,11 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
                    node_census_share(decided_records, counts[NODE_FACTS_COUNT_CONTEXTS_RECORDS]), counts[NODE_FACTS_COUNT_CONTEXTS_REFUSED],
                    counts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES], counts[NODE_FACTS_COUNT_CONTEXTS_RECORD_DIFFERENCES], counts[NODE_FACTS_COUNT_CONTEXTS_STRIDES],
                    counts[NODE_FACTS_COUNT_CONTEXTS_STRIDES_ASKED], counts[NODE_FACTS_COUNT_CONTEXTS_CONVERTED], counts[NODE_FACTS_COUNT_CONTEXTS_FAR], swept);
+            // The updates C asks its plan of, and those of them the loop's masks took: another lists its expression.
+            const uint64_t updates = counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES];
+            const uint64_t updates_taken = counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN];
+            printf("node-shadow: window contexts updates=%" PRIu64 " (%.2f%% of the records swept) taken=%" PRIu64 " listed=%" PRIu64 "\n", updates, node_census_share(updates, swept),
+                   updates_taken, updates - updates_taken);
             printf("node-shadow: window contexts listed, by an expression's first record's reason:");
             for (uint32_t reason = 1; reason < BUSTER_NODE_CONTEXTS_REASONS; reason += 1)
             {

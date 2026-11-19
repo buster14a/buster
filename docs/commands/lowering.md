@@ -1914,3 +1914,54 @@ alone): an answer is written to every slot, so a key's probe meets another
 key's answer wherever the last answer was another's; the records, the
 counts and C's answers have to be the same, and the rule's answers and
 those of the timed run are pinned.
+
+### An update on the window (#2850)
+
+The same command, `measure-node-machine --shadow --window-contexts`. C's
+answers for an update (`++`, `--` and the compound assignments) are made on
+the window by the loop's masks. No compile takes any of it. [The
+design](../node-machine.md#an-update-on-the-window) has what it measured.
+
+- **The masks** (`node_contexts_window_loop` in
+  `c_check_node_machine_window.c`) take what C's plan takes
+  (`node_machine_update_plan`): a record of a number's class that is no `/=`
+  or `%=` of an integer by an integer constant (listed, as `/` and `%` are),
+  whose destination is no atomic's and, where it is a name's, no register
+  variable's, and whose second operand is of a number's class unless the
+  update is `++`, `--` or a pointer's. The comment there says, for each term
+  of the plan, which byte gives it or why none is needed.
+- **Three bits are new:** two of an operator's class
+  (`BUSTER_NODE_CONTEXTS_CLASS_INCREMENT` and `_QUOTIENT`, the classes'
+  table's) and one of a record's flags' byte
+  (`BUSTER_NODE_CONTEXTS_REGISTER`, the bytes' sweep's in
+  `c_check_node_census.c`, from the use's `BUSTER_CHECK_REGISTER`).
+- **A pointer's update** asks its stride in the loop the pointers' sums ask
+  theirs in (`node_contexts_stride`, a record at a time): the update's
+  record holds T's conversion of its destination as a sum's does its first
+  operand's.
+- **A unit with a type in a space of its own** (`TypeTable.extended`:
+  `__seg_gs`): the loop asks each masked update's destination's type's space
+  (`check_lower_segment_override`) a record at a time, and one in a
+  segment's lists its expression.
+- **An update the masks don't take lists its expression**, with the reason
+  `update`, which a `/=` and a `%=` by a constant have too.
+- **The operands' rows** are by the update's key: its template's number
+  (`BUSTER_NODE_MACHINE_TEMPLATE_UPDATE`) and two bits
+  (`BUSTER_NODE_CONTEXTS_KEY_ADDRESS` and `_POINTER`). A destination that is
+  no name's is evaluated for its address; the second operand is evaluated to
+  T's conversion of it, or to long where the destination is a pointer. The
+  loop keeps the keys in a register for the block below, and the column it
+  stores has C's templates.
+
+The report adds:
+
+- `node-shadow: window contexts updates=N (P% of the records swept) taken=N
+  listed=N`: the updates C asks its plan of, those of them the masks took,
+  and the rest.
+
+`test-checker` (part 5 of 8) reads two fixtures for it, in
+`c_check_node_census_test.c`: the lines from "An update" on in C on the
+window's (`node_contexts_test_source`), a line a case of a term, and a unit
+with a segment's space (`node_contexts_test_spaced_source`). The updates
+asked and taken are pinned (`NodeContextsExpected.updates` and
+`.updates_taken`).
