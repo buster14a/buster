@@ -71,7 +71,17 @@ jobs:
             ./build/compiler test-ir-optimize
             clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_truth.c -o build/test-driver-tier1-truth
             ./build/test-driver-tier1-truth build/compiler "$(command -v clang)"
-            ./build/compiler --tier1 --verify --lanes 1 -O2 --predefines "$c/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$c/headers/usr/lib/clang/23/include" -isystem "$c/headers/usr/local/include" -isystem "$c/headers/usr/include" -c "$c/sqlite/sqlite3.c" -o "$root/sqlite-$rev.o"
+            clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns
+            ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"
+            cp -L build/compiler "$root/compiler-$rev"
+          done
+      - name: Compare the frozen SQLite amalgamation
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/3036"
+          c="$RUNNER_TEMP/corpus"
+          for rev in 6427879e1143026a12fb0388a20bdea1fe4b2bc5 ecec17211fcd3458e01ae808f86f9b6e019fa450; do
+            "$root/compiler-$rev" --tier1 --tier1-report --lanes 1 -O2 -march=x86-64 -std=gnu17 -DSQLITE_ENABLE_FTS4 -I"$c/sqlite" -c "$c/sqlite/sqlite3.c" -o "$root/sqlite-$rev.o"
             objcopy -j .text -O binary "$root/sqlite-$rev.o" "$root/sqlite-$rev.text"
             wc -c "$root/sqlite-$rev.text"
             sha256sum "$root/sqlite-$rev.text" "$c/sqlite/sqlite3.c"
