@@ -1845,13 +1845,13 @@ stringizing and the builtins make (`PPRange`), so any token's spelling is the
 bytes from its location to its end. A pp-number stays a pp-number:
 `int x = 1e+;` inside `#if 0` is fine.
 
-At the end, `pp_resolve_keywords_vector` gives identifiers their keyword kinds
+At the end, `pp_resolve_keywords_range` gives identifiers their keyword kinds
 for the language mode, 64 tokens at a time. A keyword stayed an identifier
 until then, because it can be a macro name.
 
 `pp_print` writes `-E`'s text. A token gets a space where whitespace was before
 it, or where it would otherwise lex together with the token before
-(`pp_needs_separation`). Each source line goes on a line of its own, and
+(`pp_separation_table`). Each source line goes on a line of its own, and
 pragmas on lines of their own.
 
 Unless `-P`, line markers give every line its presumed position, as clang's

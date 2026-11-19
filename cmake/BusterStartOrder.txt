@@ -33,6 +33,7 @@ main_unit_frontend.c parse_tokens_from_output
 main_unit_frontend.c parse_prepare_meanings
 main_unit_frontend.c parse_kernels_reserve_tree
 main_unit_frontend.c parse_vector_buffers_reserve
+main_unit_frontend.c parse_vector
 main_unit_frontend.c arena_reserve_small
 main_unit_frontend.c pp_warning_flag
 main_unit_frontend.c arena_reserve_tables

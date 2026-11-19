@@ -652,14 +652,17 @@ static uint64_t pp_kernel_digest(const Preprocessor* pp)
     return digest;
 }
 
-// The recorded digests (BUSTER_PP_KERNEL_DIGESTS, read from the repository's root): a line a comparison, its key (the
-// comparison's site, '/', the case's name), a tab and the digest, recorded where the vectorized kernels and their scalar
-// twins agreed. With BUSTER_PP_RECORD_DIGESTS set to a file, each comparison appends its line there instead, and the
+// A table of recorded digests, read from the repository's root (`path`): a line a comparison, its key (the comparison's
+// site, '/', the case's name), a tab and the digest, recorded where the vectorized kernels and their scalar twins agreed
+// (#2924). With the environment variable `record` set to a file, each comparison appends its line there instead, and the
 // lines, sorted, make the table again. A case whose outputs hold its temporary directory's name (an interned path) has
-// '-' for its digest, which any digest matches: two recordings with $TMPDIR of other lengths find them.
-typedef struct PPKernelDigests PPKernelDigests;
-struct PPKernelDigests
+// '-' for its digest, which any digest matches: two recordings with $TMPDIR of other lengths find them. The
+// preprocessor's (pp_kernel_digests) and the parser's (parse_kernel_digests) share this.
+typedef struct TestDigests TestDigests;
+struct TestDigests
 {
+    const char* path;
+    const char* record;
     char* text;
     char** keys;
     uint64_t* digests;
@@ -668,13 +671,12 @@ struct PPKernelDigests
     bool loaded;
 };
 
-static PPKernelDigests pp_kernel_digests;
+static TestDigests pp_kernel_digests = { .path = BUSTER_PP_KERNEL_DIGESTS, .record = "BUSTER_PP_RECORD_DIGESTS" };
 
-static void pp_kernel_digests_load(void)
+static void test_digests_load(TestDigests* table)
 {
-    PPKernelDigests* table = &pp_kernel_digests;
     table->loaded = true;
-    FILE* file = fopen(BUSTER_PP_KERNEL_DIGESTS, "rb");
+    FILE* file = fopen(table->path, "rb");
     long size = -1;
     if (file != 0 && fseek(file, 0, SEEK_END) == 0)
     {
@@ -723,9 +725,9 @@ static void pp_kernel_digests_load(void)
     }
 }
 
-// Whether `digest`, the comparison `site`'s on the case `name`, is the one recorded (or, recording, whether its line was
-// written). A case without a recorded digest fails.
-static bool pp_kernel_digest_matches(uint64_t digest, const char* site, const char* name)
+// Whether `digest`, the comparison `site`'s on the case `name`, is the one `table` recorded (or, recording, whether its
+// line was written). A case without a recorded digest fails; unless `quiet`, a failure says why.
+static bool test_digest_matches(TestDigests* table, uint64_t digest, const char* site, const char* name, bool quiet)
 {
     char key[4400];
     snprintf(key, sizeof(key), "%s/%s", site, name);
@@ -733,7 +735,7 @@ static bool pp_kernel_digest_matches(uint64_t digest, const char* site, const ch
     {
         *c = *c == '\t' || *c == '\n' ? ' ' : *c;
     }
-    const char* record = getenv("BUSTER_PP_RECORD_DIGESTS");
+    const char* record = getenv(table->record);
     bool result = false;
     if (record != 0 && *record != 0)
     {
@@ -743,23 +745,29 @@ static bool pp_kernel_digest_matches(uint64_t digest, const char* site, const ch
     }
     else
     {
-        if (!pp_kernel_digests.loaded)
+        if (!table->loaded)
         {
-            pp_kernel_digests_load();
+            test_digests_load(table);
         }
         uint32_t found = UINT32_MAX;
-        for (uint32_t i = 0; found == UINT32_MAX && i < pp_kernel_digests.count; i += 1)
+        for (uint32_t i = 0; found == UINT32_MAX && i < table->count; i += 1)
         {
-            found = strcmp(pp_kernel_digests.keys[i], key) == 0 ? i : found;
+            found = strcmp(table->keys[i], key) == 0 ? i : found;
         }
-        result = found != UINT32_MAX && (pp_kernel_digests.any[found] || pp_kernel_digests.digests[found] == digest);
-        if (!result && !pp_test_quiet)
+        result = found != UINT32_MAX && (table->any[found] || table->digests[found] == digest);
+        if (!result && !quiet)
         {
             printf("%s: %s %016llx (%s)\n", key, found == UINT32_MAX ? "no recorded digest for the vectorized kernels' outputs, which are" : "the vectorized kernels' outputs aren't their recorded digest, but",
-                   (unsigned long long)digest, BUSTER_PP_KERNEL_DIGESTS);
+                   (unsigned long long)digest, table->path);
         }
     }
     return result;
+}
+
+// Whether `digest`, the comparison `site`'s on the case `name`, is the preprocessor's recorded one.
+static bool pp_kernel_digest_matches(uint64_t digest, const char* site, const char* name)
+{
+    return test_digest_matches(&pp_kernel_digests, digest, site, name, pp_test_quiet);
 }
 
 // Whether the vectorized run `pp` of the comparison `site` on the case `name` gives its recorded digest.

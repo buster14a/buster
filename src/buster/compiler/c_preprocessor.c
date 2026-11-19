@@ -6360,9 +6360,6 @@ static __attribute__((unused)) void pp_system_levels(const Preprocessor* pp, uin
 // ---------------------------------------------------------------------------------------------------------------------
 // The output
 
-// The whole output's keywords by pp_resolve_keywords_range: the parser's handoff tests and benchmark (#335) time it and the
-// conversion after it against pp_resolve_keywords_scalar.
-
 // Can `c` go on an identifier or a pp-number? '$' can unless it is punctuation (pp_dollar_punctuation).
 static __attribute__((unused)) bool pp_word_character(uint8_t c, bool dollar_punctuation)
 {

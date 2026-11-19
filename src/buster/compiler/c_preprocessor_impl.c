@@ -14691,26 +14691,6 @@ static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t
     }
 }
 
-// The whole output's keywords, by the vectorized pass and by a token at a time: the parser's handoff test and benchmark
-// run them before the parser's conversion and its twin (parse_tokens_from_output_scalar), which go with the parser's
-// twins (#2924).
-static __attribute__((unused)) void pp_resolve_keywords_vector(Preprocessor* pp)
-{
-    pp_resolve_keywords_range(pp, 0, pp->output.count);
-}
-
-static __attribute__((unused)) void pp_resolve_keywords_scalar(Preprocessor* pp)
-{
-    PPTokens* out = &pp->output;
-    for (uint32_t i = 0; i < out->count; i += 1)
-    {
-        if (out->kinds[i] == C_TOKEN_RAW_IDENTIFIER && out->values[i] < BUSTER_PP_KEYWORD_TABLE)
-        {
-            out->kinds[i] = pp->keyword_kinds[out->values[i]];
-        }
-    }
-}
-
 // The output's keywords their kinds: the tokens after those the main loop's chunks resolved (pp_run_contexts).
 static void pp_resolve_keywords(Preprocessor* pp)
 {
