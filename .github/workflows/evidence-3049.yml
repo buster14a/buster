@@ -1,0 +1,86 @@
+name: Conditional AND evidence for 3049
+on:
+  push:
+    branches: [evidence/3049-hosted-and]
+permissions:
+  contents: read
+jobs:
+  witness:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BUSTER_HOST_ARCH: vector
+      BUSTER_SANITIZER: none
+      BUSTER_DEBUG_INFO: 0
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify hosted CPU
+        run: |
+          lscpu | grep 'Model name'
+          cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o /tmp/probe
+          /tmp/probe
+      - name: Build the vector Release compiler
+        run: |
+          ./build.sh --config Release
+      - name: Disassemble the C driver output
+        run: |
+          cat > /tmp/conditional.c <<'SOURCE'
+          unsigned long common_alloc_flags(const unsigned long *flags, unsigned n, unsigned long s)
+          {
+              for (unsigned i = 0; i < n; ++i)
+              {
+                  unsigned long x = flags[i];
+                  s = (x & 2ul) ? (s & x) : s;
+              }
+              return s;
+          }
+          
+          unsigned long common_nonalloc_flags(const unsigned long *flags, unsigned n, unsigned long s)
+          {
+              for (unsigned i = 0; i < n; ++i)
+              {
+                  unsigned long x = flags[i];
+                  s = (x & 2ul) ? s : (x & s);
+              }
+              return s;
+          }
+          
+          unsigned common32(const unsigned *flags, unsigned n, unsigned s)
+          {
+              for (unsigned i = 0; i < n; ++i)
+              {
+                  unsigned x = flags[i];
+                  if (x & 2u) s &= x;
+              }
+              return s;
+          }
+          
+          unsigned shared32(const unsigned *flags, unsigned n, unsigned s, unsigned t)
+          {
+              for (unsigned i = 0; i < n; ++i)
+              {
+                  unsigned x = flags[i];
+                  if (x & 2u)
+                  {
+                      s &= x;
+                      t ^= s;
+                  }
+              }
+              return s ^ t;
+          }
+          
+          unsigned volatile32(const volatile unsigned *flags, unsigned n, unsigned s)
+          {
+              for (unsigned i = 0; i < n; ++i)
+              {
+                  if (flags[i] & 2u) s &= flags[i];
+              }
+              return s;
+          }
+          SOURCE
+          build/compiler --tier1 --tier1-strict --verify -O2 -march=x86-64-v4 -c /tmp/conditional.c -o /tmp/conditional.o
+          objdump -drw -Mintel /tmp/conditional.o
+      - name: Run optimizer tests
+        run: build/compiler test-ir-optimize
