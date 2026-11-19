@@ -527,7 +527,8 @@ static bool pp_test_window_units(const char* directory, uint64_t seed)
             }
             char label[64];
             snprintf(label, sizeof(label), "windows: unit %u, window %u", s, window);
-            const bool agrees = ran && paged && pp_same_streams(&runs[1], &runs[0], label) && lengths[0] == lengths[1] && memcmp(printed[0], printed[1], lengths[0]) == 0;
+            const bool agrees = ran && paged && pp_same_streams(&runs[1], &runs[0], label) && lengths[0] == lengths[1] && memcmp(printed[0], printed[1], lengths[0]) == 0 &&
+                                pp_kernel_digest_check(&runs[1], "windows", label);
             if (!agrees && !pp_test_quiet)
             {
                 printf("%s: %s\n", label, !ran ? "the run fails" : !paged ? "the file's data has no line pages" : "the output or its text with line markers isn't the scalar twins'");

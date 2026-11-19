@@ -116,6 +116,16 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   (`pp_test_children`, #465). They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
+  vectorized kernels' outputs must also give their digests in
+  `tests/preprocessor-kernels/digests.tsv` (`pp_kernel_digest`: the stream, the
+  expansion history, the directive tables and the diagnostics' counts), a line
+  per kernel comparison of the built-in cases (`test-x86-target`'s `-march`
+  cases among them) and the fuzz batch's sum at its default seed and count,
+  recorded where the scalar twins gave the same outputs (#2924).
+  `BUSTER_PP_RECORD_DIGESTS=FILE` writes the lines instead; record twice, with
+  `$TMPDIR` of two lengths, and mark a case whose digests differ `-` (its
+  outputs hold its directory's name, or follow the host's CPU, as
+  `-march=native`'s do). The
   cases are of our own:
   - on the topics of the C standard's examples;
   - the behaviors probed against GCC and clang;

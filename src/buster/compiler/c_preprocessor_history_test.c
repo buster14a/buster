@@ -115,7 +115,8 @@ static bool pp_test_history_case(const PPHistoryCase* test, const char* director
             fclose(stream);
         }
     }
-    result = result && pp_same_streams(&runs[0], &runs[1], test->name) && diagnostics[0] != 0 && diagnostics[1] != 0 && strcmp(diagnostics[0], diagnostics[1]) == 0;
+    result = result && pp_same_streams(&runs[0], &runs[1], test->name) && diagnostics[0] != 0 && diagnostics[1] != 0 && strcmp(diagnostics[0], diagnostics[1]) == 0 &&
+             pp_kernel_digest_check(&runs[0], "history", test->name);
     char* oracle = result && with_clang ? pp_test_clang_diagnostics(path, directory, test->parser) : 0;
     if (result && with_clang)
     {

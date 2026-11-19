@@ -79,6 +79,9 @@ struct PPFuzzTally
     // Differences minimized and saved, and the ones reported.
     uint64_t saved;
     uint64_t reported;
+    // The sum of the cases' vectorized runs' digests (pp_kernel_digest), as -E and as a compile runs them: the cases'
+    // outputs, whatever the workers' shares, which must be the recorded sum at the default seed, count and start.
+    uint64_t digest;
 };
 
 // A worker's preprocessors (the vectorized kernels' and the scalar twins'), and their intern tables, which each case
@@ -1292,6 +1295,7 @@ static bool pp_fuzz_case(Arena* arena, Arena* scratch, const PPFuzzOptions* opti
         const PreprocessorFuzzDifference kernels = pp_fuzz_kernels(&pp_fuzz_state, name);
         pp_test_quiet = quiet;
         tally->unprintable += pp_fuzz_state.unprintable;
+        tally->digest += pp_kernel_digest(&pp_fuzz_state.runs[0]) + 31 * pp_kernel_digest(&pp_fuzz_state.runs[2]);
         *ours = pp_fuzz_output(&pp_fuzz_state.runs[0], pp_fuzz_state.ran[0], arena, lost);
         tally->accepted += ours->valid && ours->accepted;
         test_case->isolated |= pp_fuzz_leaks(&pp_fuzz_state.runs[0]);
@@ -1768,6 +1772,7 @@ static void pp_fuzz_add(PPFuzzTally* total, const PPFuzzTally* part)
     total->unprintable += part->unprintable;
     total->saved += part->saved;
     total->reported += part->reported;
+    total->digest += part->digest;
 }
 
 // Reads a worker's counts from its pipe. Returns false if it can't read them all.
@@ -1937,7 +1942,10 @@ static bool pp_fuzz_batch(const PPFuzzOptions* options)
             }
             printf("\n");
             const bool compared = !options->with_clang || (total->compared == total->cases && total->unverified == 0);
-            result = result && total->cases == options->count && compared && total->kernels == 0 && total->differences == 0 && total->oracle == 0 && total->invalid == 0;
+            const bool frozen = options->seed == 1 && options->first == 0 && options->count == BUSTER_PP_FUZZ_CASES;
+            const bool recorded = !frozen || pp_kernel_digest_matches(total->digest, "fuzz", mode == 1 ? "c23" : "c17");
+            result = result && total->cases == options->count && compared && total->kernels == 0 && total->differences == 0 && total->oracle == 0 && total->invalid == 0 &&
+                     recorded;
         }
     }
     pp_fuzz_epoch_end(saved_epoch);

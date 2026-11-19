@@ -65,6 +65,16 @@ static bool pp_test_print_offsets(void)
     return result;
 }
 
+// A run's -E text as pp_test_printed checks it (it lexes back into the stream, and the printers agree), whose digest must
+// be the one recorded for `key`.
+static bool pp_print_test_printed(Preprocessor* pp, const char* key)
+{
+    PPSpellings ours = { 0 };
+    const bool result = pp_stream_spellings(pp, &ours) && pp_test_printed(pp, &ours, key, key);
+    arena_release(&ours.arena);
+    return result;
+}
+
 // Every possible alignment of a printed pragma end, followed by ordinary fast batches and exceptional spellings.
 // Compare complete outputs from the independent scalar printer in both marker modes, not merely their tokenization.
 static bool pp_test_print_batches(const char* directory)
@@ -128,6 +138,9 @@ static bool pp_test_print_batches(const char* directory)
             free(vector);
             free(scalar);
         }
+        char key[64];
+        snprintf(key, sizeof(key), "printer batches, alignment %u", alignment);
+        result = result && pp_print_test_printed(&pp, key);
         pp_release(&pp);
         intern_release(&table);
     }
@@ -252,6 +265,9 @@ static bool pp_test_print_lines(const char* directory)
             free(scalar);
             runs += 1;
         }
+        char key[64];
+        snprintf(key, sizeof(key), "printer lines, alignment %u", alignment);
+        result = result && pp_print_test_printed(&pp, key);
         pp_release(&pp);
         intern_release(&table);
     }
@@ -961,6 +977,9 @@ static bool pp_test_print_spelling_paths(const char* directory)
                 free(scalar);
                 runs += 1;
             }
+            char key[96];
+            snprintf(key, sizeof(key), "printer spelling paths, alignment %u, trigraphs %u", alignment, trigraphs);
+            result = result && pp_print_test_printed(&pp, key);
             pp_release(&pp);
             intern_release(&table);
         }
