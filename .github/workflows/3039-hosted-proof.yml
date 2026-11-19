@@ -16,6 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          ref: 6427879e1143026a12fb0388a20bdea1fe4b2bc5
           persist-credentials: false
       - name: Check the hosted vector CPU
         run: |
