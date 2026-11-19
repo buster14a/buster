@@ -1543,8 +1543,10 @@ kernel's run in place (`node_facts_window_run`).
   may be void, an array). A record has its type's word whichever path wrote
   it.
 - **The records' bytes** (`node_tests_window_bytes`), sixteen records a
-  step: four gathers from the kernel's 64-byte records (the word, the flags,
-  the object, the standing), one of a name's declaration's line's byte
+  step: four columns of the kernel's 64-byte records (the word, the flags,
+  the object, the standing) by sixteen loads and twelve permutes ([the
+  columns](#the-records-bytes-columns-2850)), and one gather of a name's
+  declaration's line's byte
   (`NodeCensusReader.line_bytes`, which the census's code makes at the
   line's first leaf). Two byte columns come out: the type's byte and the
   value's (a constant a test may read, a bit-field, a declaration the tests
@@ -1754,7 +1756,7 @@ tests' chunk (`node_facts_window_run`).
   where a chunk's end took records from between a control's root and its
   operand; it says whether a record has a consumer yet.
 - **The records' bytes.** Where C runs, the tests' sweep
-  (`node_tests_window_bytes`) makes five byte columns more from its gathers:
+  (`node_tests_window_bytes`) makes five byte columns more from its columns:
   the type's word's low three bytes (its class, its facts and its kind), the
   standing's byte, and a byte of what C's rules read of the flags and the
   object (`BUSTER_NODE_CONTEXTS_*`: an effect, a vector's element, whether
@@ -2021,3 +2023,29 @@ on in C on the window's fixture (`node_contexts_test_source`), a line a case
 of a term, and six statements 64 times each for the blocks' ends. The
 branched records and the CONDITIONs among them are pinned
 (`NodeContextsExpected.branched` and `.branched_roots`).
+
+### The records' bytes' columns (#2850)
+
+No command of its own: the sweep that `--window-tests` and
+`--window-contexts` both run (`node_tests_window_bytes_by` in
+`c_check_node_census.c`). [The
+design](../node-machine.md#the-records-bytes-without-their-four-gathers) has
+what it measured.
+
+- **Four columns, no gather.** A step's sixteen records' words, flags,
+  objects and standings come from sixteen loads of the lines' first halves,
+  two records a register, one permute of two registers for each four
+  records, and eight lane shuffles. The last four are masked by the placed
+  records: a record the kernel didn't place reads as zeros.
+- **The columns' places** are `BUSTER_NODE_TESTS_COLUMN_*`, dwords of a
+  record's line; an assert beside them ties them to `NodeFactsRecord` and
+  the window's size to a whole number of steps, since a step reads its
+  sixteen lines whether placed or not.
+- **What is a gather still:** a name's declaration's line's byte, and the
+  reader's verify's two.
+
+`test-checker` (part 5 of 8) reads the sweep through the tests on the
+window's fixtures and C on the window's: a column that is another record's
+fails their pins, and one that is not masked fails the reader's verify, which
+counts a record the kernel didn't place that has a byte with the values it
+finds wrong (`own_values_wrong`, pinned at zero).

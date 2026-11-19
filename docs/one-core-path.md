@@ -1501,7 +1501,9 @@ the expressions the tests ran on:
 - **An operand further back than the block before its record's:** 0.33% of
   the records, a load each.
 - **A loop a record for the records' bytes was tried, and lost:** 14.2 ticks
-  a record at its best where six gathers a step of sixteen read 9.4.
+  a record at its best where six gathers a step of sixteen read 9.4. (Four of
+  the gathers went later without a loop a record: "The records' bytes without
+  their four gathers".)
 
 ### What it means
 
@@ -2088,6 +2090,54 @@ build before (#3025's code) against the piece's, medians of seven readings
 - **What is listed still** is `&&` and `||` as values and `?:`: 674 of 1,683
   expressions on `sqlite3.c`. Those, a comma, then X on these answers: until
   X reads them the sum of step 2 does not move.
+
+## The records' bytes without their four gathers
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/the-records-bytes-without-gathers-2850-2026-11-19).
+`measure-node-machine --shadow --window-tests` and `--window-contexts`
+([the guide](commands/lowering.md#the-records-bytes-columns-2850)).
+
+The sweep that makes the byte columns the tests' loop and C's read took four
+columns of a chunk's records, sixteen a step, by four gathers: 64 uops each
+on Zen 5. It takes them now by sixteen loads of the lines' first halves and
+twelve permutes. The same bytes; no compile takes any of it. [The node
+machine's page](node-machine.md#the-records-bytes-without-their-four-gathers)
+has it whole. [Its
+specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7020847483)
+had four gates.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release, TSC ticks a record, seven
+readings: the build before (#3030's code) against the piece's, and one
+executable that reads the columns either way, each reading's own difference:
+
+| the records' bytes | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| build against build: before, with | 9.16, 7.58 | 10.78, 9.33 | 19.67, 19.48 |
+| **one executable: loads less gathers** | **-2.41** | **-2.35** | **-3.00** |
+| the tests on the window, their sum, by the same | -2.52 | -2.26 | -1.58 |
+
+### Against its gates
+
+- **S1, the same bytes: met.** No pin moves, and the shadow's counts are the
+  build before's on every corpus.
+- **S2, cost: met.** 1.65 and 1.49 ticks a record lower on `sqlite3.c` and
+  Lua build against build, 2.41 and 2.35 by the one executable.
+- **S3, nothing else moves: met.** By the one executable each other part is
+  within 0.1 of itself. Build against build an expression's part reads 0.27
+  and 0.34 higher, and the tests' sum 1.23 and 0.50 lower.
+- **S4, faults: met.** 37 of 37 caught, three of them only once the reader's
+  verify counted a record the kernel didn't place that has a byte.
+
+### What it means
+
+- **A gather of a column is no gather.** Where the lanes' indices are a fixed
+  stride, the loads are sixteen and the rest is permutes in registers: a
+  quarter of the sweep on `sqlite3.c`. "A loop a record ... was tried, and
+  lost" (above) compared the gathers with a scalar loop, not with this.
+- **The sweep's one gather left** is of bytes at entries' numbers, which no
+  permute replaces.
 
 ## Step 4's first piece: a census of Tier 0's row
 

@@ -3581,6 +3581,18 @@ static __attribute__((noinline)) uint8_t node_tests_window_wants(NodeCensusReade
 // With `contexts` (a constant where this is inlined), C on the window's bytes of the same records too
 // (c_check_node_machine_window.c), from the same gathers, and a declaration's line's byte says whether its object has
 // a symbol.
+// The sweep's four columns' places among a record's line's first eight dwords, and what reading sixteen lines' first
+// halves a step asks: a line is sixteen dwords, and the window's array is a whole number of steps, so a step whose
+// first record is one of a chunk's reads lines of the array alone.
+#define BUSTER_NODE_TESTS_COLUMN_WORD 1
+#define BUSTER_NODE_TESTS_COLUMN_FLAGS 2
+#define BUSTER_NODE_TESTS_COLUMN_OBJECT 3
+#define BUSTER_NODE_TESTS_COLUMN_STANDING 6
+_Static_assert(offsetof(NodeFactsRecord, word) == 4 * BUSTER_NODE_TESTS_COLUMN_WORD && offsetof(NodeFactsRecord, flags) == 4 * BUSTER_NODE_TESTS_COLUMN_FLAGS &&
+               offsetof(NodeFactsRecord, object) == 4 * BUSTER_NODE_TESTS_COLUMN_OBJECT && offsetof(NodeFactsRecord, standing) == 4 * BUSTER_NODE_TESTS_COLUMN_STANDING &&
+               sizeof(NodeFactsRecord) == 64 && BUSTER_NODE_FACTS_WINDOW % 16 == 0 && BUSTER_NODE_FRONT_RECORDS <= BUSTER_NODE_FACTS_WINDOW,
+               "the sweep's four columns are dwords of a line's first half, and a step's sixteen lines are the window's");
+
 static inline __attribute__((always_inline)) void node_tests_window_bytes_by(NodeCensusReader* tests, const struct NodeFactsReader* state, const NodeFront* front,
                                                                            uint64_t* made, const bool contexts)
 {
@@ -3589,8 +3601,16 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
     const uint32_t count = front->count;
     const uint32_t end = (count + 63) & ~63u;
     const __m512i zero = _mm512_setzero_si512();
-    // Each lane's record's line, in bytes from the step's first.
+    // Each lane's record's line, in bytes from the step's first (the reader's verify's gathers).
     const __m512i lines = _mm512_set_epi32(960, 896, 832, 768, 704, 640, 576, 512, 448, 384, 320, 256, 192, 128, 64, 0);
+    // The four columns' dwords of four records, two a register (a record's eight dwords each): each column's four
+    // together, the word's, the flags', the object's and the standing's.
+    const __m512i columns = _mm512_set_epi32(16 + BUSTER_NODE_TESTS_COLUMN_STANDING + 8, 16 + BUSTER_NODE_TESTS_COLUMN_STANDING, BUSTER_NODE_TESTS_COLUMN_STANDING + 8,
+                                             BUSTER_NODE_TESTS_COLUMN_STANDING, 16 + BUSTER_NODE_TESTS_COLUMN_OBJECT + 8, 16 + BUSTER_NODE_TESTS_COLUMN_OBJECT,
+                                             BUSTER_NODE_TESTS_COLUMN_OBJECT + 8, BUSTER_NODE_TESTS_COLUMN_OBJECT, 16 + BUSTER_NODE_TESTS_COLUMN_FLAGS + 8,
+                                             16 + BUSTER_NODE_TESTS_COLUMN_FLAGS, BUSTER_NODE_TESTS_COLUMN_FLAGS + 8, BUSTER_NODE_TESTS_COLUMN_FLAGS,
+                                             16 + BUSTER_NODE_TESTS_COLUMN_WORD + 8, 16 + BUSTER_NODE_TESTS_COLUMN_WORD, BUSTER_NODE_TESTS_COLUMN_WORD + 8,
+                                             BUSTER_NODE_TESTS_COLUMN_WORD);
     uint64_t lines_made = 0;
     uint64_t values_checked = 0;
     uint64_t values_wrong = 0;
@@ -3611,10 +3631,30 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
             const __m128i taken = _mm_maskz_loadu_epi8(lanes, state->place_taken + x);
             const __mmask16 placed = _mm_test_epi8_mask(taken, taken);
             const uint8_t* const base = records + 64 * (uint64_t)x;
-            const __m512i words = _mm512_mask_i32gather_epi32(zero, placed, lines, base + offsetof(NodeFactsRecord, word), 1);
-            const __m512i flags = _mm512_mask_i32gather_epi32(zero, placed, lines, base + offsetof(NodeFactsRecord, flags), 1);
-            const __m512i objects = _mm512_mask_i32gather_epi32(zero, placed, lines, base + offsetof(NodeFactsRecord, object), 1);
-            const __m512i standings = _mm512_mask_i32gather_epi32(zero, placed, lines, base + offsetof(NodeFactsRecord, standing), 1);
+            // Four columns of the step's sixteen records (a record's word, flags, object and standing), by sixteen loads
+            // and twelve permutes: a gather of sixteen is 64 uops on Zen 5 (docs/coding-style.md, "SIMD and Zen 5"), and
+            // the four it took 256 a step. A line's first half is read whole, two records a register; one permute of two
+            // registers puts each column's four dwords of four records in a lane; and a column is that lane of the four
+            // permutes, the records the kernel didn't place read as zeros, as a masked gather's were. A step reads its
+            // sixteen lines whether placed or not: the window's own array's (the assert above the sweep).
+            __m512i fours[4];
+            for (uint32_t four = 0; four < 4; four += 1)
+            {
+                const uint8_t* const at = base + 4 * sizeof(NodeFactsRecord) * (uint64_t)four;
+                const __m512i first = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(const void*)at)),
+                                                         _mm256_loadu_si256((const __m256i*)(const void*)(at + sizeof(NodeFactsRecord))), 1);
+                const __m512i second = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(const void*)(at + 2 * sizeof(NodeFactsRecord)))),
+                                                          _mm256_loadu_si256((const __m256i*)(const void*)(at + 3 * sizeof(NodeFactsRecord))), 1);
+                fours[four] = _mm512_permutex2var_epi32(first, columns, second);
+            }
+            const __m512i words_flags_low = _mm512_shuffle_i32x4(fours[0], fours[1], 0x44);
+            const __m512i words_flags_high = _mm512_shuffle_i32x4(fours[2], fours[3], 0x44);
+            const __m512i objects_standings_low = _mm512_shuffle_i32x4(fours[0], fours[1], 0xee);
+            const __m512i objects_standings_high = _mm512_shuffle_i32x4(fours[2], fours[3], 0xee);
+            const __m512i words = _mm512_maskz_shuffle_i32x4(placed, words_flags_low, words_flags_high, 0x88);
+            const __m512i flags = _mm512_maskz_shuffle_i32x4(placed, words_flags_low, words_flags_high, 0xdd);
+            const __m512i objects = _mm512_maskz_shuffle_i32x4(placed, objects_standings_low, objects_standings_high, 0x88);
+            const __m512i standings = _mm512_maskz_shuffle_i32x4(placed, objects_standings_low, objects_standings_high, 0xdd);
             // Its type's byte: the word's six bits at the byte's bits 1 to 3 and 5 to 7, and whether its type is void, by
             // the word's kind.
             const __m512i six = _mm512_srli_epi32(words, BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT);
@@ -3746,6 +3786,11 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                                        _mm512_mask_test_epi32_mask((__mmask16)(told & ~near), high, high);
                 values_checked += (uint64_t)_mm_popcnt_u32(told);
                 values_wrong += (uint64_t)_mm_popcnt_u32((uint32_t)(told & ~(whole & (same | past))));
+                // And a record the kernel didn't place has no byte, nor has a lane past the chunk's last record: a step
+                // reads such a line with the others, and the columns' masks leave it zeros.
+                const __m128i unplaced_bytes = _mm_or_si128(_mm_or_si128(_mm_or_si128(own_bytes, value_bytes), _mm_or_si128(class_bytes, fact_bytes)),
+                                                            _mm_or_si128(_mm_or_si128(type_kind_bytes, standing_bytes), flag_bytes));
+                values_wrong += (uint64_t)_mm_popcnt_u32(_mm_mask_test_epi8_mask((__mmask16)~placed, unplaced_bytes, unplaced_bytes));
             }
         }
         _mm_storeu_si128((__m128i*)(void*)(tests->window_types + x), own_bytes);
