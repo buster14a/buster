@@ -20,7 +20,7 @@ jobs:
       - name: Check hosted CPU
         run: |
           lscpu | grep 'Model name'
-          cc -O2 tools/ci/vector-probe.c -o "$RUNNER_TEMP/probe"
+          cc -std=c17 -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/probe"
           "$RUNNER_TEMP/probe"
       - name: Build the pinned compiler
         run: |
