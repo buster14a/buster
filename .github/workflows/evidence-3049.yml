@@ -21,5 +21,5 @@ jobs:
           lscpu | grep 'Model name'
           cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o /tmp/probe
           /tmp/probe
-      - name: Check the complete SQLite script and C23 bit-precise loops
-        run: bash evidence/3049/sqlite.sh 6427879e1143026a12fb0388a20bdea1fe4b2bc5 bc7e1a5dff5808d2262d4e217b58253de2c5a6d4
+      - name: Compare base and head on this runner
+        run: bash evidence/3049/compare.sh b847801169f2b73aed6496c8fa23e9a5499c94e7 a2157ceaf5ec05a176118beb843cc4eb6f6aa967
