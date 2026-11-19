@@ -7467,15 +7467,11 @@ static const uint8_t x86_first_qword_total[64] __attribute__((aligned(64))) = {
     0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
 };
 
-// Measures one full group; a partial group is copied and zero-padded by x86_measure. compute_fields shares the
-// encoder's length rules, while its unused canonical bytes, prefixes and displacement are eliminated. In 64-bit mode
+// Measures one group of records, four to a vector (a partial group's past its last record zero). compute_fields shares
+// the encoder's length rules, while its unused canonical bytes, prefixes and displacement are eliminated. In 64-bit mode
 // checks and extension affect those unused fields alone. No machine-code bytes, layout vectors or fixup ends are made.
-BUSTER_INLINE uint32_t x86_measure_group(const X86Instruction* instructions, uint32_t base, uint32_t* offsets, __mmask16 lanes)
+BUSTER_INLINE uint32_t x86_measure_group(__m512i record0, __m512i record1, __m512i record2, __m512i record3, uint32_t base, uint32_t* offsets, __mmask16 lanes)
 {
-    const __m512i record0 = _mm512_loadu_si512(instructions);
-    const __m512i record1 = _mm512_loadu_si512(instructions + 4);
-    const __m512i record2 = _mm512_loadu_si512(instructions + 8);
-    const __m512i record3 = _mm512_loadu_si512(instructions + 12);
     const __m512i low01 = _mm512_unpacklo_epi32(record0, record1);
     const __m512i low23 = _mm512_unpacklo_epi32(record2, record3);
     const __m512i high01 = _mm512_unpackhi_epi32(record0, record1);
@@ -7513,14 +7509,20 @@ static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, u
         uint64_t i = 0;
         for (; i + BUSTER_X86_GROUP_INSTRUCTIONS <= count; i += BUSTER_X86_GROUP_INSTRUCTIONS)
         {
-            length = x86_measure_group(instructions + i, length, offsets + i, (__mmask16)0xffff);
+            const X86Instruction* group = instructions + i;
+            length = x86_measure_group(_mm512_loadu_si512(group), _mm512_loadu_si512(group + 4), _mm512_loadu_si512(group + 8), _mm512_loadu_si512(group + 12), length,
+                                       offsets + i, (__mmask16)0xffff);
         }
         if (i < count)
         {
-            X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
-            memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
-            const __mmask16 lanes = (__mmask16)((1u << (count - i)) - 1);
-            length = x86_measure_group(tail, length, offsets + i, lanes);
+            // The last partial group by masked loads of its records' dwords (four a record), which read nothing past
+            // the last: a zeroed copy's loads would wait for the copy's stores, which they can't forward from, and
+            // made a call of one record 1.2 times as long as the scalar loop it replaced (#2924, C10).
+            const X86Instruction* group = instructions + i;
+            const uint64_t dwords = (UINT64_C(1) << (4 * (count - i))) - 1;
+            length = x86_measure_group(_mm512_maskz_loadu_epi32((__mmask16)dwords, group), _mm512_maskz_loadu_epi32((__mmask16)(dwords >> 16), group + 4),
+                                       _mm512_maskz_loadu_epi32((__mmask16)(dwords >> 32), group + 8), _mm512_maskz_loadu_epi32((__mmask16)(dwords >> 48), group + 12), length,
+                                       offsets + i, (__mmask16)((1u << (count - i)) - 1));
         }
         result = length;
     }

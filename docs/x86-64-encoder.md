@@ -490,7 +490,12 @@ returns zero. Counts above `BUSTER_X86_ENCODER_MAX_INSTRUCTIONS` return
 `X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS` before either array is accessed.
 Other invalid inputs are outside the contract, as with `x86_encode`.
 
-The vector path takes 16 records at a time. It transposes their operand and
+The vector path takes 16 records at a time; the last partial group's records
+come by masked loads of their dwords, which read nothing past the last. A
+zeroed copy, which it took before, cost a call of one record 1.2 times the
+scalar twin's time (105.6 cycles against 88.0 on the 9700X): the copy's loads
+wait for its stores, which they can't forward from. With masked loads, a call
+of one record takes 41.9 (#2924, C10). It transposes their operand and
 displacement fields as the encoder does, but loads only each template's
 32-bit flags with one dword-index gather. Its indices come from the form
 fields already in the transposed vectors. This explicit gather avoids
