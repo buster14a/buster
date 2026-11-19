@@ -27,7 +27,7 @@ for kind, filename, flags in (
         trace = root / 'advice.trace'
         cmd = ['strace', '-f', '-qq', '-e', 'trace=madvise', '-o', str(trace), '--']
         if reject:
-            cmd.append(str(root / 'reject-advice'))
+            cmd += [str(root / 'reject-advice'), str(size)]
         cmd.append(str(root / 'plain-head'))
         if kind == 'shared':
             cmd += ['benchmark-link', '--only', 'direct', '--kinds', 'shared', '--functions', '1',
@@ -36,7 +36,10 @@ for kind, filename, flags in (
         else:
             cmd += [*flags, 'tools/ci/qualification.c', '-o', str(out)]
         proc = subprocess.run(cmd, check=True, capture_output=True, env=env, text=True)
-        calls = [l for l in trace.read_text().splitlines() if 'MADV_POPULATE_WRITE' in l]
+        image = directory / 'buster' / filename
+        size = image.stat().st_size
+        marker = f', {size}, MADV_POPULATE_WRITE)'
+        calls = [l for l in trace.read_text().splitlines() if marker in l]
         assert len(calls) == 1, (kind, reject, calls)
         assert ('= -1 EINVAL' in calls[0]) if reject else calls[0].rstrip().endswith('= 0'), calls
         print('ADVICE_CALL', kind, 'reject', int(reject), calls[0], flush=True)
@@ -47,7 +50,7 @@ for kind, filename, flags in (
             shutil.rmtree(temp)
         results.append(((directory / 'buster' / filename).read_bytes(), out.read_bytes()))
         warm = subprocess.run(cmd, check=True, capture_output=True, env=env, text=True)
-        assert 'MADV_POPULATE_WRITE' not in trace.read_text()
+        assert marker not in trace.read_text()
         if kind == 'shared':
             temp = Path(re.search(r'outputs in ([^;]+); the snapshots in ', warm.stdout)[1])
             assert temp.parent == root and temp.name.startswith('buster-link-benchmark-')
