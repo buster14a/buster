@@ -12196,6 +12196,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         CheckDriverTypoEdits typo_edits = { .count = 0, .table = pp->table, .scratch = scratch };
         const CheckPrefixTails typo_tails = { .end = check_driver_typo_tail, .context = &typo_edits };
         bool parse_printed = false;
+        // A typo pass whose parse has no view (#3000): the unit then ends as one whose failed parse has none does.
+        bool unviewed = false;
         check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
         pp->options.collect_diagnostics = true;
         pp_driver_verbose(options, path);
@@ -12450,6 +12452,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     else
                     {
+                        // The views that failed cleared the one the unit was read as, and the reading is of another
+                        // parse: the unit has its parse's errors alone, and the view the stages after it read is the
+                        // parse itself, whose pragmas the earlier ones aren't.
+                        checking = recovered;
+                        original_pragmas_ready = false;
+                        unviewed = true;
                         ready = false;
                     }
                 }
@@ -12530,7 +12538,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             // A rejected reader may retain complete earlier expressions solely for diagnostics. Their typed
             // reports share source order with declaration reports, but this fragment can never be emitted.
-            if (grants.return_failed)
+            if (grants.return_failed || unviewed)
             {
                 result = 1;
             }

@@ -5793,7 +5793,11 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   recovered and checked as a failed parse's is (`check_driver_typo_edits`,
   `CheckPrefixEdit`, up to 4 readings), its errors at the names first
   (`check_driver_typo_errors`) and a parse error naming one spelling the
-  correction (`Parser.respelled`). An expression statement whose `;` is
+  correction (`Parser.respelled`). A reading whose parse has no view (a
+  tentative tail given back leaves the failed parse itself, of which no type
+  view, repair or prefix can be made) ends the unit as a failed parse without a
+  view does, with its parse's errors alone: the views that failed cleared the
+  one the unit was read as, which its reports would otherwise read (#3000). An expression statement whose `;` is
   missing after its first name or that name's call (`retrn x`, `whil (a) a--`)
   is read on past as if the `;` were there (`ParseDiagnostic.probe`), as
   clang's `ParseExprStatement` does once the name is classified, so that the
