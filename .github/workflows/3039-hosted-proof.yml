@@ -1,0 +1,62 @@
+name: FDE header scratch experiment
+on:
+  push:
+    branches: [scratch/3039-hosted-proof]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      BUSTER_HOST_ARCH: vector
+      BUSTER_SANITIZER: none
+      BUSTER_SANITIZER_OPTIMIZATION: '3'
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Check the hosted vector CPU
+        run: |
+          lscpu | sed -n '/^Model name:/p'
+          cc -std=c17 -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/probe"
+      - uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ''
+      - run: bash tools/ci/setup-hosted.sh
+      - name: Count the baseline at executable emission
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 6427879e1143026a12fb0388a20bdea1fe4b2bc5 HEAD -- src tools build.sh
+          clang --version
+          dir="$RUNNER_TEMP/proof"
+          mkdir -p "$dir"
+          src=src/buster/compiler/executable_impl.c
+          sed -i '/^static bool executable_eh_frame_sort(/,/^}/ {
+            /    int32_t\* table =/a\    const uint64_t mark = arena->length; uint64_t copied = 0, scattered = 0;
+            /memcpy(from, table, 8 \* fdes);/a\            copied += 8 * fdes;
+            /memcpy(table, from, 8 \* fdes);/a\            copied += 8 * fdes;
+            /to\[starts\[digit\]\] = from\[e\];/a\                scattered += 8;
+            /    return result;/i\    if (getenv("FDE_TRACE")) fprintf(stderr, "FDE n=%llu sorted=%d exact=%d ok=%d arena=%llu copy=%llu scatter=%llu\\n", (unsigned long long)fdes, sorted, exact, result, (unsigned long long)(arena->length-mark), (unsigned long long)copied, (unsigned long long)scattered);
+          }' "$src"
+          ./build.sh --config Release > "$dir/build.log" 2>&1 || { tail -100 "$dir/build.log"; exit 1; }
+          clang -std=gnu17 -O2 -fasynchronous-unwind-tables -ffunction-sections -c tools/dco/dco.c -o "$dir/dco.o"
+          FDE_TRACE=1 ./build/compiler --lanes 1 -static "$dir/dco.o" -o "$dir/dco" 2>&1 | tee "$dir/dco-link.log"
+          "$dir/dco" status | tee "$dir/dco-status.log"
+          objcopy --dump-section .eh_frame_hdr="$dir/dco.hdr" "$dir/dco"
+          readelf -W -l "$dir/dco" | grep GNU_EH_FRAME
+          readelf -wf "$dir/dco" > "$dir/dco-readelf.txt"
+          sha256sum "$dir/dco.o" "$dir/dco" "$dir/dco.hdr"
+          FDE_TRACE=1 ./build/compiler test-executable > "$dir/test.log" 2>&1
+          grep '^FDE ' "$dir/test.log" | sort -u > "$dir/fdes.txt"
+          grep -E '^FDE n=(0|1|2|16|257|5000) ' "$dir/fdes.txt"
+          tail -25 "$dir/test.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: base-3039-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof
+          retention-days: 5
