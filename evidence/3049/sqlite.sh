@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+evidence=$(cd -- "$(dirname -- "$0")" && pwd)
 root=$(git rev-parse --show-toplevel)
 tmp=$(mktemp -d)
 base=${1:?base compiler SHA}
@@ -20,20 +21,33 @@ test "${#defines[@]}" -ge 9
 args=(-O2 -march=x86-64-v4 -fno-strict-aliasing -I"$sqlite" "${defines[@]}")
 clang "${args[@]}" -c "$sqlite/shell.c" -o "$tmp/shell.o"
 clang "${args[@]}" -c "$sqlite/sqlite3.c" -o "$tmp/clang.o"
+cp tests/sqlite/core.sql "$tmp/core.sql"
+printf '\n.print BUSTER_3049_SQL_END\n' >> "$tmp/core.sql"
 for rev in clang base head; do
     if [[ $rev != clang ]]; then
         git checkout --detach "${!rev}"
         ./build.sh --config Release
+        cp build/compiler "$tmp/compiler-$rev"
         build/compiler --tier1 "${args[@]}" -c "$sqlite/sqlite3.c" -o "$tmp/$rev.o"
     fi
     clang "$tmp/shell.o" "$tmp/$rev.o" -lm -ldl -lpthread -o "$tmp/sqlite-$rev"
-    "$tmp/sqlite-$rev" -batch -bail :memory: < tests/sqlite/core.sql > "$tmp/$rev.out"
+    status=0
+    "$tmp/sqlite-$rev" -batch :memory: < "$tmp/core.sql" > "$tmp/$rev.out" 2> "$tmp/$rev.err" || status=$?
+    echo "$status" > "$tmp/$rev.status"
+    test "$status" -le 1
+    grep -Fxq BUSTER_3049_SQL_END "$tmp/$rev.out"
+    sha256sum "$tmp/$rev.err"
+    echo "SQLite $rev status $status"
     sha256sum "$tmp/$rev.out"
     wc -lc "$tmp/$rev.out"
     size --format=sysv "$tmp/$rev.o" | awk '$1==".text" {print "SQLite .text bytes", $2}'
 done
 cmp "$tmp/clang.out" "$tmp/base.out"
 cmp "$tmp/clang.out" "$tmp/head.out"
+for rev in base head; do
+    cmp "$tmp/clang.err" "$tmp/$rev.err"
+    cmp "$tmp/clang.status" "$tmp/$rev.status"
+done
 # Count accepted AND rows on the actual TU in a separate, temporary probe compiler.
 python3 - <<'PY'
 from pathlib import Path
@@ -47,3 +61,13 @@ PY
 BUSTER_3049_COUNT=1 build/compiler --tier1 "${args[@]}" -c "$sqlite/sqlite3.c" -o "$tmp/probe.o" 2> "$tmp/counts"
 awk '/^3049 AND width/ { n[$4]++; total++ } END { for (i in n) print "accepted ANDs of width", i, n[i]; print "total accepted ANDs", total+0 }' "$tmp/counts"
 cmp "$tmp/head.o" "$tmp/probe.o"
+clang -std=c23 -O2 -march=x86-64-v4 -c "$evidence/bitint.c" -o "$tmp/clang-bitint.o"
+objcopy --prefix-symbols=clang_ "$tmp/clang-bitint.o" "$tmp/narrow-oracle.o"
+for rev in base head; do
+    echo "BEGIN $rev bit-precise"
+    "$tmp/compiler-$rev" --tier1 --tier1-strict --verify -O2 -std=c23 -march=x86-64-v4 -c "$evidence/bitint.c" -o "$tmp/$rev-bitint.o"
+    objdump -drw -Mintel "$tmp/$rev-bitint.o"
+    clang -std=c23 -O2 -march=x86-64-v4 "$evidence/check-bitint.c" "$tmp/$rev-bitint.o" "$tmp/narrow-oracle.o" -o "$tmp/check-bitint"
+    "$tmp/check-bitint"
+    echo "END $rev bit-precise"
+done
