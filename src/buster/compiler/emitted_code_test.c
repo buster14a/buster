@@ -502,6 +502,51 @@ static void emitted_test_preserve_moves(EmittedTest* test, const Tier0Code* code
     arena_pop_to(arena, mark);
 }
 
+// The rows at record boundaries for a frame that pushes rbx, rcx and r10, then stores xmm15, xmm16 and xmm31.
+// Only rbx and rbp belong to the fixed descriptor. Pin the tied rules at entry and at rbp's push and pop, as
+// well as the two DWARF vector number ranges and the different restore orders of general and vector registers.
+static void emitted_test_preserve_order(EmittedTest* test)
+{
+    static const EmissionFrameRow expected[] = {
+        { .reg = 2, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .reg = 10, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .reg = 32, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .reg = 67, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .reg = 82, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .offset = 1, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 },
+        { .offset = 1, .reg = 6, .kind = EMISSION_FRAME_OFFSET, .value = -16 },
+        { .offset = 2, .reg = 6, .kind = EMISSION_FRAME_CFA, .value = 16 },
+        { .offset = 3, .reg = 3, .kind = EMISSION_FRAME_OFFSET, .value = -24 },
+        { .offset = 4, .reg = 2, .kind = EMISSION_FRAME_OFFSET, .value = -32 },
+        { .offset = 5, .reg = 10, .kind = EMISSION_FRAME_OFFSET, .value = -40 },
+        { .offset = 7, .reg = 32, .kind = EMISSION_FRAME_OFFSET, .value = -232 },
+        { .offset = 8, .reg = 67, .kind = EMISSION_FRAME_OFFSET, .value = -168 },
+        { .offset = 9, .reg = 82, .kind = EMISSION_FRAME_OFFSET, .value = -104 },
+        { .offset = 13, .reg = 32, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .offset = 14, .reg = 67, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .offset = 15, .reg = 82, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .offset = 17, .reg = 10, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .offset = 18, .reg = 2, .kind = EMISSION_FRAME_SAME_VALUE },
+        { .offset = 19, .reg = 3, .kind = EMISSION_FRAME_RESTORE },
+        { .offset = 20, .reg = 7, .kind = EMISSION_FRAME_CFA, .value = 8 },
+        { .offset = 20, .reg = 6, .kind = EMISSION_FRAME_RESTORE },
+    };
+    const Tier0Code code = {
+        .count = 21,
+        .frame_saved = 1, // rbx in the fixed descriptor
+        .frame_pointer = true,
+        .frame_preserved = (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_R10),
+        .frame_preserve_vectors = (1u << 15) | (1u << 16) | (1u << 31),
+        .frame_preserve_vector_bytes = 64,
+    };
+    const UnwindFunction fixed = { .size = 21, .offsets = { 1, 2, 3, 19, 20 }, .saved = code.frame_saved, .event_count = 5, .pointer = 1 };
+    EmissionFrameRow rows[BUSTER_ARRAY_LENGTH(expected)];
+    memset(rows, 0xa5, sizeof(rows));
+    const uint32_t count = unwind_function_rows(&fixed, rows, BUSTER_ARRAY_LENGTH(rows));
+    const uint32_t total = emitted_tier0_preserve_rows(&code, rows, count);
+    emitted_test_expect(test, total == BUSTER_ARRAY_LENGTH(expected) && memcmp(expected, rows, sizeof(rows)) == 0, "every preserving row in record order", 0);
+}
+
 // Tier 0's preserving frames (#147, Tier0Function.preserve_general and the rest), each convention's registers (preserve_most's,
 // preserve_all's of 16 and 32 bytes, and every register's of 64 bytes with the masks, no_caller_saved_registers' set) in a
 // function of one address-taken object of each size (below a page, past one) and alignment (16, 64: a realigned frame),
@@ -535,6 +580,9 @@ static void emitted_test_tier0_preserving(EmittedTest* test)
         { 0, 0xff00u, 16, 0 },
         { 0, 0xff00u, 32, 0 },
         { (uint16_t)(1u << X86_REGISTER_RSI), 0xffff0000u, 64, 8 },
+        { 0, 0, 0, 0 },
+        { 1u << X86_REGISTER_R10, (1u << 2) | (1u << 16) | (1u << 31), 64, 0 },
+        { 0, 0, 0, 2 },
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(conventions); c += 1)
     {
@@ -760,6 +808,7 @@ static void emitted_test_tier0(EmittedTest* test, uint64_t seed, uint32_t rounds
     }
     tier0_tables_close(&tables);
     emitted_test_tier0_probes(test);
+    emitted_test_preserve_order(test);
     emitted_test_tier0_preserving(test);
     emitted_test_tier0_interrupt(test);
 }
