@@ -50,6 +50,11 @@ are, and the body may be a chain of blocks. Its own verification is therefore
 structural; the optimizer that follows verifies dominance once it has removed
 the stubs, and `test-ir-vectorize` runs that optimizer on every result.
 
+The C typed stream still loses volatility on indirect loads. With `+vectorize`,
+the driver conservatively skips a function containing a volatile-qualified
+expression and carries that decision through calls it actually inlines.
+Other functions in the same translation unit remain eligible.
+
 **What it takes.** An innermost, reducible loop with one preheader whose only
 successor is the header; a header of phis, its exit test and dead rows; a body
 that leads back to the header through a chain of blocks, optionally containing

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Link the same driver to Buster's kernels and Clang's. Each output row identifies the input and all nine results.
+// Link the same driver to Buster's kernels and Clang's. Each output row identifies the input and all ten results.
 #include <limits.h>
 #include <stdio.h>
 
@@ -12,6 +12,7 @@
 BUSTER_DECLARE(int, i32)
 BUSTER_DECLARE(unsigned, u32)
 int max_volatile(const volatile int*, unsigned long, int);
+int max_inline_volatile(const int*, unsigned long, int);
 
 int main(void)
 {
@@ -39,9 +40,9 @@ int main(void)
                 const int* a = n == 0 ? NULL : s;
                 const unsigned* b = n == 0 ? NULL : u;
                 const unsigned m = seeds[k];
-                printf("%lu %u %u: %d %d %d %d %u %u %u %u %d\n", n, pattern, m,
+                printf("%lu %u %u: %d %d %d %d %u %u %u %u %d %d\n", n, pattern, m,
                        min_if_i32(a, n, (int)m), max_if_i32(a, n, (int)m), min_cond_i32(a, n, (int)m), max_cond_i32(a, n, (int)m),
-                       min_if_u32(b, n, m), max_if_u32(b, n, m), min_cond_u32(b, n, m), max_cond_u32(b, n, m), max_volatile(a, n, (int)m));
+                       min_if_u32(b, n, m), max_if_u32(b, n, m), min_cond_u32(b, n, m), max_cond_u32(b, n, m), max_volatile(a, n, (int)m), max_inline_volatile(a, n, (int)m));
             }
         }
     }

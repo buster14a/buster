@@ -36,3 +36,18 @@ int max_volatile(const volatile int* a, unsigned long n, int m)
     }
     return m;
 }
+
+// The caller's parameter is unqualified. Both volatile accesses come from inside the inlined callee.
+static __attribute__((always_inline)) inline int volatile_element(const int* p)
+{
+    return *(const volatile int*)p;
+}
+
+int max_inline_volatile(const int* a, unsigned long n, int m)
+{
+    for (unsigned long i = 0; i < n; i += 1)
+    {
+        m = volatile_element(a + i) > m ? volatile_element(a + i) : m;
+    }
+    return m;
+}
