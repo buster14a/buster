@@ -21,8 +21,8 @@
 // x86_encode_address32, x86_encode_scalar_address32 and x86_validate_address32 are the same for 32-bit addresses (a
 // 67 on every memory operand), and x86_encoder_initialize_apx, x86_encode_apx, x86_encode_scalar_apx and
 // x86_validate_apx for APX's general registers 16 to 31 (a REX2 prefix in a legacy form of maps 0 and 1, and EVEX's B4
-// and X4 in an EVEX form), and x86_encoder_initialize_legacy, x86_encode_mode32, x86_encode_scalar_32, x86_validate_32,
-// x86_encode_mode16, x86_encode_scalar_16 and x86_validate_16 for 32-bit and 16-bit modes' instructions (the mode's
+// and X4 in an EVEX form), and x86_encoder_initialize_legacy, x86_encode_mode32, x86_validate_32, x86_encode_mode16 and
+// x86_validate_16 for 32-bit and 16-bit modes' instructions (the mode's
 // operand and address sizes, ModRM's 16-bit addresses, no REX, segment overrides in the decorations, and the
 // instructions only those modes have), each with templates of their own, so that the 64-bit loop does nothing for them.
 //
@@ -66,7 +66,7 @@
 //     x86_instruction_is_valid_32 and x86_instruction_is_valid_16) and x86_validate (and x86_validate_address32,
 //     x86_validate_apx, x86_validate_32 and x86_validate_16).
 //   - The scalar encoder: encode_one (which validation in 16- and 32-bit modes measures by, and the assembler's form
-//     matching), and x86_encode_scalar_address32, x86_encode_scalar_apx, x86_encode_scalar_32 and x86_encode_scalar_16.
+//     matching), and x86_encode_scalar_address32 and x86_encode_scalar_apx.
 //   - The vectorized encoder: X86Gather, X86Store and X86FixupStore (the variants the benchmark compares), X86Fields,
 //     the addressing mode tables (x86_mode_fields, x86_mode_constants and x86_mode_presence; for APX
 //     x86_mode_fields_apx; and for 16- and 32-bit modes x86_mode_fields_16, the
@@ -158,7 +158,7 @@ typedef enum X86Register
 #define BUSTER_X86_MEMORY_ABSOLUTE BUSTER_X86_MODE_MEMORY
 // [rip + displacement], from the end of the instruction
 #define BUSTER_X86_MEMORY_RIP (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_RIP)
-// In 16- and 32-bit modes alone (x86_encode_scalar_16 and x86_encode_scalar_32): the mode's other address size, which a
+// In 16- and 32-bit modes alone (x86_encode_mode16 and x86_encode_mode32): the mode's other address size, which a
 // 67 selects. With a memory operand, its address's: 32-bit in 16-bit mode, and 16-bit in 32-bit mode. A 16-bit address
 // is a base (BX or BP: RBX's and RBP's numbers) and an index (SI or DI), either alone, or neither (an absolute
 // address), without a scale, and a 16-bit displacement. Without a memory operand, the addresses the instruction makes
@@ -5100,13 +5100,9 @@ static __attribute__((unused)) uint64_t x86_validate_apx(const X86Instruction* i
 static __attribute__((unused)) bool x86_encoder_initialize_legacy(void);
 static __attribute__((unused)) int64_t x86_encode_mode32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
                                                          uint32_t* offsets, uint32_t* fixup_ends);
-static __attribute__((unused)) int64_t x86_encode_scalar_32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
-                                                            uint32_t* offsets, uint32_t* fixup_ends);
 static __attribute__((unused)) uint64_t x86_validate_32(const X86Instruction* instructions, uint64_t count);
 static __attribute__((unused)) int64_t x86_encode_mode16(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
                                                          uint32_t* offsets, uint32_t* fixup_ends);
-static __attribute__((unused)) int64_t x86_encode_scalar_16(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
-                                                            uint32_t* offsets, uint32_t* fixup_ends);
 static __attribute__((unused)) uint64_t x86_validate_16(const X86Instruction* instructions, uint64_t count);
 
 // Which entry point an internal function works for (a constant parameter): x86_encode's 64-bit addresses and
@@ -6940,18 +6936,6 @@ static int64_t x86_encode_scalar_apx(const X86Instruction* instructions, uint64_
                                      uint32_t* fixup_ends)
 {
     return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, X86_ENCODER_MODE_APX);
-}
-
-static int64_t x86_encode_scalar_32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                    uint32_t* fixup_ends)
-{
-    return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, X86_ENCODER_MODE_32);
-}
-
-static int64_t x86_encode_scalar_16(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                    uint32_t* fixup_ends)
-{
-    return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, X86_ENCODER_MODE_16);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

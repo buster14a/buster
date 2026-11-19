@@ -830,8 +830,8 @@ them, that would cost every group the same 20%.
 32-bit mode (protected mode, and compatibility mode under a 64-bit kernel, with
 a 32-bit code segment) and 16-bit mode (real mode, virtual-8086 mode, and
 protected mode with a 16-bit code segment) have entry points of their own:
-`x86_encode_mode32`, `x86_encode_scalar_32` and `x86_validate_32`, and
-`x86_encode_mode16`, `x86_encode_scalar_16` and `x86_validate_16`, after
+`x86_encode_mode32` and `x86_validate_32`, and `x86_encode_mode16` and
+`x86_validate_16`, after
 `x86_encoder_initialize_legacy`. An instruction is the same record, with the
 form table's forms and their fixed operand sizes, and the mode decides the
 prefixes:

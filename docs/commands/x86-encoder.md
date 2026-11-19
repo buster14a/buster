@@ -15,8 +15,7 @@ requirements. [Command index](README.md).
   `x86_fixup_distance` gives its fields' offsets and addends from that; and
   `x86_encode_address32` and `x86_encode_apx`, the same for 32-bit addresses and
   for APX's general registers 16 to 31 (REX2, and EVEX's B4 and X4), each with
-  templates of its own; and `x86_encode_mode32` and `x86_encode_mode16` (and
-  `x86_encode_scalar_32` and `x86_encode_scalar_16`), the same for 32-bit and
+  templates of its own; and `x86_encode_mode32` and `x86_encode_mode16`, the same for 32-bit and
   16-bit modes, with their operand and address sizes, segment overrides and own
   instructions, and templates of their own). `x86_measure` returns the offsets
   and total length for valid ordinary 64-bit-mode records without a
@@ -63,7 +62,7 @@ register with REX2, registers 16 to 31 in forms without REX2 or EVEX and XMM16
 to XMM31 in SSE's forms. And in 32-bit and 16-bit modes: 159 and 150 known
 encodings, 13 and 16 known fixups, a digest of each, the modes' loops at 16 and
 64 instructions per iteration (`x86_encode_16_mode32` and the rest) against the
-scalar encoders on random streams with both address sizes and segment overrides
+mode's own entry point after its validation (and their digest) on random streams with both address sizes and segment overrides
 in the decorations, and at page edges, instructions longer than 15 bytes (16-bit
 mode has them), which `x86_validate_16` must reject, and invalid operands, among
 them registers that would need REX, 16-bit addresses that aren't ModRM's, forms
@@ -114,7 +113,8 @@ GNU as writes zeros and a relocation for them, and `--compare-object` reads
 relocation's offset, type, addend and symbol with the ones the fixup ends and
 `x86_fixup_distance` give, and the mode's vectorized encoder's bytes and fixup
 ends with the reference encoder's (in 64-bit mode `x86_encode` after
-`x86_validate`; in the others, their scalar encoders). With `--address32`, the printer adds `addr32`
+`x86_validate`, and in 32-bit and 16-bit modes `x86_encode_mode32` and `x86_encode_mode16` after theirs; for 32-bit
+addresses and APX, their scalar encoders). With `--address32`, the printer adds `addr32`
 where no general register gives the address size, and the relocations of
 displacements other than RIP-relative ones are R_X86_64_32; with `--apx`, it
 names registers 16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`); and with
