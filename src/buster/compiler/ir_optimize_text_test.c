@@ -49,6 +49,7 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "fence-dce", .pass = IR_OPTIMIZE_TEXT_DCE, .effects = true },
     { .name = "fence-licm", .pass = IR_OPTIMIZE_TEXT_LICM, .effects = true },
     { .name = "memory-forwarding", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+    { .name = "memory-narrow", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-clobbers", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-private", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-blocks", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
