@@ -13,8 +13,8 @@
 // BSS is explicitly cleared even when arena storage is reused; all static bytes are defined. Read-only atoms are
 // patched privately before publication and remain read-only to the interpreter. A failed call preserves output,
 // all inputs and arena length. New allocations above the restored length have no observable lifetime on failure.
-// The producer emits contiguous address/size columns and compact bindings for both interpreter front ends. This
-// scalar oracle resolves diagnostic-sized symbol tables; no SIMD or end-to-end throughput claim is made.
+// The producer emits contiguous address/size columns and compact bindings for both interpreter front ends.
+// It indexes named definitions in input order and reports errors in the original reference order.
 #ifndef BUSTER_INTERPRETER_LINK_INCLUDED
 #define BUSTER_INTERPRETER_LINK_INCLUDED
 
@@ -246,15 +246,82 @@ static bool interpreter_link_same_name(const Link* a, SymbolId x, const Link* b,
     return result;
 }
 
-static bool interpreter_link_definition(const Link* link, SymbolId symbol, const InterpreterLinkExternal* external)
+typedef struct InterpreterLinkName InterpreterLinkName;
+struct InterpreterLinkName
 {
-    const bool result = link->symbols.atom[symbol] != 0 || link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE || external != 0;
-    return result;
+    uint32_t input;
+    SymbolId symbol;
+    uint32_t conflict_input;
+    SymbolId conflict_symbol;
+};
+
+// The winner itself supplies the spelling. Link views need only the bounded bytes and lengths validated above.
+static InterpreterLinkName* interpreter_link_name(InterpreterLinkName* names, uint64_t mask, const Link* const* links, uint32_t input, SymbolId symbol)
+{
+    const Link* link = links[input];
+    const NameId name = link->symbols.name[symbol];
+    uint64_t slot = link_hash(link->names.bytes[name], link->names.length[name]) & mask;
+    while (names[slot].symbol != 0 && !interpreter_link_same_name(link, symbol, links[names[slot].input], names[slot].symbol))
+    {
+        slot = (slot + 1) & mask;
+    }
+    return &names[slot];
 }
 
-static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, const Link* const* links, uint32_t count, const InterpreterLinkExternal* externals, uint32_t external_count)
+static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, const Link* const* links, uint32_t count, uint64_t definitions, Arena* output_arena)
 {
     InterpreterLinkResult result = interpreter_link_problem(INTERPRETER_LINK_OK, 0, 0, 0, 0);
+    // At most half the slots are occupied. Every definition already has per-symbol storage in the output arena,
+    // so doubling the count and rounding to a power of two fits in uint64_t.
+    uint64_t capacity = 1;
+    while (capacity < 2 * definitions)
+    {
+        capacity *= 2;
+    }
+    InterpreterLinkName local_names[32];
+    InterpreterLinkName* names = local_names;
+    Scratch scratch = { 0 };
+    if (capacity > sizeof(local_names) / sizeof(*local_names))
+    {
+        scratch = scratch_begin(output_arena);
+        names = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, InterpreterLinkName, capacity);
+    }
+    if (names == 0)
+    {
+        result.status = INTERPRETER_LINK_RESOURCE;
+    }
+    else
+    {
+        memset(names, 0, capacity * sizeof(*names));
+    }
+    const uint64_t mask = capacity - 1;
+    for (uint32_t input = 0; result.status == INTERPRETER_LINK_OK && input < count; input += 1)
+    {
+        const Link* link = links[input];
+        InterpreterLinkUnit* unit = &image->units[input];
+        for (uint32_t i = 0; i < unit->binding_count; i += 1)
+        {
+            const SymbolId symbol = unit->bindings[i].symbol;
+            InterpreterLinkName* entry = interpreter_link_name(names, mask, links, input, symbol);
+            const bool strong = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
+            if (entry->symbol == 0 || (strong && (links[entry->input]->symbols.flags[entry->symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_GLOBAL))
+            {
+                entry->input = input;
+                entry->symbol = symbol;
+            }
+            else if (strong && entry->conflict_symbol == 0)
+            {
+                const AtomId atom = link->symbols.atom[symbol];
+                const bool alias = input == entry->input && atom != 0 && atom == link->symbols.atom[entry->symbol] && link->symbols.value[symbol] == link->symbols.value[entry->symbol];
+                if (!alias)
+                {
+                    entry->conflict_input = input;
+                    entry->conflict_symbol = symbol;
+                }
+            }
+        }
+        unit->binding_count = 0;
+    }
     for (uint32_t input = 0; result.status == INTERPRETER_LINK_OK && input < count; input += 1)
     {
         const Link* link = links[input];
@@ -264,42 +331,19 @@ static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, co
             const uint8_t binding = link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING;
             uint32_t selected_input = input;
             SymbolId selected_symbol = symbol;
-            bool found = false;
-            bool strong = false;
-            if (binding == BUSTER_LINK_SYMBOL_LOCAL || link->symbols.name[symbol] == 0)
+            bool found = link->symbols.atom[symbol] != 0 || unit->resolved[symbol] != 0;
+            if (binding != BUSTER_LINK_SYMBOL_LOCAL && link->symbols.name[symbol] != 0)
             {
-                found = interpreter_link_definition(link, symbol, interpreter_link_external(externals, external_count, input, symbol));
-            }
-            else
-            {
-                for (uint32_t candidate_input = 0; result.status == INTERPRETER_LINK_OK && candidate_input < count; candidate_input += 1)
+                const InterpreterLinkName* entry = interpreter_link_name(names, mask, links, input, symbol);
+                found = entry->symbol != 0;
+                selected_input = entry->input;
+                selected_symbol = entry->symbol;
+                // Report the first bad spelling requested, with that spelling's first conflicting definition.
+                if (entry->conflict_symbol != 0)
                 {
-                    const Link* candidate = links[candidate_input];
-                    for (SymbolId candidate_symbol = 1; result.status == INTERPRETER_LINK_OK && candidate_symbol < candidate->symbols.count; candidate_symbol += 1)
-                    {
-                        const uint8_t candidate_binding = candidate->symbols.flags[candidate_symbol] & BUSTER_LINK_SYMBOL_BINDING;
-                        const InterpreterLinkExternal* external = interpreter_link_external(externals, external_count, candidate_input, candidate_symbol);
-                        if (candidate_binding != BUSTER_LINK_SYMBOL_LOCAL && interpreter_link_definition(candidate, candidate_symbol, external) &&
-                            interpreter_link_same_name(link, symbol, candidate, candidate_symbol))
-                        {
-                            const bool candidate_strong = candidate_binding == BUSTER_LINK_SYMBOL_GLOBAL;
-                            const Link* selected = links[selected_input];
-                            const bool same_definition = found && candidate_input == selected_input && candidate->symbols.atom[candidate_symbol] != 0 &&
-                                                         candidate->symbols.atom[candidate_symbol] == selected->symbols.atom[selected_symbol] &&
-                                                         candidate->symbols.value[candidate_symbol] == selected->symbols.value[selected_symbol];
-                            if (found && strong && candidate_strong && !same_definition)
-                            {
-                                result = interpreter_link_problem(INTERPRETER_LINK_DUPLICATE, candidate_input, candidate_symbol, candidate->symbols.atom[candidate_symbol], 0);
-                            }
-                            else if (!found || (!strong && candidate_strong))
-                            {
-                                selected_input = candidate_input;
-                                selected_symbol = candidate_symbol;
-                                found = true;
-                                strong = candidate_strong;
-                            }
-                        }
-                    }
+                    const uint32_t other = entry->conflict_input;
+                    const SymbolId conflict = entry->conflict_symbol;
+                    result = interpreter_link_problem(INTERPRETER_LINK_DUPLICATE, other, conflict, links[other]->symbols.atom[conflict], 0);
                 }
             }
             if (result.status == INTERPRETER_LINK_OK && found)
@@ -320,6 +364,10 @@ static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, co
                 result = interpreter_link_problem(INTERPRETER_LINK_UNDEFINED, input, symbol, 0, 0);
             }
         }
+    }
+    if (scratch.arena != 0)
+    {
+        scratch_end(scratch);
     }
     return result;
 }
@@ -391,6 +439,7 @@ static InterpreterLinkResult interpreter_link_materialize(InterpreterLink* outpu
     {
         result.status = INTERPRETER_LINK_INVALID;
     }
+    uint64_t definitions = 0;
     uint64_t memory_capacity = external_count;
     for (uint32_t input = 0; result.status == INTERPRETER_LINK_OK && input < link_count; input += 1)
     {
@@ -532,11 +581,18 @@ static InterpreterLinkResult interpreter_link_materialize(InterpreterLink* outpu
                 unit->addresses[symbol] = link->symbols.value[symbol];
                 unit->resolved[symbol] = 1;
             }
+            // Before publication the binding storage holds the named definitions in symbol order. An unbound code
+            // atom still defines its name. An atomless external or absolute symbol is already marked resolved.
+            if (link->symbols.name[symbol] != 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL && (atom != 0 || unit->resolved[symbol] != 0))
+            {
+                unit->bindings[unit->binding_count++].symbol = symbol;
+            }
         }
+        definitions += unit->binding_count;
     }
     if (result.status == INTERPRETER_LINK_OK)
     {
-        result = interpreter_link_resolve(&image, links, link_count, externals, external_count);
+        result = interpreter_link_resolve(&image, links, link_count, definitions, arena);
     }
     if (result.status == INTERPRETER_LINK_OK)
     {
