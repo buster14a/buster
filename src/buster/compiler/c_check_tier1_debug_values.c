@@ -123,7 +123,7 @@ struct CheckTier1DebugValues
     uint32_t instance_event_count;
     uint32_t* kill_first;
     uint32_t* kills;
-    // Reused by the count and fill passes, which are sequential.
+    // Working storage for the machine-location proof and range publication.
     uint32_t* state;
     uint32_t* winner;
     uint32_t* active;
