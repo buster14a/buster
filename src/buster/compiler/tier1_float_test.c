@@ -826,12 +826,72 @@ static void tier1_float_conversion_loads(Tier1EmitTest* test)
     }
 }
 
+static void tier1_float_fma_loads(Tier1EmitTest* test)
+{
+    const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .parameter_count = 3 };
+    for (uint32_t type = IR_F32; type <= IR_F64; type += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create a scalar FMA with a loaded operand");
+        for (uint32_t shape = 0; created && shape < 6; shape += 1)
+        {
+            function.result_type = (uint8_t)type;
+            function.block_offsets[1] = 7;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[1] = (uint8_t)type;
+            function.parameter_types[2] = (uint8_t)type;
+            tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 2, IR_PARAM, type, 2, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 3, IR_LOAD, type, 0, BUSTER_IR_NONE);
+            function.flags[3] = shape == 1 ? BUSTER_IR_VOLATILE : 0;
+            if (shape == 4)
+            {
+                tier1_emit_test_node(&function, 4, IR_STORE, IR_VOID, 0, 2);
+            }
+            else
+            {
+                tier1_emit_test_node(&function, 4, IR_COPY, type, shape == 5 ? 3 : 1, BUSTER_IR_NONE);
+            }
+            tier1_emit_test_node(&function, 5, IR_FMA, type, shape == 2 ? 3 : 1, shape == 2 ? 1 : shape == 3 ? 2 : 3);
+            function.c[5] = shape == 3 ? 3 : 2;
+            tier1_emit_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE);
+            Tier1SelectPlan plan;
+            uint32_t failed = BUSTER_IR_NONE;
+            const bool selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+            tier1_emit_test_expect(test, selected, "select scalar FMA load alternatives");
+            if (selected)
+            {
+                const bool folded = plan.patterns[5].rule == TIER1_RULE_FLOAT_FMA_LOAD;
+                tier1_emit_test_expect(test, folded == (shape == 0) && (plan.covered[3] != 0) == folded, "only the eligible second multiplicand becomes a memory operand");
+                for (uint8_t x = 1; folded && x <= 3; x += 1)
+                {
+                    const uint8_t registers[7] = { X86_REGISTER_RDI, 17, 18, 19, 20, (uint8_t)(16 + x), 0 };
+                    const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 5);
+                    const Tier1SelectRecords records = tier1_select_expand(&holes);
+                    const bool copy = x == 3;
+                    const uint16_t form = type == IR_F32 ? (x == 1 ? X86_FORM_VFMADD132SS_X_X_XM32 : X86_FORM_VFMADD231SS_X_X_XM32) :
+                                                          (x == 1 ? X86_FORM_VFMADD132SD_X_X_XM64 : X86_FORM_VFMADD231SD_X_X_XM64);
+                    const X86Instruction fma = records.records[copy];
+                    tier1_emit_test_expect(test, records.count == 1u + copy && fma.form == form && fma.reg == x && fma.vvvv == (x == 1 ? 2 : 1) &&
+                                          fma.rm == X86_REGISTER_RDI && fma.mode == BUSTER_X86_MEMORY_BASE, "132 and 231 preserve a, b, c for every destination");
+                    tier1_emit_test_expect(test, !copy || (records.records[0].form == X86_FORM_MOVAPS_X_XM && records.records[0].reg == x && records.records[0].rm == 2), "a fresh FMA destination starts with the addend");
+                }
+            }
+            arena_pop_to(&test->output, 0);
+        }
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static void tier1_float_cases(Tier1EmitTest* test)
 {
     test->terms = 0;
     test->width = 8;
     test->selects = false;
     tier1_float_conversion_loads(test);
+    tier1_float_fma_loads(test);
     for (uint32_t fixture = 0; fixture < BUSTER_TIER1_FLOAT_FIXTURES; fixture += 1)
     {
         // Few xmm registers: the mixed fixture's eight parameters, which their definitions take at once, and one more;

@@ -250,6 +250,8 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ASM,
     // A signed i32 or i64 in memory converted directly into an xmm register (#2829). Its scale belongs to the address.
     TIER1_RULE_FLOAT_CONVERT_LOAD,
+    // a * [base + index * scale + displacement] + c. The register operands a and c precede the address's two values.
+    TIER1_RULE_FLOAT_FMA_LOAD,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -458,7 +460,7 @@ static bool tier1_select_mask_rule(uint32_t rule)
 // Whether a rule is a floating value's (#141), which only the CFG consumer takes, its vector class's.
 static bool tier1_select_float_rule(uint32_t rule)
 {
-    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || rule == TIER1_RULE_FLOAT_CONVERT_LOAD;
+    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || (rule >= TIER1_RULE_FLOAT_CONVERT_LOAD && rule <= TIER1_RULE_FLOAT_FMA_LOAD);
 }
 
 // Register-only leaf bodies use caller-saved registers. R11 is reserved for a destructive instruction's second
@@ -2935,32 +2937,35 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     }
     case TIER1_RULE_FLOAT_FMA:
+    case TIER1_RULE_FLOAT_FMA_LOAD:
     {
         // a * b + c: x86's FMA3 forms take a NaN in the formula's order whatever their form (IR_FMA), so the form is the
         // one whose destination holds an operand already: 213 where it is b's (x = a * x + c), 231 where it
-        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c); otherwise b's copy into the destination, then
-        // 213. vvvv and rm are the other two, in the formula's order.
+        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c). A fresh destination starts from a copy
+        // of b for a register 213, or of c for a memory 231. vvvv and rm preserve the formula's operand order.
         static const uint16_t forms[2][3] = {
             { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
             { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
         };
         const uint8_t x = destination & 15;
         const uint8_t a = holes->left & 15;
-        const uint8_t b = holes->right & 15;
-        const uint8_t c = holes->third & 15;
+        const bool memory = holes->rule == TIER1_RULE_FLOAT_FMA_LOAD;
+        const uint8_t b = memory ? BUSTER_TIER1_SELECT_NO_REGISTER : holes->right & 15;
+        const uint8_t c = (memory ? holes->right : holes->third) & 15;
         const uint32_t d = width == 8 ? 1 : 0;
-        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : 0;
+        // With b in memory, use a's register for 132 or c's for 231. In a fresh register copy c and keep a in vvvv.
+        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : memory ? 1 : 0;
         if (x != b && x != c && x != a)
         {
-            tier1_select_append(&result, tier1_select_float_move(x, b));
+            tier1_select_append(&result, tier1_select_float_move(x, memory ? c : b));
         }
-        const X86Instruction record = {
-            .form = forms[d][kind],
-            .reg = x,
-            .vvvv = kind == 2 ? c : a,
+        X86Instruction record = memory ? holes->memory : (X86Instruction){
             .rm = kind == 0 ? c : b,
             .mode = BUSTER_X86_REGISTER_DIRECT,
         };
+        record.form = forms[d][kind];
+        record.reg = x;
+        record.vvvv = kind == 2 ? c : a;
         tier1_select_append(&result, record);
         break;
     }
@@ -6130,6 +6135,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[2] = c;
         base.intrinsic_cost = 4;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // The r/m multiplicand of both 132 and 231 is b. Swapping a and b would change which NaN payload wins.
+        if (tier1_select_load_folds(forest, node, b))
+        {
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_FLOAT_FMA_LOAD;
+            folded.values[1] = c;
+            tier1_select_fold(forest, node, b, &folded);
+            tier1_select_memory(forest, node, function->a[b], &folded, 2);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (float_width != 0 && op == IR_FNEG)
     {
@@ -7313,6 +7328,7 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const T
         case TIER1_RULE_LOAD_OPERAND:
         case TIER1_RULE_FLOAT_LOAD_OPERAND:
         case TIER1_RULE_FLOAT_CONVERT_LOAD:
+        case TIER1_RULE_FLOAT_FMA_LOAD:
             rank = 7;
             break;
         case TIER1_RULE_MULTIPLY_LEA:
@@ -8007,6 +8023,9 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_LOAD_OPERAND:
     case TIER1_RULE_FLOAT_LOAD_OPERAND:
         holes.memory = tier1_select_memory_holes(pattern, registers, 1);
+        break;
+    case TIER1_RULE_FLOAT_FMA_LOAD:
+        holes.memory = tier1_select_memory_holes(pattern, registers, 2);
         break;
     default:
         break;
