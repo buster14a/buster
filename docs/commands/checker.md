@@ -691,6 +691,19 @@ line. The cases' bytes are the table's literals as clang compiled them, compared
 byte for byte when they moved (buster-performance's
 `fixtures-runtime-2053-2026-11-13`).
 
+Each case `check_test_source` accepts also checks the reader's graph and
+enumerations (what its two paths' comparison reads: every node's columns and
+leaf, the arguments, the overload calls, the tokens' nodes and the enumeration
+records) against `tests/checker/source-digests.tsv`, from the repository's
+root, keyed by the case's name and its source's hash (#2924). The digests were
+recorded where the reader's vector path and its scalar twin agreed. A case that
+means to change them (a new case, an edited source, a reader change that
+changes a graph) records again: run every part of `test-checker` with
+`BUSTER_CHECK_RECORD_DIGESTS=FILE`, sort FILE's lines unique, and put them
+after the table's three comment lines; the PR says what vouches for the new
+graphs (clang for the cases' acceptance and first errors, the checker's typed
+streams).
+
 Ten test files' own source tables, 596 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`
 (`c_checker_test.c`) reads and runs. Each case is written to a file, clang
