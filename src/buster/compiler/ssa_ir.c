@@ -898,7 +898,7 @@ static IrError ssa_ir_debug_regions(SsaIrWork* work, IrFunction* output)
     return error;
 }
 
-#include "ssa_ir_demand.c"
+#include "ssa_ir_private.c"
 
 // `input_verified`: the caller's input is a function a full verification has passed since its last change (the
 // lowering's or GVN's result, #1379), whose verification promotion then doesn't repeat; every other caller's is verified.
@@ -972,7 +972,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     {
         if (BUSTER_TIER1_PRIVATE_VALUES)
         {
-            check.error = ssa_ir_error(ssa_ir_construct_demanded(&work.work));
+            check.error = ssa_ir_error(ssa_ir_construct_frontier(&work.work, rename_vector));
         }
         else if (dense)
         {

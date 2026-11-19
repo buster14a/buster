@@ -31,6 +31,31 @@ __attribute__((noinline)) static int accumulate(int count, int input)
     return addressed + total;
 }
 
+__attribute__((noinline)) static int two_entry_cycle(int right_first, int rounds)
+{
+    int left = 3;
+    int right = 5;
+    if (right_first)
+    {
+        goto add_right;
+    }
+    while (rounds > 0)
+    {
+        left += right;
+        if (--rounds == 0)
+        {
+            break;
+        }
+    add_right:
+        right += left;
+        if (--rounds == 0)
+        {
+            break;
+        }
+    }
+    return left * 17 + right;
+}
+
 #ifdef BUSTER_TEST_INLINE_VECTOR
 typedef int FourInts __attribute__((vector_size(16)));
 
@@ -56,6 +81,10 @@ int main(void)
     if (accumulate(0, 7) != 8 || accumulate(1, 7) != 1 || accumulate(4, 7) != 38)
     {
         return 1;
+    }
+    if (two_entry_cycle(0, 3) != 370 || two_entry_cycle(1, 3) != 206)
+    {
+        return 3;
     }
 #ifdef BUSTER_TEST_INLINE_VECTOR
     static const FourInts a = { 1, 3, 5, 7 };
