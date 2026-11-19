@@ -27,8 +27,9 @@
 // sections are larger.
 //
 // A plan, then two passes: the plan (foreign_debug_plan, on the calling thread or lane 0) places each debug section in
-// its output section in input order, and lists the contributions and the relocation sections; the bytes pass copies or
-// decompresses each contribution, and the relocations pass applies each relocation section's, each into its records'
+// its output section in input order. A single untouched input slice can supply the whole output section. For the
+// others the plan zeroes the alignment gaps, and the bytes pass copies or decompresses the contributions into place.
+// The relocations pass applies each relocation section's entries, each section into its records'
 // own range, which the end compacts in their order (foreign_debug_finish). A relocation section's relocations go 8 at a
 // time by the vector path (foreign_debug_relocate_vector), which leaves a batch with a rare relocation to the exact
 // path (foreign_debug_relocate), its twin, which Foreign's exact path takes for all of them. On the lane path the lanes take each pass's
@@ -496,6 +497,27 @@ static void foreign_debug_order(uint32_t* order, ForeignDebugCost* costs, uint32
     }
 }
 
+// The writer patches atom storage in place. Even caller-supplied objects may share backing bytes, so check the
+// actual file-backed atom ranges before lending an input slice to the writer as an untouched debug section.
+static bool foreign_debug_apart_from_atoms(const LinkAtoms* atoms, String8 slice)
+{
+    const __m512i begin = _mm512_set1_epi64((uintptr_t)slice.pointer);
+    const __m512i end = _mm512_set1_epi64((uintptr_t)slice.pointer + slice.length);
+    bool apart = true;
+    for (uint64_t first = 1; apart && first < atoms->count; first += 8)
+    {
+        const uint64_t left = atoms->count - first;
+        const __mmask8 lanes = left >= 8 ? 0xff : (__mmask8)import_lane_mask((uint32_t)left);
+        const __m512i starts = _mm512_maskz_loadu_epi64(lanes, atoms->bytes + first);
+        const __m512i sizes = _mm512_maskz_loadu_epi64(lanes, atoms->size + first);
+        const __mmask8 backed = _mm512_test_epi64_mask(starts, starts) & _mm512_test_epi64_mask(sizes, sizes);
+        // max(begin, start) - start is the first possibly shared byte's offset in this atom.
+        const __m512i offset = _mm512_sub_epi64(_mm512_max_epu64(begin, starts), starts);
+        apart = (_mm512_mask_cmplt_epu64_mask(backed, starts, end) & _mm512_cmplt_epu64_mask(offset, sizes)) == 0;
+    }
+    return apart;
+}
+
 // The plan of the selected objects' debug sections (ForeignDebugPlan), in the order of `order` (input order), from
 // `arena`: the sizing pass. Returns the first failure.
 static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const ForeignLink* output, const Foreign* foreign, const uint32_t* order, Arena* arena)
@@ -505,6 +527,8 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
     uint64_t relocation_capacity = 0;
     uint32_t contribution_capacity = 0;
     uint32_t relocation_section_capacity = 0;
+    String8 whole[BUSTER_EXECUTABLE_DEBUG_KINDS] = { 0 };
+    bool patched[BUSTER_EXECUTABLE_DEBUG_KINDS] = { 0 };
     plan->bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t*, foreign->object_count);
     plan->resolved = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t*, foreign->object_count);
     result.error = plan->bases != 0 && plan->resolved != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
@@ -546,6 +570,10 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                 {
                     // Past DWARF32's reach, the output section's size check below refuses it.
                     const uint64_t place = (plan->sizes[kind] + alignment - 1) & ~(alignment - 1);
+                    if (place == 0 && size != 0 && (header.sh_flags & SHF_COMPRESSED) == 0)
+                    {
+                        whole[kind] = import_section_bytes(&input->elf, &header);
+                    }
                     plan->bases[id][section] = place;
                     plan->sizes[kind] = size < 0xfffffff0u ? place + size : 0xfffffff0u;
                     plan->alignments[kind] = alignment > plan->alignments[kind] ? alignment : plan->alignments[kind];
@@ -553,16 +581,22 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                 }
             }
         }
+        const uint32_t prior_relocations = relocation_section_capacity;
         for (uint32_t r = 0; plan->bases[id] != 0 && result.error == FOREIGN_LINK_ERROR_NONE && r < input->relocation_count; r += 1)
         {
             const Elf64_Shdr header = import_section_header(&input->elf, input->relocations[r]);
             const uint64_t entries = header.sh_size / sizeof(Elf64_Rela);
             const bool relocates = entries != 0 && header.sh_info < input->elf.section_count && plan->bases[id][header.sh_info] != UINT64_MAX;
+            if (relocates)
+            {
+                const Elf64_Shdr target = import_section_header(&input->elf, header.sh_info);
+                patched[foreign_debug_kind(&input->elf, &target)] = true;
+            }
             relocation_capacity += relocates ? entries : 0;
             relocation_section_capacity += relocates ? 1 : 0;
         }
         // The vector path's table of the object's symbols; the exact path reads the symbols themselves.
-        if (plan->bases[id] != 0 && result.error == FOREIGN_LINK_ERROR_NONE && input->symbols.count != 0 && foreign->path == FOREIGN_PATH_VECTOR)
+        if (relocation_section_capacity != prior_relocations && result.error == FOREIGN_LINK_ERROR_NONE && input->symbols.count != 0 && foreign->path == FOREIGN_PATH_VECTOR)
         {
             plan->resolved[id] = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, input->symbols.count);
             result.error = plan->resolved[id] != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
@@ -576,12 +610,19 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
     {
         // DWARF32's offsets reach the first 4 GB of a section.
         result.error = plan->sizes[kind] >= 0xfffffff0u ? FOREIGN_LINK_ERROR_CAPACITY : FOREIGN_LINK_ERROR_NONE;
-        plan->bytes[kind] = result.error == FOREIGN_LINK_ERROR_NONE && plan->sizes[kind] != 0 ? arena_push(arena, plan->sizes[kind], 8) : 0;
-        result.error = result.error == FOREIGN_LINK_ERROR_NONE && plan->sizes[kind] != 0 && plan->bytes[kind] == 0 ? FOREIGN_LINK_ERROR_MEMORY : result.error;
-        if (plan->bytes[kind] != 0)
+        if (result.error == FOREIGN_LINK_ERROR_NONE && plan->sizes[kind] != 0)
         {
-            // The padding between contributions.
-            memset(plan->bytes[kind], 0, plan->sizes[kind]);
+            if (whole[kind].length == plan->sizes[kind] && !patched[kind] && foreign_debug_apart_from_atoms(&output->link.atoms, whole[kind]))
+            {
+                plan->bytes[kind] = (uint8_t*)whole[kind].pointer;
+                contribution_capacity -= 1;
+            }
+            else
+            {
+                whole[kind] = (String8){ 0 };
+                plan->bytes[kind] = arena_push(arena, plan->sizes[kind], 8);
+                result.error = plan->bytes[kind] != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
+            }
         }
     }
     const uint64_t items = (uint64_t)contribution_capacity + relocation_section_capacity + 1;
@@ -609,6 +650,7 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
     // checked all the same (an empty section keeps its place, which references into it take); and the relocation
     // sections with relocations.
     uint64_t first = 0;
+    uint64_t ends[BUSTER_EXECUTABLE_DEBUG_KINDS] = { 0 };
     for (uint32_t at = 0; result.error == FOREIGN_LINK_ERROR_NONE && at < foreign->object_count; at += 1)
     {
         const uint32_t id = order[at];
@@ -623,10 +665,17 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                 uint64_t alignment = 0;
                 String8 stream = { 0 };
                 foreign_debug_extent(input, &header, &size, &alignment, &stream);
-                const uint32_t item = plan->contribution_count;
-                if (size != 0 || (header.sh_flags & SHF_COMPRESSED) != 0)
+                const uint64_t base = plan->bases[id][section];
+                if (base > ends[kind])
                 {
-                    plan->contributions[item] = (ForeignDebugContribution){ .object = id, .section = section, .kind = kind, .base = plan->bases[id][section], .size = size };
+                    // An aligned empty contribution may introduce the last bytes of the output section.
+                    memset(plan->bytes[kind] + ends[kind], 0, base - ends[kind]);
+                }
+                ends[kind] = base + size;
+                const uint32_t item = plan->contribution_count;
+                if ((size != 0 && whole[kind].pointer == 0) || (header.sh_flags & SHF_COMPRESSED) != 0)
+                {
+                    plan->contributions[item] = (ForeignDebugContribution){ .object = id, .section = section, .kind = kind, .base = base, .size = size };
                     // Decompressing costs about four times copying.
                     costs[item] = (ForeignDebugCost){ .cost = (header.sh_flags & SHF_COMPRESSED) != 0 ? 4 * size : size, .item = item };
                     plan->contribution_results[item] = (ForeignLinkResult){ 0 };
