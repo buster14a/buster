@@ -499,6 +499,21 @@ static void ir_parse_test_comments(IrParseTest* test, Arena* output, Arena* twin
     arena_pop_to(twin_output, twin_mark);
 }
 
+// Check every enum, including the invalid opcode and intrinsics absent from an individual fixture.
+static void ir_parse_test_spelling_table(IrParseTest* test, const char* const* names, const uint8_t* lengths, uint32_t count)
+{
+    for (uint32_t index = 0; index < count; index += 1)
+    {
+        const uint64_t length = strlen(names[index]);
+        IrParseState state = {
+            .source = { (char*)names[index], length },
+            .end = length,
+        };
+        const uint8_t value = ir_parse_named(&state, names, lengths, count);
+        ir_parse_test_expect(test, value == index && state.result.error == IR_PARSE_OK && state.cursor == length, names[index]);
+    }
+}
+
 static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
 {
     static const char syntax[] = "function () -> void {\nb0:\n  %0 ret.void\n}\n";
@@ -756,6 +771,9 @@ static int run_ir_parse_tests(int argc, char** argv)
             {
                 ir_parse_test_expect(&test, test.types[type], "canonical fixture coverage omitted a type");
             }
+            ir_parse_test_spelling_table(&test, ir_op_names, ir_op_name_lengths, IR_OP_COUNT);
+            ir_parse_test_spelling_table(&test, ir_type_names, ir_type_name_lengths, IR_TYPE_COUNT);
+            ir_parse_test_spelling_table(&test, ir_intrinsic_names, ir_intrinsic_name_lengths, BUSTER_IR_INTRINSIC_COUNT);
             ir_parse_test_invalid(&test, &output, &twin_output, &scratch);
             ir_parse_test_reachable(&test, &output, &twin_output, &scratch);
             ir_parse_test_comments(&test, &output, &twin_output, &scratch);
