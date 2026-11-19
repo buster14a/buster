@@ -65,6 +65,22 @@ the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
 an array, or through a 32-bit index that wrapped below 0, faults.
 
+Each generated batch (the streams at the default seed and count, the snippets
+at every alignment without a file, and the deep nesting) also sums its units'
+digests: the vector path's tokens, outcome, tree and postorder
+(`parse_test_unit_digest`), and what `parse_vector` leaves on the unit
+(`parse_test_vector_digest`): the kernels' verdicts and counts, and on a unit
+they keep, every array a later stage reads, from K1's depths to K6's classes and
+groups, after the fallback. The sum must be the batch's in
+`tests/parser-kernels/digests.tsv`, keyed by the batch and its language,
+recorded where the vector path and its kernels agreed with the scalar parser and
+their twins (#2924). `BUSTER_PARSE_RECORD_DIGESTS=FILE` writes the lines
+instead; the preprocessor's digests (`tests/preprocessor-kernels`) share the
+table's code (`test_digest_matches`). Each batch prints what reached the
+fallbacks the vector path keeps: the scalar parser's top-level declarations,
+K4's units past its depth, K5's units and K6's blocks left to their scalar
+code.
+
 The generated inputs, the files and the mutations take that check unit after
 unit (`parse_test_check_unit`), with state kept from one unit to the next
 (#2078):

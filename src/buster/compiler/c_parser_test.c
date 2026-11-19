@@ -630,6 +630,10 @@ static const ParseTestSnippet parse_test_snippets[] =
     // A parameter list whose first parameter starts with an attribute: both paths mark it a function's, in a definition
     // and in a prototype (#1968).
     { "int h(__attribute__((aligned(8))) int q) { int x; return q; }\n", "", 0 },
+    // A block right after a case label, a default label and a label, whose `{` K2's rounds read as after a ternary's
+    // middle and K1's second part makes a block's (#2924: no snippet had one, and a mutant that skipped the first lane of
+    // every block but the first passed every test).
+    { "int f(int x) { switch (x) { case 1: { x = 2; } default: { x = 3; } } l: { x = 4; } return x; }\n", "", 0 },
     { "int p(__attribute__((unused)) int, __attribute__((unused)) char *);\nint (*fp)(__attribute__((unused)) int);\n", "", 0 },
     { "int k([[maybe_unused]] int q);\nint m([[maybe_unused]] int q, __attribute__((unused)) int r) { return q + r; }\n", "", "c23" },
     // A comma at the top of an array declarator's size or an array designator's index (#1867); one in parentheses or a
@@ -1943,17 +1947,70 @@ static void parse_test_release_guarded(Arena* arena)
 }
 
 // What the kernel checks did over every unit: blocks K2's rounds left to the twin's loop from random roles, K4's blocks
-// whose depths span more than byte lanes hold, and units K5 left to its twin (whose stack alone decides them).
+// whose depths span more than byte lanes hold and units deeper than its vector kernel takes, and units K5 left to its
+// twin (whose stack alone decides them).
 typedef struct ParseTestKernelTally ParseTestKernelTally;
 struct ParseTestKernelTally
 {
     uint64_t units;
     uint64_t random_twins;
     uint64_t wide_blocks;
+    uint64_t deep_units;
     uint64_t statement_twins;
     uint64_t check_twins;
     uint64_t fallback_items;
+    // The sum of the units' digests (parse_test_unit_digest, and the vector path's in parse_test_vector_digest),
+    // whatever their order: a generated batch's must be its recorded one (parse_kernel_digests).
+    uint64_t digest;
 };
+
+// The vector path's recorded outputs (#2924): a generated batch's digest at its default seed and count, recorded where
+// the vector path and its kernels agreed with the scalar parser and the kernels' twins (test_digest_matches).
+#define BUSTER_PARSE_KERNEL_DIGESTS "tests/parser-kernels/digests.tsv"
+
+static TestDigests parse_kernel_digests = { .path = BUSTER_PARSE_KERNEL_DIGESTS, .record = "BUSTER_PARSE_RECORD_DIGESTS" };
+
+// The language a batch ran in, for its digest's key: the standard, and whether GNU's extensions, keywords and digraphs.
+static void parse_test_language_key(CLanguage language, char* key, size_t capacity)
+{
+    snprintf(key, capacity, "c%u%s, keywords %u, digraphs %u", (unsigned)language.standard, language.gnu ? " gnu" : "", (unsigned)language.gnu_keywords, (unsigned)language.digraphs);
+}
+
+// Whether a generated batch's digest sum, `tally`'s, is its recorded one, the batch named `batch` in `language`.
+static uint32_t parse_test_batch_digest(const ParseTestKernelTally* tally, const char* batch, CLanguage language)
+{
+    char key[256];
+    parse_test_language_key(language, key, sizeof(key));
+    const bool same = test_digest_matches(&parse_kernel_digests, tally->digest, batch, key, false);
+    printf("%s: the vector path's outputs %s their recorded digest (%s): %llu units; the fallback took %llu top-level declarations, K4 had %llu "
+           "blocks in 16-bit lanes and %llu units past its depth, K5 left %llu units to its twin, K6 %llu blocks\n",
+           batch, same ? "give" : "don't give", key, (unsigned long long)tally->units, (unsigned long long)tally->fallback_items,
+           (unsigned long long)tally->wide_blocks, (unsigned long long)tally->deep_units, (unsigned long long)tally->statement_twins,
+           (unsigned long long)tally->check_twins);
+    return same ? 0 : 1;
+}
+
+// One unit's digest of the vector path's outputs, FNV-1a: its tokens (kinds, names, flags), its outcome (the errors, the
+// first one's place and message), and on a valid unit its tree (roles, depths, parents) and postorder. Every field is a
+// count, an id or a position, never an address.
+static uint64_t parse_test_unit_digest(const Parser* parser, const ParseTestOutcome* outcome)
+{
+    const uint32_t count = parser->tokens.count;
+    uint64_t digest = pp_kernel_fold(0xcbf29ce484222325ull, parser->tokens.kinds, count);
+    digest = pp_kernel_fold(digest, parser->tokens.names, (uint64_t)count * sizeof(uint32_t));
+    digest = pp_kernel_fold(digest, parser->tokens.flags, count);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)outcome->errors << 32 | count);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)outcome->line << 32 | outcome->column);
+    digest = pp_kernel_fold(digest, outcome->message, strlen(outcome->message));
+    if (outcome->errors == 0)
+    {
+        digest = pp_kernel_fold(digest, parser->tree.roles, count);
+        digest = pp_kernel_fold(digest, parser->tree.depths, (uint64_t)count * sizeof(uint32_t));
+        digest = pp_kernel_fold(digest, parser->tree.parents, (uint64_t)count * sizeof(uint32_t));
+        digest = parser->postorder != 0 ? pp_kernel_fold(digest, parser->postorder, (uint64_t)count * sizeof(uint32_t)) : digest;
+    }
+    return digest;
+}
 
 // Each kernel's output from the vector kernel, kept for the comparison with its twin's.
 typedef struct ParseTestCopies ParseTestCopies;
@@ -2150,6 +2207,77 @@ static uint32_t parse_test_check_role_starts(const Parser* parser, Preprocessor*
     return result;
 }
 
+// The vector path's outputs on the unit `parser` read, as parse_translation_unit's leaves them: parse_vector, from the
+// meanings prepared afresh, its fallback's diagnostics apart (`*outcome` is its result). FNV-1a over the kernels'
+// verdicts and counts, and on a unit they keep (not `everything`) over every array a later stage reads: K1's depths,
+// enclosing openers and blocks' views, K3's kinds, K2's typed states and statement contexts, the roles, flags, node
+// depths and parents the fallback leaves, and K6's classes and groups. A unit sent whole to the scalar parser leaves
+// those partly unwritten (#528): only its verdicts count. Every field is a count, an id or a position. Returns 0 (and
+// a zeroed `*outcome`) if it can't reserve its memory.
+static uint64_t parse_test_vector_digest(Parser* parser, Preprocessor* pp, ParseKernelResult* outcome)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint64_t slots = (uint64_t)count + 2 * BUSTER_PARSE_TOKEN_PADDING;
+    Arena arena = parse_test_guarded_arena(slots * 1024 + (uint64_t)parser->meanings.capacity + (64ull << 20));
+    ParseKernels kernels;
+    ParseVectorBuffers buffers;
+    bool reserved = arena.capacity != 0 && parse_kernels_reserve(&kernels, &arena, count, parser->meanings.capacity) && parse_vector_buffers_reserve(&buffers, &arena, count);
+    ParseDiagnostic* diagnostics = reserved ? BUSTER_ARENA_PUSH_ARRAY(&arena, ParseDiagnostic, slots) : 0;
+    reserved = diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
+    uint64_t digest = 0;
+    *outcome = (ParseKernelResult){ 0 };
+    if (reserved)
+    {
+        const uint64_t mark = parser->scratch.length;
+        const ParseInput input = {
+            .kinds = parser->tokens.kinds,
+            .names = parser->tokens.names,
+            .flags = parser->tokens.flags,
+            .count = count,
+            .language = parser->language,
+            .meanings = &parser->meanings,
+            .scratch = &parser->scratch,
+            .diagnostics = diagnostics,
+            .diagnostic_capacity = (uint32_t)slots,
+        };
+        const ParseKernelResult result = parse_vector(&kernels, &input, parser->predeclared, &buffers);
+        arena_pop_to(&parser->scratch, mark);
+        *outcome = result;
+        const uint64_t verdicts = (uint64_t)result.everything | (uint64_t)kernels.unbalanced << 1 | (uint64_t)kernels.unsupported << 2 | (uint64_t)result.fallback.errors << 3;
+        digest = pp_kernel_fold_u64(0xcbf29ce484222325ull, verdicts);
+        digest = pp_kernel_fold_u64(digest, result.flagged_tokens);
+        digest = pp_kernel_fold_u64(digest, result.fallback.items);
+        digest = pp_kernel_fold_u64(digest, result.fallback.tokens);
+        if (!result.everything)
+        {
+            const uint64_t words = (uint64_t)count * sizeof(uint32_t);
+            digest = pp_kernel_fold(digest, kernels.depths, words);
+            digest = pp_kernel_fold(digest, kernels.enclosing, words);
+            for (uint32_t block = 0; block < count; block += 64)
+            {
+                const ParseBracketBlock* view = &kernels.bracket_blocks[block / 64];
+                const ParseStatementContext* context = &buffers.contexts[block / 64];
+                digest = pp_kernel_fold(digest, view->opener_lanes, sizeof(view->opener_lanes));
+                digest = pp_kernel_fold(digest, view->relative_depths, sizeof(view->relative_depths));
+                digest = pp_kernel_fold_u64(digest, view->open);
+                digest = pp_kernel_fold_u64(digest, context->blocks);
+                digest = pp_kernel_fold_u64(digest, context->ifs);
+                digest = pp_kernel_fold_u64(digest, context->whiles);
+            }
+            digest = pp_kernel_fold(digest, kernels.vkinds, count);
+            digest = pp_kernel_fold(digest, buffers.typed, count);
+            digest = pp_kernel_fold(digest, kernels.roles, count);
+            digest = pp_kernel_fold(digest, kernels.flags, count);
+            digest = pp_kernel_fold(digest, kernels.node_depths, words);
+            digest = pp_kernel_fold(digest, kernels.parents, words);
+            digest = pp_kernel_fold(digest, kernels.check_classes, count);
+            digest = pp_kernel_fold(digest, kernels.check_groups, count);
+        }
+    }
+    parse_test_release_guarded(&arena);
+    return digest;
+}
+
 // Each kernel against its scalar twin on the unit `parser` read (its tokens), each from the twins' outputs before it,
 // as the spike checked them: K1 (depths, enclosing openers and every block's view), K3's classification, K2 (roles,
 // flags, typed states and statement contexts, also from other starts), K1's second part and the roles after colons, K4
@@ -2293,7 +2421,9 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
         parse_typedefs_clear(kernels);
         // K4: the twin, then the vector kernel with the stack's top in registers and with windows of fewer lanes.
         parse_parents_scalar(kernels, count);
-        if (parse_deepest(kernels, count) <= BUSTER_PARSE_MAX_VECTOR_DEPTH)
+        const bool deep = parse_deepest(kernels, count) > BUSTER_PARSE_MAX_VECTOR_DEPTH;
+        tally->deep_units += deep;
+        if (!deep)
         {
             static const uint32_t reaches[] = { BUSTER_PARSE_TOP_LANES, 1, 3, 8 };
             for (uint32_t r = 0; r < sizeof(reaches) / sizeof(reaches[0]); r += 1)
@@ -2366,7 +2496,6 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
             .diagnostic_capacity = (uint32_t)slots,
         };
         const ParseKernelResult twins = parse_twins(kernels, &input, parser->predeclared, copies.typed, copies.statements);
-        tally->fallback_items += twins.fallback.items;
         bool accepted = !twins.fallback.errors;
         if (scalar->errors == 0 && twins.fallback.errors)
         {
@@ -2415,6 +2544,13 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
         }
     }
     parse_test_release_guarded(&arena);
+    if (reserved)
+    {
+        // The vector path's outputs, into the unit's digest (the batches' recorded ones).
+        ParseKernelResult vector = { 0 };
+        tally->digest += parse_test_vector_digest(parser, pp, &vector);
+        tally->fallback_items += vector.fallback.items;
+    }
     return result;
 }
 
@@ -2879,6 +3015,7 @@ static uint32_t parse_test_check_unit(ParseTestUnits* units, const char* path, c
             failures += parse_test_tree_only(vector, &units->parsers[2], &pp, path);
             failures += parse_test_tree_only(scalar, &units->parsers[3], &pp, path);
             *outcome = parse_test_outcome(vector, &pp);
+            tally->digest += parse_test_unit_digest(vector, outcome);
             const ParseTestOutcome alone = parse_test_outcome(scalar, &pp);
             const uint32_t token = parse_test_compare_tokens(&vector->tokens, &scalar->tokens);
             if (token != BUSTER_PARSE_NONE)
@@ -3572,6 +3709,8 @@ static uint32_t parse_test_streams(uint64_t count, uint64_t seed, const PPOption
     parse_test_units_release(&units);
     printf("streams: %llu random streams (half with balanced brackets), %llu rejected, %u where the paths or a kernel and its twin differ\n", (unsigned long long)count,
            (unsigned long long)rejected, failures);
+    // At the default seed and count, the batch's digest (parse_test_batch_digest).
+    failures += seed == 1 && count == 2000 ? parse_test_batch_digest(&tally, "streams", options->language) : 0;
     return failures;
 }
 
@@ -3924,6 +4063,8 @@ static uint32_t parse_test_alignments(const char* file, const PPOptions* options
     parse_test_units_release(&units);
     printf("alignments: %u inputs (the snippets%s at 64 alignments), %u where the paths or a kernel and its twin differ\n", inputs, file != 0 ? " and the file" : "",
            failures);
+    // The snippets' alone, the batch's digest (parse_test_batch_digest).
+    failures += file == 0 ? parse_test_batch_digest(&tally, "alignments", plain.language) : 0;
     return failures;
 }
 
@@ -3990,6 +4131,7 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
     }
     parse_test_units_release(&units);
     remove(path);
+    failures += parse_test_batch_digest(&tally, "nesting", options->language);
     return failures;
 }
 #endif
