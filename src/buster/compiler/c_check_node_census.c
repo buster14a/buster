@@ -6288,6 +6288,9 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
             const uint64_t updates_taken = counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN];
             printf("node-shadow: window contexts updates=%" PRIu64 " (%.2f%% of the records swept) taken=%" PRIu64 " listed=%" PRIu64 "\n", updates, node_census_share(updates, swept),
                    updates_taken, updates - updates_taken);
+            // The records the loop evaluates as branches, and those of them a statement's CONDITION.
+            printf("node-shadow: window contexts branched=%" PRIu64 " (%.2f%% of the records swept) of-them-a-condition=%" PRIu64 "\n", counts[NODE_FACTS_COUNT_CONTEXTS_BRANCHED],
+                   node_census_share(counts[NODE_FACTS_COUNT_CONTEXTS_BRANCHED], swept), counts[NODE_FACTS_COUNT_CONTEXTS_BRANCHED_ROOTS]);
             printf("node-shadow: window contexts listed, by an expression's first record's reason:");
             for (uint32_t reason = 1; reason < BUSTER_NODE_CONTEXTS_REASONS; reason += 1)
             {

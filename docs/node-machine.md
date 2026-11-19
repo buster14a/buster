@@ -5293,6 +5293,197 @@ established. The loop's function is 6,140 bytes in the piece's build and
 selection, a division by a constant, and a value the columns don't hold
 whole. Those, then X on these answers.
 
+### A condition's branches on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/a-conditions-branches-on-the-window-2850-2026-11-19).
+`measure-node-machine --shadow --window-contexts`
+([the guide](commands/lowering.md#a-conditions-branches-on-the-window-2850)).
+
+After the updates, `&&`, `||` and `?:` were most of what C on the window
+still listed: 2,744 of the 3,730 expressions listed on `sqlite3.c`. They are
+two cases in C. This piece is the first: a statement's CONDITION over `&&`,
+`||` and `!`, which C evaluates as branches and no value
+(`NODE_MACHINE_TEMPLATE_BRANCHES`). No compile takes any of it. Its
+[specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7016320819)
+had four gates: exact (N1), what it decides (N2), what it costs by one
+executable with a switch (N3) and that nothing else moves (N4).
+
+**C's rule, term by term.** C branches a record from the root down
+(`node_machine_root`, `node_machine_branch_condition`,
+`node_machine_classify_branches`, `node_machine_branch_operator`). On the
+window each record says it of itself, from its own bytes, its first operand's
+and its consumer's class, and lists what one level cannot say:
+
+| C's term | On the window |
+| --- | --- |
+| a branch operator is a `!`, an `&&` or an `\|\|` | its operator's class's byte |
+| that is no constant without effects | `free`: its standing's and its flags' bytes |
+| whose value is an int's and no lvalue | no mask: the checker's, which takes no vector's `!`, `&&` or `\|\|` and gives any other an int |
+| and, for `&&` and `\|\|`, whose first operand's truth is not known | the first operand's standing (no constant, or an lvalue whose constant is an address) and its flags' object's bit (an lvalue at an absolute address has none, and C takes its truth for known: [#3028](https://github.com/buster14a/buster/issues/3028)) |
+| a statement's CONDITION is branches where, under its `!`s, there is a branch `&&` or `\|\|` | where its operand's code is `&&`'s or `\|\|`'s. One that is no branch operator lists the expression at its own record, and with a `!` between, the `!` does |
+| a branched operator branches each operand that is a branch operator | `&&` and `\|\|` under a CONDITION, an `&&`, an `\|\|` or a `!`, and `!` under an `&&` or an `\|\|`: by the consumer's class alone. A consumer that is not branched is a value: an `&&` or an `\|\|` lists the expression there, and a `!` does where its operand is `&&` or `\|\|` |
+| a `!` under a branched `!` is branched too | two levels away: the branched `!` over a `!` lists the expression |
+| any other operand is its value, converted to T's conversion of it and tested: of a type a truth's entries test | the aggregate's fact of each operand's own type: a `__float128` has it, and its record a template all the same. Its class asks no mask: a scalar of no class a truth tests is a half-precision float, of which no record has a template |
+| a branched record has no target | by its own branched bit |
+| its labels, its hook and its sense | not made here: X's |
+
+**A mask only takes.** An `&&` or an `||` that is not branched is a value,
+and a value lists its expression in this piece. So a consumer may take its
+operand for branched from the operand's code alone, and the reference says of
+every listed expression.
+
+**Against the specification.** It read a consumer's two bits (a branch `&&`
+or `||`; a branched `!`) by two permutes of bits made in the same step. The
+loop reads the consumer's class instead, which it has already: a consumer of
+that class that is not branched lists the expression at its own lane, and its
+operand's answer is then read by no one.
+
+**What is new in the loop.**
+
+- **A class and a bit** of the classes' table: a conditional has a class of
+  its own (it had `&&`'s and `||`'s, and is listed still), and a statement's
+  CONDITION a bit where `!` has none.
+- **A first operand's standing** is read through its distance back as its
+  other bytes are: one more permute, and a row more of the far lanes'.
+- **A branched record's template** is one masked move, and its operands' rows
+  two of the rows' table: each evaluated, a value's to T's conversion of it.
+- **A truth's operand's test** is the aggregate's fact alone, where it was
+  three operations: the class's two bounds are implied (the table's row), for
+  a truth that is no branch too.
+
+Twelve vector operations a step more: fourteen for the piece (the permute, a
+compare for `&&`'s and `||`'s class, two of the consumer's class, a test of
+the CONDITION's bit, three for the first operand's code, three for its
+standing, a test of its object's bit, a test of the second operand's fact and
+the template's move), and two fewer in a truth's operand's test.
+
+**What it decides.** `sqlite3.c`, Lua, musl and the compiler's own source,
+the same with the default warnings and with `-Wall -Wextra`:
+
+| | `sqlite3.c` | Lua | musl | own source |
+| --- | ---: | ---: | ---: | ---: |
+| expressions the kernel places | 50,996 | 10,839 | 43,415 | 51,908 |
+| records evaluated as branches | 5,613 | 570 | 2,364 | 13,975 |
+| of them a statement's CONDITION | 2,198 | 230 | 877 | 3,366 |
+| **expressions decided: before, with** | **47,266, 49,313** | **9,877, 10,079** | **40,937, 41,759** | **38,064, 41,314** |
+| of the expressions placed | 92.69%, 96.70% | 91.12%, 92.99% | 94.29%, 96.19% | 73.33%, 79.59% |
+| listed still: `&&` and `\|\|` as values, `?:` | 674 | 290 | 964 | 7,924 |
+| a comma or a selection | 264 | 376 | 169 | 0 |
+| a division by a constant | 170 | 40 | 262 | 435 |
+| a value the columns don't hold whole | 551 | 6 | 77 | 66 |
+| an update | 6 | 1 | 27 | 9 |
+| a call | 18 | 47 | 157 | 2,160 |
+
+**One executable, the piece's block on and off** (N3's measure). Two builds
+differ in more than the code one of them adds, so an experiment's build has a
+switch that skips the block by a branch and lists every `&&` and `||`, as
+before the piece: with it off the executable decides what the build before
+does (47,263, 9,877 and 40,937 expressions on the 9700X's copies). The 9700X,
+CPU 2, under the lock, Release, TSC ticks; on, off, off, on in each of seven
+readings, and each reading's own difference:
+
+| the block on, less off | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| **the loop, a record swept** | **+0.24 (0.10 to 0.35)** | **+0.27 (0.05 to 0.50)** | -0.12 (-1.11 to 1.93) |
+| the same in a second run over the same chunk | +0.21 (0.19 to 0.26) | +0.23 (0.22 to 0.46) | +0.24 (-1.38 to 0.30) |
+| **C's three sweeps, a record of the decided** | **-0.36 (-0.66 to -0.31)** | **-0.20 (-0.56 to 0.15)** | -1.91 (-3.06 to 2.76) |
+| the kernel in place, a record | +0.09 (-0.19 to 0.21) | -0.04 (-3.59 to 2.00) | -0.02 (-0.12 to 0.08) |
+| the tests on the window, a record | +0.15 (-0.23 to 0.41) | -0.91 (-2.53 to 0.61) | -3.46 (-12.06 to 1.15) |
+
+musl's first runs don't resolve the block: an earlier build's switch read the
+loop +1.59 there (-0.60 to 3.10) in this order and -0.29 (-1.34 to 3.74) with
+the settings in the other order (off, on, on, off).
+
+**Build against build**, the build before (#3025's code) and the piece in
+turn, medians of seven readings, musl's of fifteen:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| C's sweeps with the records' bytes, a record of the decided: before, with | 8.86, 8.38 | 13.55, 13.78 | 29.58, 30.72 |
+| C's three sweeps alone, a record of the decided: before, with | 7.92, 7.46 | 11.97, 11.92 | 26.42, 26.66 |
+| the reference's C on the same expressions | 38.7 | 37.2 | 41.4 |
+| the loop, a record swept: before, with | 2.97, 3.19 | 4.82, 5.17 | 9.05, 9.55 |
+| the kernel in place, a record: before, with | 17.66, 17.37 | 22.40, 22.40 | 20.50, 20.39 |
+| the tests on the window, C off: before, with | 31.4, 31.3 | 49.7, 49.6 | 94.7, 94.7 |
+
+`-c sqlite3.c`, which runs none of it: wall -0.08% and +0.10% in two
+comparisons, where the base again read -0.09% and +0.15%.
+
+**The loop's frame.** By its layout in the 9700X's builds, the loop's main
+body is 819 instructions a step with the piece and 746 before, and 256 and
+219 of them have an operand in the frame: of the 73 instructions the piece's
+build has more, 37 are frame traffic, where the block's own operations are
+fourteen. A first build of the piece, whole runs' user instructions counted:
+the switch's executable with the block off retired 1.76 instructions a record
+swept more than the build before on `sqlite3.c` and 1.73 on Lua. What a step
+keeps in the frame, and why, is the next thing to measure in this loop.
+
+**Against its gates.**
+
+- **N1, exact: met.** The fixtures, 257 statements run one at a time in a
+  unit with a type in a segment's space and in one with none, and the four
+  corpora with the default warnings and with every warning: every expression
+  C on the window decides has C's verdict on T's columns, and each record of
+  one it takes C's template, context, target and whether it is evaluated.
+- **N2, decided: met.** 49,313, 10,079 and 41,759 expressions on `sqlite3.c`,
+  Lua and musl, for 49,200, 10,050 and 41,650 asked; 41,314 on the
+  compiler's own source, where the text that read 38,020 at the specification
+  reads 38,064 before the piece now, for 40,900 asked.
+- **N3, cost: met.** In one executable the block lowers C's three sweeps a
+  record of the decided on `sqlite3.c` and Lua, by 0.36 and 0.20 (refuted at
+  0.3 over); the loop reads 0.24 and 0.27 ticks a record swept more (0.5
+  asked, refuted at 0.8).
+- **N4, nothing else moves: met.** The kernel in place reads within 0.1 of
+  itself on and off. The tests on the window, which the switch doesn't touch,
+  read +0.15 and -0.91 a record on `sqlite3.c` and Lua, each range across
+  zero.
+
+**Tests.**
+
+- **The fixture** (`test-checker`, part 5 of 8): 82 statements, a line a case
+  of each term, each run alone too with its counts summed to the fixture's
+  pins: each operator under each and a loop's three conditions; tested values
+  of each class; operands no truth tests; a first operand that is an object's
+  lvalue, and one whose truth is known, of each constant's kind; two levels
+  away; values; the operator whose code is before `&&`'s; consumers and first
+  operands past two blocks. And six statements 64 times each, a block's end
+  between every two of their records in turn. The branched records and the
+  CONDITIONs among them are pinned.
+- **Statements one at a time:** 271, each alone in a function with the
+  shadow's comparison on, in both kinds of unit: the checker accepts 257 (it
+  takes no vector's `!`, `&&` or `||`, and no `constexpr` at the default
+  standard), and none has a difference. They have each kind of record of a
+  half-precision float, a `__float128`, a long double, a 128-bit integer, a
+  complex value and a `_BitInt` as an operand.
+- **Faults,** one at a time in copies of the tree, two rounds. The first: 96
+  of 116 caught, 12 texts that did not build, 8 survivors. Two of the
+  survivors were terms another record says, and went: a branched truth's
+  second operand's test (it has none, and its bytes read zero) and a truth's
+  own class (an int's, the checker's). Two were cases with no line, and got
+  one: a complex constant first, and a bit-field of an object first. The
+  second round, on these sources: **112 of 116 caught**. The four others give
+  the same answers: a CONDITION taken for a `!` under a logical consumer (a
+  CONDITION has no consumer); an lvalue first whose constant is of any kind
+  (a placed record's lvalue has an address's or none); and a branched
+  record's target left to its row where the record has no template (its
+  expression is refused) or is a root (which has no consumer's row).
+- **Before the rounds,** two terms the first build had as masks went on
+  reading the code that makes the values: the int's class of a `!`, an `&&`
+  and an `||` (the checker's), and a branched CONDITION's `free` (a folded
+  CONDITION has a folded operand, which lists).
+
+**What the probes found beside it.** A condition on an lvalue at an absolute
+address (`if (*(int*)4096)`) is compiled as true, its load dropped:
+[#3028](https://github.com/buster14a/buster/issues/3028), a fault of the
+checker's truth rule, which C and this piece's mask read as it stands. The
+fix changes the rule under both.
+
+**What is listed still.** `&&` and `||` as values and `?:` are 674 of the
+1,683 expressions listed on `sqlite3.c`, 290 of 760 on Lua, 964 of 1,656 on
+musl; then a value the columns don't hold whole, a comma and a selection, and
+a division by a constant. The values are the piece after, with the loop's
+frame.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
