@@ -4110,8 +4110,12 @@ What the lowering covers past scalars (#145's programs):
   unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
   `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,
   initializer parts with a bit width and `__builtin_dump_struct`'s reads take
-  the bytes that hold the field's bits. A field whose bits are spread over more
-  than 8 bytes (a packed one) is refused. `c_check_program_bit_unit_test.c`
+  the bytes that hold the field's bits. A packed field of up to 64 bits off a
+  byte boundary may lie in 9 bytes (#2999): its read and its store take the
+  first 8 as an integer and the ninth as a byte, joined by shifts on a read and
+  split on a store, as clang's -O0 code does its `i72` (`check_lower_bit_wide`,
+  out of line, apart from the tasks' always-inlined store). A field wider than
+  64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
@@ -5789,7 +5793,11 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   recovered and checked as a failed parse's is (`check_driver_typo_edits`,
   `CheckPrefixEdit`, up to 4 readings), its errors at the names first
   (`check_driver_typo_errors`) and a parse error naming one spelling the
-  correction (`Parser.respelled`). An expression statement whose `;` is
+  correction (`Parser.respelled`). A reading whose parse has no view (a
+  tentative tail given back leaves the failed parse itself, of which no type
+  view, repair or prefix can be made) ends the unit as a failed parse without a
+  view does, with its parse's errors alone: the views that failed cleared the
+  one the unit was read as, which its reports would otherwise read (#3000). An expression statement whose `;` is
   missing after its first name or that name's call (`retrn x`, `whil (a) a--`)
   is read on past as if the `;` were there (`ParseDiagnostic.probe`), as
   clang's `ParseExprStatement` does once the name is classified, so that the
