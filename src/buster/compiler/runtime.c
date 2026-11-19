@@ -394,7 +394,7 @@ static __attribute__((unused)) bool runtime_kind_is_static(RuntimeKind kind);
 
 // A library's exports at a version other than their name's default (name@VERSION, a .gnu.version entry with the hidden
 // bit), which import_library leaves out of its exports (ImportLibrary.hidden): their names, with the lengths and hashes
-// runtime_libraries_versions gives them, and their versions' indices, moved as the library's definitions' are.
+// runtime_library_versions gives them, and their versions' indices, moved as the library's definitions' are.
 typedef struct RuntimeHiddenExports RuntimeHiddenExports;
 struct RuntimeHiddenExports
 {
@@ -407,7 +407,7 @@ struct RuntimeHiddenExports
 
 // A library's version needs (.gnu.version_r), as the loader checks them when it loads the library (dl-version.c): each
 // auxiliary entry's version name, its hash (vna_hash) and whether it is weak (VER_FLG_WEAK), and the file its entry
-// requires it of (vn_file), in the order runtime_libraries_versions walks them.
+// requires it of (vn_file), in the order runtime_library_versions walks them.
 typedef struct RuntimeVersionNeeds RuntimeVersionNeeds;
 struct RuntimeVersionNeeds
 {
@@ -416,6 +416,22 @@ struct RuntimeVersionNeeds
     bool* weak;
     String8* file;
     uint32_t count;
+};
+
+// What a shared library's file says beside its import (import_library), as runtime_library_dependencies and
+// runtime_library_versions read it: the names its DT_NEEDED entries give; each reference's required version and the
+// file its .gnu.version_r entry requires it of, beside ImportLibrary.references (both empty for a reference without
+// one); its exports at other versions than their names' defaults; and its version needs. The direct path's -l
+// libraries (RuntimeLibraries) and the foreign resolver's libraries (foreign.c, #1590) read them alike.
+typedef struct RuntimeLibraryVersions RuntimeLibraryVersions;
+struct RuntimeLibraryVersions
+{
+    String8* dependencies;
+    uint32_t dependency_count;
+    String8* reference_versions;
+    String8* reference_files;
+    RuntimeHiddenExports hidden;
+    RuntimeVersionNeeds needs;
 };
 
 typedef struct RuntimeLibraries RuntimeLibraries;
@@ -434,7 +450,7 @@ struct RuntimeLibraries
     uint32_t required;
     // By library: each reference's required version and the file its .gnu.version_r entry requires it of, beside
     // libraries[l].references (both empty for a reference without one); its exports at other versions than their
-    // names' defaults; and its version needs (runtime_libraries_versions).
+    // names' defaults; and its version needs (runtime_library_versions).
     String8* reference_versions[BUSTER_RUNTIME_LIBRARIES];
     String8* reference_files[BUSTER_RUNTIME_LIBRARIES];
     RuntimeHiddenExports hidden[BUSTER_RUNTIME_LIBRARIES];
@@ -2035,10 +2051,10 @@ static uint16_t runtime_libraries_top(const ImportLibrary* library)
     return top;
 }
 
-// Reads the names library `bytes`' DT_NEEDED entries give, before its first DT_NULL, into slot `l`, the array pushed from
-// the libraries' arena: RUNTIME_ERROR_IMPORT if they can't be read (import_library has checked its .dynamic), or
+// Reads the names library `bytes`' DT_NEEDED entries give, before its first DT_NULL, into `versions`, the array pushed
+// from `arena`: RUNTIME_ERROR_IMPORT if they can't be read (import_library has checked its .dynamic), or
 // RUNTIME_ERROR_MEMORY. A library without .dynamic has none. A pass over a few entries per library, beside its import.
-static RuntimeError runtime_libraries_dependencies(RuntimeLibraries* libraries, uint32_t l, String8 bytes)
+static RuntimeError runtime_library_dependencies(String8 bytes, Arena* arena, RuntimeLibraryVersions* versions)
 {
     ImportElf elf;
     RuntimeError result = import_elf(&elf, bytes, ET_DYN).error == IMPORT_ERROR_NONE ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_IMPORT;
@@ -2056,7 +2072,7 @@ static RuntimeError runtime_libraries_dependencies(RuntimeLibraries* libraries, 
     const Elf64_Shdr strings_header = linked ? import_section_header(&elf, header.sh_link) : header;
     const String8 strings = linked ? import_section_bytes(&elf, &strings_header) : (String8){ 0 };
     const String8 entries = linked ? import_section_bytes(&elf, &header) : (String8){ 0 };
-    String8* names = result == RUNTIME_ERROR_NONE && linked ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, count + 1) : 0;
+    String8* names = result == RUNTIME_ERROR_NONE && linked ? BUSTER_ARENA_PUSH_ARRAY(arena, String8, count + 1) : 0;
     result = result == RUNTIME_ERROR_NONE && linked && names == 0 ? RUNTIME_ERROR_MEMORY : result;
     uint32_t found = 0;
     bool ended = false;
@@ -2071,16 +2087,15 @@ static RuntimeError runtime_libraries_dependencies(RuntimeLibraries* libraries, 
             found += result == RUNTIME_ERROR_NONE ? 1 : 0;
         }
     }
-    libraries->dependencies[l] = names;
-    libraries->dependency_count[l] = found;
+    versions->dependencies = names;
+    versions->dependency_count = found;
     return result;
 }
 
-// The name of library `l`'s version definition that `index` (import_library's, moved past the libraries' before it)
-// names, or nothing for VER_NDX_LOCAL and VER_NDX_GLOBAL, which are no version.
-static String8 runtime_libraries_version_name(const RuntimeLibraries* libraries, uint32_t l, uint16_t index)
+// The name of `library`'s version definition that `index` (import_library's, for the direct path's libraries moved past
+// the libraries' before it) names, or nothing for VER_NDX_LOCAL and VER_NDX_GLOBAL, which are no version.
+static String8 runtime_library_version_name(const ImportLibrary* library, uint16_t index)
 {
-    const ImportLibrary* library = &libraries->libraries[l];
     String8 result = { 0 };
     for (uint32_t v = 0; index > VER_NDX_GLOBAL && result.length == 0 && v < library->version_count; v += 1)
     {
@@ -2089,22 +2104,24 @@ static String8 runtime_libraries_version_name(const RuntimeLibraries* libraries,
     return result;
 }
 
-// Reads what import_library leaves out of library `l`'s versions, from `bytes`. Its version needs (.gnu.version_r), as
+// Reads what import_library leaves out of `library`'s versions, from `bytes`, into `versions`, its arrays pushed from
+// `arena`; `shift` is how far the library's version indices were moved past others' (0 where they weren't), which its
+// references' indices in .gnu.version are not. Its version needs (.gnu.version_r), as
 // the loader walks them: a chain of entries by vn_next, each with a chain of auxiliary entries by vna_next, to 0, each
 // auxiliary entry an index (vna_other without its top bit, VER_NEED_HIDDEN, as glibc's loader and lld mask it), the
 // name of the version it requires, its hash and weakness, and the entry's file, which binding checks as the loader
 // does (RuntimeVersionNeeds, bind_library_versions). Each reference's index (ImportReferences.version) names one of
 // them, or one of the library's own version definitions, with no file, or for VER_NDX_LOCAL and VER_NDX_GLOBAL, no
 // version. Then its hidden exports' names' lengths and hashes (RuntimeHiddenExports). RUNTIME_ERROR_IMPORT, with
-// libraries->import saying where, for version needs that don't read (an entry outside its section, a string outside its
+// `import` saying where, for version needs that don't read (an entry outside its section, a string outside its
 // table, a version's name empty, more entries than the section has room for, which only overlapping entries make) and
 // for a reference whose index names nothing, as GNU ld refuses them, where the loader would read past the section or
 // take the reference as unversioned; RUNTIME_ERROR_MEMORY. A walk over the library's few version needs and its
 // references' indices, beside its import, which read .dynsym: the needs by index in a table, so that each reference's
 // is one load.
-static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint32_t l, String8 bytes, uint16_t shift)
+static RuntimeError runtime_library_versions(const ImportLibrary* library, String8 bytes, uint16_t shift, Arena* arena, RuntimeLibraryVersions* versions_out,
+                                            ImportResult* import)
 {
-    const ImportLibrary* library = &libraries->libraries[l];
     ImportElf elf;
     ImportLibrarySections sections = { 0 };
     ImportDynamicSymbols symbols = { 0 };
@@ -2129,11 +2146,11 @@ static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint
     // Entries and auxiliary entries are 16 bytes each, which a file the loader reads doesn't overlap: at most one per 16
     // bytes of the section, which bounds the walk.
     const uint64_t capacity = needs.length / sizeof(Elf64_Vernaux);
-    String8* need_names = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, capacity + 1) : 0;
-    uint32_t* need_hashes = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, uint32_t, capacity + 1) : 0;
-    bool* need_weak = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, bool, capacity + 1) : 0;
-    String8* need_files = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, capacity + 1) : 0;
-    uint16_t* need_indices = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, uint16_t, capacity + 1) : 0;
+    String8* need_names = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, String8, capacity + 1) : 0;
+    uint32_t* need_hashes = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity + 1) : 0;
+    bool* need_weak = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, bool, capacity + 1) : 0;
+    String8* need_files = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, String8, capacity + 1) : 0;
+    uint16_t* need_indices = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, capacity + 1) : 0;
     result = result == RUNTIME_ERROR_NONE && (need_names == 0 || need_hashes == 0 || need_weak == 0 || need_files == 0 || need_indices == 0) ? RUNTIME_ERROR_MEMORY
                                                                                                                                               : result;
     // Where a record didn't read, in the file.
@@ -2189,7 +2206,7 @@ static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint
         offset += need.vn_next;
     }
     // Each index's last auxiliary entry, plus 1, as the loader and lld keep it.
-    uint32_t* slot = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, uint32_t, (uint64_t)top + 1) : 0;
+    uint32_t* slot = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)top + 1) : 0;
     result = result == RUNTIME_ERROR_NONE && slot == 0 ? RUNTIME_ERROR_MEMORY : result;
     if (slot != 0)
     {
@@ -2201,8 +2218,8 @@ static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint
     }
     const ImportReferences* references = &library->references;
     const uint32_t reference_count = references->count;
-    String8* versions = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, (uint64_t)reference_count + 1) : 0;
-    String8* files = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, String8, (uint64_t)reference_count + 1) : 0;
+    String8* versions = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)reference_count + 1) : 0;
+    String8* files = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)reference_count + 1) : 0;
     result = result == RUNTIME_ERROR_NONE && (versions == 0 || files == 0) ? RUNTIME_ERROR_MEMORY : result;
     bool resolved = true;
     for (uint32_t r = 0; result == RUNTIME_ERROR_NONE && resolved && r < reference_count; r += 1)
@@ -2210,7 +2227,7 @@ static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint
         const uint16_t index = references->version[r];
         const uint32_t n = index <= top ? slot[index] : 0;
         // A version of its own, as the loader takes an index its definitions give, which requires no file.
-        const String8 defined = index > VER_NDX_GLOBAL && n == 0 ? runtime_libraries_version_name(libraries, l, (uint16_t)(index + shift)) : (String8){ 0 };
+        const String8 defined = index > VER_NDX_GLOBAL && n == 0 ? runtime_library_version_name(library, (uint16_t)(index + shift)) : (String8){ 0 };
         versions[r] = n != 0 ? need_names[n - 1] : defined;
         files[r] = n != 0 ? need_files[n - 1] : (String8){ 0 };
         resolved = index <= VER_NDX_GLOBAL || versions[r].length != 0;
@@ -2221,8 +2238,8 @@ static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint
     const ImportHiddenExports* others = &library->hidden;
     RuntimeHiddenExports hidden = {
         .name = others->name,
-        .length = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, uint32_t, (uint64_t)others->count + 1) : 0,
-        .hash = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(&libraries->arena, uint64_t, (uint64_t)others->count + 1) : 0,
+        .length = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)others->count + 1) : 0,
+        .hash = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)others->count + 1) : 0,
         .version = others->version,
         .count = result == RUNTIME_ERROR_NONE ? others->count : 0,
     };
@@ -2240,13 +2257,13 @@ static RuntimeError runtime_libraries_versions(RuntimeLibraries* libraries, uint
     if (result == RUNTIME_ERROR_IMPORT)
     {
         // The import read the library: what didn't is its version needs, or a reference's index in .gnu.version.
-        libraries->import = import_fail(IMPORT_ERROR_BOUNDS, resolved ? failed : versym_offset);
-        libraries->import.section = resolved ? verneed : sections.versym;
+        *import = import_fail(IMPORT_ERROR_BOUNDS, resolved ? failed : versym_offset);
+        import->section = resolved ? verneed : sections.versym;
     }
-    libraries->reference_versions[l] = versions;
-    libraries->reference_files[l] = files;
-    libraries->hidden[l] = hidden;
-    libraries->needs[l] = (RuntimeVersionNeeds){
+    versions_out->reference_versions = versions;
+    versions_out->reference_files = files;
+    versions_out->hidden = hidden;
+    versions_out->needs = (RuntimeVersionNeeds){
         .name = need_names,
         .hash = need_hashes,
         .weak = need_weak,
@@ -2302,8 +2319,16 @@ static RuntimeError runtime_libraries_add(RuntimeLibraries* libraries, const cha
         *base = (uint16_t)(*base + top);
         const ImportReferences* references = &library->references;
         result = import_index_build(&libraries->references[libraries->count], references->hash, references->count, &libraries->arena) ? result : RUNTIME_ERROR_MEMORY;
-        result = result == RUNTIME_ERROR_NONE ? runtime_libraries_dependencies(libraries, libraries->count, bytes) : result;
-        result = result == RUNTIME_ERROR_NONE ? runtime_libraries_versions(libraries, libraries->count, bytes, shift) : result;
+        RuntimeLibraryVersions versions = { 0 };
+        result = result == RUNTIME_ERROR_NONE ? runtime_library_dependencies(bytes, &libraries->arena, &versions) : result;
+        result = result == RUNTIME_ERROR_NONE ? runtime_library_versions(library, bytes, shift, &libraries->arena, &versions, &libraries->import) : result;
+        const uint32_t l = libraries->count;
+        libraries->dependencies[l] = versions.dependencies;
+        libraries->dependency_count[l] = versions.dependency_count;
+        libraries->reference_versions[l] = versions.reference_versions;
+        libraries->reference_files[l] = versions.reference_files;
+        libraries->hidden[l] = versions.hidden;
+        libraries->needs[l] = versions.needs;
     }
     if (result == RUNTIME_ERROR_NONE && !repeated)
     {
@@ -2429,7 +2454,7 @@ static uint32_t runtime_libraries_export_at(const RuntimeLibraries* libraries, c
     {
         const ImportLibrary* library = &libraries->libraries[m];
         const uint32_t found = import_library_find(library, name, length, hash);
-        const String8 at = found != 0 ? runtime_libraries_version_name(libraries, m, library->exports.version[found - 1]) : (String8){ 0 };
+        const String8 at = found != 0 ? runtime_library_version_name(library, library->exports.version[found - 1]) : (String8){ 0 };
         // Its default export at that version, or one at it that isn't its name's default, by the library's index of the
         // version.
         bool exported = at.length != 0 && at.length == version.length && memcmp(at.pointer, version.pointer, version.length) == 0;
