@@ -7496,7 +7496,9 @@ static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, u
 }
 
 // Encodes the 4 * `quads` instructions at `instructions` (quads is 1, 2 or 4, and a constant), appending their
-// machine code at `out`, and returns where it ends. If `offsets` isn't null, stores the offsets (from `output`) of
+// machine code at `out`, and returns where it ends. A last partial group has `loaded` instructions there (fewer than
+// 4 * `quads`), which it loads by masked loads, the rest zero, and takes X86_GATHER_INSERTS_FORMS_FROM_RECORDS, whose
+// forms come from the loaded records: nothing reads past the instructions. Full groups pass 4 * `quads`. If `offsets` isn't null, stores the offsets (from `output`) of
 // the instructions of `offset_lanes` (a bit per instruction). If `fixup_ends` isn't null, appends the end offsets (from
 // `output`) of the marked instructions at *fixup_ends and advances it past them. `encoder` (a constant) is the entry
 // point's mode: 64-bit or 32-bit addresses, APX, or 32-bit or 16-bit mode. The instructions must be valid (see
@@ -7508,7 +7510,7 @@ static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, u
 // from Phase III's shuffles and compressions.
 BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t quads, uint8_t* out, const uint8_t* output, uint32_t* offsets,
                                     uint32_t offset_lanes, uint32_t** fixup_ends, X86Gather gather, X86Store store, X86FixupStore fixup_store,
-                                    X86EncoderMode encoder)
+                                    X86EncoderMode encoder, uint32_t loaded)
 {
     const X86TemplateEntry* const templates = encoder == X86_ENCODER_MODE_ADDRESS32 ? x86_templates_address32
                                          : encoder == X86_ENCODER_MODE_APX     ? x86_templates_apx
@@ -7519,9 +7521,13 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     __m512i records[4];
     __m512i bytes[4];
     __m512i layouts[4];
+    // A last partial group's records (`loaded` of them) by masked loads of their dwords, which read nothing past the last.
+    const uint64_t dwords = loaded < BUSTER_X86_GROUP_INSTRUCTIONS ? (UINT64_C(1) << (4 * loaded)) - 1 : ~UINT64_C(0);
     for (uint32_t q = 0; q < 4; q += 1)
     {
-        records[q] = q < quads ? _mm512_loadu_si512(instructions + BUSTER_X86_QUAD_INSTRUCTIONS * q) : _mm512_setzero_si512();
+        records[q] = q >= quads                                        ? _mm512_setzero_si512()
+                     : loaded >= BUSTER_X86_QUAD_INSTRUCTIONS * (q + 1) ? _mm512_loadu_si512(instructions + BUSTER_X86_QUAD_INSTRUCTIONS * q)
+                                                                       : _mm512_maskz_loadu_epi32((__mmask16)(dwords >> (16 * q)), instructions + BUSTER_X86_QUAD_INSTRUCTIONS * q);
         bytes[q] = _mm512_setzero_si512();
         layouts[q] = _mm512_setzero_si512();
     }
@@ -7584,7 +7590,7 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     const __m512i checks = _mm512_unpacklo_epi64(template_high01, template_high23);
     const __m512i flags = _mm512_unpackhi_epi64(template_high01, template_high23);
 
-    // II. The lanes of the quads past `quads` hold zeros, which are valid, as are a zeroed copy's padding.
+    // II. The lanes of the quads past `quads` hold zeros, which are valid, as do a partial group's past `loaded`.
     const X86Fields fields = compute_fields(operands, displacement, extension, flags, checks, encoder);
 
     // Where the group's machine code starts, for its offsets and fixup ends.
@@ -7658,7 +7664,7 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
         if (fixup_ends != 0)
         {
             // The marked instructions' ends, compressed, by the fixup flags of the forms, which the records had long
-            // before the lengths. The zeroed copy's padding isn't marked.
+            // before the lengths. A partial group's zeroed lanes aren't marked.
             const __mmask16 marked = (__mmask16)_mm512_movepi8_mask(_mm512_permutexvar_epi8(_mm512_load_si512(x86_form_high_bytes), extension));
             const __m512i marked_ends = _mm512_add_epi32(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(ends)), group_start);
             if (fixup_store == X86_FIXUP_STORE_COMPRESS)
@@ -7678,34 +7684,34 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
 #undef BUSTER_X86_SPLAT
 
 // Stage the final default64 tail and return its byte count; no later encoding uses the helper's local cursor.
-// Specialize only tails of one quad; longer tails keep four quads. Check actual stack retention and spills in compiled code.
+// Specialize only tails of one quad; longer tails keep four quads. The records come by masked loads and their forms from
+// them (#2924, C10): a zeroed copy, which this took before, made a call of one instruction wait on its stores.
 BUSTER_INLINE int64_t encode_tail64(const X86Instruction* instructions, uint8_t* out, const uint8_t* output, uint32_t* offsets,
                                                              uint32_t count, uint32_t* fixup_ends)
 {
-    X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
-    memcpy(tail, instructions, count * sizeof(X86Instruction));
     uint32_t* cursor = fixup_ends;
     uint32_t** fixups = fixup_ends != 0 ? &cursor : 0;
     const uint32_t lanes = (1u << count) - 1;
     uint8_t* end;
     if (count <= 4)
     {
-        end = encode_group(tail, 1, out, output, offsets, lanes, fixups, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64);
+        end = encode_group(instructions, 1, out, output, offsets, lanes, fixups, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64, count);
     }
     else
     {
-        end = encode_group(tail, 4, out, output, offsets, lanes, fixups, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64);
+        end = encode_group(instructions, 4, out, output, offsets, lanes, fixups, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64, count);
     }
     return (int64_t)(end - output);
 }
 
 // The vectorized encoder's loop: `groups` groups of 4 * `quads` instructions per iteration (all constants), then the
-// whole groups left, then the last partial group from a zeroed copy, so that no load reads past the instructions.
+// whole groups left, then the last partial group by masked loads, its forms from its records, so that no load reads
+// past the instructions.
 // Returns the number of bytes. The instructions must be valid (see x86_encode): then it writes nothing past
 // output + BUSTER_X86_ENCODER_CAPACITY(count), but may write past the instructions' bytes.
 //
 // Why a full 64-byte store stays inside that capacity: a quad's store starts after the bytes of the instructions
-// before it, at most 15 for each of the first `count` (the zeroed copy's padding adds none), so it ends by
+// before it, at most 15 for each of the first `count` (a partial group's zeroed lanes add none), so it ends by
 // 15 * count + 64.
 BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends,
                                      uint32_t quads, uint32_t groups, X86Gather gather, X86Store store, X86FixupStore fixup_store, X86EncoderMode encoder)
@@ -7724,13 +7730,15 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
         // spill (unrolled, it's 14% slower on Zen 5).
         for (uint32_t g = 0; g < groups; g += 1)
         {
-            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder);
+            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder,
+                               (uint32_t)group_instructions);
             i += group_instructions;
         }
     }
     while (i + group_instructions <= count)
     {
-        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder);
+        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder,
+                           (uint32_t)group_instructions);
         i += group_instructions;
     }
     int64_t result = (int64_t)(out - output);
@@ -7742,10 +7750,8 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
         }
         else
         {
-            X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
-            memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
-            out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups, gather, store, fixup_store,
-                               encoder);
+            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups,
+                               X86_GATHER_INSERTS_FORMS_FROM_RECORDS, store, fixup_store, encoder, (uint32_t)(count - i));
             result = (int64_t)(out - output);
         }
     }

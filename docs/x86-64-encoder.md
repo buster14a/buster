@@ -448,13 +448,18 @@ four, in a loop over them that stays rolled; see "Zen 5's costs" and
 
 Every store is a full 64-byte one, inside the output's capacity
 (`BUSTER_X86_ENCODER_CAPACITY(count)`: 15 bytes per instruction, and 64 more):
-a quad's store starts after at most 15 bytes per earlier instruction (a zeroed
-copy's padding adds none), so it ends by `15 * count + 64` bytes in. With a
+a quad's store starts after at most 15 bytes per earlier instruction (a partial
+group's zeroed lanes add none), so it ends by `15 * count + 64` bytes in. With a
 capacity of 15 bytes per instruction alone, only the last quad's store could
 pass it, but the last two groups took masked stores (a `kmovq k, r` and a
 masked store per quad), which made calls of 16 instructions about 5% slower.
-The last partial group goes through a zeroed copy, so no load reads past the
-input. The page-edge test places inputs, outputs, offsets and fixup ends
+The last partial group's records come by masked loads of their dwords, and
+their forms from the loaded records (`X86_GATHER_INSERTS_FORMS_FROM_RECORDS`),
+so no load reads past the input. They went through a zeroed copy before, whose
+loads waited for its stores: a call of one instruction took 77.9 cycles on the
+9700X, and 102.9 to 105.6 in 32-bit and 16-bit modes, more than the scalar
+loop's 91.5 to 93.7 there; with masked loads it takes 35.4, and 69.5 to 70.0
+(#2924, C10). The page-edge test places inputs, outputs, offsets and fixup ends
 against `PROT_NONE` pages to check both.
 
 With offsets or fixup ends, Phase II's lengths are summed in each group, after
@@ -576,7 +581,7 @@ fourth dwords: a `vpermb` puts each form's high byte in instruction order and
 lengths. A `vpcompressd` by it keeps the marked instructions' ends, which a
 64-byte store appends to the fixup ends (their capacity has 16 more than the
 marked instructions, `BUSTER_X86_ENCODER_FIXUP_CAPACITY`), advanced by the
-mask's popcount; the zeroed copy's padding isn't marked. A marked form's
+mask's popcount; a partial group's zeroed lanes aren't marked. A marked form's
 template is a copy at its own index: `x86_encoder_initialize` writes each of
 the 25,062 templates again at `BUSTER_X86_FORM_FIXUP` and up, exactly 2 MB
 after it (see "Templates and the canonical slot"),
