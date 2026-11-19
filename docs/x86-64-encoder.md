@@ -448,13 +448,18 @@ four, in a loop over them that stays rolled; see "Zen 5's costs" and
 
 Every store is a full 64-byte one, inside the output's capacity
 (`BUSTER_X86_ENCODER_CAPACITY(count)`: 15 bytes per instruction, and 64 more):
-a quad's store starts after at most 15 bytes per earlier instruction (a zeroed
-copy's padding adds none), so it ends by `15 * count + 64` bytes in. With a
+a quad's store starts after at most 15 bytes per earlier instruction (a partial
+group's zeroed lanes add none), so it ends by `15 * count + 64` bytes in. With a
 capacity of 15 bytes per instruction alone, only the last quad's store could
 pass it, but the last two groups took masked stores (a `kmovq k, r` and a
 masked store per quad), which made calls of 16 instructions about 5% slower.
-The last partial group goes through a zeroed copy, so no load reads past the
-input. The page-edge test places inputs, outputs, offsets and fixup ends
+The last partial group's records come by masked loads of their dwords, and
+their forms from the loaded records (`X86_GATHER_INSERTS_FORMS_FROM_RECORDS`),
+so no load reads past the input. They went through a zeroed copy before, whose
+loads waited for its stores: a call of one instruction took 77.9 cycles on the
+9700X, and 102.9 to 105.6 in 32-bit and 16-bit modes, more than the scalar
+loop's 91.5 to 93.7 there; with masked loads it takes 35.4, and 69.5 to 70.0
+(#2924, C10). The page-edge test places inputs, outputs, offsets and fixup ends
 against `PROT_NONE` pages to check both.
 
 With offsets or fixup ends, Phase II's lengths are summed in each group, after
@@ -576,7 +581,7 @@ fourth dwords: a `vpermb` puts each form's high byte in instruction order and
 lengths. A `vpcompressd` by it keeps the marked instructions' ends, which a
 64-byte store appends to the fixup ends (their capacity has 16 more than the
 marked instructions, `BUSTER_X86_ENCODER_FIXUP_CAPACITY`), advanced by the
-mask's popcount; the zeroed copy's padding isn't marked. A marked form's
+mask's popcount; a partial group's zeroed lanes aren't marked. A marked form's
 template is a copy at its own index: `x86_encoder_initialize` writes each of
 the 25,062 templates again at `BUSTER_X86_FORM_FIXUP` and up, exactly 2 MB
 after it (see "Templates and the canonical slot"),
@@ -599,10 +604,9 @@ copies of every form for `67`, with and without FS or GS, would take the
 templates past the 32,768 that the form number's 15 bits beside the fixup flag
 reach, and a prefix the loop builds from a bit of the record would cost every
 group operations. So it has an entry point of its own, with templates of its
-own: `x86_encode_address32`, `x86_encode_scalar_address32` and
-`x86_validate_address32` work as the 64-bit functions do, but give every memory
-operand a `67`, from the templates `x86_encoder_initialize_address32` builds
-(all three need it, validation too). A call can't mix address sizes, and the
+own: `x86_encode_address32` and `x86_validate_address32` work as the 64-bit
+functions do, but give every memory operand a `67`, from the templates
+`x86_encoder_initialize_address32` builds (both need it, validation too). A call can't mix address sizes, and the
 64-bit loop pays nothing: its code is instruction for instruction the same.
 
 The 32-bit table, `x86_templates_address32`, has the 64-bit one's indices (FS
@@ -670,8 +674,8 @@ instructions with EVEX, in map 4), nor does the XSAVE family, with which REX2 is
 #UD (GNU as rejects it too).
 
 Like 32-bit addresses, APX's registers have an entry point of their own, with
-templates of their own: `x86_encode_apx`, `x86_encode_scalar_apx` and
-`x86_validate_apx`, from the table `x86_encoder_initialize_apx` builds (3.14 MB
+templates of their own: `x86_encode_apx` and `x86_validate_apx`, from the
+table `x86_encoder_initialize_apx` builds (3.14 MB
 more). An instruction without registers 16 to 31 encodes as with `x86_encode`:
 REX2 is there only where one of them needs it. Template copies couldn't do it,
 as REX2 depends on the operands, not the form, and in map 1 it takes the `0F`'s
@@ -825,8 +829,8 @@ them, that would cost every group the same 20%.
 32-bit mode (protected mode, and compatibility mode under a 64-bit kernel, with
 a 32-bit code segment) and 16-bit mode (real mode, virtual-8086 mode, and
 protected mode with a 16-bit code segment) have entry points of their own:
-`x86_encode_mode32`, `x86_encode_scalar_32` and `x86_validate_32`, and
-`x86_encode_mode16`, `x86_encode_scalar_16` and `x86_validate_16`, after
+`x86_encode_mode32` and `x86_validate_32`, and `x86_encode_mode16` and
+`x86_validate_16`, after
 `x86_encoder_initialize_legacy`. An instruction is the same record, with the
 form table's forms and their fixed operand sizes, and the mode decides the
 prefixes:
@@ -1671,11 +1675,12 @@ processes.
   the 8087's and 287's control instructions and the waiting forms with `9B`
   before a segment override and `66`, `enclv`, `vmgexit`, `rmpquery` and
   `rmpread`, Zhaoxin's PadLock and GMI instructions, and AVX512_BMM in map 6),
-  with both encoders, and each again with the fixup flag, whose end both must
+  with `x86_encode`, and each again with the fixup flag, whose end it must
   report;
-- a digest of the scalar encoder's output for 100,000 random instructions,
-  recorded when GNU as encoded the same stream to the same bytes;
-- every batch width and variant against the scalar encoder, byte for byte,
+- a digest of the reference encoder's output (each entry point after its
+  validation, since #2924 removed the scalar encoders) for 100,000 random
+  instructions, recorded when GNU as encoded the same stream to the same bytes;
+- every batch width and variant against the reference encoder, byte for byte,
   offset for offset and fixup end for fixup end, in each of its four loops (with
   neither, either or both of offsets and fixup ends), on every count from 0 to
   199 and on 300,000 random instructions of all forms, with empty instructions
@@ -1691,7 +1696,7 @@ processes.
   form can't have, unknown mode bits, an index register or a scale without an
   index, a memory operand in a form without one, a register in a form that takes
   only memory, a segment override without a memory operand: ones the encoding
-  can't represent) are found by `x86_validate`, and rejected by the scalar
+  can't represent) are found by `x86_validate`, and rejected by the reference
   encoder, which validates first (`x86_encode` doesn't check them), and that
   immediates, rel8s and rel16s
   just outside their fields' ranges (above and below, in an imm8, imm16, ENTER's,
@@ -1710,7 +1715,7 @@ processes.
   (AVX2's) aren't different registers, which the encoding can represent, are
   too;
 - then all but the known fixups (which are 64-bit) again with 32-bit addresses,
-  which is all `--address32` runs: both encoders on 34 known encodings from GNU
+  which is all `--address32` runs: `x86_encode_address32` on 34 known encodings from GNU
   as (the `67` after a segment override and `3E` and before `66`, `F2`, `F0`,
   REX, VEX and EVEX, and after FWAIT's `9B`, RBP, R13, RSP and R12 bases, an
   index scaled by 1 without a base, an absolute address and EIP, gathers by XMM2
@@ -1718,12 +1723,12 @@ processes.
   `notrack` jumps through memory, `movdir64b`, `lock cmpxchg16b` with GS and
   REX, no `67` without a memory operand, and the longest, 15 bytes), a digest of
   their own, `x86_encode_16_address32` and `x86_encode_64_address32` against the
-  scalar encoder on the random streams and at page edges, and the invalid
+  reference encoder on the random streams and at page edges, and the invalid
   operands with two more breaks: an MPX memory operand and a memory operand in a
   form without room for the `67` (as every mode's validation rejects its own
   forms without room);
-- then all but the known fixups again for APX, which is all `--apx` runs: both
-  encoders on 153 known encodings from GNU as (REX2 in maps 0 and 1 with
+- then all but the known fixups again for APX, which is all `--apx` runs:
+  `x86_encode_apx` on 153 known encodings from GNU as (REX2 in maps 0 and 1 with
   registers 16 to 31 in reg, rm, the base and the index, R20 and R28 as bases
   with a SIB byte and R21 and R29 with an 8-bit zero, R20 as an index, W, `66`,
   `F2`, `F3`, `F0`, `3E` and FS before `D5`, the `+r` forms, SIL with REX2, x87,
@@ -1738,14 +1743,14 @@ processes.
   flags value among them, and `pushp`, `popp` and `jmpabs`, with REX2 for
   registers 0 to 15 too; and REX, VEX, EVEX, map 2 and the XSAVE family
   without them, as `x86_encode` encodes them), 31 known invalid instructions
-  that `x86_validate_apx` and the scalar encoder must reject, as GNU as does
+  that `x86_validate_apx` and so the reference encoder must reject, as GNU as does
   (the XSAVE family with a
   base or index from 16 to 31, a high byte register with REX2 or in an EVEX
   form, XMM16 to XMM31 in SSE's forms, registers 16 to 31 in VEX forms without
   an EVEX one, and in the VEX and legacy map 2 forms of instructions with an APX
   EVEX one, `setzucc` on memory, a default flags value past 15, `ctest` with an
   opmask and `push2` on memory), a digest of their own, `x86_encode_16_apx`
-  and `x86_encode_64_apx` against the scalar encoder on the random streams
+  and `x86_encode_64_apx` against the reference encoder on the random streams
   (half the forms with REX2
   and a quarter EVEX ones, whose general registers, bases and general indexes
   are 16 to 31 half the time) and at page edges, and the invalid operands with
@@ -1753,7 +1758,7 @@ processes.
   or index from 16 to 31 in a form without REX2 or EVEX, and a vector register
   rm from 16 to 31 in a form with REX2;
 - then in 32-bit mode and in 16-bit mode, which is all `--mode32` and `--mode16`
-  run: both encoders on 159 and 150 known encodings from GNU as (both operand
+  run: the modes' entry points on 159 and 150 known encodings from GNU as (both operand
   and address sizes, ModRM's eight
   16-bit addresses and its absolute one, 16-bit displacements modulo 2^16,
   `[bp]`'s zero, 32-bit absolute addresses without a SIB byte, high byte
@@ -1766,7 +1771,7 @@ processes.
   overrides of every segment in the decorations), 13 and 16 known fixups (rel8s,
   rel16s and rel32s, 16- and 32-bit displacements and immediates, far pointers'
   offsets and moffs), a digest of each, the modes' loops at 16 and 64 per
-  iteration (`x86_encode_16_mode32` and the rest) against the scalar encoders
+  iteration (`x86_encode_16_mode32` and the rest) against the reference encoders
   on the random streams
   (of whose 300,000 instructions 40,300 and 116,400 have a 16-bit address,
   17,500 an override in the decorations, 10,500 of them in EVEX forms, 1,100 to
@@ -1775,7 +1780,7 @@ processes.
   (in 16-bit mode, the longest of the 17 forms that have them, HLE's locked
   arithmetic by an imm32, `bextr`, `lwpins` and `lwpval`: with an FS form, with
   an override in the decorations, and with REX's bits instead, an index past 7,
-  which validation and the scalar encoder must reject), and
+  which validation and so the reference encoder must reject), and
   the invalid operands, with the 64-bit breaks that apply and five more: a
   register that would need REX (8 to 15 but CR8, or SPL to DIL), a memory
   operand the address size can't have (RIP, a VSIB, SIB or MPX operand with a
@@ -1785,8 +1790,8 @@ processes.
   with the rows of these modes), an instruction longer than 15 bytes, and a
   segment override where the instruction can't take one, or past GS.
 
-`--print-assembly` and `--compare-object` cross-check the scalar encoder against
-GNU as for any seed (AGENTS.md has the commands): 1.7 million random
+`--print-assembly` and `--compare-object` cross-check the reference encoder
+(before #2924, the scalar encoder) against GNU as for any seed (AGENTS.md has the commands): 1.7 million random
 instructions over all forms (seeds 1, 7 and 99), 0 differences. The streams have
 every family in proportion to its forms: of 200,000 instructions, 104,700 EVEX
 (49,800 with an opmask, 22,000 zeroing, 33,800 broadcasts, 9,800 rounding or
