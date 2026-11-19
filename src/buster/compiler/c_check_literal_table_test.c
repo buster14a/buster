@@ -152,6 +152,32 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
     }
 }
 
+// check_literal_table_shape's grammar a token at a time: a number after a comma or a minus, a minus after a comma, a
+// comma after a number, the list neither empty nor ending in a minus; the numbers' count, or 0.
+static uint32_t check_test_literal_shape_reference(const uint8_t* kinds, uint32_t count)
+{
+    uint32_t numbers = 0;
+    uint8_t previous = PARSE_KIND_COMMA;
+    bool valid = count != 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t kind = kinds[i];
+        valid &= (kind == PARSE_KIND_NUMBER && (previous == PARSE_KIND_COMMA || previous == PARSE_KIND_MINUS)) ||
+                 (kind == PARSE_KIND_MINUS && previous == PARSE_KIND_COMMA) || (kind == PARSE_KIND_COMMA && previous == PARSE_KIND_NUMBER);
+        numbers += kind == PARSE_KIND_NUMBER;
+        previous = kind;
+    }
+    return valid && previous != PARSE_KIND_MINUS ? numbers : 0;
+}
+
+static uint32_t check_test_literal_draw(uint64_t* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return (uint32_t)(*state >> 32);
+}
+
 static void check_test_literal_table_shapes(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -178,6 +204,34 @@ static void check_test_literal_table_shapes(CheckTest* test)
             kinds[at] = saved;
         }
     }
+    // Lists of numbers, commas and minuses, mostly well formed: each token, with one chance in 24, takes a kind its
+    // predecessor doesn't allow (a number after a number, a comma after a comma or a minus, a minus after a number or a
+    // minus), at every length to 257 and so at every lane of the 64-token blocks, against the grammar's reading.
+    uint32_t accepted = 0;
+    uint32_t refused = 0;
+    bool same = true;
+    // Its own generator, so that the tests after it draw what they drew before (generated fixtures are keyed by source).
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t trial = 0; ready && trial < 2048; trial += 1)
+    {
+        const uint32_t count = trial % 258;
+        uint8_t* kinds = mapping + page - count;
+        uint8_t previous = PARSE_KIND_COMMA;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint8_t allowed = previous == PARSE_KIND_NUMBER ? PARSE_KIND_COMMA : check_test_literal_draw(&state) % 4 == 0 && previous == PARSE_KIND_COMMA ? PARSE_KIND_MINUS : PARSE_KIND_NUMBER;
+            const uint8_t wrong = previous == PARSE_KIND_NUMBER ? (check_test_literal_draw(&state) % 2 == 0 ? PARSE_KIND_NUMBER : PARSE_KIND_MINUS) :
+                                  previous == PARSE_KIND_MINUS ? (check_test_literal_draw(&state) % 2 == 0 ? PARSE_KIND_COMMA : PARSE_KIND_MINUS) : PARSE_KIND_COMMA;
+            kinds[i] = check_test_literal_draw(&state) % 24 == 0 ? wrong : allowed;
+            previous = kinds[i];
+        }
+        const uint32_t expected = check_test_literal_shape_reference(kinds, count);
+        same &= check_literal_table_shape(kinds, 0, count) == expected;
+        accepted += expected != 0;
+        refused += count != 0 && expected == 0;
+    }
+    check_test_expect(test, same, "literal grammar: the 64-token blocks read random lists as the grammar does at every length");
+    check_test_expect(test, accepted != 0 && refused != 0, "literal grammar: the random lists reach both verdicts");
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, page * 2);
