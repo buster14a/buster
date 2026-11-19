@@ -101,6 +101,11 @@
 // evaluated, or its verdict, in turn), so that the comparison is seen to count every one of them
 // (c_check_node_machine_facts.c's node_facts_reader_fault).
 #define BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT 8u
+// test-checker's too (with BUSTER_NODE_READER_FACTS): the kernel's call rule's arguments' answers' slots are one
+// (c_check_node_machine_facts.c's NodeFacts.argument_one: an answer is written to every slot), so that a key's probe
+// meets another key's answer at its slot wherever the last answer was another's. The calls' loop then takes a slot's
+// answer for a key only where the slot has that key, or the kernel's records are not T's.
+#define BUSTER_NODE_READER_ONE_SLOT 256u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u
 // What the reference did with an expression (NodeFactsReader.c_ran, which the reader gives the kernel's state at each
@@ -185,6 +190,18 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_WINDOW_MADE,
     NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES,
     NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS,
+    // The kernel in place's calls: those it is to make and those it made; of the made, those whose arguments'
+    // conversions it made too, and the plain ones among them; those its rule left to T for an argument alone; those
+    // the rule made in the timed run, the short path having left them; and the answers its arguments' rule made (the
+    // unit's so far, as the slots' counts).
+    NODE_FACTS_COUNT_WINDOW_CALLS,
+    NODE_FACTS_COUNT_WINDOW_CALLS_MADE,
+    NODE_FACTS_COUNT_WINDOW_CALLS_CONVERTED,
+    NODE_FACTS_COUNT_WINDOW_CALLS_PLAIN,
+    NODE_FACTS_COUNT_WINDOW_CALLS_ARGUMENT,
+    NODE_FACTS_COUNT_WINDOW_ANSWERS,
+    NODE_FACTS_COUNT_ARGUMENT_ANSWERS,
+    NODE_FACTS_COUNT_ARGUMENT_ANSWER_TICKS,
     // The tests on the window (BUSTER_NODE_READER_WINDOW_TESTS): the expressions and records they ran on, the
     // expressions whose bits are not the reference's, and their ticks.
     NODE_FACTS_COUNT_TESTS_EXPRESSIONS,

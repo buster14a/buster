@@ -3651,6 +3651,12 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                 flag_bytes = _mm_or_si128(_mm_or_si128(_mm_maskz_set1_epi8(effects, BUSTER_NODE_CONTEXTS_EFFECTS), _mm_maskz_set1_epi8(element, BUSTER_NODE_CONTEXTS_VECTOR)),
                                           _mm_or_si128(_mm_maskz_set1_epi8(objected, BUSTER_NODE_CONTEXTS_OBJECT), _mm_maskz_set1_epi8(symbolled, BUSTER_NODE_CONTEXTS_SYMBOL)));
                 flag_bytes = _mm_or_si128(flag_bytes, _mm_maskz_set1_epi8(placed, BUSTER_NODE_CONTEXTS_PLACED));
+                // What a call's record says of its arguments' conversions (the kernel's call rule's two bits of its
+                // exponent, which the standing's gather has).
+                const __mmask16 converted_call = _mm512_test_epi32_mask(standings, _mm512_set1_epi32((int32_t)((uint32_t)BUSTER_NODE_FACTS_CONVERTED_CALL << 16)));
+                const __mmask16 plain_call = _mm512_test_epi32_mask(standings, _mm512_set1_epi32((int32_t)((uint32_t)BUSTER_NODE_FACTS_PLAIN_CALL << 16)));
+                flag_bytes = _mm_or_si128(flag_bytes, _mm_or_si128(_mm_maskz_set1_epi8(converted_call, BUSTER_NODE_CONTEXTS_CONVERTED),
+                                                                   _mm_maskz_set1_epi8(plain_call, BUSTER_NODE_CONTEXTS_PLAIN)));
             }
             if (tests->verify_quiet)
             {
@@ -4468,7 +4474,7 @@ struct NodeShadow
     // packed unit's addresses at least the witnesses', and its events the reader's own alone), which must be none too;
     // `tested_kind_differences` the popped roots whose kind the front's root gives otherwise than the control.
     // By test: the expressions reader time alone refuses by it, and the census alone.
-    uint8_t reader;
+    uint16_t reader;
     uint64_t tested_expressions;
     uint64_t tested_refused;
     uint64_t tested_any[NODE_CENSUS_TESTS];
@@ -6135,6 +6141,8 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
         const double kernel = window_records != 0 ? (double)counts[NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS] / (double)window_records : 0.0;
         const double written = window_records != 0 ? (double)rise / (double)window_records : 0.0;
         const double named = window_records != 0 ? (double)names / (double)window_records : 0.0;
+        const uint64_t answers = counts[NODE_FACTS_COUNT_ARGUMENT_ANSWERS];
+        const double answered = answers != 0 ? (double)counts[NODE_FACTS_COUNT_ARGUMENT_ANSWER_TICKS] / (double)answers : 0.0;
         printf("node-shadow: reader-time fact words windows the front wrote: expressions=%" PRIu64 " (%.2f%%) records=%" PRIu64 " (%.2f%%) differences=%" PRIu64
                " expressions-not-there-in-a-row=%" PRIu64 "\n",
                counts[NODE_FACTS_COUNT_WINDOW_EXPRESSIONS], node_census_share(counts[NODE_FACTS_COUNT_WINDOW_EXPRESSIONS], counts[NODE_FACTS_COUNT_EXPRESSIONS]), window_records,
@@ -6143,6 +6151,12 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
                " (%.2f a record)\n",
                counts[NODE_FACTS_COUNT_WINDOW_WANTED], counts[NODE_FACTS_COUNT_WINDOW_MADE], counts[NODE_FACTS_COUNT_WINDOW_WANTED] - counts[NODE_FACTS_COUNT_WINDOW_MADE],
                counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES], counts[NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS], kernel);
+        printf("node-shadow: reader-time fact words the kernel in place's calls: to-make=%" PRIu64 " made=%" PRIu64 " with-every-argument's-conversion=%" PRIu64
+               " (%.2f%% of the calls to make) of-them-plain=%" PRIu64 " left-for-an-argument=%" PRIu64 "; the arguments' rule's answers=%" PRIu64
+               " of-them-in-the-timed-run=%" PRIu64 " ticks=%" PRIu64 " (%.1f an answer)\n",
+               counts[NODE_FACTS_COUNT_WINDOW_CALLS], counts[NODE_FACTS_COUNT_WINDOW_CALLS_MADE], counts[NODE_FACTS_COUNT_WINDOW_CALLS_CONVERTED],
+               node_census_share(counts[NODE_FACTS_COUNT_WINDOW_CALLS_CONVERTED], counts[NODE_FACTS_COUNT_WINDOW_CALLS]), counts[NODE_FACTS_COUNT_WINDOW_CALLS_PLAIN],
+               counts[NODE_FACTS_COUNT_WINDOW_CALLS_ARGUMENT], answers, counts[NODE_FACTS_COUNT_WINDOW_ANSWERS], counts[NODE_FACTS_COUNT_ARGUMENT_ANSWER_TICKS], answered);
         printf("node-shadow: reader-time fact words the front with the window: ticks=%" PRIu64 " records=%" PRIu64 "; the same front without it, on the same chunks: ticks=%"
                PRIu64 " records=%" PRIu64 " chunks-that-differ=%" PRIu64 "; the rise=%" PRIu64 " (%.2f ticks a record of the windows)\n",
                shadow->front_ticks, shadow->front_records, shadow->front_plain_ticks, shadow->front_plain_records, shadow->front_plain_differences, rise, written);

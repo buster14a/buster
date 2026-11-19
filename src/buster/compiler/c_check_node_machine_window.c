@@ -24,16 +24,26 @@
 //     64 rows, one register), the block's own templates read through the same distances forward. A record its
 //     consumer doesn't evaluate, with records below, takes their range out (a record at a time: few have any).
 // - The targets (node_contexts_window_targets, 16 records a step): the type a source names, one gather from the
-//   consumer's record's line (T's conversion of the operand, or the consumer's own type).
+//   consumer's record's line (T's conversion of the operand, or the consumer's own type) or, for a call's argument,
+//   from its own (its conversion's type, which the kernel's call rule made there).
 // - An expression's part (node_contexts_window_chunk, an expression at a time): whether it is decided here (none of its
 //   records is listed), whether C refuses it (an evaluated record with no template), and its root's target, given.
 //
-// What is listed, for C on T's records as before: a call, a logical operator, a conditional, an update, a comma, a
-// selection, a division or a remainder by an integer constant (the tasks' when its divisor is a power of two: the
-// divisor's value), a record whose value the columns don't hold whole, a cast to a union, a leaf C's rules give a
-// template the loop doesn't make, and any operator without a case here. Listing is always safe: C decides the
-// expression. A refusal has to be C's own, so each of C's terms is here unless what makes the records implies it, and
-// the comments say what does.
+// A call (node_machine_classify_call) is the one operator whose operands' targets are in no consumer's line: an
+// argument's is its conversion's type, which the kernel's call rule makes with the call's record
+// (c_check_node_machine_facts.c's node_facts_argument_made) and keeps in the argument's record, and what C's `plain`
+// asks of the callee's prototype and of those conversions is a bit of the call's record. The call's template is then
+// one mask, its callee is evaluated unless the lowering calls it directly (its own bytes), and its arguments are, each
+// to its own record's target.
+//
+// What is listed, for C on T's records as before: a logical operator, a conditional, an update, a comma, a selection,
+// a division or a remainder by an integer constant (the tasks' when its divisor is a power of two: the divisor's
+// value), a record whose value the columns don't hold whole, a cast to a union, a leaf C's rules give a template the
+// loop doesn't make, a call whose arguments' conversions the kernel didn't all make (one T's rule or its action
+// makes, or a call the kernel left to T), a callee with an object that is no name's leaf (its symbol's bit is a
+// leaf's line's), and any operator without a case here. Listing is always safe: C decides the expression. A refusal
+// has to be C's own, so each of C's terms is here unless what makes the records implies it, and the comments say what
+// does.
 //
 // Four things are a record at a time: a pointer's stride, its type's row's (a subscript's and a pointer's sum's rule);
 // C's rule on T's two conversions themselves (node_contexts_converted), for a sum or a binary operator whose operands'
@@ -65,6 +75,12 @@
 #define BUSTER_NODE_CONTEXTS_OBJECT 0x04u
 #define BUSTER_NODE_CONTEXTS_SYMBOL 0x08u
 #define BUSTER_NODE_CONTEXTS_PLACED 0x10u
+// And two bits of a call's record alone, what the kernel's call rule says of it (BUSTER_NODE_FACTS_CONVERTED_CALL and
+// _PLAIN_CALL): each of its arguments' conversions is made, in the argument's record; and the call is a plain one,
+// its callee's prototype's result and parameters and its arguments' conversions' types plain scalars. Another record's
+// bits are its exponent's, for another reason: the loop reads them of calls alone.
+#define BUSTER_NODE_CONTEXTS_CONVERTED 0x20u
+#define BUSTER_NODE_CONTEXTS_PLAIN 0x40u
 
 // An operator's class in the loop, by its code (NodeContextsTables.classes): the cases the loop has, the kinds it
 // lists, and whether the operator evaluates its first operand for its address (BUSTER_NODE_CONTEXTS_CLASS_PLACE).
@@ -96,6 +112,8 @@
 #define BUSTER_NODE_CONTEXTS_SOURCE_GIVEN 1u
 #define BUSTER_NODE_CONTEXTS_SOURCE_NODE 2u
 #define BUSTER_NODE_CONTEXTS_SOURCE_LONG 3u
+// And its own record's: a call's argument's conversion's type, which the kernel's call rule wrote there.
+#define BUSTER_NODE_CONTEXTS_SOURCE_OWN 4u
 #define BUSTER_NODE_CONTEXTS_SOURCE 0x07u
 // A row's bit: the consumer evaluates the operand.
 #define BUSTER_NODE_CONTEXTS_EVALUATES 0x80u
@@ -203,12 +221,17 @@ static void node_contexts_tables(NodeContextsTables* tables)
     tables->rows[(CHECK_LOWER_TEMPLATE_STORE_GLOBAL << 1) + 1] = node;
     tables->rows[CHECK_LOWER_TEMPLATE_STORE << 1] = BUSTER_NODE_CONTEXTS_EVALUATES | BUSTER_NODE_CONTEXTS_SOURCE_NONE;
     tables->rows[(CHECK_LOWER_TEMPLATE_STORE << 1) + 1] = node;
+    // A plain call's (node_machine_classify_call): its callee for its value with no target (the loop takes a callee
+    // that is called directly out), and each argument to its conversion's type, its own record's.
+    tables->rows[BUSTER_NODE_MACHINE_TEMPLATE_CALL << 1] = BUSTER_NODE_CONTEXTS_EVALUATES | BUSTER_NODE_CONTEXTS_SOURCE_NONE;
+    tables->rows[(BUSTER_NODE_MACHINE_TEMPLATE_CALL << 1) + 1] = BUSTER_NODE_CONTEXTS_EVALUATES | BUSTER_NODE_CONTEXTS_SOURCE_OWN;
 }
 
-_Static_assert(CHECK_LOWER_TEMPLATE_STORE < 32 && CHECK_OP_COUNT <= 128, "a row's place in the table is a template and a place in six bits, and an operator's code is seven");
+_Static_assert(CHECK_LOWER_TEMPLATE_STORE < 16 && BUSTER_NODE_MACHINE_TEMPLATE_CALL < 32 && CHECK_OP_COUNT <= 128,
+               "a row's place in the table is a template and a place in six bits, the loop's own templates' numbers are four, and an operator's code is seven");
 _Static_assert(CHECK_LOWER_TEMPLATE_GLOBAL == (CHECK_LOWER_TEMPLATE_LOCAL | 1), "a global's template's number is a local's and one bit");
 _Static_assert(BUSTER_NODE_CONTEXTS_CLASS_DIVIDE == BUSTER_NODE_CONTEXTS_CLASS_BINARY + 1 && BUSTER_NODE_CONTEXTS_CLASS_CALL == BUSTER_NODE_CONTEXTS_CLASS_DIVIDE + 1 &&
-               BUSTER_NODE_CONTEXTS_CLASS_COMMA <= BUSTER_NODE_CONTEXTS_CLASS_KIND,
+               BUSTER_NODE_CONTEXTS_CLASS_LOGICAL == BUSTER_NODE_CONTEXTS_CLASS_CALL + 1 && BUSTER_NODE_CONTEXTS_CLASS_COMMA <= BUSTER_NODE_CONTEXTS_CLASS_KIND,
                "the loop reads the binary classes and the listed kinds as ranges");
 
 // A 128-entry byte table by a key of seven bits, as two registers: one byte permute of two registers.
@@ -511,7 +534,8 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         // The two binary classes are one range, and so are the kinds the loop has no case for, with no class at all.
         const __mmask64 is_binary = _mm512_cmple_epu8_mask(_mm512_sub_epi8(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_BINARY)),
                                                            _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_DIVIDE - BUSTER_NODE_CONTEXTS_CLASS_BINARY));
-        const __mmask64 is_uncased = _mm512_cmpge_epu8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CALL)) | _mm512_testn_epi8_mask(class_kinds, class_kinds);
+        const __mmask64 is_call = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CALL));
+        const __mmask64 is_uncased = _mm512_cmpge_epu8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_LOGICAL)) | _mm512_testn_epi8_mask(class_kinds, class_kinds);
         const __mmask64 both_scalar = left_scalar & right_scalar;
         // The templates, C's rules (node_machine_classify's) as a mask a template: what every operator shares comes
         // first (a type no template takes, an atomic lvalue's read, a folded constant), then an operator's own case,
@@ -552,9 +576,24 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         const __mmask64 made_store_local = free & storable & named & ~named_global;
         const __mmask64 made_store_global = free & storable & named & named_global;
         const __mmask64 made_store = free & storable & ~named;
+        // A call (node_machine_classify_call, which C runs of a call before any rule the operators share): a plain one,
+        // by what the kernel's call rule says of its callee's prototype and of its arguments' conversions, evaluated for
+        // its value. A call whose arguments' conversions the kernel didn't all make has no targets to give them here,
+        // and lists its expression.
+        const __mmask64 converted_call = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CONVERTED));
+        const __mmask64 plain_call = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_PLAIN));
+        const __mmask64 made_call = is_call & ~address & plain_call;
+        // Its callee, where the lowering calls it directly (node_machine_direct_callee): no lvalue, an address constant
+        // with no offset, of an object that has a symbol, and no effect. C doesn't evaluate it. Whether an object has a
+        // symbol is a name's leaf's line's: another record with an object's address, as a callee, lists its expression.
+        const __mmask64 callee = first_place & _mm512_cmpeq_epi8_mask(_mm512_and_si512(consumer_classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_KIND)),
+                                                                      _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CALL));
+        const __mmask64 offset = _mm512_test_epi8_mask(standings, _mm512_set1_epi8(BUSTER_NODE_MACHINE_OFFSET));
+        const __mmask64 called = callee & ~lvalue & address_constant & ~offset & has_object & ~effects;
+        const __mmask64 direct = called & symbol;
         // What lists its expression: an operator with no case here, and the records the cases don't take.
         const __mmask64 divisor = is_divide & right_constant;
-        const __mmask64 listed = placed & (is_uncased | (is_wrap & union_type) | divisor | wide | odd_leaf);
+        const __mmask64 listed = placed & (is_uncased | (is_wrap & union_type) | divisor | wide | odd_leaf | (is_call & ~converted_call) | (called & ~is_value));
         _mm512_storeu_si512(state->window_c_contexts + x, _mm512_maskz_mov_epi8(address, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS)));
         _mm512_storeu_si512(state->window_c_reasons + x, class_kinds);
         // A pointer's sum and a subscript: its stride is its type's row's, a record at a time, here where the step's
@@ -584,13 +623,15 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         const __mmask64 bit1 = made_pass | made_dereference | made_truth | made_binary | made_store_global | made_store;
         const __mmask64 bit2 = made_name | made_pass | made_dereference | made_pointer | made_store_local | made_store_global | made_store;
         const __mmask64 bit3 = made_member | made_unary | made_truth | made_binary | made_pointer | made_store_local | made_store_global | made_store;
-        const __m512i templates = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(bit0, _mm512_set1_epi8(1)), _mm512_maskz_mov_epi8(bit1, _mm512_set1_epi8(2))),
-                                                  _mm512_or_si512(_mm512_maskz_mov_epi8(bit2, _mm512_set1_epi8(4)), _mm512_maskz_mov_epi8(bit3, _mm512_set1_epi8(8))));
+        const __m512i own_templates = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(bit0, _mm512_set1_epi8(1)), _mm512_maskz_mov_epi8(bit1, _mm512_set1_epi8(2))),
+                                                      _mm512_or_si512(_mm512_maskz_mov_epi8(bit2, _mm512_set1_epi8(4)), _mm512_maskz_mov_epi8(bit3, _mm512_set1_epi8(8))));
+        // A call's template's number is past those four bits, and no other mask has a call's record.
+        const __m512i templates = _mm512_mask_mov_epi8(own_templates, made_call, _mm512_set1_epi8(BUSTER_NODE_MACHINE_TEMPLATE_CALL));
         // What its consumer's template gives it: whether it is evaluated, and its target's source.
         const __m512i near_templates = _mm512_maskz_permutex2var_epi8(near_up, templates, at_up, next_templates);
         const __m512i consumer_templates = _mm512_mask_loadu_epi8(near_templates, far_up, far_bytes[BUSTER_NODE_CONTEXTS_FAR_TEMPLATE]);
         const __m512i rows = _mm512_permutexvar_epi8(_mm512_or_si512(_mm512_slli_epi16(consumer_templates, 1), places), _mm512_load_si512(tables->rows));
-        const __mmask64 evaluates = _mm512_test_epi8_mask(rows, _mm512_set1_epi8((char)BUSTER_NODE_CONTEXTS_EVALUATES));
+        const __mmask64 evaluates = _mm512_test_epi8_mask(rows, _mm512_set1_epi8((char)BUSTER_NODE_CONTEXTS_EVALUATES)) & ~direct;
         const __m512i sources = _mm512_maskz_mov_epi8(~addressed, _mm512_and_si512(rows, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_SOURCE)));
         _mm512_storeu_si512(state->window_c_templates + x, templates);
         _mm512_storeu_si512(state->window_c_sources + x, sources);
@@ -645,9 +686,13 @@ static __attribute__((noinline)) void node_contexts_window_targets(struct NodeFa
         const __m512i consumers = _mm512_add_epi32(_mm512_add_epi32(_mm512_set1_epi32((int32_t)x), lanes), ups);
         const __m512i converted = _mm512_add_epi32(_mm512_set1_epi32((int32_t)offsetof(NodeFactsRecord, converted)),
                                                    _mm512_slli_epi32(_mm512_min_epu32(places, _mm512_set1_epi32(1)), 2));
-        const __m512i fields = _mm512_mask_mov_epi32(converted, node, _mm512_set1_epi32((int32_t)offsetof(NodeFactsRecord, type)));
-        const __m512i offsets = _mm512_add_epi32(_mm512_slli_epi32(consumers, 6), fields);
-        const __m512i gathered = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), given | node, offsets, records, 1);
+        // A call's argument's is in its own record's line, its last quadword.
+        const __mmask16 own = _mm512_mask_cmpeq_epi32_mask(alive, sources, _mm512_set1_epi32(BUSTER_NODE_CONTEXTS_SOURCE_OWN));
+        const __m512i lines = _mm512_mask_mov_epi32(consumers, own, _mm512_add_epi32(_mm512_set1_epi32((int32_t)x), lanes));
+        __m512i fields = _mm512_mask_mov_epi32(converted, node, _mm512_set1_epi32((int32_t)offsetof(NodeFactsRecord, type)));
+        fields = _mm512_mask_mov_epi32(fields, own, _mm512_set1_epi32((int32_t)offsetof(NodeFactsRecord, spare)));
+        const __m512i offsets = _mm512_add_epi32(_mm512_slli_epi32(lines, 6), fields);
+        const __m512i gathered = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), given | node | own, offsets, records, 1);
         const __m512i targets = _mm512_mask_mov_epi32(gathered, index, _mm512_set1_epi32((int32_t)BUSTER_TYPE_LONG));
         _mm512_storeu_si512(state->window_c_targets + x, targets);
     }
