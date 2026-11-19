@@ -1965,3 +1965,52 @@ window's (`node_contexts_test_source`), a line a case of a term, and a unit
 with a segment's space (`node_contexts_test_spaced_source`). The updates
 asked and taken are pinned (`NodeContextsExpected.updates` and
 `.updates_taken`).
+
+### A condition's branches on the window (#2850)
+
+The same command, `measure-node-machine --shadow --window-contexts`. C's
+answers for a statement's CONDITION over `&&`, `||` and `!`, which C
+evaluates as branches and no value (`NODE_MACHINE_TEMPLATE_BRANCHES`), are
+made on the window by the loop's masks. No compile takes any of it. [The
+design](../node-machine.md#a-conditions-branches-on-the-window) has what it
+measured.
+
+- **Each record says it of itself** (`node_contexts_window_loop` in
+  `c_check_node_machine_window.c`), where C branches a record from the root
+  down: from its own bytes, its first operand's and its consumer's class.
+  The comment there says, for each term of C's rule
+  (`node_machine_branch_operator`, `node_machine_branch_condition`,
+  `node_machine_classify_branches`), which byte gives it or why none is
+  needed.
+- **A branch operator** is a `!`, an `&&` or an `||` that is no folded
+  constant, and for `&&` and `||` one whose first operand's truth is not
+  known: no constant, or an object's lvalue, whose constant is its address.
+- **A CONDITION is branched** where its operand is `&&` or `||`; `&&` and
+  `||` are under a CONDITION, an `&&`, an `||` or a `!`; `!` is under an
+  `&&` or an `||`.
+- **What one level cannot say lists the expression:** an `&&` or an `||`
+  that is not branched (a value, or one whose first operand's truth is
+  known); a `!` that is a value over `&&` or `||`, which a CONDITION over it
+  is too; and a branched `!` over a `!`. The reason is
+  `logical-or-conditional`.
+- **A branched record's operands** are each evaluated: one branched in its
+  turn with no target, a value to T's conversion of it, which C then tests.
+  An operand of a type no truth's entries test leaves the record no
+  template, which refuses the expression.
+- **A class and a bit are new** in the classes' table: a conditional's own
+  class (`BUSTER_NODE_CONTEXTS_CLASS_CONDITIONAL`; it had `&&`'s and `||`'s,
+  and is listed still), and a statement's CONDITION's bit
+  (`BUSTER_NODE_CONTEXTS_CLASS_CONDITION`), which `!` has not. A far first
+  operand's standing is a row more of the far lanes'.
+
+The report adds:
+
+- `node-shadow: window contexts branched=N (P% of the records swept)
+  of-them-a-condition=N`: the records the loop evaluates as branches, and
+  the statements' CONDITIONs among them.
+
+`test-checker` (part 5 of 8) reads the lines from "A condition's branches"
+on in C on the window's fixture (`node_contexts_test_source`), a line a case
+of a term, and six statements 64 times each for the blocks' ends. The
+branched records and the CONDITIONs among them are pinned
+(`NodeContextsExpected.branched` and `.branched_roots`).

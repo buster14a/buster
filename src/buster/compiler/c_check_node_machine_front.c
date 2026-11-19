@@ -252,6 +252,10 @@ typedef enum NodeFactsCount
     // The updates C asks its plan of, and those of them the loop's masks took: another lists its expression.
     NODE_FACTS_COUNT_CONTEXTS_UPDATES,
     NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN,
+    // The records the loop evaluates as branches (a statement's CONDITION over `&&`, `||` and `!`), and those of them
+    // that are the CONDITION.
+    NODE_FACTS_COUNT_CONTEXTS_BRANCHED,
+    NODE_FACTS_COUNT_CONTEXTS_BRANCHED_ROOTS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 

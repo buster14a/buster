@@ -2015,6 +2015,79 @@ ticks:
   expressions on `sqlite3.c`. Those, a comma, then X on these answers: until
   X reads them the sum of step 2 does not move.
 
+## A condition's branches on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/a-conditions-branches-on-the-window-2850-2026-11-19).
+`measure-node-machine --shadow --window-contexts`
+([the guide](commands/lowering.md#a-conditions-branches-on-the-window-2850)).
+
+After the updates, `&&`, `||` and `?:` were most of what C on the window
+still listed: 2,744 of 3,730 expressions on `sqlite3.c`. They are two cases
+in C, and this piece is the first: a statement's CONDITION over `&&`, `||`
+and `!`, which C evaluates as branches and no value. No compile takes any of
+it. [The node machine's page](node-machine.md#a-conditions-branches-on-the-window)
+has it whole: C's rule term by term, the switch, the builds, the loop's
+frame, the probes and the faults. [Its
+specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7016320819)
+had four gates.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release, TSC ticks; one executable with the
+piece's block on and off, each of seven readings' own difference, and the
+build before (#3025's code) against the piece's, medians of seven readings
+(musl's of fifteen):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| records evaluated as branches | 5,613 | 570 | 2,364 |
+| **expressions decided on the window: before, with** | **92.69%, 96.70%** | **91.12%, 92.99%** | **94.29%, 96.19%** |
+| **one executable, the loop a record swept: on less off** | **+0.24** | **+0.27** | -0.12 |
+| **C's three sweeps, a record of the decided: on less off** | **-0.36** | **-0.20** | -1.91 |
+| build against build, C's sweeps with the records' bytes, a record of the decided: before, with | 8.86, 8.38 | 13.55, 13.78 | 29.58, 30.72 |
+| the reference's C on the same expressions | 38.7 | 37.2 | 41.4 |
+| the kernel in place, a record: before, with | 17.66, 17.37 | 22.40, 22.40 | 20.50, 20.39 |
+
+### Against its gates
+
+- **Exact: met.** The fixtures, 257 statements run one at a time, and the
+  three corpora and the compiler's own source with the default warnings and
+  with every warning.
+- **Decided: met.** 49,313, 10,079, 41,759 and 41,314 expressions on
+  `sqlite3.c`, Lua, musl and the compiler's own source, for 49,200, 10,050,
+  41,650 and 40,900 asked.
+- **Cost, by one executable: met.** The block lowers C's sweeps a record of
+  the decided on `sqlite3.c` and Lua, and the loop reads 0.24 and 0.27 ticks
+  a record swept more, for 0.5 asked.
+- **Nothing else moves: met.** The kernel in place and the tests on the
+  window read what they did, on and off.
+
+### What it means
+
+- **Nineteen in twenty expressions the kernel places on `sqlite3.c` and musl
+  have C's answers from the window**, and thirteen in fourteen on Lua, at 8 to
+  14 ticks a record of theirs on `sqlite3.c` and Lua where C on T's columns
+  reads 37 to 39.
+- **One level of bytes was enough.** C branches a record from the root down.
+  Each record says it of itself from its own bytes, its first operand's and
+  its consumer's class, because whatever is not branched is a value, and a
+  value lists its expression here: a provisional answer is read by no one.
+- **Implied terms asked no mask again.** The int's class of a `!`, an `&&`
+  and an `||`, a truth's own class and its operand's class's bounds are the
+  checker's or another record's: the piece is fourteen vector operations a
+  step, and a truth's operand's test two fewer than it was.
+- **The loop's frame is the next cost.** The piece's build has 73
+  instructions a step more than the one before, 37 of them frame traffic,
+  and 256 of a step's 819 instructions have an operand in the frame. On Lua
+  the switch's executable reads the loop above the build before with the
+  block skipped, 5.03 for 4.82, as the update's did.
+- **The probes found a fault that is not this piece's:** a condition on an
+  lvalue at an absolute address is compiled as true
+  ([#3028](https://github.com/buster14a/buster/issues/3028)).
+- **What is listed still** is `&&` and `||` as values and `?:`: 674 of 1,683
+  expressions on `sqlite3.c`. Those, a comma, then X on these answers: until
+  X reads them the sum of step 2 does not move.
+
 ## Step 4's first piece: a census of Tier 0's row
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-census-2874-2026-11-16)
