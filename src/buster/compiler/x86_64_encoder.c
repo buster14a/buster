@@ -11,9 +11,8 @@
 //
 // Entry points: x86_encoder_initialize (builds the templates; call it once before encoding), x86_encode (the
 // vectorized encoder, the code generator's, which takes the valid instructions instruction selection and register
-// allocation make and checks nothing about them), x86_encode_scalar (a plain reference encoder, for testing),
-// x86_measure and x86_measure_scalar (the same offsets and length without retaining machine code),
-// x86_validate (which checks that every instruction is one x86_encode can take, for tests and debugging) and
+// allocation make and checks nothing about them), x86_measure (the same offsets and length without retaining machine
+// code), x86_validate (which checks that every instruction is one x86_encode can take, for tests and debugging) and
 // x86_form_descriptions (the form table, for tests and diagnostics). The output needs room for
 // BUSTER_X86_ENCODER_CAPACITY(count) bytes; x86_encode writes nothing past that, but may write past the instructions'
 // bytes (its 64-byte stores). Besides the machine code, x86_encode can store each instruction's offset, and the end of
@@ -66,8 +65,8 @@
 //     instruction_is_valid (x86_instruction_is_valid, x86_instruction_is_valid_address32, x86_instruction_is_valid_apx,
 //     x86_instruction_is_valid_32 and x86_instruction_is_valid_16) and x86_validate (and x86_validate_address32,
 //     x86_validate_apx, x86_validate_32 and x86_validate_16).
-//   - The scalar encoder: encode_one, and x86_encode_scalar, x86_encode_scalar_address32, x86_encode_scalar_apx,
-//     x86_encode_scalar_32 and x86_encode_scalar_16.
+//   - The scalar encoder: encode_one (which validation in 16- and 32-bit modes measures by, and the assembler's form
+//     matching), and x86_encode_scalar_address32, x86_encode_scalar_apx, x86_encode_scalar_32 and x86_encode_scalar_16.
 //   - The vectorized encoder: X86Gather, X86Store and X86FixupStore (the variants the benchmark compares), X86Fields,
 //     the addressing mode tables (x86_mode_fields, x86_mode_constants and x86_mode_presence; for APX
 //     x86_mode_fields_apx; and for 16- and 32-bit modes x86_mode_fields_16, the
@@ -5046,17 +5045,11 @@ static __attribute__((unused)) bool x86_encoder_initialize(void);
 // have 16 bytes, even past the capacity), as is a form number past the form table's, whose template it would read.
 static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                   uint32_t* fixup_ends);
-// The same, one instruction at a time from the form table, after x86_validate: the reference for testing. Its fixup
-// ends need room for the marked instructions' alone.
-static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                                         uint32_t* fixup_ends);
 // The offsets and length x86_encode would produce, without a machine-code buffer. Requires the same initialized
 // templates and validated 64-bit-mode instructions. The records and offsets are disjoint; offsets has room for count
 // uint32_t values, and no padding is read or written. A zero count permits null pointers. Counts past
 // BUSTER_X86_ENCODER_MAX_INSTRUCTIONS return X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS without accessing either array.
-// The scalar twin uses encode_one's independent form rules, with a bounded local buffer for one instruction.
 static __attribute__((unused)) int64_t x86_measure(const X86Instruction* instructions, uint64_t count, uint32_t* offsets);
-static __attribute__((unused)) int64_t x86_measure_scalar(const X86Instruction* instructions, uint64_t count, uint32_t* offsets);
 // The index of the first instruction that can't be encoded, or count if they all can (a memory operand in a form whose
 // template has no room for it among them: see x86_form_lacks_room). Requires x86_encoder_initialize.
 static __attribute__((unused)) uint64_t x86_validate(const X86Instruction* instructions, uint64_t count);
@@ -6937,33 +6930,6 @@ static int64_t encode_scalar(const X86Instruction* instructions, uint64_t count,
     return result;
 }
 
-static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                 uint32_t* fixup_ends)
-{
-    return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, X86_ENCODER_MODE_64);
-}
-
-static int64_t x86_measure_scalar(const X86Instruction* instructions, uint64_t count, uint32_t* offsets)
-{
-    int64_t result;
-    if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
-    {
-        result = X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
-    }
-    else
-    {
-        uint32_t length = 0;
-        uint8_t bytes[BUSTER_X86_MAX_INSTRUCTION_BYTES];
-        for (uint64_t i = 0; i < count; i += 1)
-        {
-            offsets[i] = length;
-            length += encode_one(&instructions[i], bytes, X86_ENCODER_MODE_64);
-        }
-        result = length;
-    }
-    return result;
-}
-
 static int64_t x86_encode_scalar_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                            uint32_t* fixup_ends)
 {
@@ -7467,15 +7433,11 @@ static const uint8_t x86_first_qword_total[64] __attribute__((aligned(64))) = {
     0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
 };
 
-// Measures one full group; a partial group is copied and zero-padded by x86_measure. compute_fields shares the
-// encoder's length rules, while its unused canonical bytes, prefixes and displacement are eliminated. In 64-bit mode
+// Measures one group of records, four to a vector (a partial group's past its last record zero). compute_fields shares
+// the encoder's length rules, while its unused canonical bytes, prefixes and displacement are eliminated. In 64-bit mode
 // checks and extension affect those unused fields alone. No machine-code bytes, layout vectors or fixup ends are made.
-BUSTER_INLINE uint32_t x86_measure_group(const X86Instruction* instructions, uint32_t base, uint32_t* offsets, __mmask16 lanes)
+BUSTER_INLINE uint32_t x86_measure_group(__m512i record0, __m512i record1, __m512i record2, __m512i record3, uint32_t base, uint32_t* offsets, __mmask16 lanes)
 {
-    const __m512i record0 = _mm512_loadu_si512(instructions);
-    const __m512i record1 = _mm512_loadu_si512(instructions + 4);
-    const __m512i record2 = _mm512_loadu_si512(instructions + 8);
-    const __m512i record3 = _mm512_loadu_si512(instructions + 12);
     const __m512i low01 = _mm512_unpacklo_epi32(record0, record1);
     const __m512i low23 = _mm512_unpacklo_epi32(record2, record3);
     const __m512i high01 = _mm512_unpackhi_epi32(record0, record1);
@@ -7513,14 +7475,20 @@ static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, u
         uint64_t i = 0;
         for (; i + BUSTER_X86_GROUP_INSTRUCTIONS <= count; i += BUSTER_X86_GROUP_INSTRUCTIONS)
         {
-            length = x86_measure_group(instructions + i, length, offsets + i, (__mmask16)0xffff);
+            const X86Instruction* group = instructions + i;
+            length = x86_measure_group(_mm512_loadu_si512(group), _mm512_loadu_si512(group + 4), _mm512_loadu_si512(group + 8), _mm512_loadu_si512(group + 12), length,
+                                       offsets + i, (__mmask16)0xffff);
         }
         if (i < count)
         {
-            X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
-            memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
-            const __mmask16 lanes = (__mmask16)((1u << (count - i)) - 1);
-            length = x86_measure_group(tail, length, offsets + i, lanes);
+            // The last partial group by masked loads of its records' dwords (four a record), which read nothing past
+            // the last: a zeroed copy's loads would wait for the copy's stores, which they can't forward from, and
+            // made a call of one record 1.2 times as long as the scalar loop it replaced (#2924, C10).
+            const X86Instruction* group = instructions + i;
+            const uint64_t dwords = (UINT64_C(1) << (4 * (count - i))) - 1;
+            length = x86_measure_group(_mm512_maskz_loadu_epi32((__mmask16)dwords, group), _mm512_maskz_loadu_epi32((__mmask16)(dwords >> 16), group + 4),
+                                       _mm512_maskz_loadu_epi32((__mmask16)(dwords >> 32), group + 8), _mm512_maskz_loadu_epi32((__mmask16)(dwords >> 48), group + 12), length,
+                                       offsets + i, (__mmask16)((1u << (count - i)) - 1));
         }
         result = length;
     }

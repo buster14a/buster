@@ -437,7 +437,7 @@ static uint32_t asm_round_trip(AsmTest* test, uint64_t* random, uint32_t variant
         {
             const X86Instruction original = x86_random_instruction(random, (uint16_t)row, true);
             uint8_t original_bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-            const int64_t original_length = x86_encode_scalar(&original, 1, original_bytes, sizeof(original_bytes), 0, 0);
+            const int64_t original_length = x86_validate(&original, 1) == 1 ? x86_encode(&original, 1, original_bytes, sizeof(original_bytes), 0, 0) : -1;
             char source[640];
             memcpy(source, ".intel_syntax noprefix\n", 23);
             const uint32_t length = asm_round_trip_intel(&original, source + 23, sizeof(source) - 23, false);
@@ -445,7 +445,7 @@ static uint32_t asm_round_trip(AsmTest* test, uint64_t* random, uint32_t variant
             bool differ = false;
             const bool assembled = length != 0 && original_length > 0 && asm_round_trip_assemble(test, source, true, &matched, &differ);
             uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-            const int64_t matched_length = assembled ? x86_encode_scalar(&matched, 1, bytes, sizeof(bytes), 0, 0) : 0;
+            const int64_t matched_length = assembled ? (x86_validate(&matched, 1) == 1 ? x86_encode(&matched, 1, bytes, sizeof(bytes), 0, 0) : -1) : 0;
             // The matcher's choice among the forms of the instruction: a lower rank (legacy or VEX, EVEX, then a VEX form
             // that yields), and the shortest of its rank.
             const uint32_t matched_row = (uint32_t)(x86_form_description(matched.form) - x86_form_descriptions);
@@ -473,7 +473,7 @@ static uint32_t asm_round_trip(AsmTest* test, uint64_t* random, uint32_t variant
             // The same instruction as Intel's, in the same bytes (a control immediate's field may hold its bits either signed or
             // not, as the source writes them).
             uint8_t att_bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-            const int64_t att_length = att_done ? x86_encode_scalar(&att_matched, 1, att_bytes, sizeof(att_bytes), 0, 0) : 0;
+            const int64_t att_length = att_done ? (x86_validate(&att_matched, 1) == 1 ? x86_encode(&att_matched, 1, att_bytes, sizeof(att_bytes), 0, 0) : -1) : 0;
             const bool att_same = att_done && asm_round_trip_same(&original, &att_matched) && att_length == matched_length && memcmp(att_bytes, bytes, (size_t)att_length) == 0;
             if (!att_same)
             {
@@ -595,7 +595,7 @@ static void asm_round_trip_cross_check(AsmTest* test, const char* directory, uin
             for (uint32_t i = 0; bytes.length != 0 && i < count; i += 1)
             {
                 uint8_t ours[BUSTER_X86_ENCODER_CAPACITY(1)];
-                const int64_t length = x86_encode_scalar(&copies[i].matched, 1, ours, sizeof(ours), 0, 0);
+                const int64_t length = x86_validate(&copies[i].matched, 1) == 1 ? x86_encode(&copies[i].matched, 1, ours, sizeof(ours), 0, 0) : -1;
                 const bool inside = (uint64_t)i * 16 + 16 <= bytes.length;
                 const uint8_t* theirs = (const uint8_t*)bytes.pointer + (uint64_t)i * 16;
                 bool same = inside && length > 0 && memcmp(ours, theirs, (size_t)length) == 0;
@@ -741,7 +741,7 @@ static void asm_round_trip_fixtures(AsmTest* test, const char* directory, bool c
         bool differ = false;
         const bool assembled = asm_round_trip_assemble(test, choices[i].source, false, &record, &differ);
         uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-        const int64_t length = assembled ? x86_encode_scalar(&record, 1, bytes, sizeof(bytes), 0, 0) : 0;
+        const int64_t length = assembled ? (x86_validate(&record, 1) == 1 ? x86_encode(&record, 1, bytes, sizeof(bytes), 0, 0) : -1) : 0;
         asm_test_check(test, length == choices[i].length && memcmp(bytes, choices[i].bytes, choices[i].length) == 0, "the matcher's choice among an instruction's encodings", choices[i].source);
     }
 }

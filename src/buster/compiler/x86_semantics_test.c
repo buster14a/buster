@@ -452,7 +452,8 @@ static bool x86_semantics_machine_load(X86SemanticsMachine* machine, const X86In
     X86Instruction patched[8];
     uint32_t offsets[8];
     bool result = count <= BUSTER_ARRAY_LENGTH(patched);
-    int64_t length = result ? x86_encode_scalar(records, count, machine->code, BUSTER_X86_SEMANTICS_TEST_PAGE, offsets, 0) : -1;
+    result = result && x86_validate(records, count) == count;
+    int64_t length = result ? x86_encode(records, count, machine->code, BUSTER_X86_SEMANTICS_TEST_PAGE, offsets, 0) : -1;
     result = length >= 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
@@ -463,7 +464,7 @@ static bool x86_semantics_machine_load(X86SemanticsMachine* machine, const X86In
             patched[i].displacement = (int32_t)((int64_t)(machine->data + (uint32_t)records[i].displacement) - (int64_t)(machine->code + end));
         }
     }
-    length = result ? x86_encode_scalar(patched, count, machine->code, BUSTER_X86_SEMANTICS_TEST_PAGE, 0, 0) : -1;
+    length = result && x86_validate(patched, count) == count ? x86_encode(patched, count, machine->code, BUSTER_X86_SEMANTICS_TEST_PAGE, 0, 0) : -1;
     result = length >= 0 && (uint64_t)length + 14 <= BUSTER_X86_SEMANTICS_TEST_PAGE;
     if (result)
     {
@@ -3238,7 +3239,7 @@ static bool x86_semantics_check_match(void)
 // GNU as
 
 // With --cross-check: every form the chooser picks for the boundary values (each row, value, context and destination
-// once), printed as x86_print_instruction prints it, must assemble with GNU as to the bytes x86_encode_scalar gives it:
+// once), printed as x86_print_instruction prints it, must assemble with GNU as to the bytes x86_encode gives it:
 // GNU as picks the same encoding for the instruction the chooser picked. (A register-to-register form is printed with
 // {load} or {store}, which picks the form; the immediates' are GNU as's own choice.)
 static bool x86_semantics_check_assembler(uint64_t seed, const char* parent, bool keep)
@@ -3317,7 +3318,7 @@ static bool x86_semantics_check_assembler(uint64_t seed, const char* parent, boo
     {
         const Elf64_Shdr* header = 0;
         const uint8_t* section = x86_elf_section(bytes, object_length, SHT_PROGBITS, ".text", &header);
-        const int64_t encoded_length = x86_encode_scalar(records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0);
+        const int64_t encoded_length = x86_validate(records, count) == count ? x86_encode(records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0) : -1;
         const bool same = section != 0 && encoded_length >= 0 && header->sh_size == (uint64_t)encoded_length && memcmp(section, encoded, header->sh_size) == 0;
         if (!same && section != 0 && encoded_length >= 0)
         {

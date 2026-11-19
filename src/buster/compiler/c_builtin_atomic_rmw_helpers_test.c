@@ -402,7 +402,7 @@ static __attribute__((no_sanitize("function"))) uint64_t cbuiltin_atomic_rmw_tes
     return result;
 }
 
-static bool cbuiltin_atomic_rmw_test_map(CBuiltinAtomicRmwTest* test, const Tier0Code* helper, const Tier0Code* caller, bool scalar, CBuiltinAtomicRmwTestProgram* program, uint32_t item)
+static bool cbuiltin_atomic_rmw_test_map(CBuiltinAtomicRmwTest* test, const Tier0Code* helper, const Tier0Code* caller, CBuiltinAtomicRmwTestProgram* program, uint32_t item)
 {
     X86Instruction records[BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS];
     uint32_t offsets[BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS + 1];
@@ -421,16 +421,14 @@ static bool cbuiltin_atomic_rmw_test_map(CBuiltinAtomicRmwTest* test, const Tier
     {
         memcpy(records, helper->records, helper->count * sizeof(*records));
         const BranchSizing sized = size_branches(records, helper->count, helper->branches, helper->targets, helper->branch_count, offsets);
-        const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 : scalar ? x86_encode_scalar(records, helper->count, program->mapping, helper_capacity, NULL, NULL) :
-                                                                            x86_encode(records, helper->count, program->mapping, helper_capacity, NULL, NULL);
+        const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 : x86_encode(records, helper->count, program->mapping, helper_capacity, NULL, NULL);
         result = cbuiltin_atomic_rmw_test_expect(test, encoded > 0, "branch sizing and native helper encoding", item);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
-            const int64_t caller_bytes = scalar ? x86_encode_scalar(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends) :
-                                                 x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
+            const int64_t caller_bytes = x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
             result = cbuiltin_atomic_rmw_test_expect(test, caller_bytes > 0 && caller->reference_count == 1 && caller->references[0].target == 1 &&
                 caller->references[0].kind == BUSTER_LINK_FIXUP_CALL && caller->references[0].field == X86_FIXUP_DISPLACEMENT &&
                 caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "real Tier 0 unknown-effect helper CALL reference", item);
@@ -553,7 +551,7 @@ static bool cbuiltin_atomic_rmw_test_caller(CBuiltinAtomicRmwTest* test, Arena* 
         result = cbuiltin_atomic_rmw_test_expect(test, code.error == TIER0_OK && code.branch_count == 0 && code.reference_count == 1, "Tier 0 CALL compiles with retained live prefix", ordinal);
         if (result)
         {
-            result = cbuiltin_atomic_rmw_test_map(test, &helper->code, &code, path == 0, &item->programs[path][variant], ordinal);
+            result = cbuiltin_atomic_rmw_test_map(test, &helper->code, &code, &item->programs[path][variant], ordinal);
         }
     }
     arena_pop_to(arena, mark);
@@ -692,7 +690,7 @@ static bool cbuiltin_atomic_rmw_test_prepare(CBuiltinAtomicRmwTest* test, Arena*
     }
     for (uint32_t path = 0; result && path < 2; path += 1)
     {
-        result = cbuiltin_atomic_rmw_test_map(test, &helper.code, NULL, path == 0, &item->programs[path][0], ordinal);
+        result = cbuiltin_atomic_rmw_test_map(test, &helper.code, NULL, &item->programs[path][0], ordinal);
     }
     for (uint32_t variant = 1; result && variant < 3; variant += 1)
     {

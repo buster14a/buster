@@ -1763,9 +1763,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
         check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
-        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
-                               run->scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
-                                             x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
         check_clock_lap(run->stage_clock, CHECK_STAGE_ENCODE);
         valid = length >= 0;
         if (valid && run->sources)
@@ -3454,13 +3452,13 @@ static UnwindError check_asm_unit_frame(uint32_t saved, uint32_t frame, uint32_t
     uint32_t sizes_count = 0;
     for (uint32_t r = 0; valid && r < prologue_count; r += 1)
     {
-        const int64_t encoded = x86_encode_scalar(prologue + r, 1, bytes, sizeof(bytes), 0, 0);
+        const int64_t encoded = x86_validate(prologue + r, 1) == 1 ? x86_encode(prologue + r, 1, bytes, sizeof(bytes), 0, 0) : -1;
         valid = encoded > 0;
         sizes[sizes_count++] = encoded > 0 ? (uint32_t)encoded : 0;
     }
     for (uint32_t r = 0; valid && r < epilogue_length; r += 1)
     {
-        const int64_t encoded = x86_encode_scalar(epilogue + r, 1, bytes, sizeof(bytes), 0, 0);
+        const int64_t encoded = x86_validate(epilogue + r, 1) == 1 ? x86_encode(epilogue + r, 1, bytes, sizeof(bytes), 0, 0) : -1;
         valid = encoded > 0;
         sizes[sizes_count++] = encoded > 0 ? (uint32_t)encoded : 0;
     }
@@ -5510,9 +5508,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
                 const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
-                const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
-                                       BUSTER_SCALAR_PATH(scalar) ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
-                                                x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+                const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
                 encodes = length >= 0;
                 if (encodes && unwind)
                 {

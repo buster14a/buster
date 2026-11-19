@@ -62,8 +62,7 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
     bool result = cbuiltin_rounds_test_expect(tally, program->mapping != MAP_FAILED, "native mapping", path);
     if (result)
     {
-        const int64_t encoded = path == 0 ? x86_encode_scalar(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL)
-                                          : x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
+        const int64_t encoded = x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
         result = cbuiltin_rounds_test_expect(tally, encoded > 0, "helper encoding", path);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
@@ -92,8 +91,7 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
-            const int64_t caller_bytes = path == 0 ? x86_encode_scalar(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends)
-                                                  : x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
+            const int64_t caller_bytes = x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
             result = cbuiltin_rounds_test_expect(tally, caller_bytes > 0 && caller->reference_count == 1 && caller->references[0].target == 1 &&
                 caller->references[0].field == X86_FIXUP_DISPLACEMENT && caller->references[0].kind == BUSTER_LINK_FIXUP_CALL &&
                 caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "real Tier 0 helper CALL reference", path);

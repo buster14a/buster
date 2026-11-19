@@ -762,10 +762,10 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                 {
                     uint8_t checked[BUSTER_X86_ENCODER_CAPACITY(1)];
                     uint8_t direct[BUSTER_X86_ENCODER_CAPACITY(1)];
-                    const int64_t checked_length = x86_encode_scalar(&scalar.instruction, 1, checked, sizeof(checked), 0, 0);
+                    const int64_t checked_length = x86_validate(&scalar.instruction, 1) == 1 ? x86_encode(&scalar.instruction, 1, checked, sizeof(checked), 0, 0) : -1;
                     const uint32_t direct_length = encode_one(&scalar.instruction, direct, X86_ENCODER_MODE_64);
                     const bool identical = checked_length > 0 && checked_length == scalar.length && direct_length == scalar.length && direct_length <= BUSTER_X86_MAX_INSTRUCTION_BYTES && memcmp(checked, direct, direct_length) == 0;
-                    asm_test_check(test, identical, "validated matcher length and bytes against checked scalar encoder", form->mnemonic);
+                    asm_test_check(test, identical, "validated matcher length and bytes against the validated encoder", form->mnemonic);
                     length_checks += 1;
                 }
             }
@@ -920,7 +920,7 @@ static void asm_test_code(AsmTest* test)
         const AsmCode scans = asm_test_code_pair(test, "rep bsfl %ecx,%eax\nrep bsrq %rcx,%rax\n", 2, "inline code: baseline rep scans");
         uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(2)];
         static const uint8_t expected[] = { 0xf3, 0x0f, 0xbc, 0xc1, 0xf3, 0x48, 0x0f, 0xbd, 0xc1 };
-        const int64_t length = scans.error == 0 ? x86_encode_scalar(scans.records, scans.count, bytes, sizeof(bytes), 0, 0) : -1;
+        const int64_t length = scans.error == 0 && x86_validate(scans.records, scans.count) == scans.count ? x86_encode(scans.records, scans.count, bytes, sizeof(bytes), 0, 0) : -1;
         asm_test_check(test, length == sizeof(expected) && memcmp(bytes, expected, sizeof(expected)) == 0, "inline code: baseline rep scan bytes", 0);
     }
     // Every feature, as the C lowering's index has them: a template's instructions are its author's to choose.

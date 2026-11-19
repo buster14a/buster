@@ -429,24 +429,17 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
         tier1_emit_test_expect(test, encoded, "canonical-register probes preserve straight-line records and use reserved R11 only");
         const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(count);
         const uint64_t mapping_bytes = (capacity + page - 1) / page * page;
-        uint8_t* native[2] = {
-            mmap(0, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0),
-            mmap(0, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0),
-        };
-        encoded = encoded && native[0] != MAP_FAILED && native[1] != MAP_FAILED;
+        uint8_t* native = mmap(0, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        encoded = encoded && native != MAP_FAILED;
         encoded = encoded && x86_validate(records, count) == count && x86_target_validate(test->allowed, records, count) == count;
-        int64_t lengths[2] = {0};
         if (encoded)
         {
-            lengths[0] = x86_encode_scalar(records, count, native[0], capacity, 0, 0);
-            lengths[1] = x86_encode(records, count, native[1], capacity, 0, 0);
-            encoded = lengths[0] > 0 && lengths[1] > 0 && (uint64_t)lengths[0] <= capacity && (uint64_t)lengths[1] <= capacity;
-            encoded = encoded && lengths[0] == lengths[1] && memcmp(native[0], native[1], (size_t)lengths[0]) == 0;
-            encoded = encoded && mprotect(native[0], mapping_bytes, PROT_READ | PROT_EXEC) == 0 && mprotect(native[1], mapping_bytes, PROT_READ | PROT_EXEC) == 0;
+            const int64_t length = x86_encode(records, count, native, capacity, 0, 0);
+            encoded = length > 0 && (uint64_t)length <= capacity && mprotect(native, mapping_bytes, PROT_READ | PROT_EXEC) == 0;
         }
-        tier1_emit_test_expect(test, encoded, "both encoders agree on baseline narrow records and create executable mappings");
+        tier1_emit_test_expect(test, encoded, "baseline narrow records encode into an executable mapping");
         const bool executable = encoded && tier1_emit_test_native(test, records, count);
-        for (uint32_t encoder = 0; executable && encoder < 2; encoder += 1)
+        if (executable)
         {
             for (uint32_t placement = 0; placement < 2; placement += 1)
             {
@@ -464,7 +457,7 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
                         data[offset + byte] = (uint8_t)(expected->initial[sample] >> (byte * 8));
                         page_expected[offset + byte] = (uint8_t)(expected->memory[sample] >> (byte * 8));
                     }
-                    const uint64_t actual = tier1_emit_test_call(native[encoder], (uintptr_t)(data + offset), expected->input[sample]);
+                    const uint64_t actual = tier1_emit_test_call(native, (uintptr_t)(data + offset), expected->input[sample]);
                     tier1_emit_test_expect(test, actual == expected->result[sample], "native narrow result has the independent exact canonical 32/64-bit value");
                     tier1_emit_test_expect(test, memcmp(data, page_expected, page) == 0, "narrow memory value and every adjacent byte match the frozen oracle");
                     for (uint32_t node = 0; probes && node < fixture->nodes; node += 1)
@@ -477,12 +470,9 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
                 }
             }
         }
-        for (uint32_t encoder = 0; encoder < 2; encoder += 1)
+        if (native != MAP_FAILED)
         {
-            if (native[encoder] != MAP_FAILED)
-            {
-                munmap(native[encoder], mapping_bytes);
-            }
+            munmap(native, mapping_bytes);
         }
     }
     if (guard != MAP_FAILED)

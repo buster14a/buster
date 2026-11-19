@@ -4742,7 +4742,7 @@ static void asm_layout(AsmParser* parser)
 static int64_t asm_emit_address32(const AsmParser* parser, const X86Instruction* record, uint8_t* output)
 {
     uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-    const int64_t length = BUSTER_VECTOR_PATH(parser->options.vectorized) ? x86_encode(record, 1, bytes, sizeof(bytes), 0, 0) : x86_encode_scalar(record, 1, bytes, sizeof(bytes), 0, 0);
+    const int64_t length = x86_encode(record, 1, bytes, sizeof(bytes), 0, 0);
     uint32_t at = 0;
     const bool waiting = length > 0 && bytes[0] == 0x9b;
     at += waiting;
@@ -5256,9 +5256,7 @@ static void asm_emit(AsmParser* parser)
                     next += 1;
                 }
                 const uint64_t capacity = link->atoms.size[atom] - fragment->offset + BUSTER_X86_ENCODER_CAPACITY(256);
-                const int64_t encoded = address32 ? asm_emit_address32(parser, records, bytes + fragment->offset)
-                                      : BUSTER_VECTOR_PATH(parser->options.vectorized) ? x86_encode(records, count, bytes + fragment->offset, capacity, 0, 0)
-                                                                                        : x86_encode_scalar(records, count, bytes + fragment->offset, capacity, 0, 0);
+                const int64_t encoded = address32 ? asm_emit_address32(parser, records, bytes + fragment->offset) : x86_encode(records, count, bytes + fragment->offset, capacity, 0, 0);
                 if (encoded != size)
                 {
                     asm_fail(parser, fragment->location, "encoder length disagrees with assembly layout");
@@ -5760,7 +5758,7 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
         measured[r] = result.records[r];
         measured[r].form &= (uint16_t)~BUSTER_X86_FORM_FIXUP;
     }
-    const int64_t length = measured == 0 ? -1 : BUSTER_VECTOR_PATH(options.vectorized) ? x86_measure(measured, count, offsets) : x86_measure_scalar(measured, count, offsets);
+    const int64_t length = measured == 0 ? -1 : x86_measure(measured, count, offsets);
     if (parser.result.error == 0 && fixed_count != 0 && length < 0)
     {
         asm_fail(&parser, 0, measured == 0 ? "arena exhausted placing inline assembly's records" : "inline assembly's records don't encode");

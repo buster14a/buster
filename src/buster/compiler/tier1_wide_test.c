@@ -647,11 +647,9 @@ static uint8_t* tier1_wide_test_load(Tier1WideTest* test, Tier1EmitResult* emitt
     // The code's literals after it (#2744, tier1_emit_place_literals), the only references it has.
     *mapped = (capacity + tier1_emit_literal_bytes(emitted) + 4095) & ~UINT64_C(4095);
     uint8_t* machine = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint8_t* scalar = malloc(capacity);
     uint32_t* offsets = malloc(((uint64_t)code->count + 1) * sizeof(uint32_t));
     uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count) * sizeof(uint32_t));
-    uint32_t* scalar_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count) * sizeof(uint32_t));
-    bool ok = tier1_wide_test_expect(test, machine != MAP_FAILED && scalar != 0 && offsets != 0 && ends != 0 && scalar_ends != 0, "the encoders' buffers");
+    bool ok = tier1_wide_test_expect(test, machine != MAP_FAILED && offsets != 0 && ends != 0, "the encoder's buffers");
     bool literals_only = true;
     for (uint32_t i = 0; i < emitted->reference_count; i += 1)
     {
@@ -677,18 +675,13 @@ static uint8_t* tier1_wide_test_load(Tier1WideTest* test, Tier1EmitResult* emitt
     if (ok)
     {
         const int64_t size = x86_encode(code->records, code->count, machine, capacity, 0, ends);
-        const int64_t scalar_size = x86_encode_scalar(code->records, code->count, scalar, capacity, 0, scalar_ends);
-        ok = tier1_wide_test_expect(test, size > 0 && size == scalar_size && memcmp(machine, scalar, (uint64_t)size) == 0 &&
-                                              memcmp(ends, scalar_ends, (uint64_t)emitted->reference_count * sizeof(uint32_t)) == 0,
-                                    "both encoders make the same bytes");
+        ok = tier1_wide_test_expect(test, size > 0, "encode the code");
         ok = ok && tier1_wide_test_expect(test, tier1_emit_place_literals(emitted, machine, ends, capacity, *mapped), "the code's literals are placed");
         test->records += code->count;
     }
     ok = ok && tier1_wide_test_expect(test, mprotect(machine, *mapped, PROT_READ | PROT_EXEC) == 0, "make the code executable");
-    free(scalar);
     free(offsets);
     free(ends);
-    free(scalar_ends);
     if (!ok && machine != MAP_FAILED)
     {
         munmap(machine, *mapped);
