@@ -532,7 +532,7 @@ static int run_ir_source_passes_tests(int count, char** arguments)
 // #139's compile time per pass for both versions (benchmark-ir-source --passes): the files' functions prepared as
 // test-ir-source --passes prepares them, each lowered (L) and promoted (P) once outside the time, and each caller's
 // inlining unit built once; then each pass by its vector and its scalar version over the whole corpus (by its one version,
-// where #2924 left one: the inliner, the unroller and the loop vectorizer), in
+// where #2924 left one: the inliner, the unroller, the loop vectorizer and value numbering with memory alone), in
 // BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of the pair runs first, after a warm-up of each. The passes
 // take the inputs --tier1's pipeline gives them: SROA (Tier 1's options), #866's solver and the inliner the lowered form,
 // the optimizer's rows and LICM the promoted one (the driver's optimizer and LICM take it after the wide integers' halves,
@@ -828,8 +828,9 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             }
             double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
             memset(values, 0, sizeof(values));
-            // The inliner, the unroller and the loop vectorizer have one path (#2924): timed once.
-            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_INLINE ? 1 : 2;
+            // The inliner, the unroller, the loop vectorizer and value numbering with memory alone have one path (#2924):
+            // timed once.
+            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_INLINE || pass == IR_SOURCE_PASS_MEMORY ? 1 : 2;
             for (uint32_t version = 0; version < versions; version += 1)
             {
                 failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;

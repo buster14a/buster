@@ -28,6 +28,9 @@ struct IrOptimizeTest
     uint64_t sink_digest;
     // test-ir-unroll's: every fixture's unrolled function and counts, with the default seed and shapes.
     uint64_t unroll_digest;
+    // Value numbering with memory's generated programs' and overflow fixture's results (ir_optimize_memory_test.c), in
+    // order, frozen where the pass's vector path and its scalar twin agreed: with the default seed, which generates them.
+    uint64_t memory_digest;
 };
 
 #define BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
@@ -35,6 +38,8 @@ struct IrOptimizeTest
 #define BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST UINT64_C(0xdf6ed6b7ef142f23)
 #define BUSTER_IR_OPTIMIZE_TEST_SINK_DIGEST UINT64_C(0x9f4d956b5e0b38fc)
 #define BUSTER_IR_OPTIMIZE_TEST_UNROLL_DIGEST UINT64_C(0xc92a6941c51cf4e2)
+#define BUSTER_IR_OPTIMIZE_TEST_SEED UINT64_C(139)
+#define BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST UINT64_C(0x5d860cd5f67a13ce)
 
 static void ir_optimize_test_expect(IrOptimizeTest* test, bool condition, const char* description)
 {
@@ -1999,10 +2004,11 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test);
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
     IrOptimizeTest test = {
-        .random = 139,
+        .random = BUSTER_IR_OPTIMIZE_TEST_SEED,
         .if_convert_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
         .thread_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
         .sink_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
+        .memory_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
     };
     bool arguments_valid = true;
     bool print_text = false;
@@ -2031,6 +2037,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
     }
     else if (arguments_valid)
     {
+        const uint64_t seed = test.random;
         ir_optimize_test_folds(&test);
         ir_optimize_test_fold_guards(&test);
         ir_optimize_test_ir(&test);
@@ -2049,6 +2056,14 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         }
         ir_optimize_text_tests(&test);
         ir_optimize_memory_tests(&test);
+        if (seed == BUSTER_IR_OPTIMIZE_TEST_SEED)
+        {
+            ir_optimize_test_expect(&test, test.memory_digest == BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST, "value numbering with memory's results have their frozen digest");
+            if (test.memory_digest != BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST)
+            {
+                fprintf(stderr, "ir-optimize: memory digest %#018" PRIx64 "\n", test.memory_digest);
+            }
+        }
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }
