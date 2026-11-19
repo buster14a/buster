@@ -1,0 +1,39 @@
+name: Hosted memory lookup sample for 2758
+on:
+  push:
+    branches: [codex/2758-cloud-probes]
+    paths: ['tools/ci/probe-2758.sh']
+permissions:
+  contents: read
+jobs:
+  sample:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Qualify this GitHub-hosted x86-64 worker
+        run: |
+          set -eu
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          lscpu | grep -E 'Model name|CPU\(s\)'
+          cc -march=x86-64-v4 -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni -mgfni -mvaes -maes tools/ci/vector-probe.c -o "$RUNNER_TEMP/vector-probe"
+          "$RUNNER_TEMP/vector-probe"
+          test "$(nproc)" -ge 4
+      - uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ''
+      - name: Install the pinned toolchain
+        run: bash tools/ci/setup-hosted.sh
+      - name: Measure on four CPUs
+        run: |
+          cpus=$(python3 -c 'import os; print(",".join(map(str,sorted(os.sched_getaffinity(0))[:4])))')
+          taskset -c "$cpus" bash tools/ci/probe-2758.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: memory-lookup-2758
+          path: ${{ runner.temp }}/lookup-results
+          if-no-files-found: ignore
+          retention-days: 7
