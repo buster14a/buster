@@ -24,9 +24,11 @@ for kind, filename, flags in (
         if (directory / 'buster').exists():
             shutil.rmtree(directory / 'buster')
         env = dict(os.environ, XDG_CACHE_HOME=str(directory))
+        trace = root / 'advice.trace'
+        cmd = ['strace', '-f', '-qq', '-e', 'trace=madvise', '-o', str(trace), '--']
         if reject:
-            env['LD_PRELOAD'] = str(root / 'reject.so')
-        cmd = [str(root / 'plain-head')]
+            cmd.append(str(root / 'reject-advice'))
+        cmd.append(str(root / 'plain-head'))
         if kind == 'shared':
             cmd += ['benchmark-link', '--only', 'direct', '--kinds', 'shared', '--functions', '1',
                     '--runs', '1', '--cpus', str(cpu), '--cache', str(directory / 'buster'),
@@ -34,7 +36,10 @@ for kind, filename, flags in (
         else:
             cmd += [*flags, 'tools/ci/qualification.c', '-o', str(out)]
         proc = subprocess.run(cmd, check=True, capture_output=True, env=env, text=True)
-        assert proc.stderr.count('declined writable snapshot advice') == int(reject), (kind, reject, proc.stderr)
+        calls = [l for l in trace.read_text().splitlines() if 'MADV_POPULATE_WRITE' in l]
+        assert len(calls) == 1, (kind, reject, calls)
+        assert ('= -1 EINVAL' in calls[0]) if reject else calls[0].rstrip().endswith('= 0'), calls
+        print('ADVICE_CALL', kind, 'reject', int(reject), calls[0], flush=True)
         if kind == 'shared':
             temp = Path(re.search(r'outputs in ([^;]+); the snapshots in ', proc.stdout)[1])
             assert temp.parent == root and temp.name.startswith('buster-link-benchmark-')
@@ -42,7 +47,7 @@ for kind, filename, flags in (
             shutil.rmtree(temp)
         results.append(((directory / 'buster' / filename).read_bytes(), out.read_bytes()))
         warm = subprocess.run(cmd, check=True, capture_output=True, env=env, text=True)
-        assert 'declined writable snapshot advice' not in warm.stderr
+        assert 'MADV_POPULATE_WRITE' not in trace.read_text()
         if kind == 'shared':
             temp = Path(re.search(r'outputs in ([^;]+); the snapshots in ', warm.stdout)[1])
             assert temp.parent == root and temp.name.startswith('buster-link-benchmark-')

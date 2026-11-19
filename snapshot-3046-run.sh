@@ -2,7 +2,8 @@
 set -euo pipefail
 root="$RUNNER_TEMP/snapshot-3046-independent"
 mkdir "$root"
-cc -std=c17 -O2 -Werror -fPIC -shared snapshot-3046/reject-advice.c -o "$root/reject.so"
+if ! command -v strace >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y strace; fi
+cc -std=c17 -O2 -Werror snapshot-3046/reject-advice.c -o "$root/reject-advice"
 for variant in base head; do
     git restore --source=HEAD -- src/buster/compiler/snapshot.c src/buster/compiler/snapshot_test.c
     if test "$variant" = head; then
@@ -11,7 +12,7 @@ for variant in base head; do
         ./build.sh --config Release
         cp build/compiler "$root/plain-head"
         python3 -u snapshot-3046/reject.py "$root"
-        LD_PRELOAD="$root/reject.so" "$root/plain-head" test-snapshot > "$root/forced-advice-test.txt" 2>&1
+        "$root/reject-advice" "$root/plain-head" test-snapshot > "$root/forced-advice-test.txt" 2>&1
         echo "SUITE forced-EINVAL"
         grep -E 'checks, [0-9]+ failed' "$root/forced-advice-test.txt"
     fi
