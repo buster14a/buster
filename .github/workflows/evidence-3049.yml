@@ -21,66 +21,44 @@ jobs:
           lscpu | grep 'Model name'
           cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o /tmp/probe
           /tmp/probe
+      - name: Trace the private pass entry and exit
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("src/buster/compiler/ir_if_convert.c")
+          s = path.read_text()
+          at = s.index("    const uint64_t om = output->length;", s.index("static IrCheck ir_if_convert(const IrFunction* function, Arena* output"))
+          s = s[:at] + '    if (getenv("BUSTER_3049_TRACE")) { fputs("BEGIN IFCONVERT INPUT\\n", stderr); ir_print(function, scratch, stderr); fputs("END IFCONVERT INPUT\\n", stderr); }\n' + s[at:]
+          path.write_text(s)
+          PY
       - name: Build the vector Release compiler
         run: |
           ./build.sh --config Release
-      - name: Disassemble the C driver output
+      - name: Compare a pure update with qualified and unqualified arm reloads
         run: |
-          cat > /tmp/conditional.c <<'SOURCE'
-          unsigned long common_alloc_flags(const unsigned long *flags, unsigned n, unsigned long s)
+          set -euo pipefail
+          for shape in saved plain volatile; do
+            case "$shape" in
+              saved) qualifier=; arm='x';;
+              plain) qualifier=; arm='p[i]';;
+              volatile) qualifier=volatile; arm='p[i]';;
+            esac
+            cat > /tmp/conditional.c <<SOURCE
+          unsigned mask(const $qualifier unsigned *p, unsigned n, unsigned s)
           {
-              for (unsigned i = 0; i < n; ++i)
-              {
-                  unsigned long x = flags[i];
-                  s = (x & 2ul) ? (s & x) : s;
-              }
-              return s;
-          }
-          
-          unsigned long common_nonalloc_flags(const unsigned long *flags, unsigned n, unsigned long s)
-          {
-              for (unsigned i = 0; i < n; ++i)
-              {
-                  unsigned long x = flags[i];
-                  s = (x & 2ul) ? s : (x & s);
-              }
-              return s;
-          }
-          
-          unsigned common32(const unsigned *flags, unsigned n, unsigned s)
-          {
-              for (unsigned i = 0; i < n; ++i)
-              {
-                  unsigned x = flags[i];
-                  if (x & 2u) s &= x;
-              }
-              return s;
-          }
-          
-          unsigned shared32(const unsigned *flags, unsigned n, unsigned s, unsigned t)
-          {
-              for (unsigned i = 0; i < n; ++i)
-              {
-                  unsigned x = flags[i];
-                  if (x & 2u)
-                  {
-                      s &= x;
-                      t ^= s;
-                  }
-              }
-              return s ^ t;
-          }
-          
-          unsigned volatile32(const volatile unsigned *flags, unsigned n, unsigned s)
-          {
-              for (unsigned i = 0; i < n; ++i)
-              {
-                  if (flags[i] & 2u) s &= flags[i];
+              for (unsigned i = 0; i < n; ++i) {
+                  unsigned x = p[i];
+                  if (x & 2u) s &= $arm;
               }
               return s;
           }
           SOURCE
-          build/compiler --tier1 --tier1-strict --verify -O2 -march=x86-64-v4 -c /tmp/conditional.c -o /tmp/conditional.o
-          objdump -drw -Mintel /tmp/conditional.o
+            echo "$shape"
+            BUSTER_3049_TRACE=1 build/compiler --tier1 --tier1-strict --verify -O2 -march=x86-64-v4 -c /tmp/conditional.c -o "/tmp/$shape.o" 2> "/tmp/$shape.ir"
+            cat "/tmp/$shape.ir"
+            objdump -drw -Mintel "/tmp/$shape.o"
+            sha256sum "/tmp/$shape.ir"
+          done
+          cmp /tmp/plain.ir /tmp/volatile.ir && echo "Plain and volatile reloads have identical pass input"
       - name: Run optimizer tests
         run: build/compiler test-ir-optimize
