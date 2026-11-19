@@ -10,13 +10,13 @@ import subprocess
 import sys
 import time
 
-stage, path = sys.argv[1:]
+stage, path, selected = sys.argv[1:]
 root = Path(path)
 kinds = {
     'dynamic': ([], 'runtime.snapshot'),
     'static': (['-static'], 'runtime-static.snapshot'),
     'static-pie': (['-static-pie'], 'runtime-static-pie.snapshot'),
-    'shared': (['-shared', '-fPIC'], 'runtime-shared.snapshot'),
+    'shared': ([], 'runtime-shared.snapshot'),
     'no-pie': (['-no-pie'], 'runtime-no-pie.snapshot'),
 }
 src = 'tools/ci/qualification.c'
@@ -27,13 +27,26 @@ out = root / 'qualification'
 print('PLACEMENT', stage, 'cpu', pinned, 'source', src, sha256(Path(src).read_bytes()).hexdigest(), flush=True)
 
 def driver(v, kind, directory):
-    cmd = [str(root / (stage + '-' + v)), *kinds[kind][0], src, '-o', str(out)]
+    compiler = str(root / (stage + '-' + v))
+    if kind == 'shared':
+        # The plain C driver exposes four executable kinds. Its foreign -shared link does not
+        # create a runtime snapshot. This direct shared-library link calls runtime_open_shared.
+        cmd = [compiler, 'benchmark-link', '--only','direct','--kinds','shared','--functions','1',
+               '--runs','1','--cpus',str(pinned),'--cache',str(directory/'buster'),
+               '--directory',str(root),'--keep']
+    else:
+        cmd = [compiler, *kinds[kind][0], src, '-o', str(out)]
     env = dict(os.environ, XDG_CACHE_HOME=str(directory))
     begin = time.monotonic_ns()
     run = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     elapsed = time.monotonic_ns() - begin
     if run.returncode:
         raise RuntimeError((cmd, run.returncode, run.stderr))
+    if kind == 'shared':
+        workdir = Path(re.search(r'outputs in ([^;]+); the snapshots in ', run.stdout)[1])
+        assert workdir.parent == root and workdir.name.startswith('buster-link-benchmark-')
+        shutil.copyfile(workdir/'direct', out)
+        shutil.rmtree(workdir)
     return elapsed, run.stderr
 
 def stats(p):
@@ -53,6 +66,8 @@ def outcome(tag, kind, vals):
           'paired_gain_pct',round(median(delta),2),'boot95',round(percentile(boots,.025),2),round(percentile(boots,.975),2), flush=True)
 
 for kind, (_, filename) in kinds.items():
+    if kind != selected:
+        continue
     objs = []
     images = []
     for v in variants:

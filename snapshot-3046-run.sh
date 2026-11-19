@@ -20,7 +20,10 @@ for v in base head; do
     build_witness plain-$v
     "$root/plain-$v" test-snapshot
 done
-python3 -u snapshot-3046/qualify.py plain "$root"
+status=0
+for kind in dynamic static static-pie no-pie shared; do
+    python3 -u snapshot-3046/qualify.py plain "$root" "$kind" || status=1
+done
 for v in head base; do
     if test "$v" = base; then
         git restore --source=HEAD -- src/buster/compiler/snapshot.c src/buster/compiler/snapshot_test.c
@@ -28,4 +31,7 @@ for v in head base; do
     python3 snapshot-3046/instrument.py src/buster/compiler/snapshot.c
     build_witness trace-$v
 done
-python3 -u snapshot-3046/qualify.py trace "$root"
+for kind in dynamic static static-pie no-pie shared; do
+    python3 -u snapshot-3046/qualify.py trace "$root" "$kind" || status=1
+done
+exit "$status"
