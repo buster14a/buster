@@ -30,7 +30,9 @@
 //     variants against x86_encode_scalar, byte for byte, offset for offset and fixup end for fixup end, with and without
 //     each of the offsets and the fixup ends, on random instructions of every form (with empty X86_FORM_NONE
 //     instructions among them, and one in BUSTER_X86_TEST_MARKED marked with the fixup flag): every count from 0 to
-//     BUSTER_X86_TEST_SHORT_COUNTS - 1, then N instructions (BUSTER_X86_TEST_DEFAULT_COUNT by default) at once.
+//     BUSTER_X86_TEST_SHORT_COUNTS - 1, then N instructions (BUSTER_X86_TEST_DEFAULT_COUNT by default) at once. With the
+//     default seed and count, the streams' lengths, bytes, offsets and fixup ends must hash to the mode's recorded
+//     digest (BUSTER_X86_TEST_RANDOM_DIGEST and the others).
 //   - Lengths without bytes, in 64-bit mode: x86_measure and its scalar twin against both encoders, on known
 //     encodings, every form with generated operands and accepted FS/GS/fixup variants, random streams, legal batch
 //     partitions and empty records. Exact guarded tails and every dword alignment include the 1024-record boundary.
@@ -51,6 +53,8 @@
 //     scaled index, a 3DNow! form's immediate other than its operation byte, or a NOTRACK form with a segment
 //     override): x86_validate must find them all, and the scalar encoder, which validates first, reject them.
 //     x86_encode takes what x86_validate accepts and doesn't check them.
+//   - Entry errors: a capacity a byte short of BUSTER_X86_ENCODER_CAPACITY(count), and a count past
+//     BUSTER_X86_ENCODER_MAX_INSTRUCTIONS, which x86_encode must refuse, and the exact capacity, which it must take.
 // Then the same again with 32-bit addresses (x86_test_mode, from the seed's first state again), but the known fixups:
 // x86_encode_address32 and x86_encode_scalar_address32 on x86_known_encodings_address32, a digest of their own
 // (BUSTER_X86_TEST_DIGEST_ADDRESS32), x86_encode_16_address32 and x86_encode_64_address32 on the random streams and at
@@ -137,6 +141,13 @@
 #define BUSTER_X86_TEST_DIGEST_APX 0xa93018755bf10a0eull
 #define BUSTER_X86_TEST_DIGEST_32 0x7dd46140275c23b6ull
 #define BUSTER_X86_TEST_DIGEST_16 0xa1ca8dc80cc67494ull
+// The random streams' digest (x86_check_random) with the default seed and count, by mode: every stream's length, bytes,
+// offsets and fixup ends, as the mode's encoders give them (FNV-1a, 64-bit), recorded where the scalar encoders agreed.
+#define BUSTER_X86_TEST_RANDOM_DIGEST 0x63cbbbe711e7245dull
+#define BUSTER_X86_TEST_RANDOM_DIGEST_ADDRESS32 0xfa4a971b0670c68bull
+#define BUSTER_X86_TEST_RANDOM_DIGEST_APX 0xbebd9a4926a2da72ull
+#define BUSTER_X86_TEST_RANDOM_DIGEST_32 0x032afd6b72dbf3fbull
+#define BUSTER_X86_TEST_RANDOM_DIGEST_16 0xb724d4597bd11115ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -3761,14 +3772,20 @@ static bool x86_check_known_fixups(void)
     return failures == 0;
 }
 
-static uint64_t x86_fnv1a(const uint8_t* bytes, uint64_t length)
+// FNV-1a of `length` bytes, from `hash`.
+static uint64_t x86_fnv1a_fold(uint64_t hash, const void* bytes, uint64_t length)
 {
-    uint64_t hash = 0xcbf29ce484222325ull;
+    const uint8_t* byte = bytes;
     for (uint64_t i = 0; i < length; i += 1)
     {
-        hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+        hash = (hash ^ byte[i]) * 0x100000001b3ull;
     }
     return hash;
+}
+
+static uint64_t x86_fnv1a(const uint8_t* bytes, uint64_t length)
+{
+    return x86_fnv1a_fold(0xcbf29ce484222325ull, bytes, length);
 }
 
 static bool x86_check_digest(X86Instruction* instructions, uint8_t* output)
@@ -3898,13 +3915,21 @@ static bool x86_compare_measures(const X86Instruction* instructions, uint64_t co
 }
 
 // Compares a variant with the mode's scalar encoder on `count` instructions, with each combination of offsets and fixup
-// ends. Prints the first difference if `report`.
-static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, bool report)
+// ends, and folds the scalar encoder's length, bytes, offsets and fixup ends into *digest. Prints the first difference if
+// `report`.
+static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, bool report, uint64_t* digest)
 {
     const int64_t expected = x86_test_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets,
                                                     buffers->expected_fixup_ends);
     const uint64_t marked = x86_count_marked(instructions, count);
     bool result = expected >= 0;
+    *digest = x86_fnv1a_fold(*digest, &expected, sizeof(expected));
+    if (result)
+    {
+        *digest = x86_fnv1a_fold(*digest, buffers->expected, (uint64_t)expected);
+        *digest = x86_fnv1a_fold(*digest, buffers->expected_offsets, count * sizeof(uint32_t));
+        *digest = x86_fnv1a_fold(*digest, buffers->expected_fixup_ends, marked * sizeof(uint32_t));
+    }
     for (uint32_t outputs = 0; outputs < BUSTER_X86_TEST_OUTPUT_COMBINATIONS; outputs += 1)
     {
         const bool with_offsets = (outputs & BUSTER_X86_TEST_WITH_OFFSETS) != 0;
@@ -3957,9 +3982,12 @@ static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction
     return result;
 }
 
-static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* instructions, X86Buffers* buffers)
+// The variants on the random streams. With the default seed and count (`frozen`), the streams' digest must be the mode's
+// recorded one (BUSTER_X86_TEST_RANDOM_DIGEST and the others).
+static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* instructions, X86Buffers* buffers, bool frozen)
 {
     bool result = true;
+    uint64_t digest = 0xcbf29ce484222325ull;
     uint64_t variants = 0;
     const X86Variant* mode_variants = x86_mode_variants(&variants);
     for (uint64_t v = 0; v < variants; v += 1)
@@ -3972,17 +4000,25 @@ static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* in
             x86_random_instructions(state, instructions, n, true, false);
             x86_mark_random(state, instructions, n);
             marked += x86_count_marked(instructions, n);
-            failures += !x86_compare_encoders(variant, instructions, n, buffers, failures < BUSTER_X86_TEST_REPORTED);
+            failures += !x86_compare_encoders(variant, instructions, n, buffers, failures < BUSTER_X86_TEST_REPORTED, &digest);
         }
         x86_random_instructions(state, instructions, count, true, false);
         x86_mark_random(state, instructions, count);
         marked += x86_count_marked(instructions, count);
-        failures += !x86_compare_encoders(variant, instructions, count, buffers, failures < BUSTER_X86_TEST_REPORTED);
+        failures += !x86_compare_encoders(variant, instructions, count, buffers, failures < BUSTER_X86_TEST_REPORTED, &digest);
         printf("random: %-35s %d short streams and %lu instructions (%lu marked), %lu differ\n", variant->name, BUSTER_X86_TEST_SHORT_COUNTS,
                (unsigned long)count, (unsigned long)marked, (unsigned long)failures);
         result = result && failures == 0;
     }
-    return result;
+    const uint64_t recorded = x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? BUSTER_X86_TEST_RANDOM_DIGEST_ADDRESS32
+                              : x86_test_mode == X86_ENCODER_MODE_APX     ? BUSTER_X86_TEST_RANDOM_DIGEST_APX
+                              : x86_test_mode == X86_ENCODER_MODE_32      ? BUSTER_X86_TEST_RANDOM_DIGEST_32
+                              : x86_test_mode == X86_ENCODER_MODE_16      ? BUSTER_X86_TEST_RANDOM_DIGEST_16
+                                                                          : BUSTER_X86_TEST_RANDOM_DIGEST;
+    const bool same = !frozen || digest == recorded;
+    printf("random digest%s: 0x%016llx (%s)\n", x86_test_mode_words(), (unsigned long long)digest,
+           !frozen ? "not the default seed and count" : same ? "the recorded one" : "DIFFERENT FROM THE RECORDED ONE");
+    return result && same;
 }
 
 // The page-edge check's input, for the fault handler.
@@ -5300,6 +5336,31 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
     return failures == 0;
 }
 
+// The mode's vectorized entry point's own checks, which the other checks give room enough to pass: a capacity a byte
+// short of BUSTER_X86_ENCODER_CAPACITY(count) is X86_ENCODER_ERROR_OUTPUT_TOO_SMALL and the exact one encodes, at counts
+// around a quad and a group; and a count past BUSTER_X86_ENCODER_MAX_INSTRUCTIONS is
+// X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS, without touching the arrays. Its random instructions have a state of their
+// own, so that the streams after it stay the digests'.
+static bool x86_check_entry_errors(X86Instruction* instructions, X86Buffers* buffers)
+{
+    static const uint32_t counts[] = { 0, 1, 3, 4, 5, 15, 16, 17, 64 };
+    uint64_t state = BUSTER_X86_TEST_GOLDEN_RATIO * 3 + 1;
+    uint64_t failures = 0;
+    for (uint64_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        const uint64_t count = counts[c];
+        x86_random_instructions(&state, instructions, count, true, false);
+        const int64_t short_by_one = x86_test_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count) - 1, 0, 0);
+        const int64_t exact = x86_test_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, 0);
+        failures += short_by_one != X86_ENCODER_ERROR_OUTPUT_TOO_SMALL || exact < 0;
+    }
+    const int64_t too_many = x86_test_encode(0, (uint64_t)BUSTER_X86_ENCODER_MAX_INSTRUCTIONS + 1, 0, UINT64_MAX, 0, 0);
+    const int64_t most = x86_test_encode(0, UINT64_MAX, 0, UINT64_MAX, 0, 0);
+    failures += too_many != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS || most != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
+    printf("entry errors%s: %d counts and two too many, %lu wrong\n", x86_test_mode_words(), (int)BUSTER_ARRAY_LENGTH(counts), (unsigned long)failures);
+    return failures == 0;
+}
+
 // In 16- and 32-bit modes, BUSTER_X86_TEST_OVERLONG_INSTRUCTIONS instructions longer than 15 bytes of each of three
 // kinds (the longest of the forms that can be, x86_overflowing_rows', so none in 32-bit mode): of the FS forms, of the
 // forms without FS and with an override in the decorations instead, and of those with neither but an index past 7,
@@ -5733,7 +5794,7 @@ static bool x86_check_mode(uint64_t seed, uint64_t count, X86Instruction* instru
         passed = x86_check_known_invalid_apx() && passed;
     }
     passed = x86_check_digest(instructions, buffers->output) && passed;
-    passed = x86_check_random(&state, count, instructions, buffers) && passed;
+    passed = x86_check_random(&state, count, instructions, buffers, seed == BUSTER_X86_TEST_DIGEST_SEED && count == BUSTER_X86_TEST_DEFAULT_COUNT) && passed;
     passed = x86_check_page_edges(&state, instructions, buffers) && passed;
     if (x86_test_mode == X86_ENCODER_MODE_64)
     {
@@ -5746,6 +5807,7 @@ static bool x86_check_mode(uint64_t seed, uint64_t count, X86Instruction* instru
         passed = x86_check_overlong(&state) && passed;
     }
     passed = x86_check_invalid(&state, instructions, buffers) && passed;
+    passed = x86_check_entry_errors(instructions, buffers) && passed;
     return passed;
 }
 
