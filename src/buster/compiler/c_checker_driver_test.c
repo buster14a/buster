@@ -7040,6 +7040,9 @@ static void check_test_driver_reports(CheckTest* test)
                     fp[p] = model != NULL ? *model : (CheckInputFpPragma){ .source_begin = 0, .source_end = 6 };
                     fp[p].token = check_test_driver_random_token(&state, count, true);
                     fp[p].warnings = (uint8_t)((random >> 4) & (CHECK_FP_PRAGMA_INVALID_PLACEMENT | CHECK_FP_PRAGMA_UNKNOWN_STATE));
+                    // An unknown state's command-line policy, as the reader records it (#1970): a warning, or -Werror's error.
+                    fp[p].warning_severity = (uint8_t)((random >> 8) % 4 == 0 ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING);
+                    fp[p].warning_quiet = false;
                 }
                 // In token order, but now and then out of it.
                 for (uint32_t p = 1; fp != NULL && p < pragma_count; p += 1)

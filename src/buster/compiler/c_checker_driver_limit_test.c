@@ -466,6 +466,10 @@ static void check_test_driver_preprocessor_flags(CheckTest* test, const char* cl
     snprintf(path, sizeof(path), "%s/s.h", include);
     static const char s[] = "#warning in a system header\n#pragma message(\"hidden there\")\n#define S 1\n#define S 2\n";
     written = written && parse_test_write(path, s, sizeof(s) - 1);
+    // The STDC pragmas' warnings (#1970): clang's lexer's, which the checker issues.
+    snprintf(path, sizeof(path), "%s/stdc.h", include);
+    static const char stdc[] = "#pragma STDC FENV_ACCESS BOGUS\n#pragma STDC FOO\n";
+    written = written && parse_test_write(path, stdc, sizeof(stdc) - 1);
     static const char* const sources[] =
     {
         "#include \"pp-flags/a.h\"\n#include \"pp-flags/b.h\"\n",
@@ -475,6 +479,16 @@ static void check_test_driver_preprocessor_flags(CheckTest* test, const char* cl
         "#ifdef A junk\n#endif junk\n#pragma clang diagnostic push\n#pragma clang diagnostic error \"-W#pragma-messages\"\n"
         "#pragma message(\"promoted\")\n#pragma clang diagnostic pop\n#pragma clang diagnostic ignored \"-W#warnings\"\n#warning ignored\n"
         "#pragma clang diagnostic warning \"-W#warnings\"\n#pragma clang diagnostic pop\n#define B@\nint x = 'ab';\n",
+        // An STDC pragma's state that is no ON, OFF or DEFAULT, or none, and an unknown one, in a system header and out of
+        // it; one a pragma promotes; a vendor's pragma without a name (-Wall's, at the line's end); with real includes and
+        // with line markers.
+        "#include <stdc.h>\n#pragma STDC FENV_ACCESS BOGUS\n#pragma STDC FOO\n#pragma STDC FP_CONTRACT\n#pragma STDC\n"
+        "#pragma clang diagnostic push\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n#pragma STDC CX_LIMITED_RANGE BOGUS\n"
+        "#pragma clang diagnostic pop\n#pragma GCC\nint x;\n",
+        "# 1 \"x.c\"\n# 1 \"./pp-flags/stdc.h\" 1 3\n#pragma STDC FENV_ACCESS BOGUS\n#pragma STDC FOO\n# 2 \"x.c\" 2\n"
+        "#pragma STDC FENV_ACCESS BOGUS\n#pragma STDC FOO\n#pragma STDC FP_CONTRACT\n#pragma STDC\n#pragma clang diagnostic push\n"
+        "#pragma clang diagnostic error \"-Wunknown-pragmas\"\n#pragma STDC CX_LIMITED_RANGE BOGUS\n#pragma clang diagnostic pop\n"
+        "#pragma GCC\nint x;\n",
     };
     static const char* const options[][3] =
     {
@@ -488,6 +502,7 @@ static void check_test_driver_preprocessor_flags(CheckTest* test, const char* cl
         { "-Wno-all", "-Wsystem-headers", NULL },
         { "-std=c23", "-pedantic", NULL },
         { "-Wno-everything", NULL },
+        { "-Wall", "-Wsystem-headers", NULL },
     };
     char source[640];
     snprintf(source, sizeof(source), "%s/pp-flags.c", directory);
@@ -496,8 +511,8 @@ static void check_test_driver_preprocessor_flags(CheckTest* test, const char* cl
         const bool fixture = parse_test_write(source, sources[f], strlen(sources[f]));
         for (uint32_t o = 0; fixture && o < BUSTER_ARRAY_LENGTH(options); o += 1)
         {
-            // The line markers' fixture leaves out -pedantic's sets: clang's -Wgnu-line-marker isn't given yet (#2222).
-            const bool compared = !(f == 1 && (o == 6 || o == 8));
+            // The line markers' fixtures leave out -pedantic's sets: clang's -Wgnu-line-marker isn't given yet (#2222).
+            const bool compared = !((f == 1 || f == 4) && (o == 6 || o == 8));
             char* theirs_arguments[16] = { (char*)clang, "-fsyntax-only", "-std=gnu17", "-fno-color-diagnostics", "-isystem", include };
             char* ours_arguments[16] = { (char*)executable, "-fsyntax-only", "-std=gnu17", "-isystem", include };
             uint32_t theirs_count = 6;

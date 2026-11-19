@@ -2019,13 +2019,27 @@ static void check_driver_pragma_report(const Parser* parser, Preprocessor* pp, c
     }
     else if (!quiet && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0)
     {
-        const CheckWarningSeverity severity = check_diagnostic_severity_at(input, record->token, record->source_begin,
-                                                                           CHECK_WARNING_UNKNOWN_PRAGMA, false);
+        // clang's lexer warning with its flag, as its options and pragmas map it (#1970): at the state, or at the line's
+        // end where a directive's line has none (its eod; a _Pragma's stays at the _Pragma, as clang's does).
+        const CheckWarningSeverity severity = check_diagnostic_unknown_state_severity(input, record);
         if (severity != CHECK_WARNING_IGNORE)
         {
             const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                            severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-            pp_diagnose_output(pp, pp_severity, check_diagnostic_pragma_source(record), "%s", check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
+            const uint32_t source = check_diagnostic_pragma_source(record);
+            const char* message = check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA);
+            const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR);
+            // (The output's columns may have been given back: pp_output_ensure.)
+            const bool missing = record->source_end - record->source_begin <= 5 && pp_history_ensure(pp) && pp_output_ensure(pp) && pp_history_at(pp, source) == 0;
+            const uint32_t line_end = missing ? pp_output_line_end(pp, source) : 0;
+            if (line_end != 0)
+            {
+                pp_diagnose_output_location_at(pp, pp_severity, source, line_end, source, PP_DIAGNOSTIC_SEMANTIC, "%s [%s-Wunknown-pragmas]", message, prefix);
+            }
+            else
+            {
+                pp_diagnose_output(pp, pp_severity, source, "%s [%s-Wunknown-pragmas]", message, prefix);
+            }
         }
     }
     else if (!quiet && !record->warning_quiet && (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0)
