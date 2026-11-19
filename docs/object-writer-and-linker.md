@@ -4487,7 +4487,14 @@ are the later parts.
     GNU ld decides it left to right (`foreign_needed_library`). Lane 0 marks
     the needs, and the members not loaded before and the newly needed
     libraries' objects of references are the next round's objects, in
-    position order.
+    position order. A needed library's versioned reference does not establish
+    the bare name's earliest strong-reference position (#2911): `foo@V1`
+    cannot extract an archive member defining only `foo`. `foreign_fold`
+    reads the existing `ImportReferences.version` index for library records
+    on both paths, without adding columns or changing the record format.
+    It keeps their bare names and reference classes for winner accounting
+    and exports, so `foreign_link_dynamic_finish` still exports a definition
+    already loaded when a needed library refers to its name.
 - **COMDAT groups** (step 5). A group's record goes through the exchange with
   the symbols', and its partition's group table keeps each signature's
   earliest group by position. After the last round each object's sections in

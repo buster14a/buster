@@ -439,6 +439,13 @@ Existing unsupported C code-generation and linker options remain refusals.
 clang -std=c17 -O2 -Wall -Wextra -Wno-unused-function -DBUSTER_DRIVER_MIXED_STANDALONE src/buster/compiler/c_driver_mixed_test.c -o /tmp/buster-mixed-test && /tmp/buster-mixed-test ./build/compiler clang
 ```
 
+The mixed archive regressions include a needed library's versioned reference
+(#2911). An archive between the referring library and its provider must stay
+unloaded for that reference alone. Both reader paths at one and three lanes
+check execution and defined dynamic symbols: an ordinary reference
+still extracts, and a source definition or a member loaded for another name
+still exports the unversioned definition that the library uses at runtime.
+
 The last command runs the focused original argv-level fixtures, also included
 in `test-checker-driver`: own/Clang objects, object-only links, lazy archives,
 shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
