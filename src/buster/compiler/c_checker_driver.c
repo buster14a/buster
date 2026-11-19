@@ -12153,13 +12153,24 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528), and the tree
     // alone: the reader derives the traversal it reads into those pages (check_input_run).
     const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .scratch = scratch };
-    bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order)) && pp_initialize(pp, options, identifiers) &&
-                 parse_initialize(parser, &parser_options, options->language);
+    bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order));
+    // A preprocessor that refused to start on its own fatal error (an invalid SOURCE_DATE_EPOCH, #2996) has printed it;
+    // the unit ends with that error alone, not with a memory failure that didn't happen.
+    bool pp_refused = false;
+    if (ready)
+    {
+        ready = pp_initialize(pp, options, identifiers);
+        pp_refused = !ready && pp->fatal;
+    }
+    ready = ready && parse_initialize(parser, &parser_options, options->language);
     // Whether the unit reported its memory failure itself (arena_report_failure), which the notes at its end then don't.
     bool memory_reported = false;
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
-        arena_report_failure(errors, "checking", UINT64_C(1) << 36);
+        if (!pp_refused || scratch->base == 0 || output_arena->base == 0)
+        {
+            arena_report_failure(errors, "checking", UINT64_C(1) << 36);
+        }
         driver_fatal = true;
         memory_reported = true;
     }

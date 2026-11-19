@@ -1335,7 +1335,9 @@ as clang's is.
 
 `SOURCE_DATE_EPOCH` must contain only decimal digits and fit a nonnegative
 signed 64-bit value; signs, whitespace, empty values and suffixes are fatal
-errors. Its time is UTC. All three macros require a successful libc calendar
+errors, a unit's only error at `-c` and `-fsyntax-only` too, where the checker
+reports no memory failure after a preprocessor that refused to start (#2996).
+Its time is UTC. All three macros require a successful libc calendar
 conversion and a year from 0000 through 9999, so their fixed spellings fit
 without truncation. Unrepresentable `time_t` values, a failed current-time read,
 failed calendar conversions and out-of-range calendar fields produce fatal
