@@ -1,17 +1,19 @@
 diff --git a/src/buster/compiler/interpreter_link.c b/src/buster/compiler/interpreter_link.c
-index e56dbbeb4..d20bd0235 100644
+index e56dbbeb4..287b5d0dd 100644
 --- a/src/buster/compiler/interpreter_link.c
 +++ b/src/buster/compiler/interpreter_link.c
-@@ -14,7 +14,7 @@
+@@ -13,8 +13,8 @@
+ // BSS is explicitly cleared even when arena storage is reused; all static bytes are defined. Read-only atoms are
  // patched privately before publication and remain read-only to the interpreter. A failed call preserves output,
  // all inputs and arena length. New allocations above the restored length have no observable lifetime on failure.
- // The producer emits contiguous address/size columns and compact bindings for both interpreter front ends. This
+-// The producer emits contiguous address/size columns and compact bindings for both interpreter front ends. This
 -// scalar oracle resolves diagnostic-sized symbol tables; no SIMD or end-to-end throughput claim is made.
-+// image builder selects each named definition once and reports errors in the original reference order.
++// The producer emits contiguous address/size columns and compact bindings for both interpreter front ends.
++// It indexes named definitions in input order and reports errors in the original reference order.
  #ifndef BUSTER_INTERPRETER_LINK_INCLUDED
  #define BUSTER_INTERPRETER_LINK_INCLUDED
  
-@@ -246,15 +246,81 @@ static bool interpreter_link_same_name(const Link* a, SymbolId x, const Link* b,
+@@ -246,15 +246,82 @@ static bool interpreter_link_same_name(const Link* a, SymbolId x, const Link* b,
      return result;
  }
  
@@ -44,16 +46,17 @@ index e56dbbeb4..d20bd0235 100644
 +static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, const Link* const* links, uint32_t count, uint64_t definitions, Arena* output_arena)
  {
      InterpreterLinkResult result = interpreter_link_problem(INTERPRETER_LINK_OK, 0, 0, 0, 0);
-+    // Each counted definition already fits in the output arena with its per-symbol columns.
++    // At most half the slots are occupied. Every definition already has per-symbol storage in the output arena,
++    // so doubling the count and rounding to a power of two fits in uint64_t.
 +    uint64_t capacity = 1;
 +    while (capacity < 2 * definitions)
 +    {
 +        capacity *= 2;
 +    }
-+    InterpreterLinkName local[32];
-+    InterpreterLinkName* names = local;
++    InterpreterLinkName local_names[32];
++    InterpreterLinkName* names = local_names;
 +    Scratch scratch = { 0 };
-+    if (capacity > sizeof(local) / sizeof(*local))
++    if (capacity > sizeof(local_names) / sizeof(*local_names))
 +    {
 +        scratch = scratch_begin(output_arena);
 +        names = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, InterpreterLinkName, capacity);
@@ -97,7 +100,7 @@ index e56dbbeb4..d20bd0235 100644
      for (uint32_t input = 0; result.status == INTERPRETER_LINK_OK && input < count; input += 1)
      {
          const Link* link = links[input];
-@@ -264,42 +330,19 @@ static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, co
+@@ -264,42 +331,19 @@ static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, co
              const uint8_t binding = link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING;
              uint32_t selected_input = input;
              SymbolId selected_symbol = symbol;
@@ -151,7 +154,7 @@ index e56dbbeb4..d20bd0235 100644
                  }
              }
              if (result.status == INTERPRETER_LINK_OK && found)
-@@ -321,6 +364,10 @@ static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, co
+@@ -321,6 +365,10 @@ static InterpreterLinkResult interpreter_link_resolve(InterpreterLink* image, co
              }
          }
      }
@@ -162,7 +165,7 @@ index e56dbbeb4..d20bd0235 100644
      return result;
  }
  
-@@ -391,6 +438,7 @@ static InterpreterLinkResult interpreter_link_materialize(InterpreterLink* outpu
+@@ -391,6 +439,7 @@ static InterpreterLinkResult interpreter_link_materialize(InterpreterLink* outpu
      {
          result.status = INTERPRETER_LINK_INVALID;
      }
@@ -170,18 +173,18 @@ index e56dbbeb4..d20bd0235 100644
      uint64_t memory_capacity = external_count;
      for (uint32_t input = 0; result.status == INTERPRETER_LINK_OK && input < link_count; input += 1)
      {
-@@ -532,11 +580,18 @@ static InterpreterLinkResult interpreter_link_materialize(InterpreterLink* outpu
+@@ -532,11 +581,18 @@ static InterpreterLinkResult interpreter_link_materialize(InterpreterLink* outpu
                  unit->addresses[symbol] = link->symbols.value[symbol];
                  unit->resolved[symbol] = 1;
              }
 +            // Before publication the binding storage holds the named definitions in symbol order. An unbound code
-+            // atom still defines its name; an atomless external or absolute symbol is already marked resolved.
++            // atom still defines its name. An atomless external or absolute symbol is already marked resolved.
 +            if (link->symbols.name[symbol] != 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL && (atom != 0 || unit->resolved[symbol] != 0))
 +            {
 +                unit->bindings[unit->binding_count++].symbol = symbol;
-+                definitions += 1;
 +            }
          }
++        definitions += unit->binding_count;
      }
      if (result.status == INTERPRETER_LINK_OK)
      {

@@ -42,8 +42,7 @@ cmp "$out/musl.clang" "$out/musl.out"
 for source in "${sources[@]}"; do
     name=$(basename "$source" .c)
     "$compiler" -Dhidden= -c "$source" -o "$out/$name.o"
-    llvm-objcopy --dump-section=".text=$out/$name.text" "$out/$name.o"
-    sha256sum "$out/$name.text"
+    sha256sum "$out/$name.o"
 done
 
 "$CC" -O2 "$here/generate.c" -o "$out/generate"

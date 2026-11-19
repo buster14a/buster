@@ -47,10 +47,10 @@ jobs:
             cmp "$RUNNER_TEMP/base/$name.trace" "$RUNNER_TEMP/head/$name.trace"
             echo "$name stdout, winners, maps, relocations and diagnostics match"
           done
-          for text in "$RUNNER_TEMP/base"/*.text; do
-            cmp "$text" "$RUNNER_TEMP/head/${text##*/}"
+          for object in "$RUNNER_TEMP/base"/*.o; do
+            cmp "$object" "$RUNNER_TEMP/head/${object##*/}"
           done
-          echo "All six generated .text sections match"
+          echo "All six generated ELF objects match byte for byte"
       - name: Run the clean candidate through the published entry point
         run: |
           set -euo pipefail
@@ -60,3 +60,19 @@ jobs:
           ./build.sh --config Release > "$RUNNER_TEMP/build-clean.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build-clean.log"; exit 1; }
           ./build/compiler test-interpreter-link
           ./build/compiler interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c
+      - name: Retain the base and candidate observations
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: interpreter-link-observations
+          path: |
+            ${{ runner.temp }}/base/*.out
+            ${{ runner.temp }}/base/*.err
+            ${{ runner.temp }}/base/*.trace
+            ${{ runner.temp }}/base/*.clang
+            ${{ runner.temp }}/head/*.out
+            ${{ runner.temp }}/head/*.err
+            ${{ runner.temp }}/head/*.trace
+            ${{ runner.temp }}/head/*.clang
+          if-no-files-found: ignore
+          retention-days: 14
