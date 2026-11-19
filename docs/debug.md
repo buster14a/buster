@@ -109,7 +109,17 @@ Tier 0's `.debug_loclists` restrict a home to encoded source-entry ranges after 
 prologue and within the declaration's lexical scope. Shared epilogues and
 whole tail-call entries are omitted: those can restore registers or destroy a
 frame base. Lexical blocks use corresponding `.debug_rnglists` entries, so
-nested shadowed names stop being visible on leaving their scope. The ranges
+nested shadowed names stop being visible on leaving their scope. Only a scope
+that declares an object or a typedef of its own has a block, as clang's do:
+LLVM drops a scope without children and gives the children of one that holds
+only scopes to its parent, and so does `check_debug_value_own_blocks` (#2543),
+which marks those blocks once per function before the writer's two passes. A
+block that declared nothing cost a DIE, a range list and an object's relocation
+and told a debugger nothing: `-c -g sqlite3.c` wrote 24,839 blocks and now
+writes 2,139 (clang -O0's 2,120), its object 20% smaller, with 17,397
+relocations of `.debug_info` for 40,097, and on the 9700X its `debug` stage
+takes 10.5% less and the compile 2.3% fewer cycles ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/lexical-blocks-2543-2026-11-19)). The ranges
 use the existing function address table. They are derived after branch sizing,
 not from estimated instruction lengths.
 
