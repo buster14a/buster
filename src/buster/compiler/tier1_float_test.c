@@ -782,11 +782,56 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     arena_pop_to(&test->input, 0);
 }
 
+static void tier1_float_conversion_loads(Tier1EmitTest* test)
+{
+    const IrSizes sizes = { .instruction_count = 4, .block_count = 1, .parameter_count = 1 };
+    const uint8_t registers[4] = { X86_REGISTER_RDI, X86_REGISTER_RAX, 16, 0 };
+    for (uint32_t source = IR_I32; source <= IR_I64; source += 1)
+    {
+        for (uint32_t target = IR_F32; target <= IR_F64; target += 1)
+        {
+            IrFunction function;
+            const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+            tier1_emit_test_expect(test, created, "create a signed-load conversion");
+            if (created)
+            {
+                function.result_type = (uint8_t)target;
+                function.block_offsets[1] = 4;
+                function.parameter_types[0] = IR_PTR;
+                tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 1, IR_LOAD, source, 0, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 2, IR_SITOFP, target, 1, BUSTER_IR_NONE);
+                tier1_emit_test_node(&function, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE);
+                for (uint32_t observable = 0; observable <= 1; observable += 1)
+                {
+                    function.flags[1] = observable != 0 ? BUSTER_IR_VOLATILE : 0;
+                    Tier1SelectPlan plan;
+                    uint32_t failed = BUSTER_IR_NONE;
+                    const bool selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+                    tier1_emit_test_expect(test, selected, "select the signed-load conversion");
+                    if (selected)
+                    {
+                        const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 2);
+                        const Tier1SelectRecords records = tier1_select_expand(&holes);
+                        const bool memory = records.count == 2 && (records.records[1].mode & BUSTER_X86_MODE_MEMORY) != 0;
+                        const uint16_t form = tier1_select_float_forms(target == IR_F32 ? 4 : 8)->from_integer[source == IR_I64];
+                        tier1_emit_test_expect(test, records.count == 2 && records.records[0].form == X86_FORM_XORPS_X_XM128 && records.records[1].form == form, "clear the destination and convert at the exact source width");
+                        tier1_emit_test_expect(test, memory == (observable == 0) && (plan.covered[1] != 0) == memory, "fold an ordinary load and keep a volatile load at its own node");
+                    }
+                    arena_pop_to(&test->output, 0);
+                }
+            }
+            arena_pop_to(&test->input, 0);
+        }
+    }
+}
+
 static void tier1_float_cases(Tier1EmitTest* test)
 {
     test->terms = 0;
     test->width = 8;
     test->selects = false;
+    tier1_float_conversion_loads(test);
     for (uint32_t fixture = 0; fixture < BUSTER_TIER1_FLOAT_FIXTURES; fixture += 1)
     {
         // Few xmm registers: the mixed fixture's eight parameters, which their definitions take at once, and one more;
