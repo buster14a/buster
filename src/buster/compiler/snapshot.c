@@ -158,6 +158,9 @@ static __attribute__((unused)) bool snapshot_discard(const char* directory, Runt
 // The writer's arena: the strings and the file's image.
 #define BUSTER_SNAPSHOT_WRITE_BYTES (256ull << 20)
 
+// Linux MADV_POPULATE_WRITE (5.14), including with libc headers that predate it.
+#define BUSTER_SNAPSHOT_MADV_POPULATE_WRITE 23
+
 // The runtime's strings that the header points to, by their place in it.
 typedef enum SnapshotPath
 {
@@ -979,6 +982,12 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
     bool fits = image != 0 && snapshot_pieces_contiguous(runtime);
     if (fits)
     {
+        // Fault in the fresh mapping before the individual records first touch its pages. If the kernel cannot
+        // populate them here, the writes below fault them in normally. Existing page contents are preserved.
+        if (arena->mapping_bytes != 0 && image == arena->base)
+        {
+            madvise(image, end, BUSTER_SNAPSHOT_MADV_POPULATE_WRITE);
+        }
         // The header and each region have writers of their own. Only the alignment gaps have no writer.
         uint64_t previous_end = sizeof(header);
         for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
