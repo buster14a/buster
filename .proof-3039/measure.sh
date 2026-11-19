@@ -34,7 +34,7 @@ elif [[ $action == link ]]; then
         readelf -W -l "$output/$name" > "$output/$name.phdr"
         grep -q GNU_EH_FRAME "$output/$name.phdr"
         readelf --debug-dump=frames "$output/$name" > "$output/$name.frames"
-        llvm-readelf --unwind "$output/$name" > "$output/$name.unwind"
+        llvm-readobj --unwind "$output/$name" > "$output/$name.unwind"
         read -r hdr_addr frame_addr < <(objdump -h "$output/$name" | awk '$2==".eh_frame_hdr"{h=$4} $2==".eh_frame"{f=$4} END{print h, f}')
         "$input/verify" "$output/$name.hdr" "$output/$name.frames" "$hdr_addr" "$frame_addr"
         printf '%s ' "$name"

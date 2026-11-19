@@ -35,7 +35,7 @@ jobs:
           test "$(git rev-parse 0c27d6f47e79d34ea255505f89785241ea898f8f^)" = 6427879e1143026a12fb0388a20bdea1fe4b2bc5
           git switch --detach 6427879e1143026a12fb0388a20bdea1fe4b2bc5
           mkdir -p "$RUNNER_TEMP/results"
-          { uname -sr; lscpu | sed -n '/^Model name:/p'; clang --version; readelf --version | head -1; llvm-readelf --version | head -1; } | tee "$RUNNER_TEMP/results/environment.txt"
+          { uname -sr; lscpu | sed -n '/^Model name:/p'; clang --version; readelf --version | head -1; llvm-readobj --version | sed -n '1p'; } | tee "$RUNNER_TEMP/results/environment.txt"
           bash "$RUNNER_TEMP/record/measure.sh" prepare "$RUNNER_TEMP/objects" | tee "$RUNNER_TEMP/results/inputs.txt"
       - name: Build measured baseline
         id: buildbase
