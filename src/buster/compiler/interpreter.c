@@ -91,6 +91,9 @@ struct InterpreterRuntime
     // the search from the newest down finds first, and older memories (a global, the heap), which it finds last; one
     // hint for the last access sent each of those back to the search (#2758).
     uint32_t recent[1u << BUSTER_INTERPRETER_RECENT_LOG2];
+    // The hint each entry last displaced. On 00040.c two hot regions can hash to the same entry and one is far
+    // back in the registry. Consult this table only on a primary miss. Both hints must still pass the same checks.
+    uint32_t evicted[1u << BUSTER_INTERPRETER_RECENT_LOG2];
     bool check_memory;
     bool check_undefined;
     uint64_t stack_serial;
@@ -347,8 +350,8 @@ static uint32_t interpreter_memory_recent(uint64_t address)
 
 // The first memory that holds all `bytes` (at least 1) from `address`, or memory_count if none does. One in the
 // disjoint prefix (InterpreterRuntime.disjoint_count) is the first, before any past it, and the only one in it: so
-// first the memory an earlier access at its address's entry found if it is in the prefix, then the prefix from its
-// newest down, then the memories past it from the first.
+// try each of the address entry's two hints if it is in the prefix, then the prefix from its newest down, then the
+// memories past it from the first.
 static uint32_t interpreter_memory_find(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes)
 {
     const InterpreterMemory* const memories = runtime->memories;
@@ -357,18 +360,30 @@ static uint32_t interpreter_memory_find(InterpreterRuntime* runtime, uint64_t ad
     const uint32_t entry = interpreter_memory_recent(address);
     const uint32_t hint = runtime->recent[entry];
     uint32_t found = hint < prefix && interpreter_memory_holds(&memories[hint], address, bytes) ? hint : count;
-    for (uint32_t i = prefix; found == count && i > 0; i -= 1)
+    if (found == count)
     {
-        found = interpreter_memory_holds(&memories[i - 1], address, bytes) ? i - 1 : count;
-    }
-    for (uint32_t i = prefix; found == count && i < count; i += 1)
-    {
-        found = interpreter_memory_holds(&memories[i], address, bytes) ? i : count;
-    }
-    // The entry keeps its hint unless another memory held the range: a store only when it changes (#2758).
-    if (found != count && found != hint)
-    {
-        runtime->recent[entry] = found;
+        const uint32_t evicted = runtime->evicted[entry];
+        if (evicted != hint && evicted < prefix && interpreter_memory_holds(&memories[evicted], address, bytes))
+        {
+            found = evicted;
+        }
+        else
+        {
+            for (uint32_t i = prefix; found == count && i > 0; i -= 1)
+            {
+                found = interpreter_memory_holds(&memories[i - 1], address, bytes) ? i - 1 : count;
+            }
+            for (uint32_t i = prefix; found == count && i < count; i += 1)
+            {
+                found = interpreter_memory_holds(&memories[i], address, bytes) ? i : count;
+            }
+            // A scan installs a new pair. A hit in either slot uses it without rewriting the pair.
+            if (found != count && found != hint)
+            {
+                runtime->evicted[entry] = hint;
+                runtime->recent[entry] = found;
+            }
+        }
     }
     return found;
 }

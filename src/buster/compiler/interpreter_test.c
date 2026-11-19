@@ -406,9 +406,14 @@ static void interpreter_test_memory(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, address + 7, 2, false) == INTERPRETER_MEMORY, "allocation crossing");
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, UINT64_MAX, 2, false) == INTERPRETER_MEMORY, "address overflow");
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, false) == INTERPRETER_UNDEFINED, "defined-byte read checking");
+    runtime.recent[interpreter_memory_recent(address)] = runtime.memory_count;
+    runtime.evicted[interpreter_memory_recent(address)] = 0;
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, false) == INTERPRETER_UNDEFINED, "defined-byte read through a displaced hint");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, true) == INTERPRETER_MEMORY, "read-only write through a displaced hint");
     interpreter_memory_remove_owner(&runtime, 1);
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 1, false) == INTERPRETER_MEMORY, "returned frame allocation lifetime");
     added = interpreter_memory_add(&runtime, (uint8_t*)&bytes, 8, 0, true, 0);
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, true) == INTERPRETER_OK, "a reused address has its new registration's permissions");
     interpreter_memory_remove(&runtime, (uint8_t*)&bytes);
     interpreter_test_expect(tally, added && runtime.memory_count == 0, "heap allocation removal");
 }
@@ -701,6 +706,11 @@ static void interpreter_test_lookup(InterpreterTestTally* tally)
     interpreter_test_expect(tally, runtime.memory_count == 4 && runtime.disjoint_count == 1, "lookup: a removal keeps the prefix's memories it kept");
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_MEMORY,
                             "lookup: a hint past the prefix isn't taken over an earlier memory that holds the range");
+    const uint32_t entry = interpreter_memory_recent(at_first + 8);
+    runtime.recent[entry] = runtime.memory_count;
+    runtime.evicted[entry] = 3;
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_MEMORY,
+                            "lookup: a displaced hint past the prefix cannot bypass the first read-only registration");
     // With first removed, its views decide for its bytes 4 to 12, and nothing for its others.
     interpreter_memory_remove(&runtime, first);
     interpreter_test_expect(tally, runtime.memory_count == 3 && runtime.disjoint_count == 0, "lookup: no prefix once its memories are gone");
