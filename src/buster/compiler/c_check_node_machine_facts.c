@@ -365,10 +365,15 @@ _Static_assert(sizeof(NodeFactsPair) == 16, "a pointer conversion's slot is a qu
 //   (check_action_inherit's flags and fault), so the call's record is the kernel's. A made one's is said kept too.
 // - BUSTER_NODE_FACTS_ARGUMENT_PLAIN: a made conversion's type is a plain scalar's (check_lower_plain_scalar), C's
 //   term of a plain call's argument.
+// - BUSTER_NODE_FACTS_ARGUMENT_QUIET: it can't be a null pointer constant that is no literal (#3012, the compiler's
+//   -Wnon-literal-null-conversion, c_check_node_census.c's node_tests_null_asked): it is no integer constant, or its
+//   record has the literal's flag, or its parameter's conversion's type is no pointer's. A call with an argument
+//   without it is not quiet for the census's tests (BUSTER_NODE_FACTS_QUIET_CALL).
 // An argument with neither of the first two says the call is T's.
 #define BUSTER_NODE_FACTS_ARGUMENT_KEPT 0x01u
 #define BUSTER_NODE_FACTS_ARGUMENT_MADE 0x02u
 #define BUSTER_NODE_FACTS_ARGUMENT_PLAIN 0x04u
+#define BUSTER_NODE_FACTS_ARGUMENT_QUIET 0x08u
 
 // What the call's rule asks of a type, T's own answers once a type (node_facts_argued), so that the rule is words of
 // 0 or 1 an argument and asks the type table nothing. Of a type as an argument's value, by its index
@@ -408,9 +413,10 @@ _Static_assert(sizeof(NodeFactsPair) == 16, "a pointer conversion's slot is a qu
 #define BUSTER_NODE_FACTS_NO_PARAMETER UINT32_MAX
 // The flags of an argument's record that the rule reads, a part of the key: a register's name (an array's pointer), a
 // volatile part and an integer constant expression's value (an lvalue's), the forms of a null pointer constant and
-// its flag, and the inherited flags a vector's conversion drops (check_vector_convert).
+// its flag, a literal zero's (the answer's BUSTER_NODE_FACTS_ARGUMENT_QUIET), and the inherited flags a vector's
+// conversion drops (check_vector_convert).
 #define BUSTER_NODE_FACTS_ARGUMENT_FLAGS \
-    (BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_NULL_POINTER | \
+    (BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_LITERAL_ZERO | \
      (BUSTER_CHECK_INHERITED & ~(BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT)))
 
 typedef struct NodeFactsArgumentSlot NodeFactsArgumentSlot;
@@ -2413,6 +2419,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_argument_made(N
     uint32_t made = 0;
     uint32_t neutral = 0;
     uint32_t plain = 0;
+    uint32_t warned = 0;
     TypeId made_type = 0;
     uint32_t made_flags = 0;
     if (parameter)
@@ -2421,6 +2428,9 @@ static inline __attribute__((always_inline)) uint32_t node_facts_argument_made(N
         const uint32_t target_facts = (uint32_t)(target >> 32);
         const uint32_t targeted = (target_facts & BUSTER_NODE_FACTS_ARGUED_VALID) != 0 ? 1u : 0u;
         const uint32_t pointer = (target_facts & BUSTER_NODE_FACTS_ARGUED_POINTER) != 0 ? 1u : 0u;
+        // What the compiler may warn of as a null pointer constant that is no literal: the record's own constant an
+        // integer's (an lvalue's too: the warning reads the node's value), no literal's flag, a pointer's target.
+        warned = pointer & (((standing >> 2) & 0x07u) == CHECK_CONSTANT_INTEGER ? 1u : 0u) & ((flags & BUSTER_CHECK_LITERAL_ZERO) == 0 ? 1u : 0u);
         const uint32_t same = target_type == value ? 1u : 0u;
         // The rule's own tests: neither type atomic (a target is a conversion's operand, none where the parameter is
         // atomic, and no target is neither a pointer's nor an arithmetic one); then a pointer's or an arithmetic
@@ -2478,7 +2488,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_argument_made(N
     made &= complex ^ 1u;
     *conversion = (uint64_t)made_type | (uint64_t)made_flags << 32;
     return ((made | neutral) != 0 ? BUSTER_NODE_FACTS_ARGUMENT_KEPT : 0u) | (made != 0 ? BUSTER_NODE_FACTS_ARGUMENT_MADE : 0u) |
-           ((made & plain) != 0 ? BUSTER_NODE_FACTS_ARGUMENT_PLAIN : 0u);
+           ((made & plain) != 0 ? BUSTER_NODE_FACTS_ARGUMENT_PLAIN : 0u) | (warned == 0 ? BUSTER_NODE_FACTS_ARGUMENT_QUIET : 0u);
 }
 
 // The second word of an argument's slot's key, of its record: its flags the rule reads, its standing, and whether it
@@ -2540,7 +2550,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_call_arguments(
     const uint32_t count = view->counts[w];
     const uint16_t* arguments = view->arguments + view->inputs[w];
     const uint64_t* targets = view->targets + row->parameters;
-    uint32_t outcome = BUSTER_NODE_FACTS_ARGUMENT_KEPT | BUSTER_NODE_FACTS_ARGUMENT_MADE | BUSTER_NODE_FACTS_ARGUMENT_PLAIN;
+    uint32_t outcome = BUSTER_NODE_FACTS_ARGUMENT_KEPT | BUSTER_NODE_FACTS_ARGUMENT_MADE | BUSTER_NODE_FACTS_ARGUMENT_PLAIN | BUSTER_NODE_FACTS_ARGUMENT_QUIET;
 #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
     for (uint32_t i = 0; i < parameters; i += 1)
     {
@@ -3851,9 +3861,13 @@ static inline __attribute__((always_inline)) void node_facts_calls_of(NodeFacts*
                     rare_count += 1;
                     records[w].standing = BUSTER_NODE_MACHINE_WIDE;
                 }
-                else if (!lean)
+                else
                 {
-                    records[w].exponent |= (uint16_t)node_facts_call_says(outcome, row->function);
+                    // It is not quiet for the census's tests where an argument may be a null pointer constant that is no
+                    // literal, whatever the short path said of the arguments by themselves.
+                    const uint32_t loud = (outcome & BUSTER_NODE_FACTS_ARGUMENT_QUIET) == 0 ? (uint32_t)BUSTER_NODE_FACTS_QUIET_CALL : 0u;
+                    const uint32_t says = lean ? 0u : node_facts_call_says(outcome, row->function);
+                    records[w].exponent = (uint16_t)((records[w].exponent & ~loud) | says);
                 }
             }
         }
@@ -4911,7 +4925,6 @@ static bool node_facts_value_line(const NodeMachine* machine, const CheckValue* 
     const bool rare = high != 0 || value->imaginary_storage[0] != 0 || (value->imaginary_storage[1] & 0xffffu) != 0 || value->overload_head != 0 ||
                       value->bit_width != 0 || value->fault != CHECK_FAULT_NONE || value->fault_node != 0 || value->object_bit_offset != 0 ||
                       (uint32_t)value->category > 0x03u || (uint32_t)kind > 0x07u;
-    const uint32_t fields = (low != 0) + (offset != 0) + floating;
     const uint64_t payload = offset != 0 ? offset : floating ? significand : low;
     *line = (NodeFactsRecord){
         .type = value->type,
@@ -4923,7 +4936,7 @@ static bool node_facts_value_line(const NodeMachine* machine, const CheckValue* 
         .taken = 1,
         .exponent = (uint16_t)(offset == 0 && floating ? exponent : node_facts_small(payload)),
     };
-    return !rare && fields <= 1;
+    return !rare && node_machine_whole(kind, low, offset, floating);
 }
 
 // A literal's or a string's line of its own for `value`, as node_facts_literal makes one from T's record: its number,

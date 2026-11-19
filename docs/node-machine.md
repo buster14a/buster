@@ -2887,9 +2887,9 @@ three kinds of record. Each test is then decided where what it reads is:
 | a register object, a declaration the tables don't model | at each leaf | its flags and the name's declaration's byte |
 | a comparison under a bitwise operator or as a statement, a `!` under a comparison, an assignment as a condition | at a comparison's token, a `!` and an `=` | the parser's tree |
 | a call's aggregates and its callee's own semantics | at each call | the arguments' bytes, the callee's declaration's byte |
-| a constant its conversion changes, a division by zero, a shift's count, a null dereferenced, a zero that is no literal made a pointer | at an operator with a constant operand, exact in place | the constant's value in T's columns, the types' widths |
+| a constant its conversion changes, a division by zero, a shift's count, a null dereferenced | at an operator with a constant operand, exact in place | the constant's value in T's columns, the types' widths |
 | a pointer cast to a narrow integer, a string plus an integer, a comma's discard | at the operator, exact in place | its operands' bytes |
-| a comparison's bound, a mix of enumerations, signs compared, a void dereferenced, a shift of a sum, a chained comparison, a shift or a product read as a truth, a name assigned to itself, an atomic record's member, a subscript at its array's end or past it, a constant the columns don't hold whole | by the census's code, on that record alone | a condition each of them needs, from the operator's bytes and its operands' |
+| a comparison's bound, a mix of enumerations, signs compared, a void dereferenced, a shift of a sum, a chained comparison, a shift or a product read as a truth, a name assigned to itself, an atomic record's member, a subscript at its array's end or past it, a constant the columns don't hold whole, an integer constant without the literal's flag made a pointer (which may be a null pointer constant that is no literal: "A null pointer constant that is no literal", below) | by the census's code, on that record alone | a condition each of them needs, from the operator's bytes and its operands' |
 | a statement's discard, a for statement's clause, an initializer's constant, a returned local's address, T's actions' warnings | once an expression | the root, and the loop's bits |
 | two writes not apart from a sequence point | by the census's code after its walk | two writes in the expression, or one below its top |
 
@@ -3699,7 +3699,7 @@ call out of its list where:
 | --- | --- |
 | its own type | is no aggregate's |
 | its callee | is a name whose declaration gives a call no semantics of its own (no printf-family name, none of the attributes the call's test asks about), or no name at all |
-| its arguments | have no aggregate among them, and no constant but an address's or an integer's of zero or 1 to 126 |
+| its arguments | have no aggregate among them, no constant but an address's or an integer's of zero or 1 to 126, and none that may be a null pointer constant that is no literal: an integer constant without the literal's flag whose own parameter's conversion's type is a pointer's |
 | its callee's type | takes such an integer unchanged in each parameter: none is an enumeration's, a floating type's, or an integer's but a plain one of 8 to 64 bits |
 | its operands' properties | send it nothing |
 
@@ -3721,6 +3721,13 @@ type void is none, a cast or not.
   first four arguments are read with no branch, as they were. A call the
   rule makes after its short path refused it says nothing, and stays
   listed: seven on Lua, none on the two others.
+- **An argument against its own parameter, in the calls' second pass.**
+  Whether an argument may be a null pointer constant that is no literal is
+  a pair's to say, the argument's record and its parameter's conversion's
+  type, and the arguments' rule has both: its answer has a bit for it
+  (`BUSTER_NODE_FACTS_ARGUMENT_QUIET`), the answers' key has the literal's
+  flag, and the loop takes the call's 1 away where an argument's answer
+  lacks the bit.
 - **What each parameter takes, a bit of the callee's type's row**
   (`BUSTER_NODE_FACTS_TAKES`), made with the row, once a function type.
 - **The callee's own semantics, a bit of its declaration's line's byte,**
@@ -4873,13 +4880,221 @@ alone.
   division by a constant (167), a comma or a selection (150).
 - **A unit's first answers** are not in the timed run (above).
 - **A constant the fold leaves two fields in** is a value the columns don't
-  hold whole, and its call is T's: `(char*)5` and `(int)1.5`
-  ([#3014](https://github.com/buster14a/buster/issues/3014), which the
-  probes found: the tests on the window read `(int)0.5`'s exponent as its
-  value). And a zero that is no literal, as a null pointer constant, is
-  [#3012](https://github.com/buster14a/buster/issues/3012)'s.
+  hold whole, and its call is T's: `(char*)5` and `(int)1.5`. What the
+  probes found beside it, `(int)0.5` read by its exponent and a zero that is
+  no literal taken as a null pointer constant, is the next section's.
 - **X reads none of it, and no compile takes any.** A call's depth is X's
   piece's.
+
+### A null pointer constant that is no literal
+
+Three defects in the tests, found by running statements one at a time for the
+call piece and fixed together
+([#3012](https://github.com/buster14a/buster/issues/3012),
+[#3014](https://github.com/buster14a/buster/issues/3014),
+[#3017](https://github.com/buster14a/buster/issues/3017)). Each was in the
+shadow alone: no compile takes the tests' verdicts yet. No corpus has a case
+of any of them, and no fixture had one.
+
+**What was wrong.**
+
+- **The warning's test covered a part of it (#3012).** The compiler warns of
+  a zero that is no literal `0` made a pointer
+  (`-Wnon-literal-null-conversion`, on by default): `ip = RED;`,
+  `int* np = 1 - 1;`, `fp((char)0);`, `return (char)0;`. The census's test
+  had `=`, an initialization's node and a conversion, and only where the
+  source was neither a leaf nor a cast. So the tests took an enumerator and
+  every cast in `=` and `return`; every form as a scalar's initializer, whose
+  conversion is in its plan and at no node; and every form as an argument.
+  Of 253 such statements the checker accepts, 136 ended with a take the
+  census refuses.
+- **The reference took some of them too (#3017).** The census after the
+  pipeline refuses an expression with a warning's event between its nodes'
+  tokens. The compiler puts this warning at its source's first token where
+  that is a parenthesis (a cast's, a group's) or `_Generic` or
+  `__builtin_choose_expr`, which is no node's token; and a scalar's
+  initializer's root is the bare expression, with no node before it as an
+  assignment's, a call's or a return's has. So of 42 initializer forms the
+  compiler warns of, the reference saw the event of 18, and the shadow
+  showed nothing for the other 24.
+- **A constant's value was read from a field that isn't its own (#3014).**
+  The fold of a floating constant to an integer leaves the floating storage,
+  and T's record keeps the one storage that is not zero: `(int)0.5` is an
+  integer constant whose payload and exponent are the floating value's, its
+  integer being zero. The standing's field bits say so. Two readers didn't
+  look at them: the tests' sweep of the window, which reads a constant's
+  value from its exponent (`(int)1e-4900L` read as 104, a quiet divisor,
+  where the compiler warns of a division by zero); and the kernel's operand,
+  from which a store made a null pointer anew where the action's keeps the
+  floating storage (`ip = (int)0.5;` differed from T's record). (The
+  kernel's call rule gathers its arguments' said values too, but no call
+  with such an argument is its own: the arguments' rule leaves it to T's.)
+
+**The rule is the compiler's own, called.** `node_census_null_warned` asks
+`check_warning_null_integer`, which is what raises the warning (the
+destination a pointer; the source an integer constant expression of an
+integer type that is no bool, of value zero, with no fault), and that the
+value has no literal's flag. The warning's own test of the tokens, by which a
+lone number in parentheses is a literal, is not copied: a number's leaf has
+the flag and parentheses make no node. It is asked of `=`, an
+initialization's node and a conversion, with the type the node converts its
+source to; of each argument of a call, with its own conversion's type; and of
+a scalar's initializer's root, with its object's type.
+
+**Where each form asks it.**
+
+| | what it does |
+| --- | --- |
+| the census's code, the reference at both times | the call above |
+| the tests in the machine's own form | send the record to the census's code where the conversion's type is a pointer's and the source an integer constant without the literal's flag; no second statement of the test |
+| the loop on the window | lists `=` and a return's conversion to a pointer already: no quiet rule takes a pointer's destination |
+| the kernel's call rule | the arguments' rule's answer says whether the argument is such a constant to a pointer's parameter, and a call with one is not quiet |
+
+An argument is asked against its own parameter: `f(RED, 0)` to an integer
+and a pointer is quiet, and `f(0, RED)` is listed. A call's quiet bit is the
+short path's and the answers are the second pass's, which takes the bit away.
+
+**An integer constant whose storage is not its integer is no record of the
+columns'.** T writes a value into its columns where they hold it whole: at
+most one of its integer, its offset and its floating value no zero. It asks
+now that an integer constant's be its integer (`node_machine_whole`): one
+folded from a floating constant goes to the wide values, as a value with two
+storages does. So no reader of the columns meets it. The sweep reads no said
+value of it, for a wide record says none and its operator stays listed; the
+kernel leaves what consumes it to the rule, which is T's action; and C on the
+window lists its expression as a value the columns don't hold whole. Neither
+loop has a term for it.
+
+A first form of the fix had two: a mask in the sweep, over the records whose
+payload is a floating value's, and a test of each operand in the kernel's
+rule and in its updates' loop. With one executable and a switch that turned
+them off, on the 9700X, the sweep's bytes read 0.02 ticks a record more with
+them and the kernel in place 0.27 on Lua (0.06 to 3.15 over seven readings;
+0.02 and 0.03 on `sqlite3.c` and musl): some eight instructions an operand,
+and the rule alone makes 12% of Lua's records, 3% of `sqlite3.c`'s. The
+writer's test is in a path T takes for a value the action made, some 7,000
+times on `sqlite3.c`.
+
+The fold itself is as it was: clearing the storage it leaves is a change to
+every compile, with its own check, and
+[#3014](https://github.com/buster14a/buster/issues/3014) has the counts
+(66 addresses and 11 floating constants with a stale integer on `sqlite3.c`,
+each a value the columns don't hold whole for that alone).
+
+**An initializer's span after the pipeline** starts at the token after its
+object's name, so the events before its first node's token are its own. At
+reader time the span stays the nodes': the events the reader has when it pops
+a root are at tokens it has read as nodes, and the warning the pipeline puts
+before them has its own test there, the one above. A warning's event there
+with no test of its own would show in the shadow as a take the census
+refuses.
+
+**Counts.** On `sqlite3.c`, Lua and musl, with the default warnings and with
+`-Wall -Wextra`, every count of the shadow with C on the window is what it
+was: no call lost its quiet bit, no constant its said value, no initializer
+an event. The arguments' answers are 1,726, 1,393 and 8,250 for 1,669, 1,393
+and 8,209: the key has one flag more.
+
+**One statement at a time.** 59 sources of a zero, each alone in a function
+in five places (`ip = X;`, `int* np = X;`, `fp(X);`, `f2(a, X);`,
+`return X;`), through the shadow with `--verify`: 295 statements, of which
+the checker rejects 42. The compiler warns of 42 of the sources, in every
+place, and clang 23 warns of the same 210 statements.
+
+| of the 253 accepted | before | now |
+| --- | ---: | ---: |
+| end with a take the census refuses | 136 | 0 |
+| end with a said value that is not its payload's | 2 | 0 |
+| warned initializers whose event the reference has | 18 of 42 | 42 |
+| warned statements the reader-time tests refuse | 32 | 190 |
+
+Before, the tests refused the 16 sources that are neither a leaf nor a cast,
+under `=` and `return` alone. Now they refuse the same 38 sources in each
+place, and nothing the compiler doesn't warn of. The other four are no
+expression of the reader's: its front leaves a character constant and a
+`sizeof`, and the set has no `_Generic` and no `__builtin_choose_expr`.
+
+And 72 statements with a constant folded from a floating one under each
+operator (an operand of the arithmetic, shift, bitwise, comparison, logical
+and conditional operators and of their compound forms, a pointer's addend
+and index, a cast's operand, an argument, and a null pointer assigned,
+compared and passed on), of which the checker rejects one:
+
+| of the 71 accepted | before | now |
+| --- | ---: | ---: |
+| end with a status: a said value that is not its payload's | 71 | 0 |
+| of them, a record the kernel made otherwise than T | 8 | 0 |
+| of them, an operator the sweep left out where the census has a test | 2 | 0 |
+| of them, a take the census refuses | 9 | 0 |
+
+**On the 9700X,** the piece against the build before it, in turn (ticks a
+record, medians of 7 readings on `sqlite3.c` and Lua, 15 on musl):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the kernel in place: before, with | 17.39, 17.38 | 22.35, 22.41 | 20.49, 20.38 |
+| each reading's own difference | -0.02 (-0.15 to 0.16) | 0.03 (-0.24 to 0.18) | 0.02 (-1.80 to 3.54) |
+| C's three sweeps, a record of the decided: before, with | 8.27, 8.07 | 11.62, 11.62 | 25.77, 25.96 |
+| the tests on the window, C off: before, with | 31.3, 31.3 | 50.1, 49.8 | 99.9, 100.3 |
+| the tests' bytes alone: before, with | 9.16, 9.25 | 10.82, 10.88 | 20.42, 19.17 |
+| the front with the window: before, with | 53.2, 53.1 | 71.7, 70.7 | 89.6, 91.5 |
+
+`-c sqlite3.c`, which runs none of it, read 0.16% and 0.09% more wall time
+with the piece in two comparisons where the base again read 0.08% less and
+0.05% more.
+
+**Tests.**
+
+- **The fixtures** have 51 lines for it with the default warnings, each with
+  what the census must do with it at both times: the four places, and the
+  forms that warn beside those that don't (a literal, in parentheses too, a
+  bool's zero, a pointer's); an argument and its own parameter both ways
+  round; an atomic pointer assigned; an initializer that starts with a
+  parenthesis, which the event refuses after the pipeline and the constant's
+  test at reader time (a `// reader: TEST` marker says so); a for
+  statement's clauses a line each, whose first one's event is no other's;
+  and the constant folded from a floating one as a divisor, a shift's count,
+  an argument and a null pointer. Five lines with the warning off take
+  everything. Ten lines in C on the window's fixture have the folded
+  constant as an argument and as a null pointer assigned, and a null that is
+  no literal as an argument.
+- **Faults.** Put into the new code one at a time, in a copy of the tree, in
+  four rounds as the code changed, the last on these sources with every
+  earlier fault whose text is still in them. Of its 43, 37 are caught. Of
+  the other 6: 3 are terms no statement separates (an assignment's own type
+  is its source's conversion's on every statement, an atomic destination's
+  too; no initialization's node is in an expression the tests read, the
+  reader's root for one being its operand; and the front's line of a leaf's
+  value asks the columns' rule of a literal's or a string's value, which has
+  its own storage alone); 2 give the same answer (the span's low end a token
+  either way: no kept event is at an object's name or at its `=`); and 1
+  guards a program the checker rejects (an lvalue's constant that is no
+  integer constant expression, to a pointer's parameter). The record names
+  each with what makes it so. With the writer's rule taken out, the fixture
+  shows what the issue found: 2 operators left out where the census has a
+  test, and 14 said values that are not their payloads'.
+- **What the rounds changed:** five terms out as dead, each a guard the
+  compiler's own test has or one no record reaches (among them a guard of
+  the kernel's gathered arguments: no call with such an argument is the
+  short path's); the count of the initializers' roots asked, which made two
+  pre-filters' faults caught; the warning of the event that refuses an
+  expression, in the census's record, so that a fixture's
+  `// refuse: warning-event` line asks for an event; lines for an atomic
+  pointer, a pointer's first parameter and the for statement; and, after
+  the 9700X's switch, the writer's rule for the two readers' terms.
+- **Before pushing,** in the cloud container on these sources: a native
+  Release build; `test-checker`'s eight parts; C on the window on the four
+  corpora with the default warnings and with `-Wall -Wextra`; the shadow's
+  eleven other modes on `sqlite3.c` and Lua; the self-check, the self-parse
+  and the call graph; the build's ownership check; the complete driver's
+  lists (one item fails in this container as in every run before the piece:
+  its clang spells its include directory another way); and the sanitizer
+  rows a pull request's checks skip (memory, address and thread, native):
+  the node machine's tests' part, and under memory and address C on the
+  window on `sqlite3.c`, Lua and the compiler's own source. No report.
+  After the rebase on main `a847fd0e6`, which changed none of the piece's
+  files: the build, the node machine's tests' part, the ownership check and
+  C on the window on `sqlite3.c`, Lua and musl again.
 
 ### What it says of step 2
 

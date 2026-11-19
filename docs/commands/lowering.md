@@ -316,7 +316,9 @@ unevaluated operands too; its counts are the evaluated nodes, the inventory's.
   operand with an effect, constants (a narrowing conversion that changes one, a
   division by zero, a shift out of range, a null dereference, a subscript past
   its array, a comparison outside its operand's range in the comparison's
-  common type, a non-literal null), parentheses (an assignment as a condition,
+  common type, a null pointer constant that is no literal, by the compiler's own
+  test of an assignment's, a conversion's and an initializer's source and of a
+  call's arguments), parentheses (an assignment as a condition,
   a comparison in a bitwise operator, `!` before a comparison, a shift of a sum,
   a chained comparison, a shift in a truth context), a discarded value without
   an effect or a discarded call of a `warn_unused_result`, `const` or `pure`
@@ -1587,7 +1589,11 @@ kernel's run in place (`node_facts_window_run`).
   they have no aggregate and no constant but an address's or such an
   integer's, which the callee's type's row says each parameter takes
   unchanged (`BUSTER_NODE_FACTS_TAKES`: no enumeration's type, no floating
-  one, no integer's but a plain one of 8 to 64 bits). The callee's part is a
+  one, no integer's but a plain one of 8 to 64 bits). The calls' second pass
+  takes the 1 away where an argument may be a null pointer constant that is
+  no literal: an integer constant without the literal's flag whose own
+  parameter's conversion's type is a pointer's (the arguments' rule's
+  answer's `BUSTER_NODE_FACTS_ARGUMENT_QUIET`). The callee's part is a
   bit of its declaration's line's byte (`BUSTER_NODE_TESTS_LINE_LOUD`, the
   census's code's fact of the declaration, made at the line's first leaf
   where the leaf's type's row says it calls), which a name's leaf has in its
@@ -1665,13 +1671,18 @@ The report adds:
   not-their-payloads'=0`: the operators the rule left out, of every record
   the loop swept; with `--verify`, those of them in an expression the tests
   ran on, each checked (a swept record of an expression without tests has
-  none to check), and the integer constants whose record says its value;
+  none to check), and the integer constants whose record says its value
+  (one folded from a floating constant is a wide value, which says none);
 - `node-shadow: own tests calls-left-out=N checked=N of-them-with-a-test=0
   of-them-with-a-loud-argument=0 casts-over-one=N
-  callees-asked-for-their-result=N`: the calls the rule left out, of every
-  record the loop swept; with `--verify`, those of them in an expression the
-  tests ran on, each checked twice; the casts to void in the asks' list;
-  and the declarations asked whether they want their result;
+  callees-asked-for-their-result=N
+  initializers-asked-for-a-null-constant=N`: the calls the rule left out, of
+  every record the loop swept; with `--verify`, those of them in an
+  expression the tests ran on, each checked twice; the casts to void in the
+  asks' list; the declarations asked whether they want their result; and
+  the initializers' roots asked of the census's code for a null pointer
+  constant that is no literal (an integer constant without the literal's
+  flag whose object's type is a pointer's);
 - `node-shadow: own tests casts-left-out=N checked=N of-them-with-a-test=0`:
   the casts the loop left out for their own type, of every record it swept;
   with `--verify`, those of them in an expression the tests ran on, each

@@ -392,6 +392,9 @@ struct NodeFrontTypes
     uint64_t own_quiet_calls_loud;
     uint64_t own_result_casts;
     uint64_t own_result_asks;
+    // The initializers' roots asked of the census's code for a null pointer constant that is no literal (#3012): an
+    // integer constant without the literal's flag whose object's type is a pointer's.
+    uint64_t own_root_nulls;
     // The casts the loop left out of its list for having no test to make (a pointer's to void or to a pointer); and,
     // with the reader's verify, those of them checked and those whose test had something.
     uint64_t own_quiet_casts;
