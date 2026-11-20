@@ -833,12 +833,10 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     uint32_t* offsets = calloc((uint64_t)code->count + 1, sizeof(uint32_t));
     uint32_t* ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint32_t* twin_ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint8_t* twin = malloc(capacity);
     // Narrow fixtures put helper TEXT before the caller; wide fixtures put it after. Both rel32 signs execute.
     const uint32_t entry_offset = fixture->width == 4 ? 16u << 10 : 64;
     uint8_t* entry = mapping + entry_offset;
-    bool ready = offsets && ends && twin_ends && twin && capacity + entry_offset <= BUSTER_TIER1_CALL_CODE_BYTES;
+    bool ready = offsets && ends && capacity + entry_offset <= BUSTER_TIER1_CALL_CODE_BYTES;
     tier1_emit_test_expect(test, ready, "direct-call loader storage");
     int64_t length = -1;
     if (ready)
@@ -850,10 +848,9 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
     }
     if (ready)
     {
-        length = x86_encode(code->records, code->count, entry, capacity, 0, ends);
-        const int64_t twin_length = x86_encode_scalar(code->records, code->count, twin, capacity, offsets, twin_ends);
-        ready = length > 0 && length == twin_length && memcmp(entry, twin, (size_t)length) == 0 && memcmp(ends, twin_ends, emitted->reference_count * sizeof(uint32_t)) == 0;
-        tier1_emit_test_expect(test, ready, "call encoders agree on bytes and symbolic instruction ends");
+        length = x86_encode(code->records, code->count, entry, capacity, offsets, ends);
+        ready = length > 0;
+        tier1_emit_test_expect(test, ready, "the direct-call code encodes");
     }
     uint32_t targets[BUSTER_TIER1_CALL_HELPERS] = {0};
     uint32_t used = fixture->width == 4 ? 64 : ready ? (entry_offset + (uint32_t)length + 15) & ~15u : 0;
@@ -923,8 +920,6 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
         ready = mprotect(mapping, BUSTER_TIER1_CALL_CODE_BYTES, PROT_READ | PROT_EXEC) == 0;
         tier1_emit_test_expect(test, ready, "patched direct-call image is executable");
     }
-    free(twin);
-    free(twin_ends);
     free(ends);
     free(offsets);
     return ready && native ? entry : 0;

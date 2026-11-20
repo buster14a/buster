@@ -33,8 +33,9 @@ array accesses in parallel over IR rows, clones the accepted body into vector
 lanes, guards it with exact trip count and run-time overlap checks, and leaves
 the original loop as the scalar fallback. Integer reductions use the existing
 reduction operations; strict floating-point reductions are never reassociated.
-An exact scalar twin is the oracle for every data-parallel analysis and
-rewrite.
+The data-parallel analyses are checked against their definitions, and every
+fixture's result against a frozen digest and the interpreter (#2924 deleted
+the exact scalar twin that was their oracle).
 
 ## The first implementation
 
@@ -112,12 +113,12 @@ conversions between lane widths, reductions and population counts are EVEX's.
 
 **Data-parallel part.** Every row's admission kind is one two-register byte
 lookup of its opcode per 64 rows, with the volatile and atomic flags folded in
-(`ir_vectorize_kinds_vector`), and each loop's blocks are scanned 64 rows at a
-time for a refusing kind (`ir_vectorize_forbidden`); both have exact scalar
-twins. The classification, which reads each row's operands' classes in order,
-and the emission are the ordered part, shared by both paths, so the two give the
-same function (and object) by construction; the tests compare them anyway. A
-function without a phi on a back edge in block order walks no blocks.
+(`ir_vectorize_kinds`), and each loop's blocks are scanned 64 rows at a time
+for a refusing kind (`ir_vectorize_forbidden`). `test-ir-vectorize` checks both
+against their definitions on random columns (#2924, which deleted their exact
+scalar twins). The classification, which reads each row's operands' classes in
+order, and the emission are the ordered part. A function without a phi on a
+back edge in block order walks no blocks.
 
 **Finding the loops.** The pass builds no CFG and no dominator tree: one
 iterative depth-first walk over the blocks' terminators marks the reachable
@@ -404,7 +405,7 @@ lane extension or a masked operation the target lacks. Set-up and tail costs
 are included; short-trip-count profitability is measured separately from the
 8 KB steady-state suite before the pass becomes a default.
 
-## A data-parallel implementation with an exact scalar twin
+## A data-parallel implementation
 
 Add `ir_vectorize_loops.c` beside the other optimization passes and follow the
 shared immutable-input, fresh-output, verified-result and arena-rollback
@@ -428,13 +429,10 @@ an AST walk:
   operands from that map. CFG creation, phi cycle resolution and publication
   of one loop at a time remain the small ordered part.
 
-The scalar twin independently walks the same rows and constructs the same
-fresh IR. It is not merely the vector implementation with a width of one.
-Both paths must produce byte-identical canonical IR for every accepted and
-refused fixture; a legitimate difference in internal discovery order may not
-change block, value or guard order. A host without the full AVX-512 feature
-set uses the scalar path, and generated target objects must be identical
-between host paths.
+The design had a scalar twin that walked the same rows independently, and both
+paths had to give byte-identical IR. #2924 deleted it: the scans are checked
+against their definitions, and every fixture's result and counts at every
+target against a digest frozen where the two agreed.
 
 Report `vectorized_loops`, split by width and reduction kind, and refusal
 counts by reason in `--tier1-report`. These counts make a silently narrowing

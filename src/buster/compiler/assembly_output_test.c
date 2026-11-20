@@ -141,7 +141,7 @@ static AtomId assembly_fixture_function(AssemblyTest* test, AssemblyFixture* fix
     }
     const BranchSizing sizing = valid ? size_branches(code.records, code.count, code.branches, code.targets, code.branch_count, offsets) : (BranchSizing){ 0 };
     valid = valid && sizing.error == BRANCH_SIZING_OK;
-    const int64_t length = valid ? x86_encode_scalar(code.records, code.count, bytes, BUSTER_X86_ENCODER_CAPACITY(code.count), offsets, fixup_ends) : -1;
+    const int64_t length = valid ? x86_encode(code.records, code.count, bytes, BUSTER_X86_ENCODER_CAPACITY(code.count), offsets, fixup_ends) : -1;
     valid = length > 0;
     uint32_t marked = 0;
     for (uint32_t r = 0; valid && r < code.reference_count; r += 1)
@@ -784,7 +784,7 @@ static void assembly_test_forms(AssemblyTest* test, uint32_t variants)
             if (keep[i] != 0)
             {
                 uint8_t* bytes = arena_push(&test->arena, BUSTER_X86_ENCODER_CAPACITY(1), 16);
-                const int64_t length = bytes != 0 ? x86_encode_scalar(&records[i], 1, bytes, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0) : -1;
+                const int64_t length = bytes != 0 ? x86_encode(&records[i], 1, bytes, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0) : -1;
                 const AtomId atom = length > 0 ? link_add_atom(&fixture.link, BUSTER_LINK_CLASS_TEXT, 4, (uint64_t)length, bytes, 0) : 0;
                 valid = atom != 0;
                 if (valid)

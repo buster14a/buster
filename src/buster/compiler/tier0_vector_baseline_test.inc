@@ -89,7 +89,7 @@ static void tier0_test_vector_baselines(Tier0TestTally* tally, Tier0TestVectorSh
                 char name[96];
                 snprintf(name, sizeof(name), "baseline %u-byte registers, %u-byte object, %u live floats", mode, tier0_test_vector_type_bytes(object), floating_depths[f]);
                 Tier0Error error = TIER0_OK;
-                const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_OK, &error);
+                const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, TIER0_OK, &error);
                 if (length != 0)
                 {
                     tier0_test_vector_inputs(shared, &state);

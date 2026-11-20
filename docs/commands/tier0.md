@@ -390,7 +390,11 @@ calls were inlined, and folds the spliced streams (every column and the starts)
 into a digest that must equal the frozen one of its run
 (`BUSTER_TIER0_INLINE_TEST_DIGEST` and `_SHAPES_DIGEST`, taken where the splice's
 vector path and its former scalar twin gave the same bytes, #2924; a change to
-the splice, the lowering or the fixture moves them, and the run prints its own). On the compiler's own `main.c` (`-march=native -Isrc -fwrapv
+the splice, the lowering or the fixture moves them, and the run prints its own).
+Before the files it checks the splice's fills and Tier 1's unit-stage scan for
+the candidates whose address code takes (`check_tier1_inline_addressed_entries`)
+against their definitions on random columns, the scan at every count to 200
+with an address alone at its last entry and at each full batch's last lane. On the compiler's own `main.c` (`-march=native -Isrc -fwrapv
 -funsigned-char -fno-strict-aliasing`) it splices 830 of 8,509 bodies,
 7,695 calls, in about 8 s on a 4-core cloud host. `test-checker-driver`'s
 fixture (`c_check_tier0_inline_driver_test.c`) builds a program of the

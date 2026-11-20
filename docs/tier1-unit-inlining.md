@@ -1069,7 +1069,7 @@ larger hashing and interning functions with several callers
   the callers with expansions have at most 8 sites, 47.5% of the nodes copied.
   The caller's runs take the masked adds up to 8 sites
   (`IrInlineOptions.add_sites`) and the gathers past them, the same columns by
-  both and by the scalar twin (`test-ir-inline` runs each unit both ways). It
+  both (`test-ir-inline` runs each unit both ways). It
   is under 0.1% of a compile either way, which no end-to-end run can see.
 
 ### The rest, measured

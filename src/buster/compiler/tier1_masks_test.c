@@ -3283,11 +3283,9 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
     const uint64_t literal_start = helper_start + BUSTER_X86_ENCODER_CAPACITY(helper_count);
     *mapped = (literal_start + tier1_emit_literal_bytes(emitted) + 4095) & ~UINT64_C(4095);
     uint8_t* machine = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint8_t* scalar = malloc(capacity);
     uint32_t* offsets = malloc(((uint64_t)code->count + 1) * sizeof(uint32_t));
     uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count) * sizeof(uint32_t));
-    uint32_t* scalar_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count) * sizeof(uint32_t));
-    bool ok = tier1_masks_test_expect(test, machine != MAP_FAILED && scalar != 0 && offsets != 0 && ends != 0 && scalar_ends != 0, "the encoders' buffers");
+    bool ok = tier1_masks_test_expect(test, machine != MAP_FAILED && offsets != 0 && ends != 0, "the encoder's buffers");
     if (ok)
     {
         const BranchSizingCheck checked = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
@@ -3323,8 +3321,7 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
     if (ok)
     {
         size = x86_encode(code->records, code->count, machine, capacity, 0, ends);
-        const int64_t scalar_size = x86_encode_scalar(code->records, code->count, scalar, capacity, 0, scalar_ends);
-        ok = tier1_masks_test_expect(test, size > 0 && size == scalar_size && memcmp(machine, scalar, (uint64_t)size) == 0 && memcmp(ends, scalar_ends, (uint64_t)emitted->reference_count * sizeof(uint32_t)) == 0, "both encoders make the same bytes");
+        ok = tier1_masks_test_expect(test, size > 0, "encode the code");
         const int64_t helper_size = x86_encode(helper, helper_count, machine + helper_start, BUSTER_X86_ENCODER_CAPACITY(helper_count), 0, 0);
         ok = ok && tier1_masks_test_expect(test, helper_size > 0, "encode the helper");
         test->records += code->count;
@@ -3347,10 +3344,8 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
         }
     }
     ok = ok && tier1_masks_test_expect(test, mprotect(machine, *mapped, PROT_READ | PROT_EXEC) == 0, "make the code executable");
-    free(scalar);
     free(offsets);
     free(ends);
-    free(scalar_ends);
     if (!ok && machine != MAP_FAILED)
     {
         munmap(machine, *mapped);
@@ -4511,17 +4506,15 @@ static void tier1_masks_test_typed_native(Tier1MasksTest* test, const char* name
     {
         Tier1SelectCode* code = &emitted[f].code;
         const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
-        uint8_t* scalar = malloc(capacity);
         uint32_t* offsets = malloc(((uint64_t)code->count + 1) * sizeof(uint32_t));
         uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted[f].reference_count) * sizeof(uint32_t));
-        ok = tier1_masks_test_expect(test, scalar != 0 && offsets != 0 && ends != 0, "the encoders' buffers");
+        ok = tier1_masks_test_expect(test, offsets != 0 && ends != 0, "the encoder's buffers");
         ok = ok && tier1_masks_test_expect(test, branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count).error == BRANCH_SIZING_OK &&
                                                      size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets).error == BRANCH_SIZING_OK &&
                                                      x86_target_validate(test->v4, code->records, code->count) == code->count,
                                            "a typed program's branches size and its records obey x86-64-v4");
         const int64_t size = ok ? x86_encode(code->records, code->count, machine + starts[f], capacity, 0, ends) : -1;
-        const int64_t scalar_size = ok ? x86_encode_scalar(code->records, code->count, scalar, capacity, 0, 0) : -1;
-        ok = ok && tier1_masks_test_expect(test, size > 0 && size == scalar_size && memcmp(machine + starts[f], scalar, (uint64_t)size) == 0, "both encoders make a typed program's bytes");
+        ok = ok && tier1_masks_test_expect(test, size > 0, "encode a typed program");
         for (uint32_t r = 0; ok && r < emitted[f].reference_count; r += 1)
         {
             const LinkReference* fixup = &emitted[f].references[r];
@@ -4535,7 +4528,6 @@ static void tier1_masks_test_typed_native(Tier1MasksTest* test, const char* name
             }
         }
         test->records += code->count;
-        free(scalar);
         free(offsets);
         free(ends);
     }

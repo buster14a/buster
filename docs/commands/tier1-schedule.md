@@ -19,9 +19,10 @@ requirements. [Command index](README.md).
   from, whose register it then takes. `--tier1-report`'s `sunk` counts its
   expressions; `--verify` checks its order with `tier1_schedule_ir_verify`.
   `test-ir-optimize` runs its IR fixtures (`tier1_sink_ir_test.c`, with #2782's
-  joins of pc's values: `rejoin`, `nested`, `shared`, and the `loop` refusal) by both
-  paths, which must agree, through the verifier and the independent executor,
-  with refusals; `tests/driver/tier1_patterns.c`'s fetch checks Lua's
+  joins of pc's values: `rejoin`, `nested`, `shared`, and the `loop` refusal)
+  through the verifier and the independent executor, with refusals; it folds
+  their results into a frozen digest and checks the classification and the
+  readers' scan against their definitions (#2924); `tests/driver/tier1_patterns.c`'s fetch checks Lua's
   `i = *(pc++)` natively. [The allocation guide](../../docs/tier1-allocation.md)
   has the rule and its measurements.
 - `test-tier1-schedule [--seed N]` checks the postallocation scheduler's graph,
