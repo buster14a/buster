@@ -691,10 +691,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
             }
             if (result->adapted || result->input.diagnostic_graph)
             {
-                const CheckOptions options =
-                {
-                    .scalar = BUSTER_SCALAR_PATH(scalar),
-                };
+                const CheckOptions options = { 0 };
                 result->checked = check_graph_run(&result->types, &result->input.graph, &result->output_arena, &result->scratch, &options, &result->stream);
                 result->checked = result->checked && check_input_packed_finalize(&result->input, &repair->parser, &result->types, &result->stream, &result->scratch);
                 result->checked = result->checked && check_input_warning_graph(&result->input, &repair->parser, &result->types, &result->stream, &result->output_arena, &result->scratch);
@@ -990,9 +987,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     if (ready && (path->adapted || path->input.diagnostic_graph))
     {
         path->phase = path->adapted ? "expression" : path->phase;
-        const CheckOptions options = {
-            .scalar = BUSTER_SCALAR_PATH(scalar),
-        };
+        const CheckOptions options = { 0 };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
         path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
         const uint32_t reported = path->input.report_count;

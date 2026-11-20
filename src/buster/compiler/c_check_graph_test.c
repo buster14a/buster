@@ -606,7 +606,7 @@ static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph*
     uint32_t defined_failed = 0;
     uint32_t vector_failed = 0;
     const bool defined = check_test_graph_validate_definition(graph, defined_pure, &defined_state, &defined_failed);
-    const bool vector = check_graph_validate_vector(graph, vector_pure, &vector_state, &vector_failed);
+    const bool vector = check_graph_validate(graph, vector_pure, &vector_state, &vector_failed);
     bool equal = defined == vector && defined_failed == vector_failed && defined_state.vector_blocks == 0;
     if (equal && defined)
     {
@@ -758,7 +758,7 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
                     CheckGraphValidation state;
                     uint32_t failed = 0;
                     const bool defined = check_test_graph_validate_definition(&graph, defined_pure, &state, &failed);
-                    const bool vector = check_graph_validate_vector(&graph, vector_pure, &state, &failed);
+                    const bool vector = check_graph_validate(&graph, vector_pure, &state, &failed);
                     check_test_expect(test, !defined && !vector, "a leaf's row past the graph's rows, or rows without their column, is an invalid graph");
                 }
                 // The leaves' rows first, as the leaf's own restoration below reads its value through them.
@@ -868,7 +868,7 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
                 CheckGraphValidation state;
                 uint32_t failed = 0;
                 const bool defined = check_test_graph_validate_definition(&guarded, defined_pure, &state, &failed);
-                const bool vector = check_graph_validate_vector(&guarded, vector_pure, &state, &failed);
+                const bool vector = check_graph_validate(&guarded, vector_pure, &state, &failed);
                 check_test_expect(test, !defined && !vector, "a leaf's row past the graph's rows at a page edge is an invalid graph");
                 check_test_graph_validators_agree(test, &guarded, defined_pure, vector_pure, BUSTER_CHECK_NONE, "vector graph validation differs from its definition on a leaf's row at a page edge");
                 last->row = row;
@@ -1073,7 +1073,7 @@ static void check_test_leaf_rows_invalid(CheckTest* test, Arena* storage)
                 default: break;
             }
             const bool defined = check_test_graph_validate_definition(&graph, pure, &state, &failed);
-            const bool vector = check_graph_validate_vector(&graph, pure, &state, &failed);
+            const bool vector = check_graph_validate(&graph, pure, &state, &failed);
             wrong += defined != (step == 0) || vector != (step == 0);
             cases += 1;
             graph.leaf_payloads = payloads;

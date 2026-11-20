@@ -2561,7 +2561,7 @@ static __attribute__((noinline)) void check_test_graph_marked_end(CheckTest* tes
                 if (node < count)
                 {
                     const uint32_t expected = node <= unmarked ? unmarked : count;
-                    wrong += check_graph_marked_end(marks, node, count, false) != expected;
+                    wrong += check_graph_marked_end(marks, node, count) != expected;
                     cases += 1;
                 }
             }
@@ -2593,7 +2593,7 @@ static __attribute__((noinline)) void check_test_graph_resource_node(CheckTest* 
                 diagnostics[count - 1] = CHECK_DIAG_RESOURCE;
             }
             const uint32_t expected = exhausted < count ? exhausted : BUSTER_CHECK_NONE;
-            wrong += check_graph_resource_node(&stream, count, false) != expected;
+            wrong += check_graph_resource_node(&stream, count) != expected;
             cases += 1;
         }
     }
@@ -2700,7 +2700,7 @@ static __attribute__((noinline)) void check_test_graph_constant_contexts(CheckTe
                 for (uint32_t zero = 0; zero < 2; zero += 1)
                 {
                     memset(marks, zero != 0 ? 0 : 0xa5, count);
-                    check_graph_constant_contexts(&graph, marks, zero != 0, false);
+                    check_graph_constant_contexts(&graph, marks, zero != 0);
                     wrong += memcmp(marks, expected, count) != 0;
                     graphs += 1;
                 }
@@ -2857,7 +2857,7 @@ static void check_test_input_recorded(CheckTest* test, const CheckGraph* graph, 
         CheckGraphValidation validation;
         uint32_t failed;
         const bool valid = defined ? check_test_graph_validate_definition(graph, pure, &validation, &failed) :
-                                     check_graph_validate_vector(graph, pure, &validation, &failed);
+                                     check_graph_validate(graph, pure, &validation, &failed);
         check_test_expect(test, valid && check_graph_recorded_equal(graph, &validation, pure, &failed),
                           "every source fixture's reader facts equal both independent validation paths");
     }

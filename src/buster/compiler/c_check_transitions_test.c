@@ -111,7 +111,7 @@ static void check_test_transition_statics(CheckTest* test, const char* name, con
             marked.system_tokens = marks;
             marked.system_token_count = counts[variant] < tokens ? counts[variant] : tokens;
         }
-        check_transition_statics(&marked, stream, vector, false);
+        check_transition_statics(&marked, stream, vector);
         check_test_transition_statics_definition(&marked, stream, defined);
         valid = memcmp(vector, defined, (uint64_t)graph->count * sizeof(uint32_t)) == 0;
         for (uint32_t node = 0; valid && node < graph->count; node += 1)
@@ -206,7 +206,7 @@ static void check_test_transition_policy_keys(CheckTest* test)
         memcpy(objects, cases[variant].objects, sizeof(cases[variant].objects));
         memset(environments, cases[variant].environment, sizeof(environments));
         check_test_transition_statics_definition(&graph, &stream, defined);
-        check_transition_statics(&graph, &stream, vector, false);
+        check_transition_statics(&graph, &stream, vector);
         check_test_expect(test, memcmp(defined, vector, sizeof(defined)) == 0,
                           "the transition statics, as their definition, preserve contraction, evaluation and call-count fields");
         const uint32_t sentinel = UINT32_C(0xa5a5a5a5);
@@ -234,7 +234,7 @@ static void check_test_transition_policy_keys(CheckTest* test)
         {
             graph.fp_environments = NULL;
             graph.fp_contract_default = cases[variant].environment;
-            check_transition_statics(&graph, &stream, inherited, false);
+            check_transition_statics(&graph, &stream, inherited);
             check_test_expect(test, memcmp(defined, inherited, sizeof(defined)) == 0,
                               "a graph's contraction default keys exactly as the same explicit lexical policy");
         }
