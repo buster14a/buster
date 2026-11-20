@@ -2229,6 +2229,83 @@ records to read for, compressed, 64 records a step.
   Next: an update's rows, the branches', then the entries' values.
 
 
+## An update's rows on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x-update-rows-2850-2026-11-20).
+`measure-node-machine --shadow --window-rows`
+([the guide](commands/lowering.md#xs-rows-on-the-window-2850)).
+
+X's rows on the window listed every expression with an update: 3,394 of
+`sqlite3.c`'s 49,155 that C takes there. This piece makes an update's two rows
+(the old value's read after its destination's row, and the operation, the
+conversion back and the store at its own record) as shapes of the rows'
+table, in the slots its two records have free, written over the shapes'
+sweep's by a sweep and a loop of their own. No compile takes any of it. [The
+node machine's page](node-machine.md#an-updates-rows-on-the-window) has it
+whole: the rows, the six builds, the probes and the faults. [Its
+specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7030649938)
+had five gates.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release, TSC ticks, seven readings; in each
+one executable with the update's rows on and off (an experiment's switch),
+and the piece before's executable between them:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions C takes on the window | 49,155 | 9,909 | 39,712 |
+| their tapes made here | 47,027 (95.67%) | 9,689 (97.78%) | 38,705 (97.46%) |
+| the piece before's | 43,719 (88.94%) | 8,961 (90.43%) | 35,194 (88.62%) |
+| tapes that differ from X's on T's columns | 0 | 0 | 0 |
+| **the rows' sweeps and the part, a record swept** | **4.71 (4.61 to 4.93)** | **6.11 (5.99 to 8.12)** | **11.97 (9.87 to 14.39)** |
+| the piece before's executable, in the same readings | 4.12 | 5.15 | 10.59 |
+| **more than the piece before's** | **+0.67 (+0.47 to +0.81)** | **+0.94 (+0.87 to +1.99)** | **+1.27 (-1.11 to +4.23)** |
+| the updates; with none to make | 0.52; 0.11 | 0.81; 0.27 | 1.55; 0.69 |
+| a second run over the same chunk; the piece before's | 3.81; 3.29 | 3.54; 3.15 | 4.70; 4.04 |
+| a record of the taken expressions | 6.22 | 9.51 | 25.20 |
+| X on T's columns, a record of theirs, with its values | 26.64 | 24.78 | 29.25 |
+
+### Against its gates
+
+- **U1, exact: met.** No tape made differs from X's on T's columns in its number of entries, a kind or a class, on
+  the three corpora and the compiler's own source.
+- **U2, how much: met.** 3,308, 728 and 3,511 tapes more (2,900, 600 and 3,400 asked): 95.67%, 97.78% and 97.46% of the
+  expressions C takes.
+- **U3, cost: not met.** +0.67 ticks a record swept more than the piece before's on `sqlite3.c` and +0.94 on Lua (0.5
+  asked, 1.0 refutes); +0.52 and +0.40 on a chunk's second run.
+- **U4, nothing else moves: met.** The kernel, the tests' parts and C's sweeps read within 0.12 with the update's
+  rows on (0.3 asked).
+- **U5, faults: met.** The first three rounds left six faults, one of them twice: one changes nothing a program reaches, one's term went
+  out, and four got their cases in the fixture. The fourth round's 181 faults, on the code as it is, are all caught.
+
+### What stays a record at a time, and why
+
+The updates' loop, for one record in some ninety. An update's two records
+are apart by a distance only its own record has, its computation's class is
+a load by its line's type's number, and its shapes are bytes stored at the
+two records. The fourth build had the two rows' shapes as masks in the
+shapes' sweep, with the loop carrying only what crosses the two records:
+the shapes' sweep read 0.22 ticks a record more on `sqlite3.c` and 0.49
+on Lua with them, 0.18 and 0.47 of it with no update to make; the loop of its own reads 0.52 and 0.81, and leaves
+the sweep where it was.
+
+### What it means
+
+- **An update's rows are shapes of the same table**, in slots its two records have free: no slot more, no column
+  more, and the write's compress joins them as it joins any row.
+- **A rare case's terms go in a loop of their own.** As masks in the shapes' sweep (the fourth build), an update's
+  terms made that sweep read 0.22 ticks a record more on `sqlite3.c` and 0.49 on Lua, 0.18 and 0.47 of it with no
+  update to make. As a sweep and a loop of their own they read 0.52 and 0.81, and the shapes' sweep reads what it
+  read before.
+- **What it reads more, against what it takes from the reference.** The rows read 215,361 ticks more over `sqlite3.c`'s
+  records swept, 85,777 over Lua's and 479,027 over musl's (a chunk's first run); X on T's columns spends 506,203, 117,814 and 597,853 on the
+  16,813, 4,158 and 18,109 records of the expressions the update's rows take from it.
+- **A sweep a chunk is read more a chunk's first time.** The updates' list's sweep alone, with no update to make,
+  reads 0.11 ticks a record on `sqlite3.c`, 0.27 on Lua and 0.69 on musl a first run, and 0.09, 0.12 and 0.30 a
+  second; their chunks are 526, 379 and 127 records.
+- **Next:** the branches' rows, then the entries' values.
+
 ## Step 4's first piece: a census of Tier 0's row
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-census-2874-2026-11-16)
