@@ -910,11 +910,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                 const Tier1SelectPlace place = argument < arguments ? tier1_select_argument_place(function, called, argument, &places) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_GENERAL };
                 const uint8_t kind = place.kind;
                 const bool stacked = kind == BUSTER_TIER1_PLACE_STACK || kind == BUSTER_TIER1_PLACE_AGGREGATE;
-                // A register argument's register (tier1_emit_call's destinations), and an indirect call's callee's.
-                const bool callee = call && function->op[node] == IR_CALL_INDIRECT && argument == arguments;
+                // A register argument's register (tier1_emit_call's destinations), an indirect call's callee's, and a
+                // destination that is a pointer value's rdi (#2820), the use after the callee's.
+                const bool indirect = call && function->op[node] == IR_CALL_INDIRECT;
+                const bool callee = indirect && argument == arguments;
+                const bool destination = call && argument == arguments + (indirect ? 1u : 0u) && tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
                 const uint8_t reg = argument < arguments && kind == BUSTER_TIER1_PLACE_GENERAL ? tier1_select_parameter_registers[place.index] :
                                     argument < arguments && kind == BUSTER_TIER1_PLACE_VECTOR ? place.index :
-                                    callee ? tier1_select_callee_register(function, called) : UINT8_MAX;
+                                    callee ? tier1_select_callee_register(function, called) : destination ? X86_REGISTER_RDI : UINT8_MAX;
                 if (v != BUSTER_TIER1_CFG_NONE)
                 {
                     use_positions[use_cursors[v]] = base + 2 * node;
@@ -4114,8 +4117,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             Tier1SelectHoles holes = { 0 };
             // A call's outgoing area in a dynamic frame (tier1_emit_cfg_call_area), released after it returns.
             uint32_t call_area = 0;
-            // The arguments' registers, and an indirect call's callee's after them.
-            uint32_t argument_registers[BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 1] = { 0 };
+            // The arguments' registers, and an indirect call's callee's and a pointer destination's (#2820) after them.
+            uint32_t argument_registers[BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 2] = { 0 };
             uint8_t row_sources[BUSTER_TIER0_OPERATION_OPERANDS] = { 0 };
             if (error == TIER1_EMIT_OK && selected)
             {
@@ -4293,7 +4296,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     }
                     if (error == TIER1_EMIT_OK && pass == 0)
                     {
-                        // An aggregate result's object (#789): the frame object the call's into operand addresses.
+                        // An aggregate result's object (#789): the frame object the call's into operand addresses, or
+                        // none where it is a pointer value (#2820), which the call's moves put in rdi.
                         const uint32_t into_node = function->c[node];
                         Tier1EmitInto into = { .base = (uint8_t)emitted->frame.base_register };
                         into.valid = into_node < count && function->op[into_node] == IR_STACK_ADDR && tier1_emit_cfg_object(function, emitted, function->a[into_node], &into.displacement);

@@ -617,7 +617,12 @@ patterns are:
   below rsp, so its use needn't be required: a call may pass more aggregates than
   its first allocation gives its uses registers. The consumer stores an
   aggregate result's parts into the result object, the call's into operand's
-  frame object, byte for byte, and points rdi at it for a hidden pointer. A
+  frame object, byte for byte, and points rdi at it for a hidden pointer. An
+  into operand that is a pointer value, no frame object's address (a call that
+  passes its function's own hidden pointer on, #2820), is the call's last
+  effective use, after an indirect call's callee, which the call's general moves
+  put in rdi; `test-tier1-emit`'s code certificate fixtures run such a call
+  natively and refuse its move into rdi left out. A
   return loads the parts staged below rsp (the frame stays out of the red zone),
   or copies the bytes through the hidden pointer that the entry stored, which
   rax returns.
