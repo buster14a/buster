@@ -1685,8 +1685,8 @@ The report adds:
   not-their-payloads'=0`: the operators the rule left out, of every record
   the loop swept; with `--verify`, those of them in an expression the tests
   ran on, each checked (a swept record of an expression without tests has
-  none to check), and the integer constants whose record says its value
-  (one folded from a floating constant is a wide value, which says none);
+  none to check), and the integer constants whose record says its value, including ordinary integers folded from floating
+  constants;
 - `node-shadow: own tests calls-left-out=N checked=N of-them-with-a-test=0
   of-them-with-a-loud-argument=0 casts-over-one=N
   callees-asked-for-their-result=N
