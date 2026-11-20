@@ -386,8 +386,10 @@ patterns are:
   converts to. A copy is a `movaps`. Addition, subtraction, multiplication and
   division are the two-operand `ss` or `sd` forms, the right operand from memory
   where it folds a load, as an integer's. A scalar FMA3 can fold its single-use
-  second multiplicand into 132 or 231, or its addend into 213. The latter keeps
-  the multiplicands' NaN payload priority. A destination holding the first
+  second multiplicand into 132 or 231. A first multiplicand can occupy that
+  same memory operand when the second is a non-NaN constant or the result
+  of an integer-to-floating conversion. The addend can fold into 213, which
+  keeps the multiplicands' NaN payload priority. A destination holding the first
   multiplicand can exchange them when one is an integer conversion or a
   non-NaN constant. Otherwise it takes the register form with a separate load.
   A negation `xorps` the sign bit, which

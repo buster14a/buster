@@ -6337,19 +6337,32 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[2] = c;
         base.intrinsic_cost = 4;
         tier1_select_add_candidate(forest, node, &candidates, base);
-        // The r/m multiplicand of both 132 and 231 is b. Swapping a and b would change which NaN payload wins.
-        const bool multiplicand = tier1_select_load_folds(forest, node, b);
-        if (multiplicand || tier1_select_load_folds(forest, node, c))
+        // Prefer the existing second multiplicand and addend folds. A first multiplicand can
+        // occupy r/m too when exchanging the two factors cannot change which NaN is propagated.
+        uint32_t load = BUSTER_IR_NONE;
+        if (tier1_select_load_folds(forest, node, b))
         {
-            const uint32_t load = multiplicand ? b : c;
+            load = b;
+        }
+        else if (tier1_select_load_folds(forest, node, c))
+        {
+            load = c;
+        }
+        else if (tier1_select_load_folds(forest, node, a) && tier1_select_fma_non_nan(function, b))
+        {
+            load = a;
+        }
+        if (load != BUSTER_IR_NONE)
+        {
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_FLOAT_FMA_LOAD;
-            if (!multiplicand)
+            if (load == c)
             {
                 const bool commute = a == b || tier1_select_fma_non_nan(function, a) || tier1_select_fma_non_nan(function, b);
                 folded.condition = commute ? BUSTER_TIER1_FMA_COMMUTATIVE_ADDEND : BUSTER_TIER1_FMA_MEMORY_ADDEND;
             }
-            folded.values[1] = multiplicand ? c : b;
+            folded.values[0] = load == a ? b : a;
+            folded.values[1] = load == c ? b : c;
             tier1_select_fold(forest, node, load, &folded);
             tier1_select_memory(forest, node, function->a[load], &folded, 2);
             tier1_select_add_candidate(forest, node, &candidates, folded);
