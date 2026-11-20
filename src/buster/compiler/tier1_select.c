@@ -3120,12 +3120,19 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_FLOAT_CONVERT_LOAD:
     {
-        const uint8_t x = destination & 15;
         X86Instruction record = holes->memory;
-        record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
-        record.reg = x;
-        // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+        record.reg = destination & 15;
+        if (holes->condition == BUSTER_TIER1_FLOAT_FROM_SIGNED)
+        {
+            record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
+            // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, record.reg, record.reg));
+        }
+        else
+        {
+            // Truncate to a general register. An unsigned I32 fits in the signed 64-bit conversion's result.
+            record.form = tier1_select_float_forms(holes->source_width)->to_integer[width == 8 || holes->condition == BUSTER_TIER1_FLOAT_TO_UNSIGNED];
+        }
         tier1_select_append(&result, record);
         break;
     }
@@ -6373,10 +6380,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
-        if (op == IR_SITOFP && (source == IR_I32 || source == IR_I64) && tier1_select_load_folds(forest, node, a))
+        const bool from_integer = op == IR_SITOFP && (source == IR_I32 || source == IR_I64);
+        const bool to_integer = (op == IR_FPTOSI && (type == IR_I32 || type == IR_I64)) || (op == IR_FPTOUI && type == IR_I32);
+        if ((from_integer || to_integer) && tier1_select_load_folds(forest, node, a))
         {
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_FLOAT_CONVERT_LOAD;
+            // The selected address takes scale. Keep the conversion kind in condition.
+            folded.condition = base.scale;
             tier1_select_fold(forest, node, a, &folded);
             tier1_select_memory(forest, node, function->a[a], &folded, 0);
             tier1_select_add_candidate(forest, node, &candidates, folded);
