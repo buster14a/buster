@@ -84,10 +84,10 @@ nothing, since the queue tested it before it landed.
   reports `Integration qualification` passed when the label is added, and `9700x.yml` skips the aggregate on the
   pull request's later pushes. Its candidate still runs everything. Use it for fixes that must land fast: a
   hotfix that fails does so in the queue, where it costs the entries behind it a rebuild.
-- **Accounting.** `ci-timings.yml` reports candidates by fate (merged,
-  passed but invalidated, failed, cancelled), with their runner-minutes, the
-  merged ones' wall time and their hosted jobs' waits for a runner
-  (`timings --queue`, #2031).
+- **Accounting.** `ci-timings.yml` reports outcomes separately from candidate
+  fate (merged, live, confirmed invalidated, unknown), all collected attempts'
+  runner-minutes, feedback/completion-proxy latency and hosted job queue waits
+  (`timings --accounting`, #2034). Failed reads do not prove invalidation.
 - **Policy pins.** `changes --self-test` pins the trigger, the concurrency
   group, the selector's routing, the auxiliary calls and the aggregate's
   coverage step. Its mutants include a path filter, another branch or type, a
@@ -656,21 +656,26 @@ the policy. In short:
 
 ## Queue and execution timing
 
-The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid, after
-the nightly window, and on manual dispatch. It samples the latest 100 main CI workflow runs and reports the
-median and nearest-rank p95 separately for PR, main-push, nightly targeted and
-full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
-run name. Besides queue and execution, it reports the host's occupation, from
-the job's first step (after the runner hook took the lock) to its end. It also
-reports the shared lock's wait and hold, which it reads from the runner hooks'
-lines in each job's log. It keeps
-the raw API responses and normalized observations as workflow artifacts. It
-does not run benchmarks, weaken the hardware gate, or change any schedule.
+The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid and
+on manual dispatch. `tools/ci/timings.sh` collects bounded API snapshots and
+`tools/ci/timings.c --accounting` reports all outcomes/collected attempts,
+first feedback and completion-proxy p50/p95, runner-minutes, reconciled phases,
+CPU classes, queue fate and finite-capacity limits. PR setup/build uses actual
+step spans and remains measurable without native tests. `Compare` and `Time`
+belong to measurement; missing timestamps remain unknown. Lock hold is an
+overlay, not an extra additive phase.
 
-Read `docs/ci.md` for metric definitions and limitations. In particular, the
-runner hook's step duration includes its overhead. The shared-lock wait and
-hold (`lock-wait`, `lock-hold`) come from the hooks' own log lines, which
-bracket the lock operations to within tens of milliseconds.
-Missing timestamps are unknown rather than zero. Run its network-free fixtures with
-`bash tests/ci/timings.sh`. Keep stored raw evidence in `buster-performance`, not
-in this repository's retired `docs/measurements` path.
+The default sample is 10 runs per workflow/event; a UTC split queries separate
+before/after windows. Collection uses bounded retries and records incomplete
+reads instead of dropping available evidence. Raw JSON, normalized facts,
+request/run receipts and the report are retained as workflow artifacts.
+`CI_TIMINGS_REPLAY=INPUT_DIRECTORY` regenerates a report in a different output
+directory without network calls. Actual account concurrency defaults to
+unknown and needs a dated administrative source; the report changes no
+scheduling or coverage policy. Backlog age links and quotes the existing
+#1439 nightly report rather than creating another ledger.
+
+Read [the metric definitions, configuration and replay recipe](../ci.md#ci-latency-baseline)
+before interpreting results. Run `bash tests/ci/timings.sh` for the network-free
+regressions. Store raw live evidence in `buster-performance`, not this
+repository's retired `docs/measurements` path.

@@ -21,8 +21,8 @@
 // Sqrt's ordered comparison with zero naturally honors DAZ and excludes NaNs. Ordered negative input stores EDOM
 // before SQRTSS/SD; -0 and DAZ-converted negative subnormals leave errno alone. The hardware operation supplies
 // current rounding, signed zero, NaN quieting and exceptions. The x87 control word/register stack remain untouched.
-// General clobbers are caller-saved RAX/RCX/RDX/R8/R9/R10/R11, flags and XMM0/XMM1. A 16-byte stack reservation is
-// restored before every normal return. No assumptions about SSE4.1, AVX or the compiler host's ISA are made.
+// General clobbers are caller-saved RAX/RCX/RDX/R8/R9/R10/R11, flags and XMM0/XMM1. Only the rounding leaves reserve
+// 16 stack bytes. No assumptions about SSE4.1, AVX or the compiler host's ISA are made.
 //
 // Behavioral references only; no implementation was imported:
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Basic/Builtins.cpp
@@ -161,9 +161,7 @@ static void cbuiltin_math_copy_sign(CBuiltinMathRecipe* recipe, bool single)
 
 static void cbuiltin_math_sqrt(CBuiltinMathRecipe* recipe, bool single)
 {
-    cbuiltin_math_immediate(recipe, X86_FORM_SUB_RM64_IMM8, X86_REGISTER_RSP, 16);
-    cbuiltin_math_stack(recipe, X86_FORM_MOV_RM64_R64, X86_REGISTER_RDI, 0);
-    cbuiltin_math_stack(recipe, single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, 0, 0);
+    cbuiltin_math_rr(recipe, single ? X86_FORM_MOVD_X_RM32 : X86_FORM_MOVQ_X_RM64, 0, X86_REGISTER_RDI);
     cbuiltin_math_rr(recipe, X86_FORM_PXOR_X_XM128, 1, 1);
     cbuiltin_math_rr(recipe, single ? X86_FORM_UCOMISS_X_XM32 : X86_FORM_UCOMISD_X_XM64, 0, 1);
     cbuiltin_math_jump(recipe, X86_FORM_JP_REL8, CBUILTIN_MATH_SQRT);
@@ -171,9 +169,7 @@ static void cbuiltin_math_sqrt(CBuiltinMathRecipe* recipe, bool single)
     cbuiltin_math_append(recipe, (X86Instruction){ .form = X86_FORM_MOV_RM32_IMM32, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .immediate = EDOM });
     cbuiltin_math_label(recipe, CBUILTIN_MATH_SQRT);
     cbuiltin_math_rr(recipe, single ? X86_FORM_SQRTSS_X_XM32 : X86_FORM_SQRTSD_X_XM64, 0, 0);
-    cbuiltin_math_stack(recipe, single ? X86_FORM_MOVSS_XM32_X : X86_FORM_MOVSD_XM64_X, 0, 0);
-    cbuiltin_math_stack(recipe, single ? X86_FORM_MOV_R32_RM32 : X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, 0);
-    cbuiltin_math_immediate(recipe, X86_FORM_ADD_RM64_IMM8, X86_REGISTER_RSP, 16);
+    cbuiltin_math_rr(recipe, single ? X86_FORM_MOVD_RM32_X : X86_FORM_MOVQ_RM64_X, 0, X86_REGISTER_RAX);
     cbuiltin_math_append(recipe, (X86Instruction){ .form = X86_FORM_RET });
 }
 
@@ -337,8 +333,7 @@ static __attribute__((unused)) CBuiltinMathHelper cbuiltin_math_helper(CBuiltinI
                 {
                     result.code.records = (X86Instruction*)storage;
                     result.code.count = recipe.count;
-                    // Sqrt and rounding reserve 16 bytes until their common epilogue; copysign has no frame.
-                    result.code.frame_size = operation == 1 ? 0 : 16;
+                    result.code.frame_size = operation <= 1 ? 0 : 16;
                     memcpy(result.code.records, recipe.records, (size_t)record_bytes);
                     result.code.branches = (uint32_t*)(storage + record_bytes);
                     result.code.targets = (uint32_t*)(storage + record_bytes + branch_bytes);

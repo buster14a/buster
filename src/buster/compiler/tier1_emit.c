@@ -1506,7 +1506,8 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
     // An aggregate result in registers (#789): each part's bytes into the result object at its offset, exactly (the object
     // may be no larger than the aggregate), a general register's by tier1_emit_store_part and an xmm one's by movss or movsd,
-    // or through the scratch register for any other size.
+    // or through the scratch register for any other size; a whole vector register's by its width's store, and a record's
+    // payload no register is as wide as (#2798) in pieces.
     Tier1SelectPart returned[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t returned_count = parts_returned ? tier1_select_result_parts(abi->call.result, abi->result_size, returned) : 0;
     // In the x87's registers (#141): st0's 10 bytes into the first part's 16, then st1's into the second's.
@@ -1524,7 +1525,18 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         const uint8_t xmm_part = (uint8_t)(part.reg & 0x1f);
         const int32_t displacement = into->displacement + part.offset;
         bool appended = true;
-        if (vector_part && (part.bytes == 4 || part.bytes == 8 || part.bytes >= 16))
+        if (vector_part && tier1_select_part_payload(part.bytes))
+        {
+            // A record's payload (#2798) in pieces that don't write past it (tier0_payload_store), which lose its result
+            // register's value: nothing reads the register after its stores.
+            X86Instruction pieces[4];
+            const uint32_t piece_count = tier0_payload_store(xmm_part, part.bytes, into->base, BUSTER_X86_MEMORY_BASE, displacement, pieces);
+            for (uint32_t j = 0; appended && j < piece_count; j += 1)
+            {
+                appended = tier1_emit_append(buffer, pieces[j]);
+            }
+        }
+        else if (vector_part && (part.bytes == 4 || part.bytes == 8 || part.bytes >= 16))
         {
             // A whole vector register's (#141) by its width's store.
             const uint16_t form = part.bytes >= 16 ? tier1_select_part_form(part.bytes, false) : part.bytes == 8 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSS_XM32_X;

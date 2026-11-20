@@ -93,7 +93,7 @@ Each phi takes a new select row in the head for the region's two entries, which
 become one entry from the head. That is the shape of LLVM SimplifyCFG's
 `FoldTwoEntryPHINode` and `SpeculativelyExecuteBB`, for the C lowering's
 nested `?:`. The head then branches to the join. Rows are permuted, and the
-only new rows are the folded selects and the sunk accumulations' zeros (below).
+only new rows are the folded selects and the sunk accumulations' identity constants (below).
 
 Two cost rules keep a branch or move a select:
 
@@ -108,15 +108,18 @@ Two cost rules keep a branch or move a select:
   selection, and clang -O2 keeps branches there.
 - **An accumulation's select sinks below its operation.** An in-place phi may
   take `s op x` on one edge and `s` on the other: an addition, a subtraction
-  from `s`, an or or a xor of integers, which nothing else reads. The
-  operation's row then selects `x` or zero instead, and the phi becomes
-  `s op select`, as InstCombine folds a select of a binary operation. A
-  conditional sum's accumulator then waits for one addition per element, not
-  for the `cmov` as well, and a predictable condition costs no more than its
-  branch did. The zero is a new constant row in the head that names a zero the
-  constant table already has; a function whose table has none keeps the select
-  outside. A variable binding of the operation's row, whose value changed,
-  becomes unavailable.
+  from `s`, an or or a xor of integers, which nothing else reads. For these
+  operations the arm row selects `x` or zero, and the phi becomes `s op select`.
+  They need a zero already in the constant table. A one-arm AND of i8, i16,
+  i32 or i64 instead selects `x` or all ones at that width. It admits a boolean
+  parameter or a direct integer comparison and requires a region without
+  reused or speculated arm loads. Copies and extensions in a comparison can
+  hide a floating truth test, so this fold leaves them alone. A saved value in the head can feed the AND. A C arm
+  reload can arrive without its volatile flag ([the IR guide](ir.md)), so the
+  AND fold skips it. The pass reuses each required mask in the constant table
+  or appends a missing width once to a private copy. In both orientations the
+  accumulator waits only for the operation. A binding of the repurposed arm
+  row becomes unavailable.
 
 A converted head whose single-predecessor chain climbs to a conditional branch
 may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
@@ -132,7 +135,10 @@ integer result is one, and the outer region would otherwise stay a branch. Tier 
 32-bit operations (#2677), as clang does. A truth value used as an integer
 rather than tested, `select c, (zext x), 0` itself, is Tier 1's `and` of the
 condition and the value too, or #2676's `cmp` and `cmovCC` where the condition
-is a comparison only the select reads ([the selection guide](tier1-selection.md)). The
+is a comparison only the select reads ([the selection guide](tier1-selection.md)).
+A test of a floating comparison, which no integer comparison can take the place
+of, becomes its `i1` copy, which Tier 1's selects and branches read through to
+an ordered comparison's `ucomis` and `cmovCC` or `jcc` (#2791). The
 earlier truth pass, before threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
@@ -151,7 +157,7 @@ unchanged.
 SSA and distinct output/scratch arenas; scratch must own none of the input.
 The output arena may already contain the input. A changed result owns fresh
 row columns, block offsets, extra words and call records for each round,
-borrowing immutable tables from the input until the ordinary optimizer
+borrowing immutable tables (apart from an extended constant table) from the input until the ordinary optimizer
 materializes its output. Both lifetimes must cover that consumption. Shared or
 overlapping `extra` slices are never remapped in place: original switch/label
 words stay intact, and surviving phi/call occurrences get appended value
