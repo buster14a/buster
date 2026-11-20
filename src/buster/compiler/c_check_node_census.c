@@ -3613,8 +3613,10 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                                              16 + BUSTER_NODE_TESTS_COLUMN_FLAGS, BUSTER_NODE_TESTS_COLUMN_FLAGS + 8, BUSTER_NODE_TESTS_COLUMN_FLAGS,
                                              16 + BUSTER_NODE_TESTS_COLUMN_WORD + 8, 16 + BUSTER_NODE_TESTS_COLUMN_WORD, BUSTER_NODE_TESTS_COLUMN_WORD + 8,
                                              BUSTER_NODE_TESTS_COLUMN_WORD);
-    // And the four records' types, a line's first dword, in the permute's first lane (the rows' column).
+    // And the four records' types, a line's first dword, in the permute's first lane (the rows' column); and their
+    // payloads, a line's third quadword, in its first four (the rows' values' column).
     const __m512i type_columns = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16 + 8, 16, 8, 0);
+    const __m512i payload_columns = _mm512_set_epi64(0, 0, 0, 0, 8 + 6, 8 + 2, 6, 2);
     uint64_t lines_made = 0;
     uint64_t values_checked = 0;
     uint64_t values_wrong = 0;
@@ -3629,6 +3631,8 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
         __m128i standing_bytes = _mm_setzero_si128();
         __m128i flag_bytes = _mm_setzero_si128();
         __m512i type_dwords = zero;
+        __m512i value_low = zero;
+        __m512i value_high = zero;
         if (x < count)
         {
             const uint32_t live = count - x < 16 ? count - x : 16;
@@ -3644,6 +3648,7 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
             // sixteen lines whether placed or not: the window's own array's (the assert above the sweep).
             __m512i fours[4];
             __m128i types[4] = { _mm_setzero_si128(), _mm_setzero_si128(), _mm_setzero_si128(), _mm_setzero_si128() };
+            __m256i payloads[4] = { _mm256_setzero_si256(), _mm256_setzero_si256(), _mm256_setzero_si256(), _mm256_setzero_si256() };
             for (uint32_t four = 0; four < 4; four += 1)
             {
                 const uint8_t* const at = base + 4 * sizeof(NodeFactsRecord) * (uint64_t)four;
@@ -3655,6 +3660,7 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                 if (rows)
                 {
                     types[four] = _mm512_castsi512_si128(_mm512_permutex2var_epi32(first, type_columns, second));
+                    payloads[four] = _mm512_castsi512_si256(_mm512_permutex2var_epi64(first, payload_columns, second));
                 }
             }
             if (rows)
@@ -3723,6 +3729,21 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
             const uint32_t wide = _mm512_test_epi32_mask(standings, _mm512_set1_epi32(BUSTER_NODE_MACHINE_WIDE));
             const uint32_t null = _mm512_testn_epi32_mask(objects, objects);
             const __mmask16 constant = (__mmask16)(some & (~address | wide | null));
+            if (rows)
+            {
+                // A record's value, for the rows' values (NodeFactsReader.window_x_values): its object's number where
+                // it has one (a name's read, an address constant's: what their rows' first entry holds; the test is
+                // X's own, node_machine_address's), and else its payload (a constant's bits, an address constant's
+                // offset where it has no object). A constant that is no address's has no object: the kernel's rules
+                // give one to a name's line and keep it through what they make of an address, and none of the three
+                // corpora's records has both (the measurement record's count). A record the kernel didn't place has
+                // whatever its line has: its expression is not the window's.
+                const uint32_t designates = ~null;
+                value_low = _mm512_mask_mov_epi64(_mm512_inserti64x4(_mm512_castsi256_si512(payloads[0]), payloads[1], 1), (__mmask8)designates,
+                                                  _mm512_cvtepu32_epi64(_mm512_castsi512_si256(objects)));
+                value_high = _mm512_mask_mov_epi64(_mm512_inserti64x4(_mm512_castsi256_si512(payloads[2]), payloads[3], 1), (__mmask8)(designates >> 8),
+                                                   _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(objects, 1)));
+            }
             const __mmask16 bit_field = _mm512_test_epi32_mask(flags, _mm512_set1_epi32((int32_t)BUSTER_CHECK_BIT_FIELD));
             // A register object's flags are its leaf's, and a member's or an element's of it above that leaf in the same
             // expression: over the expression's records they say what its leaves' say.
@@ -3826,6 +3847,8 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
         if (rows)
         {
             _mm512_storeu_si512(state->window_x_types + x, type_dwords);
+            _mm512_storeu_si512(state->window_x_values + x, value_low);
+            _mm512_storeu_si512(state->window_x_values + x + 8, value_high);
         }
     }
     *made += lines_made;
@@ -6394,12 +6417,14 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
             const uint64_t shapes = counts[NODE_FACTS_COUNT_ROWS_SHAPE_TICKS];
             const uint64_t updates = counts[NODE_FACTS_COUNT_ROWS_UPDATE_TICKS];
             const uint64_t write = counts[NODE_FACTS_COUNT_ROWS_WRITE_TICKS];
+            const uint64_t valued = counts[NODE_FACTS_COUNT_ROWS_VALUE_TICKS];
             const uint64_t part = counts[NODE_FACTS_COUNT_ROWS_PART_TICKS];
             const uint64_t reference = counts[NODE_FACTS_COUNT_ROWS_REFERENCE_TICKS];
             const uint64_t later_reads = counts[NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS];
             const uint64_t later_shapes = counts[NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS];
             const uint64_t later_updates = counts[NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS];
             const uint64_t later_write = counts[NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS];
+            const uint64_t later_valued = counts[NODE_FACTS_COUNT_ROWS_LATER_VALUE_TICKS];
             const uint64_t later_part = counts[NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS];
             const double per = swept != 0 ? 1.0 / (double)swept : 0.0;
             const double per_taken = taken_records != 0 ? 1.0 / (double)taken_records : 0.0;
@@ -6418,18 +6443,33 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
                    node_census_share(counts[NODE_FACTS_COUNT_ROWS_LINES], swept), counts[NODE_FACTS_COUNT_ROWS_UPDATES],
                    node_census_share(counts[NODE_FACTS_COUNT_ROWS_UPDATES], swept), counts[NODE_FACTS_COUNT_ROWS_BRANCHED],
                    node_census_share(counts[NODE_FACTS_COUNT_ROWS_BRANCHED], swept));
-            const uint64_t sum = reads + shapes + updates + write + part;
-            const uint64_t later_sum = later_reads + later_shapes + later_updates + later_write + later_part;
+            // The entries' values: the records on each of their lists (BUSTER_NODE_ROWS_LIST_*), and the expressions
+            // whose calls' rows, labels and temporaries were numbered.
+            const uint64_t* lists = counts + NODE_FACTS_COUNT_ROWS_LIST;
+            uint64_t listed = 0;
+            for (uint32_t list = 0; list <= NODE_FACTS_COUNT_ROWS_LIST_LAST - NODE_FACTS_COUNT_ROWS_LIST; list += 1)
+            {
+                listed += lists[list];
+            }
+            printf("node-shadow: window rows values: tapes that differ in a value alone=%" PRIu64 "; records on a list=%" PRIu64 " (%.3f a record swept): its record's value=%" PRIu64
+                   " a store by name's destination's=%" PRIu64 " an integer constant's bits=%" PRIu64 " a stride=%" PRIu64 " the control's label=%" PRIu64 " the rest=%" PRIu64
+                   " a number of its expression's after the first=%" PRIu64 "; expressions numbered=%" PRIu64 " (%.2f%% of the taken), the records their labels' walks went over=%"
+                   PRIu64 "\n",
+                   counts[NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES], listed, (double)listed * per, lists[0], lists[1], lists[2], lists[3], lists[4], lists[5], lists[6],
+                   counts[NODE_FACTS_COUNT_ROWS_NUMBERED], node_census_share(counts[NODE_FACTS_COUNT_ROWS_NUMBERED], taken), counts[NODE_FACTS_COUNT_ROWS_NUMBER_STEPS]);
+            const uint64_t sum = reads + shapes + updates + write + valued + part;
+            const uint64_t later_sum = later_reads + later_shapes + later_updates + later_write + later_valued + later_part;
             printf("node-shadow: window rows ticks=%" PRIu64 " (%.2f a record swept, %.2f a record of the taken): the reads=%" PRIu64 " (%.2f) the shapes=%" PRIu64
-                   " (%.2f) the updates and the branches=%" PRIu64 " (%.2f) the rows=%" PRIu64 " (%.2f) an expression's part=%" PRIu64
+                   " (%.2f) the updates and the branches=%" PRIu64 " (%.2f) the rows=%" PRIu64 " (%.2f) the values=%" PRIu64 " (%.2f) an expression's part=%" PRIu64
                    " (%.2f); the reference's X on the taken expressions=%" PRIu64 " (%.2f a record of theirs)\n",
                    sum, (double)sum * per, (double)sum * per_taken, reads, (double)reads * per, shapes, (double)shapes * per, updates, (double)updates * per, write,
-                   (double)write * per, part, (double)part * per, reference, (double)reference * per_taken);
+                   (double)write * per, valued, (double)valued * per, part, (double)part * per, reference, (double)reference * per_taken);
             printf("node-shadow: window rows a second run over the same chunk, not counted: ticks=%" PRIu64 " (%.2f a record swept, %.2f a record of the taken): the reads=%"
-                   PRIu64 " (%.2f) the shapes=%" PRIu64 " (%.2f) the updates and the branches=%" PRIu64 " (%.2f) the rows=%" PRIu64 " (%.2f) an expression's part=%" PRIu64
-                   " (%.2f)\n",
+                   PRIu64 " (%.2f) the shapes=%" PRIu64 " (%.2f) the updates and the branches=%" PRIu64 " (%.2f) the rows=%" PRIu64 " (%.2f) the values=%" PRIu64
+                   " (%.2f) an expression's part=%" PRIu64 " (%.2f)\n",
                    later_sum, (double)later_sum * per, (double)later_sum * per_taken, later_reads, (double)later_reads * per, later_shapes, (double)later_shapes * per,
-                   later_updates, (double)later_updates * per, later_write, (double)later_write * per, later_part, (double)later_part * per);
+                   later_updates, (double)later_updates * per, later_write, (double)later_write * per, later_valued, (double)later_valued * per, later_part,
+                   (double)later_part * per);
         }
         printf("node-shadow: reader-time fact words chunks' ends: waiting values kept whole=%" PRIu64 " (their records %" PRIu64 ") kept as their place alone, cut=%" PRIu64
                "; the calls' arguments' list at most=%" PRIu64 " (room %u)\n",

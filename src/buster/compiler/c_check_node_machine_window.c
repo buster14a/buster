@@ -338,10 +338,11 @@ static inline __attribute__((always_inline)) __m512i node_window_consumers(const
 // Whether a pointer's sum, a subscript or a pointer's update at the window's record `x` has a stride
 // (check_action_pointer_stride's of its first operand's conversion's type, a pointer's, which its record holds): its
 // type's row's, or the type table's where the row doesn't hold it (an element past 4 GB), by a call the loop keeps out
-// of its way.
-static __attribute__((noinline, cold)) bool node_contexts_stride_asked(const NodeFacts* facts, TypeId pointer)
+// of its way. The stride is kept by the record (NodeFactsReader.window_c_strides): it is the value of the PTR_ADD X
+// writes for the record, which X's rows' values read there.
+static __attribute__((noinline, cold)) uint64_t node_contexts_stride_asked(const NodeFacts* facts, TypeId pointer)
 {
-    return pointer != 0 && check_action_pointer_stride(facts->machine->types, pointer) != 0;
+    return pointer != 0 ? check_action_pointer_stride(facts->machine->types, pointer) : 0;
 }
 
 static inline __attribute__((always_inline)) bool node_contexts_stride(const struct NodeFactsReader* state, uint32_t x, uint64_t* asked)
@@ -350,13 +351,14 @@ static inline __attribute__((always_inline)) bool node_contexts_stride(const str
     const TypeId pointer = facts->records[x].converted[0];
     const uint32_t index = type_index(pointer);
     const NodeFactsRow* row = facts->rows + (index < facts->row_count ? index : facts->row_count);
-    bool stride = row->stride != 0;
+    uint64_t stride = row->stride;
     if (__builtin_expect((row->flags & BUSTER_NODE_FACTS_STRIDE) == 0, 0))
     {
         stride = node_contexts_stride_asked(facts, pointer);
         *asked += 1;
     }
-    return stride;
+    state->window_c_strides[x] = stride;
+    return stride != 0;
 }
 
 // Whether T's conversions of the two operands of the window's record `x`, a sum or a binary operator, are both of a

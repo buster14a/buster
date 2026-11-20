@@ -108,12 +108,14 @@
 #define BUSTER_NODE_READER_ONE_SLOT 256u
 // X's rows on that window too, first their shapes (measure-node-machine --shadow --window-rows, with
 // BUSTER_NODE_READER_WINDOW_CONTEXTS, whose answers they are made from; c_check_node_machine_rows.c's
-// node_rows_window_chunk; "X's rows on the window"): the kinds and the classes of the entries X writes for the
-// expressions C takes there, compared with X's tape on T's columns at reader time.
+// node_rows_window_chunk; "X's rows on the window"): the kinds, the classes and the values of the entries X writes
+// for the expressions C takes there, compared with X's tape on T's columns at reader time.
 #define BUSTER_NODE_READER_WINDOW_ROWS 512u
 // test-checker's control of that comparison (with BUSTER_NODE_READER_WINDOW_ROWS): the reference's tape is read with
-// one of its answers changed for each expression the rows take (its first entry's kind, its last's class or its
-// length, in turn), so that the comparison is seen to count every one of them (node_rows_window_compare).
+// one of its answers changed for each expression the rows take (its first entry's kind, its last's class, its length
+// or an entry's value, in turn), so that the comparison is seen to count every one of them
+// (node_rows_window_compare); and one of a chunk's first run's answers is changed, so that its second run's
+// comparison is seen to count every chunk (node_rows_window_chunk).
 #define BUSTER_NODE_READER_WINDOW_ROWS_FAULT 1024u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u
@@ -303,6 +305,16 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS,
+    // The rows' values: the records each of the values' lists has (BUSTER_NODE_ROWS_LISTS of them, in their order),
+    // the expressions whose calls' rows, labels and temporaries are numbered, the tapes that differ from the
+    // reference's by a value alone, and the values' sweep's ticks, a chunk's first run's and its second's.
+    NODE_FACTS_COUNT_ROWS_LIST,
+    NODE_FACTS_COUNT_ROWS_LIST_LAST = NODE_FACTS_COUNT_ROWS_LIST + 6,
+    NODE_FACTS_COUNT_ROWS_NUMBERED,
+    NODE_FACTS_COUNT_ROWS_NUMBER_STEPS,
+    NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES,
+    NODE_FACTS_COUNT_ROWS_VALUE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_VALUE_TICKS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 
