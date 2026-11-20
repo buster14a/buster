@@ -70,7 +70,8 @@ requirements. [Command index](README.md).
   builtin's row and every comparison into a mask (#1623) through the IR, SSA and
   the optimizer to Tier 1's native code; comparisons ANDed with a mask, which
   selection folds into one compare under that writemask, #1847) for bounded typed-stream/native
-  validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
+  validation; a select of `F32` or `F64` values (#2842) is a blend without a branch, under k1 at
+  x86-64-v4 or by a lane mask elsewhere ([the selection guide](../../docs/tier1-selection.md)); `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
   [--only select] [-E's options] file...` selection's core cycles per IR
