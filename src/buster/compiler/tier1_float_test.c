@@ -805,6 +805,7 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     arena_pop_to(&test->input, 0);
 }
 
+<<<<<<< HEAD
 static void tier1_float_unsigned_dword_memory(Tier1EmitTest* test)
 {
     for (uint32_t width = 4; width <= 8; width += 4)
@@ -839,65 +840,111 @@ static void tier1_float_unsigned_dword_memory(Tier1EmitTest* test)
     }
 }
 
+||||||| 79f565efe
+=======
+// The real target can admit either form independently. A register conversion does not use
+// embedded rounding or a mask, and preserves the software path on targets lacking its form.
+static void tier1_float_unsigned_i64_forms(Tier1EmitTest* test)
+{
+    for (uint32_t mask = 0; mask < 4; mask += 1)
+    {
+        for (uint32_t width = 4; width <= 8; width += 4)
+        {
+            const Tier1SelectHoles holes = { .rule = TIER1_RULE_FLOAT_CONVERT_WIDE, .scale = BUSTER_TIER1_FLOAT_FROM_UNSIGNED,
+                .source_width = 8, .width = (uint8_t)width, .left = X86_REGISTER_R9, .destination = 16 + 7,
+                .unsigned_i64_float_forms = (uint8_t)mask };
+            X86Instruction rows[32];
+            const uint32_t count = tier1_select_fixed(&holes, rows);
+            const bool hardware = (mask & (width == 4 ? 1u : 2u)) != 0;
+            const uint16_t form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM64 : X86_FORM_VCVTUSI2SD_X_X_RM64;
+            tier1_emit_test_expect(test, !hardware || x86_zen5_missing(rows, count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "the emitted unsigned conversion has measured Zen 5 costs");
+            tier1_emit_test_expect(test, hardware ? count == 2 && rows[0].form == X86_FORM_XORPS_X_XM128 &&
+                                   rows[0].reg == 7 && rows[0].rm == 7 && rows[1].form == form &&
+                                   rows[1].reg == 7 && rows[1].vvvv == 7 && rows[1].rm == X86_REGISTER_R9 :
+                                   count > 2 && rows[count - 1].form != form,
+                                   "only the admitted unsigned qword register conversion replaces the software sequence");
+        }
+    }
+}
+
+>>>>>>> origin/main
 static void tier1_float_conversion_loads(Tier1EmitTest* test)
 {
     const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .parameter_count = 2, .address_count = 1 };
-    const uint8_t registers[6] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, X86_REGISTER_RAX, 16, 0 };
-    for (uint32_t source = IR_I32; source <= IR_I64; source += 1)
+    const struct
     {
-        for (uint32_t target = IR_F32; target <= IR_F64; target += 1)
+        uint8_t op;
+        uint8_t source;
+        uint8_t target;
+    } cases[] = {
+        { IR_SITOFP, IR_I32, IR_F32 }, { IR_SITOFP, IR_I64, IR_F32 },
+        { IR_SITOFP, IR_I32, IR_F64 }, { IR_SITOFP, IR_I64, IR_F64 },
+        { IR_FPTOSI, IR_F32, IR_I32 }, { IR_FPTOSI, IR_F32, IR_I64 },
+        { IR_FPTOSI, IR_F64, IR_I32 }, { IR_FPTOSI, IR_F64, IR_I64 },
+        { IR_FPTOUI, IR_F32, IR_I32 }, { IR_FPTOUI, IR_F64, IR_I32 },
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(cases); k += 1)
+    {
+        const bool from_integer = cases[k].op == IR_SITOFP;
+        const uint32_t source = cases[k].source;
+        const uint32_t target = cases[k].target;
+        const uint8_t registers[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX,
+                                      from_integer ? X86_REGISTER_RAX : 19, from_integer ? 20 : X86_REGISTER_R9, 0 };
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create a scalar conversion with a loaded operand");
+        if (created)
         {
-            IrFunction function;
-            const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
-            tier1_emit_test_expect(test, created, "create a signed-load conversion");
-            if (created)
+            function.result_type = (uint8_t)target;
+            function.block_offsets[1] = 6;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[1] = IR_I64;
+            tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 2, IR_ADDRESS, IR_PTR, 0, 1);
+            function.c[2] = 0;
+            tier1_emit_test_node(&function, 3, IR_LOAD, source, 2, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 4, cases[k].op, target, 3, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE);
+            for (uint32_t address = 0; address <= 4; address += 1)
             {
-                function.result_type = (uint8_t)target;
-                function.block_offsets[1] = 6;
-                function.parameter_types[0] = IR_PTR;
-                function.parameter_types[1] = IR_I64;
-                tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
-                tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
-                tier1_emit_test_node(&function, 2, IR_ADDRESS, IR_PTR, 0, 1);
-                function.c[2] = 0;
-                tier1_emit_test_node(&function, 3, IR_LOAD, source, 2, BUSTER_IR_NONE);
-                tier1_emit_test_node(&function, 4, IR_SITOFP, target, 3, BUSTER_IR_NONE);
-                tier1_emit_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE);
-                // A base alone, then each scale of the index. Keep the displacement on the conversion's record.
-                for (uint32_t address = 0; address <= 4; address += 1)
+                const uint8_t shift = address == 0 ? 0 : (uint8_t)(address - 1);
+                function.b[2] = address == 0 ? BUSTER_IR_NONE : 1;
+                function.addresses[0] = (IrAddress){ .offset = -7, .scale = (uint8_t)(1u << shift) };
+                for (uint32_t observable = 0; observable <= 1; observable += 1)
                 {
-                    const uint8_t shift = address == 0 ? 0 : (uint8_t)(address - 1);
-                    function.b[2] = address == 0 ? BUSTER_IR_NONE : 1;
-                    function.addresses[0] = (IrAddress){ .offset = -7, .scale = (uint8_t)(1u << shift) };
-                    for (uint32_t observable = 0; observable <= 1; observable += 1)
+                    function.flags[3] = observable != 0 ? BUSTER_IR_VOLATILE : 0;
+                    Tier1SelectPlan plan;
+                    uint32_t failed = BUSTER_IR_NONE;
+                    const bool selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+                    tier1_emit_test_expect(test, selected, "select the loaded scalar conversion");
+                    if (selected)
                     {
-                        function.flags[3] = observable != 0 ? BUSTER_IR_VOLATILE : 0;
-                        Tier1SelectPlan plan;
-                        uint32_t failed = BUSTER_IR_NONE;
-                        const bool selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
-                        tier1_emit_test_expect(test, selected, "select the signed-load conversion");
-                        if (selected)
+                        const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 4);
+                        const Tier1SelectRecords records = tier1_select_expand(&holes);
+                        const X86Instruction record = records.records[from_integer ? 1 : 0];
+                        const bool memory = (record.mode & BUSTER_X86_MODE_MEMORY) != 0;
+                        const uint16_t form = from_integer ? tier1_select_float_forms(target == IR_F32 ? 4 : 8)->from_integer[source == IR_I64] :
+                                                             tier1_select_float_forms(source == IR_F32 ? 4 : 8)->to_integer[target == IR_I64 || cases[k].op == IR_FPTOUI];
+                        tier1_emit_test_expect(test, records.count == (from_integer ? 2 : 1) && record.form == form && record.reg == (registers[4] & 15),
+                                               "convert at the original register width directly into the destination");
+                        tier1_emit_test_expect(test, !from_integer || (records.records[0].form == X86_FORM_XORPS_X_XM128 && records.records[0].reg == record.reg),
+                                               "clear the upper-lane dependency of an integer-to-float conversion");
+                        tier1_emit_test_expect(test, memory == (observable == 0) && (plan.covered[3] != 0) == memory,
+                                               "fold an ordinary load and preserve a volatile load at its original node");
+                        if (memory)
                         {
-                            const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 4);
-                            const Tier1SelectRecords records = tier1_select_expand(&holes);
-                            const bool memory = records.count == 2 && (records.records[1].mode & BUSTER_X86_MODE_MEMORY) != 0;
-                            const uint16_t form = tier1_select_float_forms(target == IR_F32 ? 4 : 8)->from_integer[source == IR_I64];
-                            tier1_emit_test_expect(test, records.count == 2 && records.records[0].form == X86_FORM_XORPS_X_XM128 && records.records[1].form == form, "clear the destination and convert at the exact source width");
-                            tier1_emit_test_expect(test, memory == (observable == 0) && (plan.covered[3] != 0) == memory, "fold an ordinary load and keep a volatile load at its own node");
-                            if (memory)
-                            {
-                                tier1_emit_test_expect(test, x86_zen5_missing(records.records, records.count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "the signed memory conversion has measured Zen 5 costs");
-                                const X86Instruction record = records.records[1];
-                                const uint8_t mode = address == 0 ? BUSTER_X86_MEMORY_BASE : BUSTER_X86_MEMORY_BASE_INDEX(shift);
-                                tier1_emit_test_expect(test, record.mode == mode && record.rm == X86_REGISTER_RDI && (address == 0 || record.index == X86_REGISTER_RSI) && record.displacement == -7, "convert from the folded base, index, scale and displacement");
-                            }
+                            tier1_emit_test_expect(test, !from_integer || x86_zen5_missing(records.records, records.count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "the signed memory conversion has measured Zen 5 costs");
+                            const uint8_t mode = address == 0 ? BUSTER_X86_MEMORY_BASE : BUSTER_X86_MEMORY_BASE_INDEX(shift);
+                            tier1_emit_test_expect(test, record.mode == mode && record.rm == X86_REGISTER_RDI && (address == 0 || record.index == X86_REGISTER_RSI) && record.displacement == -7,
+                                                   "convert from the selected base, index, scale and displacement");
                         }
-                        arena_pop_to(&test->output, 0);
                     }
+                    arena_pop_to(&test->output, 0);
                 }
             }
-            arena_pop_to(&test->input, 0);
         }
+        arena_pop_to(&test->input, 0);
     }
 }
 
@@ -1019,6 +1066,7 @@ static void tier1_float_fma_factor_addresses(Tier1EmitTest* test)
 
 static void tier1_float_cases(Tier1EmitTest* test)
 {
+    tier1_float_unsigned_i64_forms(test);
     test->terms = 0;
     test->width = 8;
     test->selects = false;

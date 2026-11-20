@@ -442,9 +442,9 @@ typedef enum Tier1SelectRule
 // - FROM_BITS and TO_BITS, a bitcast between an F32 and an I32 or an F64 and an I64: movd or movq.
 // Each conversion to a floating value zeroes its destination first (xorps), but a resize: cvtsi2s* writes its low
 // element alone, which would otherwise wait for the register's last writer.
-// TIER1_RULE_FLOAT_CONVERT_WIDE is an unsigned I64's (#141), FROM_UNSIGNED or TO_UNSIGNED by its `scale`, whose values
-// past INT64_MAX no single conversion takes: a sequence longer than a node's room, through the fixed-register path's
-// (tier1_select_fixed), which names the scratch register alone, holding no value (tier1_select_fixed_registers).
+// TIER1_RULE_FLOAT_CONVERT_WIDE is an unsigned I64's (#141), FROM_UNSIGNED or TO_UNSIGNED by its `scale`.
+// The fixed-register path (tier1_select_fixed) holds the software sequence or, for FROM_UNSIGNED on targets
+// admitting its EVEX register form, a cleared destination and a direct conversion using MXCSR rounding.
 #define BUSTER_TIER1_FLOAT_FROM_SIGNED 0
 #define BUSTER_TIER1_FLOAT_FROM_UNSIGNED 1
 #define BUSTER_TIER1_FLOAT_TO_SIGNED 2
@@ -809,6 +809,8 @@ struct Tier1SelectHoles
     bool sse;
     // The target has AVX2 (Tier1EmitPrepared.avx2): without it, a VEX target's 32-byte vectors take AVX's forms alone.
     bool avx2;
+    // Bits 0 and 1 allow the target's unsigned qword register conversion to float and double.
+    uint8_t unsigned_i64_float_forms;
 };
 
 static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
@@ -3122,29 +3124,39 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_FLOAT_CONVERT_LOAD:
     {
-        const uint8_t x = destination & 15;
         X86Instruction record = holes->memory;
-        const bool unsigned_dword = holes->condition == BUSTER_TIER1_FLOAT_FROM_UNSIGNED;
-        if (unsigned_dword && (holes->unsigned_dword_memory_forms & (width == 4 ? 1u : 2u)) == 0)
+        record.reg = destination & 15;
+        if (holes->condition == BUSTER_TIER1_FLOAT_FROM_SIGNED)
         {
-            // A dword load zero-extends into the reserved scratch. Its qword is safe to convert as signed.
-            record.form = X86_FORM_MOV_R32_RM32;
-            record.reg = BUSTER_TIER1_SELECT_SCRATCH;
-            tier1_select_append(&result, record);
-            record = tier1_select_register_record(tier1_select_float_forms(width)->from_integer[1], x, BUSTER_TIER1_SELECT_SCRATCH);
+            record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
+            // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, record.reg, record.reg));
+        }
+        else if (holes->condition == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
+        {
+            const uint8_t x = destination & 15;
+            if ((holes->unsigned_dword_memory_forms & (width == 4 ? 1u : 2u)) == 0)
+            {
+                // A dword load zero-extends into the reserved scratch. Its qword is safe to convert as signed.
+                record.form = X86_FORM_MOV_R32_RM32;
+                record.reg = BUSTER_TIER1_SELECT_SCRATCH;
+                tier1_select_append(&result, record);
+                record = tier1_select_register_record(tier1_select_float_forms(width)->from_integer[1], x, BUSTER_TIER1_SELECT_SCRATCH);
+            }
+            else
+            {
+                record.form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM32 : X86_FORM_VCVTUSI2SD_X_X_RM32;
+                record.reg = x;
+                record.vvvv = x;
+            }
+            // Legacy destinations and EVEX merge inputs both get a dependency-breaking zero.
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
         }
         else
         {
-            record.form = unsigned_dword ? (width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM32 : X86_FORM_VCVTUSI2SD_X_X_RM32) :
-                                          tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
-            record.reg = x;
-            if (unsigned_dword)
-            {
-                record.vvvv = x;
-            }
+            // Truncate to a general register. An unsigned I32 fits in the signed 64-bit conversion's result.
+            record.form = tier1_select_float_forms(holes->source_width)->to_integer[width == 8 || holes->condition == BUSTER_TIER1_FLOAT_TO_UNSIGNED];
         }
-        // Legacy destinations and EVEX merge inputs both get a dependency-breaking zero.
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
         tier1_select_append(&result, record);
         break;
     }
@@ -3361,6 +3373,18 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
         {
             records[count++] = tier1_select_move(8, holes->destination, X86_REGISTER_RDX);
         }
+    }
+    else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED &&
+             (holes->unsigned_i64_float_forms & (width == 4 ? 1u : 2u)) != 0)
+    {
+        // A zero merge source breaks the destination dependency and clears the other scalar lanes.
+        // The register form uses MXCSR rounding, including when a large positive integer rounds up.
+        const uint8_t x = holes->destination & 15;
+        const uint16_t form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM64 : X86_FORM_VCVTUSI2SD_X_X_RM64;
+        records[count++] = tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x);
+        X86Instruction conversion = tier1_select_register_record(form, x, holes->left);
+        conversion.vvvv = x;
+        records[count++] = conversion;
     }
     else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
     {
@@ -5338,6 +5362,37 @@ struct Tier1SelectAddress
     bool rip;
 };
 
+// A register-register LEA can encode one operand's multiplication in its SIB byte (#2700). Both operations have
+// the addition's width, so wrapping the product before the addition gives the same low 32 or 64 bits.
+static void tier1_select_product_index(const Tier1SelectForest* forest, uint32_t node, Tier1SelectPattern* lea)
+{
+    const IrFunction* function = forest->function;
+    for (uint32_t side = 0; side < 2; side += 1)
+    {
+        const uint32_t product = lea->values[1 - side];
+        if (function->op[product] == IR_MUL && tier1_select_tree_child(forest, node, product))
+        {
+            uint32_t index = function->a[product];
+            uint32_t factor = function->b[product];
+            if (function->op[factor] != IR_CONST)
+            {
+                factor = index;
+                index = function->b[product];
+            }
+            uint64_t value = 0;
+            if (tier1_select_constant(function, factor, &value) && (value == 2 || value == 4 || value == 8))
+            {
+                lea->values[0] = lea->values[side];
+                lea->values[1] = index;
+                lea->scale = (uint8_t)tier1_select_log2(value);
+                tier1_select_fold(forest, node, product, lea);
+                tier1_select_fold(forest, node, factor, lea);
+                break;
+            }
+        }
+    }
+}
+
 // An address's index through single-use I64 arithmetic in its block, at most BUSTER_TIER1_SELECT_WALK nodes: additions
 // and subtractions of constants join the displacement at the current scale; shifts and power-of-two multiplies join
 // the SIB's log2 scale while it remains at most 3. Walk from the consumer: (i + c) << k scales c, but (i << k) + c does
@@ -6392,11 +6447,13 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
-        if (((op == IR_SITOFP && (source == IR_I32 || source == IR_I64)) || (op == IR_UITOFP && source == IR_I32)) && tier1_select_load_folds(forest, node, a))
+        const bool from_integer = (op == IR_SITOFP && (source == IR_I32 || source == IR_I64)) || (op == IR_UITOFP && source == IR_I32);
+        const bool to_integer = (op == IR_FPTOSI && (type == IR_I32 || type == IR_I64)) || (op == IR_FPTOUI && type == IR_I32);
+        if ((from_integer || to_integer) && tier1_select_load_folds(forest, node, a))
         {
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_FLOAT_CONVERT_LOAD;
-            // The folded address uses scale. Keep the conversion kind in condition.
+            // The selected address takes scale. Keep the conversion kind in condition.
             folded.condition = base.scale;
             tier1_select_fold(forest, node, a, &folded);
             tier1_select_memory(forest, node, function->a[a], &folded, 0);
@@ -6812,6 +6869,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             Tier1SelectPattern lea = base;
             lea.rule = TIER1_RULE_LEA_ADD;
             lea.intrinsic_cost = 1;
+            if (function->op[b] == IR_MUL || function->op[a] == IR_MUL)
+            {
+                tier1_select_product_index(forest, node, &lea);
+            }
             tier1_select_add_candidate(forest, node, &candidates, lea);
         }
         uint32_t constant = b;
