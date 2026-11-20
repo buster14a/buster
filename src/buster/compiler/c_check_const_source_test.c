@@ -311,7 +311,7 @@ static void check_const_source_atomic_runtime(CheckTest* test)
         static Parser parser;
         const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
         const ParseOptions parse_options = { .scalar = path == 0 };
-        const CheckOptions check_options = { .scalar = path == 0, .verify = true };
+        const CheckOptions check_options = { .verify = true };
         CheckTestTypes types = { 0 };
         Arena input_storage = arena_reserve(UINT64_C(1) << 24);
         Arena output_storage = arena_reserve(UINT64_C(1) << 24);

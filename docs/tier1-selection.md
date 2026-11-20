@@ -389,7 +389,10 @@ patterns are:
   to 64 bits are `cvtsi2s*` and `cvtts*2si`, a narrow signed operand
   sign-extended into the scratch register first and an unsigned `I32` converted
   as its zero extension's 64 bits; the precisions convert by `cvtss2sd` and
-  `cvtsd2ss`, and a bitcast is `movd` or `movq`. A conversion to a floating value
+  `cvtsd2ss`, and a bitcast is `movd` or `movq`. A signed 32- or 64-bit load
+  can feed `cvtsi2s*` directly. A float or double load can feed `cvtts*2si` directly
+  for signed 32- or 64-bit results and unsigned 32-bit results. The latter uses
+  the 64-bit destination. A conversion to a floating value
   zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
   alone, which would otherwise wait for the register's last writer. An unsigned
   64-bit integer's conversions, whose values past `INT64_MAX` no single

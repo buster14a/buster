@@ -134,6 +134,10 @@ struct Tier1CfgInput
     const uint32_t* use_offsets;
     const uint32_t* use_positions;
     const uint8_t* use_required;
+    // Optional, per use (#2646): the register of its value's class that the use reads it in, or UINT8_MAX: a call's
+    // register argument's. An interval whose last use names one takes it where no value hint names another and it is
+    // free (Tier1AllocationInput.register_hints).
+    const uint8_t* use_registers;
     // Block b's phis are phi_values[phi_offsets[b] .. phi_offsets[b + 1]); phi k's operand from its block's j-th
     // predecessor is phi_operands[phi_operand_offsets[k] + j], or BUSTER_TIER1_CFG_NONE for an undefined one (the IR's
     // undef): any value is the phi's along that edge, so the edge moves nothing for it and nothing is live for it there.
@@ -2546,6 +2550,15 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     }
                 }
                 use_offsets[count] = input->use_count;
+                // Each interval whose last use reads its value in a named register, at the interval's end (#2646).
+                uint8_t* register_hints = input->use_registers != 0 ? arena_push(output, (uint64_t)count + 1, 1) : 0;
+                ready = input->use_registers == 0 || register_hints != 0;
+                for (uint32_t i = 0; register_hints != 0 && i < count; i += 1)
+                {
+                    const uint32_t end = use_offsets[i + 1];
+                    const bool used = end > use_offsets[i] && input->use_positions[end - 1] + 1 == pieces.ends[i];
+                    register_hints[i] = used ? input->use_registers[end - 1] : UINT8_MAX;
+                }
                 tier1_cfg_phi_exits(input, chosen, ups, firsts, dispatchers, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
@@ -2562,6 +2575,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     .alternate_intervals = pieces.alternates,
                     .continuation_intervals = pieces.continuations,
                     .hint_intervals = pieces.hint_intervals,
+                    .register_hints = register_hints,
                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
                     .use_offsets = use_offsets,
                     .use_positions = input->use_positions,
@@ -3225,7 +3239,8 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
     differs = same || differs != 0 ? differs : 2;
     same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
            tier1_cfg_same_column(a->alternate_intervals, b->alternate_intervals, count * 4) && tier1_cfg_same_column(a->continuation_intervals, b->continuation_intervals, count * 4) &&
-           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count);
+           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count) &&
+           tier1_cfg_same_column(a->register_hints, b->register_hints, count);
     differs = same || differs != 0 ? differs : 3;
     same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;
     differs = same || differs != 0 ? differs : 4;

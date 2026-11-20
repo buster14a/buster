@@ -852,8 +852,7 @@ static uint32_t check_debug_inline_end(const CheckDebugBody* source, uint32_t k)
 }
 
 // The range list of instance subtree [first, end) in body `source`, whose .debug_addr entry is `address`: its spans
-// (CheckDebugValueSpan.inline_instance) adjacent ones coalesced; how many pairs it has (0 writes nothing but the list's
-// end, which the caller doesn't refer to).
+// (CheckDebugValueSpan.inline_instance) with adjacent ones coalesced. A subtree without a pair writes no bytes.
 static uint32_t check_debug_inline_ranges(const CheckDebugBody* source, DebugWriter* out, uint32_t address, uint32_t first, uint32_t end)
 {
     uint32_t pairs = 0;
@@ -973,15 +972,14 @@ static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, ui
         }
         const bool placed = j == k || depth != 0;
         const uint32_t subtree = check_debug_inline_end(source, j);
-        // The pairs first, by measuring into a writer of no bytes: a list of none isn't referred to.
-        DebugWriter probe = { 0 };
-        const bool spanned = placed && instance.described && check_debug_inline_ranges(source, &probe, values->address_indices[body], j, subtree) != 0;
+        // A list without spans writes nothing. Save its start so the DIE can refer to the list after writing it.
+        const uint64_t range_offset = values->ranges.size;
+        const bool spanned = placed && instance.described && check_debug_inline_ranges(source, &values->ranges, values->address_indices[body], j, subtree) != 0;
         if (spanned)
         {
             debug_uleb(&values->info, CHECK_DEBUG_INLINED);
             debug_integer(&values->info, values->function_offsets[instance.body], 4);
-            check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
-            check_debug_inline_ranges(source, &values->ranges, values->address_indices[body], j, subtree);
+            check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, range_offset);
             debug_uleb(&values->info, instance.call_file);
             debug_uleb(&values->info, instance.call_line);
             check_debug_inline_parameters(values, body, instance);

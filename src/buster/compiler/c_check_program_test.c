@@ -1961,7 +1961,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         Arena bytes = arena_reserve(UINT64_C(1) << 22);
         Arena scratch = arena_reserve(plan_room);
         const ParseOptions parse_options = { .scalar = path == 0 };
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         bool ready = input_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
                      parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
         CheckInput input = { 0 };
@@ -2634,7 +2634,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
@@ -2791,7 +2791,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };

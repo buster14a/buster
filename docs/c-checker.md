@@ -201,8 +201,8 @@ below).
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check
-returns zero. `--scalar` selects both the scalar parser and the postorder checker
-schedule and the independent scalar binding-event resolver. `--dump-typed`
+returns zero. `--scalar` selects the scalar parser and the independent scalar
+binding-event resolver; the checker has one schedule since #2924. `--dump-typed`
 prints the node types, categories, constants, faults and operand/store
 conversion metadata. `--dump-static` materializes supported static
 definitions as real `Link` atoms and prints their bytes and symbolic fixups.
@@ -1151,11 +1151,12 @@ Allocation failure follows the reader's ordinary resource failure path.
 `CheckOptions.verify`, selected by the C driver's `--verify`, validates these
 graphs too and checks every counter and purity byte against the reader's
 facts. Mismatches return `CHECK_STATUS_INVALID_GRAPH` and roll back output;
-a purity mismatch names its first node. Generated graphs and fixtures retain
-the ordinary scalar/vector validators as independent oracles. `test-checker`
-checks both recorded schedules with and without verification on its generated
-graphs, compares both validators with each source fixture's recorded facts,
-and mutates every counter and purity byte to check rejection and rollback.
+a purity mismatch names its first node. Generated graphs and fixtures are
+validated by `check_graph_validate`, which `test-checker` compares with its
+definition (the exact path on every node, `check_test_graph_validate_definition`)
+and with each source fixture's recorded facts. It checks the recorded schedules
+with and without verification on its generated graphs, and mutates every counter
+and purity byte to check rejection and rollback.
 
 [The frozen #674 qualification](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-674/target/README.md)
 compares `bc1b4861` with `7274e1bc`. Eight physical workers compile the pinned
@@ -1270,9 +1271,9 @@ the second addition depends on the first even when both tokens have the same
 bracket depth. The checker computes heights from actual operand edges. A node
 is ready only after all its operand values and types have been produced.
 
-The scalar schedule processes graph nodes in postorder, one at a time. So
-does the vector schedule by default, with its leaves and statements' discards
-without their actions ("Node order or regions" below). With its regions
+The checker processes graph nodes in postorder, one at a time, by default, with
+its leaves and statements' discards without their actions ("Node order or
+regions" below). With its regions
 (`CheckOptions.regions`), it finds contiguous regions whose type behavior is
 known to stay within builtin arithmetic types, and checks each region in
 postorder batches (`check_graph_region_postorder`). From the first node not yet done, a batch
@@ -1283,9 +1284,10 @@ and stably groups the ready nodes at each height. The benchmark measured both
 on the same actions, and the postorder batches won ("Level order or
 postorder" below). Operations that can create a pointer, decay an array or
 function, or otherwise intern a derived type are postorder barriers. This
-conservative rule preserves newly allocated `TypeId` numbers across fresh
-scalar and vector type tables. Comparing both schedules in a table already
-populated by one schedule would miss that requirement.
+conservative rule preserves newly allocated `TypeId` numbers across fresh type
+tables, whatever the schedule: `test-checker` compares node order, the
+transitions, level order and regions, each in a fresh table. Comparing them in a
+table already populated by one schedule would miss that requirement.
 
 `CheckOptions.batch_size` is a logical batching limit: zero selects 16 and
 values 1 through 16 are valid. A batch ends at a node that reads a member (in
@@ -1298,7 +1300,7 @@ Irregular types and operations, integer multiplication/division/remainder,
 folding use the scalar semantic action. Singleton frontiers execute directly
 without packing a vector batch.
 
-The vector path completes each leaf without an overload set, a `VALUE` that
+The checker completes each leaf without an overload set, a `VALUE` that
 reads no operand and interns no type (about 45% of `sqlite3.c`'s body nodes),
 without running its action (`check_graph_leaf`, #530). The record is the one
 the action gives: the leaf with its type as operand 0's conversion, or for an
@@ -1306,21 +1308,24 @@ invalid type, that type's diagnostic and a zero value. It writes the records in
 node order: the barrier's leaves in the walk, a region's in its level pass,
 which then schedules only the rest. A separate pass of leaves wrote each
 output cache line twice. When validation is required (an external producer or
-`--verify`), the vector path validates the graph 16 nodes at a time
-(`check_graph_validate_vector`): the operators' classes come from one
-`vpermi2b` table built from the scalar rules, and each argument slice's offset
-from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
-or a sideband entry goes to `check_graph_validate_node`, the scalar
-validator's step. Most of that validation's time is the leaves' records it
+`--verify`), the checker validates the graph 16 nodes at a time
+(`check_graph_validate`): the operators' classes come from one `vpermi2b`
+table built from the exact path's rules, and each argument slice's offset from
+a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin or a
+sideband entry goes to the exact path, `check_graph_validate_node`, a node at a
+time. Most of that validation's time is the leaves' records it
 reads, which since #572 lie one after another, as only `VALUE` nodes have one,
 and since #628 are 32 bytes each, half a cache line, where a 96-byte value took
-two. `test-checker` compares the two
-validators on random graphs whole, with each rule broken, and with their
-columns ending at `PROT_NONE` pages.
+two. `test-checker` compares the validator
+with its definition, the exact path on every node, on random graphs whole, with
+each rule broken, and with their columns ending at `PROT_NONE` pages.
 
-Both schedules call the same semantic-action contract. Scalar fixtures with
-independently stated expected results and the external source oracle therefore
-remain necessary: scalar/vector equality alone cannot validate shared C rules.
+Every schedule calls the same semantic-action contract. Fixtures with
+independently stated expected results, the external source oracle and the
+typed streams' recorded digests (`tests/checker/stream-digests.tsv`, recorded
+where the scalar schedule and node order agreed, before #2924 removed the
+former) check it: equality between schedules alone cannot validate shared C
+rules.
 `CheckStatistics` reports nodes, levels, batches, actual scalar/vector node
 counts, and arena bytes. The node counts describe the path executed, not merely
 which operations could theoretically use SIMD: `vector_nodes` counts the vector
@@ -1341,9 +1346,10 @@ postorder. `benchmark-checker-source` times both in one build, with the same
 actions, type table and graph: its paths `regions` (the postorder batches,
 `CheckOptions.regions`, which were `vector`, the vector path's default, until
 #1050 made it node order: "Node order or regions" below) and `levels`
-(`CheckOptions.level_order`), beside `scalar`. Before it times them, it checks
-that each gives the scalar path's typed stream, and `test-checker` compares both
-orders at every batch size with the scalar path. The measurements below, from
+(`CheckOptions.level_order`), beside `scalar` (the scalar reader's graph, which
+node order checks since #2924). Before it times them, it checks that each gives
+the same typed stream, and `test-checker` compares both orders at every batch
+size with node order. The measurements below, from
 #133, name the postorder batches as they were then.
 
 Level order computes each region node's height from its operands, counts the
@@ -1683,11 +1689,10 @@ the diagnostics are the same bytes):
   clears no column and its main loop writes no zero (`CheckStream.zero_columns`):
   the diagnostics, their operands, the warnings and their ignored kinds take
   no memory where no node has one, and a first write reads no payload row.
-- The vector path writes a discard of an rvalue without its action
+- The checker writes a discard of an rvalue without its action
   (`check_graph_discard`): the operand's value, its conversion to void and the
   cast's provenance, by the same helpers in the same order as the action, where
-  the action would read nothing else (`check_graph_discard_taken`). The scalar
-  path keeps the action, the twin whose streams the tests compare.
+  the action would read nothing else (`check_graph_discard_taken`).
 - `check_graph_constant_contexts` passes over 64 nodes that hold neither a
   context nor a mark at a time, and `check_graph_is_leaf` reads no leaf's record
   without overload candidates.
@@ -8320,24 +8325,24 @@ visit mark is retained even when zero-valued sparse stores are skipped.
 ```sh
 ./build/compiler benchmark-checker --nodes 65535 --shape wide
 ./build/compiler benchmark-checker --nodes 4096 --shape chain
-./build/compiler benchmark-checker --only scalar
-./build/compiler benchmark-checker --only vector
-./build/compiler benchmark-checker --only vector --after-scalar 200
+./build/compiler benchmark-checker --only node
+./build/compiler benchmark-checker --only regions
+./build/compiler benchmark-checker --only regions --after-node 200
 ```
 
 The benchmark calls the production `check_graph_run` API. The timed interval
 includes graph validation, dependency analysis and scheduling, action
 preparation, output allocation, semantic actions and diagnostic collection.
-Graph construction and the scalar reference run are outside timing; each
+Graph construction and the node-order reference run are outside timing; each
 measured output is checked against that reference afterward. The wide shape
 contains independent balanced arithmetic trees; the chain exposes the cost of
 frontiers with only one ready node. The input is synthetic and contains builtin
 unsigned arithmetic, so it does not represent complete source adaptation or a
 real compiler corpus.
 
-One warmup precedes 21 recorded passes. The default alternates scalar/vector
-order; `--only` isolates one measured path, and `--after-scalar` conditions the
-vector path with repeated scalar graph work before each timed sample. Output
+One warmup precedes 21 recorded passes. The default alternates node order and
+regions; `--only` isolates one measured path, and `--after-node` conditions the
+regions with repeated node-order graph work before each timed sample. Output
 reports median nanoseconds per node, useful node throughput, cycles and
 instructions when available, and schedule/memory statistics. A denied or
 multiplexed performance counter is printed as unavailable, never as zero.

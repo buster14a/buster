@@ -65,7 +65,7 @@ static void check_test_varargs_graph_guards(CheckTest* test, TypeTable* table, T
         }
         for (uint32_t path = 0; path < 2; path += 1)
         {
-            const CheckOptions options = { .scalar = path == 0 };
+            const CheckOptions options = { 0 };
             CheckStream stream;
             const bool accepted = check_graph_run(table, &graph, output, scratch, &options, &stream);
             bool exact = accepted && stream.report_count == 0 && stream.varargs_count == count && (count != 0 || stream.varargs == NULL);
@@ -153,8 +153,8 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
         const uint32_t end = check_test_varargs_node(&graph, CBUILTIN_VA_END, 1, ap, BUSTER_CHECK_NONE, 0, context);
         graph.varargs_calls[0].second_argument_declaration = 18;
         CheckStream expected;
-        const CheckOptions scalar = { .scalar = true };
-        const bool checked = check_graph_run(table, &graph, &output, &scratch, &scalar, &expected);
+        const CheckOptions node_order = { 0 };
+        const bool checked = check_graph_run(table, &graph, &output, &scratch, &node_order, &expected);
         check_test_expect(test, checked && expected.report_count == 0 && expected.varargs_count == 5 && expected.effect_count == 0,
                           "varargs calls retain one compact descriptor each without overflow store records");
         if (checked)
@@ -172,6 +172,7 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
                                    expected.varargs[4].node == end && expected.varargs[4].evaluated_operands == 1 && !expected.varargs[4].mutates_list,
                               "va_copy and va_end retain distinct evaluation/lifetime contracts");
             const uint64_t mark = output.length;
+            check_test_expect(test, check_test_stream_recorded(&expected, &graph, 0, "varargs-graphs"), "varargs-graphs: the reference stream is its recorded digest");
             for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 const CheckOptions options = { .batch_size = batch, .regions = batch != 0 };
@@ -184,7 +185,7 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
             const uint32_t saved = graph.varargs_calls[4].node;
             graph.varargs_calls[4].node = start;
             CheckStream invalid;
-            const bool accepted = check_graph_run(table, &graph, &output, &scratch, &scalar, &invalid);
+            const bool accepted = check_graph_run(table, &graph, &output, &scratch, &node_order, &invalid);
             check_test_expect(test, !accepted && invalid.status == CHECK_STATUS_INVALID_GRAPH && invalid.failed_node == end &&
                                    invalid.varargs == NULL && invalid.varargs_count == 0 && output.length == mark,
                               "mismatched compact varargs identity rejects atomically before evaluation");
@@ -194,7 +195,7 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
         _Alignas(16) uint8_t bytes[8192];
         Arena bounded = { .base = bytes, .length = 7, .capacity = sizeof(bytes) - 16 };
         CheckStream baseline;
-        const bool complete = check_graph_run(table, &graph, &bounded, &scratch, &scalar, &baseline);
+        const bool complete = check_graph_run(table, &graph, &bounded, &scratch, &node_order, &baseline);
         const uint64_t required = bounded.length;
         check_test_expect(test, complete, "varargs bounded-output fixture fits");
         for (uint64_t limit = 7; complete && limit < required; limit += 1)
@@ -203,7 +204,7 @@ static __attribute__((noinline)) void check_test_varargs_graph(CheckTest* test, 
             bounded.length = 7;
             bounded.capacity = limit;
             CheckStream failed;
-            const bool accepted = check_graph_run(table, &graph, &bounded, &scratch, &scalar, &failed);
+            const bool accepted = check_graph_run(table, &graph, &bounded, &scratch, &node_order, &failed);
             check_test_expect(test, !accepted && failed.status == CHECK_STATUS_RESOURCE && failed.varargs == NULL && failed.varargs_count == 0 &&
                                    !check_stream_has_values(&failed) && failed.warnings == NULL && bounded.length == 7 && scratch.length == 0 &&
                                    check_test_graph_canary(bytes, 0, 7) && check_test_graph_canary(bytes, limit, limit + 16),
