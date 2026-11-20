@@ -860,8 +860,42 @@ static void ir_inline_test_general_wide(IrInlineTest* test, Arena* input, Arena*
     }
 }
 
+// Calls separated by whole chunks and kept machine calls. Repeated references to one call descriptor are
+// separate sites, and selected sites from the next caller must not enter the current block's copied run.
+static void ir_inline_test_recorded_sites(IrInlineTest* test)
+{
+    uint8_t ops[130] = { [0] = IR_CALL, [62] = IR_CALL_INDIRECT, [63] = IR_CALL, [64] = IR_CALL,
+                          [65] = IR_CALL, [127] = IR_CALL, [128] = IR_CALL_INDIRECT, [129] = IR_CALL };
+    uint32_t targets[130] = { [63] = 11, [64] = 23, [127] = 27 };
+    uint32_t descriptors[130] = { [0] = 1, [65] = 2, [129] = 1 };
+    IrCall calls[3] = { [1].row = 1, [2].body = 1 };
+    IrFunction function = { .instruction_count = BUSTER_ARRAY_LENGTH(ops), .op = ops, .a = targets, .b = descriptors, .calls = calls, .call_count = BUSTER_ARRAY_LENGTH(calls) };
+    const uint32_t symbols[] = { 11, 27 };
+    const IrInlineUnit unit = { .symbols = symbols, .count = BUSTER_ARRAY_LENGTH(symbols) };
+    uint32_t nodes[6] = { 0, 0, 0, 0, 0, 999 };
+    uint32_t callees[6] = { 0, 0, 0, 0, 0, 999 };
+    const uint32_t expected_nodes[] = { 62, 63, 64, 127, 128, 999 };
+    const uint32_t expected_callees[] = { BUSTER_IR_NONE, 0, BUSTER_IR_NONE, 1, BUSTER_IR_NONE, 999 };
+    const uint32_t counted = ir_inline_sites(&unit, &function, NULL, NULL);
+    const uint32_t written = ir_inline_sites(&unit, &function, nodes, callees);
+    ir_inline_test_expect(test, counted == 5 && written == 5 && memcmp(nodes, expected_nodes, sizeof(nodes)) == 0 && memcmp(callees, expected_callees, sizeof(callees)) == 0,
+                          "sparse call nodes and targets preserve direct and indirect sites across full chunks and a tail");
+    function.instruction_count = 64;
+    ir_inline_test_expect(test, ir_inline_sites(&unit, &function, NULL, NULL) == 2, "a call in lane 63 belongs to the complete chunk");
+    uint8_t decisions[] = { IR_INLINE_INDIRECT, IR_INLINE_SELECTED, IR_INLINE_UNKNOWN_SYMBOL, IR_INLINE_SELECTED, IR_INLINE_INDIRECT, IR_INLINE_SELECTED };
+    IrInlineResult result = { .call_nodes = nodes, .decisions = decisions };
+    uint32_t call = 0;
+    const uint32_t first = ir_inline_selected_node(&result, &call, 5);
+    call += 1;
+    const uint32_t second = ir_inline_selected_node(&result, &call, 5);
+    call += 1;
+    const uint32_t end = ir_inline_selected_node(&result, &call, 5);
+    ir_inline_test_expect(test, first == 63 && second == 127 && end == BUSTER_IR_NONE && call == 5, "a copied run stops only at an expanded site in this caller");
+}
+
 static void ir_inline_test_general(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
+    ir_inline_test_recorded_sites(test);
     ir_inline_test_general_units(test, input, output, twin, scratch);
     ir_inline_test_general_wide(test, input, output, twin, scratch);
     ir_inline_test_general_by_value(test, input, output, twin, scratch);
