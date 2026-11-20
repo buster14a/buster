@@ -1006,6 +1006,7 @@ static void node_contexts_window_chunk(struct NodeFactsReader* state, const Node
     NodeContextsLoopCounts loop_counts = { 0 };
     node_contexts_window_loop(state, front, count, &loop_counts);
     state->c_updates_now = loop_counts.updates_taken;
+    state->c_branches_now = loop_counts.branched - loop_counts.branched_roots;
     const uint64_t t1 = __rdtsc();
     node_contexts_window_targets(state, front, count);
     const uint64_t t2 = __rdtsc();

@@ -2061,13 +2061,14 @@ finds wrong (`own_values_wrong`, pinned at zero).
 
 `--window-rows` adds X's rows to `--window-contexts`' run. For each
 expression C takes on the window, the kinds and the classes of each evaluated
-record's own entries and of its conversion's, and of an update's two rows,
-are made from C's answers there, 64 records a step, and compared entry by
-entry with X's tape on T's columns at reader time (`node_machine_expand`),
-their reference. An entry's value is not made yet. No compile takes any of
-it. The design has what it measured: [the
-shapes](../node-machine.md#xs-rows-on-the-window-first-their-shapes) and [an
-update's rows](../node-machine.md#an-updates-rows-on-the-window).
+record's own entries and of its conversion's, of an update's two rows and of
+a tested value's test and branch are made from C's answers there, 64 records
+a step, and compared entry by entry with X's tape on T's columns at reader
+time (`node_machine_expand`), their reference. An entry's value is not made
+yet. No compile takes any of it. The design has what it measured: [the
+shapes](../node-machine.md#xs-rows-on-the-window-first-their-shapes), [an
+update's rows](../node-machine.md#an-updates-rows-on-the-window) and [the
+branches' rows](../node-machine.md#the-branches-rows-on-the-window).
 
 - **A shape a part** (`c_check_node_machine_rows.c`): a byte for a record's
   own entries and one for its conversion's. Below 64 it is a typed kind's
@@ -2100,8 +2101,9 @@ update's rows](../node-machine.md#an-updates-rows-on-the-window).
   where one of its operand's records is; else its tape is its operand's
   records' rows, in a row in the streams, and its root's. A root's own record
   never lists it alone (the comment there).
-- **What is listed**, and left to X on T's columns: an operator's template
-  evaluated as branches; a conversion from or to a class past double's (a
+- **What is listed**, and left to X on T's columns: a value that an operator
+  evaluated as branches tests after a conversion of its own (a qualified
+  `_Bool`'s read, #3185); a conversion from or to a class past double's (a
   long double's, a 128-bit integer's, a half-precision one's, an aggregate's,
   a complex type's), which X's rules refuse; an integer constant converted
   to float or double, whose fold reads its value; a bool's update, whose
@@ -2135,6 +2137,22 @@ update's rows](../node-machine.md#an-updates-rows-on-the-window).
   operand's conversion's column, and a bool's update's and a destination's
   with no room's bit into the block's mask of the records that list their
   expression. The reads' and the shapes' sweeps have no term of an update.
+- **The branches' rows** (the same function's second list and loop, in a
+  chunk where C's loop evaluated a record as branches): the sweep compresses
+  the chunk's `!`, `&&` and `||` evaluated as branches into a second list,
+  and a loop goes down it from its end, a turn an operator
+  (`node_rows_window_branch`). An operator's sense is a byte of the senses'
+  column (`window_x_senses`), which its consumer's turn left there; a
+  statement's CONDITION takes no turn, and the reader writes its sense at
+  its operand's record (`node_facts_reader_expression`: a `do`'s is true, an
+  `if`'s, a `while`'s and a `for`'s false). A turn gives each operand its
+  sense (`node_rows_window_tested`): an `&&`'s first false and an `||`'s
+  true, a second operand its operator's, a `!`'s the other. An operand that
+  is such an operator keeps it for its own turn. A value takes its test and
+  its branch as its conversion's part's row (`BUSTER_NODE_ROWS_TESTED`: a
+  narrow class's or not, by the sense), where that part is free; one with a
+  conversion of its own keeps its row and lists its expression. The
+  operators themselves have no shape and no entry.
 
 The report adds:
 
@@ -2144,27 +2162,29 @@ The report adds:
   entries-written=N`: the expressions C takes on the window; those whose tape
   is made here; the tapes that differ from X's on T's columns in their
   number of entries, a kind or a class; the taken ones the reference kept no
-  tape for, for want of room; and the chunks whose second run wrote another
-  number of entries.
+  tape for, for want of room; and the chunks whose second run wrote other
+  entries (the first run's streams are kept and compared with it, byte for
+  byte).
 - `node-shadow: window rows listed, by an expression's first record's
   reason: update=N branches=N refused-conversion=N
   constant-to-a-floating-class=N`.
 - `node-shadow: window rows records read a record at a time: a target's
   word=N (P% of the records swept) a line or a table=N (P%) an update's
-  line=N (P%)`: the reads' two lists' records and the updates' list's.
+  line=N (P%); and operators evaluated as branches, a turn each=N (P%)`: the
+  reads' two lists' records, the updates' list's and the branches' list's.
 - `node-shadow: window rows ticks=N (T a record swept, T a record of the
-  taken): the reads=N (T) the shapes=N (T) the updates=N (T) the rows=N (T)
-  an expression's part=N (T); the reference's X on the taken expressions=N
-  (T a record of theirs)`: TSC ticks. The reference's are with its entries'
-  values, which the rows here don't make.
+  taken): the reads=N (T) the shapes=N (T) the updates and the branches=N
+  (T) the rows=N (T) an expression's part=N (T); the reference's X on the
+  taken expressions=N (T a record of theirs)`: TSC ticks. The reference's
+  are with its entries' values, which the rows here don't make.
 - `node-shadow: window rows a second run over the same chunk, not counted:
   ...`: the same five parts over the chunk once more, their code and tables
   at hand.
 - `node-shadow: window rows difference file=F line=N token=N`, with `--list
   N`: where a tape that differs is.
 
-The command fails where a tape differs or a chunk's second run wrote another
-number of entries.
+The command fails where a tape differs or a chunk's second run wrote other
+entries.
 
 `test-checker` (part 5 of 8) reads the rows' fixture
 (`node_rows_test_source`): a line a shape, a line a term's case (a `_BitInt`'s
@@ -2173,14 +2193,21 @@ store of a constant, records that are not evaluated), an update's rows (by
 name and through an address, prefix and postfix, each operator, a narrow, a
 floating and a pointer's destination, its value used, an update below
 another, and the four it lists), two groups of statements 64 times each
-for the blocks' ends, and five update statements 64 times each (an update
+for the blocks' ends, five update statements 64 times each (an update
 and its destination on either side of a block's end, and more than 16
-updates in a block). It reads C on the window's
-fixture through the rows too. Every tape made is X's on T's columns; the
+updates in a block), and a condition's lines: `&&`, `||` and `!` under an
+`if`, a `while`, a `do` and a `for`, nested in either operand; a tested value
+of each class and kind, the bounds of a narrow class, the `const` bool's
+reads it lists and a bool's update that is tested; and four conditions 64
+times each (a condition's records on either side of a block's end, more than
+16 operators in a block, a listed value on every lane). Two units of one
+chunk each have one update, and one condition with no update. It reads C on
+the window's fixture through the rows too. Every tape made is X's on T's columns; the
 reader's verify finds no byte of the window wrong, the types' column's among
 them; the expressions, the tapes, their entries, the listed ones by reason,
 the entries written and the records read for (an update's plan among them)
-are pinned (`NodeRowsExpected`); and with one
+and the operators with a turn are pinned (`NodeRowsExpected`); no chunk's
+second run writes other entries than its first; and with one
 of the reference's answers changed for each tape
 (`BUSTER_NODE_READER_WINDOW_ROWS_FAULT`: its first entry's kind, its last's
 class and its length in turn) the comparison counts every tape.
