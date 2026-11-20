@@ -594,16 +594,6 @@ static bool foreign_link_test_generated(const char* directory, Arena* arena, con
 
 static bool foreign_link_test(const char* directory, Arena* arena, bool cross_check)
 {
-    const char* arch = getenv("BUSTER_HOST_ARCH");
-    const char* sanitizer = getenv("BUSTER_SANITIZER");
-    bool evidence = true;
-    if (cross_check && getenv("GITHUB_ACTIONS") != 0 && getenv("BUSTER_3158_INNER") == 0 && arch != 0 && strcmp(arch, "vector") == 0 &&
-        sanitizer != 0 && strcmp(sanitizer, "none") == 0)
-    {
-        char command[192];
-        snprintf(command, sizeof(command), "python3 tests/foreign-type-recovery-3158/verify.py /proc/%u/exe", (unsigned)getpid());
-        evidence = system(command) == 0;
-    }
     ForeignTestTally tally = {
         .check = "foreign executable handoff",
     };
@@ -617,7 +607,7 @@ static bool foreign_link_test(const char* directory, Arena* arena, bool cross_ch
         2000,
     };
     const bool generated = foreign_link_test_generated(directory, arena, sizes, BUSTER_ARRAY_LENGTH(sizes), 0);
-    return foreign_test_report(&tally) && generated && evidence;
+    return foreign_test_report(&tally) && generated;
 }
 
 // One-lane producer/handoff/writer measurements. Pin externally to CPU 2 under the shared 9700X lock.

@@ -183,64 +183,8 @@ static void foreign_link_names_lanes(ForeignLinkLanes* state)
 
 // The least object with a typed reference owns the symbol's flags. Count its wins before scanning its records so
 // each winning object stops at its last required type, and an object that won nothing reads no records again.
-static void foreign_link_maps_base_3158(ForeignLinkLanes* state)
+static void foreign_link_maps_lanes(ForeignLinkLanes* state)
 {
-    uint64_t mapped = 0;
-    uint64_t scans = 0;
-    uint64_t visits = 0;
-    uint64_t types = 0;
-    ForeignLinkBuild* build = state->build;
-    ForeignLink* output = build->output;
-    const Foreign* foreign = build->foreign;
-    const Range64 symbols = lane_range(output->link.symbols.count);
-    for (uint64_t symbol = symbols.begin; symbol < symbols.end; symbol += 1)
-    {
-        state->first_typed[symbol] = UINT32_MAX;
-    }
-    lane_sync();
-    const Range64 range = lane_range(foreign->object_count > 1 ? foreign->object_count - 1 : 0);
-    for (uint64_t at = range.begin; at < range.end; at += 1)
-    {
-        const ForeignObject* counted_input = &foreign->objects[(uint32_t)at + 1];
-        mapped += counted_input->library == 0 ? counted_input->global_count : 0;
-        foreign_link_map_object(output, foreign, (uint32_t)at + 1, state->first_typed);
-    }
-    lane_sync();
-    for (uint64_t symbol = symbols.begin; symbol < symbols.end; symbol += 1)
-    {
-        const uint32_t object_id = state->first_typed[symbol];
-        if (object_id != UINT32_MAX)
-        {
-            // The type the least object's reference gives it: its record for the symbol's name.
-            scans += 1;
-            const ForeignObject* input = &foreign->objects[object_id];
-            const ForeignRound* round = foreign_symbol_round(foreign, input->global_begin);
-            uint8_t type = 0;
-            for (uint32_t i = 0; type == 0 && i < input->global_count; i += 1)
-            {
-                visits += 1;
-                const uint32_t at = input->global_begin + i - round->first_symbol;
-                const bool same = output->names[round->symbols.name_id[at]] == symbol;
-                type = same ? (uint8_t)ELF64_ST_TYPE(round->symbols.info[at]) : 0;
-            }
-            types += 1;
-            output->link.symbols.flags[symbol] |= type;
-        }
-    }
-    if (getenv("BUSTER_3158_COUNTS") != 0)
-    {
-        fprintf(stderr, "b3158-count %u %u %llu %llu %llu %llu\n", lane_index(), lane_count(), (unsigned long long)mapped,
-                (unsigned long long)scans, (unsigned long long)visits, (unsigned long long)types);
-    }
-    lane_sync();
-}
-
-static void foreign_link_maps_candidate_3158(ForeignLinkLanes* state)
-{
-    uint64_t mapped = 0;
-    uint64_t scans = 0;
-    uint64_t visits = 0;
-    uint64_t types = 0;
     ForeignLinkBuild* build = state->build;
     ForeignLink* output = build->output;
     const Foreign* foreign = build->foreign;
@@ -257,8 +201,6 @@ static void foreign_link_maps_candidate_3158(ForeignLinkLanes* state)
     {
         const uint32_t id = (uint32_t)at + 1;
         wins[id] = 0;
-        const ForeignObject* counted_input = &foreign->objects[(uint32_t)at + 1];
-        mapped += counted_input->library == 0 ? counted_input->global_count : 0;
         foreign_link_map_object(output, foreign, id, first_typed);
     }
     lane_sync();
@@ -285,72 +227,25 @@ static void foreign_link_maps_candidate_3158(ForeignLinkLanes* state)
         uint64_t left = wins[id];
         if (left != 0)
         {
-            scans += 1;
             const ForeignObject* input = &foreign->objects[id];
             const ForeignRound* round = foreign_symbol_round(foreign, input->global_begin);
             const uint8_t* info = round->symbols.info + (input->global_begin - round->first_symbol);
             const SymbolId* targets = output->objects[id].symbols + input->first_global;
             for (uint32_t i = 0; left != 0 && i < input->global_count; i += 1)
             {
-                visits += 1;
                 const SymbolId symbol = targets[i];
                 const uint8_t type = ELF64_ST_TYPE(info[i]);
                 // Only this object's lane can read or write these flags. Later records for the name see its type.
                 if (type != STT_NOTYPE && first_typed[symbol] == id && (flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_NOTYPE)
                 {
                     flags[symbol] |= type;
-                    types += 1;
                     left -= 1;
                 }
             }
         }
     }
-    if (getenv("BUSTER_3158_COUNTS") != 0)
-    {
-        fprintf(stderr, "b3158-count %u %u %llu %llu %llu %llu\n", lane_index(), lane_count(), (unsigned long long)mapped,
-                (unsigned long long)scans, (unsigned long long)visits, (unsigned long long)types);
-    }
     lane_sync();
 }
-
-static void foreign_link_maps_lanes(ForeignLinkLanes* state)
-{
-    if (getenv("BUSTER_3158_BASE") != 0)
-    {
-        foreign_link_maps_base_3158(state);
-    }
-    else
-    {
-        foreign_link_maps_candidate_3158(state);
-    }
-}
-
-// Verification draft only. Both the serial caller below the include and lane zero reach this after mapping.
-static void foreign_link_middle_3158(ForeignLinkBuild* build)
-{
-    const char* path = getenv("BUSTER_3158_FLAGS");
-    if (path != 0 && build->result.error == FOREIGN_LINK_ERROR_NONE)
-    {
-        const Link* link = &build->output->link;
-        FILE* file = fopen(path, "w");
-        if (file == 0)
-        {
-            abort();
-        }
-        for (uint32_t s = 0; s < link->symbols.count; s += 1)
-        {
-            const NameId n = link->symbols.name[s];
-            fprintf(file, "%u\t%02x\t%.*s\n", s, (unsigned)link->symbols.flags[s], n != 0 ? (int)link->names.length[n] : 0,
-                    n != 0 ? (const char*)link->names.bytes[n] : "");
-        }
-        if (fclose(file) != 0)
-        {
-            abort();
-        }
-    }
-    foreign_link_build_middle(build);
-}
-#define foreign_link_build_middle foreign_link_middle_3158
 
 // An object's fixups and relocation entries, as foreign_link_relocations imports them: its relocation sections' with an
 // atom (but the bound ones, which foreign_link_bounds_relocations imports), every entry but R_X86_64_NONE's a fixup.
