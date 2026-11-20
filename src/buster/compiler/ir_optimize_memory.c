@@ -25,9 +25,10 @@
 // and its family's write counts there, and an undo log that restores the entries and the counts as the walk leaves a
 // subtree (ir_memory_walk). Across a block boundary a value survives where no path from the block's immediate dominator
 // to the block may write its class's memory (ir_memory_clear). The data-parallel phases before the walk (classification,
-// the slots' derivation and escapes, the event lists and the families' and keys' hashes) have vector versions and exact
-// scalar twins, which the caller's explicit request chooses; the addresses' chains, the grouping, the overlaps, the
-// blocks' summaries and the walk are shared.
+// the slots' derivation and escapes, the event lists and the families' and keys' hashes) are vector code. Their scalar
+// versions take only a function whose value spaces a signed dword gather can't index (2^30 instructions or address
+// rows): a fallback, which #2924's phase D removes. The addresses' chains, the grouping, the overlaps, the blocks'
+// summaries and the walk are one code for both.
 
 #define BUSTER_IR_MEMORY_NONE 0u
 #define BUSTER_IR_MEMORY_LOAD 1u
@@ -196,7 +197,7 @@ static uint32_t ir_memory_kind(const IrOptimizeWork* work, uint32_t i)
 
 // The instructions' info words, and the operands their addresses are read through: a conversion's (inttoptr's of an
 // i64 alone), an IR_ADDRESS's base, an addition's other operand than its constant one and a subtraction's of a constant.
-// Scalar twin.
+// The fallback past the gathers' reach.
 static void ir_memory_classify_scalar(IrMemoryWork* m)
 {
     const IrOptimizeWork* work = m->ir;
@@ -294,7 +295,7 @@ static void ir_memory_classify_vector(IrMemoryWork* m)
 }
 
 // The slot each reachable value's follow chain starts at: in reverse postorder, each one's followed operand first (it
-// dominates the value). Scalar twin.
+// dominates the value). The fallback past the gathers' reach.
 static void ir_memory_derive_scalar(IrMemoryWork* m)
 {
     const IrOptimizeWork* work = m->ir;
@@ -388,7 +389,8 @@ static void ir_memory_escape_uses(IrMemoryWork* m, uint32_t v)
     }
 }
 
-// The slots whose addresses escape, from the uses of the values derived from them, which are few. Scalar twin.
+// The slots whose addresses escape, from the uses of the values derived from them, which are few. The fallback past the
+// gathers' reach.
 static void ir_memory_escapes_scalar(IrMemoryWork* m)
 {
     for (uint32_t v = 0; v < m->ir->function->instruction_count; v += 1)
@@ -425,7 +427,7 @@ static uint32_t ir_memory_undos(uint32_t kind)
 }
 
 // The events and accesses, each block's first event, every slot's first IR_STACK_ADDR and the undo bound; a volatile
-// slot's access becomes a write. Scalar twin.
+// slot's access becomes a write. The fallback past the gathers' reach.
 static void ir_memory_events_scalar(IrMemoryWork* m)
 {
     const IrFunction* f = m->ir->function;
@@ -599,7 +601,8 @@ static uint32_t ir_memory_type(const IrFunction* f, uint32_t i)
     return f->op[i] == IR_STORE ? f->type[f->b[i]] : f->type[i];
 }
 
-// The accesses' family hashes (`keys` false) or key hashes (true, from their families). Scalar twin.
+// The accesses' family hashes (`keys` false) or key hashes (true, from their families). The fallback past the gathers'
+// reach.
 static void ir_memory_hash_scalar(IrMemoryWork* m, bool keys)
 {
     const IrFunction* f = m->ir->function;
@@ -1024,10 +1027,10 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
 
 // Value numbering with memory on the optimizer's work, after SCCP and the identities: the loads it forwards go to
 // work->forward (made here where the identities made none), their number to `forwarded`. Its other columns are scratch's
-// and go before it returns. `scalar` is the caller's explicit request for the scalar twins, not the AUTO policy's size
-// bound (work->scalar): this pass's vector phases have no set-up that small functions don't repay (the verifier's rule
-// too, #786). Returns false where scratch has no room for them.
-static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool requested_scalar, uint32_t* forwarded)
+// and go before it returns. Its vector phases run whatever the AUTO policy's size bound (work->scalar): they have no
+// set-up that small functions don't repay (the verifier's rule too, #786). Returns false where scratch has no room for
+// them.
+static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* forwarded)
 {
     const IrFunction* f = work->function;
     const uint32_t n = f->instruction_count;
@@ -1044,8 +1047,8 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
     }
     const uint64_t mark = scratch->length;
     // AVX-512's gather indices are signed dwords, and the constants' and addresses' gathers double theirs: larger value
-    // spaces take the scalar twin.
-    const bool scalar = !BUSTER_VECTOR_PATH(!requested_scalar) || n >= (UINT32_C(1) << 30) || f->address_count >= (UINT32_C(1) << 30);
+    // spaces take the scalar phases.
+    const bool scalar = n >= (UINT32_C(1) << 30) || f->address_count >= (UINT32_C(1) << 30);
     IrMemoryWork m = { .ir = work, .undo_bound = (uint64_t)f->block_count * 2 };
     m.info = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
     m.follow = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);

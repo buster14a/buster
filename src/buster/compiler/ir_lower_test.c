@@ -1392,11 +1392,8 @@ static void ir_lower_test_cas_parameter(IrLowerTestTally* tally)
                                               "a compare-exchange parameter's records are valid, without branches or references", 0, f);
         const uint64_t room = ready ? BUSTER_X86_ENCODER_CAPACITY(scalar.count) : 0;
         uint8_t* image = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room) : 0;
-        uint8_t* twin = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room) : 0;
         const int64_t length = image != 0 ? x86_encode(vector.records, vector.count, image, room, 0, 0) : -1;
-        const int64_t twin_length = twin != 0 ? x86_encode_scalar(scalar.records, scalar.count, twin, room, 0, 0) : -1;
-        ready = ready && ir_lower_test_expect(tally, length > 0 && length == twin_length && memcmp(image, twin, (size_t)length) == 0,
-                                              "a compare-exchange parameter's code encodes alike by both encoders", 0, f);
+        ready = ready && ir_lower_test_expect(tally, length > 0, "a compare-exchange parameter's code encodes", 0, f);
         if (ready)
         {
             shared->object = 5;

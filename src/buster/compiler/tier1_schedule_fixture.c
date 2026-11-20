@@ -99,11 +99,8 @@ static bool tier1_schedule_fixture_open(Tier1ScheduleFixture* fixture, Tier1Sche
             if (valid)
             {
                 records[branch].displacement = (int32_t)offsets[loop] - (int32_t)offsets[branch + 1];
-                uint8_t scalar[BUSTER_TIER1_SCHEDULE_FIXTURE_BYTES];
                 fixture->sizes[variant] = x86_encode(records, count, fixture->code[variant], BUSTER_TIER1_SCHEDULE_FIXTURE_BYTES, 0, 0);
-                const int64_t scalar_size = x86_encode_scalar(records, count, scalar, sizeof(scalar), 0, 0);
-                valid = fixture->sizes[variant] > 0 && scalar_size == fixture->sizes[variant] && memcmp(scalar, fixture->code[variant], (uint64_t)scalar_size) == 0 &&
-                        mprotect(fixture->code[variant], BUSTER_TIER1_SCHEDULE_FIXTURE_BYTES, PROT_READ | PROT_EXEC) == 0;
+                valid = fixture->sizes[variant] > 0 && mprotect(fixture->code[variant], BUSTER_TIER1_SCHEDULE_FIXTURE_BYTES, PROT_READ | PROT_EXEC) == 0;
             }
         }
     }

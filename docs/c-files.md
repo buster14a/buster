@@ -483,8 +483,7 @@ The merge, in `files_prepare`, with a sync between steps:
 6. **Rewrite.** Each lane rewrites its files' identifier values, and their
    guards, from its own ids to the shared table's (`files_remap`, 64 tokens at a
    time: one compare finds the identifiers, and a gather takes 16 of their
-   shared ids at once; for the scalar kernels, `files_remap_scalar`, a token at
-   a time, is its twin).
+   shared ids at once).
 
 A lane writes only its own spellings and its own segments of the partitions,
 and reads the others' through the candidates (rule 2). The shared table's
@@ -791,9 +790,10 @@ the walk must do what it did. The checks:
   counts are exact: 13 files prepared, each identity once, in 4 rounds; 1
   unused; 2 requests not found; the units' errors (0, 0, 1) and warnings (1, 2,
   0); and after the walk, the unit with the computed include opens one path and
-  the others none. It runs with the vectorized kernels and their scalar twins,
-  its rounds cut into parts and split once, all on every lane (its rounds are
-  small enough for lane 0 alone otherwise).
+  the others none. It runs with `PPOptions.scalar` off and on (which now
+  selects `pp_define`'s scalar body scan alone, #2924), its rounds cut into
+  parts and split once, all on every lane (its rounds are small enough for lane
+  0 alone otherwise).
 - **Spellings:** 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, names past 16 and 63 bytes, line splices and
   UCNs), prepared without following includes, and a translation unit that
@@ -851,8 +851,7 @@ without it:
 
 - the vectorized printer doubling the space before an identifier whose id is
   odd: only that check fails, on the tree's, the spellings', the contexts' and
-  the special paths' `-E` text (the tree's scalar ways print with the scalar
-  printer);
+  the special paths' `-E` text;
 - a macro's id after its name in the "expanded from macro" note: that check
   fails on the tree's diagnostics, and without it so does the comparison with
   each unit alone, whose table gives the names other ids;

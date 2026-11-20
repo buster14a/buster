@@ -175,9 +175,7 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 function.symbol_count = 2;
                 const IrInlineUnit unit = { .functions = &function, .symbols = symbols, .flags = flags, .count = 1, .symbol_count = 2 };
                 IrInlineResult inlined = { .function_count = 123 };
-                IrInlineOptions inline_options = ir_inline_options();
-                inline_options.scalar = scalar != 0;
-                checked = ir_optimize_inline(&unit, output, scratch, inline_options, &inlined, NULL);
+                checked = ir_optimize_inline(&unit, output, scratch, ir_inline_options(), &inlined, NULL);
                 ir_test_expect(tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].instruction_count == function.instruction_count && scratch->length == 0,
                                "the inliner takes masks (#1282)");
                 arena_pop_to(output, 0);
@@ -341,8 +339,7 @@ static int run_ir_simd_tests(int argc, char** argv)
             const uint8_t flags[1] = { BUSTER_IR_INLINE_INTERNAL };
             const IrInlineUnit unit = { .functions = &function, .symbols = symbols, .flags = flags, .count = 1, .symbol_count = 2 };
             IrInlineResult inlined = { .function_count = 123 };
-            IrInlineOptions inline_options = ir_inline_options();
-            inline_options.scalar = scalar != 0;
+            const IrInlineOptions inline_options = ir_inline_options();
             checked = ir_optimize_inline(&unit, &output, &scratch, inline_options, &inlined, NULL);
             ir_test_expect(&tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].vector_constant_count == 1 &&
                                        memcmp(inlined.functions[0].vector_constants, function.vector_constants, sizeof(IrSimdValue)) == 0 && scratch.length == 0,

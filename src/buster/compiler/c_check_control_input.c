@@ -72,10 +72,9 @@ static bool check_input_region_transfer(const CheckInputReader* reader, uint32_t
     bool valid = true;
     // Most units have no GNU statement expression. Otherwise only regions below the source and target's common
     // ancestor can be entered: a region above it holds both. The reader's postorder intervals recognize that ancestor
-    // without another token column or a walk from the source. Keep the full parent walk on the scalar path as oracle.
-    const bool scalar = parser->options.scalar;
-    const uint32_t source_position = !scalar && reader->output->region_count != 0 && source < parser->tokens.count ? reader->postorder_positions[source] : BUSTER_CHECK_NONE;
-    for (uint32_t ancestor = target; valid && ancestor < parser->tokens.count && (scalar || reader->output->region_count != 0); ancestor = parser->tree.parents[ancestor])
+    // without another token column or a walk from the source.
+    const uint32_t source_position = reader->output->region_count != 0 && source < parser->tokens.count ? reader->postorder_positions[source] : BUSTER_CHECK_NONE;
+    for (uint32_t ancestor = target; valid && ancestor < parser->tokens.count && reader->output->region_count != 0; ancestor = parser->tree.parents[ancestor])
     {
         const uint32_t selected = reader->output->expression_regions[ancestor];
         if (selected != 0)
@@ -83,14 +82,11 @@ static bool check_input_region_transfer(const CheckInputReader* reader, uint32_t
             const CheckInputRegion* region = &reader->output->regions[selected - 1];
             valid = source > region->opening && source < region->closing;
         }
-        if (!scalar)
+        const uint32_t position = reader->postorder_positions[ancestor];
+        const uint32_t size = reader->subtree_sizes[position];
+        if (source_position <= position && position - source_position < size)
         {
-            const uint32_t position = reader->postorder_positions[ancestor];
-            const uint32_t size = reader->subtree_sizes[position];
-            if (source_position <= position && position - source_position < size)
-            {
-                break;
-            }
+            break;
         }
     }
     return valid;
@@ -1769,33 +1765,23 @@ static uint32_t check_input_control_next(const Parser* parser, CheckInputControl
 static uint64_t check_input_label_capacity_range(const Parser* parser, uint32_t prefix_count, uint32_t begin, uint32_t count)
 {
     uint64_t entries = 0;
-    if (BUSTER_SCALAR_PATH(parser->options.scalar))
+    for (uint64_t first = begin; first < count; first += BUSTER_CHECK_CONTROL_TOKENS)
     {
-        for (uint32_t token = begin; token < count; token += 1)
+        const uint32_t remaining = count - first;
+        const uint32_t length = remaining < BUSTER_CHECK_CONTROL_TOKENS ? remaining : BUSTER_CHECK_CONTROL_TOKENS;
+        const uint64_t valid = length == BUSTER_CHECK_CONTROL_TOKENS ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+        const __m512i roles = _mm512_maskz_loadu_epi8(valid, parser->tree.roles + first);
+        uint64_t selected = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LABEL));
+        if (first < prefix_count)
         {
-            entries += parser->tree.roles[token] == PARSE_ROLE_LABEL || (token < prefix_count && check_input_label_address(parser, token));
+            const uint32_t prefix_remaining = prefix_count - first;
+            const uint32_t prefix_length = prefix_remaining < length ? prefix_remaining : length;
+            const uint64_t prefix = prefix_length == BUSTER_CHECK_CONTROL_TOKENS ? UINT64_MAX : (UINT64_C(1) << prefix_length) - 1;
+            const __m512i kinds = _mm512_maskz_loadu_epi8(prefix, parser->tokens.kinds + first);
+            selected |= prefix & _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_PREFIX)) &
+                        _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_AMPAMP));
         }
-    }
-    else
-    {
-        for (uint64_t first = begin; first < count; first += BUSTER_CHECK_CONTROL_TOKENS)
-        {
-            const uint32_t remaining = count - first;
-            const uint32_t length = remaining < BUSTER_CHECK_CONTROL_TOKENS ? remaining : BUSTER_CHECK_CONTROL_TOKENS;
-            const uint64_t valid = length == BUSTER_CHECK_CONTROL_TOKENS ? UINT64_MAX : (UINT64_C(1) << length) - 1;
-            const __m512i roles = _mm512_maskz_loadu_epi8(valid, parser->tree.roles + first);
-            uint64_t selected = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LABEL));
-            if (first < prefix_count)
-            {
-                const uint32_t prefix_remaining = prefix_count - first;
-                const uint32_t prefix_length = prefix_remaining < length ? prefix_remaining : length;
-                const uint64_t prefix = prefix_length == BUSTER_CHECK_CONTROL_TOKENS ? UINT64_MAX : (UINT64_C(1) << prefix_length) - 1;
-                const __m512i kinds = _mm512_maskz_loadu_epi8(prefix, parser->tokens.kinds + first);
-                selected |= prefix & _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_PREFIX)) &
-                            _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_AMPAMP));
-            }
-            entries += (uint64_t)__builtin_popcountll(selected & valid);
-        }
+        entries += (uint64_t)__builtin_popcountll(selected & valid);
     }
     uint64_t capacity = 1;
     while (capacity < entries * 2 + 1)
@@ -3687,7 +3673,6 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     const bool prefix = before != BUSTER_CHECK_NONE;
     const uint32_t limit = prefix && before < end ? before : end;
     const uint64_t mark = reader->scratch->length;
@@ -3703,13 +3688,10 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
         CheckInputControlScan scan = { .after = begin };
         for (uint32_t token = begin; token < end; token += 1)
         {
-            if (!scalar)
+            token = check_input_control_next_range(parser, &scan, false, end);
+            if (token == end)
             {
-                token = check_input_control_next_range(parser, &scan, false, end);
-                if (token == end)
-                {
-                    break;
-                }
+                break;
             }
             if (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0)
             {
@@ -3892,13 +3874,10 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
         scan = (CheckInputControlScan){ .after = begin };
         for (uint32_t token = begin; token < limit; token += 1)
         {
-            if (!scalar)
+            token = check_input_control_next_range(parser, &scan, true, end);
+            if (token >= limit)
             {
-                token = check_input_control_next_range(parser, &scan, true, end);
-                if (token >= limit)
-                {
-                    break;
-                }
+                break;
             }
             if (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0)
             {

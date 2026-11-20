@@ -4110,8 +4110,12 @@ What the lowering covers past scalars (#145's programs):
   unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
   `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,
   initializer parts with a bit width and `__builtin_dump_struct`'s reads take
-  the bytes that hold the field's bits. A field whose bits are spread over more
-  than 8 bytes (a packed one) is refused. `c_check_program_bit_unit_test.c`
+  the bytes that hold the field's bits. A packed field of up to 64 bits off a
+  byte boundary may lie in 9 bytes (#2999): its read and its store take the
+  first 8 as an integer and the ninth as a byte, joined by shifts on a read and
+  split on a store, as clang's -O0 code does its `i72` (`check_lower_bit_wide`,
+  out of line, apart from the tasks' always-inlined store). A field wider than
+  64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
@@ -4242,8 +4246,10 @@ What the lowering covers past scalars (#145's programs):
   after it isn't reported. The function has a prototype of one parameter
   ("'cleanup' function 'f' must take 1 parameter"), to which the variable's
   address converts as clang's `IsAssignConvertCompatible` takes it: `void *`,
-  `_Bool`, or a pointer to a compatible type whatever either's qualifiers
-  ("'cleanup' function 'f' parameter has incompatible type", the spelling of
+  `_Bool`, or a pointer to a compatible type whatever either's qualifiers, or
+  an `_Atomic` one of those, which clang's `CheckAssignmentConstraints` checks
+  as its value's type (`_Atomic(int *)`, `_Atomic(void *)`, `_Atomic _Bool`:
+  #1844) ("'cleanup' function 'f' parameter has incompatible type", the spelling of
   clang's message without its two types). A pointer of another signedness or
   to a pointer of other qualifiers, which an assignment only warns about, is
   an error here. An `__auto_type` variable's parameter type is checked once
@@ -4338,13 +4344,14 @@ What the lowering covers past scalars (#145's programs):
   lowering's call (`check_lower_cleanup`) takes the variable's address,
   which makes its local a frame slot, and drops the result: an aggregate's
   (in memory or in registers), a 128-bit integer's or a vector's lands in a
-  frame object of its own, as a source call's does. The one parameter other
-  than a pointer that clang's Sema takes, a `_Bool`, gets the address's low
-  bit, as clang's code passes it (it bit-casts the address to the `_Bool`);
-  an `_Atomic _Bool`'s, which clang's instruction selection can't take, is
-  refused by name. The body's selection references
+  frame object of its own, as a source call's does. An `_Atomic` pointer
+  parameter gets the address, as a pointer's does (#1844). The one parameter
+  other than a pointer that clang's Sema takes, a `_Bool`, gets the address's
+  low bit, as clang's code passes it (it bit-casts the address to the
+  `_Bool`); an `_Atomic _Bool`'s, which clang's instruction selection can't
+  take ("Cannot select: bitcast FrameIndex"), is refused by name. The body's selection references
   the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare
-  54 fixtures' acceptance and first errors with clang's, and run programs of
+  78 fixtures' acceptance and first errors with clang's, and run programs of
   each exit, each class of returned value, the named return value's cases,
   statement expressions, switches and the functions' kinds (their parameters
   and results among them) natively against
@@ -5786,7 +5793,11 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   recovered and checked as a failed parse's is (`check_driver_typo_edits`,
   `CheckPrefixEdit`, up to 4 readings), its errors at the names first
   (`check_driver_typo_errors`) and a parse error naming one spelling the
-  correction (`Parser.respelled`). An expression statement whose `;` is
+  correction (`Parser.respelled`). A reading whose parse has no view (a
+  tentative tail given back leaves the failed parse itself, of which no type
+  view, repair or prefix can be made) ends the unit as a failed parse without a
+  view does, with its parse's errors alone: the views that failed cleared the
+  one the unit was read as, which its reports would otherwise read (#3000). An expression statement whose `;` is
   missing after its first name or that name's call (`retrn x`, `whil (a) a--`)
   is read on past as if the `;` were there (`ParseDiagnostic.probe`), as
   clang's `ParseExprStatement` does once the name is classified, so that the
@@ -7133,15 +7144,15 @@ tests can warn (`check_common_candidate_bits`): a constant whose value an initia
 an assignment's, a conversion's or a call's argument's conversion changes (the
 types alone rule out a widening conversion, before the value's row is read), a
 self-assignment's names, a constant index outside its array, a source comma.
-What its warning tests past them only takes warnings away. The scalar path
-makes the facts in one pass in graph order and the evaluated nodes by a pass
-from the roots down. The vector path works on the graph's tree
-(`check_common_parents`: each node's reader, 16 nodes at a time, each operand
-slot's present children compressed to the front and written a child at a time,
-since a scatter costs as much whatever its mask and most slots are absent; a
-tree where every operand and argument precedes its node and no node has two
-readers, which counting the distinct children against the edges tells, and
-otherwise the scalar path). It visits only the nodes whose operators may have a
+What its warning tests past them only takes warnings away. The facts come
+from the graph's tree (`check_common_parents`: each node's reader, 16 nodes at
+a time, each operand slot's present children compressed to the front and
+written a child at a time, since a scatter costs as much whatever its mask and
+most slots are absent; a tree where every operand and argument precedes its
+node and no node has two readers, which counting the distinct children against
+the edges tells). A graph that isn't one takes the fallback: the facts in one
+pass in graph order and the evaluated nodes by a pass from the roots down
+(#2924 left it for its phase D). The tree path visits only the nodes whose operators may have a
 bit of their own, 16 at a time, and carries each bit up to the first ancestor
 that has it; and takes the evaluated nodes as everything with a parent, then
 clears, with all below them, the roots the control and selection walks left
@@ -7151,8 +7162,8 @@ frames, which would find nothing else. The comma markers' subtree starts come
 from a search back from the operand by doubling steps, then halving, each
 probe's climb stopping at a token shallower than the operand
 (`check_common_emission_subtree_start`), rather than from a column of every
-token's start. `test-checker-driver` checks the parents by both paths and the
-starts against their definitions on random graphs and trees whose columns end
+token's start. `test-checker-driver` checks the parents and the starts against
+their definitions on random graphs and trees whose columns end
 at `PROT_NONE` pages (`c_check_common_tree_test.c`).
 
 The vector warning driver classifies its immutable operator column once
@@ -7173,19 +7184,19 @@ emission scans reuse it instead of reloading four bytes of parent per node.
 Control flow and selections still change their separate evaluated marks.
 Displaced roots, statement expressions and initializer publication still use
 the existing root-order machinery. A graph that fails the tree check keeps
-the original fallback; the scalar driver allocates neither index and still
-visits every node as its independent oracle. Empty graphs allocate nothing,
+the original fallback. Empty graphs allocate nothing,
 and allocation failure reports the existing common-warning capacity error.
 Both indexes belong to the warning driver's scratch region and expire before
 backend processing. Their combined payload is about 1.125 bytes per node;
 this is a storage and scan-work description, not a measured timing result.
 
-`c_check_common_candidates_test.c` compares the lookup and scalar classifier
-with independent operator predicates, every operator across lane boundaries,
+`c_check_common_candidates_test.c` compares the lookup classifier with
+independent operator predicates, every operator across lane boundaries,
 invalid operator IDs, protected input and exact-capacity output tails,
-independent readers, and allocation failure. The tree tests also compare the
-root bitmap with an independent edge walk on valid and rejected trees and
-verify cached, uncached and scalar root enumeration.
+independent readers, and allocation failure, and the token, operator, reach
+and unevaluated scans with their definitions at every length to 300. The tree
+tests also compare the root bitmap with an independent edge walk on valid and
+rejected trees and verify cached and uncached root enumeration.
 
 The expression walk starts only at a root that reaches something or whose
 discarded expression may get the statement's unused-value warning, and enters
@@ -7495,8 +7506,7 @@ they do per token where little of it was per declaration or expression:
   a list of n elements took about n²/2 steps: on the frozen `sqlite3.c`, 4.05%
   of the whole `-c`'s cycles. Each token now keeps its chain's length beside
   its first and last values (`CheckInputReader.value_counts`), and a parent
-  adds its children's. The scalar path, `--scalar`, walks the chains: the
-  tests that compare the two paths compare the counts with the walks.
+  adds its children's.
 - **One pass before reading.** `check_input_count_tokens` makes every count
   `check_input_run` sizes its tables by (`[`, `asm`, `sizeof`, member
   operators, operands and calls, and the names of the builtin constants, the
@@ -7509,8 +7519,7 @@ they do per token where little of it was per declaration or expression:
   builtins the walk prepares, an attribute's start, and a string or
   `__func__`. The walk in source order tests a bit where it compared the
   token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
-  instructions fewer, about 70 a token. The scalar path computes each bit with
-  the walk's own tests (`check_input_syntax_of`).
+  instructions fewer, about 70 a token.
 - **Comma contexts.** `check_input_expression_commas` classifies 64 contiguous
   roles at a time, then visits only separators and statement terminators.
   Non-separators' contexts depend directly on their roles; separators inherit
@@ -7788,9 +7797,10 @@ integration, not a new measurement of that combination.
 
 The expressions' walk still took each token it visited through its action's
 chain of about 25 tests of the token's role, kind and columns before it acted,
-every step loading at the token the postorder had reached. Its vector path is
-now the coded walk (`c_check_expression_input.c`); `--scalar` keeps the walk,
-the oracle.
+every step loading at the token the postorder had reached. It is now the coded
+walk (`c_check_expression_input.c`); the walk that visited every token, the
+scalar twin, is gone (#2924), and `test-checker`'s source fixtures check the
+graphs against their recorded digests.
 
 - **Classes.** The classes' pass gives each token the walk acts at a class too
   (`CheckInputExpressionCode`, in the visits byte's bits 2 to 6): which branch
@@ -7816,11 +7826,8 @@ the oracle.
   The actions test none of these as the walk reaches each token. An intrinsic's
   id was the walk's hottest load: a column no other pass reads, so a miss at
   nearly every call.
-  `check_input_expression_code` is the scalar twin, by the walk's tests in their
-  order. The scalar classes' pass computes the codes only for the coded walk:
-  `--scalar`'s walk reads a token's `ACTS` and `SPARSE` bits alone, so it gets
-  no code, and doesn't pay for the code's tests. Baseline builds run the coded
-  walk through the twins, codes and all.
+  The scan test checks the classes against its own reading of the columns
+  (`check_test_expression_class`).
 - **Compaction.** The postorder is read 1,024 positions at a time
   (`check_input_expression_compact`), 16 tokens' bytes gathered from `visits`
   and compressed with their tokens into two arrays on the stack. The column has
@@ -7862,8 +7869,8 @@ the oracle.
     isn't on;
   - the identifier's action only adds the node and writes the words.
 
-  `check_input_identifier_entry` is the scalar twin. Unlike the batch measured
-  below, this needs no flush: the node ids still come from the walk, and only
+  `check_input_identifier_entry` makes an entry a token at a time, for a unit
+  past the gathers' signed 32-bit offsets. Unlike the batch measured below, this needs no flush: the node ids still come from the walk, and only
   the leaves' contents are made ahead.
 
   An action doesn't write its node to the graph: it numbers it into a batch,
@@ -7886,8 +7893,7 @@ the oracle.
   coded walk counts, by class, the tokens it acted at by
   the class's action and those it left to the walk's visit
   (`CheckInput.expression_acted` and `expression_left`). `test-checker` requires
-  it to act by class at tokens of every fixture whose features it takes, and
-  the scalar walk at none. Over its fixtures, each class's action must act and,
+  it to act by class at tokens of every fixture whose features it takes. Over its fixtures, each class's action must act and,
   where it can decline, leave a token; a full run prints both counts per class.
   `benchmark-checker-bindings` prints a file's tokens acted at by class
   (`expression_classed`), declined by their classes' actions
@@ -8078,11 +8084,11 @@ the oracle.
   of the two the last numbers were in, else `pp_find_range`'s search, which
   all lanes take in step); then the two aligned words that hold each
   spelling, four tokens a vector, whose digits one shuffle right-aligns and
-  pairs, quads and lanes multiply out. `check_input_literal_plain` is its
-  scalar twin. The scan test checks both paths on random chunks over three
-  guarded ranges of spellings, and every plain value against
-  `check_literal_number`; `test-checker`'s graph comparisons check the walk's
-  literals against the scalar walk's, which parses every literal.
+  pairs, quads and lanes multiply out; a unit past the gathers' signed 32-bit
+  offsets takes `check_input_literal_plain` for every literal. The scan test
+  checks random chunks over three guarded ranges of spellings, every plain
+  value against `check_literal_number`; `test-checker`'s source fixtures check
+  the graphs the literals make against their recorded digests.
   - **What it costs, on the 9700X.** Most of a literal's cost is the first
     read since the parser of its preprocessor columns and its source: on the
     VM the pass takes 1.7 to 1.9 ms of `sqlite3.c` cold and 0.45 to 0.72 ms
@@ -8222,11 +8228,10 @@ the oracle.
   - **The twins.** The scan test writes random batches of up to 200 nodes,
     after up to 40 a visit made, over random token columns of up to 200 tokens,
     each ending at a `PROT_NONE` page and the byte columns at every alignment,
-    by both paths: the two graphs must agree column for column, the gathered
-    columns must be their tokens', and the records alike. A deliberate one-node
-    difference in the scalar path made it report 1,842 of 38,098 nodes.
-    `test-checker`'s graph comparisons, `test-checker-corpus` and c-testsuite's
-    objects compare the batch's graphs with `--scalar`'s walk.
+    against the batch's definition (`check_test_flush_definition`): the two
+    graphs must agree column for column, the gathered columns must be their
+    tokens', and the records alike. `test-checker`'s source fixtures check the
+    graphs against their recorded digests.
 
   Measured on the 9700X, the frozen corpus's `sqlite3.c` (`-c`, CPU 2, under
   the lock), against `main` at `0eca996a`; the objects are byte-identical by
@@ -8541,10 +8546,9 @@ ancestors are checked only up to the first subtree containing the source: every
 region above that ancestor also contains the source. A case therefore stops at
 its switch instead of revisiting every enclosing switch. The subtree test uses
 the reader's `postorder_positions` and shared `subtree_sizes`; it allocates no
-new token column and does not require the parser's optional size metadata.
-The scalar reader keeps the full ancestor walk as an independent diagnostic
-oracle. Both use the same strict region-boundary rules, including jumps out of
-nested regions and refusals when entering sibling regions.
+new token column and does not require the parser's optional size metadata. It
+uses strict region-boundary rules, including jumps out of nested regions and
+refusals when entering sibling regions.
 
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump
@@ -11675,8 +11679,17 @@ enables, which this checker doesn't all give.
 
 The checker consumes retained pragmas after their existing semantic handlers. An
 unknown directive is not an unsupported C construct: it is ignored, with
-`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall` or `-Wpragmas`).
-Unknown `STDC` directives warn by default. Malformed alignment hints such as
+`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall`, `-Wmost` or `-Wpragmas`).
+Unknown `STDC` directives warn by default ("unknown pragma in STDC namespace"),
+and so does an `STDC FENV_ACCESS`, `FP_CONTRACT` or `CX_LIMITED_RANGE` state
+that is no `ON`, `OFF` or `DEFAULT` ("expected 'ON' or 'OFF' or 'DEFAULT' in
+pragma"). Both are clang's lexer warnings, which the checker issues (#1970):
+they print `[-Wunknown-pragmas]`, follow its options and pragmas as
+`CHECK_WARNING_ID_UNKNOWN_PRAGMA`, an extension that `-pedantic-errors`
+promotes, and are hidden in system headers without `-Wsystem-headers`. A
+directive's line that lacks the name or the state (`#pragma STDC`, `#pragma
+GCC`, `#pragma STDC FP_CONTRACT`) is diagnosed at the line's end, clang's eod
+(`pp_output_line_end`); a `_Pragma`'s, at the `_Pragma`. Malformed alignment hints such as
 `#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
 `#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
 is not an implementation of COFF linker directives or automatic library loading.

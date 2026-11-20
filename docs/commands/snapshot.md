@@ -41,7 +41,9 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   references (with the members they load) and COMDAT groups and its global
   names' members, for the static PIE's (`runtime_import_static_pie`), and
   for the shared library's (`runtime_import_shared`), its start object's
-  piece empty;
+  piece empty, and for the position-dependent executable's
+  (`runtime_import_kind(RUNTIME_KIND_NO_PIE)`: `crt1.o`, `crtbegin.o` and
+  `crtend.o` with the dynamic PIE's libraries);
 - links, static links and static PIE links: test-link's two sets that call
   libc and a program of `--functions` workers (2,000 by default), bound by
   both of binding's paths against the imported runtime and against a loaded
@@ -55,11 +57,13 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where
   the directory can't be made, the runtime still imported, the failure named;
-- kinds: `runtime_open_static`, `runtime_open_static_pie` and
-  `runtime_open_shared`, each imported and written, then loaded, with its
-  kind's records; the dynamic runtime's snapshot beside them, the four
-  (`runtime.snapshot`, `runtime-static.snapshot`,
-  `runtime-static-pie.snapshot` and `runtime-shared.snapshot`) the
+- kinds: `runtime_open_static`, `runtime_open_static_pie`,
+  `runtime_open_shared` and the position-dependent executable's
+  (`RUNTIME_KIND_NO_PIE`, `-no-pie`'s: #1503) through `runtime_open_as`,
+  each imported and written, then loaded, with its kind's records; the
+  dynamic runtime's snapshot beside them, the five (`runtime.snapshot`,
+  `runtime-static.snapshot`, `runtime-static-pie.snapshot`,
+  `runtime-shared.snapshot` and `runtime-no-pie.snapshot`) the
   directory's only files; each kind's snapshot loaded as each other kind,
   stale; and each kind's snapshot renamed to the next kind's name in turn,
   stale there, imported again and written over;

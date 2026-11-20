@@ -691,6 +691,20 @@ line. The cases' bytes are the table's literals as clang compiled them, compared
 byte for byte when they moved (buster-performance's
 `fixtures-runtime-2053-2026-11-13`).
 
+Each case `check_test_source` accepts also checks the reader's graph and
+enumerations (what its two paths' comparison reads: every node's columns and
+leaf, the arguments, the overload calls, the tokens' nodes and the enumeration
+records) against `tests/checker/source-digests.tsv`, from the repository's
+root, keyed by the case's name and its source's hash (#2924). The digests were
+recorded where the reader's vector path and its scalar twin agreed. A case
+with no line passes: a new case, or an edited source (a new key), has no such
+agreement to record, and clang's acceptance and first error and the checker's
+typed streams check it. Each run prints how many cases had a line and how many
+had none. A reader change that changes a recorded case's graph records again:
+run every part of `test-checker` with `BUSTER_CHECK_RECORD_DIGESTS=FILE`, sort
+FILE's lines unique, and put them after the table's three comment lines; the
+PR says what vouches for the changed graphs.
+
 Ten test files' own source tables, 596 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`
 (`c_checker_test.c`) reads and runs. Each case is written to a file, clang
@@ -716,9 +730,10 @@ programs that `check_test_constant_conversions`
 (`c_check_constant_conversion_test.c`) runs natively against clang by
 `check_test_program_source`, whose catalog names select the checks of their
 entries and code ([the lowering guide](lowering.md#node-templates-1048)).
-`tests/checker/branch-conditions` (#2883) is too: two programs that
+`tests/checker/branch-conditions` (#2883) is too: three programs that
 `check_test_branch_conditions` (`c_check_branch_condition_test.c`) runs the same
-way ([the lowering guide](lowering.md#conditions-as-branches-2883)).
+way ([the lowering guide](lowering.md#conditions-as-branches-2883)), the third
+for a condition on an lvalue at an absolute address (#3028).
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they

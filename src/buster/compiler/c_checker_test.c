@@ -2405,6 +2405,99 @@ static bool check_test_source_enums_equal(const CheckInput* a, const CheckInput*
     return equal;
 }
 
+// The reader's outputs that check_test_source_graphs_equal and check_test_source_enums_equal compare, as a digest
+// (#2924), recorded where the reader's vector path and its scalar twin agreed: the graph's counts, each node's columns
+// and leaf (as check_test_value_equal compares it), the arguments' slices, the overload calls, the tokens' nodes and
+// overload heads, and the enumerations. No field is an address: a wide number is folded by its limbs, the trailing
+// zeros dropped, and a long double by its ten bytes, a NaN as any NaN.
+#define BUSTER_CHECK_SOURCE_DIGESTS "tests/checker/source-digests.tsv"
+// A case with no line passes (TestDigests.unrecorded): a case added after the twin went has no agreement to record.
+static TestDigests check_source_digests = { .path = BUSTER_CHECK_SOURCE_DIGESTS, .record = "BUSTER_CHECK_RECORD_DIGESTS", .unrecorded = true };
+
+static uint64_t check_test_fold_float(uint64_t digest, const uint64_t* storage, long double value)
+{
+    const uint64_t nan = UINT64_C(0x7ff8000000000000);
+    return isnan(value) ? pp_kernel_fold_u64(digest, nan) : pp_kernel_fold(digest, storage, 10);
+}
+
+static uint64_t check_test_fold_value(uint64_t digest, const CheckValue* value)
+{
+    uint64_t count = 0;
+    const uint64_t* limbs = check_wide_held(value, &count);
+    while (limbs != NULL && count != 0 && limbs[count - 1] == 0)
+    {
+        count -= 1;
+    }
+    digest = pp_kernel_fold_u64(digest, (uint64_t)value->type << 32 | (uint32_t)value->category);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)value->flags << 32 | (uint32_t)value->constant_kind);
+    digest = pp_kernel_fold(digest, &value->integer, sizeof(value->integer));
+    if (limbs != NULL)
+    {
+        digest = pp_kernel_fold_u64(digest, count);
+        digest = pp_kernel_fold(digest, limbs, count * sizeof(uint64_t));
+    }
+    else
+    {
+        digest = check_test_fold_float(digest, value->floating_storage, value->floating);
+    }
+    digest = check_test_fold_float(digest, value->imaginary_storage, value->imaginary);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)value->object << 32 | value->overload_head);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)value->offset);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)value->bit_width << 32 | (uint32_t)value->fault);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)value->fault_node << 32 | value->object_bit_offset);
+    return digest;
+}
+
+static uint64_t check_test_source_digest(const CheckInput* input)
+{
+    const CheckGraph* graph = &input->graph;
+    uint64_t digest = UINT64_C(0xcbf29ce484222325);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)graph->count << 32 | graph->leaf_count);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)graph->argument_count << 32 | graph->overload_count);
+    digest = pp_kernel_fold_u64(digest, input->overload_heads != NULL);
+    for (uint32_t node = 0; node < graph->count; node += 1)
+    {
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->ops[node] << 32 | graph->tokens[node]);
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->operand0[node] << 32 | graph->operand1[node]);
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->operand2[node] << 32 | graph->types[node]);
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->members[node] << 32 | graph->contexts[node]);
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->leaf_slots[node] << 32 | graph->argument_offsets[node]);
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->argument_counts[node] << 32 |
+                                                (graph->source_positions != NULL ? graph->source_positions[node] : UINT32_MAX));
+        if (graph->ops[node] == CHECK_OP_VALUE)
+        {
+            const CheckValue leaf = check_graph_leaf_value(graph, node);
+            digest = check_test_fold_value(digest, &leaf);
+        }
+    }
+    for (uint32_t argument = 0; argument < graph->argument_count; argument += 1)
+    {
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->argument_nodes[argument] << 32 |
+                                                (graph->argument_tokens != NULL ? graph->argument_tokens[argument] : UINT32_MAX));
+    }
+    for (uint32_t call = 0; call < graph->overload_count; call += 1)
+    {
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->overload_calls[call].node << 32 | graph->overload_calls[call].head);
+        digest = pp_kernel_fold_u64(digest, graph->overload_calls[call].captured_head);
+    }
+    for (uint32_t token = 0; token < input->token_count; token += 1)
+    {
+        digest = pp_kernel_fold_u64(digest, (uint64_t)input->token_nodes[token] << 32 | (input->overload_heads != NULL ? input->overload_heads[token] : 0));
+    }
+    digest = pp_kernel_fold_u64(digest, (uint64_t)input->enum_value_count << 32 | input->enum_definition_count);
+    for (uint32_t i = 0; i < input->enum_value_count; i += 1)
+    {
+        digest = pp_kernel_fold_u64(digest, input->enum_values[i].token);
+        digest = pp_kernel_fold(digest, &input->enum_values[i].value, sizeof(input->enum_values[i].value));
+    }
+    for (uint32_t i = 0; i < input->enum_definition_count; i += 1)
+    {
+        digest = pp_kernel_fold_u64(digest, (uint64_t)input->enum_definitions[i].type << 32 | input->enum_definitions[i].open);
+        digest = pp_kernel_fold_u64(digest, input->enum_definitions[i].close);
+    }
+    return digest;
+}
+
 static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* clang)
 {
     static InternTable identifiers;
@@ -2489,19 +2582,17 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             if (p == 1 && adapted && !rejected[0] && input[0].token_count >= 16)
             {
                 // The selected walks skip tokens (#529), independently of the host's classification kernels.
-                snprintf(resource_message, sizeof(resource_message), "%s: the selected walks visit %u and %u of %u tokens, the scalar path's %u and %u",
-                         fixture->name, input[1].resolve_visits, input[1].expression_visits, input[1].token_count, input[0].resolve_visits, input[0].expression_visits);
-                const bool visits = input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits;
+                snprintf(resource_message, sizeof(resource_message), "%s: the selected walks visit %u and %u of %u tokens", fixture->name,
+                         input[1].resolve_visits, input[1].expression_visits, input[1].token_count);
+                const bool visits = input[1].resolve_visits < input[1].token_count && input[1].expression_visits < input[1].token_count;
                 check_test_expect(test, visits, resource_message);
-                // The coded walk acts by class (#1038) at tokens of every unit whose features it takes, and the scalar walk at none.
+                // The coded walk acts by class (#1038) at tokens of every unit whose features it takes.
                 const uint32_t classed = check_input_expression_classed(&input[1]);
-                const uint32_t scalar_counted = check_input_expression_classed(&input[0]) + check_input_expression_declined(&input[0]) +
-                                                input[0].expression_left[CHECK_INPUT_CODE_SCALAR];
-                snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits, the scalar walk at %u",
-                         fixture->name, classed, input[1].expression_visits, scalar_counted);
+                snprintf(resource_message, sizeof(resource_message), "%s: the coded walk acts by class at %u of the %u tokens it visits",
+                         fixture->name, classed, input[1].expression_visits);
                 const bool coded = input[1].diagnostic_limits != NULL || input[1].deferred_tokens != NULL ||
                                    (classed != 0 && classed <= input[1].expression_visits);
-                check_test_expect(test, coded && scalar_counted == 0, resource_message);
+                check_test_expect(test, coded, resource_message);
             }
             if (fixture->overload_tables != 0)
             {
@@ -2593,6 +2684,12 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             check_test_expect(test, check_test_source_graphs_equal(&input[0], &input[1], input[0].token_count), graphs);
             snprintf(graphs, sizeof(graphs), "%s: the source paths list the same enumeration constants and definitions", fixture->name);
             check_test_expect(test, check_test_source_enums_equal(&input[0], &input[1]), graphs);
+            // The same outputs against their recorded digest, the case's key its name and its source's hash.
+            char key[512];
+            const uint64_t hash = pp_kernel_fold(UINT64_C(0xcbf29ce484222325), fixture->source, strlen(fixture->source));
+            snprintf(key, sizeof(key), "%s@%08x", fixture->name, (uint32_t)(hash ^ hash >> 32));
+            snprintf(graphs, sizeof(graphs), "%s: the reader's graph and enumerations are their recorded digest", fixture->name);
+            check_test_expect(test, test_digest_matches(&check_source_digests, check_test_source_digest(&input[1]), "sources", key, false), graphs);
         }
         if (checked[0] && checked[1])
         {
@@ -3593,12 +3690,10 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
             builtins[i] = draw < 2 ? recorded[pick % BUSTER_ARRAY_LENGTH(recorded)] : draw < 4 ? unrecorded[pick % BUSTER_ARRAY_LENGTH(unrecorded)] : 0;
             expected += draw < 2;
         }
-        const uint32_t vector = check_input_builtin_capacity(NULL, builtins, count, false);
-        const uint32_t scalar = check_input_builtin_capacity(NULL, builtins, count, true);
+        const uint32_t found = check_input_builtin_capacity(NULL, builtins, count);
         char description[160];
-        snprintf(description, sizeof(description), "builtin call records of %u tokens: %u by the vector path and %u by the scalar one, for %u", count,
-                 vector, scalar, expected);
-        check_test_expect(test, vector == expected && scalar == expected, description);
+        snprintf(description, sizeof(description), "builtin call records of %u tokens: %u, for %u", count, found, expected);
+        check_test_expect(test, found == expected, description);
     }
     if (mapping != MAP_FAILED)
     {
@@ -4374,6 +4469,10 @@ static int run_checker_tests(int argc, char** argv)
     {
         printf("test-checker: part %u of %u: %u of the %u units dealt\n", check_test_part.index + 1, check_test_part.count, check_test_part.taken,
                check_test_part.dealt);
+    }
+    if (check_source_digests.matched + check_source_digests.unlisted != 0)
+    {
+        printf("test-checker: the reader's recorded digests: %u cases with a line, %u without\n", check_source_digests.matched, check_source_digests.unlisted);
     }
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int returned = test.failures != 0;

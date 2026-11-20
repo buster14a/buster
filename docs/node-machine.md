@@ -228,8 +228,8 @@ Eleven entries, the ones the tasks write today (the inventory's patterns
 
 ### Where it sits
 
-The machine is the reader's third way to read an expression, beside the
-scalar walk and the coded walk, and it runs where they run: after the reader's
+The machine is the reader's second way to read an expression, beside the
+coded walk, and it runs where it runs: after the reader's
 walk in source order has bound the range's names and made its declarations'
 types (`check_input_resolve_range`, the binding answers, the controls and the
 constant contexts), and before `check_input_expressions_coded_range` acts on
@@ -2887,9 +2887,9 @@ three kinds of record. Each test is then decided where what it reads is:
 | a register object, a declaration the tables don't model | at each leaf | its flags and the name's declaration's byte |
 | a comparison under a bitwise operator or as a statement, a `!` under a comparison, an assignment as a condition | at a comparison's token, a `!` and an `=` | the parser's tree |
 | a call's aggregates and its callee's own semantics | at each call | the arguments' bytes, the callee's declaration's byte |
-| a constant its conversion changes, a division by zero, a shift's count, a null dereferenced, a zero that is no literal made a pointer | at an operator with a constant operand, exact in place | the constant's value in T's columns, the types' widths |
+| a constant its conversion changes, a division by zero, a shift's count, a null dereferenced | at an operator with a constant operand, exact in place | the constant's value in T's columns, the types' widths |
 | a pointer cast to a narrow integer, a string plus an integer, a comma's discard | at the operator, exact in place | its operands' bytes |
-| a comparison's bound, a mix of enumerations, signs compared, a void dereferenced, a shift of a sum, a chained comparison, a shift or a product read as a truth, a name assigned to itself, an atomic record's member, a subscript at its array's end or past it, a constant the columns don't hold whole | by the census's code, on that record alone | a condition each of them needs, from the operator's bytes and its operands' |
+| a comparison's bound, a mix of enumerations, signs compared, a void dereferenced, a shift of a sum, a chained comparison, a shift or a product read as a truth, a name assigned to itself, an atomic record's member, a subscript at its array's end or past it, a constant the columns don't hold whole, an integer constant without the literal's flag made a pointer (which may be a null pointer constant that is no literal: "A null pointer constant that is no literal", below) | by the census's code, on that record alone | a condition each of them needs, from the operator's bytes and its operands' |
 | a statement's discard, a for statement's clause, an initializer's constant, a returned local's address, T's actions' warnings | once an expression | the root, and the loop's bits |
 | two writes not apart from a sequence point | by the census's code after its walk | two writes in the expression, or one below its top |
 
@@ -3134,7 +3134,9 @@ readings each):
 
 - **The gathers stay.** A loop a record is slower on the 9700X in every form
   tried. Its four loads of a record's line are the gathers' loads; what it
-  adds is a record's work a turn.
+  adds is a record's work a turn. (Until "The records' bytes without their
+  four gathers", below: sixteen records a step still, their columns by loads
+  and permutes.)
 - **Lists as bits cost the same as lists.** With the tree's records and the
   operators compressed into lists, an expression's part read 9.1 and the
   tests on T's records 36.8. As words of the blocks' masks, read bit by bit
@@ -3699,7 +3701,7 @@ call out of its list where:
 | --- | --- |
 | its own type | is no aggregate's |
 | its callee | is a name whose declaration gives a call no semantics of its own (no printf-family name, none of the attributes the call's test asks about), or no name at all |
-| its arguments | have no aggregate among them, and no constant but an address's or an integer's of zero or 1 to 126 |
+| its arguments | have no aggregate among them, no constant but an address's or an integer's of zero or 1 to 126, and none that may be a null pointer constant that is no literal: an integer constant without the literal's flag whose own parameter's conversion's type is a pointer's |
 | its callee's type | takes such an integer unchanged in each parameter: none is an enumeration's, a floating type's, or an integer's but a plain one of 8 to 64 bits |
 | its operands' properties | send it nothing |
 
@@ -3721,6 +3723,13 @@ type void is none, a cast or not.
   first four arguments are read with no branch, as they were. A call the
   rule makes after its short path refused it says nothing, and stays
   listed: seven on Lua, none on the two others.
+- **An argument against its own parameter, in the calls' second pass.**
+  Whether an argument may be a null pointer constant that is no literal is
+  a pair's to say, the argument's record and its parameter's conversion's
+  type, and the arguments' rule has both: its answer has a bit for it
+  (`BUSTER_NODE_FACTS_ARGUMENT_QUIET`), the answers' key has the literal's
+  flag, and the loop takes the call's 1 away where an argument's answer
+  lacks the bit.
 - **What each parameter takes, a bit of the callee's type's row**
   (`BUSTER_NODE_FACTS_TAKES`), made with the row, once a function type.
 - **The callee's own semantics, a bit of its declaration's line's byte,**
@@ -4281,6 +4290,1537 @@ code:
   loud over its runs there, 1,869 of 5,712 on `sqlite3.c` and 854 of 9,422
   on musl.
 
+### C on the window
+
+The tests stop at their fourth piece for now: what step 2 lacked next was no
+test. C and X still read T's columns, 25 of them, a case an operator. C
+(`c_check_node_machine_contexts.c`) goes from each root down and gives every
+evaluated record its template and its operands their contexts and targets, a
+record at a time. This piece makes its answers on the window, 64 records a
+step, for the expressions with no call, no `&&`, `||` or `?:`, no update and
+no comma. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/c-on-the-window-2850-2026-11-18)
+has each build's patch, every reading, the probes and the faults; [the
+census's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/c-answers-census-2850-2026-11-18)
+has what the design rests on.
+
+**What C's answers depend on, counted.** Before any kernel: a line for each
+record of each expression T takes at reader time, with C run on it as today
+(158,121 expressions, 968,051 records, 763,283 of them evaluated with a
+template, on the three corpora and the compiler's own source), and C's rules
+restated over a record's own bytes and its consumer's:
+
+- **Every answer but one is a consumer's bytes and a record's own.** The
+  restated rules gave C's context, its target's source and whether a record
+  is evaluated on all 858,545 operand answers.
+- **A template needed none of T's conversions' words there.** An operand's
+  type as its operator reads it was its own record's, an array's and a
+  function's as a pointer's: 0 of the 763,283 templates differed for it.
+  The 1,978 that the restated rules missed read a value: a division by a
+  power of two (505), a call that is not plain (1,466), a stride (5) and an
+  update (2).
+- **Only whether a record is evaluated chains down a tree,** and the chain
+  breaks at a leaf nearly always.
+- **A call's arguments' targets are in no line** (10.8% to 16.8% of the
+  evaluated records): an argument's target is its conversion's type, and
+  the kernel's call rule makes none of a call's arguments' conversions,
+  which are T's still (`node_machine_argument`). A call is listed in this
+  piece.
+- **A learned table of a few bytes is not enough for the template:** 83.5%
+  to 88.5% of the records by the consumer's template, the operator and the
+  place alone. The rules are masks here, not a table.
+
+**What it is.** Four sweeps over a chunk's records, after the kernel has made
+them in place:
+
+- **The records' bytes.** The tests' sweep makes five byte columns more from
+  the gathers it has: the type's word's low three bytes (class, facts,
+  kind), the standing's byte, and a byte of what the record's flags and
+  object are. Whether a name's leaf's object has a symbol is its
+  declaration's line's byte's. The sweep is two, each its own code: the
+  tests' bytes alone as before, and with C's.
+- **The loop, 64 records a step, from the chunk's last block to its first,**
+  so that a consumer's template is made before its operands read it. A
+  record's context is its consumer's operator's class and its own place. Its
+  template is C's rules as masks, four of them the template's number's
+  bits. Whether its consumer evaluates it and where its target comes from
+  are a table of 64 rows by the consumer's template and the place, one byte
+  permute.
+- **The targets, 16 records a step:** one gather from the consumer's
+  record's line, at T's conversion of the operand or at the consumer's own
+  type.
+- **An expression's part:** whether any of its records is listed, whether an
+  evaluated one has no template (C refuses the expression), and its root's
+  target, given.
+
+A consumer's bytes come through its distance forward among the window's
+records, which the front writes beside its distance in the unit's postorder:
+the two differ where a chunk's end took records from between a control's
+root and its operand. One store an operand.
+
+Four things are a record at a time: a pointer's stride, its type's row's; C's
+rule on T's two conversions themselves, for a sum or a binary operator whose
+operands' own classes don't decide (below); a consumer past the block after
+or a first operand before the block before, read by loads; and the records
+under one that isn't evaluated, taken out by its subtree's size.
+
+**What is listed,** for C on T's records as before: a call; `&&`, `||` and
+`?:`; an update; a comma and a selection; a division or a remainder by an
+integer constant; a record whose value the columns don't hold whole (a
+bit-field's, a faulted constant's and an overload set's are); a cast to a
+union; a leaf with an effect, of void's type, or read for its address
+without being an address constant; and any operator without a case.
+
+**Listing is always safe; a refusal has to be C's own.** The census's
+restated rules were exact on 763,283 templates and wrong on programs none of
+the corpora has. The first fault campaign's survivors read as dead terms, and
+the build without them (the sixth below) was still exact on the three corpora,
+the compiler's own source and the fixture. Reading C's rule against the code
+that makes each record, and one statement at a time through the shadow, found
+what the corpora could not:
+
+- **T's record of an aggregate has an address's class** (`node_machine_type`),
+  where its type's word has none: a wrapper of a struct passes, and one of a
+  half-precision value does not. Without the wrapper's class's test
+  `(int)(_Float16)d` differed; with it and no more, `return *o` of a struct.
+- **A cast to an atomic type** converts its operand to the value type and
+  has the atomic one: its operand's target is the cast's own type, not T's
+  conversion, and C's atomic rule is an lvalue's read alone.
+- **A 128-bit integer beside a double or a float is converted to it:** C's
+  rule reads the conversion's class, a number's, where the operand's own is
+  none. Two 128-bit integers, and a long double beside a double, stay.
+
+So the loop has each of C's terms, but where what makes the records implies
+one (a bit-field's flag comes with its width, which makes its value one the
+columns don't hold whole; at reader time every object is one the unit
+knows). And an operand's own bytes stand for T's conversion of it only
+where the two say the same. A value is converted as a value alone, an
+lvalue to its value and an array or a function to a pointer, and a type's
+class and facts are its value's already: a truth's operand, a subscript's
+and a pointer's sum's read the same either way. The usual arithmetic
+conversions are where the two differ: for a sum or a binary operator of a
+number's class whose operands' own classes are not both a number's, the
+record's rule reads T's two conversions, a record at a time: none on
+`sqlite3.c` and Lua, 128 records on musl, 140 on the compiler's own source.
+
+The counts, in the cloud container (default warnings):
+
+| | `sqlite3.c` | Lua | musl | the compiler's own source |
+| --- | ---: | ---: | ---: | ---: |
+| expressions the kernel placed and C ran on | 50,996 | 10,839 | 43,415 | 52,015 |
+| **decided on the window** | **32,300 (63%)** | **5,644 (52%)** | **30,863 (71%)** | **24,659 (47%)** |
+| their records | 138,609 (48%) | 32,054 (42%) | 111,599 (50%) | 98,719 (27%) |
+| of them, refused for a template, as C refuses them | 124 | 144 | 1,631 | 817 |
+| expressions and records that differ from C's | 0 | 0 | 0 | 0 |
+| listed for a call | 12,179 | 3,741 | 7,288 | 12,841 |
+| for `&&`, `\|\|` or `?:` | 2,267 | 334 | 1,034 | 8,866 |
+| for an update | 3,415 | 758 | 3,873 | 5,191 |
+| for a comma or a selection | 149 | 320 | 39 | 0 |
+| for a division by a constant | 160 | 38 | 243 | 405 |
+| for a value the columns don't hold whole | 526 | 4 | 75 | 53 |
+| records swept | 321,488 | 91,270 | 377,187 | 557,987 |
+| strides read, a record at a time | 6,965 | 1,074 | 3,850 | 12,897 |
+| of them, asked of the type table | 0 | 0 | 5 | 0 |
+| rules that read T's conversions | 0 | 0 | 128 | 140 |
+| consumers and first operands read by loads | 1,356 | 192 | 351 | 2,485 |
+
+An expression counts for the first reason its records give, its root's last.
+
+The 9700X, CPU 2, under the lock, Release; main `521d5b63d` and the piece on
+it in turn; medians of seven readings, musl's of fifteen. TSC ticks:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| **C on the window, a record its sweeps ran over** | **5.44** | **6.77** | **10.96** |
+| of which the loop | 2.44 | 3.82 | 6.75 |
+| the targets | 1.24 | 1.43 | 2.20 |
+| an expression's part | 1.75 | 1.51 | 2.05 |
+| the same three sweeps again over the chunk | 4.60 | 4.52 | 5.09 |
+| of which the loop | 1.83 | 2.06 | 2.12 |
+| the records' bytes with C's five columns, a record of the tests' | 9.95 | 11.86 | 21.81 |
+| the tests' bytes alone: main | 9.30 | 10.79 | 19.03 |
+| with the piece, C off | 9.19 | 10.81 | 19.97 |
+| **C's three sweeps, a record of the decided expressions** | **12.6** | **19.3** | **37.0** |
+| with the bytes' five columns: the gate's figure | 13.9 | 22.0 | 43.9 |
+| the reference's C on the same expressions | 40.2 | 36.2 | 43.0 |
+| the tests on the window: main | 31.1 | 49.8 | 93.8 |
+| with the piece, C off | 31.2 | 49.5 | 97.7 |
+| the kernel in place: main | 16.0 | 20.6 | 18.9 |
+| with the piece, C off | 16.0 | 20.6 | 19.0 |
+| with C on | 16.3 | 20.6 | 18.9 |
+| the front with the window: main | 53.2 | 70.7 | 89.4 |
+| with the piece | 53.6 | 70.6 | 90.3 |
+
+- **A record of the decided is 2.3 to 3.4 records swept:** the sweeps run
+  over every record of a chunk, and half of them or fewer are a decided
+  expression's. The loop's 2.4 ticks a record swept are 5.7 a record of the
+  decided on `sqlite3.c`.
+- **A chunk's first run is not its second:** the loop reads 2.44, 3.82 and
+  6.75 where a second run over the same chunk reads 1.83, 2.06 and 2.12.
+  The three corpora's second runs are within a tenth of each other; their
+  first runs are not.
+- **C on T's columns costs 3.2 times as much on `sqlite3.c`** (40.2 a record
+  of the same expressions), 1.9 times on Lua, and 1.2 times on musl, where
+  it is the first run that costs.
+- **`-c sqlite3.c` reads the same,** as it must with nothing in a compile:
+  wall -0.03% and -0.01% in two runs of 21 processes a build (the base
+  again -0.04% and -0.08%).
+- **The kernel in place reads 16.3 on `sqlite3.c` where C runs beside it**
+  and 16.0 where it doesn't, in the same executable (16.3 to 16.8 for 16.0
+  to 16.4 over the builds).
+- **musl's readings scatter:** its tests on the window read 97.7 with the
+  piece for main's 93.8 here, and 94.2 for 95.8 and 91.9 for 95.3 in the
+  two builds before.
+
+**What moved it, and what didn't.** Ten builds on the 9700X, each against
+the same main in turn; C's three sweeps and the bytes' five columns, a record
+of the decided expressions on `sqlite3.c`:
+
+| build | what changed | ticks |
+| --- | --- | ---: |
+| 1 | the first | 17.2 |
+| 2 | the forward distance as one store an operand in the front, where the window's writers had stored it a record; the template's number as four masks | 16.0 |
+| 3 | the loop a function of its own, its frame aligned to 64 bytes | 15.3 |
+| 4 | the fact words' kernel back at a cache line's first byte | 15.2 |
+| 5 | the bytes' sweep as two, the tests' alone as before | 15.4 |
+| 6 | the terms the first fault campaign's survivors read as dead, removed: not C's rule (above) | 13.7 |
+| 7 | each of C's terms, the rule on T's conversions, the vector's element's flag | 14.2 |
+| 8 | what the third fault campaign found unneeded, removed: the rows' table 64 bytes read as one register, a name's template one mask less | 14.2 |
+| 9 | the conversions' rule without two arguments that were always true | 14.2 |
+| 10 | the conversions' rule for the arithmetic conversions alone; a range's reset that did nothing, removed: the pull request's code | 13.9 |
+
+- **A 512-bit loop inside a large function spilled its registers across
+  cache lines.** As part of `node_facts_reader_flush`, whose frame is
+  aligned to 16 bytes, the loop kept twenty registers in the frame: 78 of a
+  profile's 427 samples were on those moves and 112 right after one. A
+  function of its own with an aligned frame took the loop from 3.15 to 2.86
+  ticks a record swept, a tenth: the spills were not most of its cost.
+- **A function's place in its cache line moved the fact words' kernel.** The
+  third build's layout put `node_facts_window` 48 bytes into a line, and
+  the kernel in place read 16.4 ticks a record for 16.0 with the same 736
+  instructions. Aligned to 64 bytes it reads 16.0 again.
+- **One bytes' sweep with a test a step for C's columns cost the tests'
+  bytes 0.2, 0.6 and 2 ticks a record** with C off (builds 2 to 4). Two
+  sweeps from one inlined body read main's on `sqlite3.c` and Lua, and 0.1
+  to 1.1 more on musl, whose own readings are 0.9 apart from job to job.
+- **Exactness cost a fifth to a half of a tick:** 14.2, 14.2, 14.2 and 13.9
+  in the last four builds for the sixth's 13.7.
+
+**Against its gates.** The piece was [specified on the
+issue](https://github.com/buster14a/buster/issues/2850#issuecomment-6983596165)
+before its code:
+
+1. **Exact: met.** No expression's verdict and no record's template,
+   context or target differs from C's on T's columns, on the three corpora
+   and the compiler's own source, with the default warnings and with every
+   warning, on `test-checker`'s fixtures, and on 266 statements run one at a
+   time. The corpora alone would have passed the sixth build, which was not
+   C's rule.
+2. **The counts: met.** 32,300, 5,644, 30,863 and 24,659 expressions decided
+   (`sqlite3.c`, Lua, musl, the compiler's own source), where the gate asked
+   for 32,000, 5,500, 30,000 and 24,000.
+3. **Under 10.0 ticks a record of the decided on `sqlite3.c`: not met.**
+   13.9 (13.8 to 14.5 over seven readings; 14.2 in the three builds
+   before). It was to be refuted at 15.0, and the first five builds read
+   15.2 to 17.2.
+4. **What is not the piece's reads the same: met but for the front.** The
+   tests on the window (31.2 for 31.1 on `sqlite3.c`), the kernel in place
+   with C off (16.0 for 16.0) and `-c sqlite3.c` read main's. The front with
+   the window reads 0.4, -0.1 and 0.9 ticks a record more (0.0 to 0.4, -0.1
+   to 1.2 and 0.5 to 3.9 over the builds): the forward distance's store.
+
+**Tests.**
+
+- **A fixture of its own** (`node_contexts_test_fixture`): two functions of
+  250 expressions, each rule's cases on both sides and each kind it lists,
+  and 128 statements of seven and of five records, which put a block's end
+  between every two of a statement's records in turn. Pinned: 240 decided
+  and 30 of them refused, 20 strides read (3 of the type table), 6 rules
+  that read T's conversions, 16 loads out of a block's reach, and the listed
+  by reason; no verdict and no record differs.
+- **The comparison's control.** The fixture runs again with one of the
+  reference's answers changed for each expression C takes: its root's
+  template, context, target or whether it is evaluated, or its verdict, in
+  turn (`BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT`). The comparison has to
+  count every decided expression C takes, 210. Before it, a fault in the
+  comparison itself passed every test.
+- **The census's twelve fixtures** in the window's form, each with its
+  decided and refused expressions pinned, and the room's fixture, where a
+  chunk's end cuts expressions.
+- **Faults,** one at a time in a copy of the tree, each built and run
+  against the node machine's tests, seven rounds as the code changed. Of the
+  380 whose text is in the pull request's sources, 347 are caught. A corpus
+  tells none of the 33 others from the code: five change how many records
+  are read by loads and no answer; two choose between two right readings;
+  seven are the guard that lists a leaf the loop makes no template for,
+  which no source reaches; nineteen are terms of C's own that what makes the
+  records never separates (the record names what does, for each).
+- **What the rounds changed.** The first round's survivors were read as dead
+  and removed, wrongly (above). The later rounds' gave the fixture its
+  lines for what the corpora told apart and it did not (what a block
+  carries to the block before, an operand's second conversion, a root that
+  alone has no template, a range under a folded constant over more than two
+  blocks), the comparison its control, and the code four removals: the
+  rows' third and fourth places, a local's template's own mask, the
+  conversions' rule's branches for a truth and a subscript, and a range's
+  reset that did nothing.
+- **The sanitizers:** memory, address and thread on the native host, the
+  rows a pull request's checks skip: the node machine's tests' part, and
+  under memory and address C on the window on `sqlite3.c`, Lua and the
+  compiler's own source. No report.
+
+**What is left, counted.**
+
+- **Two thirds of what it lists is a call's.** Of `sqlite3.c`'s 18,696
+  listed expressions 12,179 are listed for a call, 3,415 for an update and
+  2,267 for `&&`, `||` or `?:`. An argument's target is its conversion's
+  type, and the kernel's call rule makes the call's own record and none of
+  its arguments' conversions, which are T's still
+  (`node_machine_argument`): making them in the kernel is the piece after
+  this one, [a call on the window](#a-call-on-the-window).
+- **X reads none of it, and no compile takes any.** The answers are
+  compared with C's and dropped. The sum of step 2 moves when X runs on
+  them.
+- **A chunk's first run:** 0.8, 2.3 and 5.9 ticks a record swept over its
+  second.
+- **An expression's part is a third of the sweeps on `sqlite3.c`** (1.75 of
+  5.44): two ranges of a block's masks an expression, and its root's
+  target.
+- **The five columns:** 0.7, 1.1 and 2.8 ticks a record of the tests' over
+  the tests' bytes alone.
+
+### A call on the window
+
+Two thirds of what C on the window listed was a call's. This piece takes
+them: the kernel's call rule makes each argument's conversion, and C's
+answers for a call are made on the window from them. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/a-call-on-the-window-2850-2026-11-19)
+has the census, each build's patch and readings, the probes and the faults.
+
+**A correction came first.** This piece's first specification, and the
+result note before it, said the kernel's call rule made a call's arguments'
+conversions and kept none. It made none: `node_facts_call`,
+`node_facts_call_fast` and `node_facts_call_load` checked the callee's
+type's row and the arguments' count, gathered the arguments' flags, and
+wrote the call's own record. Each argument's conversion was T's
+(`node_machine_argument` through its memo, or the action's). The sentence
+was written from the rule's comment, not from its body. An argument's target
+in C is its conversion's type, so nothing on the kernel's side had it.
+
+**And the kernel's call record was not T's where an argument's conversion
+changes its flags.** A call inherits its flags from its converted arguments
+(`check_action_call`), and the kernel's call rules gathered the arguments'
+own. Two statements, on main before this piece, each ended the shadow with
+a difference:
+
+```c
+fi(1e100);    /* void fi(int): the constant saturates, with two inherited flags */
+fvec(a = b);  /* a vector's conversion keeps three flags and drops the others */
+```
+
+No corpus has such a call, and no fixture had one: 102 calls run one
+statement at a time found the first, and reading each conversion's code
+after it found the second. No compile was affected (the kernel in place is
+in the shadow alone).
+
+**What a call's arguments are, counted.** A line an argument of every call
+T types at reader time:
+
+| | `sqlite3.c` | Lua | musl | the compiler's own source |
+| --- | ---: | ---: | ---: | ---: |
+| calls | 16,016 | 4,213 | 7,967 | 16,985 |
+| arguments | 42,623 | 10,017 | 21,027 | 43,628 |
+| already the parameter's type, no constant | 66.4% | 67.7% | 63.6% | 59.6% |
+| an integer constant of the parameter's type | 11.9% | 12.6% | 8.2% | 2.7% |
+| an integer constant converted (a null pointer constant among them) | 4.8% | 2.4% | 7.1% | 12.5% |
+| a pointer to another pointer type | 7.7% | 3.5% | 5.8% | 6.3% |
+| an array or a function, to a pointer | 3.2% | 7.3% | 3.0% | 11.5% |
+| an arithmetic conversion, no constant | 2.8% | 1.9% | 11.1% | 3.1% |
+| past the parameters (the default promotions) | 3.0% | 4.6% | 0.8% | 4.2% |
+
+**The arguments' rule** (`node_facts_argument_made`) is T's own
+(`node_machine_argument`), as words of 0 or 1 with one branch (a pointer to
+another pointer type asks that pair's slot), and it asks the type table
+nothing: what it needs of a type is that type's answers, made once with its
+row (`node_facts_argued`: whether it is arithmetic, a scalar, bool, real, a
+pointer, an aggregate, a vector, complex; whether an integer constant folds
+to it; its width; and the type its value has past the parameters). Three
+answers an argument:
+
+- **Made:** its conversion, T's type and flags, written to the argument's
+  record's last quadword. To a pointer parameter a null pointer constant, a
+  pointer of its type or one its pair's slot says is assignable; to another
+  parameter what `node_machine_arithmetic_assignable` takes; past the
+  parameters the default argument promotions. And only where the conversion
+  changes nothing a call inherits: with no constant or an address's, an
+  integer constant to an integer's or an enumeration's type or to float,
+  double and long double, a floating constant among those three.
+- **Kept:** the conversion is T's, and the call's record the kernel's all
+  the same, because the conversion changes nothing the call inherits (a
+  struct by value to a parameter of its type, an enumeration's value, a
+  volatile or an atomic object's value, a pointer whose conversion drops a
+  qualifier, a vector with none of the flags its conversion drops).
+- **Neither:** the call is T's (a floating constant to an integer's type or
+  of a type that is not one of the three, a complex number, a vector with
+  such a flag, a value of another type to a struct's or a union's
+  parameter, a parameter with no target).
+
+A call's record says two things more, beside the tests' quiet bit: every
+argument's conversion is made, and the call is a plain one as C asks (its
+prototype's result and its arguments' conversions' types are plain
+scalars).
+
+**A call the loop leaves is marked, because a call of its batch may have it
+as an argument.** The kernel's batches are by an operator's code and its
+operands' rounds, and a call's code is not after a call's: `f(g(x))` has
+both calls in one batch. The short path makes `f` from `g`'s record as it
+stood. Where `g`'s arguments then don't keep `g`'s record, `g` is marked as
+a value the record doesn't hold whole, `f` is neither made nor kept for it,
+and both go to the rule in the window's order, which makes `f` from T's
+record of `g`. A build without the mark was exact on `sqlite3.c`, Lua, musl
+and the fixture of the time, and wrong on `fi(two(1e100, b));`: the fault
+round that removed the mark as a dead term had no nested call to tell it.
+
+**The rule's answers are kept by key.** An argument's answer is some 300
+instructions, and a unit's arguments have few keys: 1,146 on `sqlite3.c`
+for its 33,150 arguments (491 of them an argument of its parameter's type,
+265 a pointer to another pointer type, 150 an array or a function). The key
+is everything the rule reads of the record (its type, the target, eleven of
+its flags, its standing, and whether it is an integer constant whose
+payload is zero), and what the rule reads beside is the unit's words, which
+once made don't change. 4,096 slots of half a line, one place a key. The
+calls' loop reads each argument's slot; where the slot has another key's
+answer or none, the rule answers there and then and the slot takes it.
+
+**What was tried, each measured on the 9700X** (the kernel in place on
+`sqlite3.c`, ticks a record of the window over the build before the piece:
+the first four over C on the window's first piece on main `521d5b63d`, the
+first of them with C off as its job read it, and the last over main
+`bc66290c5`):
+
+| | the kernel in place |
+| --- | ---: |
+| four arguments' slots read in the call's short path, unrolled | +2.2 |
+| the slots read in a second pass over the batch's calls | +1.07 |
+| the same with one multiply for the key's hash | +1.30 |
+| the second pass, the rule as words of 0 or 1, a miss answered in the loop | +0.99 |
+| the same as pushed (the rule's dead terms out, a left call marked) | +1.21 |
+
+- **The short path lost its registers.** Four slots read beside the call's
+  own arguments' gather doubled the loop (1,267 bytes to 2,722, 158 reads
+  and writes of the stack).
+- **The cheaper hash cost more than it saved.** One multiply of the two key
+  words folded together sent 286 calls a pass to the rule for another key's
+  answer at their slot (59 with a multiply each).
+- **A missed branch is not the cost.** Samples of mispredicted branches in
+  the calls' loop: 0.13 a call more than before the piece.
+- **The rule on every argument, with no slots, was the slower.** Exact, and
+  some 300 instructions an argument in the loop: 24 to 29 ticks a record in
+  the cloud container, where the slots read 21 and the build before 19.
+
+**What the timed run does not count.** The shadow times the kernel's third
+run of a chunk, with the slots filled: it makes 58, 6 and 10 answers there
+(a key whose slot another key took). A unit's first answers are made in the
+runs before: about 1,150 on `sqlite3.c`, 1,330 over Lua's 35 units and
+8,000 over musl's 1,500, where a unit has few calls and nearly every call a
+key of its own. An answer reads 102, 103 and 128 ticks with its own two
+clock reads: 0.4, 1.8 and 4.6 ticks a record of the window that no timed
+figure here has. Most of an answer is the first touch of code and
+words the loop leaves seldom, not the rule's length: an earlier rule that
+asked the type table read 250 to 300 ticks an answer in the cloud
+container, and this one 200 to 290 there.
+
+**C's answers for a call** (`node_contexts_window_loop`):
+
+- **The call:** the call's template where its record says a plain call and
+  its context is no address's; none otherwise, which refuses the expression
+  as C does.
+- **Its callee:** evaluated, unless the lowering calls it directly, by its
+  own bytes (no lvalue, an address constant with an object that has a
+  symbol, no offset, no effect).
+- **Its arguments:** evaluated, each to its conversion's type, read from
+  its own record: the targets' gather's third source.
+- **Listed:** a call whose record doesn't say every argument's conversion
+  is made, and a callee that is no name's leaf and is such a constant (a
+  symbol's bit is a leaf's line's).
+
+C sets a call's depth too (`call_depths`), which the window does not make:
+X's piece.
+
+The counts, in the cloud container (default warnings; the same with `-Wall
+-Wextra`):
+
+| | `sqlite3.c` | Lua | musl | the compiler's own source |
+| --- | ---: | ---: | ---: | ---: |
+| calls the kernel in place is to make | 12,921 | 4,182 | 8,586 | 16,877 |
+| made | 12,883 | 4,182 | 8,556 | 16,876 |
+| **with every argument's conversion** | **12,865 (99.57%)** | **4,131 (98.78%)** | **8,415 (98.01%)** | **14,150 (83.84%)** |
+| of them plain | 12,865 | 4,131 | 8,179 | 12,815 |
+| left to T for an argument | 0 | 0 | 25 | 0 |
+| records and conversions that differ from T's | 0 | 0 | 0 | 0 |
+| **expressions decided on the window** | **43,876 (86.04%)** | **9,135 (84.28%)** | **37,304 (85.92%)** | **32,853 (63.16%)** |
+| of them refused, as C refuses them | 147 | 165 | 1,899 | 1,213 |
+| differ from C | 0 | 0 | 0 | 0 |
+| listed for a call | 18 | 47 | 157 | 2,107 |
+
+On the compiler's own source a sixth of the calls pass a vector or a struct
+by value, whose conversion is the action's.
+
+The 9700X, CPU 2, under the lock, Release; main `bc66290c5` and the piece
+on it, in turn in each reading; medians of seven readings, musl's of
+fifteen. TSC ticks:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| **the kernel in place: main** | **16.31** | **20.69** | **18.89** |
+| **with the piece** | **17.52** | **22.36** | **20.36** |
+| the same two builds with C off | 15.94, 17.63 | 20.63, 22.36 | 19.00, 20.36 |
+| **C's three sweeps, a record of the decided: main** | **12.47** | **18.88** | **34.09** |
+| **with the piece** | **8.17** | **11.68** | **26.55** |
+| with the bytes' columns: the gate's figure | 9.18 | 13.42 | 31.20 |
+| the reference's C on the same expressions: main, with | 37.7, 38.5 | 34.2, 36.6 | 41.2, 40.6 |
+| C's sweeps, a record they ran over: main, with | 5.38, 5.79 | 6.63, 7.14 | 10.09, 12.16 |
+| of which the loop | 2.42, 2.60 | 3.69, 4.03 | 5.89, 7.78 |
+| the targets | 1.23, 1.38 | 1.42, 1.58 | 1.99, 2.54 |
+| an expression's part | 1.73, 1.73 | 1.52, 1.50 | 1.95, 2.02 |
+| the tests on the window, C off: main, with | 31.4, 31.1 | 49.7, 49.0 | 91.6, 96.6 |
+| the front with the window: main, with | 53.1, 53.4 | 70.8, 70.9 | 90.9, 89.9 |
+
+`-c sqlite3.c` (nothing of the piece runs in it): wall +0.05% and -0.30%
+in two runs of 21 processes a build (the base again -0.02% and -0.45%).
+
+Against [its
+gates](https://github.com/buster14a/buster/issues/2850#issuecomment-6995139458):
+
+- **Exact (A1, B1): met.** No record, no argument's conversion and none of
+  C's answers differs, on the four corpora with the default warnings and
+  with `-Wall -Wextra`, the fixtures, and 608 statements one at a time (44
+  of them the checker rejects).
+- **The kernel keeps its calls (A2): met.** Every argument's conversion is
+  made for 99.57%, 98.78%, 98.01% and 83.84% of the calls (98, 95, 97 and 80
+  asked), and it leaves 0, 0, 25 and 0 to T for an argument.
+- **The kernel's cost (A3): not met.** 1.0 tick a record over main was
+  asked on `sqlite3.c`, to be refuted at 2.0: it reads 17.52 for main's
+  16.31, 1.21 over (each reading's own difference 0.96 to 1.27), and 1.69
+  over with C off (17.63 for 15.94).
+- **Decided (B2): met** (43,876, 9,135, 37,304 and 32,853 for 43,000,
+  8,800, 36,500 and 32,000).
+- **C's cost (B3): met.** C's sweeps with the records' bytes read 9.18 ticks
+  a record of the decided on `sqlite3.c` (8.94 to 9.32 over seven readings;
+  10.0 asked, refuted at 12.0; 13.9 before the piece).
+- **Nothing else moves (B4): met on `sqlite3.c` and Lua, not on musl.** The
+  tests on the window read 31.4 and 31.1, and 49.7 and 49.0; the front
+  with the window 53.1 and 53.4, 70.8 and 70.9, 90.9 and 89.9. On musl the
+  tests on the window read 91.6 for main and 96.6 with the piece; in a turn
+  of main, the piece, the piece and main again, 91.9, 97.4, 98.3 and 90.3.
+  **It is the executable's, not what the piece runs:** one build with a
+  switch reads 98.8 and 94.9 as pushed (the same setting twice), and 95.8,
+  97.5 and 96.4 with the arguments' pass off, then its tables' clearing
+  too, then the types' answers too. Every part of the tests reads more,
+  the census's code on T's records among them, which is main's source.
+  What in the executable is not established.
+
+**What stays scalar, and why.** An argument's key is four loads at computed
+addresses (its record's type, flags and standing, and its target), its slot
+three more and a store, one argument after another: about 10 ticks
+an argument (1.2 a record of the window's 289,838 over its 33,150
+arguments). It was not built with gathers, for what two measured figures
+say: on this machine a gather's lane costs about what a scalar load does
+(C's targets' sweep, one 16-lane gather and a store, reads 1.2 to 1.4 ticks
+a record), and eight arguments by gathers are nine 8-lane gathers and a
+scatter, no fewer loads than the loop's. The rule itself runs on a miss
+alone.
+
+**Tests.**
+
+- **The fixture** (`test-checker`, C on the window's own) has 263 calls, by
+  what the rule makes of their arguments: made and plain, made and refused
+  by C, kept, left, left inside another call (once, twice over, past the
+  parameters, beside one the first pass leaves), and calls five deep that
+  the rule alone makes. Pinned: the calls to make, made, with every
+  conversion, plain and left for an argument, and C's decided, refused and
+  listed by reason.
+- **The comparison's control** changes T's conversion of each converted
+  call's arguments too, and the kernel's comparison has to count each, once
+  over poison and once over decoys: 426 for the 213 such calls.
+- **The slots as one:** the fixture runs again with each answer written to
+  every slot, so a key's probe meets another key's answer wherever the last
+  answer was another's: 2,307 answers where the slots apart make 105, with
+  the same records, counts and answers of C.
+- **An unwritten conversion is poison:** every record's last quadword,
+  before each run.
+- **Faults,** one at a time in a copy of the tree, seven rounds as the code
+  changed: of the 278 whose text is in these sources, **241 are caught**. Of
+  the 37 others, 13 guard a program the checker rejects (the kernel has to
+  leave it to T, and the shadow compares no rejected program), 19 are terms
+  of T's rule or of C's that what makes the records never separates, 4 give
+  the same answer without them (a spared probe, a tripwire nothing trips),
+  and 1 waits for #3014. The record names each with what makes it so.
+- **What the rounds changed:** dead terms out, each with what makes it dead
+  named where it was; fixture lines for what the survivors showed untested
+  (a const struct's member array, a callee with an offset, a vector with a
+  GNU constant's flag, a floating constant of another type, the two passes'
+  order); and the mark of a left call, taken out as dead and put back.
+- **Before pushing,** in the cloud container on these sources: a native
+  Release build; `test-checker`'s eight parts; C on the window on the four
+  corpora with the default warnings and with `-Wall -Wextra`; the shadow's
+  eleven other modes on `sqlite3.c` and Lua; the self-check, the self-parse
+  and the call graph; the build's ownership check; the complete driver's
+  lists (one item fails in this container as in every run before the
+  piece: its clang spells its include directory another way); and the
+  sanitizer rows a pull request's checks skip (memory, address and thread,
+  native): the node machine's tests' part, and under memory and address C
+  on the window on `sqlite3.c`, Lua and the compiler's own source. No
+  report. After the rebase on main `041cfd9ed`, which changed none of the
+  piece's files: the build, the node machine's tests' part and the four
+  corpora again.
+
+**What is left, counted.**
+
+- **Listed still:** an update (3,535 expressions on `sqlite3.c`), `&&`,
+  `||` and `?:` (2,721), a value the columns don't hold whole (529), a
+  division by a constant (167), a comma or a selection (150).
+- **A unit's first answers** are not in the timed run (above).
+- **A constant the fold leaves two fields in** is a value the columns don't
+  hold whole, and its call is T's: `(char*)5` and `(int)1.5`. What the
+  probes found beside it, `(int)0.5` read by its exponent and a zero that is
+  no literal taken as a null pointer constant, is the next section's.
+- **X reads none of it, and no compile takes any.** A call's depth is X's
+  piece's.
+
+### A null pointer constant that is no literal
+
+Three defects in the tests, found by running statements one at a time for the
+call piece and fixed together
+([#3012](https://github.com/buster14a/buster/issues/3012),
+[#3014](https://github.com/buster14a/buster/issues/3014),
+[#3017](https://github.com/buster14a/buster/issues/3017)). Each was in the
+shadow alone: no compile takes the tests' verdicts yet. No corpus has a case
+of any of them, and no fixture had one.
+
+**What was wrong.**
+
+- **The warning's test covered a part of it (#3012).** The compiler warns of
+  a zero that is no literal `0` made a pointer
+  (`-Wnon-literal-null-conversion`, on by default): `ip = RED;`,
+  `int* np = 1 - 1;`, `fp((char)0);`, `return (char)0;`. The census's test
+  had `=`, an initialization's node and a conversion, and only where the
+  source was neither a leaf nor a cast. So the tests took an enumerator and
+  every cast in `=` and `return`; every form as a scalar's initializer, whose
+  conversion is in its plan and at no node; and every form as an argument.
+  Of 253 such statements the checker accepts, 136 ended with a take the
+  census refuses.
+- **The reference took some of them too (#3017).** The census after the
+  pipeline refuses an expression with a warning's event between its nodes'
+  tokens. The compiler puts this warning at its source's first token where
+  that is a parenthesis (a cast's, a group's) or `_Generic` or
+  `__builtin_choose_expr`, which is no node's token; and a scalar's
+  initializer's root is the bare expression, with no node before it as an
+  assignment's, a call's or a return's has. So of 42 initializer forms the
+  compiler warns of, the reference saw the event of 18, and the shadow
+  showed nothing for the other 24.
+- **A constant's value was read from a field that isn't its own (#3014).**
+  The fold of a floating constant to an integer leaves the floating storage,
+  and T's record keeps the one storage that is not zero: `(int)0.5` is an
+  integer constant whose payload and exponent are the floating value's, its
+  integer being zero. The standing's field bits say so. Two readers didn't
+  look at them: the tests' sweep of the window, which reads a constant's
+  value from its exponent (`(int)1e-4900L` read as 104, a quiet divisor,
+  where the compiler warns of a division by zero); and the kernel's operand,
+  from which a store made a null pointer anew where the action's keeps the
+  floating storage (`ip = (int)0.5;` differed from T's record). (The
+  kernel's call rule gathers its arguments' said values too, but no call
+  with such an argument is its own: the arguments' rule leaves it to T's.)
+
+**The rule is the compiler's own, called.** `node_census_null_warned` asks
+`check_warning_null_integer`, which is what raises the warning (the
+destination a pointer; the source an integer constant expression of an
+integer type that is no bool, of value zero, with no fault), and that the
+value has no literal's flag. The warning's own test of the tokens, by which a
+lone number in parentheses is a literal, is not copied: a number's leaf has
+the flag and parentheses make no node. It is asked of `=`, an
+initialization's node and a conversion, with the type the node converts its
+source to; of each argument of a call, with its own conversion's type; and of
+a scalar's initializer's root, with its object's type.
+
+**Where each form asks it.**
+
+| | what it does |
+| --- | --- |
+| the census's code, the reference at both times | the call above |
+| the tests in the machine's own form | send the record to the census's code where the conversion's type is a pointer's and the source an integer constant without the literal's flag; no second statement of the test |
+| the loop on the window | lists `=` and a return's conversion to a pointer already: no quiet rule takes a pointer's destination |
+| the kernel's call rule | the arguments' rule's answer says whether the argument is such a constant to a pointer's parameter, and a call with one is not quiet |
+
+An argument is asked against its own parameter: `f(RED, 0)` to an integer
+and a pointer is quiet, and `f(0, RED)` is listed. A call's quiet bit is the
+short path's and the answers are the second pass's, which takes the bit away.
+
+**An integer constant whose storage is not its integer is no record of the
+columns'.** T writes a value into its columns where they hold it whole: at
+most one of its integer, its offset and its floating value no zero. It asks
+now that an integer constant's be its integer (`node_machine_whole`): one
+folded from a floating constant goes to the wide values, as a value with two
+storages does. So no reader of the columns meets it. The sweep reads no said
+value of it, for a wide record says none and its operator stays listed; the
+kernel leaves what consumes it to the rule, which is T's action; and C on the
+window lists its expression as a value the columns don't hold whole. Neither
+loop has a term for it.
+
+A first form of the fix had two: a mask in the sweep, over the records whose
+payload is a floating value's, and a test of each operand in the kernel's
+rule and in its updates' loop. With one executable and a switch that turned
+them off, on the 9700X, the sweep's bytes read 0.02 ticks a record more with
+them and the kernel in place 0.27 on Lua (0.06 to 3.15 over seven readings;
+0.02 and 0.03 on `sqlite3.c` and musl): some eight instructions an operand,
+and the rule alone makes 12% of Lua's records, 3% of `sqlite3.c`'s. The
+writer's test is in a path T takes for a value the action made, some 7,000
+times on `sqlite3.c`.
+
+The fold itself is as it was: clearing the storage it leaves is a change to
+every compile, with its own check, and
+[#3014](https://github.com/buster14a/buster/issues/3014) has the counts
+(66 addresses and 11 floating constants with a stale integer on `sqlite3.c`,
+each a value the columns don't hold whole for that alone).
+
+**An initializer's span after the pipeline** starts at the token after its
+object's name, so the events before its first node's token are its own. At
+reader time the span stays the nodes': the events the reader has when it pops
+a root are at tokens it has read as nodes, and the warning the pipeline puts
+before them has its own test there, the one above. A warning's event there
+with no test of its own would show in the shadow as a take the census
+refuses.
+
+**Counts.** On `sqlite3.c`, Lua and musl, with the default warnings and with
+`-Wall -Wextra`, every count of the shadow with C on the window is what it
+was: no call lost its quiet bit, no constant its said value, no initializer
+an event. The arguments' answers are 1,726, 1,393 and 8,250 for 1,669, 1,393
+and 8,209: the key has one flag more.
+
+**One statement at a time.** 59 sources of a zero, each alone in a function
+in five places (`ip = X;`, `int* np = X;`, `fp(X);`, `f2(a, X);`,
+`return X;`), through the shadow with `--verify`: 295 statements, of which
+the checker rejects 42. The compiler warns of 42 of the sources, in every
+place, and clang 23 warns of the same 210 statements.
+
+| of the 253 accepted | before | now |
+| --- | ---: | ---: |
+| end with a take the census refuses | 136 | 0 |
+| end with a said value that is not its payload's | 2 | 0 |
+| warned initializers whose event the reference has | 18 of 42 | 42 |
+| warned statements the reader-time tests refuse | 32 | 190 |
+
+Before, the tests refused the 16 sources that are neither a leaf nor a cast,
+under `=` and `return` alone. Now they refuse the same 38 sources in each
+place, and nothing the compiler doesn't warn of. The other four are no
+expression of the reader's: its front leaves a character constant and a
+`sizeof`, and the set has no `_Generic` and no `__builtin_choose_expr`.
+
+And 72 statements with a constant folded from a floating one under each
+operator (an operand of the arithmetic, shift, bitwise, comparison, logical
+and conditional operators and of their compound forms, a pointer's addend
+and index, a cast's operand, an argument, and a null pointer assigned,
+compared and passed on), of which the checker rejects one:
+
+| of the 71 accepted | before | now |
+| --- | ---: | ---: |
+| end with a status: a said value that is not its payload's | 71 | 0 |
+| of them, a record the kernel made otherwise than T | 8 | 0 |
+| of them, an operator the sweep left out where the census has a test | 2 | 0 |
+| of them, a take the census refuses | 9 | 0 |
+
+**On the 9700X,** the piece against the build before it, in turn (ticks a
+record, medians of 7 readings on `sqlite3.c` and Lua, 15 on musl):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the kernel in place: before, with | 17.39, 17.38 | 22.35, 22.41 | 20.49, 20.38 |
+| each reading's own difference | -0.02 (-0.15 to 0.16) | 0.03 (-0.24 to 0.18) | 0.02 (-1.80 to 3.54) |
+| C's three sweeps, a record of the decided: before, with | 8.27, 8.07 | 11.62, 11.62 | 25.77, 25.96 |
+| the tests on the window, C off: before, with | 31.3, 31.3 | 50.1, 49.8 | 99.9, 100.3 |
+| the tests' bytes alone: before, with | 9.16, 9.25 | 10.82, 10.88 | 20.42, 19.17 |
+| the front with the window: before, with | 53.2, 53.1 | 71.7, 70.7 | 89.6, 91.5 |
+
+`-c sqlite3.c`, which runs none of it, read 0.16% and 0.09% more wall time
+with the piece in two comparisons where the base again read 0.08% less and
+0.05% more.
+
+**Tests.**
+
+- **The fixtures** have 51 lines for it with the default warnings, each with
+  what the census must do with it at both times: the four places, and the
+  forms that warn beside those that don't (a literal, in parentheses too, a
+  bool's zero, a pointer's); an argument and its own parameter both ways
+  round; an atomic pointer assigned; an initializer that starts with a
+  parenthesis, which the event refuses after the pipeline and the constant's
+  test at reader time (a `// reader: TEST` marker says so); a for
+  statement's clauses a line each, whose first one's event is no other's;
+  and the constant folded from a floating one as a divisor, a shift's count,
+  an argument and a null pointer. Five lines with the warning off take
+  everything. Ten lines in C on the window's fixture have the folded
+  constant as an argument and as a null pointer assigned, and a null that is
+  no literal as an argument.
+- **Faults.** Put into the new code one at a time, in a copy of the tree, in
+  four rounds as the code changed, the last on these sources with every
+  earlier fault whose text is still in them. Of its 43, 37 are caught. Of
+  the other 6: 3 are terms no statement separates (an assignment's own type
+  is its source's conversion's on every statement, an atomic destination's
+  too; no initialization's node is in an expression the tests read, the
+  reader's root for one being its operand; and the front's line of a leaf's
+  value asks the columns' rule of a literal's or a string's value, which has
+  its own storage alone); 2 give the same answer (the span's low end a token
+  either way: no kept event is at an object's name or at its `=`); and 1
+  guards a program the checker rejects (an lvalue's constant that is no
+  integer constant expression, to a pointer's parameter). The record names
+  each with what makes it so. With the writer's rule taken out, the fixture
+  shows what the issue found: 2 operators left out where the census has a
+  test, and 14 said values that are not their payloads'.
+- **What the rounds changed:** five terms out as dead, each a guard the
+  compiler's own test has or one no record reaches (among them a guard of
+  the kernel's gathered arguments: no call with such an argument is the
+  short path's); the count of the initializers' roots asked, which made two
+  pre-filters' faults caught; the warning of the event that refuses an
+  expression, in the census's record, so that a fixture's
+  `// refuse: warning-event` line asks for an event; lines for an atomic
+  pointer, a pointer's first parameter and the for statement; and, after
+  the 9700X's switch, the writer's rule for the two readers' terms.
+- **Before pushing,** in the cloud container on these sources: a native
+  Release build; `test-checker`'s eight parts; C on the window on the four
+  corpora with the default warnings and with `-Wall -Wextra`; the shadow's
+  eleven other modes on `sqlite3.c` and Lua; the self-check, the self-parse
+  and the call graph; the build's ownership check; the complete driver's
+  lists (one item fails in this container as in every run before the piece:
+  its clang spells its include directory another way); and the sanitizer
+  rows a pull request's checks skip (memory, address and thread, native):
+  the node machine's tests' part, and under memory and address C on the
+  window on `sqlite3.c`, Lua and the compiler's own source. No report.
+  After the rebase on main `a847fd0e6`, which changed none of the piece's
+  files: the build, the node machine's tests' part, the ownership check and
+  C on the window on `sqlite3.c`, Lua and musl again.
+
+### An update on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/an-update-on-the-window-2850-2026-11-19).
+`measure-node-machine --shadow --window-contexts`
+([the guide](commands/lowering.md#an-update-on-the-window-2850)).
+
+Of what C on the window still listed after the calls, the largest part was
+an update's (`++`, `--` and the compound assignments): 3,535 of 7,120
+expressions on `sqlite3.c`. This piece makes C's answers for them on the
+window, by the loop's masks. No compile takes any of
+it. Its [specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7011006204)
+had four gates: exact (U1), what it decides (U2), what C's sweeps cost (U3)
+and that nothing else moves (U4). The form it specified was refuted on U3 and
+is not the one here; [the note of that](https://github.com/buster14a/buster/issues/2850#issuecomment-7013427495)
+is on the issue, and "The form that was refuted" below has its readings.
+
+**C's plan of an update, term by term.** C asks its plan (`node_machine_update_plan`) of an update whose record is of a
+number's class and is not read for its address, and takes the update where
+the plan does. On the window each term is a byte's, or needs none:
+
+| The plan's term | On the window |
+| --- | --- |
+| the record's class is a number's | its type's class's byte (`numeric`); a record the kernel didn't place has none |
+| the record is not read for its address | no mask: an update's value is no lvalue and no struct's, and each operator that takes its first operand's address asks for one |
+| its shape: a destination, and a second operand unless it is `++` or `--` | no mask: the front's |
+| the destination is an lvalue | no mask: the checker takes no update of anything else |
+| the destination's class is a number's, with no aggregate's, `_BitInt`'s or complex fact | no mask: the update's own record has its destination's value's type, and the loop asks only of a record of such a class with none of those facts |
+| the destination is no atomic's | its facts' byte's bit |
+| it is no bit-field | no mask: a bit-field's record is a value the columns don't hold whole, which lists the expression |
+| it is no vector's element | no mask: a vector's element has no template of its own, which refuses the expression |
+| a destination that is a name's is an object's the unit knows, and no register variable's | a new bit of the flags' byte, the use's `BUSTER_CHECK_REGISTER`; at reader time the unit knows every object |
+| the computation's type and the second operand's conversion are of a number's class with none of those facts, unless the update is `++`, `--` or a pointer's | the second operand's own class's byte: two operands of a number's class convert to one |
+| the destination is in no segment's space | a record at a time, in a unit whose type table has an extended qualifier at all |
+| a pointer's stride is not zero | a record at a time, in the loop the pointers' sums ask theirs in |
+| a division or a remainder by a power of two is no signed one's | `/=` and `%=` of an integer by an integer constant are listed, as `/` and `%` are |
+
+**A mask only takes.** An update the masks don't take lists its expression,
+and what C's plan makes of it is the reference's to say. So a term the masks
+read more strictly than the plan costs a listed expression and nothing else.
+
+**What is new in the loop.**
+
+- **Three bits.** Two of an operator's class, in the classes' table the loop
+  already reads by a permute: `++` and `--` (no second operand), and `/=` and
+  `%=` (the plan asks their divisor's power). One of a record's flags' byte,
+  made in the bytes' sweep: a register object's use.
+- **An update's key.** Its operands' rows are four where its template is
+  one, by whether its destination is evaluated for its address (it is, unless
+  the update names it) and whether it is a pointer's (its second operand is
+  then made a long). The key is the template's number and those two bits, by
+  two masked adds; the loop keeps the keys in a register for the block below,
+  and the column it stores has C's templates. A consumer out of the two
+  registers' reach is asked its key again from the bytes, and only its
+  address's bit: the pointer's is read by the second operand, the record
+  right before the update's own.
+- **A pointer's update's stride** is asked with the pointers' sums', in their
+  loop, its body unchanged: the update's record holds T's conversion of its
+  destination, the pointer's type without its qualifiers, as a sum's holds
+  its first operand's.
+- **A segment's space.** In a unit with `__seg_gs` or another extended
+  qualifier the loop asks `check_lower_segment_override` of each masked
+  update's destination's type, a record at a time. No unit of the corpora has
+  one.
+
+Eight vector operations of a step of 64 records are the update's, where the
+first masks had nineteen: two compares (an update's class; a destination that
+is a name's, which a store's mask compares too), three tests of a bit (the
+class's two and the register's), a move of the template's number and the two
+adds of the key.
+
+**What it decides.** `sqlite3.c`, Lua and musl, the same with the default warnings and with
+`-Wall -Wextra`:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| updates C asks its plan of | 3,736 | 861 | 3,969 |
+| of them a pointer's | 527 | 369 | 846 |
+| **taken by the masks** | **3,734** | **861** | **3,969** |
+| **expressions decided: before, with** | **43,876, 47,266** | **9,135, 9,877** | **37,304, 40,937** |
+| of the expressions the kernel places | 86.04%, 92.69% | 84.28%, 91.12% | 85.92%, 94.29% |
+| listed still: `&&`, `\|\|`, `?:` | 2,744 | 493 | 1,787 |
+| a comma or a selection | 263 | 375 | 169 |
+| a division by a constant | 170 | 40 | 261 |
+| a value the columns don't hold whole | 529 | 6 | 77 |
+| an update | 6 | 1 | 27 |
+| a call | 18 | 47 | 157 |
+
+The two updates of `sqlite3.c` the masks leave are two the plan refuses. The
+other listed updates are `/=` and `%=` by a constant. The compiler's own
+source has 6,103 updates, all taken, and 38,020 of its 51,842 expressions
+decided (73.34%): 11,222 of the rest are listed for `&&`, `||` or `?:`.
+
+**The form that was refuted.** The specification asked the plan of each update a record at a time: a rule
+that read the kernel's records, the types' words and the destination's
+declaration's bits. It was exact and decided the same expressions. On the
+9700X, against the build before in the same job:
+
+| C's sweeps with the records' bytes, a record of the decided | `sqlite3.c` | Lua |
+| --- | ---: | ---: |
+| before | 9.10 | 13.19 |
+| **with a rule a record** | **10.14** | **14.60** |
+| the gate's limit, and where it is refuted | 9.1, 9.6 | 13.3, 13.8 |
+
+The rule alone, run again over each chunk's updates, read 75.4 ticks an
+update on `sqlite3.c` and 82.2 on Lua, an update being 1.16% and 0.94% of the
+records swept. What in the rule cost that was not measured.
+
+**What it measured.** The 9700X, CPU 2, under the lock, Release; the build before (#3023's code)
+and the piece in turn; medians of seven readings, musl's of fifteen. TSC
+ticks:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| **C's sweeps with the records' bytes, a record of the decided (U3's figure): before, with** | **9.12, 8.90** | **12.93, 13.39** | 30.42, 27.54 |
+| C's three sweeps alone, a record of the decided: before, with | 8.28, 7.94 | 11.52, 11.91 | 27.49, 25.54 |
+| the reference's C on the same expressions | 38.4 | 36.8 | 41.0 |
+| the loop, a record swept: before, with | 2.66, 2.97 | 3.98, 4.77 | 8.03, 8.78 |
+| the same in a second run over the same chunk | 1.95, 2.16 | 2.17, 2.38 | 2.27, 2.62 |
+| the kernel in place, a record: before, with | 17.56, 17.41 | 22.43, 22.43 | 20.49, 20.37 |
+| the tests on the window, C off: before, with | 31.5, 31.2 | 50.3, 49.6 | 99.0, 94.7 |
+
+**One executable, the update's block on and off.** Two builds differ in more
+than the code one of them adds, so an experiment's build has a switch that
+skips the update's block by a branch and lists every update's expression, as
+before the piece. On, off, off, on in each of seven readings; each reading's
+own difference:
+
+| the block on, less off | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the loop, a record swept | +0.19 (0.09 to 0.27) | +0.26 (0.13 to 0.35) | +0.14 (-1.22 to 2.22) |
+| the same in a second run | +0.15 (0.13 to 0.25) | +0.17 (0.16 to 0.21) | +0.17 (0.12 to 0.21) |
+| **C's three sweeps, a record of the decided** | **-0.36 (-0.46 to -0.16)** | **-0.52 (-0.70 to -0.35)** | -2.70 (-5.58 to 1.81) |
+
+With the block off the experiment's executable reads the loop at 2.85 and
+4.53 ticks a record swept, where the build before read 2.66 to 2.73 and 3.98
+to 4.06 in four jobs: more than half of what the two builds differ by on Lua
+is there with the update's block skipped. What that part is was not
+established. The loop's function is 6,140 bytes in the piece's build and
+4,920 in the one before.
+
+**Against its gates.**
+
+- **U1, exact: met.** The fixtures, 250 statements run one at a time in a
+  unit with a type in a segment's space and in one with none, and the three
+  corpora and the compiler's own source with the default warnings and with
+  every warning: every expression C on the window decides has C's verdict on
+  T's columns, and each record of one it takes C's template, context, target
+  and whether it is evaluated.
+- **U2, decided: met.** 47,266, 9,877, 40,937 and 38,020 expressions on
+  `sqlite3.c`, Lua, musl and the compiler's own source, for 47,100, 9,800,
+  40,700 and 38,000 asked.
+- **U3, C's cost: met on `sqlite3.c`, at its limit on Lua.** 8.90 ticks a
+  record of the decided for 9.1 asked; 13.39 for 13.3, below where it is
+  refuted (13.8). In one executable the piece lowers the sweeps' cost a record
+  of the decided on both, by 0.36 and 0.52.
+- **U4, nothing else moves: met.** The kernel in place and the tests on the
+  window read what they did.
+
+**What stays a record at a time, and why.**
+
+- **A pointer's stride:** a lane of the loop the pointers' sums already have.
+  Its answer is its type's row's, a load at a computed address a lane; 7,491
+  lanes on `sqlite3.c`'s 321,488 records swept, 527 of them an update's.
+- **A destination's space:** only in a unit that has an extended qualifier,
+  which none of the corpora's is.
+
+**Tests.**
+
+- **The fixtures** (`test-checker`, part 5 of 8). C on the window's has a
+  line for each case of each term: by name, through an address, a pointer's
+  both ways, each class, what the plan refuses, a register variable in
+  parentheses and as a struct's and a pointer's base, a qualified pointer, a
+  second operand that is a wrapper's record of a long double (which has a
+  template where the plan refuses) and of a 128-bit integer under a pointer
+  (taken), a consumer past two blocks, and each update's records with a
+  block's end between every two. A second fixture is a unit with a segment's
+  space, its updates in the flat space and in a segment's in turn. The
+  updates asked and taken are pinned.
+- **Statements one at a time:** 251, each alone in a function, with the
+  shadow's comparison on: 250 the checker accepts, none with a difference,
+  in either kind of unit.
+- **Faults,** one at a time in copies of the tree, three rounds as the code
+  changed. The last, on these sources: 60 of 61 caught. The other is the
+  test of whether the unit has an extended qualifier, made always true: the
+  same answers, a loop a step more.
+- **What the rounds removed,** each a term no accepted program separates and
+  so not a mask's: the destination's standing (a permute and a far lane's
+  row, for "an lvalue"); the object's flag beside the register's; `placed`
+  and the address's context in what the loop asks of; the pointer's fact's
+  own mask where `left_pointer` says the same of an update; and a far
+  consumer's key's pointer's bit.
+
+**What is listed still.** `&&`, `||` and `?:` are most of it: 2,744 of the 3,730 expressions listed on
+`sqlite3.c`, 493 of 962 on Lua, 1,787 of 2,478 on musl. Then a comma and a
+selection, a division by a constant, and a value the columns don't hold
+whole. Those, then X on these answers.
+
+### A condition's branches on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/a-conditions-branches-on-the-window-2850-2026-11-19).
+`measure-node-machine --shadow --window-contexts`
+([the guide](commands/lowering.md#a-conditions-branches-on-the-window-2850)).
+
+After the updates, `&&`, `||` and `?:` were most of what C on the window
+still listed: 2,744 of the 3,730 expressions listed on `sqlite3.c`. They are
+two cases in C. This piece is the first: a statement's CONDITION over `&&`,
+`||` and `!`, which C evaluates as branches and no value
+(`NODE_MACHINE_TEMPLATE_BRANCHES`). No compile takes any of it. Its
+[specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7016320819)
+had four gates: exact (N1), what it decides (N2), what it costs by one
+executable with a switch (N3) and that nothing else moves (N4).
+
+**C's rule, term by term.** C branches a record from the root down
+(`node_machine_root`, `node_machine_branch_condition`,
+`node_machine_classify_branches`, `node_machine_branch_operator`). On the
+window each record says it of itself, from its own bytes, its first operand's
+and its consumer's class, and lists what one level cannot say:
+
+| C's term | On the window |
+| --- | --- |
+| a branch operator is a `!`, an `&&` or an `\|\|` | its operator's class's byte |
+| that is no constant without effects | `free`: its standing's and its flags' bytes |
+| whose value is an int's and no lvalue | no mask: the checker's, which takes no vector's `!`, `&&` or `\|\|` and gives any other an int |
+| and, for `&&` and `\|\|`, whose first operand's truth is not known | the first operand's standing (no constant, or an lvalue whose constant is an address) and its flags' object's bit (an lvalue at an absolute address has none: C knows its truth only where it is an array's, since [#3028](https://github.com/buster14a/buster/issues/3028)'s fix, and the loop lists its expression either way) |
+| a statement's CONDITION is branches where, under its `!`s, there is a branch `&&` or `\|\|` | where its operand's code is `&&`'s or `\|\|`'s. One that is no branch operator lists the expression at its own record, and with a `!` between, the `!` does |
+| a branched operator branches each operand that is a branch operator | `&&` and `\|\|` under a CONDITION, an `&&`, an `\|\|` or a `!`, and `!` under an `&&` or an `\|\|`: by the consumer's class alone. A consumer that is not branched is a value: an `&&` or an `\|\|` lists the expression there, and a `!` does where its operand is `&&` or `\|\|` |
+| a `!` under a branched `!` is branched too | two levels away: the branched `!` over a `!` lists the expression |
+| any other operand is its value, converted to T's conversion of it and tested: of a type a truth's entries test | the aggregate's fact of each operand's own type: a `__float128` has it, and its record a template all the same. Its class asks no mask: a scalar of no class a truth tests is a half-precision float, of which no record has a template |
+| a branched record has no target | by its own branched bit |
+| its labels, its hook and its sense | not made here: X's |
+
+**A mask only takes.** An `&&` or an `||` that is not branched is a value,
+and a value lists its expression in this piece. So a consumer may take its
+operand for branched from the operand's code alone, and the reference says of
+every listed expression.
+
+**Against the specification.** It read a consumer's two bits (a branch `&&`
+or `||`; a branched `!`) by two permutes of bits made in the same step. The
+loop reads the consumer's class instead, which it has already: a consumer of
+that class that is not branched lists the expression at its own lane, and its
+operand's answer is then read by no one.
+
+**What is new in the loop.**
+
+- **A class and a bit** of the classes' table: a conditional has a class of
+  its own (it had `&&`'s and `||`'s, and is listed still), and a statement's
+  CONDITION a bit where `!` has none.
+- **A first operand's standing** is read through its distance back as its
+  other bytes are: one more permute, and a row more of the far lanes'.
+- **A branched record's template** is one masked move, and its operands' rows
+  two of the rows' table: each evaluated, a value's to T's conversion of it.
+- **A truth's operand's test** is the aggregate's fact alone, where it was
+  three operations: the class's two bounds are implied (the table's row), for
+  a truth that is no branch too.
+
+Twelve vector operations a step more: fourteen for the piece (the permute, a
+compare for `&&`'s and `||`'s class, two of the consumer's class, a test of
+the CONDITION's bit, three for the first operand's code, three for its
+standing, a test of its object's bit, a test of the second operand's fact and
+the template's move), and two fewer in a truth's operand's test.
+
+**What it decides.** `sqlite3.c`, Lua, musl and the compiler's own source,
+the same with the default warnings and with `-Wall -Wextra`:
+
+| | `sqlite3.c` | Lua | musl | own source |
+| --- | ---: | ---: | ---: | ---: |
+| expressions the kernel places | 50,996 | 10,839 | 43,415 | 51,908 |
+| records evaluated as branches | 5,613 | 570 | 2,364 | 13,975 |
+| of them a statement's CONDITION | 2,198 | 230 | 877 | 3,366 |
+| **expressions decided: before, with** | **47,266, 49,313** | **9,877, 10,079** | **40,937, 41,759** | **38,064, 41,314** |
+| of the expressions placed | 92.69%, 96.70% | 91.12%, 92.99% | 94.29%, 96.19% | 73.33%, 79.59% |
+| listed still: `&&` and `\|\|` as values, `?:` | 674 | 290 | 964 | 7,924 |
+| a comma or a selection | 264 | 376 | 169 | 0 |
+| a division by a constant | 170 | 40 | 262 | 435 |
+| a value the columns don't hold whole | 551 | 6 | 77 | 66 |
+| an update | 6 | 1 | 27 | 9 |
+| a call | 18 | 47 | 157 | 2,160 |
+
+**One executable, the piece's block on and off** (N3's measure). Two builds
+differ in more than the code one of them adds, so an experiment's build has a
+switch that skips the block by a branch and lists every `&&` and `||`, as
+before the piece: with it off the executable decides what the build before
+does (47,263, 9,877 and 40,937 expressions on the 9700X's copies). The 9700X,
+CPU 2, under the lock, Release, TSC ticks; on, off, off, on in each of seven
+readings, and each reading's own difference:
+
+| the block on, less off | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| **the loop, a record swept** | **+0.24 (0.10 to 0.35)** | **+0.27 (0.05 to 0.50)** | -0.12 (-1.11 to 1.93) |
+| the same in a second run over the same chunk | +0.21 (0.19 to 0.26) | +0.23 (0.22 to 0.46) | +0.24 (-1.38 to 0.30) |
+| **C's three sweeps, a record of the decided** | **-0.36 (-0.66 to -0.31)** | **-0.20 (-0.56 to 0.15)** | -1.91 (-3.06 to 2.76) |
+| the kernel in place, a record | +0.09 (-0.19 to 0.21) | -0.04 (-3.59 to 2.00) | -0.02 (-0.12 to 0.08) |
+| the tests on the window, a record | +0.15 (-0.23 to 0.41) | -0.91 (-2.53 to 0.61) | -3.46 (-12.06 to 1.15) |
+
+musl's first runs don't resolve the block: an earlier build's switch read the
+loop +1.59 there (-0.60 to 3.10) in this order and -0.29 (-1.34 to 3.74) with
+the settings in the other order (off, on, on, off).
+
+**Build against build**, the build before (#3025's code) and the piece in
+turn, medians of seven readings, musl's of fifteen:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| C's sweeps with the records' bytes, a record of the decided: before, with | 8.86, 8.38 | 13.55, 13.78 | 29.58, 30.72 |
+| C's three sweeps alone, a record of the decided: before, with | 7.92, 7.46 | 11.97, 11.92 | 26.42, 26.66 |
+| the reference's C on the same expressions | 38.7 | 37.2 | 41.4 |
+| the loop, a record swept: before, with | 2.97, 3.19 | 4.82, 5.17 | 9.05, 9.55 |
+| the kernel in place, a record: before, with | 17.66, 17.37 | 22.40, 22.40 | 20.50, 20.39 |
+| the tests on the window, C off: before, with | 31.4, 31.3 | 49.7, 49.6 | 94.7, 94.7 |
+
+`-c sqlite3.c`, which runs none of it: wall -0.08% and +0.10% in two
+comparisons, where the base again read -0.09% and +0.15%.
+
+**The loop's frame.** By its layout in the 9700X's builds, the loop's main
+body is 819 instructions a step with the piece and 746 before, and 256 and
+219 of them have an operand in the frame: of the 73 instructions the piece's
+build has more, 37 are frame traffic, where the block's own operations are
+fourteen. A first build of the piece, whole runs' user instructions counted:
+the switch's executable with the block off retired 1.76 instructions a record
+swept more than the build before on `sqlite3.c` and 1.73 on Lua. What a step
+keeps in the frame, and why, is the next thing to measure in this loop.
+
+**Against its gates.**
+
+- **N1, exact: met.** The fixtures, 257 statements run one at a time in a
+  unit with a type in a segment's space and in one with none, and the four
+  corpora with the default warnings and with every warning: every expression
+  C on the window decides has C's verdict on T's columns, and each record of
+  one it takes C's template, context, target and whether it is evaluated.
+- **N2, decided: met.** 49,313, 10,079 and 41,759 expressions on `sqlite3.c`,
+  Lua and musl, for 49,200, 10,050 and 41,650 asked; 41,314 on the
+  compiler's own source, where the text that read 38,020 at the specification
+  reads 38,064 before the piece now, for 40,900 asked.
+- **N3, cost: met.** In one executable the block lowers C's three sweeps a
+  record of the decided on `sqlite3.c` and Lua, by 0.36 and 0.20 (refuted at
+  0.3 over); the loop reads 0.24 and 0.27 ticks a record swept more (0.5
+  asked, refuted at 0.8).
+- **N4, nothing else moves: met.** The kernel in place reads within 0.1 of
+  itself on and off. The tests on the window, which the switch doesn't touch,
+  read +0.15 and -0.91 a record on `sqlite3.c` and Lua, each range across
+  zero.
+
+**Tests.**
+
+- **The fixture** (`test-checker`, part 5 of 8): 82 statements, a line a case
+  of each term, each run alone too with its counts summed to the fixture's
+  pins: each operator under each and a loop's three conditions; tested values
+  of each class; operands no truth tests; a first operand that is an object's
+  lvalue, and one whose truth is known, of each constant's kind; two levels
+  away; values; the operator whose code is before `&&`'s; consumers and first
+  operands past two blocks. And six statements 64 times each, a block's end
+  between every two of their records in turn. The branched records and the
+  CONDITIONs among them are pinned.
+- **Statements one at a time:** 271, each alone in a function with the
+  shadow's comparison on, in both kinds of unit: the checker accepts 257 (it
+  takes no vector's `!`, `&&` or `||`, and no `constexpr` at the default
+  standard), and none has a difference. They have each kind of record of a
+  half-precision float, a `__float128`, a long double, a 128-bit integer, a
+  complex value and a `_BitInt` as an operand.
+- **Faults,** one at a time in copies of the tree, two rounds. The first: 96
+  of 116 caught, 12 texts that did not build, 8 survivors. Two of the
+  survivors were terms another record says, and went: a branched truth's
+  second operand's test (it has none, and its bytes read zero) and a truth's
+  own class (an int's, the checker's). Two were cases with no line, and got
+  one: a complex constant first, and a bit-field of an object first. The
+  second round, on these sources: **112 of 116 caught**. The four others give
+  the same answers: a CONDITION taken for a `!` under a logical consumer (a
+  CONDITION has no consumer); an lvalue first whose constant is of any kind
+  (a placed record's lvalue has an address's or none); and a branched
+  record's target left to its row where the record has no template (its
+  expression is refused) or is a root (which has no consumer's row).
+- **Before the rounds,** two terms the first build had as masks went on
+  reading the code that makes the values: the int's class of a `!`, an `&&`
+  and an `||` (the checker's), and a branched CONDITION's `free` (a folded
+  CONDITION has a folded operand, which lists).
+
+**What the probes found beside it.** A condition on an lvalue at an absolute
+address (`if (*(int*)4096)`) was compiled as true, its load dropped:
+[#3028](https://github.com/buster14a/buster/issues/3028), a fault of the
+checker's truth rule, which C reads. Its fix makes such an lvalue's truth
+unknown unless it is an array's. This piece's mask takes a first operand
+that is an lvalue only where it has an object, and lists the expression of
+one at an absolute address before the fix and after it.
+
+**What is listed still.** `&&` and `||` as values and `?:` are 674 of the
+1,683 expressions listed on `sqlite3.c`, 290 of 760 on Lua, 964 of 1,656 on
+musl; then a value the columns don't hold whole, a comma and a selection, and
+a division by a constant. The values are the piece after, with the loop's
+frame.
+
+### The records' bytes without their four gathers
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/the-records-bytes-without-gathers-2850-2026-11-19).
+Its [specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7020847483)
+had four gates: the same bytes (S1), what it costs (S2), that nothing else
+moves (S3) and faults (S4).
+
+The tests' loop and C's read a chunk's records as byte columns, which one
+sweep makes sixteen records a step (`node_tests_window_bytes_by`). It read
+four columns of the kernel's 64-byte records (a record's word, flags, object
+and standing) by four masked gathers of sixteen dwords. A gather of sixteen
+is 64 uops on Zen 5 ("SIMD and Zen 5" in [the coding style](coding-style.md)):
+256 a step, for what sixteen loads hold.
+
+**Loads and permutes.** A record's line's first half is its type, word,
+flags and object, its payload, and its standing with its exponent: eight
+dwords. The sweep reads that half whole, two records a register. One permute
+of two registers puts each column's four dwords of four records in one
+128-bit lane, and eight lane shuffles make the four columns, the last four
+masked by the placed records as the gathers were. Sixteen loads and twelve
+permutes a step. A step reads its sixteen lines whether placed or not: they
+are the window's own array, 4,096 lines.
+
+**What "The gathers stay" had measured** ("The tests on the window", above)
+was a loop a record, which lost to the gathers in every form. This is no loop
+a record: the same sixteen records a step, their columns by permutes.
+
+**What stays a gather:** the names' declarations' lines' bytes, whose indices
+are entries' numbers and no column, and the two of the reader's verify.
+
+**Measured.** The 9700X, CPU 2, Release, each run its own hold of the lock,
+TSC ticks a record, seven readings; a reading's own difference, its median
+and range. Build against build is the build before (#3030's code) and the
+piece in turn. The switch is one executable, an experiment's build, that
+reads the columns by the gathers where its environment says so: loads,
+gathers, gathers, loads in each reading.
+
+| the records' bytes | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| build against build: before, with | 9.16, 7.58 | 10.78, 9.33 | 19.67, 19.48 |
+| with less before | -1.65 (-1.72 to -1.35) | -1.49 (-1.86 to -0.64) | -0.48 (-3.57 to 6.54) |
+| **the switch: loads less gathers** | **-2.41 (-2.51 to -2.32)** | **-2.35 (-2.40 to -2.27)** | **-3.00 (-3.61 to -2.14)** |
+| the same where the sweep makes C's bytes too | -2.44 (-2.52 to -2.36) | -2.55 (-2.79 to -2.43) | -3.68 (-5.80 to -2.69) |
+
+| by the switch, loads less gathers | `sqlite3.c` | Lua |
+| --- | ---: | ---: |
+| the tests on the window, their sum | -2.52 (-2.66 to -2.35) | -2.26 (-2.48 to 0.84) |
+| the tests' loop | -0.03 (-0.15 to 0.04) | +0.07 (-0.03 to 0.10) |
+| an expression's part | -0.03 (-0.12 to 0.08) | +0.03 (0.02 to 2.86) |
+| the tests on T's records | -0.03 (-0.14 to 0.06) | +0.03 (-0.25 to 0.49) |
+| C's three sweeps, a record swept | -0.04 (-0.16 to 0.11) | +0.04 (-0.08 to 0.19) |
+
+The two measures are 0.8 apart on `sqlite3.c`. The switch's executable reads
+the gathers at 9.54 where the build before reads 9.16, and the loads at 7.15
+where their own build reads 7.58. By the switch the tests on the window are
+29.11 ticks a record on `sqlite3.c` for 31.56.
+
+**Against its gates.**
+
+- **S1, the same bytes: met.** No pin of `test-checker`'s fixtures moves.
+  On the 9700X's three corpora the shadow's count lines of the piece's build
+  are the build before's in each of 42 readings; in the cloud container the
+  three corpora and the compiler's own source, with the default warnings and
+  with `-Wall -Wextra`, read the counts of "A condition's branches on the
+  window" with no difference.
+- **S2, cost: met.** 1.65 and 1.49 ticks a record lower on `sqlite3.c` and
+  Lua build against build (1.2 asked, refuted under 1.0), 2.41 and 2.35 by
+  the switch (2.0 asked, refuted under 1.6); musl lower in both medians.
+- **S3, nothing else moves: met.** By the switch each other part reads
+  within 0.1 of itself in the median on `sqlite3.c` and Lua (0.3 asked).
+  Build against build an expression's part reads 0.27 and 0.34 higher in the
+  piece's build (0.05 to 0.37, and 0.27 to 0.60), which one executable's two
+  settings do not show: the tests' sum is 1.23 and 0.50 lower between the
+  two builds for the 2.52 and 2.26 of the switch.
+- **S4, faults: met.** 37 faults, one at a time in the piece's tree on the
+  9700X (each index of the permute, each shuffle's selection, each column's
+  mask, each load's place, the permute's registers swapped), each built and
+  run on `test-checker`'s part 5. The first round caught 34. The three it
+  passed dropped the placed records' mask of the flags', the objects' and the
+  standings' columns: a record the kernel didn't place then has bytes, which
+  no test read. The reader's verify now counts such a record
+  (`own_values_wrong`), and a second round with it caught those three and the
+  words' mask again.
+
+**What else the sweep spends** is not measured here: its one gather, and
+the declarations' lines' bytes' first making (18,295 lines on `sqlite3.c`).
+
+### X's rows on the window, first their shapes
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x-rows-on-the-window-2850-2026-11-19).
+Its [specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7023470094)
+had five gates: exact (R1), how much (R2), cost (R3), that nothing else moves
+(R4) and faults (R5). [The census of X's
+rows](https://github.com/buster14a/buster/issues/2850#issuecomment-7022665047)
+came before it.
+
+X goes up an expression's postorder and writes each evaluated record's row:
+its own entries by its template, then its conversion's to its target, then
+what follows its row. An entry is a kind, a class and a value. This piece
+makes the kinds and the classes of the first two parts on the window, from
+C's answers there, for the expressions with no update and no operator
+evaluated as branches. `c_check_node_machine_rows.c` has it; no compile takes
+any of it.
+
+**A shape a part.** A record's own entries and its conversion's are each a
+shape, a byte:
+
+| shape | entries |
+| --- | --- |
+| 0 | none |
+| a typed kind's number, below 64 | one entry of that kind, of the record's class: a constant's CONST, a local's and a global's read, the three stores, a binary operator's kind, NEG and NOT, a LOAD, a CALL, a DISCARD |
+| an address constant's, 64 to 73 | a CONST with no object, or a local's or a global's address; a CONST and a PTR_ADD more with an offset; a CONVERT more for an rvalue of an integer's class |
+| a member's, 74 and 75 | its offset's CONST and PTR_ADD; and its LOAD |
+| a truth's, 76 to 79 | a CONST of its operand's conversion's class and NE, or EQ for `!`; a narrow class's after a CONVERT to I32 |
+| a pointer's, 80 to 82 | its sum's PTR_ADD; a NEG before it for a difference; a LOAD after it for a subscript that loads |
+| a conversion's, 83 to 85 | to bool, a CONST, NE and a CONVERT to U8, a narrow class's after a CONVERT to I32; and a CONVERT to the target's class |
+| a folded constant's, 86 | its CONST of its target's class |
+| 127 | none: the mark of a template whose rows are not made here, which lists its expression |
+
+A shape from 64 up is a row of a table, which has each entry's kind and
+where its class comes from: the class itself, the record's, its target's or
+its first operand's conversion's.
+
+**Three sweeps over a chunk's records.**
+
+- **The reads.** What the window's bytes don't hold: a target's type's class
+  and facts where a record converts (it is in a value's context and its
+  target is not its type; none are read for void, whose class and facts are
+  zeros); a member's offset; a truth's operand's conversion's class; and
+  whether an address constant's object is a local's. A sweep of masks, 64
+  records a step, compresses the numbers of the records to read for into two
+  lists, and a loop a list reads a record at a time. A record's type is a
+  column the tests' sweep makes with the records' bytes, so target and type
+  are compared in registers.
+- **The shapes**, 64 records a step: X's rules as masks over the window's
+  bytes and the reads' columns (`node_machine_own`'s case of a record's
+  template, `node_machine_convert`'s cases, and the fold of an integer
+  constant's conversion into its CONST).
+- **The rows**, 64 records a step. A part has four slots, an entry each. A
+  slot's kinds, and its classes' sources, are one lookup of the block's
+  shapes each (a table of 128 bytes a slot); the classes are made from their
+  sources by masked moves; the eight slots' registers are transposed, by
+  three rounds of unpacks, into eight records' rows a register; and each
+  register's entries, the bytes whose kind is not zero, are compressed into
+  the chunk's two streams. The compress joins a record's two parts and the
+  eight records' rows. A row's place is the entries before it.
+
+An expression's tape is its operand's records' rows, in a row in the streams,
+and its root's.
+
+**What is listed for X** and left to the reference: an expression with an
+update or with an operator evaluated as branches; a conversion from or to a
+class past double's (a long double's, a 128-bit integer's, a half-precision
+one's, and an aggregate's and a complex type's, which have no class's
+number), which the templates refuse; and an integer constant converted to a
+floating class, whose fold reads its value.
+
+**The terms that are no mask.** X's rules ask more than a record on the
+window can separate. The fault rounds' survivors pointed at such terms; 241
+one-statement programs, each a file of its own, and the three corpora, run
+with the term changed, showed which a C program reaches there; and each term
+that none reaches is out of the sweeps, with what makes it in the code's
+comments:
+
+- **The discarded context**, which writes a constant no entry: C gives it to
+  a comma's value, a bit-field's assignment and an aggregate's store under a
+  discard. C on the window lists or refuses each, and its contexts' byte has
+  an address's bit alone.
+- **A value's context**, in which alone the rule converts: a record read for
+  its address has no target but a `.`'s base, whose target is T's conversion
+  of it, its own type.
+- **An empty conversion**, two types of one class with the target no bool:
+  nothing asks whether a conversion is one. A DISCARD or a CONVERT is to
+  another class's type alone, and an integer constant's fold to its own
+  class is its own CONST again.
+- **A complex's and a `_BitInt`'s source:** C gives a record of either no
+  template.
+- **A complex target, and an aggregate's on either side:** neither has a
+  class's number, so one compare of the two classes' greater with a long
+  double's refuses them with the long doubles; the rule's two tests of the
+  facts, and its reading of an aggregate's target as an address's, ask
+  nothing more.
+- **An address constant's offset** is its standing's bit, which whatever
+  writes a value sets for an offset that is not zero and for no other: the
+  payload is not read.
+- **A member's offset** is not zero, in bits: a bit-field's record lists its
+  expression in C's loop.
+- **A constant's class** is an integer's where its kind is: C's rule for the
+  template.
+- **The templates whose rows are not made here** are a mark in the
+  templates' table, one compare, where a range of numbers with a call's
+  excepted was three operations.
+- **A constant folded to bool** is the folded constant's row: its CONST is of
+  its target's class, and bool's is a U8's.
+- **Whether a record that lists its expression is evaluated.** A record that
+  is not evaluated converts nothing (the reads' mask), so only its template
+  could list. The records C leaves unevaluated in an expression it takes are
+  a store's or an update's named destination, a callee called directly and a
+  folded constant's operands, and none of them is an update or an operator
+  evaluated as branches: C lists a folded `&&`, `||` and `?:` itself. A mask
+  that only takes would at worst list one more expression.
+- **An expression's root's own record**, in its part: a statement's discard,
+  a control's CONDITION, a `switch`'s value or a `return`'s conversion has no
+  target, so no conversion of its own lists it; and its template is one whose
+  rows are not made here only as a CONDITION over `&&` or `||`, whose operand
+  C then takes with that template too, or does not take the expression. The
+  operand's records' bits say it.
+
+What a program does reach got a line in the fixture, and its term stayed: a
+`_BitInt`'s target, which is an initialized object's alone (of its value's
+class with no entry, of another with a CONVERT and no fold); a complex, a
+long double's, a 128-bit integer's and a half-precision target; an aggregate
+converted to an aggregate; and a store of a constant, `a = b = 0`, which has
+its value's constant kind and is no fold. That last one no probe had: with
+the fold's test of the template out, five of musl's tapes differed, and the
+term went back with its line.
+
+**How it came to its cost.** Builds on the 9700X, TSC ticks a record swept on
+`sqlite3.c` and Lua, three readings each and seven for the last three:
+
+| | `sqlite3.c` | Lua |
+| --- | ---: | ---: |
+| first: one sweep with two loops a block, the rows eight records a step | 7.47 | 8.21 |
+| the reads a sweep of their own, a record's type a column, the rows by slots | 5.66 | 6.52 |
+| the reads' two lists, a loop a list | 4.88 | 6.04 |
+| no word read for void, and the expression's part with no branch | 5.00 | 5.90 |
+| the part with its branch again | 4.84 | 5.80 |
+| the terms that are no mask out | 4.38 | 5.37 |
+| the part without its root's test, and the last terms out | 4.11 | 5.17 |
+
+- **A register read of bytes just stored a byte at a time waits for the
+  stores.** The first sweep's loops wrote a block's bytes and its vector part
+  read them back at once: the shapes read 4.35 ticks a record there and 0.80
+  once the reads were a sweep before them.
+- **A loop a block ends on a branch its count mispredicts.** The reads read
+  2.71 as two loops a block and 1.81 as two loops a chunk over compressed
+  lists.
+- **The rows by slots and a compress read less than half of the rows a
+  quadword a record.** Eight records a step, a quadword a record joined by a
+  shift, read 1.85; 64 records a step, joined by the compress, 0.84.
+- **Half the conversions are to void**, a discarded value's: the reads' word
+  loop runs for 9.95% of `sqlite3.c`'s records where it ran for 18.11%. Its
+  time did not move for it.
+- **The expression's part with no branch read more**, 1.45 for 1.26: it is
+  back to its branch.
+- **The terms that are no mask** were a third of the shapes' sweep on
+  `sqlite3.c`: it read 0.88 ticks a record with them and 0.59 without; and
+  the reads read 1.83 and 1.65.
+- **The part without its test of the root's record** reads 1.02 ticks a
+  record swept on `sqlite3.c` and 1.05 on Lua, where the build before, with
+  the test, read 1.29 and 1.19.
+
+**Measured.** The 9700X, CPU 2, Release, each run its own hold of the lock,
+TSC ticks, seven readings: one executable, the rows on (`--window-rows`), off
+(`--window-contexts`), off, on in each reading.
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions C takes on the window | 49,155 | 9,909 | 39,712 |
+| their tapes made here | 43,719 (88.94%) | 8,961 (90.43%) | 35,194 (88.62%) |
+| of the expressions C decides | 88.66% | 88.91% | 84.28% |
+| listed for an update | 3,394 | 742 | 3,530 |
+| listed for branches | 2,033 | 196 | 775 |
+| listed for a refused conversion | 1 | 0 | 20 |
+| listed for a constant to a floating class | 8 | 10 | 193 |
+| tapes that differ from X's on T's columns | 0 | 0 | 0 |
+| **the three sweeps and the part, a record swept** | **4.11 (4.02 to 4.23)** | **5.17 (5.09 to 5.33)** | **10.54 (9.22 to 13.20)** |
+| the reads | 1.62 | 1.83 | 3.46 |
+| the shapes | 0.62 | 1.00 | 2.60 |
+| the rows | 0.86 | 1.29 | 2.66 |
+| an expression's part | 1.02 | 1.05 | 1.54 |
+| a second run over the same chunk | 3.29 | 3.14 | 4.04 |
+| a record of the taken expressions | 5.84 | 8.66 | 24.68 |
+| X on T's columns, a record of theirs, with its values | 24.34 | 22.99 | 27.54 |
+| records whose target's word is read | 31,998 (9.95%) | 6,919 (7.58%) | 34,220 (9.07%) |
+| records whose line is read | 47,178 (14.68%) | 11,584 (12.69%) | 19,496 (5.17%) |
+
+**Against its gates.**
+
+- **R1, exact: met.** No tape made differs from X's on T's columns in its
+  number of entries, a kind or a class: on the three corpora on the 9700X,
+  and in the cloud container on them and the compiler's own source (31,607
+  tapes there) with the default warnings and with `-Wall -Wextra`. The
+  fixture has a line a shape and a line a term's case (356 tapes), and
+  C's fixture 679 more. With one of the reference's answers changed for each
+  tape (its first entry's kind, its last's class and its length in turn) the
+  comparison counts every tape of both.
+- **R2, how much: met on `sqlite3.c` and Lua, not on musl.** 88.66% and
+  88.91% of the expressions C decides (85% asked, refuted under 80%), and
+  84.28% on musl: C refuses 2,047 of the 41,759 it decides there for a
+  template, which have no tape to make, and the rows make 88.62% of those
+  it takes.
+- **R3, cost: met on `sqlite3.c`, not on Lua.** 4.11 and 5.17 ticks a record
+  swept (5.0 asked, refuted over 8.0); 4.26 and 5.52 with what the types'
+  column adds to the records' bytes' sweep (R4). A second run over the same
+  chunk, right after the first, reads 3.29 and 3.14. What a chunk's first run
+  reads more is not taken apart here; Lua's chunks are 379 records for
+  `sqlite3.c`'s 526.
+- **R4, nothing else moves: met, but for the records' bytes on Lua.** By the
+  switch on `sqlite3.c` and Lua, on less off: the kernel in place -0.12 and
+  +0.06; the tests' loop -0.04 and +0.05, their expression's part +0.06 and
+  -0.01, their sweep on T's records +0.04 and +0.08; C's three sweeps +0.00
+  and +0.01 (0.3 asked). The records' bytes' sweep makes the types' column
+  with the rows on, the rows' own work, and reads +0.15 and +0.35 for it
+  (+0.08 and -0.07 in the build before, whose code there is the same); the
+  tests' sum with it +0.21 and +0.56.
+- **R5, faults: met.** Five rounds: each term of a mask, each row of the
+  tables and each of the write's permutes and shifts changed alone, a build
+  and the fixture's tests a fault. A round stopped where its survivors had
+  changed the code, and the next ran on the changed code: 12 survivors of
+  the first round's 55 faults run, 4 of the second's 47, 2 of the third's 44
+  and 4 of the fourth's 157. Each one's term went out as one no record on
+  the window separates (the corpora's tapes are the same without it), or
+  its case got a line in the fixture; one, a column's mask of the records
+  the kernel placed, got the reader's verify asserted. The fifth round's 167
+  faults, on the code as it is, are all caught.
+
+**What stays a record at a time, and why.** The reads' two loops: 24.6% of
+`sqlite3.c`'s records swept, 20.3% of Lua's and 14.2% of musl's. Each
+iteration is a load by a type's or an object's number, or of a record's
+line, and a store of bytes, with no branch but the loop's. A gather of
+sixteen such loads is 64 uops on Zen 5 ("SIMD and Zen 5" in [the coding
+style](coding-style.md)), what sixteen loads are, and its results would be
+stored to the same bytes. The lists, not the loads, are what the vector does
+here. With a clock read between the reads' stages (an experiment's build of
+the round before's code, whose reads are these, three runs), the masks and
+the two lists are 0.50 ticks a record swept on `sqlite3.c` and 0.57 on Lua,
+the loop over the targets' words 0.35 and 0.32, and the loop over the lines
+0.67 and 0.65.
+
+**What is next:** an update's rows (its plan on the window), the branches'
+(the states, the senses and the labels), and the entries' values.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -4316,6 +5856,11 @@ discards nothing" took it to 51% and 43%: about 31 and 27 cycles,
 and 1.22. "The casts, a pointer's subscripts and its sums" took it to 38%:
 about 23 cycles, and 1.22 to 1.23. The sum stands only with the tests at a
 third of the own form's.
+
+"C on the window" is the first of the sweeps where the records are made: C's
+answers for 63% of `sqlite3.c`'s placed expressions at 12.6 ticks a record of
+theirs, where C on T's columns reads 40.2, in the shadow. The sum does not
+move for it: X reads T's columns still, and no compile takes either.
 What would move it:
 
 - **The rest of the tests where their inputs are:** an initialization's
@@ -4334,7 +5879,10 @@ What would move it:
   the parse itself is #2850's step 3.
 - **The sweeps on these records where they run:** #2850's step 2. T on the
   front's records as the shadow's scalar T would read them was this step's
-  plan before #2850's step 0, and is dropped.
+  plan before #2850's step 0, and is dropped. "C on the window" is C's
+  first piece there, "A call on the window" and "An update on the window" the
+  next two: the logical operators and a comma are listed still, and X is not
+  on its answers.
 - **`sizeof` and `_Alignof`,** which the front leaves: 1.5% of `sqlite3.c`'s
   taken expressions and most of musl's missing 5% of nodes.
 - **Where the sweeps run:** 164 cycles a node in the tight loop, 199 a body's

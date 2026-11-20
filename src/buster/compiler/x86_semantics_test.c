@@ -452,7 +452,8 @@ static bool x86_semantics_machine_load(X86SemanticsMachine* machine, const X86In
     X86Instruction patched[8];
     uint32_t offsets[8];
     bool result = count <= BUSTER_ARRAY_LENGTH(patched);
-    int64_t length = result ? x86_encode_scalar(records, count, machine->code, BUSTER_X86_SEMANTICS_TEST_PAGE, offsets, 0) : -1;
+    result = result && x86_validate(records, count) == count;
+    int64_t length = result ? x86_encode(records, count, machine->code, BUSTER_X86_SEMANTICS_TEST_PAGE, offsets, 0) : -1;
     result = length >= 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
@@ -463,7 +464,7 @@ static bool x86_semantics_machine_load(X86SemanticsMachine* machine, const X86In
             patched[i].displacement = (int32_t)((int64_t)(machine->data + (uint32_t)records[i].displacement) - (int64_t)(machine->code + end));
         }
     }
-    length = result ? x86_encode_scalar(patched, count, machine->code, BUSTER_X86_SEMANTICS_TEST_PAGE, 0, 0) : -1;
+    length = result && x86_validate(patched, count) == count ? x86_encode(patched, count, machine->code, BUSTER_X86_SEMANTICS_TEST_PAGE, 0, 0) : -1;
     result = length >= 0 && (uint64_t)length + 14 <= BUSTER_X86_SEMANTICS_TEST_PAGE;
     if (result)
     {
@@ -3162,12 +3163,11 @@ static bool x86_semantics_check_target(void)
 // x86_match's agreement
 
 // The assembler's matcher (x86_match.c) takes its values' immediates from the shared rule: on every form its syntax
-// supports whose immediate is a value, x86_match_immediate (its scalar path, the vector path's oracle) must take exactly
-// the values x86_immediate_encodes takes, the unsigned spellings of sign-extended patterns among them (0xffffffff for an
-// imm8 at 32 bits, which is -1, and 2^64 - 128 for one at 64 bits), and an __int128 past the operation's width none
-// (2^32 + 5 at 32 bits, whose low 32 bits would fit). Every form it reads as sign-extending (x86_match_sign_extends) must
-// be such a value's form, with a field narrower than the operation, so that its fallback for other immediates never
-// meets one; and its intervals (x86_match_range) must give the same answers as the rule.
+// supports whose immediate is a value, its intervals (x86_match_range) must take exactly the values x86_immediate_encodes
+// takes, the unsigned spellings of sign-extended patterns among them (0xffffffff for an imm8 at 32 bits, which is -1, and
+// 2^64 - 128 for one at 64 bits), and an __int128 past the operation's width none (2^32 + 5 at 32 bits, whose low 32
+// bits would fit). Every form it reads as sign-extending (x86_match_sign_extends) must be such a value's form, with a
+// field narrower than the operation, so that its fallback for other immediates never meets one.
 static bool x86_semantics_check_match(void)
 {
     X86SemanticsTally tally = {
@@ -3210,20 +3210,15 @@ static bool x86_semantics_check_match(void)
             for (uint32_t i = 0; i < total; i += 1)
             {
                 const __int128 operand_value = i < BUSTER_ARRAY_LENGTH(x86_semantics_values) ? (__int128)x86_semantics_values[i] : beyond[i - BUSTER_ARRAY_LENGTH(x86_semantics_values)];
-                const X86Operand operand = {
-                    .value = operand_value,
-                    .kind = X86_OPERAND_IMMEDIATE,
-                };
                 const uint32_t width = effects->width;
                 const bool of_width = operand_value >= -((__int128)1 << (8 * width - 1)) && operand_value <= ((__int128)1 << (8 * width)) - 1;
                 const bool ours = of_width && x86_immediate_encodes(form, (int64_t)operand_value);
-                const bool theirs = x86_match_immediate(description, &operand);
                 const uint64_t bits = (uint64_t)operand_value;
                 const bool interval = operand_value >= INT64_MIN && operand_value <= (__int128)UINT64_MAX &&
                                       (operand_value < 0 ? (int64_t)bits >= range.min : bits <= range.max || bits - range.spelling <= range.max);
-                x86_semantics_expect(&tally, theirs == ours && interval == ours, "%s, 0x%016llx%016llx: x86_match %s it, its intervals %s it, the shared rule %s",
+                x86_semantics_expect(&tally, interval == ours, "%s, 0x%016llx%016llx: x86_match's intervals %s it, the shared rule %s",
                                      x86_semantics_test_name(form), (unsigned long long)((unsigned __int128)operand_value >> 64), (unsigned long long)bits,
-                                     theirs ? "takes" : "refuses", interval ? "take" : "refuse", ours ? "takes" : "refuses");
+                                     interval ? "take" : "refuse", ours ? "takes" : "refuses");
                 values += 1;
                 spellings += ours && operand_value > 0 && description->immediate_bytes < width && (uint64_t)operand_value > (uint64_t)range.max;
             }
@@ -3238,7 +3233,7 @@ static bool x86_semantics_check_match(void)
 // GNU as
 
 // With --cross-check: every form the chooser picks for the boundary values (each row, value, context and destination
-// once), printed as x86_print_instruction prints it, must assemble with GNU as to the bytes x86_encode_scalar gives it:
+// once), printed as x86_print_instruction prints it, must assemble with GNU as to the bytes x86_encode gives it:
 // GNU as picks the same encoding for the instruction the chooser picked. (A register-to-register form is printed with
 // {load} or {store}, which picks the form; the immediates' are GNU as's own choice.)
 static bool x86_semantics_check_assembler(uint64_t seed, const char* parent, bool keep)
@@ -3317,7 +3312,7 @@ static bool x86_semantics_check_assembler(uint64_t seed, const char* parent, boo
     {
         const Elf64_Shdr* header = 0;
         const uint8_t* section = x86_elf_section(bytes, object_length, SHT_PROGBITS, ".text", &header);
-        const int64_t encoded_length = x86_encode_scalar(records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0);
+        const int64_t encoded_length = x86_validate(records, count) == count ? x86_encode(records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0) : -1;
         const bool same = section != 0 && encoded_length >= 0 && header->sh_size == (uint64_t)encoded_length && memcmp(section, encoded, header->sh_size) == 0;
         if (!same && section != 0 && encoded_length >= 0)
         {

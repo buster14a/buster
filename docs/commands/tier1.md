@@ -315,13 +315,13 @@ each removed where it is made:
   the entry or a label's block, and its chain has at most four operations, at
   most sixteen predecessors take copies, and the rewrite runs up to four rounds
   (`a && b && c`). A block no reachable predecessor reaches any more is left an
-  `unreachable` alone. Its candidate scan has a scalar twin. `test-ir-optimize`
+  `unreachable` alone. `test-ir-optimize`
   runs nine IR text fixtures (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's
   found flag, a value read past the test, a switch's kept edge with mapped
   successor phis, a collapse, `a && b && c`, a label's block and a self-loop.
-  Each runs through both paths, which must agree, and is verified as complete
-  SSA. Each is executed against its input before and after the truth rewrite
-  and the optimizer.
+  Each is verified as complete SSA, folded into a frozen digest (#2924), and
+  executed against its input after threading and after the truth rewrite and
+  the optimizer. The candidate scan is checked against its definition.
 - **Stored constants** (`tier1_select.c`, `tier1_select_burs.c`). A store of a
   constant is `mov $imm, mem` at its width, an 8-byte store's where the constant
   fits a sign-extended imm32, rather than the constant's register. The candidates

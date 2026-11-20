@@ -406,7 +406,7 @@ static inline __attribute__((always_inline)) void node_machine_record(NodeMachin
 }
 
 // Record `r`'s value from `value`: into its columns where they hold it whole (node_machine_record_value gives it back
-// field for field: at most one of its integer, offset and floating value is no zero), and else into `wides`.
+// field for field: node_machine_whole), and else into `wides`.
 static void node_machine_put_value(NodeMachine* machine, uint32_t r, const CheckValue* value)
 {
     NodeMachineColumns* columns = machine->columns;
@@ -420,8 +420,7 @@ static void node_machine_put_value(NodeMachine* machine, uint32_t r, const Check
     const bool rare = high != 0 || value->imaginary_storage[0] != 0 || (value->imaginary_storage[1] & 0xffffu) != 0 || value->overload_head != 0 ||
                       value->bit_width != 0 || value->fault != CHECK_FAULT_NONE || value->fault_node != 0 || value->object_bit_offset != 0 ||
                       (uint32_t)value->category > 0x03u || (uint32_t)kind > 0x07u;
-    const uint32_t fields = (low != 0) + (offset != 0) + floating;
-    const bool whole = !rare && fields <= 1;
+    const bool whole = !rare && node_machine_whole(kind, low, offset, floating);
     columns->value_types[r] = value->type;
     columns->value_flags[r] = value->flags;
     columns->objects[r] = value->object;

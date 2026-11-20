@@ -26,8 +26,8 @@
 // pieces, the second writes the columns. Tables are copied whole, the new addresses and vector constants appended; each
 // phi's predecessor list (each piece's) and each call's arguments are appended to the extra table, their values
 // remapped. The counts are 64-bit, and an output past a u32's count is refused (IR_ERROR_LIMIT). SIMD: what pays. Every
-// function --tier1 compiles at such a target is scanned for a wide vector instruction, 64 type bytes two compares on the
-// vector path, one at a time on its scalar twin, which must agree; a function without one is returned as it is. The
+// function --tier1 compiles at such a target is scanned for a wide vector instruction, 64 type bytes two compares; a
+// function without one is returned as it is. The
 // rewrite is scalar: it runs on the functions with wide vectors alone.
 
 #ifndef BUSTER_IR_VECTOR_SPLIT_C
@@ -73,30 +73,17 @@ static bool ir_vector_split_wide(uint32_t type, uint32_t piece_type)
     return type > piece_type && type <= IR_V16I32;
 }
 
-// Whether a function has an instruction of a vector wider than `piece_type`: its type column 64 bytes two compares on
-// the vector path, one at a time on its scalar twin, which must agree.
-static bool ir_vector_split_present_path(const IrFunction* function, uint32_t piece_type, bool vector)
+// Whether a function has an instruction of a vector wider than `piece_type`: its type column 64 bytes two compares.
+static bool ir_vector_split_present(const IrFunction* function, uint32_t piece_type)
 {
-    (void)vector;
-
     bool found = false;
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
     {
-        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
-        {
-            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
-            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
-            const __mmask64 above = _mm512_mask_cmpgt_epu8_mask(active, types, _mm512_set1_epi8((char)piece_type));
-            found = _mm512_mask_cmplt_epu8_mask(above, types, _mm512_set1_epi8(IR_V16I32 + 1)) != 0;
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
-        {
-            found = ir_vector_split_wide(function->type[i], piece_type);
-        }
+        const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+        const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+        const __mmask64 above = _mm512_mask_cmpgt_epu8_mask(active, types, _mm512_set1_epi8((char)piece_type));
+        found = _mm512_mask_cmplt_epu8_mask(above, types, _mm512_set1_epi8(IR_V16I32 + 1)) != 0;
     }
     return found;
 }
@@ -432,14 +419,14 @@ static void ir_vector_split_pass(IrVectorSplitWork* work)
 }
 
 // The split of `function` into pieces of `piece_bytes` (16 or 32; 64, a target with every width, splits nothing).
-static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, bool vector, IrVectorSplitResult* result)
+static __attribute__((unused)) IrCheck ir_vector_split(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, IrVectorSplitResult* result)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     *result = (IrVectorSplitResult){ .function = *function };
     const uint32_t piece_type = piece_bytes == 16 ? IR_V4I32 : piece_bytes == 32 ? IR_V8I32 : IR_V16I32;
-    const bool present = output != scratch && piece_type != IR_V16I32 && ir_vector_split_present_path(function, piece_type, vector);
+    const bool present = output != scratch && piece_type != IR_V16I32 && ir_vector_split_present(function, piece_type);
     if (output == scratch || (piece_bytes != 16 && piece_bytes != 32 && piece_bytes != 64))
     {
         check.error = IR_ERROR_STRUCTURE;
@@ -596,16 +583,6 @@ static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_b
     }
     arena_pop_to(scratch, scratch_mark);
     return check;
-}
-
-static __attribute__((unused)) IrCheck ir_vector_split(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, IrVectorSplitResult* result)
-{
-    return ir_vector_split_path(function, piece_bytes, output, scratch, true, result);
-}
-
-static __attribute__((unused)) IrCheck ir_vector_split_scalar(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, IrVectorSplitResult* result)
-{
-    return ir_vector_split_path(function, piece_bytes, output, scratch, false, result);
 }
 
 #endif

@@ -6,7 +6,7 @@
 // input's immutable tables: both the input and output arena must remain alive until that optimizer materializes its
 // result. The input is never mutated, including shared/overlapping extra slices.
 //
-// A 64-byte opcode mask finds conditional terminators, with an exact scalar twin and no padded-tail reads. A region is
+// A 64-byte opcode mask finds conditional terminators, with no padded-tail reads. A region is
 // a reachable head ending in a conditional branch whose two sides reach one join: each side is either the join itself
 // (a triangle) or an arm, a chain of at most four blocks, each with the previous block (or the head) as its only
 // reachable predecessor and an unconditional branch to the next. The join's phis take at most four selects.
@@ -179,7 +179,6 @@ struct IrIfConvertWork
     uint32_t recurrences;
     // An accepted head could be an arm of an outer region in the next round.
     bool nested;
-    bool scalar;
 };
 
 _Static_assert(IR_OP_COUNT == 70, "a new operation needs its class in ir_if_convert_barriers");
@@ -261,26 +260,15 @@ static const uint8_t ir_if_convert_numbered[BUSTER_IR_OP_TABLE] = {
     [IR_LOAD] = 1,
 };
 
-static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t count, bool scalar)
+static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t count)
 {
     uint64_t candidates = 0;
     if (count != 0 && count <= BUSTER_IR_IF_CONVERT_BATCH)
     {
-        if (!scalar)
-        {
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - count);
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
-            candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
-        }
-        else
-        {
-            for (uint32_t lane = 0; lane < count; lane += 1)
-            {
-                candidates |= (uint64_t)(operations[lane] == IR_CBR) << lane;
-            }
-        }
+        const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - count);
+        const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
+        candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
     }
-    (void)scalar;
     return candidates;
 }
 
@@ -289,92 +277,58 @@ static bool ir_if_convert_scalar_type(uint32_t type)
     return (type >= IR_I1 && type <= IR_I64) || type == IR_PTR;
 }
 
-// The last row of [first, end) whose class has one of `classes`' bits, or BUSTER_IR_NONE. Its vector twin looks the
-// classes up 64 opcodes at a time (vpermi2b over the 128-entry table) and tests the observable loads' flags beside.
-static uint32_t ir_if_convert_barrier(const IrFunction* f, uint32_t first, uint32_t end, uint32_t classes, bool scalar)
+// The last row of [first, end) whose class has one of `classes`' bits, or BUSTER_IR_NONE: the classes looked up 64
+// opcodes at a time (vpermi2b over the 128-entry table), the observable loads' flags tested beside.
+static uint32_t ir_if_convert_barrier(const IrFunction* f, uint32_t first, uint32_t end, uint32_t classes)
 {
     uint32_t found = BUSTER_IR_NONE;
-    if (!scalar)
+    const __m512i low = _mm512_loadu_si512(ir_if_convert_barriers);
+    const __m512i high = _mm512_loadu_si512(ir_if_convert_barriers + 64);
+    uint32_t limit = end;
+    while (limit > first && found == BUSTER_IR_NONE)
     {
-        const __m512i low = _mm512_loadu_si512(ir_if_convert_barriers);
-        const __m512i high = _mm512_loadu_si512(ir_if_convert_barriers + 64);
-        uint32_t limit = end;
-        while (limit > first && found == BUSTER_IR_NONE)
+        const uint32_t start = limit - first > BUSTER_IR_IF_CONVERT_BATCH ? limit - BUSTER_IR_IF_CONVERT_BATCH : first;
+        const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - (limit - start));
+        const __m512i op = _mm512_maskz_loadu_epi8(valid, f->op + start);
+        const __m512i flags = _mm512_maskz_loadu_epi8(valid, f->flags + start);
+        const __m512i class = _mm512_permutex2var_epi8(low, op, high);
+        uint64_t hits = _mm512_mask_test_epi8_mask(valid, class, _mm512_set1_epi8((char)classes));
+        if ((classes & BUSTER_IR_IF_CONVERT_WRITE) != 0)
         {
-            const uint32_t start = limit - first > BUSTER_IR_IF_CONVERT_BATCH ? limit - BUSTER_IR_IF_CONVERT_BATCH : first;
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - (limit - start));
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, f->op + start);
-            const __m512i flags = _mm512_maskz_loadu_epi8(valid, f->flags + start);
-            const __m512i class = _mm512_permutex2var_epi8(low, op, high);
-            uint64_t hits = _mm512_mask_test_epi8_mask(valid, class, _mm512_set1_epi8((char)classes));
-            if ((classes & BUSTER_IR_IF_CONVERT_WRITE) != 0)
-            {
-                hits |= _mm512_mask_cmpeq_epi8_mask(valid, op, _mm512_set1_epi8(IR_LOAD)) & _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_IR_OBSERVABLE));
-            }
-            found = hits != 0 ? start + 63 - (uint32_t)__builtin_clzll(hits) : BUSTER_IR_NONE;
-            limit = start;
+            hits |= _mm512_mask_cmpeq_epi8_mask(valid, op, _mm512_set1_epi8(IR_LOAD)) & _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_IR_OBSERVABLE));
         }
+        found = hits != 0 ? start + 63 - (uint32_t)__builtin_clzll(hits) : BUSTER_IR_NONE;
+        limit = start;
     }
-    else
-    {
-        for (uint32_t i = end; i > first && found == BUSTER_IR_NONE; i -= 1)
-        {
-            const uint32_t row = i - 1;
-            const uint32_t op = f->op[row];
-            const bool observable = op == IR_LOAD && (f->flags[row] & BUSTER_IR_OBSERVABLE) != 0 && (classes & BUSTER_IR_IF_CONVERT_WRITE) != 0;
-            found = (ir_if_convert_barriers[op] & classes) != 0 || observable ? row : BUSTER_IR_NONE;
-        }
-    }
-    (void)scalar;
     return found;
 }
 
 // The rows of [first, first + count), count 1 to 16, that pass a key's filter, as bits; the caller checks each.
-static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32_t count, IrIfConvertKey key, bool scalar)
+static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32_t count, IrIfConvertKey key)
 {
-    uint32_t matches = 0;
-    if (!scalar)
+    const __mmask16 valid = (__mmask16)(0xffffu >> (BUSTER_IR_IF_CONVERT_LANES - count));
+    __mmask16 m = _mm_mask_cmpeq_epi8_mask(valid, _mm_maskz_loadu_epi8(valid, f->op + first), _mm_set1_epi8((char)key.op));
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) != 0)
     {
-        const __mmask16 valid = (__mmask16)(0xffffu >> (BUSTER_IR_IF_CONVERT_LANES - count));
-        __mmask16 m = _mm_mask_cmpeq_epi8_mask(valid, _mm_maskz_loadu_epi8(valid, f->op + first), _mm_set1_epi8((char)key.op));
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) != 0)
-        {
-            m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->type + first), _mm_set1_epi8((char)key.type));
-        }
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) != 0)
-        {
-            m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->flags + first), _mm_set1_epi8((char)key.flags));
-        }
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_A) != 0)
-        {
-            m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->a + first), _mm512_set1_epi32((int)key.a));
-        }
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_B) != 0)
-        {
-            m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->b + first), _mm512_set1_epi32((int)key.b));
-        }
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_C) != 0)
-        {
-            m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->c + first), _mm512_set1_epi32((int)key.c));
-        }
-        matches = m;
+        m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->type + first), _mm_set1_epi8((char)key.type));
     }
-    else
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) != 0)
     {
-        for (uint32_t lane = 0; lane < count; lane += 1)
-        {
-            const uint32_t row = first + lane;
-            bool match = f->op[row] == key.op;
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) == 0 || f->type[row] == key.type);
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) == 0 || f->flags[row] == key.flags);
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_A) == 0 || f->a[row] == key.a);
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_B) == 0 || f->b[row] == key.b);
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_C) == 0 || f->c[row] == key.c);
-            matches |= (uint32_t)match << lane;
-        }
+        m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->flags + first), _mm_set1_epi8((char)key.flags));
     }
-    (void)scalar;
-    return matches;
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_A) != 0)
+    {
+        m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->a + first), _mm512_set1_epi32((int)key.a));
+    }
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_B) != 0)
+    {
+        m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->b + first), _mm512_set1_epi32((int)key.b));
+    }
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_C) != 0)
+    {
+        m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->c + first), _mm512_set1_epi32((int)key.c));
+    }
+    return m;
 }
 
 // Whether row q computes row r's value: the same operation, type, flags and fields, value operands compared by their
@@ -430,7 +384,7 @@ static uint32_t ir_if_convert_equal(const IrIfConvertWork* work, uint32_t first,
     while (limit > first && found == BUSTER_IR_NONE)
     {
         const uint32_t start = limit - first > BUSTER_IR_IF_CONVERT_LANES ? limit - BUSTER_IR_IF_CONVERT_LANES : first;
-        uint32_t matches = ir_if_convert_filter(f, start, limit - start, key, work->scalar);
+        uint32_t matches = ir_if_convert_filter(f, start, limit - start, key);
         while (matches != 0 && found == BUSTER_IR_NONE)
         {
             const uint32_t lane = 31 - (uint32_t)__builtin_clz(matches);
@@ -457,9 +411,9 @@ static bool ir_if_convert_accessed(const IrIfConvertWork* work, uint32_t first, 
     {
         const uint32_t start = limit - first > BUSTER_IR_IF_CONVERT_LANES ? limit - BUSTER_IR_IF_CONVERT_LANES : first;
         key.op = IR_LOAD;
-        uint32_t matches = ir_if_convert_filter(f, start, limit - start, key, work->scalar);
+        uint32_t matches = ir_if_convert_filter(f, start, limit - start, key);
         key.op = IR_STORE;
-        matches |= ir_if_convert_filter(f, start, limit - start, key, work->scalar);
+        matches |= ir_if_convert_filter(f, start, limit - start, key);
         while (matches != 0 && !found)
         {
             const uint32_t q = start + (uint32_t)__builtin_ctz(matches);
@@ -768,8 +722,8 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
     uint32_t released = BUSTER_IR_NONE;
     if (safe && row_count != 0)
     {
-        written = ir_if_convert_barrier(f, head_first, terminator, BUSTER_IR_IF_CONVERT_WRITE, work->scalar);
-        released = ir_if_convert_barrier(f, head_first, terminator, BUSTER_IR_IF_CONVERT_RELEASE, work->scalar);
+        written = ir_if_convert_barrier(f, head_first, terminator, BUSTER_IR_IF_CONVERT_WRITE);
+        released = ir_if_convert_barrier(f, head_first, terminator, BUSTER_IR_IF_CONVERT_RELEASE);
     }
     const uint32_t readable = written == BUSTER_IR_NONE ? head_first : written + 1;
     const uint32_t proven = released == BUSTER_IR_NONE ? head_first : released + 1;
@@ -1254,27 +1208,22 @@ static bool ir_if_convert_fold_cast(IrFunction* function, uint32_t row)
     return operation != IR_OP_COUNT;
 }
 
-static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
+// The narrowing casts among `lanes` (1 to 64) operations, a bit each.
+static uint64_t ir_if_convert_truncations(const uint8_t* operations, uint32_t lanes)
+{
+    const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - lanes);
+    const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
+    return valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_TRUNC));
+}
+
+static void ir_if_convert_fold_casts(IrFunction* function)
 {
     const uint32_t count = function->instruction_count;
     const uint8_t* const operations = function->op;
     for (uint64_t first = 0; first < count; first += BUSTER_IR_IF_CONVERT_BATCH)
     {
         const uint32_t lanes = count - first < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first : BUSTER_IR_IF_CONVERT_BATCH;
-        uint64_t candidates = 0;
-        if (!scalar)
-        {
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - lanes);
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, operations + first);
-            candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_TRUNC));
-        }
-        else
-        {
-            for (uint32_t lane = 0; lane < lanes; lane += 1)
-            {
-                candidates |= (uint64_t)(operations[first + lane] == IR_TRUNC) << lane;
-            }
-        }
+        uint64_t candidates = ir_if_convert_truncations(operations + first, lanes);
         while (candidates != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
@@ -1282,15 +1231,13 @@ static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
             candidates &= candidates - 1;
         }
     }
-    (void)scalar;
 }
 
 // One round over `function`: its regions found, then rewritten into output. A round without regions borrows it.
-static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_candidate, Arena* output, Arena* scratch, bool scalar, IrIfConvertResult* converted, bool* again)
+static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_candidate, Arena* output, Arena* scratch, IrIfConvertResult* converted, bool* again)
 {
     IrIfConvertWork work = {
         .function = function,
-        .scalar = scalar,
     };
     const uint32_t count = function->instruction_count;
     const uint8_t* const operations = function->op;
@@ -1359,7 +1306,7 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
         for (uint64_t first = first_candidate; first < count; first += BUSTER_IR_IF_CONVERT_BATCH)
         {
             const uint32_t lanes = count - first < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first : BUSTER_IR_IF_CONVERT_BATCH;
-            uint64_t candidates = ir_if_convert_candidates(operations + first, lanes, scalar);
+            uint64_t candidates = ir_if_convert_candidates(operations + first, lanes);
             while (candidates != 0)
             {
                 ir_if_convert_region(&work, (uint32_t)first + (uint32_t)__builtin_ctzll(candidates));
@@ -1375,8 +1322,8 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
         {
             // The new selects' truth values tested against zero, as i1 selects (ir_truth.c), on the owned columns.
             // Then trunc(zext/sext x) becomes one cast of x, so a sunk _Bool conversion is not a second arm row (#2846).
-            ir_truth_simplify_values(&rewritten, scalar);
-            ir_if_convert_fold_casts(&rewritten, scalar);
+            ir_truth_simplify_values(&rewritten);
+            ir_if_convert_fold_casts(&rewritten);
             converted->function = rewritten;
             converted->regions += work.region_count;
             converted->selects += work.select_count;
@@ -1392,7 +1339,7 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
     return check;
 }
 
-static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* scratch, bool scalar, IrIfConvertResult* result)
+static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* scratch, IrIfConvertResult* result)
 {
     const uint64_t om = output->length;
     const uint64_t sm = scratch->length;
@@ -1407,7 +1354,7 @@ static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* s
         while (first_candidate < count && !candidate)
         {
             const uint32_t lanes = count - first_candidate < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first_candidate : BUSTER_IR_IF_CONVERT_BATCH;
-            candidate = ir_if_convert_candidates(operations + first_candidate, lanes, scalar) != 0;
+            candidate = ir_if_convert_candidates(operations + first_candidate, lanes) != 0;
             first_candidate += candidate ? 0 : BUSTER_IR_IF_CONVERT_BATCH;
         }
     }
@@ -1422,7 +1369,7 @@ static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* s
         const uint64_t mark = scratch->length;
         const IrFunction input = converted.function;
         // A later round's input has no conditional branch before the first one's.
-        check = ir_if_convert_round(&input, round == 0 ? first_candidate : 0, output, scratch, scalar, &converted, &again);
+        check = ir_if_convert_round(&input, round == 0 ? first_candidate : 0, output, scratch, &converted, &again);
         again = again && check.error == IR_OK;
         arena_pop_to(scratch, mark);
     }

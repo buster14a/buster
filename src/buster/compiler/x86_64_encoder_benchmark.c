@@ -6,19 +6,21 @@
 // The x86-64 encoder benchmark: times x86_encode at each batch width (instructions per loop iteration) and output
 // store, x86_encode_apx's loop at 64 and 16 per iteration (whose instructions here have no registers 16 to 31, and so
 // the same bytes) and a one-instruction-at-a-time scalar loop, on a synthetic instruction stream, after checking that
-// they all produce the same bytes, offsets and fixup ends; or with --mode32 or --mode16, the loops of 32-bit or 16-bit
-// mode at 64 and 16 per iteration (x86_encode_mode32's or x86_encode_mode16's is the second) and the mode's scalar
-// loop.
+// they all produce the same bytes, offsets and fixup ends; or with --mode32, --mode16, --apx or --address32, the loops
+// of 32-bit or 16-bit mode, of APX's registers or of 32-bit addresses at 64 and 16 per iteration (the entry point's is
+// the second) and its scalar loop.
 //
-// Usage: build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform | --vector] [--mode32 | --mode16]
-//                                             [--offsets] [--fixups] [--after-scalar MS] [--seed N] [--only NAME]
+// Usage: build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform | --vector]
+//                                             [--mode32 | --mode16 | --apx | --address32] [--offsets] [--fixups]
+//                                             [--after-scalar MS] [--seed N] [--only NAME]
 //
 // The stream has --count instructions (BUSTER_X86_BENCHMARK_DEFAULT_COUNT by default): a mix shaped like compiler
 // output (x86_benchmark_patterns: register moves, stack loads and stores, calls, branches, arithmetic, some SSE); with
 // --vector, like vectorized compiler output (x86_benchmark_vector_patterns: AVX-512 with opmasks and broadcasts, AVX2,
 // BMI and the loop around them); with --mode32, like 32-bit compiler output (x86_benchmark_patterns_32), and with
-// --mode16, like 16-bit code (x86_benchmark_patterns_16); or with --uniform, random instructions of every form (in the
-// mode). --section N encodes it in calls
+// --mode16, like 16-bit code (x86_benchmark_patterns_16); with --apx, the compiler mix with general registers 16 to 31
+// in the forms that can have them, and with --address32, the compiler mix with 32-bit addresses; or with --uniform,
+// random instructions of every form (in the mode). --section N encodes it in calls
 // of N instructions, each appending to the same output, like a compiler encoding a function at a time; otherwise one
 // call encodes it all. --offsets has every call store each instruction's offset too; --fixups marks the instructions a
 // code generator would have fixups for (calls and RIP-relative operands, x86_benchmark_mark) and has every call
@@ -391,39 +393,46 @@ static uint32_t x86_benchmark_below(uint64_t* state, uint32_t bound)
 
 // The mode of the stream and of the encoders (--mode32 and --mode16).
 static X86EncoderMode x86_benchmark_mode;
+// With --apx, whether the instruction being made may take general registers 16 to 31 (x86_form_has_apx_registers).
+static bool x86_benchmark_extended;
 
 // A register of the class (in a form of the family), without the high byte registers: 0 to 15, or 31 for an EVEX
-// form's vector registers, or 7 for an opmask; or in 16- and 32-bit modes, 0 to 7, AH to BH for a legacy byte
-// register's 4 to 7, and a segment register but CS (which MOV can't write).
+// form's vector registers or, with --apx, a general register in a form that can have 16 to 31, or 7 for an opmask; or in
+// 16- and 32-bit modes, 0 to 7, AH to BH for a legacy byte register's 4 to 7, and a segment register but CS (which MOV
+// can't write).
 static uint8_t x86_benchmark_register(uint64_t* state, uint16_t operand, uint8_t family)
 {
     static const uint8_t segments[] = { 0, 2, 3, 4, 5 };
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
     const bool legacy = x86_mode_is_legacy(x86_benchmark_mode);
-    const uint32_t count = class == BUSTER_X86_CLASS_OPMASK || legacy                                                ? 8
-                           : class >= BUSTER_X86_CLASS_XMM && class <= BUSTER_X86_CLASS_ZMM && family == BUSTER_X86_FAMILY_EVEX ? 32
-                                                                                                                          : 16;
+    const bool extended = x86_benchmark_extended && class >= BUSTER_X86_CLASS_GPR8 && class <= BUSTER_X86_CLASS_GPR64;
+    const uint32_t count = class == BUSTER_X86_CLASS_OPMASK || legacy                                                              ? 8
+                           : extended || (class >= BUSTER_X86_CLASS_XMM && class <= BUSTER_X86_CLASS_ZMM && family == BUSTER_X86_FAMILY_EVEX) ? 32
+                                                                                                                                        : 16;
     const uint8_t number = (uint8_t)x86_benchmark_below(state, count);
     const bool high_byte = legacy && class == BUSTER_X86_CLASS_GPR8 && family == BUSTER_X86_FAMILY_LEGACY && number >= 4;
     const uint8_t result = (uint8_t)(number | (high_byte ? BUSTER_X86_REGISTER_HIGH_BYTE : 0));
     return legacy && class == BUSTER_X86_CLASS_SEGMENT ? segments[number % BUSTER_ARRAY_LENGTH(segments)] : result;
 }
 
-// A general register for a memory operand's base or index: 0 to 7 in 32-bit mode, and BX, BP, SI or DI in 16-bit mode.
+// A general register for a memory operand's base or index: 0 to 7 in 32-bit mode, BX, BP, SI or DI in 16-bit mode, and
+// 0 to 31 with --apx in a form that can have 16 to 31.
 static uint8_t x86_benchmark_address_register(uint64_t* state)
 {
     static const uint8_t registers16[] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_RSI, X86_REGISTER_RDI };
     return x86_benchmark_mode == X86_ENCODER_MODE_16   ? registers16[x86_benchmark_below(state, 4)]
            : x86_benchmark_mode == X86_ENCODER_MODE_32 ? (uint8_t)x86_benchmark_below(state, 8)
-                                                       : (uint8_t)x86_benchmark_below(state, 16);
+                                                       : (uint8_t)x86_benchmark_below(state, x86_benchmark_extended ? 32 : 16);
 }
 
 // Whether the mode's encoders can encode the instruction.
 static bool x86_benchmark_is_valid(const X86Instruction* instruction)
 {
-    return x86_benchmark_mode == X86_ENCODER_MODE_32   ? x86_instruction_is_valid_32(instruction)
-           : x86_benchmark_mode == X86_ENCODER_MODE_16 ? x86_instruction_is_valid_16(instruction)
-                                                       : x86_instruction_is_valid(instruction);
+    return x86_benchmark_mode == X86_ENCODER_MODE_32          ? x86_instruction_is_valid_32(instruction)
+           : x86_benchmark_mode == X86_ENCODER_MODE_16        ? x86_instruction_is_valid_16(instruction)
+           : x86_benchmark_mode == X86_ENCODER_MODE_APX       ? x86_instruction_is_valid_apx(instruction)
+           : x86_benchmark_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_instruction_is_valid_address32(instruction)
+                                                              : x86_instruction_is_valid(instruction);
 }
 
 // The register operands the form has besides rm: reg and vvvv.
@@ -560,6 +569,7 @@ static X86Instruction uniform_instruction(uint64_t* state)
     {
         const uint16_t form_index = (uint16_t)(1 + x86_benchmark_below(state, X86_FORM_COUNT - 1));
         const X86FormDescription* form = &x86_form_descriptions[form_index];
+        x86_benchmark_extended = x86_benchmark_mode == X86_ENCODER_MODE_APX && x86_form_has_apx_registers(form_index);
         result = (X86Instruction){ .form = form_index };
         x86_benchmark_registers(state, form, &result);
         if (form->rm != BUSTER_X86_OPERAND_NONE)
@@ -624,7 +634,15 @@ static bool make_stream(X86Instruction* instructions, uint64_t count, const X86B
                 pick -= patterns[p].weight;
                 p += 1;
             }
+            // With --apx, registers 16 to 31 where the form can have them; where the pattern's operands can't take one
+            // (an index that would read as none), the pattern again without them.
+            x86_benchmark_extended = x86_benchmark_mode == X86_ENCODER_MODE_APX && x86_form_has_apx_registers(patterns[p].form);
             instructions[i] = pattern_instruction(&state, &patterns[p]);
+            if (x86_benchmark_extended && !x86_benchmark_is_valid(&instructions[i]))
+            {
+                x86_benchmark_extended = false;
+                instructions[i] = pattern_instruction(&state, &patterns[p]);
+            }
             result = result && x86_benchmark_is_valid(&instructions[i]);
         }
     }
@@ -681,6 +699,18 @@ __attribute__((noinline)) static int64_t encode_scalar_loop(const X86Instruction
                                                             uint32_t* fixup_ends)
 {
     return scalar_loop(instructions, count, output, offsets, fixup_ends, X86_ENCODER_MODE_64);
+}
+
+__attribute__((noinline)) static int64_t encode_scalar_loop_apx(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets,
+                                                                uint32_t* fixup_ends)
+{
+    return scalar_loop(instructions, count, output, offsets, fixup_ends, X86_ENCODER_MODE_APX);
+}
+
+__attribute__((noinline)) static int64_t encode_scalar_loop_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets,
+                                                                      uint32_t* fixup_ends)
+{
+    return scalar_loop(instructions, count, output, offsets, fixup_ends, X86_ENCODER_MODE_ADDRESS32);
 }
 
 __attribute__((noinline)) static int64_t encode_scalar_loop_32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets,
@@ -745,8 +775,21 @@ static const X86BenchmarkImplementation x86_benchmark_implementations[] = {
 };
 #define BUSTER_X86_BENCHMARK_IMPLEMENTATIONS BUSTER_ARRAY_LENGTH(x86_benchmark_implementations)
 
-// The same for 32-bit and 16-bit modes (--mode32 and --mode16): the mode's scalar loop and its loops at 64 and 16 per
-// iteration (x86_encode_mode32's or x86_encode_mode16's).
+// The same for APX's registers and 32-bit addresses (--apx and --address32), and for 32-bit and 16-bit modes (--mode32
+// and --mode16): the entry point's scalar loop and its loops at 64 and 16 per iteration (the entry point's is the
+// second).
+static const X86BenchmarkImplementation x86_benchmark_implementations_apx[] = {
+    { "scalar", encode_scalar_loop_apx },
+    { "x86_encode_64_apx", x86_encode_64_apx },
+    { "x86_encode_16_apx", x86_encode_16_apx },
+};
+
+static const X86BenchmarkImplementation x86_benchmark_implementations_address32[] = {
+    { "scalar", encode_scalar_loop_address32 },
+    { "x86_encode_64_address32", x86_encode_64_address32 },
+    { "x86_encode_16_address32", x86_encode_16_address32 },
+};
+
 static const X86BenchmarkImplementation x86_benchmark_implementations_32[] = {
     { "scalar", encode_scalar_loop_32 },
     { "x86_encode_64_mode32", x86_encode_64_mode32 },
@@ -931,10 +974,11 @@ int run_x86_encoder_benchmark(int argc, char** argv)
         {
             vector = true;
         }
-        else if (strcmp(argv[i], "--mode32") == 0 || strcmp(argv[i], "--mode16") == 0)
+        else if (strcmp(argv[i], "--mode32") == 0 || strcmp(argv[i], "--mode16") == 0 || strcmp(argv[i], "--apx") == 0 || strcmp(argv[i], "--address32") == 0)
         {
             valid = valid && mode == X86_ENCODER_MODE_64;
-            mode = strcmp(argv[i], "--mode32") == 0 ? X86_ENCODER_MODE_32 : X86_ENCODER_MODE_16;
+            mode = strcmp(argv[i], "--mode32") == 0 ? X86_ENCODER_MODE_32 : strcmp(argv[i], "--mode16") == 0 ? X86_ENCODER_MODE_16 : strcmp(argv[i], "--apx") == 0 ? X86_ENCODER_MODE_APX
+                                                                                                                                                    : X86_ENCODER_MODE_ADDRESS32;
         }
         else if (strcmp(argv[i], "--offsets") == 0)
         {
@@ -961,12 +1005,16 @@ int run_x86_encoder_benchmark(int argc, char** argv)
     }
     section = section == 0 ? count : section;
     x86_benchmark_mode = mode;
-    const X86BenchmarkImplementation* implementations = mode == X86_ENCODER_MODE_32   ? x86_benchmark_implementations_32
-                                                        : mode == X86_ENCODER_MODE_16 ? x86_benchmark_implementations_16
-                                                                                      : x86_benchmark_implementations;
-    const uint64_t implementation_count = mode == X86_ENCODER_MODE_32   ? BUSTER_ARRAY_LENGTH(x86_benchmark_implementations_32)
-                                          : mode == X86_ENCODER_MODE_16 ? BUSTER_ARRAY_LENGTH(x86_benchmark_implementations_16)
-                                                                        : BUSTER_X86_BENCHMARK_IMPLEMENTATIONS;
+    const X86BenchmarkImplementation* implementations = mode == X86_ENCODER_MODE_32          ? x86_benchmark_implementations_32
+                                                        : mode == X86_ENCODER_MODE_16        ? x86_benchmark_implementations_16
+                                                        : mode == X86_ENCODER_MODE_APX       ? x86_benchmark_implementations_apx
+                                                        : mode == X86_ENCODER_MODE_ADDRESS32 ? x86_benchmark_implementations_address32
+                                                                                             : x86_benchmark_implementations;
+    const uint64_t implementation_count = mode == X86_ENCODER_MODE_32          ? BUSTER_ARRAY_LENGTH(x86_benchmark_implementations_32)
+                                          : mode == X86_ENCODER_MODE_16        ? BUSTER_ARRAY_LENGTH(x86_benchmark_implementations_16)
+                                          : mode == X86_ENCODER_MODE_APX       ? BUSTER_ARRAY_LENGTH(x86_benchmark_implementations_apx)
+                                          : mode == X86_ENCODER_MODE_ADDRESS32 ? BUSTER_ARRAY_LENGTH(x86_benchmark_implementations_address32)
+                                                                               : BUSTER_X86_BENCHMARK_IMPLEMENTATIONS;
     const X86BenchmarkPattern* patterns = mode == X86_ENCODER_MODE_32 ? x86_benchmark_patterns_32
                                           : mode == X86_ENCODER_MODE_16 ? x86_benchmark_patterns_16
                                           : vector                      ? x86_benchmark_vector_patterns
@@ -985,10 +1033,10 @@ int run_x86_encoder_benchmark(int argc, char** argv)
     uint32_t* fixup_ends[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS] = { 0 };
     if (!valid || count == 0 || count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS || (uniform && vector) || (vector && mode != X86_ENCODER_MODE_64))
     {
-        fprintf(stderr, "usage: %s [--count N] [--section N] [--uniform | --vector] [--mode32 | --mode16] [--offsets] [--fixups] [--after-scalar MS] [--seed N] [--only NAME]\n",
+        fprintf(stderr, "usage: %s [--count N] [--section N] [--uniform | --vector] [--mode32 | --mode16 | --apx | --address32] [--offsets] [--fixups] [--after-scalar MS] [--seed N] [--only NAME]\n",
                 argv[0]);
     }
-    else if (!x86_encoder_initialize() || !x86_encoder_initialize_apx() || !x86_encoder_initialize_legacy())
+    else if (!x86_encoder_initialize() || !x86_encoder_initialize_apx() || !x86_encoder_initialize_address32() || !x86_encoder_initialize_legacy())
     {
         fprintf(stderr, "a form doesn't fit in a template\n");
     }
@@ -1107,7 +1155,11 @@ int run_x86_encoder_benchmark(int argc, char** argv)
             {
                 snprintf(after_text, sizeof(after_text), ", each after %lu ms of the scalar loop", (unsigned long)after_scalar);
             }
-            const char* mode_words = mode == X86_ENCODER_MODE_32 ? " in 32-bit mode" : mode == X86_ENCODER_MODE_16 ? " in 16-bit mode" : "";
+            const char* mode_words = mode == X86_ENCODER_MODE_32          ? " in 32-bit mode"
+                                     : mode == X86_ENCODER_MODE_16        ? " in 16-bit mode"
+                                     : mode == X86_ENCODER_MODE_APX       ? " with APX's registers"
+                                     : mode == X86_ENCODER_MODE_ADDRESS32 ? " with 32-bit addresses"
+                                                                          : "";
             printf("%lu %s instructions%s, %lld bytes (%.2f per instruction), in calls of %lu%s%s; %d interleaved passes of %lu runs%s, medians (cycles also "
                    "min-max):\n",
                    (unsigned long)count, uniform ? "uniform" : vector ? "vector" : "mixed", mode_words, (long long)lengths[0], (double)lengths[0] / (double)count,

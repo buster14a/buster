@@ -90,83 +90,51 @@ static uint16_t check_input_warning_block(CheckInputReader* reader, uint32_t blo
     uint8_t* ignored = warnings != 0 ? reader->output->constant_warning_ignored : 0;
     uint8_t* suppressed = reader->warning_suppressed;
     uint16_t summary = 0;
-    if (reader->parser->options.scalar)
+    const __mmask64 present = finish - begin == BUSTER_CHECK_WARNING_BLOCK ? UINT64_MAX : (UINT64_C(1) << (finish - begin)) - 1;
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i contexts = reader->constant_contexts != 0 ? _mm512_maskz_loadu_epi8(present, reader->constant_contexts + begin) : zero;
+    const __mmask64 active = present & _mm512_testn_epi8_mask(contexts, _mm512_set1_epi8(BUSTER_CHECK_CONSTANT_BOUND_CONTEXT));
+    const uint32_t left = first > begin ? first - begin : 0;
+    const uint32_t right = end < finish ? end - begin : finish - begin;
+    const __mmask64 through = right == BUSTER_CHECK_WARNING_BLOCK ? UINT64_MAX : (UINT64_C(1) << right) - 1;
+    const __mmask64 selected = active & through & (UINT64_MAX << left);
+    const __m512i keep = _mm512_set1_epi8((char)~clear);
+    __m512i pending = zero;
+    if (warnings != 0)
     {
-        for (uint32_t token = begin; token < finish; token += 1)
-        {
-            const bool independent = reader->constant_contexts != 0 && (reader->constant_contexts[token] & BUSTER_CHECK_CONSTANT_BOUND_CONTEXT) != 0;
-            if (!independent)
-            {
-                if (token >= first && token < end)
-                {
-                    if (warnings != 0)
-                    {
-                        check_input_constant_warning_set(reader->output, token, warnings[token] & (uint8_t)~clear);
-                    }
-                    if (ignored != 0)
-                    {
-                        ignored[token] &= (uint8_t)~clear;
-                    }
-                    if (suppressed != 0)
-                    {
-                        check_input_rare_claim(reader, suppressed + token);
-                        suppressed[token] |= suppress;
-                    }
-                }
-                summary |= warnings != 0 ? warnings[token] : 0;
-                summary |= ignored != 0 ? ignored[token] : 0;
-                summary |= suppressed != 0 ? (uint16_t)(uint8_t)~suppressed[token] << 8 : 0;
-            }
-        }
+        __m512i bytes = _mm512_maskz_loadu_epi8(present, warnings + begin);
+        const __mmask64 before = selected & _mm512_cmpneq_epi8_mask(bytes, zero);
+        bytes = _mm512_mask_mov_epi8(bytes, selected, _mm512_and_si512(bytes, keep));
+        const __mmask64 after = selected & _mm512_cmpneq_epi8_mask(bytes, zero);
+        reader->output->constant_warning_count -= (uint32_t)_mm_popcnt_u64(before) - (uint32_t)_mm_popcnt_u64(after);
+        _mm512_mask_storeu_epi8(warnings + begin, selected, bytes);
+        pending = _mm512_or_si512(pending, bytes);
     }
-    else
+    if (ignored != 0)
     {
-        const __mmask64 present = finish - begin == BUSTER_CHECK_WARNING_BLOCK ? UINT64_MAX : (UINT64_C(1) << (finish - begin)) - 1;
-        const __m512i zero = _mm512_setzero_si512();
-        const __m512i contexts = reader->constant_contexts != 0 ? _mm512_maskz_loadu_epi8(present, reader->constant_contexts + begin) : zero;
-        const __mmask64 active = present & _mm512_testn_epi8_mask(contexts, _mm512_set1_epi8(BUSTER_CHECK_CONSTANT_BOUND_CONTEXT));
-        const uint32_t left = first > begin ? first - begin : 0;
-        const uint32_t right = end < finish ? end - begin : finish - begin;
-        const __mmask64 through = right == BUSTER_CHECK_WARNING_BLOCK ? UINT64_MAX : (UINT64_C(1) << right) - 1;
-        const __mmask64 selected = active & through & (UINT64_MAX << left);
-        const __m512i keep = _mm512_set1_epi8((char)~clear);
-        __m512i pending = zero;
-        if (warnings != 0)
+        __m512i bytes = _mm512_maskz_loadu_epi8(present, ignored + begin);
+        bytes = _mm512_mask_mov_epi8(bytes, selected, _mm512_and_si512(bytes, keep));
+        _mm512_mask_storeu_epi8(ignored + begin, selected, bytes);
+        pending = _mm512_or_si512(pending, bytes);
+    }
+    uint32_t low = (uint32_t)_mm512_reduce_or_epi32(_mm512_maskz_mov_epi8(active, pending));
+    low |= low >> 16;
+    low |= low >> 8;
+    summary = (uint8_t)low;
+    if (suppressed != 0)
+    {
+        __m512i bytes = _mm512_maskz_loadu_epi8(present, suppressed + begin);
+        bytes = _mm512_mask_mov_epi8(bytes, selected, _mm512_or_si512(bytes, _mm512_set1_epi8((char)suppress)));
+        // The claim's store is of a byte this reader writes: lanes share a block at their bodies' boundary.
+        if (selected != 0)
         {
-            __m512i bytes = _mm512_maskz_loadu_epi8(present, warnings + begin);
-            const __mmask64 before = selected & _mm512_cmpneq_epi8_mask(bytes, zero);
-            bytes = _mm512_mask_mov_epi8(bytes, selected, _mm512_and_si512(bytes, keep));
-            const __mmask64 after = selected & _mm512_cmpneq_epi8_mask(bytes, zero);
-            reader->output->constant_warning_count -= (uint32_t)_mm_popcnt_u64(before) - (uint32_t)_mm_popcnt_u64(after);
-            _mm512_mask_storeu_epi8(warnings + begin, selected, bytes);
-            pending = _mm512_or_si512(pending, bytes);
+            check_input_rare_claim(reader, suppressed + begin + (uint32_t)__builtin_ctzll(selected));
         }
-        if (ignored != 0)
-        {
-            __m512i bytes = _mm512_maskz_loadu_epi8(present, ignored + begin);
-            bytes = _mm512_mask_mov_epi8(bytes, selected, _mm512_and_si512(bytes, keep));
-            _mm512_mask_storeu_epi8(ignored + begin, selected, bytes);
-            pending = _mm512_or_si512(pending, bytes);
-        }
-        uint32_t low = (uint32_t)_mm512_reduce_or_epi32(_mm512_maskz_mov_epi8(active, pending));
-        low |= low >> 16;
-        low |= low >> 8;
-        summary = (uint8_t)low;
-        if (suppressed != 0)
-        {
-            __m512i bytes = _mm512_maskz_loadu_epi8(present, suppressed + begin);
-            bytes = _mm512_mask_mov_epi8(bytes, selected, _mm512_or_si512(bytes, _mm512_set1_epi8((char)suppress)));
-            // The claim's store is of a byte this reader writes: lanes share a block at their bodies' boundary.
-            if (selected != 0)
-            {
-                check_input_rare_claim(reader, suppressed + begin + (uint32_t)__builtin_ctzll(selected));
-            }
-            _mm512_mask_storeu_epi8(suppressed + begin, selected, bytes);
-            uint32_t high = (uint32_t)_mm512_reduce_or_epi32(_mm512_maskz_mov_epi8(active, _mm512_xor_si512(bytes, _mm512_set1_epi8(-1))));
-            high |= high >> 16;
-            high |= high >> 8;
-            summary |= (uint16_t)(uint8_t)high << 8;
-        }
+        _mm512_mask_storeu_epi8(suppressed + begin, selected, bytes);
+        uint32_t high = (uint32_t)_mm512_reduce_or_epi32(_mm512_maskz_mov_epi8(active, _mm512_xor_si512(bytes, _mm512_set1_epi8(-1))));
+        high |= high >> 16;
+        high |= high >> 8;
+        summary |= (uint16_t)(uint8_t)high << 8;
     }
     // A boundary block keeps a conservative summary for its untouched bytes. Besides avoiding unrelated loads,
     // this lets deferred lanes update disjoint body ranges sharing a block without reading each other's bytes.

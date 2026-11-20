@@ -78,6 +78,11 @@ struct NodeMachineReader
 // has run on each of a chunk's roots, the kernel on the chunk's windows, checked against T's records and timed.
 struct NodeFactsReader;
 static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader, NodeMachine* machine, NodeFrontTypes* types);
+// What the reference's C did with the expression at hand, for C on the window (BUSTER_NODE_READER_WINDOW_CONTEXTS):
+// whether it ran (0: it didn't; 1: it took the expression; 2: it refused it for a template), its ticks, and the
+// root's target.
+static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target);
+static void node_facts_reader_rows(struct NodeFactsReader* state, uint64_t ticks);
 static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
                                          uint32_t operand, bool taken);
 static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front);
@@ -354,7 +359,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     room = room && (!sweeps || (sweep_refusals != NULL && targets != NULL && root_objects != NULL && tape_firsts != NULL && tape_counts != NULL && side_digests != NULL &&
                                 tape_kinds != NULL && tape_classes != NULL && tape_values != NULL));
     // The census's tests' results by root node.
-    const uint8_t options = reader->pp->options.node_reader;
+    const uint16_t options = reader->pp->options.node_reader;
     const bool tested = (options & BUSTER_NODE_READER_TESTS) != 0;
     uint64_t* tests = tested ? arena_push_array(reader->arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
     uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
@@ -549,6 +554,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     // take: the two steps in the order the unit's options give.
                     uint64_t verdict = 0;
                     NodeMachineRefusal swept = NODE_MACHINE_TAKEN;
+                    if (typer->facts != NULL)
+                    {
+                        node_facts_reader_contexts(typer->facts, BUSTER_NODE_CONTEXTS_RAN_NONE, 0, 0);
+                    }
                     for (uint32_t step = 0; step < 2; step += 1)
                     {
                     if ((step == 0) != last && tested && refusal == NODE_MACHINE_TAKEN && (!last || swept == NODE_MACHINE_TAKEN || pass != 0))
@@ -581,8 +590,21 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         TypeId target = 0;
                         uint32_t object = 0;
                         const uint8_t context = node_machine_reader_root(typer, front, reader, record, &target, &object);
+                        const uint64_t contexts_start = __rdtsc();
                         swept = node_machine_contexts(machine, context, target, object);
+                        if (pass != 0 && typer->facts != NULL)
+                        {
+                            // The reference of C on the window: this run's answers, which the kernel's hook below keeps.
+                            const uint8_t ran = swept == NODE_MACHINE_TAKEN ? BUSTER_NODE_CONTEXTS_RAN_TAKEN : BUSTER_NODE_CONTEXTS_RAN_REFUSED;
+                            node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target);
+                        }
+                        const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
+                        if (pass != 0 && typer->facts != NULL)
+                        {
+                            // The reference of X's rows on the window: this run's ticks; its tape is kept below.
+                            node_facts_reader_rows(typer->facts, __rdtsc() - expand_start);
+                        }
                         if (pass != 0)
                         {
                             const bool taken = swept == NODE_MACHINE_TAKEN;

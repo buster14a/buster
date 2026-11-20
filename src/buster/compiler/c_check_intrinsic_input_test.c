@@ -462,6 +462,17 @@ static uint32_t check_test_intrinsic_exact_code(const InternTable* table, uint32
     return info != NULL ? BUSTER_CHECK_INTRINSIC_ROW + (uint32_t)(info - builtin_intrinsic_infos) : BUSTER_CHECK_INTRINSIC_MISS;
 }
 
+// Whether `token` is an operand the intrinsics' pass counts (check_input_intrinsic_operands' tests, a token at a time): an
+// identifier operand, neither in a deferred body the unit doesn't read nor in a declaration attested declarations skip.
+static bool check_test_intrinsic_operand(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t* deferred_tokens = reader->output->deferred_tokens;
+    const bool skipped = reader->skips != NULL && (reader->skips[token / 64] >> (token % 64) & 1) != 0;
+    return parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
+           (deferred_tokens == 0 || reader->deferred != 0 || !deferred_tokens[token]) && !skipped;
+}
+
 // Runs `unit` on `table` (its spellings interned there first) by one path, and checks it against the oracle.
 static void check_test_intrinsic_memo_run(CheckTest* test, CheckIntrinsicMemoUnit* unit, InternTable* table, char (*spellings)[48], bool scalar,
                                           const char* description)
@@ -493,7 +504,7 @@ static void check_test_intrinsic_memo_run(CheckTest* test, CheckIntrinsicMemoUni
     valid = valid && operands != NULL;
     for (uint32_t token = 0; valid && token < CHECK_TEST_INTRINSIC_MEMO_TOKENS; token += 1)
     {
-        if (check_input_intrinsic_operand(&reader, token))
+        if (check_test_intrinsic_operand(&reader, token))
         {
             const uint32_t name = unit->names[token];
             if (check_test_intrinsic_exact_code(table, name) != BUSTER_CHECK_INTRINSIC_MISS)
@@ -652,9 +663,9 @@ static void check_test_intrinsic_memo(CheckTest* test)
 }
 
 // #2654's fill of the memo in id order: tables of every catalogue name, a near miss of each and short names, the last of
-// them under four bytes so that their four-byte reads would pass the written records, filled on the vector path and on the
-// scalar path, in one step and in two. The 16-lane filter must pass exactly the ids its scalar twin passes, and every id's
-// code must be the binary search's.
+// them under four bytes so that their four-byte reads would pass the written records, filled in one step and in two. The
+// 16-lane filter must pass exactly the ids check_input_intrinsic_candidate passes (the records' fallback past the gathers'
+// offsets), and every id's code must be the binary search's.
 static void check_test_intrinsic_fill(CheckTest* test)
 {
     InternTable tables[3] = { 0 };
@@ -686,13 +697,13 @@ static void check_test_intrinsic_fill(CheckTest* test)
                 const int length = snprintf(spelling, sizeof(spelling), "%s%u", pass == 0 ? tail[i] : "", pass == 0 ? 0 : i);
                 ready = intern_find_or_add(table, (const uint8_t*)spelling, (uint32_t)(pass == 0 ? strlen(tail[i]) : (uint64_t)length)) != 0;
             }
-            // Table 0 is filled once, on the vector path, after both passes' ids; table 1 on the scalar path and table 2 on
-            // the vector path after each pass, the second fill taking only the ids the second pass added.
+            // Table 0 is filled once, after both passes' ids; tables 1 and 2 after each pass, the second fill taking only the
+            // ids the second pass added.
             uint16_t* rows = ready && (t != 0 || pass == 1) ? intern_intrinsic_rows(table) : NULL;
             ready = rows != NULL || (t == 0 && pass == 0);
             if (rows != NULL)
             {
-                check_input_intrinsic_fill(table, rows, t == 1);
+                check_input_intrinsic_fill(table, rows);
             }
         }
         const uint64_t written = tables[0].record_arena.length - (uint64_t)(tables[0].records - tables[0].record_arena.base);
@@ -707,7 +718,7 @@ static void check_test_intrinsic_fill(CheckTest* test)
             }
             lanes = check_input_intrinsic_candidates(&tables[0], first, mask, written) == scalar;
         }
-        check_test_expect(test, lanes, "the 16-lane filter passes exactly the ids its scalar twin passes, short spellings at the records' end included");
+        check_test_expect(test, lanes, "the 16-lane filter passes exactly the ids each one's test passes, short spellings at the records' end included");
         bool exact = ready;
         for (uint32_t t = pass == 0 ? 1 : 0; exact && t < 3; t += 1)
         {
@@ -719,7 +730,7 @@ static void check_test_intrinsic_fill(CheckTest* test)
         }
         exact = exact && (pass == 0 || (memcmp(tables[0].intrinsic_rows, tables[1].intrinsic_rows, tables[0].count * sizeof(uint16_t)) == 0 &&
                                         memcmp(tables[0].intrinsic_rows, tables[2].intrinsic_rows, tables[0].count * sizeof(uint16_t)) == 0));
-        check_test_expect(test, exact, "both paths fill every id with the binary search's code, in one step or two");
+        check_test_expect(test, exact, "the fill gives every id the binary search's code, in one step or two");
     }
     check_test_expect(test, ready, "the fill fixtures' tables initialize");
     intern_release(&tables[2]);

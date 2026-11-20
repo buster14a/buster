@@ -77,11 +77,10 @@ static bool ir_if_convert_test_fixture(Arena* arena, IrFunction* f, uint32_t typ
     return created;
 }
 
-static void ir_if_convert_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* optimized, Arena* scratch,
+static void ir_if_convert_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* optimized, Arena* scratch,
                                        uint32_t regions, uint32_t selects)
 {
     const uint64_t vm = vector->length;
-    const uint64_t sm = scalar->length;
     const uint64_t om = optimized->length;
     const uint64_t tm = scratch->length;
     const IrCheck valid = ir_verify_complete(f, scratch);
@@ -89,20 +88,31 @@ static void ir_if_convert_test_compare(IrOptimizeTest* test, const IrFunction* f
     if (valid.error == IR_OK)
     {
         IrIfConvertResult v = { 0 };
-        IrIfConvertResult s = { 0 };
-        const IrCheck vc = ir_if_convert(f, vector, scratch, false, &v);
-        const IrCheck sc = ir_if_convert(f, scalar, scratch, true, &s);
-        ir_optimize_test_expect(test, vc.error == IR_OK && sc.error == IR_OK, "if-conversion accepts verified SSA on both paths");
+        const IrCheck vc = ir_if_convert(f, vector, scratch, &v);
+        ir_optimize_test_expect(test, vc.error == IR_OK, "if-conversion accepts verified SSA");
         ir_optimize_test_expect(test, scratch->length == tm, "if-conversion restores scratch");
-        if (vc.error == IR_OK && sc.error == IR_OK)
+        if (vc.error == IR_OK)
         {
-            ir_optimize_test_expect(test, v.regions == regions && v.selects == selects && s.regions == regions && s.selects == selects, "if-conversion bounded admission and select count");
-            ir_optimize_test_expect(test, ir_optimize_test_equal(&v.function, &s.function), "if-conversion scalar/vector exact columns and side tables");
-            ir_optimize_test_expect(test, ir_verify_complete(&v.function, scratch).error == IR_OK && ir_verify_complete(&s.function, scratch).error == IR_OK,
-                                    "if-conversion preserves complete SSA, including unreachable arm stubs");
+            ir_optimize_test_expect(test, v.regions == regions && v.selects == selects, "if-conversion bounded admission and select count");
+            ir_optimize_test_fold_function(&test->if_convert_digest, &v.function);
+            const uint64_t counts[] = {
+                v.regions,
+                v.selects,
+                v.folded,
+                v.reused,
+                v.loads,
+                v.sunk,
+                v.recurrences,
+                v.rounds,
+            };
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(counts); k += 1)
+            {
+                ir_optimize_test_fold(&test->if_convert_digest, counts[k]);
+            }
+            ir_optimize_test_expect(test, ir_verify_complete(&v.function, scratch).error == IR_OK, "if-conversion preserves complete SSA, including unreachable arm stubs");
             if (regions == 0)
             {
-                ir_optimize_test_expect(test, v.function.op == f->op && s.function.extra == f->extra && vector->length == vm && scalar->length == sm,
+                ir_optimize_test_expect(test, v.function.op == f->op && v.function.extra == f->extra && vector->length == vm,
                                         "refused regions borrow unchanged input without output allocation");
             }
             IrOptimizeResult o = { 0 };
@@ -125,7 +135,6 @@ static void ir_if_convert_test_compare(IrOptimizeTest* test, const IrFunction* f
         }
     }
     arena_pop_to(vector, vm);
-    arena_pop_to(scalar, sm);
     arena_pop_to(optimized, om);
 }
 
@@ -519,25 +528,105 @@ static void ir_if_convert_test_guards(IrOptimizeTest* test)
             operations[i] = i % 3 == 0 ? IR_CBR : IR_ADD;
             expected |= (uint64_t)(i % 3 == 0) << i;
         }
-        ir_optimize_test_expect(test, ir_if_convert_candidates(operations, count, true) == expected && ir_if_convert_candidates(operations, count, false) == expected,
+        ir_optimize_test_expect(test, ir_if_convert_candidates(operations, count) == expected,
                                 "if-conversion candidate mask respects every guarded tail");
     }
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, (uint64_t)page * 2);
     }
-    ir_optimize_test_expect(test, ir_if_convert_candidates(0, 0, false) == 0 && ir_if_convert_candidates(0, 65, true) == 0,
+    ir_optimize_test_expect(test, ir_if_convert_candidates(0, 0) == 0 && ir_if_convert_candidates(0, 65) == 0,
                             "if-conversion empty and invalid mask counts do not access columns");
+}
+
+// #2924: the conditional branches' scan, the barriers' and the keys' filter against their definitions, on random columns:
+// every count of a batch at several offsets, ranges longer than a batch, and keys of every field set.
+static void ir_if_convert_test_scans(IrOptimizeTest* test)
+{
+    IrOptimizeTestScan scan;
+    bool candidates = true;
+    bool barriers = true;
+    bool filters = true;
+    for (uint32_t round = 0; round < 48; round += 1)
+    {
+        ir_optimize_test_scan_fill(test, &scan);
+        const IrFunction* f = &scan.function;
+        for (uint32_t count = 0; count <= BUSTER_IR_IF_CONVERT_BATCH; count += 1)
+        {
+            const uint32_t start = round * 3 % (BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS - BUSTER_IR_IF_CONVERT_BATCH);
+            uint64_t expected = 0;
+            for (uint32_t lane = 0; lane < count; lane += 1)
+            {
+                expected |= (uint64_t)(f->op[start + lane] == IR_CBR) << lane;
+            }
+            candidates &= ir_if_convert_candidates(f->op + start, count) == expected;
+            uint64_t truncations = 0;
+            for (uint32_t lane = 0; lane < count; lane += 1)
+            {
+                truncations |= (uint64_t)(f->op[start + lane] == IR_TRUNC) << lane;
+            }
+            candidates &= count == 0 || ir_if_convert_truncations(f->op + start, count) == truncations;
+        }
+        for (uint32_t first = round % 7; first < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; first += 23)
+        {
+            for (uint32_t end = first; end <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; end += 1 + (end - first) / 4)
+            {
+                for (uint32_t classes = 1; classes <= 3; classes += 1)
+                {
+                    uint32_t expected = BUSTER_IR_NONE;
+                    for (uint32_t row = first; row < end; row += 1)
+                    {
+                        const bool observable = f->op[row] == IR_LOAD && (f->flags[row] & BUSTER_IR_OBSERVABLE) != 0 && (classes & BUSTER_IR_IF_CONVERT_WRITE) != 0;
+                        expected = (ir_if_convert_barriers[f->op[row]] & classes) != 0 || observable ? row : expected;
+                    }
+                    barriers &= ir_if_convert_barrier(f, first, end, classes) == expected;
+                }
+            }
+        }
+        for (uint32_t count = 1; count <= BUSTER_IR_IF_CONVERT_LANES; count += 1)
+        {
+            const uint32_t first = (round * 17 + count) % (BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS - BUSTER_IR_IF_CONVERT_LANES);
+            for (uint32_t fields = 0; fields < 32; fields += 1)
+            {
+                const uint32_t model = first + (round + fields) % count;
+                const IrIfConvertKey key = {
+                    .a = f->a[model],
+                    .b = f->b[model],
+                    .c = f->c[model],
+                    .fields = fields,
+                    .op = f->op[model],
+                    .type = f->type[model],
+                    .flags = f->flags[model],
+                };
+                uint32_t expected = 0;
+                for (uint32_t lane = 0; lane < count; lane += 1)
+                {
+                    const uint32_t row = first + lane;
+                    bool match = f->op[row] == key.op;
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) == 0 || f->type[row] == key.type);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) == 0 || f->flags[row] == key.flags);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_A) == 0 || f->a[row] == key.a);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_B) == 0 || f->b[row] == key.b);
+                    match = match && ((fields & BUSTER_IR_IF_CONVERT_KEY_C) == 0 || f->c[row] == key.c);
+                    expected |= (uint32_t)match << lane;
+                }
+                filters &= ir_if_convert_filter(f, first, count, key) == expected;
+            }
+        }
+    }
+    ir_optimize_test_expect(test, candidates, "if-conversion's conditional branches' and narrowing casts' scans, against their definitions");
+    ir_optimize_test_expect(test, barriers, "if-conversion's barriers' scan, against its definition");
+    ir_optimize_test_expect(test, filters, "if-conversion's keys' filter, against its definition");
 }
 
 static void ir_if_convert_tests(IrOptimizeTest* test)
 {
+    ir_if_convert_test_scans(test);
     Arena input = arena_reserve(4ull << 20);
     Arena vector = arena_reserve(4ull << 20);
-    Arena scalar = arena_reserve(4ull << 20);
     Arena optimized = arena_reserve(4ull << 20);
     Arena scratch = arena_reserve(8ull << 20);
-    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && optimized.base != 0 && scratch.base != 0;
+    const bool ready = input.base != 0 && vector.base != 0 && optimized.base != 0 && scratch.base != 0;
     ir_optimize_test_expect(test, ready, "if-conversion fixture arenas");
     ir_if_convert_test_guards(test);
     if (ready)
@@ -552,7 +641,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                 ir_optimize_test_expect(test, created, "if-conversion scalar type and triangle fixture allocation");
                 if (created)
                 {
-                    ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, types[type] == IR_F64 ? 0 : 1, types[type] == IR_F64 ? 0 : 2);
+                    ir_if_convert_test_compare(test, &f, &vector, &optimized, &scratch, types[type] == IR_F64 ? 0 : 1, types[type] == IR_F64 ? 0 : 2);
                 }
                 arena_pop_to(&input, 0);
             }
@@ -631,7 +720,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                         f.alignment_log2[5] = 3;
                     }
                 }
-                ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
+                ir_if_convert_test_compare(test, &f, &vector, &optimized, &scratch, expected, expected);
             }
             arena_pop_to(&input, 0);
         }
@@ -644,12 +733,12 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             if (created)
             {
                 const uint32_t expected = kind == 0 || kind >= 3 ? 2 : 1;
-                ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
+                ir_if_convert_test_compare(test, &f, &vector, &optimized, &scratch, expected, expected);
                 if (kind == 1)
                 {
                     // The loop's conditional sum, `s + (c ? i : 0)`: its phi adds a select of the index or zero.
                     IrIfConvertResult converted = { 0 };
-                    const IrCheck check = ir_if_convert(&f, &vector, &scratch, false, &converted);
+                    const IrCheck check = ir_if_convert(&f, &vector, &scratch, &converted);
                     uint32_t sum = BUSTER_IR_NONE;
                     for (uint32_t i = 0; check.error == IR_OK && i < converted.function.instruction_count; i += 1)
                     {
@@ -665,7 +754,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                 if (kind == 3 || kind == 4)
                 {
                     IrIfConvertResult converted = { 0 };
-                    const IrCheck check = ir_if_convert(&f, &vector, &scratch, false, &converted);
+                    const IrCheck check = ir_if_convert(&f, &vector, &scratch, &converted);
                     ir_optimize_test_expect(test, check.error == IR_OK && converted.rounds == 2 && converted.folded == (kind == 3 ? 1u : 0u),
                                             "if-conversion takes the outer region in a second round, folding a join with a third predecessor");
                     arena_pop_to(&vector, 0);
@@ -673,7 +762,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                 if (kind == 2)
                 {
                     IrIfConvertResult converted = { 0 };
-                    const IrCheck check = ir_if_convert(&f, &vector, &scratch, false, &converted);
+                    const IrCheck check = ir_if_convert(&f, &vector, &scratch, &converted);
                     ir_optimize_test_expect(test, check.error == IR_OK && converted.function.op[6] == IR_SELECT && converted.function.extra[5] == 4 &&
                                             converted.function.extra[converted.function.calls[0].argument_first] == 6 && f.extra[5] == 4 && f.calls[0].argument_first == 5,
                                             "if-conversion separates shared switch indices and remapped call values without mutating input");
@@ -690,17 +779,13 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             if (created)
             {
                 const uint32_t expected = variant == 0 || variant == 1 || variant == 5 ? 1 : 0;
-                ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
+                ir_if_convert_test_compare(test, &f, &vector, &optimized, &scratch, expected, expected);
                 IrIfConvertResult v = { 0 };
-                IrIfConvertResult s = { 0 };
-                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, false, &v);
-                const IrCheck sc = ir_if_convert(&f, &scalar, &scratch, true, &s);
+                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, &v);
                 // Variant 0 reuses the address, the load and the dead comparison; 1 and 5 reuse the address alone.
                 const uint32_t reused = variant == 0 ? 3 : expected != 0 ? 1 : 0;
-                ir_optimize_test_expect(test, vc.error == IR_OK && sc.error == IR_OK && v.loads == expected && s.loads == expected && v.reused == reused && s.reused == reused,
-                                        "if-conversion reuses or speculates an arm's reload only behind the head's proof");
+                ir_optimize_test_expect(test, vc.error == IR_OK && v.loads == expected && v.reused == reused, "if-conversion reuses or speculates an arm's reload only behind the head's proof");
                 arena_pop_to(&vector, 0);
-                arena_pop_to(&scalar, 0);
             }
             arena_pop_to(&input, 0);
         }
@@ -711,15 +796,11 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "if-conversion running maximum fixture allocation");
             if (created)
             {
-                ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, variant, variant);
+                ir_if_convert_test_compare(test, &f, &vector, &optimized, &scratch, variant, variant);
                 IrIfConvertResult v = { 0 };
-                IrIfConvertResult s = { 0 };
-                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, false, &v);
-                const IrCheck sc = ir_if_convert(&f, &scalar, &scratch, true, &s);
-                ir_optimize_test_expect(test, vc.error == IR_OK && sc.error == IR_OK && v.recurrences == 1 - variant && s.recurrences == 1 - variant,
-                                        "if-conversion keeps the branch of a recurrence through its condition");
+                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, &v);
+                ir_optimize_test_expect(test, vc.error == IR_OK && v.recurrences == 1 - variant, "if-conversion keeps the branch of a recurrence through its condition");
                 arena_pop_to(&vector, 0);
-                arena_pop_to(&scalar, 0);
             }
             arena_pop_to(&input, 0);
         }
@@ -731,9 +812,9 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             if (created)
             {
                 const uint32_t expected = variant == 2 ? 0 : 1;
-                ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
+                ir_if_convert_test_compare(test, &f, &vector, &optimized, &scratch, expected, expected);
                 IrIfConvertResult v = { 0 };
-                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, false, &v);
+                const IrCheck vc = ir_if_convert(&f, &vector, &scratch, &v);
                 // The test of the phi is now an i1 and (`&&`) or or (`||`) of the head's comparison and the arm's, in the
                 // head, and no i1 select is left.
                 const uint32_t logic = variant == 1 ? IR_OR : IR_AND;
@@ -767,7 +848,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                 memcpy(before, &result, sizeof(result));
                 const uint64_t vm = vector.length;
                 const uint64_t sm = scratch.length;
-                const IrCheck check = ir_if_convert(&f, kind == 0 ? &small : &vector, kind == 0 ? &scratch : &small, false, &result);
+                const IrCheck check = ir_if_convert(&f, kind == 0 ? &small : &vector, kind == 0 ? &scratch : &small, &result);
                 ir_optimize_test_expect(test, check.error == IR_OK || (check.error == IR_ERROR_MEMORY && memcmp(before, &result, sizeof(result)) == 0 &&
                                         (kind == 0 ? small.length == vm : vector.length == vm)), "if-conversion allocation failure preserves output and result");
                 ir_optimize_test_expect(test, kind == 0 ? scratch.length == sm : small.length == sm, "if-conversion allocation failure restores scratch");
@@ -778,7 +859,6 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
     }
     arena_release(&scratch);
     arena_release(&optimized);
-    arena_release(&scalar);
     arena_release(&vector);
     arena_release(&input);
 }
