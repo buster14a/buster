@@ -314,17 +314,58 @@ each removed where it is made:
   chooses, where its inputs are constants (one jump where both of its edges then
   reach one block). The truth rewrite then runs again, so a copied
   `icmp ne (zext c), 0` is `c`, the branch's own comparison. The block's values
-  must be read only by itself and by its successors' phis on its edges. It is not
-  the entry or a label's block, and its chain has at most four operations, at
+  must be read only by itself and by its successors' phis on its edges, but for
+  one case (#2608): a phi read past the block, where one successor has the block
+  as its only predecessor and dominates every reader (an instruction's block, or
+  a phi entry's predecessor). Lua's `tonumberns` is a `?:` whose join's phis are
+  the truth value and the number it set, which the arithmetic reads after the
+  test. That successor then starts with a phi that merges the number again from
+  each predecessor that now reaches it (and from the block, where the block
+  stays), and the readers read it: SSA repair over the successor's dominance
+  subtree. A value of the chain still may not be read past the block, and a
+  loop's header isn't repaired, since threading it would rotate the loop. A
+  successor that only the block reaches and that has phis or a merge keeps a
+  predecessor: a block whose predecessors would all be redirected to its other
+  successor is left alone, its test the same constant on every edge (Lua's
+  `checktab`), which SCCP folds; #2607's rule had left such a successor's phi
+  empty. The
+  dominators are built only in a round with a block to repair, and a second pass
+  of the escape scan intersects the successors that dominate each reader. It is
+  not the entry or a label's block, and its chain has at most four operations, at
   most sixteen predecessors take copies, and the rewrite runs up to four rounds
-  (`a && b && c`). A block no reachable predecessor reaches any more is left an
-  `unreachable` alone. `test-ir-optimize`
-  runs nine IR text fixtures (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's
-  found flag, a value read past the test, a switch's kept edge with mapped
-  successor phis, a collapse, `a && b && c`, a label's block and a self-loop.
-  Each is verified as complete SSA, folded into a frozen digest (#2924), and
+  (`a && b && c`). A next round runs where this one changed something and left
+  a block to it: by the roles that keep a round's blocks apart, a block to
+  repair whose readers no successor dominated yet, or a block of phis that took
+  a copy, which may have a candidate's shape with it
+  (`tonumberns(a, n) && tonumberns(b, m)`: the `&&` join first, then both `?:`
+  joins). A block no reachable predecessor reaches any more is left an
+  `unreachable` alone. `test-ir-optimize` runs thirty-four IR text fixtures
+  (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's found flag, a truth value
+  read past the test (merged again), a switch's kept edge with mapped successor
+  phis, a collapse, `a && b && c`, a label's block and a self-loop; and #2608's
+  `tonumberns`, `tonumberns && tonumberns` and `tonumberns && x < y` (two
+  rounds each), readers through the successor's subtree and on an edge out of
+  it, a chain value read past the test, readers where both successors' paths
+  meet, a successor with a second predecessor, a loop's header, a kept edge, a
+  merge in each successor, a reader on a loop's back edge in the subtree, an
+  `&&` whose right side is a `?:` (two rounds), two repairs, one inside the
+  other's subtree, whose reads are copied, merged and passed to a call, a
+  vector a ternary intrinsic reads (verified, not executed), a repair the roles
+  left to a second round, three blocks whose redirects would strand a
+  successor's merge or phi and two whose redirects leave a successor with a
+  predecessor of its own, a merge reached by one of two redirects, one kept by
+  the block's own edge, the block's only phi merged again behind a kept edge
+  and read by a select, a number read past two successors that reach each
+  other (no dominators built), and a block of 70 phis, past a 64-byte mask.
+  #2608's
+  fixtures draw their random trials from a stream of their own, so that the
+  programs generated after them stay the ones value numbering with memory's
+  digest was frozen on.
+  Each is verified as complete SSA, folded with the pass's work (the rounds run
+  and the dominator analyses built) into a frozen digest (#2924), and
   executed against its input after threading and after the truth rewrite and
-  the optimizer. The candidate scan is checked against its definition.
+  the optimizer. The candidate scan and both passes of the escape scan are
+  checked against their definitions.
 - **Stored constants** (`tier1_select.c`, `tier1_select_burs.c`). A store of a
   constant is `mov $imm, mem` at its width, an 8-byte store's where the constant
   fits a sign-extended imm32, rather than the constant's register. The candidates
