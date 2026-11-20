@@ -848,6 +848,7 @@ static void tier1_float_conversion_loads(Tier1EmitTest* test)
                                                "fold an ordinary load and preserve a volatile load at its original node");
                         if (memory)
                         {
+                            tier1_emit_test_expect(test, !from_integer || x86_zen5_missing(records.records, records.count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "the signed memory conversion has measured Zen 5 costs");
                             const uint8_t mode = address == 0 ? BUSTER_X86_MEMORY_BASE : BUSTER_X86_MEMORY_BASE_INDEX(shift);
                             tier1_emit_test_expect(test, record.mode == mode && record.rm == X86_REGISTER_RDI && (address == 0 || record.index == X86_REGISTER_RSI) && record.displacement == -7,
                                                    "convert from the selected base, index, scale and displacement");
