@@ -365,13 +365,13 @@ static void tier1_float_select_loops(Tier1EmitTest* test, uint32_t* fused_loops)
                         IrFunction function;
                         uint32_t root = BUSTER_IR_NONE;
                         const bool created = tier1_float_select_loop_function(test, source_width, width, predicate, kind, &function, &root);
-                        const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+                        const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
                         tier1_emit_test_expect(test, valid, "a floating select's loop is valid IR");
                         IrDominance dominance;
-                        const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+                        const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
                         Tier1SelectPlan plan;
                         uint32_t node = BUSTER_IR_NONE;
-                        const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+                        const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
                         tier1_emit_test_expect(test, planned, "a floating select's loop selects by both paths");
                         const uint8_t rule = planned ? plan.patterns[root].rule : TIER1_RULE_NONE;
                         tier1_emit_test_expect(test, rule == (fused ? TIER1_RULE_FLOAT_SELECT_COMPARE : TIER1_RULE_SELECT),
