@@ -5,8 +5,9 @@
 // constant-switch collector. A block is walked in source order. A statement with no insertion point and no label or
 // outer case (check_control_enterable, clang's ContainsLabel) is left out with the constant if's dropped ranges, so
 // its calls and statics are not selected. What follows a return, break, continue, goto or
-// __builtin_unreachable() has no insertion point. An if whose taken arms both end that way, and a while or for whose
-// condition is constantly true and that no break leaves, end the same way. __builtin_trap() does not, and a do's
+// __builtin_unreachable() has no insertion point. An if whose taken arms both end that way, a while whose condition
+// is constantly true, and a `for (;;)` that no break leaves, end the same way. A for that has a condition does
+// not: clang still branches to its exit. __builtin_trap() does not, and a do's
 // following statement stays: clang -O0 still names a function only that statement calls. An automatic local the
 // dropped statement declares keeps its place when an emitted statement names it; its initializer is not emitted.
 // The walk is ordered because each statement's insertion point is the one before it. The statement tree is an explicit stack
@@ -259,12 +260,12 @@ static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t 
             first = semi && first == BUSTER_CHECK_NONE ? child : first;
             body = child > token ? child : body;
         }
-        const uint32_t expression = condition != BUSTER_CHECK_NONE ? check_control_reach_condition(writer, condition) : BUSTER_CHECK_NONE;
+        // Clang's EmitForStmt branches to the exit whenever the for has a condition, even `for (; 1;)`. Only
+        // `for (;;)` leaves that block unused, so only then is there no insertion point after the loop.
         const bool absent = condition != BUSTER_CHECK_NONE && writer->token_first[condition] == BUSTER_CHECK_NONE &&
                             (condition >= writer->program->input->token_count || writer->program->input->token_nodes[condition] == BUSTER_CHECK_NONE);
-        const bool always = check_control_reach_always(writer, expression, absent);
         const bool breaks = check_control_reach_breaks(writer, token, body);
-        result = !always || breaks;
+        result = !absent || breaks;
     }
     *completes = result;
     return leaf;

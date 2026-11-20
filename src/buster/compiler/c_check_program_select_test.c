@@ -491,6 +491,8 @@ static void check_test_program_unreachable_statements(CheckTest* test, const cha
           "static int dead(void){return 1;}int tested(int a){switch(a)dead();return 0;}", 1 },
         { "unreachable-after-infinite-for",
           "static int dead(void){return 1;}static int loop(void){for(;;){}return dead();}int tested(int n){return n==100?loop():n;}", 2 },
+        { "reachable-after-constant-for",
+          "static int kept(void){return 1;}static int loop(void){for(;1;){}return kept();}int tested(int n){return n==100?loop():n;}", 3 },
         { "unreachable-after-infinite-while",
           "static int dead(void){return 1;}static int loop(void){while(1){}return dead();}int tested(int n){return n==100?loop():n;}", 2 },
         { "reachable-after-broken-for",
