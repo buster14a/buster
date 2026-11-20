@@ -820,6 +820,52 @@ the one-call order on every function, comparing the allocations field by field
 the two calls cost, the design and what the one call measured are in
 [tier1-one-allocation.md](tier1-one-allocation.md).
 
+### A leaf's callee-saved registers (#2819)
+
+A function with no call and no asm body had no reason to prefer a register:
+the preference above moves only values live across a call, so every value
+took the caller-saved registers, which cost the function nothing to use. Once
+more values were live than those hold, some spilled, inside a loop on every
+iteration, while `rbx`, `rbp` and `r12` to `r15` stayed free. `sum8`, eight
+sums around a loop with its array, bound and index, spilled six values: five
+stores and six reloads on every iteration of its loop (`spill_stores=6
+spill_loads=10` in all).
+
+Where such a leaf's allocation spills and its CFG has a loop (an edge to its
+own block or an earlier one in layout, `tier1_emit_cfg_cyclic`), it is
+allocated again with the callee-saved registers the frame doesn't reserve
+added to every general value (`tier1_emit_cfg_leaf`). Each range avoids them
+(`Tier1CfgInput.avoided_general`, the same column as a fixed sequence's
+registers, #2767): it takes one only where no caller-saved register is free,
+so the callee-saved registers go to what the caller-saved ones can't hold.
+That allocation replaces the plain one, as the preference's does, where it is
+taken (`tier1_cfg_taken`) and spills fewer values by at least as many as the
+callee-saved registers it uses, each a push and a pop in the prologue and the
+epilogue (`tier1_emit_cfg_callee_used`, which the frame saves). Without a loop
+a spill costs about what a save does, and the plain allocation keeps its red
+zone and its early returns free of saves. Both allocation orders end with the
+step, so that `--verify` compares them as they are.
+
+`sum8` now keeps its eleven values in registers and saves four callee-saved
+ones, the loop's pressure past the eight caller-saved registers. On the frozen
+`sqlite3.c` and Lua's 34 units by `--tier1 -c` (1,992 functions), 14 of
+`sqlite3.c`'s functions change, all with loops, and each is smaller:
+`sqlite3_complete` by 404 bytes, `sqlite3FindTable` by 240, `identPut` by
+172, `walChecksumBytes` by 22; 1,400 bytes in all. Spill stores go from 10,730
+to 10,577, reloads from 11,658 to 11,490 and slots from 3,006 to 2,941; nine
+leaves give up their red zone for their saves. No function of Lua's changes.
+`test-checker-driver`'s leaf fixture runs `sum8`, a loop one value past the
+caller-saved registers (one save, which the avoidance leaves it: taken in order,
+`rbx` and `rbp` come before `rsi`), a leaf whose values fit, a loop-free
+leaf of twelve loads live across a branch and `sqlite3TriggerList`'s shape
+against clang's build, and checks their saves and their frames' operands. The
+last is the rule's refusal: with rematerialization it spills two values, and the
+callee-saved allocation would take three registers and copy values between them
+(20 bytes more in `sqlite3.c`'s own); taking every such allocation instead
+would change two other functions of `sqlite3.c` for the better and this one for
+the worse; `test-tier1-pipeline`'s loop past five
+caller-saved registers takes callee-saved ones where the frame pointer is free.
+
 ### Recomputable values read on every iteration (#2574)
 
 Lua's `vmdispatch` is `goto *disptab[GET_OPCODE(i)]`, at the end of every

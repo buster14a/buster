@@ -174,6 +174,9 @@ struct Tier1CfgInput
     const uint32_t* sequence_operands;
     const uint32_t* sequence_results;
     uint32_t sequence_count;
+    // Optional (#2819): general registers every general range avoids, as one avoids a sequence's above: a leaf function's
+    // callee-saved registers, which a range takes only where no caller-saved one is free.
+    uint32_t avoided_general;
     uint32_t block_count;
     uint32_t edge_count;
     uint32_t value_count;
@@ -2555,8 +2558,18 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         // A general value live across a fixed sequence avoids its registers in all its ranges, as does its phi web (#2767),
         // the same in every problem over these intervals. The ranges are whole now, a merged block's having grown past the
         // piece the builder started.
-        uint32_t* crossed = ready && input->sequence_count != 0 ? arena_push_array(output, (uint64_t)candidate.intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && (input->sequence_count == 0 || (crossed != 0 && tier1_cfg_crossed(input, pieces.starts, pieces.ends, pieces.values, pieces.classes, candidate.intervals.count, scratch, crossed)));
+        // And every general range avoids the problem's avoided_general registers (#2819).
+        const bool avoids = input->sequence_count != 0 || input->avoided_general != 0;
+        uint32_t* crossed = ready && avoids ? arena_push_array(output, (uint64_t)candidate.intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        if (crossed != 0 && input->sequence_count == 0)
+        {
+            memset(crossed, 0, ((uint64_t)candidate.intervals.count + 1) * sizeof(uint32_t));
+        }
+        ready = ready && (!avoids || (crossed != 0 && (input->sequence_count == 0 || tier1_cfg_crossed(input, pieces.starts, pieces.ends, pieces.values, pieces.classes, candidate.intervals.count, scratch, crossed))));
+        for (uint32_t i = 0; ready && input->avoided_general != 0 && i < candidate.intervals.count; i += 1)
+        {
+            crossed[i] |= pieces.classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? input->avoided_general : 0;
+        }
         candidate.intervals.avoided_registers = crossed;
         if (ready)
         {

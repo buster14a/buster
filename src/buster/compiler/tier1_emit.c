@@ -304,6 +304,9 @@ struct Tier1EmitResult
     // which the frame saves; and how many values live across a call it gave them.
     uint32_t callee_registers;
     uint32_t callee_used;
+    // In a function with no call and no asm body, the callee-saved registers its values may take where the caller-saved
+    // ones alone spill (#2819, tier1_emit_cfg_leaf), which callee_registers then holds.
+    uint32_t leaf_registers;
     uint32_t crossing_values;
     const uint8_t* symbol_access;
     uint32_t symbol_access_count;
