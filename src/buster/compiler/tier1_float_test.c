@@ -805,7 +805,6 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     arena_pop_to(&test->input, 0);
 }
 
-<<<<<<< HEAD
 static void tier1_float_unsigned_dword_memory(Tier1EmitTest* test)
 {
     for (uint32_t width = 4; width <= 8; width += 4)
@@ -840,8 +839,6 @@ static void tier1_float_unsigned_dword_memory(Tier1EmitTest* test)
     }
 }
 
-||||||| 79f565efe
-=======
 // The real target can admit either form independently. A register conversion does not use
 // embedded rounding or a mask, and preserves the software path on targets lacking its form.
 static void tier1_float_unsigned_i64_forms(Tier1EmitTest* test)
@@ -867,7 +864,6 @@ static void tier1_float_unsigned_i64_forms(Tier1EmitTest* test)
     }
 }
 
->>>>>>> origin/main
 static void tier1_float_conversion_loads(Tier1EmitTest* test)
 {
     const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .parameter_count = 2, .address_count = 1 };
