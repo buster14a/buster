@@ -1902,6 +1902,23 @@ static Tier1CodeCertificateWide tier1_code_certificate_wide(int64_t x)
     return wide;
 }
 
+// The emitted code called with f and d (the destination); the sanitizer's function check stays out, since the code has
+// no type prefix before it.
+static __attribute__((no_sanitize("function"))) int64_t tier1_code_certificate_forwarded_call(const void* code, int64_t x, void* destination)
+{
+    int64_t (*function)(int64_t, Tier1CodeCertificateWide (*)(int64_t), void*);
+    memcpy(&function, &code, sizeof(function));
+    return function(x, tier1_code_certificate_wide, destination);
+}
+
+// The emitted code called with f alone, for the frame object's control.
+static __attribute__((no_sanitize("function"))) int64_t tier1_code_certificate_object_call(const void* code, int64_t x)
+{
+    int64_t (*function)(int64_t, Tier1CodeCertificateWide (*)(int64_t));
+    memcpy(&function, &code, sizeof(function));
+    return function(x, tier1_code_certificate_wide);
+}
+
 #define BUSTER_TIER1_CODE_CERTIFICATE_FORWARDED_CALLS 48u
 
 static void tier1_code_certificate_forwarded(Tier1EmitTest* test, bool vector, uint32_t shape, uint32_t* refused)
@@ -2017,7 +2034,7 @@ static void tier1_code_certificate_forwarded(Tier1EmitTest* test, bool vector, u
                 storage[k] = (int64_t)UINT64_C(0xa5a5a5a5a5a5a5a5);
             }
             const Tier1CodeCertificateWide expected = tier1_code_certificate_wide(x);
-            const int64_t returned = ((int64_t (*)(int64_t, Tier1CodeCertificateWide (*)(int64_t), void*))executable)(x, tier1_code_certificate_wide, storage + 1);
+            const int64_t returned = tier1_code_certificate_forwarded_call(executable, x, storage + 1);
             const bool guarded = storage[0] == (int64_t)UINT64_C(0xa5a5a5a5a5a5a5a5) && storage[9] == (int64_t)UINT64_C(0xa5a5a5a5a5a5a5a5);
             const bool same = memcmp(storage + 1, expected.words, sizeof(expected.words)) == 0 && (shape == 0 || returned == expected.words[0]);
             tier1_emit_test_expect(test, guarded && same, "the call writes its result where the destination points, its bytes alone");
@@ -2080,7 +2097,7 @@ static void tier1_code_certificate_object_destination(Tier1EmitTest* test, bool 
     if (certified && tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
     {
         const int64_t x = 0x2820;
-        const int64_t returned = ((int64_t (*)(int64_t, Tier1CodeCertificateWide (*)(int64_t)))executable)(x, tier1_code_certificate_wide);
+        const int64_t returned = tier1_code_certificate_object_call(executable, x);
         tier1_emit_test_expect(test, returned == tier1_code_certificate_wide(x).words[0], "the frame object holds the call's result");
     }
     if (executable != MAP_FAILED)
