@@ -633,6 +633,7 @@ static void tier1_emit_test_calls_before(Tier1EmitTest* test)
 #include "tier1_induction_test.c"
 #include "tier1_storage_test.c"
 #include "tier1_branch_layout_test.c"
+#include "tier1_float_select_emit_test.c"
 #include "tier1_address_sink_test.c"
 #include "tier1_hot_recipes_test.c"
 #include "tier1_symbol_fold_test.c"
@@ -1561,6 +1562,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_storage_midpoint_tests(&test);
             tier1_storage_parameter_tests(&test);
             tier1_branch_layout_tests(&test);
+            tier1_float_select_tests(&test);
             tier1_address_sink_tests(&test);
             tier1_hot_recipes_tests(&test);
             tier1_symbol_fold_tests(&test);
