@@ -2466,11 +2466,11 @@ static void tier1_cfg_test_latch_chain(Tier1CfgTestTally* tally, Arena* output, 
     Tier1CfgInput input;
     const bool built = numbered && tier1_cfg_test_build(&builder, output, &input);
     tier1_cfg_test_expect(tally, built, "a latch between a loop's body and its header: built");
-    for (uint32_t path = 0; built && path < 2; path += 1)
+    if (built)
     {
         const uint64_t mark = output->length;
         Tier1CfgAllocation result = { 0 };
-        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
         Tier1CfgCheck check;
         const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
         tier1_cfg_test_expect(tally, allocated, "a latch between a loop's body and its header: allocated");

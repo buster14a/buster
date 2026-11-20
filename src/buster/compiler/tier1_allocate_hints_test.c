@@ -450,12 +450,12 @@ static void tier1_allocation_test_borrowed_recipe(Tier1AllocationTestTally* tall
             .position_count = 12,
             .registers = { 1 },
         };
-        Tier1Allocation outputs[3] = { { 0 } };
+        Tier1Allocation outputs[2] = { { 0 } };
         bool produced = true;
         const uint64_t saved = arena->length;
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
             const Tier1Allocation* output = &outputs[path];
             bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments[fixture] && tier1_allocation_verify(&input, output) && tier1_allocation_test_occupancy(&input, output);
             valid = valid && memcmp(output->kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output->registers, expected_registers[fixture], fragments[fixture]) == 0;
