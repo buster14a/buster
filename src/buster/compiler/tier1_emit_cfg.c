@@ -3456,56 +3456,74 @@ static Tier1EmitError tier1_emit_cfg_asm(const Tier1SelectPlan* plan, Tier1EmitR
     return error;
 }
 
-static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool probe)
+// Space beyond the per-node and per-block bounds. Read 64 operation bytes at once: only calls need a
+// descriptor. Count returns, vector literals and dynamic stack allocations directly from their masks.
+typedef struct Tier1EmitCfgCapacity Tier1EmitCfgCapacity;
+struct Tier1EmitCfgCapacity
 {
-    uint64_t records = function->parameter_passed != 0 ? 2u * (uint64_t)function->parameter_count + 2 : 0;
-    for (uint32_t node = 0; node < function->instruction_count; node += 1)
-    {
-        const uint32_t op = function->op[node];
-        const IrCall* call = op == IR_CALL || op == IR_CALL_INDIRECT ? &function->calls[function->b[node]] : 0;
-        const bool recorded = call != 0 && call->abi != 0;
-        records += recorded ? function->abi_calls[call->abi - 1].call.stack_bytes / 4u + 4u * (uint64_t)call->argument_count + 5u * (BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS) + 16u : 0;
-        records += op == IR_RET && function->result_size != 0 ? function->result_size / 4u + 32u : 0;
-        // A vector constant's broadcast or its literal's load (#141, #2744, tier1_emit_cfg_vector_constant).
-        records += op == IR_VCONST ? 2u : 0;
-        // A machine row's records, its operands' moves and its result's (#141, tier1_emit_cfg_row).
-        records += call != 0 && call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
-        // An asm body's records and its saves and restores (#1839, tier1_emit_cfg_asm): of the general registers, of
-        // xmm0 to xmm14 and of k1 to k7.
-        records += call != 0 && call->body != 0 && call->body <= function->asm_body_count ? function->asm_bodies[call->body - 1].count + 2u * (BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 15u + 7u) : 0;
-        // And its register operands' moves (#2144, tier1_emit_cfg_asm_operands), a cycle's through the scratch register.
-        records += call != 0 && call->body != 0 && call->body <= function->asm_body_count ? 2u * (uint64_t)function->asm_bodies[call->body - 1].passed + 2u : 0;
-        // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, and a call area's
-        // loop and final touch (tier1_emit_cfg_adjust: up to eight records replacing its one subtraction).
-        records += probe && op == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_RECORDS : 0;
-        records += probe && call != 0 ? 7u : 0;
-    }
-    return records;
-}
+    uint64_t records;
+    uint64_t branches;
+    uint32_t references;
+    uint32_t literals;
+};
 
-// An asm body's own branches (#1839, tier1_emit_cfg_asm).
-static uint64_t tier1_emit_cfg_asm_branches(const IrFunction* function)
+static Tier1EmitCfgCapacity tier1_emit_cfg_capacity(const Tier1SelectPlan* plan, bool probe)
 {
-    uint64_t branches = 0;
-    for (uint32_t node = 0; function->asm_body_count != 0 && node < function->instruction_count; node += 1)
+    const IrFunction* function = plan->function;
+    Tier1EmitCfgCapacity capacity = { .records = function->parameter_passed != 0 ? 2u * (uint64_t)function->parameter_count + 2 : 0 };
+    const bool extra = function->call_count != 0 || function->result_size != 0 || function->vector_constant_count != 0 || probe;
+    for (uint32_t first = 0; extra && first < function->instruction_count;)
     {
-        const IrCall* call = function->op[node] == IR_CALL ? &function->calls[function->b[node]] : 0;
-        branches += call != 0 && call->body != 0 && call->body <= function->asm_body_count ? function->asm_bodies[call->body - 1].branch_count : 0;
+        const uint32_t left = function->instruction_count - first;
+        const uint32_t length = left < 64 ? left : 64;
+        const __mmask64 lanes = length == 64 ? ~(__mmask64)0 : (((__mmask64)1 << length) - 1);
+        const __m512i ops = _mm512_maskz_loadu_epi8(lanes, function->op + first);
+        const __mmask64 calls = _mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_CALL)) | _mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_CALL_INDIRECT));
+        if (function->result_size != 0)
+        {
+            const uint32_t returns = (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_RET)));
+            capacity.records += (uint64_t)returns * (function->result_size / 4u + 32u);
+        }
+        if (function->vector_constant_count != 0)
+        {
+            capacity.literals += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_VCONST)));
+        }
+        if (probe)
+        {
+            const uint32_t allocations = (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_ALLOCA)));
+            capacity.records += (uint64_t)allocations * BUSTER_TIER1_EMIT_PROBE_RECORDS + 7u * (uint32_t)__builtin_popcountll(calls);
+            capacity.branches += (uint64_t)allocations * BUSTER_TIER1_EMIT_PROBE_BRANCHES;
+        }
+        for (uint64_t bits = calls; bits != 0; bits &= bits - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+            const uint32_t node = first + lane;
+            const IrCall* call = &function->calls[function->b[node]];
+            if (call->abi != 0)
+            {
+                capacity.records += function->abi_calls[call->abi - 1].call.stack_bytes / 4u + 4u * (uint64_t)call->argument_count + 5u * (BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS) + 16u;
+            }
+            capacity.records += call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
+            if (call->body != 0 && call->body <= function->asm_body_count)
+            {
+                // The body's records, the moves of its operands, its register saves and restores, and its own branches.
+                const IrAsmBody* body = &function->asm_bodies[call->body - 1];
+                capacity.records += body->count + 2u * (uint64_t)body->passed + 2u + 2u * (BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 15u + 7u);
+                capacity.branches += function->op[node] == IR_CALL ? body->branch_count : 0;
+            }
+            if (tier1_select_function_call(function, node))
+            {
+                capacity.branches += probe;
+                // An uncovered callee's recomputed arguments can carry a symbol reference (#141).
+                capacity.references += !plan->covered[node] ? tier1_select_call_stack_bytes(function, call) / BUSTER_ABI_SLOT_BYTES + call->argument_count : 0;
+            }
+        }
+        first += length;
     }
-    return branches;
-}
-
-// The dynamic allocations' probes' branches (#177, tier1_emit_cfg_probed_allocation), three each, and each call area's
-// possible probe loop's one (#1450, tier1_emit_cfg_adjust).
-static uint64_t tier1_emit_cfg_probe_branches(const IrFunction* function)
-{
-    uint64_t branches = 0;
-    for (uint32_t node = 0; node < function->instruction_count; node += 1)
-    {
-        branches += function->op[node] == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_BRANCHES : 0;
-        branches += tier1_select_function_call(function, node) ? 1u : 0;
-    }
-    return branches;
+    // A vector constant can emit two broadcast or literal-load records and one literal reference (#2744).
+    capacity.records += 2u * (uint64_t)capacity.literals;
+    capacity.references += capacity.literals;
+    return capacity;
 }
 
 // The long double phis' copies' records (#141, tier1_emit_cfg_x87_phis), past every node's share: on each edge, an fld and
@@ -3649,10 +3667,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint32_t returns = emitted->jumps;
     emitted->jumps = 0;
     emitted->dispatch_copies = 0;
-    const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function, emitted->frame.probe_stack) +
+    const Tier1EmitCfgCapacity extra = tier1_emit_cfg_capacity(plan, emitted->frame.probe_stack);
+    const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + extra.records +
                               tier1_emit_cfg_x87_copy_records(function, input, emitted->prepared.x87_count) + tier1_emit_cfg_x87_node_records(plan, emitted->prepared.x87_count) + (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
-    const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count +
-                                     (emitted->frame.probe_stack ? tier1_emit_cfg_probe_branches(function) : 0) + tier1_emit_cfg_asm_branches(function);
+    const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count + extra.branches;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     Tier1EmitError error = capacity <= UINT32_MAX && branch_capacity <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
@@ -3678,16 +3696,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         emitted->reference_capacity += cfg->move_sources[m] == BUSTER_TIER1_CFG_REMATERIALIZE && recipes[emitted->value_nodes[cfg->move_values[m]]] == BUSTER_TIER1_REMAT_SYMBOL;
     }
-    // A call's argument past its class's registers that the call recomputes, a symbol's address with a reference (#141);
-    // and a vector constant's literal's load (#2744), whose literal is one of the function's.
-    uint32_t vector_constants = 0;
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        const bool call = !plan->covered[node] && tier1_select_function_call(function, node);
-        emitted->reference_capacity += call ? tier1_select_call_stack_bytes(function, &function->calls[function->b[node]]) / BUSTER_ABI_SLOT_BYTES + function->calls[function->b[node]].argument_count : 0;
-        vector_constants += function->op[node] == IR_VCONST;
-    }
-    emitted->reference_capacity += vector_constants;
+    const uint32_t vector_constants = extra.literals;
+    emitted->reference_capacity += extra.references;
     bool ok = error == TIER1_EMIT_OK;
     code->records = ok ? ir_allocate(output, capacity, sizeof(X86Instruction), &ok) : 0;
     code->cost_ids = ok ? ir_allocate(output, capacity, 1, &ok) : 0;
