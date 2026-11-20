@@ -26,26 +26,27 @@ static __attribute__((noinline)) void check_test_vector_graph(CheckTest* test, T
         graph.vector_members = calls;
         graph.vector_member_count = 2;
         graph.vector_member_capacity = 2;
-        CheckStream scalar;
-        const CheckOptions scalar_options = { .scalar = true };
-        const bool checked = check_graph_run(table, &graph, &output, &scratch, &scalar_options, &scalar);
-        check_test_expect(test, checked && scalar.report_count == 0,
+        CheckStream reference;
+        const CheckOptions node_order = { 0 };
+        const bool checked = check_graph_run(table, &graph, &output, &scratch, &node_order, &reference);
+        check_test_expect(test, checked && reference.report_count == 0,
                           "sorted compact vector members bind to the exact source graph nodes");
         if (checked)
         {
             const TypeId pair = type_vector(table, BUSTER_TYPE_INT, 2, true);
-            check_test_expect(test, check_stream_type(&scalar, first) == pair && check_stream_category(&scalar, first) == CHECK_LVALUE &&
-                                   (check_stream_flags(&scalar, first) & BUSTER_CHECK_VECTOR_ELEMENT) != 0 &&
-                                   (check_stream_flags(&scalar, first) & BUSTER_CHECK_VECTOR_DUPLICATE) == 0 &&
-                                   check_stream_type(&scalar, second) == pair && (check_stream_flags(&scalar, second) & BUSTER_CHECK_VECTOR_DUPLICATE) != 0,
+            check_test_expect(test, check_stream_type(&reference, first) == pair && check_stream_category(&reference, first) == CHECK_LVALUE &&
+                                   (check_stream_flags(&reference, first) & BUSTER_CHECK_VECTOR_ELEMENT) != 0 &&
+                                   (check_stream_flags(&reference, first) & BUSTER_CHECK_VECTOR_DUPLICATE) == 0 &&
+                                   check_stream_type(&reference, second) == pair && (check_stream_flags(&reference, second) & BUSTER_CHECK_VECTOR_DUPLICATE) != 0,
                               "member lane order and duplicate classification preserve exact vector result types");
             const uint64_t mark = output.length;
+            check_test_expect(test, check_test_stream_recorded(&reference, &graph, 0, "vector-graphs"), "vector-graphs: the reference stream is its recorded digest");
             for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 const CheckOptions options = { .batch_size = batch, .regions = batch != 0 };
                 CheckStream actual;
                 check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &options, &actual) &&
-                                       check_test_stream_equal(&scalar, &actual, 0),
+                                       check_test_stream_equal(&reference, &actual, 0),
                                   "all graph scheduler partitions preserve compact member payload semantics");
                 arena_pop_to(&output, mark);
             }
@@ -65,7 +66,7 @@ static __attribute__((noinline)) void check_test_vector_graph(CheckTest* test, T
                     default: invalid_calls[0].member.kind = CHECK_VECTOR_MEMBER_ODD + 1; break;
                 }
                 CheckStream invalid;
-                check_test_expect(test, !check_graph_run(table, &invalid_graph, &output, &scratch, &scalar_options, &invalid) &&
+                check_test_expect(test, !check_graph_run(table, &invalid_graph, &output, &scratch, &node_order, &invalid) &&
                                        invalid.status == CHECK_STATUS_INVALID_GRAPH && output.length == mark && scratch.length == 0 &&
                                        !check_stream_has_values(&invalid) && invalid.count == 0,
                                   "malformed compact vector metadata fails within its bounds and rolls publication back");

@@ -1698,18 +1698,397 @@ static uint32_t check_test_leaf(CheckGraph* graph, uint32_t token, CheckValue va
     return node;
 }
 
+static uint64_t check_test_fold_value(uint64_t digest, const CheckValue* value);
+
+// check_graph_validate's definition (#2924): the exact path (check_graph_validate_node) on every node in order, up to the
+// first invalid one, which `failed` names, between the lists' checks and the counters' consumption.
+static bool check_test_graph_validate_definition(const CheckGraph* graph, uint8_t* pure, CheckGraphValidation* state, uint32_t* failed)
+{
+    *state = (CheckGraphValidation){ 0 };
+    *failed = BUSTER_CHECK_NONE;
+    bool result = check_graph_validate_lists(graph);
+    for (uint32_t node = 0; result && node < graph->count; node += 1)
+    {
+        result = check_graph_validate_node(graph, node, pure, state);
+        *failed = result ? BUSTER_CHECK_NONE : node;
+    }
+    result = result && check_graph_validate_consumed(graph, state);
+    return result;
+}
+
+// A graph's nodes as a key (#2924): its extensions, each node's suppressed warnings, operator, token and operands, the
+// columns a fixture may leave out as absent, each leaf's value, and the arguments' nodes. Equal graphs have equal keys, and a fixture's graph keeps its key
+// whatever path checks it.
+static uint64_t check_test_graph_key(const CheckGraph* graph)
+{
+    uint64_t digest = UINT64_C(0xcbf29ce484222325);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)graph->count << 32 | graph->argument_count);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)graph->extensions);
+    for (uint32_t node = 0; node < graph->count; node += 1)
+    {
+        digest = pp_kernel_fold_u64(digest, graph->warning_suppressed != NULL ? graph->warning_suppressed[node] : 0);
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->ops[node] << 32 | (graph->tokens != NULL ? graph->tokens[node] : UINT32_MAX));
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->operand0[node] << 32 | graph->operand1[node]);
+        digest = pp_kernel_fold_u64(digest, (uint64_t)graph->operand2[node] << 32 | (graph->types != NULL ? graph->types[node] : UINT32_MAX));
+        digest = pp_kernel_fold_u64(digest, (uint64_t)(graph->members != NULL ? graph->members[node] : UINT32_MAX) << 32 |
+                                                (graph->contexts != NULL ? graph->contexts[node] : UINT32_MAX));
+        digest = pp_kernel_fold_u64(digest, (uint64_t)(graph->argument_offsets != NULL ? graph->argument_offsets[node] : UINT32_MAX) << 32 |
+                                                (graph->argument_counts != NULL ? graph->argument_counts[node] : UINT32_MAX));
+        if (graph->ops[node] == CHECK_OP_VALUE)
+        {
+            const CheckValue leaf = check_graph_leaf_value(graph, node);
+            digest = check_test_fold_value(digest, &leaf);
+        }
+    }
+    for (uint32_t argument = 0; graph->argument_nodes != NULL && argument < graph->argument_count; argument += 1)
+    {
+        digest = pp_kernel_fold_u64(digest, graph->argument_nodes[argument]);
+    }
+    return digest;
+}
+
+// What check_test_stream_equal compares, as a digest (#2924), recorded where the checker's vector path and its scalar
+// twin agreed: the counts, each node's value (as check_test_value_equal compares it), diagnostic, warnings and
+// conversions, the arguments' conversions, the reports, and every effect's fields that its comparison reads. No field is
+// an address: an x86 builtin's catalogue entry is its name.
+#define CHECK_TEST_FOLD(field) digest = pp_kernel_fold_u64(digest, (uint64_t)(field))
+#define CHECK_TEST_FOLD_VALUE(field) digest = check_test_fold_value(digest, &(field))
+static uint64_t check_test_stream_digest(const CheckStream* s, uint32_t arguments)
+{
+    uint64_t digest = UINT64_C(0xcbf29ce484222325);
+    CHECK_TEST_FOLD(s->status);
+    CHECK_TEST_FOLD(s->count);
+    CHECK_TEST_FOLD(s->report_count);
+    CHECK_TEST_FOLD(s->effect_count);
+    CHECK_TEST_FOLD(s->varargs_count);
+    CHECK_TEST_FOLD((uint64_t)s->misc_count << 32 | s->floating_count);
+    CHECK_TEST_FOLD((uint64_t)s->query_count << 32 | s->atomic_count);
+    CHECK_TEST_FOLD((uint64_t)s->vector_count << 32 | s->x86_count);
+    CHECK_TEST_FOLD((uint64_t)s->bit_cast_count << 32 | s->overload_count);
+    CHECK_TEST_FOLD(s->overload_address_count);
+    for (uint32_t i = 0; i < s->count; i += 1)
+    {
+        const CheckValue value = check_stream_value(s, i);
+        CHECK_TEST_FOLD_VALUE(value);
+        CHECK_TEST_FOLD((uint64_t)s->diagnostics[i] << 32 | s->warnings[i]);
+        CHECK_TEST_FOLD(s->diagnostic_operands != NULL ? s->diagnostic_operands[i] : 0);
+        CHECK_TEST_FOLD(s->member_offsets != NULL ? s->member_offsets[i] : 0);
+        CHECK_TEST_FOLD(s->warning_ignored != NULL ? s->warning_ignored[i] : 0);
+        CHECK_TEST_FOLD((uint64_t)s->conversions[i].store.type << 32 | s->conversions[i].store.flags);
+        for (uint32_t operand = 0; operand < 3; operand += 1)
+        {
+            CHECK_TEST_FOLD((uint64_t)s->conversions[i].operands[operand].type << 32 | s->conversions[i].operands[operand].flags);
+        }
+    }
+    for (uint32_t i = 0; i < arguments; i += 1)
+    {
+        CHECK_TEST_FOLD((uint64_t)s->argument_conversions[i].type << 32 | s->argument_conversions[i].flags);
+    }
+    for (uint32_t i = 0; i < s->report_count; i += 1)
+    {
+        const CheckReport* r = s->reports + i;
+        CHECK_TEST_FOLD((uint64_t)r->node << 32 | r->token);
+        CHECK_TEST_FOLD((uint64_t)r->message << 32 | r->diagnostic);
+        CHECK_TEST_FOLD(r->fault);
+    }
+    for (uint32_t i = 0; i < s->effect_count; i += 1)
+    {
+        const CheckStoreEffect* e = s->effects + i;
+        CHECK_TEST_FOLD(e->node);
+        CHECK_TEST_FOLD_VALUE(e->value);
+        CHECK_TEST_FOLD_VALUE(e->destination);
+        CHECK_TEST_FOLD((uint64_t)e->runtime_builtin << 32 | e->evaluated_operands);
+        CHECK_TEST_FOLD((uint64_t)e->warnings << 32 | e->warning_operands);
+        CHECK_TEST_FOLD(e->unsupported);
+    }
+    for (uint32_t i = 0; i < s->varargs_count; i += 1)
+    {
+        const CheckVarargsEffect* e = s->varargs + i;
+        CHECK_TEST_FOLD((uint64_t)e->node << 32 | e->requested_type);
+        CHECK_TEST_FOLD((uint64_t)e->evaluated_operands << 32 | e->warnings);
+        CHECK_TEST_FOLD(e->mutates_list);
+    }
+    for (uint32_t i = 0; i < s->misc_count; i += 1)
+    {
+        const CheckBuiltinMiscEffect* e = s->misc + i;
+        CHECK_TEST_FOLD(e->node);
+        CHECK_TEST_FOLD_VALUE(e->constant_value);
+        CHECK_TEST_FOLD((uint64_t)e->constant_evaluated_operands << 32 | e->evaluated_operands);
+        CHECK_TEST_FOLD((uint64_t)e->warnings << 32 | e->unsupported);
+        CHECK_TEST_FOLD(e->frame_level);
+        CHECK_TEST_FOLD(e->alignment);
+        CHECK_TEST_FOLD(e->alignment_offset);
+        CHECK_TEST_FOLD((uint64_t)e->runtime_builtin << 32 | e->constraint);
+        CHECK_TEST_FOLD(e->warning_operands);
+        CHECK_TEST_FOLD((uint64_t)e->prefetch_rw << 32 | e->prefetch_locality);
+        CHECK_TEST_FOLD((uint64_t)e->terminates << 5 | (uint64_t)e->reads_memory << 4 | (uint64_t)e->writes_memory << 3 |
+                        (uint64_t)e->allocates_stack << 2 | (uint64_t)e->alignment_offset_known);
+    }
+    for (uint32_t i = 0; i < s->floating_count; i += 1)
+    {
+        const CheckBuiltinFloatEffect* e = s->floating + i;
+        CHECK_TEST_FOLD(e->node);
+        CHECK_TEST_FOLD((uint64_t)e->math_kind << 32 | e->errno_pointer_type);
+        CHECK_TEST_FOLD_VALUE(e->converted_arguments[0]);
+        CHECK_TEST_FOLD_VALUE(e->converted_arguments[1]);
+        CHECK_TEST_FOLD((uint64_t)e->floating_type << 32 | e->evaluated_operands);
+        CHECK_TEST_FOLD((uint64_t)e->definite_operands << 32 | e->selected_selector);
+        CHECK_TEST_FOLD((uint64_t)e->class_mask << 32 | e->unsupported);
+        CHECK_TEST_FOLD((uint64_t)e->warnings << 32 | e->runtime_builtin);
+        CHECK_TEST_FOLD(e->evaluation);
+        CHECK_TEST_FOLD((uint64_t)e->folded << 6 | (uint64_t)e->reads_memory << 5 | (uint64_t)e->compiler_barrier << 4 |
+                        (uint64_t)e->reads_fp_environment << 3 | (uint64_t)e->may_raise_fp_exceptions << 2 | (uint64_t)e->may_raise_inexact << 1 |
+                        (uint64_t)e->may_set_errno);
+    }
+    for (uint32_t i = 0; i < s->query_count; i += 1)
+    {
+        const CheckBuiltinQueryEffect* e = s->queries + i;
+        CHECK_TEST_FOLD(e->node);
+        CHECK_TEST_FOLD_VALUE(e->runtime_value);
+        CHECK_TEST_FOLD((uint64_t)e->evaluated_operands << 32 | e->warnings);
+        CHECK_TEST_FOLD((uint64_t)e->warning_operands << 32 | e->mode);
+        CHECK_TEST_FOLD((uint64_t)e->known << 32 | e->constraint);
+        CHECK_TEST_FOLD((uint64_t)e->source_proof << 32 | e->runtime_plan);
+        CHECK_TEST_FOLD(e->unsupported);
+        CHECK_TEST_FOLD((uint64_t)e->runtime_effects.flags << 32 | e->runtime_effects.fault);
+        CHECK_TEST_FOLD(e->runtime_effects.fault_node);
+        CHECK_TEST_FOLD((uint64_t)e->runtime_effects.reads_fp_environment << 1 | (uint64_t)e->runtime_effects.may_raise_fp_exceptions);
+    }
+    for (uint32_t i = 0; i < s->atomic_count; i += 1)
+    {
+        const CheckBuiltinAtomicEffect* e = s->atomics + i;
+        CHECK_TEST_FOLD(e->node);
+        CHECK_TEST_FOLD_VALUE(e->object_address);
+        CHECK_TEST_FOLD_VALUE(e->store_value);
+        CHECK_TEST_FOLD((uint64_t)e->object_type << 32 | e->value_type);
+        CHECK_TEST_FOLD(e->object_size);
+        CHECK_TEST_FOLD(e->required_alignment);
+        CHECK_TEST_FOLD(e->minimum_alignment);
+        CHECK_TEST_FOLD((uint64_t)e->evaluated_operands << 32 | e->success_order);
+        CHECK_TEST_FOLD((uint64_t)e->failure_order << 32 | e->known_orders);
+        CHECK_TEST_FOLD((uint64_t)e->warnings << 32 | e->warning_operands);
+        CHECK_TEST_FOLD((uint64_t)e->unsupported << 32 | e->runtime_builtin);
+        CHECK_TEST_FOLD(e->fence_scope);
+        CHECK_TEST_FOLD((uint64_t)e->alignment_known << 6 | (uint64_t)e->volatile_access << 5 | (uint64_t)e->reads_memory << 4 |
+                        (uint64_t)e->writes_memory << 3 | (uint64_t)e->rmw << 2 | (uint64_t)e->compiler_barrier);
+    }
+    for (uint32_t i = 0; i < s->vector_count; i += 1)
+    {
+        const CheckBuiltinVectorEffect* e = s->vectors + i;
+        CHECK_TEST_FOLD(e->node);
+        CHECK_TEST_FOLD((uint64_t)e->element_type << 32 | e->memory_type);
+        CHECK_TEST_FOLD((uint64_t)e->lane_count << 32 | e->evaluated_argument_count);
+        CHECK_TEST_FOLD((uint64_t)e->warnings << 32 | e->warning_operands);
+        CHECK_TEST_FOLD((uint64_t)e->unsupported << 32 | e->runtime_builtin);
+        CHECK_TEST_FOLD((uint64_t)e->constraint << 32 | e->store_conversion);
+        CHECK_TEST_FOLD((uint64_t)e->reads_memory << 6 | (uint64_t)e->writes_memory << 5 | (uint64_t)e->nondeterministic << 4 |
+                        (uint64_t)e->constant_evaluation_unmodeled << 3 | (uint64_t)e->reads_fp_environment << 2 |
+                        (uint64_t)e->may_raise_fp_exceptions << 1 | (uint64_t)e->bool_splat_signed_true);
+        for (uint32_t a = 0; a < 3; a += 1)
+        {
+            CHECK_TEST_FOLD_VALUE(e->converted_arguments[a]);
+        }
+    }
+    for (uint32_t i = 0; i < s->x86_count; i += 1)
+    {
+        const CheckBuiltinX86Effect* e = s->x86 + i;
+        CHECK_TEST_FOLD(e->node);
+        digest = e->info != NULL ? pp_kernel_fold(digest, e->info->name, e->info->name_length) : pp_kernel_fold_u64(digest, 0);
+        CHECK_TEST_FOLD((uint64_t)e->status << 32 | e->constraint);
+        CHECK_TEST_FOLD(e->checked_ice_arguments);
+        CHECK_TEST_FOLD(e->matched_rules);
+        CHECK_TEST_FOLD((uint64_t)e->unsupported << 32 | e->range_event_count);
+        for (uint32_t r = 0; r < e->range_event_count; r += 1)
+        {
+            const CheckBuiltinX86RangeEvent* x = e->range_events + r;
+            CHECK_TEST_FOLD((uint64_t)x->node << 32 | x->argument);
+            CHECK_TEST_FOLD(x->low);
+            CHECK_TEST_FOLD(x->high);
+            CHECK_TEST_FOLD(x->source_line);
+            CHECK_TEST_FOLD_VALUE(x->value);
+            CHECK_TEST_FOLD((uint64_t)x->disposition << 32 | x->default_error);
+        }
+    }
+    for (uint32_t i = 0; i < s->bit_cast_count; i += 1)
+    {
+        const CheckBuiltinBitCastEffect* e = s->bit_casts + i;
+        CHECK_TEST_FOLD((uint64_t)e->node << 32 | e->source_type);
+        CHECK_TEST_FOLD(e->representation_type);
+        CHECK_TEST_FOLD(e->byte_count);
+        CHECK_TEST_FOLD((uint64_t)e->evaluated_operands << 32 | e->unsupported);
+        CHECK_TEST_FOLD((uint64_t)e->runtime_builtin << 32 | e->payload_count);
+        CHECK_TEST_FOLD((uint64_t)e->representation_known << 3 | (uint64_t)e->folded << 2 | (uint64_t)e->runtime_required << 1 |
+                        (uint64_t)e->volatile_read);
+        digest = pp_kernel_fold(digest, e->bytes, sizeof(e->bytes));
+    }
+    for (uint32_t i = 0; i < s->overload_count; i += 1)
+    {
+        const CheckOverloadEffect* e = s->overloads + i;
+        CHECK_TEST_FOLD((uint64_t)e->node << 32 | e->selected.status);
+        CHECK_TEST_FOLD((uint64_t)e->selected.candidate << 32 | e->selected.declaration);
+        CHECK_TEST_FOLD((uint64_t)e->selected.canonical << 32 | e->selected.object);
+        CHECK_TEST_FOLD((uint64_t)e->selected.type << 32 | e->selected.flags);
+    }
+    for (uint32_t i = 0; i < s->overload_address_count; i += 1)
+    {
+        const CheckOverloadAddressEffect* e = s->overload_addresses + i;
+        CHECK_TEST_FOLD((uint64_t)e->node << 32 | e->operand);
+        CHECK_TEST_FOLD((uint64_t)e->selected.status << 32 | e->selected.candidate);
+        CHECK_TEST_FOLD((uint64_t)e->selected.declaration << 32 | e->selected.canonical);
+        CHECK_TEST_FOLD((uint64_t)e->selected.object << 32 | e->selected.type);
+        CHECK_TEST_FOLD(e->selected.flags);
+    }
+    return digest;
+}
+#undef CHECK_TEST_FOLD
+#undef CHECK_TEST_FOLD_VALUE
+
+// The checker's streams' recorded digests (#2924), a table apart from the reader's: the generated graphs', by their
+// keys, and the source fixtures', by their names. A case with no line passes (TestDigests.unrecorded): a graph another
+// seed draws, or a case added after the twin went, has no agreement to record.
+#define BUSTER_CHECK_STREAM_DIGESTS "tests/checker/stream-digests.tsv"
+static TestDigests check_stream_digests = { .path = BUSTER_CHECK_STREAM_DIGESTS, .record = "BUSTER_CHECK_RECORD_STREAM_DIGESTS", .unrecorded = true };
+
+// The byte flips check_test_stream_digest_sees made that check_test_stream_equal saw, each changing the digest too.
+static uint64_t check_stream_digest_flips;
+
+// Whether the digest sees what check_test_stream_equal compares (#2924): `stream`'s columns copied, the bytes of each
+// column's first two elements and its last flipped one at a time, and every flip the comparison sees changing the digest.
+// A field the digest left out would let a stream the comparison rejects match its recorded line. The x86 effects keep
+// their information pointer, which the digest reads by its name, and their range events' count, which bounds its read
+// of the events.
+static bool check_test_stream_digest_sees(const CheckStream* stream, uint32_t arguments)
+{
+    typedef struct CheckTestColumn CheckTestColumn;
+    struct CheckTestColumn
+    {
+        void** column;
+        uint64_t size;
+        uint32_t count;
+        const char* name;
+    };
+    CheckStream copy = *stream;
+    const CheckTestColumn columns[] = {
+        { (void**)&copy.dense_values, sizeof(*copy.dense_values), stream->count, "dense values" },
+        { (void**)&copy.value_types, sizeof(*copy.value_types), stream->count, "value types" },
+        { (void**)&copy.value_flags, sizeof(*copy.value_flags), stream->count, "value flags" },
+        { (void**)&copy.value_objects, sizeof(*copy.value_objects), stream->count, "value objects" },
+        { (void**)&copy.value_categories, sizeof(*copy.value_categories), stream->count, "value categories" },
+        { (void**)&copy.value_constants, sizeof(*copy.value_constants), stream->count, "value constants" },
+        { (void**)&copy.payload_rows, sizeof(*copy.payload_rows), stream->count, "payload rows" },
+        { (void**)&copy.payloads, sizeof(*copy.payloads), stream->payload_count, "payloads" },
+        { (void**)&copy.conversions, sizeof(*copy.conversions), stream->count, "conversions" },
+        { (void**)&copy.argument_conversions, sizeof(*copy.argument_conversions), arguments, "argument conversions" },
+        { (void**)&copy.diagnostics, sizeof(*copy.diagnostics), stream->count, "diagnostics" },
+        { (void**)&copy.diagnostic_operands, sizeof(*copy.diagnostic_operands), stream->count, "diagnostic operands" },
+        { (void**)&copy.member_offsets, sizeof(*copy.member_offsets), stream->count, "member offsets" },
+        { (void**)&copy.warnings, sizeof(*copy.warnings), stream->count, "warnings" },
+        { (void**)&copy.warning_ignored, sizeof(*copy.warning_ignored), stream->count, "ignored warnings" },
+        { (void**)&copy.reports, sizeof(*copy.reports), stream->report_count, "reports" },
+        { (void**)&copy.effects, sizeof(*copy.effects), stream->effect_count, "store effects" },
+        { (void**)&copy.varargs, sizeof(*copy.varargs), stream->varargs_count, "varargs" },
+        { (void**)&copy.misc, sizeof(*copy.misc), stream->misc_count, "misc builtins" },
+        { (void**)&copy.floating, sizeof(*copy.floating), stream->floating_count, "floating builtins" },
+        { (void**)&copy.queries, sizeof(*copy.queries), stream->query_count, "queries" },
+        { (void**)&copy.atomics, sizeof(*copy.atomics), stream->atomic_count, "atomics" },
+        { (void**)&copy.vectors, sizeof(*copy.vectors), stream->vector_count, "vector builtins" },
+        { (void**)&copy.x86, sizeof(*copy.x86), stream->x86_count, "x86 builtins" },
+        { (void**)&copy.bit_casts, sizeof(*copy.bit_casts), stream->bit_cast_count, "bit casts" },
+        { (void**)&copy.overloads, sizeof(*copy.overloads), stream->overload_count, "overloads" },
+        { (void**)&copy.overload_addresses, sizeof(*copy.overload_addresses), stream->overload_address_count, "overload addresses" },
+    };
+    void* owned[BUSTER_ARRAY_LENGTH(columns)] = { 0 };
+    bool copied = true;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+    {
+        void* original = *columns[c].column;
+        owned[c] = original != NULL && columns[c].count != 0 ? malloc(columns[c].size * columns[c].count) : NULL;
+        copied &= original == NULL || columns[c].count == 0 || owned[c] != NULL;
+        if (owned[c] != NULL)
+        {
+            memcpy(owned[c], original, columns[c].size * columns[c].count);
+        }
+        *columns[c].column = owned[c] != NULL ? owned[c] : original;
+    }
+    const uint64_t digest = check_test_stream_digest(stream, arguments);
+    bool sees = copied && check_test_stream_equal(stream, &copy, arguments) && check_test_stream_digest(&copy, arguments) == digest;
+    const uint64_t pointer = __builtin_offsetof(CheckBuiltinX86Effect, info);
+    const uint64_t events = __builtin_offsetof(CheckBuiltinX86Effect, range_event_count);
+    for (uint32_t c = 0; sees && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+    {
+        uint8_t* bytes = *columns[c].column;
+        const uint32_t elements[] = { 0, 1, columns[c].count - 1 };
+        for (uint32_t e = 0; sees && bytes != NULL && e < BUSTER_ARRAY_LENGTH(elements); e += 1)
+        {
+            const uint32_t element = elements[e];
+            const bool repeated = (e == 1 && columns[c].count < 2) || (e == 2 && columns[c].count < 3);
+            for (uint64_t at = 0; sees && !repeated && element < columns[c].count && at < columns[c].size; at += 1)
+            {
+                const bool kept = columns[c].column == (void**)&copy.x86 &&
+                                  ((at >= pointer && at < pointer + sizeof(void*)) || (at >= events && at < events + sizeof(uint32_t)));
+                uint8_t* byte = bytes + (uint64_t)element * columns[c].size + at;
+                *byte ^= kept ? 0 : 1;
+                const bool seen = !check_test_stream_equal(stream, &copy, arguments);
+                sees = !seen || check_test_stream_digest(&copy, arguments) != digest;
+                check_stream_digest_flips += seen;
+                if (!sees)
+                {
+                    fprintf(stderr, "test-checker: a flip of byte %llu of %s %u changes what the stream comparison compares, not the digest\n",
+                            (unsigned long long)at, columns[c].name, element);
+                }
+                *byte ^= kept ? 0 : 1;
+            }
+        }
+    }
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+    {
+        free(owned[c]);
+    }
+    return sees;
+}
+
+// Whether the digest sees what the comparison compares (check_test_stream_digest_sees) on the first stream of 1 to 4,096
+// nodes at `site`; any other stream passes.
+static bool check_test_stream_flipped(const CheckStream* stream, uint32_t arguments, const char* site)
+{
+    static const char* seen[64];
+    static uint32_t seen_count;
+    bool first = stream->count != 0 && stream->count <= 4096 && seen_count < BUSTER_ARRAY_LENGTH(seen);
+    for (uint32_t i = 0; first && i < seen_count; i += 1)
+    {
+        first = strcmp(seen[i], site) != 0;
+    }
+    if (first)
+    {
+        seen[seen_count++] = site;
+    }
+    return !first || check_test_stream_digest_sees(stream, arguments);
+}
+
+// Whether `stream`, a comparison's reference for `graph` at `site` (its other paths and partitions compared with it),
+// is its recorded digest, the graph's key its name: `arguments` as the comparison reads them; and whether the digest
+// sees what the comparison compares (check_test_stream_flipped).
+static bool check_test_stream_recorded(const CheckStream* stream, const CheckGraph* graph, uint32_t arguments, const char* site)
+{
+    char key[32];
+    snprintf(key, sizeof(key), "%016llx", (unsigned long long)check_test_graph_key(graph));
+    const bool sees = check_test_stream_flipped(stream, arguments, site);
+    return test_digest_matches(&check_stream_digests, check_test_stream_digest(stream, arguments), site, key, false) && sees;
+}
+
 static void check_test_compare_graph(CheckTest* test, TypeTable* table, const CheckGraph* graph, Arena* output, Arena* scratch, bool partitions)
 {
     const uint64_t mark = output->length;
     const uint64_t scratch_mark = scratch->length;
-    const CheckOptions scalar_options = {
-        .scalar = true
-    };
-    CheckStream scalar;
-    const bool scalar_valid = check_graph_run(table, graph, output, scratch, &scalar_options, &scalar);
-    check_test_expect(test, scalar_valid && scalar.status == CHECK_STATUS_OK && scalar.count == graph->count, "scalar graph run failed");
-    check_test_expect(test, scratch->length == scratch_mark, "scalar graph retained scratch storage");
-    const uint64_t scalar_end = output->length;
+    const CheckOptions reference_options = { 0 };
+    CheckStream reference;
+    const bool reference_valid = check_graph_run(table, graph, output, scratch, &reference_options, &reference);
+    check_test_expect(test, reference_valid && reference.status == CHECK_STATUS_OK && reference.count == graph->count, "the reference graph run failed");
+    check_test_expect(test, scratch->length == scratch_mark, "the reference graph run retained scratch storage");
+    // The stream against its recorded digest, the graph's key its name.
+    check_test_expect(test, !reference_valid || check_test_stream_recorded(&reference, graph, graph->argument_count, "graphs"),
+                      "a generated graph's stream is its recorded digest");
+    const uint64_t reference_end = output->length;
     CheckGraph recorded = *graph;
     recorded.recorded = (CheckGraphValidation){ 0 };
     recorded.recorded_nodes = 0;
@@ -1717,26 +2096,26 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     recorded.recorded_pure = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
     const bool recorded_room = graph->count == 0 || recorded.recorded_pure != NULL;
     check_test_expect(test, recorded_room, "recorded graph oracle allocation");
-    if (scalar_valid && recorded_room)
+    if (reference_valid && recorded_room)
     {
         check_graph_record_finish(&recorded);
         for (uint32_t path = 0; path < 8; path += 1)
         {
-            const CheckOptions options = { .scalar = path % 4 == 0, .verify = path >= 4, .level_order = path % 4 == 2, .regions = path % 4 == 3 };
+            const CheckOptions options = { .verify = path >= 4, .transitions = path % 4 == 1, .level_order = path % 4 == 2, .regions = path % 4 == 3 };
             CheckStream stream;
             const uint64_t recorded_mark = scratch->length;
             const bool checked = check_graph_run(table, &recorded, output, scratch, &options, &stream);
-            check_test_expect(test, checked && check_test_stream_equal(&scalar, &stream, graph->argument_count),
-                              "recorded graph facts agree with both validators and all four schedules");
+            check_test_expect(test, checked && check_test_stream_equal(&reference, &stream, graph->argument_count),
+                              "recorded graph facts agree with the validator and all four schedules");
             check_test_expect(test, scratch->length == recorded_mark, "recorded graph run releases only its own scratch");
-            arena_pop_to(output, scalar_end);
+            arena_pop_to(output, reference_end);
         }
     }
     arena_pop_to(scratch, scratch_mark);
-    // Each batch size by each of the vector path's orders but node order, which takes none: its regions in postorder
+    // Each batch size by each of the checker's orders but node order, which takes none: its regions in postorder
     // batches (CheckOptions.regions), its regions by level (CheckOptions.level_order), and its memoized transitions (#1050),
     // every hit verified against its action.
-    for (uint32_t run = partitions ? 3 : 3 * BUSTER_CHECK_BATCH; scalar_valid && run < 3 * (BUSTER_CHECK_BATCH + 1); run += 1)
+    for (uint32_t run = partitions ? 3 : 3 * BUSTER_CHECK_BATCH; reference_valid && run < 3 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
         const uint32_t batch = run / 3;
         const uint32_t order = run % 3;
@@ -1749,7 +2128,7 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0 &&
+        check_test_expect(test, vector_valid && check_test_stream_equal(&reference, &vector, graph->argument_count) && vector.statistics.transition_mismatches == 0 &&
                                 vector.statistics.transition_verified == vector.statistics.transition_hits,
                           order == 1 ? "graph paths or level-order batch partitions differ" :
                           order == 2 ? "graph paths or the transitions differ" : "graph paths or batch partitions differ");
@@ -1762,7 +2141,7 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
                 check_test_expect(test, vector.reports[i - 1].token <= vector.reports[i].token, "diagnostics are not in source-token order");
             }
         }
-        arena_pop_to(output, scalar_end);
+        arena_pop_to(output, reference_end);
     }
     arena_pop_to(output, mark);
 }
@@ -1909,7 +2288,7 @@ static void check_test_graph_recorded(CheckTest* test, TypeTable* table, Arena* 
         check_graph_record_finish(&graph);
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
-            const CheckOptions options = { .scalar = scalar != 0, .verify = true };
+            const CheckOptions options = { .verify = true };
             CheckStream stream;
             bool checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
             check_test_expect(test, checked, "incremental recorded graph facts verify across a vector block boundary");
@@ -2057,11 +2436,9 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
             });
             check_graph_add(&graph, CHECK_OP_ADD, 5, second_array, one, BUSTER_CHECK_NONE);
             const CheckOptions options[4] = {
+                { 0 },
                 {
-                    .scalar = true
-                },
-                {
-                    .scalar = false
+                    .transitions = true
                 },
                 {
                     .level_order = true
@@ -2072,6 +2449,7 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
             };
             CheckStream streams[4];
             const bool first = check_graph_run(&types[0].table, &graph, output, scratch, &options[0], &streams[0]);
+            check_test_expect(test, !first || check_test_stream_recorded(&streams[0], &graph, 0, "scheduler"), "scheduler: the reference stream is its recorded digest");
             for (uint32_t path = 1; path < 4; path += 1)
             {
                 const bool checked = check_graph_run(&types[path].table, &graph, output, scratch, &options[path], &streams[path]);
@@ -2157,6 +2535,179 @@ static __attribute__((noinline)) void check_test_graph_arguments(CheckTest* test
         check_test_expect(test, output->length == output_mark && scratch->length == scratch_mark, "invalid call graph retained arena storage");
     }
     arena_pop_to(storage, mark);
+}
+
+// The regions' scan (check_graph_marked_end) against its definition, the first node from `node` without a mark, or the
+// count: one unmarked node at every place of graphs up to three blocks of 64 and a part, from starts on each side of a
+// block's bounds. Marks of every value count, a done region's too. The fixtures' regions are runs far shorter than a block,
+// whose bound no graph of them reaches.
+static __attribute__((noinline)) void check_test_graph_marked_end(CheckTest* test)
+{
+    uint8_t marks[200];
+    const uint32_t starts[] = { 0, 1, 62, 63, 64, 65, 127, 128, 129 };
+    uint32_t wrong = 0;
+    uint32_t cases = 0;
+    for (uint32_t count = 1; count <= BUSTER_ARRAY_LENGTH(marks); count += 1)
+    {
+        for (uint32_t unmarked = 0; unmarked <= count; unmarked += 1)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                marks[i] = i == unmarked ? 0 : (uint8_t)(1 + i % 3);
+            }
+            for (uint32_t s = 0; s <= BUSTER_ARRAY_LENGTH(starts); s += 1)
+            {
+                const uint32_t node = s < BUSTER_ARRAY_LENGTH(starts) ? starts[s] : unmarked;
+                if (node < count)
+                {
+                    const uint32_t expected = node <= unmarked ? unmarked : count;
+                    wrong += check_graph_marked_end(marks, node, count, false) != expected;
+                    cases += 1;
+                }
+            }
+        }
+    }
+    check_test_expect(test, cases > 100000 && wrong == 0, "the regions' scan ends at the first unmarked node, or the count");
+}
+
+// The resource scan (check_graph_resource_node) against its definition, the first node whose diagnostic is
+// CHECK_DIAG_RESOURCE, or none: one at every place of streams up to five blocks of 16, with other diagnostics around it and
+// a second one after it. No fixture runs out of room at a block's last lane.
+static __attribute__((noinline)) void check_test_graph_resource_node(CheckTest* test)
+{
+    CheckDiagnostic diagnostics[80];
+    const CheckStream stream = { .diagnostics = diagnostics };
+    uint32_t wrong = 0;
+    uint32_t cases = 0;
+    for (uint32_t count = 1; count <= BUSTER_ARRAY_LENGTH(diagnostics); count += 1)
+    {
+        for (uint32_t exhausted = 0; exhausted <= count; exhausted += 1)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                diagnostics[i] = i % 3 == 0 ? CHECK_DIAG_INVALID_TYPE : CHECK_DIAG_NONE;
+            }
+            if (exhausted < count)
+            {
+                diagnostics[exhausted] = CHECK_DIAG_RESOURCE;
+                diagnostics[count - 1] = CHECK_DIAG_RESOURCE;
+            }
+            const uint32_t expected = exhausted < count ? exhausted : BUSTER_CHECK_NONE;
+            wrong += check_graph_resource_node(&stream, count, false) != expected;
+            cases += 1;
+        }
+    }
+    check_test_expect(test, cases > 3000 && wrong == 0, "the resource scan finds the first node that ran out of room");
+}
+
+// The constant contexts' marks (check_graph_constant_contexts) against their definition, one reverse pass over every node:
+// a node with a required context is marked, and a marked node marks its operands and its call's arguments. Random postorder
+// graphs of sizes around the pass's 64-node blocks, with few contexts (an ICE alone among them, and bits outside the required
+// ones) and operands anywhere below their node, so that whole blocks hold only marks from later nodes; over marks the pass
+// clears itself, zeroed ones, and a graph without contexts.
+static __attribute__((noinline)) void check_test_graph_constant_contexts(CheckTest* test)
+{
+    enum { capacity = 320 };
+    CheckOp ops[capacity];
+    uint32_t operand0[capacity];
+    uint32_t operand1[capacity];
+    uint32_t operand2[capacity];
+    uint8_t contexts[capacity];
+    uint32_t argument_offsets[capacity];
+    uint32_t argument_counts[capacity];
+    uint32_t argument_nodes[capacity * 3];
+    uint8_t marks[capacity];
+    uint8_t expected[capacity];
+    const uint8_t required = BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE;
+    const uint32_t sizes[] = { 1, 2, 63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256, 257, 320 };
+    uint64_t random = UINT64_C(0x2924c12c3);
+    uint32_t wrong = 0;
+    uint32_t graphs = 0;
+    uint32_t skippable = 0;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+    {
+        for (uint32_t seed = 0; seed < 40; seed += 1)
+        {
+            const uint32_t count = sizes[s];
+            uint32_t arguments = 0;
+            for (uint32_t node = 0; node < count; node += 1)
+            {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                const bool leaf = node == 0 || random % 3 == 0;
+                const bool call = !leaf && (random >> 8) % 6 == 0;
+                ops[node] = leaf ? CHECK_OP_VALUE : call ? CHECK_OP_CALL : CHECK_OP_POSITIVE;
+                operand0[node] = leaf ? BUSTER_CHECK_NONE : (uint32_t)((random >> 16) % node);
+                operand1[node] = leaf || call || (random >> 24) % 2 == 0 ? BUSTER_CHECK_NONE : (uint32_t)((random >> 28) % node);
+                operand2[node] = BUSTER_CHECK_NONE;
+                argument_offsets[node] = arguments;
+                argument_counts[node] = call ? (uint32_t)((random >> 36) % 4) : 0;
+                for (uint32_t i = 0; i < argument_counts[node]; i += 1)
+                {
+                    argument_nodes[arguments++] = (uint32_t)((random >> (40 + 4 * i)) % node);
+                }
+                const uint8_t bits[] = { BUSTER_CHECK_CONTEXT_ICE, BUSTER_CHECK_CONTEXT_ICE, BUSTER_CHECK_CONTEXT_ASSERT, BUSTER_CHECK_CONTEXT_STATIC,
+                                         BUSTER_CHECK_CONTEXT_GNU_CONSTANT, BUSTER_CHECK_CONTEXT_VALUE, BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT };
+                contexts[node] = (random >> 56) % 48 == 0 ? bits[(random >> 52) % BUSTER_ARRAY_LENGTH(bits)] : 0;
+            }
+            for (uint32_t with = 0; with < 2; with += 1)
+            {
+                const CheckGraph graph = {
+                    .count = count,
+                    .ops = ops,
+                    .operand0 = operand0,
+                    .operand1 = operand1,
+                    .operand2 = operand2,
+                    .contexts = with != 0 ? contexts : NULL,
+                    .argument_offsets = argument_offsets,
+                    .argument_counts = argument_counts,
+                    .argument_nodes = argument_nodes,
+                    .argument_count = arguments,
+                };
+                memset(expected, 0, count);
+                for (uint32_t node = count; node > 0;)
+                {
+                    node -= 1;
+                    expected[node] |= graph.contexts != NULL && (graph.contexts[node] & required) != 0;
+                    if (expected[node] != 0)
+                    {
+                        const uint32_t operands[] = { operand0[node], operand1[node], operand2[node] };
+                        for (uint32_t i = 0; i < 3; i += 1)
+                        {
+                            if (operands[i] != BUSTER_CHECK_NONE)
+                            {
+                                expected[operands[i]] = 1;
+                            }
+                        }
+                        for (uint32_t i = 0; ops[node] == CHECK_OP_CALL && i < argument_counts[node]; i += 1)
+                        {
+                            expected[argument_nodes[argument_offsets[node] + i]] = 1;
+                        }
+                    }
+                }
+                for (uint32_t block = 64; block <= count; block += 64)
+                {
+                    bool context = false;
+                    bool marked = false;
+                    for (uint32_t node = count - block; node < count - block + 64; node += 1)
+                    {
+                        context |= graph.contexts != NULL && (graph.contexts[node] & required) != 0;
+                        marked |= expected[node] != 0;
+                    }
+                    skippable += marked && !context;
+                }
+                for (uint32_t zero = 0; zero < 2; zero += 1)
+                {
+                    memset(marks, zero != 0 ? 0 : 0xa5, count);
+                    check_graph_constant_contexts(&graph, marks, zero != 0, false);
+                    wrong += memcmp(marks, expected, count) != 0;
+                    graphs += 1;
+                }
+            }
+        }
+    }
+    check_test_expect(test, graphs == 2400 && skippable > 100 && wrong == 0, "the constant contexts mark what their definition marks");
 }
 
 static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, TypeTable* table, Arena* output, Arena* scratch)
@@ -2301,12 +2852,12 @@ static void check_test_input_recorded(CheckTest* test, const CheckGraph* graph, 
     const bool room = graph->count == 0 || pure != NULL;
     check_test_expect(test, room && graph->recorded_ready && graph->recorded_nodes == graph->count,
                       "source reader publishes complete graph facts even for a diagnostic-only prefix");
-    for (uint32_t scalar = 0; room && scalar < 2; scalar += 1)
+    for (uint32_t defined = 0; room && defined < 2; defined += 1)
     {
         CheckGraphValidation validation;
         uint32_t failed;
-        const bool valid = scalar ? check_graph_validate(graph, pure, &validation, &failed) :
-                                    check_graph_validate_vector(graph, pure, &validation, &failed);
+        const bool valid = defined ? check_test_graph_validate_definition(graph, pure, &validation, &failed) :
+                                     check_graph_validate_vector(graph, pure, &validation, &failed);
         check_test_expect(test, valid && check_graph_recorded_equal(graph, &validation, pure, &failed),
                           "every source fixture's reader facts equal both independent validation paths");
     }
@@ -2612,7 +3163,6 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             if (adapted)
             {
                 const CheckOptions options = {
-                    .scalar = p == 0,
                     .verify = true,
                 };
                 checked[p] = check_graph_run(&types[p].table, &input[p].graph, &output_storage[p], &scratch[p], &options, &streams[p]);
@@ -2695,6 +3245,15 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         {
             check_test_expect(test, input[0].graph.argument_count == input[1].graph.argument_count &&
                                    check_test_stream_equal(&streams[0], &streams[1], input[0].graph.argument_count), "source paths produce different typed streams");
+            // The typed stream against its recorded digest, keyed as the reader's.
+            char key[512];
+            const uint64_t hash = pp_kernel_fold(UINT64_C(0xcbf29ce484222325), fixture->source, strlen(fixture->source));
+            snprintf(key, sizeof(key), "%s@%08x", fixture->name, (uint32_t)(hash ^ hash >> 32));
+            char streams_message[256];
+            snprintf(streams_message, sizeof(streams_message), "%s: the checker's typed stream is its recorded digest", fixture->name);
+            check_test_expect(test, test_digest_matches(&check_stream_digests, check_test_stream_digest(&streams[1], input[1].graph.argument_count), "sources", key, false) &&
+                                   check_test_stream_flipped(&streams[1], input[1].graph.argument_count, "sources"),
+                              streams_message);
             // The vector path by its memoized transitions too (#1050, CheckOptions.transitions), every hit verified.
             const uint64_t mark = output_storage[1].length;
             const CheckOptions memoized = { .verify = true, .transitions = true, .verify_transitions = true };
@@ -4089,6 +4648,9 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_shared())
             {
                 check_test_graph_guarded(&test, &types.table, &output, &scratch);
+                check_test_graph_marked_end(&test);
+                check_test_graph_resource_node(&test);
+                check_test_graph_constant_contexts(&test);
             }
             if (check_test_shared())
             {
@@ -4473,6 +5035,12 @@ static int run_checker_tests(int argc, char** argv)
     if (check_source_digests.matched + check_source_digests.unlisted != 0)
     {
         printf("test-checker: the reader's recorded digests: %u cases with a line, %u without\n", check_source_digests.matched, check_source_digests.unlisted);
+    }
+    if (check_stream_digests.matched + check_stream_digests.unlisted != 0)
+    {
+        printf("test-checker: the checker's recorded stream digests: %u cases with a line, %u without; %llu byte flips the stream comparison saw, each changing the digest\n",
+               check_stream_digests.matched, check_stream_digests.unlisted, (unsigned long long)check_stream_digest_flips);
+        check_test_expect(&test, check_stream_digest_flips != 0, "the stream digests' byte flips reach what the stream comparison compares");
     }
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int returned = test.failures != 0;

@@ -190,7 +190,7 @@ static void check_test_lazy_fixture(CheckTest* test, const CheckLazyFixture* fix
                 const bool initialized = retained.base != 0 && checked.base != 0 && check_test_types_open(&types);
                 const bool adapted = initialized && (mode == 0 ? check_input(&input, parser, &pp, &types.table, &retained, &scratch) :
                                        check_input_selected(&input, parser, &pp, &types.table, &retained, &scratch, plans[path].deferred_tokens));
-                const CheckOptions checking = { .scalar = scalar };
+                const CheckOptions checking = { 0 };
                 const bool graphed = adapted && check_graph_run(&types.table, &input.graph, &checked, &scratch, &checking, &stream);
                 const bool prepared = graphed && stream.report_count == 0 &&
                                       check_initializers_run(&initializers, &input, &stream, parser, &types.table, &checked, &scratch) &&
