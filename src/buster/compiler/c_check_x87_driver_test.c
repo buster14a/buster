@@ -13,6 +13,9 @@ static const char check_test_x87_source[] =
     "void x87_affine(long double *out, const long double *p) { *out = p[0] * 0.5L + p[1]; }\n"
     "long double x87_single_min(void) { return 0x1p-126L; }\n"
     "long double x87_single_max(void) { return -0x1.fffffep127L; }\n"
+    "long double x87_positive_zero(void) { return 0.0L; }\n"
+    "long double x87_positive_one(void) { return 1.0L; }\n"
+    "long double x87_negative_one(void) { return -1.0L; }\n"
     "long double x87_negative_zero(void) { return -0.0L; }\n"
     "long double x87_below_single_normal(void) { return 0x1p-127L; }\n"
     "long double x87_above_single_max(void) { return 0x1p128L; }\n"
@@ -38,6 +41,7 @@ static const char check_test_x87_harness[] =
     "void x87_literals(long double*); void x87_alias(long double*);\n"
     "void x87_trap(volatile int*, long double*, const long double*);\n"
     "long double x87_join(int); long double x87_call(long double);\n"
+    "long double x87_positive_zero(void),x87_positive_one(void),x87_negative_one(void);\n"
     "long double x87_single_min(void),x87_single_max(void),x87_negative_zero(void);\n"
     "long double x87_below_single_normal(void),x87_above_single_max(void),x87_extra_fraction(void);\n"
     "long double x87_double_min(void),x87_double_max(void),x87_below_double_normal(void),x87_above_double_max(void),x87_beyond_double_precision(void);\n"
@@ -69,9 +73,9 @@ static const char check_test_x87_harness[] =
     "__asm__ volatile(\"fnstsw %0\":\"=a\"(expected_flags));\n"
     "errors+=memcmp(&actual,&expected,10)!=0; errors+=(actual_flags&0x3f)!=(expected_flags&0x3f);\n"
     "__asm__ volatile(\"fnstcw %0\":\"=m\"(after)); errors+=after!=control; }\n"
-    "long double (*leaves[])(void)={x87_single_min,x87_single_max,x87_negative_zero,x87_below_single_normal,x87_above_single_max,x87_extra_fraction,\n"
+    "long double (*leaves[])(void)={x87_positive_zero,x87_positive_one,x87_negative_one,x87_single_min,x87_single_max,x87_negative_zero,x87_below_single_normal,x87_above_single_max,x87_extra_fraction,\n"
     "x87_double_min,x87_double_max,x87_below_double_normal,x87_above_double_max,x87_beyond_double_precision};\n"
-    "static const long double boundary[]={0x1p-126L,-0x1.fffffep127L,-0.0L,0x1p-127L,0x1p128L,0x1.000001p0L,\n"
+    "static const long double boundary[]={0.0L,1.0L,-1.0L,0x1p-126L,-0x1.fffffep127L,-0.0L,0x1p-127L,0x1p128L,0x1.000001p0L,\n"
     "-0x1p-1022L,0x1.fffffffffffffp1023L,-0x1p-1023L,0x1p1024L,0x1.00000000000008p0L};\n"
     "for(unsigned i=0;i<sizeof(leaves)/sizeof(*leaves);++i){long double got=leaves[i]();errors+=memcmp(&got,boundary+i,10)!=0;}\n"
     "long double values[7]; static const long double constants[]={0.0L,-0.0L,0.5L,-1.5L,0x1.0000000000000002p+0L,0x1p-16382L,0x1p-16445L};\n"
@@ -152,6 +156,9 @@ static void check_test_driver_x87(CheckTest* test, const char* clang, const char
             // At each normal-range or precision boundary, decode the load width at the consumer.
             // A literal that would be subnormal at the narrower width needs its wider representation.
             static const struct { const char* name; uint32_t form; } widths[] = {
+                { "x87_positive_zero", X86_FORM_FLDZ },
+                { "x87_positive_one", X86_FORM_FLD1 },
+                { "x87_negative_one", X86_FORM_FLD_M32 },
                 { "x87_single_min", X86_FORM_FLD_M32 },
                 { "x87_single_max", X86_FORM_FLD_M32 },
                 { "x87_negative_zero", X86_FORM_FLD_M32 },
@@ -169,17 +176,20 @@ static void check_test_driver_x87(CheckTest* test, const char* clang, const char
                 X86Decoded records[32];
                 uint32_t offsets[32], types[32], relocations = 0;
                 const uint32_t n = check_test_tier1_function(object, widths[i].name, records, BUSTER_ARRAY_LENGTH(records), offsets, types, &relocations);
+                const bool direct = widths[i].form == X86_FORM_FLDZ || widths[i].form == X86_FORM_FLD1;
+                const bool references = direct ? relocations == 0 : relocations == 1 && types[0] == R_X86_64_PC32;
                 uint32_t loads = 0;
                 for (uint32_t r = 0; r < n; r += 1)
                 {
                     const X86Decoded record = records[r];
-                    if ((record.instruction.form & BUSTER_X86_FORM_NUMBER) == widths[i].form && record.instruction.mode == BUSTER_X86_MEMORY_RIP &&
-                        relocations == 1 && offsets[0] + 4 == record.offset + record.length)
+                    const bool operand = direct ? record.length == 2 : record.instruction.mode == BUSTER_X86_MEMORY_RIP &&
+                                         relocations == 1 && offsets[0] + 4 == record.offset + record.length;
+                    if ((record.instruction.form & BUSTER_X86_FORM_NUMBER) == widths[i].form && operand)
                     {
                         loads += 1;
                     }
                 }
-                check_test_expect(test, n != 0 && loads == 1 && relocations == 1 && types[0] == R_X86_64_PC32, widths[i].name);
+                check_test_expect(test, n != 0 && loads == 1 && references, widths[i].name);
             }
         }
         char captured[128] = "";

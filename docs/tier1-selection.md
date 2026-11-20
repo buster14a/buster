@@ -361,9 +361,10 @@ patterns are:
   consumer reads them from the IR's operands' objects (`tier1_emit_cfg_x87`), and
   the plan marks them needed as it marks a pattern's values. The values are the
   other operands alone: a load's and a store's address, a conversion's integer
-  or floating operand. An F80 constant emits no records at its definition. Each
-  consumer loads a 16-byte mergeable, PC-relative literal at the original x87
-  waiting point. Signed zero and exact normal binary32 values use `flds`.
+  or floating operand. An F80 constant emits no records at its definition. Its consumer
+  uses `fldz` for positive zero and `fld1` for positive one at the original x87
+  waiting point. Other constants use a 16-byte mergeable, PC-relative literal.
+  Negative zero and exact normal binary32 values use `flds`.
   Other values exactly representable as normal binary64 use `fldl`. A narrower
   subnormal load could raise a denormal-operand exception. All remaining
   encodings retain their ten bytes and use `fldt`. External stores and
