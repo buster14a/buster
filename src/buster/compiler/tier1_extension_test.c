@@ -10,9 +10,9 @@
 // I32's 32-bit write), the select reads the load, nothing computes the extension, and its copy into a register of its
 // own is gone; a word's sign extension, whose storage is zero past its 16 bits, stays an extension of its own. Where the
 // comparison reads x instead, the load's one use is the extension, which takes it as its movsx's memory operand in
-// its block (in another, the load dies at the extension's copy), and the select reads the extension. Both paths plan
-// alike, the CFG consumer's code certifies, and it runs natively against the oracle on each type's boundaries and random
-// words, by both consumers.
+// its block (in another, the load dies at the extension's copy), and the select reads the extension. The CFG consumer's
+// code certifies, and each runs natively against the oracle on each type's boundaries and random words, by both
+// consumers.
 
 typedef struct Tier1ExtensionCase Tier1ExtensionCase;
 struct Tier1ExtensionCase
@@ -121,15 +121,14 @@ static void tier1_extension_compile(Tier1EmitTest* test, const Tier1ExtensionCas
     IrFunction function;
     Tier1ExtensionNodes nodes = { 0 };
     const bool created = tier1_extension_function(&test->input, &function, shape, branch, &nodes);
-    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+    const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the extensions' fixture is valid IR");
     IrDominance dominance;
-    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the extensions' fixture selects");
-    tier1_emit_test_expect(test, planned && tier1_select_test_plan_twin(&function, &dominance, &plan, &test->output, &test->scratch), "both selection paths plan the extensions' fixture alike");
     if (planned)
     {
         const bool forwarded = plan.covered[nodes.extended] && !plan.covered[nodes.load] && tier1_extension_reads(&plan, nodes.select, nodes.load) &&
