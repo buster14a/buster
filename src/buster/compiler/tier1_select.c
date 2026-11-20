@@ -6529,6 +6529,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.source_width = (uint8_t)(operand_float != 0 ? operand_float : source == IR_I1 ? 1 : tier1_select_memory_width(source));
         base.scale = (uint8_t)(op == IR_SITOFP ? BUSTER_TIER1_FLOAT_FROM_SIGNED : op == IR_UITOFP ? BUSTER_TIER1_FLOAT_FROM_UNSIGNED : op == IR_FPTOSI ? BUSTER_TIER1_FLOAT_TO_SIGNED :
                                op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
+        // A zero-extended I32 already holds its unsigned value as a nonnegative signed qword.
+        if (op == IR_UITOFP && source == IR_I32 && forest->canonical != NULL && (forest->canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0)
+        {
+            base.source_width = 8;
+        }
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
         const bool from_integer = op == IR_SITOFP && (source == IR_I32 || source == IR_I64);
