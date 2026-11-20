@@ -902,6 +902,63 @@ static void tier1_float_fma_loads(Tier1EmitTest* test)
     }
 }
 
+static void tier1_float_fma_factor_addresses(Tier1EmitTest* test)
+{
+    const IrSizes sizes = { .instruction_count = 8, .block_count = 1, .parameter_count = 4, .address_count = 1 };
+    for (uint32_t type = IR_F32; type <= IR_F64; type += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create a scalar FMA with an addressed factor");
+        if (created)
+        {
+            function.result_type = (uint8_t)type;
+            function.block_offsets[1] = 8;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[1] = IR_I64;
+            function.parameter_types[2] = (uint8_t)type;
+            function.parameter_types[3] = (uint8_t)type;
+            tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 2, IR_PARAM, type, 2, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 3, IR_PARAM, type, 3, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 4, IR_ADDRESS, IR_PTR, 0, 1);
+            function.c[4] = 0;
+            tier1_emit_test_node(&function, 5, IR_LOAD, type, 4, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 6, IR_FMA, type, 2, 5);
+            function.c[6] = 3;
+            tier1_emit_test_node(&function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE);
+            for (uint32_t address = 0; address <= 4; address += 1)
+            {
+                const uint8_t shift = address == 0 ? 0 : (uint8_t)(address - 1);
+                function.b[4] = address == 0 ? BUSTER_IR_NONE : 1;
+                function.addresses[0] = (IrAddress){ .offset = -7, .scale = (uint8_t)(1u << shift) };
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const bool selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+                tier1_emit_test_expect(test, selected, "select a folded FMA factor address");
+                for (uint8_t x = 1; selected && x <= 3; x += 1)
+                {
+                    const uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, 17, 18, X86_REGISTER_RDX, 19, (uint8_t)(16 + x), 0 };
+                    const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 6);
+                    const Tier1SelectRecords records = tier1_select_expand(&holes);
+                    const X86Instruction memory = records.records[x == 3];
+                    const uint16_t form = type == IR_F32 ? (x == 1 ? X86_FORM_VFMADD132SS_X_X_XM32 : X86_FORM_VFMADD231SS_X_X_XM32) :
+                                                          (x == 1 ? X86_FORM_VFMADD132SD_X_X_XM64 : X86_FORM_VFMADD231SD_X_X_XM64);
+                    const uint8_t mode = address == 0 ? BUSTER_X86_MEMORY_BASE : BUSTER_X86_MEMORY_BASE_INDEX(shift);
+                    tier1_emit_test_expect(test, x86_zen5_missing(records.records, records.count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "the emitted factor load has measured Zen 5 costs");
+                    tier1_emit_test_expect(test, plan.covered[4] && plan.covered[5] && records.count == (x == 3 ? 2u : 1u) &&
+                                          memory.form == form && memory.rm == X86_REGISTER_RDI && memory.mode == mode &&
+                                          (address == 0 || memory.index == X86_REGISTER_RSI) && memory.displacement == -7,
+                                          "the actual factor load keeps its base, index, scale and displacement");
+                }
+                arena_pop_to(&test->output, 0);
+            }
+        }
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static void tier1_float_cases(Tier1EmitTest* test)
 {
     test->terms = 0;
@@ -909,6 +966,7 @@ static void tier1_float_cases(Tier1EmitTest* test)
     test->selects = false;
     tier1_float_conversion_loads(test);
     tier1_float_fma_loads(test);
+    tier1_float_fma_factor_addresses(test);
     for (uint32_t fixture = 0; fixture < BUSTER_TIER1_FLOAT_FIXTURES; fixture += 1)
     {
         // Few xmm registers: the mixed fixture's eight parameters, which their definitions take at once, and one more;
