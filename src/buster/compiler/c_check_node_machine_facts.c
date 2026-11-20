@@ -4696,6 +4696,9 @@ struct NodeFactsReader
     uint8_t* window_c_standings;
     uint8_t* window_c_flags;
     uint8_t* window_c_templates;
+    // A record's key, which its operands' rows are read by (BUSTER_NODE_CONTEXTS_KEY_*): its template's number, but
+    // for an update, a comma and a conditional.
+    uint8_t* window_c_keys;
     uint8_t* window_c_contexts;
     uint8_t* window_c_sources;
     uint8_t* window_c_reasons;
@@ -4889,7 +4892,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->window_c_masks = arena_push_array(arena, 8 * ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2), sizeof(uint64_t), 64);
         state->c_tables = arena_push_array(arena, 1, 256, 64);
         uint8_t** columns[] = { &state->window_c_classes, &state->window_c_facts, &state->window_c_kinds, &state->window_c_standings, &state->window_c_flags,
-                                &state->window_c_templates, &state->window_c_contexts, &state->window_c_sources, &state->window_c_reasons };
+                                &state->window_c_templates, &state->window_c_keys, &state->window_c_contexts, &state->window_c_sources, &state->window_c_reasons };
         room = state->place_c_states != NULL && state->place_c_contexts != NULL && state->place_c_templates != NULL && state->place_c_targets != NULL &&
                state->c_ran != NULL && state->c_targets != NULL && state->c_ticks != NULL && state->c_verdicts != NULL && state->window_c_targets != NULL &&
                state->window_c_masks != NULL && state->c_tables != NULL && state->window_c_strides != NULL;

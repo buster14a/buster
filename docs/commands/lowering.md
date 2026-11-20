@@ -1743,9 +1743,11 @@ tests' chunk (`node_facts_window_run`).
   ran on is decided on the window unless one of its records is listed: a
   call whose record doesn't say every argument's conversion is made, or
   whose callee is no name's leaf and has an object ([a call's
-  arguments](#a-calls-arguments-in-the-kernel-and-cs-call-2850)); `&&`, `||`
-  or `?:`; an update (`++`, `--`, a compound assignment); a
-  comma or a selection; a division or a remainder by an integer constant
+  arguments](#a-calls-arguments-in-the-kernel-and-cs-call-2850)); an `&&`,
+  an `||`, a `?:` or a comma that the masks don't take ([an operator's
+  value and a comma](#an-operators-value-and-a-comma-on-the-window-2850));
+  an update the masks don't take; a selection; a division or a remainder by
+  an integer constant
   (the tasks' rule for a power of two reads the divisor's value); a record
   whose value the columns don't hold whole (a bit-field's, a faulted
   constant's and an overload set's are); a cast to a union; a leaf with an
@@ -2002,11 +2004,13 @@ measured.
 - **A CONDITION is branched** where its operand is `&&` or `||`; `&&` and
   `||` are under a CONDITION, an `&&`, an `||` or a `!`; `!` is under an
   `&&` or an `||`.
-- **What one level cannot say lists the expression:** an `&&` or an `||`
-  that is not branched (a value, or one whose first operand's truth is
-  known); a `!` that is a value over `&&` or `||`, which a CONDITION over it
-  is too; and a branched `!` over a `!`. The reason is
-  `logical-or-conditional`.
+- **What that cannot say lists the expression,** with the reason
+  `logical-or-conditional`. Since [an operator's value and a
+  comma](#an-operators-value-and-a-comma-on-the-window-2850) a record that
+  has its consumer's answer reads it from the next record, down a run of
+  such records, and what is listed is there: an `&&` or an `||` whose first
+  operand's truth may be known, a `!` over `&&` or `||` under a CONDITION,
+  and a run of more than three.
 - **A branched record's operands** are each evaluated: one branched in its
   turn with no target, a value to T's conversion of it, which C then tests.
   An operand of a type no truth's entries test leaves the record no
@@ -2287,3 +2291,76 @@ slot; a postfix update's destination's two parts by its own entries' shape;
 each template's shape with the mark of those whose rows are not made here,
 the order's permutation, void's word, which the reads don't read, and the
 values' two tables' bytes by a record's own shape.
+
+### An operator's value and a comma on the window (#2850)
+
+The same commands, `measure-node-machine --shadow --window-contexts` and
+`--window-rows`. `&&` and `||` as values, `?:` and a comma are made in C's
+loop and in X's rows on the window, where both listed them. No compile takes
+any of it. [The design](../node-machine.md#an-operators-value-and-a-comma-on-the-window)
+has the rules, what it measured and its gates.
+
+- **A comma** (`node_contexts_window_loop`): a free record of a comma's
+  class and a number's that is not read for its address has a wrapper's
+  template and a key of its own (`BUSTER_NODE_CONTEXTS_KEY_COMMA`): its
+  first operand is converted to void (`BUSTER_NODE_CONTEXTS_SOURCE_VOID`,
+  which the targets' sweep writes) and its second to the comma's type. A
+  discarded comma (`_KEY_COMMA_DISCARD`: a comma's first operand, or one
+  whose consumer, a wrapper or a conditional with the comma for an arm, is
+  of void's class, a byte read a record at a time) converts its second
+  operand to void too and has the discard's context. Listed: a comma read for its
+  address, a folded one, and a comma's second operand that is a comma.
+- **Which operators are branches.** A branch operator (`!`, `&&`, `||`,
+  free, the last two with a first operand whose truth is not known) is
+  entered as an `&&`'s or an `||`'s first operand, and, where it is an `&&`,
+  an `||` or a `!` over one with `!`s alone between (a deep `!`), as a
+  CONDITION's operand or a conditional's condition; it is chained, with its
+  consumer's answer, as an `&&`'s or an `||`'s second operand or a `!`'s
+  operand. The answers go down a run of chained records by two doubling
+  steps, with a bit from the block after. Any other is a value.
+- **An operator's value** (`NODE_MACHINE_TEMPLATE_BRANCH`): an `&&` or an
+  `||` that is a value, and a conditional whose condition's truth is not
+  known (its key `BUSTER_NODE_CONTEXTS_KEY_CONDITIONAL`: its arms are
+  converted to its own type). A record at a time, for these records alone:
+  a conditional of one operand twice, and the conversion its consumer puts
+  into its arms (`node_contexts_sinks`: three of the reference's terms,
+  which list a little more than the reference leaves to the tasks), asked of
+  a root in its expression's part. Each lists.
+- **Listed still:** a condition whose truth may be known, a value whose
+  first operand is a `!`, a `!` over `&&` or `||` under a CONDITION, a run
+  of more than three chained records, a block's last record that is a branch
+  operator under a `!`, and a selection (reason `operator`).
+- **X's turns** (`node_rows_window_held`, from the branches' loop): the
+  condition's test and branch, a tested value's shape with its operator's
+  label; a conditional's first arm's jump after its conversion
+  (`BUSTER_NODE_ROWS_ARM`, by `NodeRowsTables.arms`); a logical operator's
+  own four entries (`BUSTER_NODE_ROWS_LOGIC`); a conditional's own part with
+  no entry (`BUSTER_NODE_ROWS_HELD`). Listed for X: an arm whose conversion
+  leaves its jump no slot, and a logical operator whose second operand's
+  conversion is of a narrow class.
+- **The labels:** an operator's value has two. The values' sweep counts the
+  records with a label apart from those with a call's row or a temporary
+  (`BUSTER_NODE_ROWS_VALUE_LABELED`), and the numbering
+  (`node_rows_window_label`) counts labels: two a value's, one an operator's
+  evaluated as branches with a label of its own.
+
+The report adds:
+
+- `node-shadow: window contexts valued=N (P% of the records swept)
+  of-them-listed-for-their-target=N commas=N`: the records the loop gives an
+  operator's value's two labels, those of them whose consumer's conversion
+  lists their expression, and the commas it takes. `comma-or-selection`
+  among the listed reasons is `comma` now.
+
+`test-checker` (part 5 of 8) reads the function `valued` in C on the
+window's fixture (`node_contexts_test_source`), which the rows' fixture run
+reads too: a line a case of each term (commas discarded and not, of each
+operand and consumer; conditionals with each arm's conversion and each kind
+of condition; `&&` and `||` as values with each operand's class and each
+operator for an operand; runs of `!`s and of chained operators of each
+length; what the tasks sink; operands and consumers past two blocks), and
+six statements 64 times each for the blocks' ends. The operators' values,
+those listed for their target and the commas are pinned
+(`NodeContextsExpected.valued`, `.sunk` and `.commas`), and
+`node_rows_test_tables` has the new shapes' rows, the arms' table and the
+values' bytes.

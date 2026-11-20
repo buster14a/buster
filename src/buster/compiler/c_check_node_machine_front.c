@@ -267,6 +267,11 @@ typedef enum NodeFactsCount
     // that are the CONDITION.
     NODE_FACTS_COUNT_CONTEXTS_BRANCHED,
     NODE_FACTS_COUNT_CONTEXTS_BRANCHED_ROOTS,
+    // The records the loop gives an operator's value's two labels (a conditional's, an `&&`'s and an `||`'s), those of
+    // them that list their expression for the conversion their consumer puts into their arms, and the commas it takes.
+    NODE_FACTS_COUNT_CONTEXTS_VALUED,
+    NODE_FACTS_COUNT_CONTEXTS_SUNK,
+    NODE_FACTS_COUNT_CONTEXTS_COMMAS,
     // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS): the expressions it ran on (those C takes on the window)
     // and their records; those whose tape it made, their records and their entries; the listed ones by their first
     // record's reason (BUSTER_NODE_ROWS_REASON_*, in its order); the made tapes that differ from the reference's, and
