@@ -10,6 +10,7 @@
 // not: clang still branches to its exit. __builtin_trap() does not, and a do's
 // following statement stays: clang -O0 still names a function only that statement calls. An automatic local the
 // dropped statement declares keeps its place when an emitted statement names it; its initializer is not emitted.
+// A block-scope static it declares is still emitted, as clang emits that declaration with no insertion point.
 // The walk is ordered because each statement's insertion point is the one before it. The statement tree is an explicit stack
 // (BUSTER_CHECK_REACH_DEPTH frames): past that, the following statements stay, which keeps a reachable call.
 
@@ -474,6 +475,18 @@ static bool check_control_reach_local(const CheckControlWriter* writer, uint32_t
     return result;
 }
 
+// A block-scope static. Clang emits its declaration even with no insertion point (EmitDeclStmt is a simple statement),
+// so the object and its initializer stay. A static in a constant if's dead arm is a different drop.
+static bool check_control_reach_static(const CheckControlWriter* writer, uint32_t token)
+{
+    const CheckInput* input = writer->program->input;
+    const bool result = token < input->token_count && input->declarations != NULL && input->declarations[token] == token &&
+                        check_sparse_get(input->declaration_bodies, token) < input->token_count &&
+                        input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                        check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC);
+    return result;
+}
+
 // Whether `used` (declaration tokens an emitted statement names) holds `token`.
 static bool check_control_reach_used(const uint32_t* used, uint32_t used_count, uint32_t token)
 {
@@ -485,15 +498,16 @@ static bool check_control_reach_used(const uint32_t* used, uint32_t used_count, 
     return found;
 }
 
-// Drops `low` through `high`. An automatic local in `used` stays out of the range, so it keeps a place while the
-// statement that declared it is not emitted and its initializer does not run.
+// Drops `low` through `high`. An automatic local in `used`, and every block-scope static, stays out of the range.
+// The statement is not emitted. An automatic local's initializer does not run; a static's initializer is its object's.
 static void check_control_drop_unreachable(CheckControlWriter* writer, uint32_t low, uint32_t high, const uint32_t* used, uint32_t used_count)
 {
     uint32_t cursor = low;
     const uint32_t limit = writer->parser->tokens.count;
     for (uint32_t token = low; token <= high; token += 1)
     {
-        const bool keep = check_control_reach_local(writer, token) && check_control_reach_used(used, used_count, token);
+        const bool keep = check_control_reach_static(writer, token) ||
+                          (check_control_reach_local(writer, token) && check_control_reach_used(used, used_count, token));
         if (keep)
         {
             if (cursor < token && writer->dropped_range_count < limit)
@@ -573,6 +587,7 @@ static void check_control_emit_sequence(CheckControlWriter* writer, uint32_t par
     }
     // A local the dropped statement declares keeps a place when an emitted statement names it (a declaration before
     // the first case, or between a goto and its label). One nothing emitted names stays dropped, cleanup included.
+    // A block-scope static stays either way: clang emits its declaration with no insertion point.
     uint32_t* used = drop_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room) : NULL;
     uint32_t used_count = 0;
     if (drop_count != 0 && used == NULL)

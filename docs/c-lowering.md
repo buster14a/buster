@@ -249,7 +249,10 @@ definition. Its flags and edges:
   whole. An automatic local that dropped statement declares still has a place
   when a statement that is emitted names it: a later case, or a label after a
   `goto`. Clang allocates that local and does not emit its initializer. A
-  local nothing emitted names stays dropped, so its cleanup is not run. What only the dropped
+  local nothing emitted names stays dropped, so its cleanup is not run. A
+  block-scope static the dropped statement declares is still emitted: clang
+  emits that declaration with no insertion point, and its initializer with it.
+  What only the dropped
   statement reaches is not selected and is not checked for target features. A
   cleanup whose declaration was dropped does not run.
 - **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
