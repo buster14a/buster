@@ -521,6 +521,29 @@ static double tier1_float_value(uint64_t* random, bool nonnegative)
     return nonnegative || ((bits >> 40) & 1) == 0 ? magnitude : -magnitude;
 }
 
+// A scalar negation preserves a live input in another register. When the input dies in the result register,
+// the dedicated scratch holds the sign mask instead.
+static void tier1_float_negation_operands(Tier1EmitTest* test)
+{
+    const uint8_t source = 9;
+    for (uint32_t width = 4; width <= 8; width *= 2)
+    {
+        for (uint32_t same = 0; same < 2; same += 1)
+        {
+            const uint8_t result = same ? source : 2;
+            const uint8_t mask = same ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : result;
+            const Tier1SelectHoles holes = { .rule = TIER1_RULE_FLOAT_NEGATE, .width = (uint8_t)width, .left = source, .destination = result };
+            const Tier1SelectRecords records = tier1_select_expand(&holes);
+            const bool transfer = records.records[1].form == (width == 4 ? X86_FORM_MOVD_X_RM32 : X86_FORM_MOVQ_X_RM64) &&
+                                  records.records[1].reg == mask && records.records[1].rm == BUSTER_TIER1_SELECT_SCRATCH;
+            const bool sign = records.records[2].form == X86_FORM_XORPS_X_XM128 && records.records[2].reg == result &&
+                              records.records[2].rm == (same ? mask : source);
+            tier1_emit_test_expect(test, records.count == 3 && records.requested && transfer && sign,
+                                   "float negation toggles the sign with three records and preserves a separate input");
+        }
+    }
+}
+
 static bool tier1_float_same(double left, double right)
 {
     return memcmp(&left, &right, sizeof(left)) == 0;
@@ -862,6 +885,7 @@ static void tier1_float_cases(Tier1EmitTest* test)
             tier1_float_compile(test, fixture, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : 0, (variant & 8) != 0);
         }
     }
+    tier1_float_negation_operands(test);
     // Some compile saves an xmm register around a call, so the rows' check reads such stores, not none (#1116).
     tier1_emit_test_expect(test, test->vector_saves != 0, "a floating value lives past a call in an xmm register, whose row its call stores and loads");
 }

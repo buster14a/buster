@@ -2966,16 +2966,14 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_FLOAT_NEGATE:
     {
-        // The sign bit in the vector class's scratch register, through the scratch general register, and the value's
-        // copy in the destination xor it: the value stays in its class, and its other bits as they were.
+        // When the source stays live in another register the destination can hold the sign mask itself. For an
+        // in-place negate the vector scratch holds the mask. XOR leaves every other bit of the source unchanged.
         const uint8_t x = destination & 15;
+        const uint8_t source = holes->left & 15;
+        const uint8_t mask = x == source ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : x;
         tier1_select_request(&result, X86_OPERATION_MOV, width, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(UINT64_C(1) << (width * 8 - 1)), 0);
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, BUSTER_TIER1_SELECT_FLOAT_SCRATCH, BUSTER_TIER1_SELECT_SCRATCH));
-        if (x != (holes->left & 15))
-        {
-            tier1_select_append(&result, tier1_select_float_move(x, holes->left & 15));
-        }
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, BUSTER_TIER1_SELECT_FLOAT_SCRATCH));
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, mask, BUSTER_TIER1_SELECT_SCRATCH));
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x == source ? mask : source));
         break;
     }
     // One movss or movsd each, the node's last record, which the CFG consumer's frame-object patch rewrites; a masked
