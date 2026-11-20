@@ -2300,8 +2300,10 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
         const uint64_t peak = scratch->length - scratch_mark;
         inlined.scratch_bytes = peak > inlined.scratch_bytes ? peak : inlined.scratch_bytes;
         arena_pop_to(scratch, function_mark);
-        // Its shape as its callers' candidate, from its final body; a general one's marks stay in scratch for the unit.
-        if (check.error == IR_OK && !ir_inline_shape(&inlined.functions[failed_function], options.control_flow, scratch, &shapes[failed_function]))
+        // A shape is read only when choosing what to inline into a later caller. In single-caller mode the
+        // rewritten body is that caller, and its expanded rows and slot lifetimes need no callee summary.
+        if (check.error == IR_OK && (unit->only == 0 || !rewritten) &&
+            !ir_inline_shape(&inlined.functions[failed_function], options.control_flow, scratch, &shapes[failed_function]))
         {
             check.error = IR_ERROR_MEMORY;
         }

@@ -226,6 +226,11 @@ static uint32_t foreign_unwind_record_at(const ForeignUnwind* output, uint64_t o
     return low;
 }
 
+static bool foreign_unwind_past_record(const ForeignUnwind* output, uint32_t index, uint64_t offset)
+{
+    return index < output->record_count && output->records[index].old_offset + output->records[index].length <= offset;
+}
+
 static bool foreign_unwind_offset(const ForeignUnwind* output, uint64_t old_offset, uint64_t* new_offset)
 {
     const uint32_t index = foreign_unwind_record_at(output, old_offset);
@@ -324,18 +329,14 @@ static ForeignUnwindResult foreign_unwind_prune(const ForeignUnwindInput* input,
     Scratch scratch = { 0 };
     ForeignUnwindState* states = 0;
     uint32_t* owners = 0;
-    uint32_t* order = 0;
-    uint32_t* spare = 0;
     uint64_t* widths = 0;
     if (result.error == FOREIGN_UNWIND_ERROR_NONE)
     {
         scratch = scratch_begin(arena);
         states = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ForeignUnwindState, built.record_count);
         owners = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, input->relocation_count);
-        order = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, input->relocation_count);
-        spare = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, input->relocation_count);
         widths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, input->relocation_count);
-        result.error = states == 0 || owners == 0 || order == 0 || spare == 0 || widths == 0 ? FOREIGN_UNWIND_ERROR_MEMORY : FOREIGN_UNWIND_ERROR_NONE;
+        result.error = states == 0 || owners == 0 || widths == 0 ? FOREIGN_UNWIND_ERROR_MEMORY : FOREIGN_UNWIND_ERROR_NONE;
     }
     offset = 0;
     for (uint32_t r = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && r < built.record_count; r += 1)
@@ -388,7 +389,11 @@ static ForeignUnwindResult foreign_unwind_prune(const ForeignUnwindInput* input,
         }
         offset += record->length;
     }
-    // Classify the relocation fields in bounded batches. Record lookup and original ownership remain irregular.
+    // Consecutive fields usually belong to the same or the next record. Crossing a record end proves order.
+    // Search across larger gaps so a sparse or reversed table cannot make its first field walk every record.
+    uint32_t record_cursor = 0;
+    uint64_t previous_offset = 0;
+    bool ordered = true;
     for (uint64_t first = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && first < input->relocation_count; first += BUSTER_IMPORT_BATCH)
     {
         const uint32_t n = input->relocation_count - first < BUSTER_IMPORT_BATCH ? (uint32_t)(input->relocation_count - first) : BUSTER_IMPORT_BATCH;
@@ -414,11 +419,24 @@ static ForeignUnwindResult foreign_unwind_prune(const ForeignUnwindInput* input,
             {
                 widths[i] = type == R_X86_64_NONE ? 0 : type == R_X86_64_64 ? 8 : type == R_X86_64_PC32 || type == R_X86_64_32 || type == R_X86_64_32S ? 4 : UINT64_MAX;
             }
-            order[i] = i;
             owners[i] = UINT32_MAX;
             if (widths[i] != 0)
             {
-                const uint32_t r = foreign_unwind_record_at(&built, relocation.r_offset);
+                const bool advance = ordered && foreign_unwind_past_record(&built, record_cursor, relocation.r_offset);
+                if (advance)
+                {
+                    record_cursor += 1;
+                }
+                else
+                {
+                    ordered = ordered && previous_offset <= relocation.r_offset;
+                }
+                previous_offset = relocation.r_offset;
+                if (!ordered || (advance && foreign_unwind_past_record(&built, record_cursor, relocation.r_offset)))
+                {
+                    record_cursor = foreign_unwind_record_at(&built, relocation.r_offset);
+                }
+                const uint32_t r = record_cursor;
                 const uint64_t symbol = ELF64_R_SYM(relocation.r_info);
                 if (widths[i] == UINT64_MAX)
                 {
@@ -470,15 +488,32 @@ static ForeignUnwindResult foreign_unwind_prune(const ForeignUnwindInput* input,
     }
     if (result.error == FOREIGN_UNWIND_ERROR_NONE)
     {
-        const String8 relocation_bytes = {
-            .pointer = (char*)input->relocations,
-            .length = (uint64_t)input->relocation_count * sizeof(Elf64_Rela),
-        };
-        const uint32_t* sorted = import_sort_relocations(relocation_bytes, order, spare, input->relocation_count);
+        const uint32_t* sorted = 0;
+        if (!ordered)
+        {
+            uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, input->relocation_count);
+            uint32_t* spare = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, input->relocation_count);
+            if (order == 0 || spare == 0)
+            {
+                result.error = FOREIGN_UNWIND_ERROR_MEMORY;
+            }
+            else
+            {
+                for (uint32_t i = 0; i < input->relocation_count; i += 1)
+                {
+                    order[i] = i;
+                }
+                const String8 relocation_bytes = {
+                    .pointer = (char*)input->relocations,
+                    .length = (uint64_t)input->relocation_count * sizeof(Elf64_Rela),
+                };
+                sorted = import_sort_relocations(relocation_bytes, order, spare, input->relocation_count);
+            }
+        }
         uint64_t previous_end = 0;
         for (uint32_t at = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && at < input->relocation_count; at += 1)
         {
-            const uint32_t i = sorted[at];
+            const uint32_t i = sorted != 0 ? sorted[at] : at;
             if (widths[i] != 0)
             {
                 const uint64_t start = foreign_unwind_relocation(input, i).r_offset;

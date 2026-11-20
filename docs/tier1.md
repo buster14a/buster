@@ -393,7 +393,9 @@ below), and long double (#141), in frame objects of their own, computed on the
 x87 stack (the selection guide's "Long double"), with aggregates returned in
 the x87's registers, and the convention's rarer aggregate shapes (#141): a
 part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
-register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
+register whole, and an aggregate it ignores; and the records SSE, SSEUP of a
+size no vector register has (#2798), whose payload a wider ymm or zmm register
+or stack slot carries. So do the IR's vectors (#141, the
 selection guide's "Vectors"), within a function and passed or returned by value,
 which the lowering makes aggregates in a vector register whole. Calls whose
 register parts exceed the red zone's 14 eightbyte staging slots reserve one

@@ -656,7 +656,10 @@ static bool cbuiltin_atomic_rmw_test_prepare(CBuiltinAtomicRmwTest* test, Arena*
     const CBuiltinAtomicRmwHelper helper = cbuiltin_atomic_rmw_helper_emit(item->spec.id, item->bytes, item->format, arena);
     const bool release = (item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_RELEASE) != 0;
     const bool cas = (item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_CAS) != 0;
-    const uint32_t branches = release || (cas && item->spec.id != CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N) ? 0 : 1;
+    const CBuiltinId id = item->spec.id;
+    const bool exchange = id == CBUILTIN_ATOMIC_EXCHANGE_N || id == CBUILTIN_SYNC_LOCK_TEST_AND_SET ||
+                          id == CBUILTIN_SYNC_SWAP || id == CBUILTIN_ATOMIC_TEST_AND_SET;
+    const uint32_t branches = release || exchange || (cas && id != CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N) ? 0 : 1;
     bool result = cbuiltin_atomic_rmw_test_expect(test, helper.code.error == TIER0_OK && helper.code.count > 0 &&
         helper.code.count <= BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS && helper.code.branch_count == branches && helper.code.reference_count == 0 &&
         helper.parameter_count == item->spec.parameters && helper.result_class == (release ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_U64) &&
@@ -673,6 +676,25 @@ static bool cbuiltin_atomic_rmw_test_prepare(CBuiltinAtomicRmwTest* test, Arena*
     {
         result = cbuiltin_atomic_rmw_test_expect(test, helper.code.branches[b] < helper.code.count && helper.code.targets[b] < helper.code.count &&
             helper.code.records[helper.code.branches[b]].displacement == 0, "unsized branch has a bounded target and zero displacement", ordinal);
+    }
+    if (result && exchange)
+    {
+        const uint16_t form = item->bytes == 1 ? X86_FORM_XCHG_RM8_R8 : item->bytes == 2 ? X86_FORM_XCHG_RM16_R16 :
+                              item->bytes == 4 ? X86_FORM_XCHG_RM32_R32 : X86_FORM_XCHG_RM64_R64;
+        uint32_t accesses = 0;
+        bool shape = helper.code.branches == NULL && helper.code.targets == NULL;
+        for (uint32_t i = 0; i < helper.code.count; i += 1)
+        {
+            const X86Instruction record = helper.code.records[i];
+            if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0)
+            {
+                accesses += 1;
+                shape &= record.form == form && record.mode == BUSTER_X86_MEMORY_BASE && record.rm == X86_REGISTER_RDI && record.displacement == 0;
+            }
+            const uint32_t control = x86_effects_control(x86_effects(record.form));
+            shape &= control == (i + 1 == helper.code.count ? BUSTER_X86_CONTROL_RETURN : BUSTER_X86_CONTROL_NONE);
+        }
+        result = cbuiltin_atomic_rmw_test_expect(test, shape && accesses == 1, "one exact-width memory XCHG on the object, straight through to RET", ordinal);
     }
     if (result && release)
     {

@@ -248,6 +248,8 @@ typedef enum Tier1SelectRule
     // the prologue saves the callee-saved ones it touches. `immediate` is the body's index in IrFunction.asm_bodies (tier1_select_asm_supported).
     // Only the CFG consumer takes it.
     TIER1_RULE_ASM,
+    // A signed i32 or i64 in memory converted directly into an xmm register (#2829). Its scale belongs to the address.
+    TIER1_RULE_FLOAT_CONVERT_LOAD,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -456,7 +458,7 @@ static bool tier1_select_mask_rule(uint32_t rule)
 // Whether a rule is a floating value's (#141), which only the CFG consumer takes, its vector class's.
 static bool tier1_select_float_rule(uint32_t rule)
 {
-    return rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN;
+    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || rule == TIER1_RULE_FLOAT_CONVERT_LOAD;
 }
 
 // Register-only leaf bodies use caller-saved registers. R11 is reserved for a destructive instruction's second
@@ -3092,6 +3094,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         break;
     }
+    case TIER1_RULE_FLOAT_CONVERT_LOAD:
+    {
+        const uint8_t x = destination & 15;
+        X86Instruction record = holes->memory;
+        record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
+        record.reg = x;
+        // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+        tier1_select_append(&result, record);
+        break;
+    }
     case TIER1_RULE_FLOAT_RETURN:
         if ((holes->left & 15) != 0)
         {
@@ -4195,26 +4208,25 @@ struct Tier1SelectPart
 // registers[0], its low one padding; with `slot` (#141) a SPLIT location's two eightbytes, one in a register and the other
 // in its stack slot, or with `high` or `low` a STACK location's one eightbyte in its slot (the low one alone of a larger
 // value), each part with no register its slot's. Returns how many, into `parts`, or 0 for a shape Tier 1 doesn't take: no
-// part in a register (a whole STACK location's), a second register for 8 bytes or less, more than 16 bytes (a value in
-// one vector register whole, which only a vector makes, among them), or a register outside the general ones in `general`
-// and the first `vectors` xmm ones.
+// part in a register (a whole STACK location's), a second register for 8 bytes or less, more than 16 bytes but in one
+// vector register alone (a vector's whole, or a record's payload, #2113), or a register outside the general ones in
+// `general` and the first `vectors` xmm ones.
 static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool low, bool slot, uint32_t size, uint32_t general, uint32_t vectors, Tier1SelectPart* parts)
 {
     const bool one = high || low;
     const bool first = registers[0] != BUSTER_ABI_REGISTER_NONE;
     const bool second = registers[1] != BUSTER_ABI_REGISTER_NONE;
     const bool shape = one ? !(high && low) && !second && size > 8 && first != slot : slot ? first != second && size > 8 : first && (!second || size > 8);
-    // A vector register alone of 16 bytes or more holds the aggregate whole (#141), as Tier 0's tier0_parts_of has it: a
-    // vector's (SSE then SSEUP), 16 bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the target's registers
-    // are that wide; a struct's whose high eightbyte is padding too, whose bytes past the low eightbyte it carries, and its
-    // copy keeps them as padding.
+    // A vector register alone of 16 bytes or more holds the aggregate's payload (#141, #2113), as Tier 0's tier0_parts_of
+    // has it: a vector's whole (SSE then SSEUP), 16 bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the
+    // target's registers are that wide; a struct's whose high eightbyte is padding too, whose bytes past the low eightbyte
+    // it carries, and its copy keeps them as padding; and a record SSE, SSEUP of a size no vector register has,
+    // GetByteVectorType's <size / 8 x double> (abi_vector_payload_bytes): a 17--23-byte record's first 16 bytes in an xmm
+    // register, and past them its size rounded down to 8 in the ymm or zmm register LLVM widens it to
+    // (tier1_select_part_width), the rest of the record lost.
     const bool vector_first = first && (registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
-    const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 ? (size >= 64 ? 64 : size >= 32 ? 32 : 16) : 0;
-    // GetByteVectorType's two doubles carry a 17--23-byte record's first 16 bytes; stack copies retain its C size. A
-    // larger record of a size no vector register has (#2113) carries its <size / 8 x double> in a YMM or ZMM register
-    // wider than it, which Tier 0 loads and stores in pieces (tier0_payload_load): Tier 1 leaves its functions to Tier 0
-    // (no part matches here), as it does a PAYLOAD stack slot (tier1_select_record_supported's flags), until #2798.
-    bool valid = size != 0 && (size <= 16 || (whole != 0 && (whole == size || (whole == 16 && size < 24)))) && shape;
+    const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 && size <= 64 ? abi_vector_payload_bytes(size) : 0;
+    bool valid = size != 0 && (size <= 16 || whole != 0) && shape;
     uint32_t count = 0;
     for (uint32_t k = 0; valid && k < (one ? 1u : 2u); k += 1)
     {
@@ -4233,42 +4245,70 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
 }
 
 // Whether an aggregate argument's or parameter's `location` has it on the stack whole, its bytes in its slots from its
-// first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot.
+// first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot, and a record's vector
+// payload alone (PAYLOAD, #2798), whose slot is a part's (tier1_select_location_parts).
 static bool tier1_select_location_whole(AbiLocation location)
 {
-    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0;
+}
+
+// The bytes of the vector register a part of `bytes` takes whole (#141, #2798): its own 16, 32 or 64, or a payload's
+// register's, LLVM's widening of <size / 8 x double> to the next power of two (abi_vector_register_bytes): 24 bytes' ymm,
+// and 40's, 48's and 56's zmm. An eightbyte's (8 or less) is its own.
+static uint32_t tier1_select_part_width(uint32_t bytes)
+{
+    return bytes <= 8 ? bytes : abi_vector_register_bytes(bytes);
+}
+
+// Whether a vector register's part of `bytes` is a payload its register is wider than (#2113, tier0_vector_payload): 24,
+// 40, 48 or 56 bytes, which the consumers load from and store to an object of the record's size in pieces that stay inside
+// it (tier0_payload_load, tier0_payload_store), and move whole between registers and the staging slots.
+static bool tier1_select_part_payload(uint32_t bytes)
+{
+    return tier1_select_part_width(bytes) != bytes;
 }
 
 // The parts of an aggregate argument or parameter of `size` bytes at `location` (#789, #141): in argument registers, a
 // SPLIT location's register and stack slot, or a STACK location's high or low eightbyte alone in its slot
-// (tier1_select_parts_of); none on the stack whole or ignored.
+// (tier1_select_parts_of), or a PAYLOAD one's (#2798) record's vector payload alone in its slot of the payload's
+// register's width (tier1_select_part_width), its bytes past the payload lost: one part of the payload's bytes, with no
+// register; none on the stack whole or ignored.
 static uint32_t tier1_select_location_parts(AbiLocation location, uint32_t size, Tier1SelectPart* parts)
 {
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
-    const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS && !low;
-    const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT && !high && !low;
-    const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low);
+    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS && !low && !payload;
+    const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT && !high && !low && !payload;
+    const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low) && !payload;
     const bool taken = registers || split || slot;
-    return taken ? tier1_select_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
+    const uint32_t payload_bytes = abi_vector_payload_bytes(size);
+    const bool payload_slot = location.kind == BUSTER_ABI_LOCATION_STACK && payload && !high && !low && size <= 64 && payload_bytes >= 16 && payload_bytes < size;
+    uint32_t count = taken ? tier1_select_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
+    if (payload_slot)
+    {
+        parts[0] = (Tier1SelectPart){ .reg = BUSTER_ABI_REGISTER_NONE, .offset = 0, .bytes = (uint8_t)payload_bytes };
+        count = 1;
+    }
+    return count;
 }
 
 // The 8-byte staging slots a part of `bytes` takes below rsp (#789, tier1_emit_staging): one an eightbyte's, and a whole
-// vector register's (#141) its bytes'.
+// vector register's (#141) its register's bytes', a payload's (#2798) among them, which its register's load reads whole.
 static uint32_t tier1_select_part_slots(uint32_t bytes)
 {
-    return bytes <= 8 ? 1 : bytes / 8;
+    return bytes <= 8 ? 1 : tier1_select_part_width(bytes) / 8;
 }
 
 // A call argument's whole 64-byte vector register part (#141) waits in zmm16 and on rather than in the red zone, whose 14
 // staging slots two such parts would overflow: Tier 1 allocates nothing to registers past xmm15, a call clobbers them all,
-// and only a target with AVX-512F, which has them, passes a vector in a zmm register. The first of them, by the call's
-// parts in order.
+// and only a target with AVX-512F, which has them, passes a vector in a zmm register. And so does a payload a zmm register
+// carries (#2798: 40, 48 or 56 bytes). The first of them, by the call's parts in order.
 #define BUSTER_TIER1_SELECT_PART_ZMM 16u
 
 static bool tier1_select_part_in_zmm(uint32_t bytes)
 {
-    return bytes == 64;
+    return tier1_select_part_width(bytes) == 64;
 }
 
 // The red zone's staging slots a call argument's part takes (tier1_select_part_slots), none for one in zmm16 and on.
@@ -4279,12 +4319,14 @@ static uint32_t tier1_select_argument_part_slots(uint32_t bytes)
 
 // The form that loads (`load`) or stores a vector register's part of `bytes` (#789, #141) whole: an eightbyte's or less
 // movsd (its bytes past the part's padding), and a whole register's movups, vmovdqu (AVX's) or vmovdqu64 (AVX512F's), as
-// the convention passes it at the target's width, whose forms the target then has.
+// the convention passes it at the target's width, whose forms the target then has; a payload's (#2798) its register's
+// (tier1_select_part_width), which moves it between registers, the staging slots and a copy as wide as the register.
 static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 {
-    return bytes <= 8 ? (load ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOVSD_XM64_X) : bytes == 16 ? (load ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOVUPS_XM_X) :
-           bytes == 32                                                        ? (load ? X86_FORM_VMOVDQU_Y_YM256 : X86_FORM_VMOVDQU_YM256_Y) :
-           bytes == 64                                                        ? (load ? X86_FORM_VMOVDQU64_Z_ZM512 : X86_FORM_VMOVDQU64_ZM512_Z) :
+    const uint32_t width = tier1_select_part_width(bytes);
+    return width <= 8 ? (load ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOVSD_XM64_X) : width == 16 ? (load ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOVUPS_XM_X) :
+           width == 32                                                        ? (load ? X86_FORM_VMOVDQU_Y_YM256 : X86_FORM_VMOVDQU_YM256_Y) :
+           width == 64                                                        ? (load ? X86_FORM_VMOVDQU64_Z_ZM512 : X86_FORM_VMOVDQU64_ZM512_Z) :
                                                                                 X86_FORM_NONE;
 }
 
@@ -4297,7 +4339,8 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 
 // Whether a function's own result part is loaded straight from the result's address on the way out (#1847): a whole
 // vector register's, 16, 32 or 64 bytes of a split vector (tier1_select_result_parts), which no byte past the object's
-// widens and whose load can't overwrite the address, a general register. Any other part is staged in the red zone.
+// widens and whose load can't overwrite the address, a general register; and a record's payload (#2798), in pieces that
+// stay inside it (tier0_payload_load). Any other part is staged in the red zone.
 static bool tier1_select_part_direct(Tier1SelectPart part)
 {
     return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16;
@@ -4357,9 +4400,10 @@ static bool tier1_select_result_staged(const Tier1SelectPart* parts, uint32_t co
 // Whether Tier 1 takes an argument's or a parameter's ABI record for a value of IR type `type` (#789): a scalar in one
 // register of its class (a general argument register for an integer or a pointer, xmm0 to xmm7 for a floating value) or
 // in a stack slot, its extension the IR's; or a by-value aggregate, a ptr to its bytes, on the stack whole or in its
-// parts (tier1_select_location_parts): in registers, and since #141 a part LLVM put in a stack slot (SPLIT) and a
-// value's high or low eightbyte alone (HIGH, LOW); or one passed in no place (IGNORE, #141), which a call copies
-// nothing for and a function's copy of has no bytes it must keep.
+// parts (tier1_select_location_parts): in registers, a record's payload among them (#2798), and since #141 a part LLVM
+// put in a stack slot (SPLIT), a value's high or low eightbyte alone (HIGH, LOW) and a record's payload alone in its slot
+// (PAYLOAD, #2798); or one passed in no place (IGNORE, #141), which a call copies nothing for and a function's copy of
+// has no bytes it must keep.
 static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
 {
     const AbiLocation location = record->location;
@@ -4393,7 +4437,9 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
         {
             placed &= parts[k].reg != BUSTER_ABI_REGISTER_NONE || slotted;
         }
-        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0 && (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
+        // A PAYLOAD slot (#2798) is a part's, its payload alone (tier1_select_location_parts).
+        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0 &&
+                    (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
     }
     return supported;
 }
@@ -6286,6 +6332,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         }
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        if (op == IR_SITOFP && (source == IR_I32 || source == IR_I64) && tier1_select_load_folds(forest, node, a))
+        {
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_FLOAT_CONVERT_LOAD;
+            tier1_select_fold(forest, node, a, &folded);
+            tier1_select_memory(forest, node, function->a[a], &folded, 0);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
         // An integer constant's conversion is the floating constant it converts to, rounded as cvtsi2s* rounds under the
         // default rounding mode, to nearest: C's conversion on this host computes it so.
         uint64_t integer = 0;
@@ -7296,6 +7350,7 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const T
             break;
         case TIER1_RULE_LOAD_OPERAND:
         case TIER1_RULE_FLOAT_LOAD_OPERAND:
+        case TIER1_RULE_FLOAT_CONVERT_LOAD:
             rank = 7;
             break;
         case TIER1_RULE_MULTIPLY_LEA:
@@ -7968,6 +8023,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_MASK_LOAD_ADDRESS:
     case TIER1_RULE_MASK_STORE:
     case TIER1_RULE_MASK_STORE_ADDRESS:
+    case TIER1_RULE_FLOAT_CONVERT_LOAD:
     case TIER1_RULE_FLOAT_LOAD:
     case TIER1_RULE_FLOAT_LOAD_ADDRESS:
     case TIER1_RULE_FLOAT_STORE:
