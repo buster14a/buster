@@ -99,7 +99,18 @@ patterns are:
   index's sign extension too: a pattern reads its block's first symbol address,
   or sign or zero extension to I64, of the same operand in their place
   (`tier1_select_symbol_firsts`, #2601), so a block's accesses of one table
-  share one `lea` and one index register. An extension to I32 stays its own:
+  share one `lea` and one index register. An extension to I64 that selection
+  takes as a copy of its operand, whose storage already holds the 64-bit
+  value (a sign-stored I32's sign extension; a zero extension, or a sign
+  extension known nonnegative, of a narrow value or an I32 whose bits past
+  its width are zero), is that operand where the operand has other uses
+  (`tier1_select_extension_forwards`, #2843): a pattern reads the operand's
+  register in its place, so nothing computes the extension. Its copy had
+  moved the value into a register of its own while the operand stayed live,
+  `movslq (%rdi,%rcx,4),%rdx; mov %rdx,%r8` before `test %edx,%edx` and
+  `cmovg %r8,%r9`, where #2838's arms extend `p[i]` in `s += p[i] > 0 ?
+  p[i] : 1`. A single-use operand is left to its extension, which folds a
+  load into its `movsx` or takes the dying operand's register. An extension to I32 stays its own:
   `tier1_select_storage.c`'s column keeps each I32 sign-extended,
   zero-extended or neither above its 32 bits by its own users, so two of one
   operand can differ (`sqlite3LogEstAdd`'s `a + x[a - b]`, whose index read
@@ -374,7 +385,14 @@ patterns are:
   `movq`), and an integer constant's conversion is the floating constant it
   converts to. A copy is a `movaps`. Addition, subtraction, multiplication and
   division are the two-operand `ss` or `sd` forms, the right operand from memory
-  where it folds a load, as an integer's. A negation `xorps` the sign bit, which
+  where it folds a load, as an integer's. A scalar FMA3 can fold its single-use
+  second multiplicand into 132 or 231. A first multiplicand can occupy that
+  same memory operand when the second is a non-NaN constant or the result
+  of an integer-to-floating conversion. The addend can fold into 213, which
+  keeps the multiplicands' NaN payload priority. A destination holding the first
+  multiplicand can exchange them when one is an integer conversion or a
+  non-NaN constant. Otherwise it takes the register form with a separate load.
+  A negation `xorps` the sign bit, which
   the scratch register moves into xmm15. Loads and stores are one `movss` or
   `movsd`, folded through their addresses as an integer's. A comparison's truth
   value is `ucomis`, `setcc` and `movzx`, where `<` and `<=` swap their operands
@@ -389,13 +407,17 @@ patterns are:
   to 64 bits are `cvtsi2s*` and `cvtts*2si`, a narrow signed operand
   sign-extended into the scratch register first and an unsigned `I32` converted
   as its zero extension's 64 bits; the precisions convert by `cvtss2sd` and
-  `cvtsd2ss`, and a bitcast is `movd` or `movq`. A conversion to a floating value
+  `cvtsd2ss`, and a bitcast is `movd` or `movq`. A signed 32- or 64-bit load
+  can feed `cvtsi2s*` directly. A float or double load can feed `cvtts*2si` directly
+  for signed 32- or 64-bit results and unsigned 32-bit results. The latter uses
+  the 64-bit destination. A conversion to a floating value
   zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
   alone, which would otherwise wait for the register's last writer. An unsigned
-  64-bit integer's conversions, whose values past `INT64_MAX` no single
-  conversion takes, are sequences of the fixed-register path's room
-  (`TIER1_RULE_FLOAT_CONVERT_WIDE`, through the scratch registers alone). To a
-  floating value, the source converts as a signed value where its sign bit is
+  64-bit integer's conversions use the fixed-register path
+  (`TIER1_RULE_FLOAT_CONVERT_WIDE`). For integer to floating, an output target
+  admitting the unsigned qword register form uses `xorps` followed by
+  `vcvtusi2ss` or `vcvtusi2sd` with MXCSR rounding. On other targets the
+  source converts as a signed value where its sign bit is
   clear. Otherwise it is halved with its last bit kept as a sticky bit, so
   rounding the half rounds the source, then converted, and `paddq` or `paddd`
   adds 1 to the result's exponent. From a floating value, one truncation runs,
@@ -416,10 +438,13 @@ patterns are:
   consumer reads them from the IR's operands' objects (`tier1_emit_cfg_x87`), and
   the plan marks them needed as it marks a pattern's values. The values are the
   other operands alone: a load's and a store's address, a conversion's integer
-  or floating operand. For signed zero or an exactly representable normal binary32
-  constant, one 32-bit immediate store fills its private home and each use loads it
-  with `flds`. An external store or outgoing argument still writes all ten bytes.
-  Other constants store their ten bytes as immediates and use `fldt`. A load and a
+  or floating operand. An F80 constant emits no records at its definition. Each
+  consumer loads a 16-byte mergeable, PC-relative literal at the original x87
+  waiting point. Signed zero and exact normal binary32 values use `flds`.
+  Other values exactly representable as normal binary64 use `fldl`. A narrower
+  subnormal load could raise a denormal-operand exception. All remaining
+  encodings retain their ten bytes and use `fldt`. External stores and
+  outgoing arguments write all ten bytes. A load and a
   store are `fld` and `fstp` of them through the address; arithmetic loads both
   operands and `faddp` (`fsubp`, `fmulp`, `fdivp`) `st(1), st(0)`; a negation is
   `fchs`. A comparison is `fucomip` of the operands in the order that makes

@@ -14,7 +14,8 @@ static UnitPair change(UnitPair value)
     shared += 1;
     return value;
 }
-UnitPair (*operation)(UnitPair) = change;
+static UnitPair change_alias(UnitPair) __attribute__((alias("change")));
+UnitPair (*operation)(UnitPair) = change_alias;
 int selected(void)
 {
     return 2;
