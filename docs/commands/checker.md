@@ -705,7 +705,7 @@ run every part of `test-checker` with `BUSTER_CHECK_RECORD_DIGESTS=FILE`, sort
 FILE's lines unique, and put them after the table's three comment lines; the
 PR says what vouches for the changed graphs.
 
-Ten test files' own source tables, 596 cases, are runtime data in the same
+Ten test files' own source tables, 599 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`
 (`c_checker_test.c`) reads and runs. Each case is written to a file, clang
 `-fsyntax-only -std=gnu17` checks them all at once, and then each case's
@@ -719,7 +719,7 @@ as the tables' own loops did. There are no generated cases.
 | `cleanup` | 71 | `check_test_cleanup_sources` (`c_check_cleanup_test.c`) |
 | `const-alias` | 53 | `check_test_const_alias_sources` (`c_check_const_alias_test.c`) |
 | `float-constants` | 8 | `check_test_float_constant_sources` (`c_check_program_constants_test.c`) |
-| `generic-builtins` | 268 | `check_test_generic_builtin_sources` (`c_check_program_generic_builtins_test.c`) |
+| `generic-builtins` | 271 | `check_test_generic_builtin_sources` (`c_check_program_generic_builtins_test.c`) |
 | `library` | 21 | `check_test_library_sources` (`c_check_program_library_test.c`) |
 | `musttail` | 63 | `check_test_musttail_sources` (`c_check_musttail_test.c`) |
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |

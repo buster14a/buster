@@ -14900,6 +14900,64 @@ static void check_input_longjmp_argument(CheckInputReader* reader, const CheckIn
     }
 }
 
+// A builtin immediate uses the source evaluator's integer witness. Its original expression still has every
+// node checked, including parts the constant evaluator leaves unevaluated.
+static uint32_t check_input_immediate(CheckInputReader* reader, uint32_t argument, uint32_t first, uint32_t end)
+{
+    CheckValue value = { 0 };
+    uint32_t proven = BUSTER_CHECK_NONE;
+    if (check_input_evaluate_cached(reader, first, end, &value) && check_input_integer_ice(reader, &value))
+    {
+        CheckGraph* graph = &reader->output->graph;
+        proven = check_input_add(reader, CHECK_OP_VALUE, graph->tokens[argument], BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (proven != BUSTER_CHECK_NONE)
+        {
+            check_graph_set_leaf(graph, proven, &value);
+        }
+    }
+    return proven;
+}
+
+// The integer-constant operands checked by check_builtin_misc_constant, including the object-size queries.
+// Runtime operands keep their nodes even when the source evaluator can fold them.
+static uint32_t check_input_builtin_immediates(CheckInputReader* reader, uint16_t builtin, uint32_t closing, uint32_t first)
+{
+    uint32_t mask = 0;
+    switch (builtin)
+    {
+        case CBUILTIN_FRAME_ADDRESS:
+        case CBUILTIN_RETURN_ADDRESS:
+        case CBUILTIN_EH_RETURN_DATA_REGNO: mask = 1; break;
+        case CBUILTIN_OBJECT_SIZE:
+        case CBUILTIN_DYNAMIC_OBJECT_SIZE:
+        case CBUILTIN_ASSUME_ALIGNED:
+        case CBUILTIN_ALLOCA_WITH_ALIGN:
+        case CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED: mask = 2; break;
+        case CBUILTIN_PREFETCH: mask = 6; break;
+        default: break;
+    }
+    uint32_t begin = reader->first_child[closing] + 2;
+    uint32_t* link = &first;
+    while (mask != 0 && *link != BUSTER_CHECK_NONE && begin < closing)
+    {
+        const uint32_t argument = *link;
+        const uint32_t end = check_constant_punctuation(reader->parser, begin, closing, PARSE_KIND_COMMA);
+        if ((mask & 1) != 0 && reader->output->graph.ops[argument] != CHECK_OP_VALUE)
+        {
+            const uint32_t proven = check_input_immediate(reader, argument, begin, end);
+            if (proven != BUSTER_CHECK_NONE)
+            {
+                *link = proven;
+                reader->value_next[proven] = reader->value_next[argument];
+            }
+        }
+        link = &reader->value_next[*link];
+        mask >>= 1;
+        begin = end + 1;
+    }
+    return first;
+}
+
 static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call,
                                                uint32_t first, uint64_t* ice_arguments)
 {
@@ -14923,21 +14981,13 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
     for (uint32_t index = 0; index < call->argument_count && argument != BUSTER_CHECK_NONE; index += 1)
     {
         const uint32_t next = reader->value_next[argument];
-        CheckValue value = { 0 };
         const CheckInputIntrinsicArgument span = call->arguments[index];
-        const bool ice = index < 64 && check_input_evaluate_cached(reader, span.first, span.end, &value) && check_input_integer_ice(reader, &value);
-        if (ice)
+        if (index < 64 && (required & (UINT64_C(1) << index)) != 0)
         {
-            *ice_arguments |= UINT64_C(1) << index;
-        }
-        if (ice && (required & (UINT64_C(1) << index)) != 0)
-        {
-            // Keep the original subtree checked, but an immediate operand is the value proved in its source
-            // constant context. Runtime-only effects in discarded constant-evaluator paths are not call inputs.
-            const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, graph->tokens[argument], BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            const uint32_t proven = check_input_immediate(reader, argument, span.first, span.end);
             if (proven != BUSTER_CHECK_NONE)
             {
-                check_graph_set_leaf(graph, proven, &value);
+                *ice_arguments |= UINT64_C(1) << index;
                 argument = proven;
             }
         }
@@ -15686,6 +15736,12 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         {
             const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[token] - 1;
             intrinsic_offset = check_input_intrinsic_arguments(reader, call, a, &intrinsic_ice);
+        }
+        else if ((op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_QUERY) &&
+                 (reader->output->const_values.count != 0 || reader->output->const_values.prefix != NULL))
+        {
+            // A source fold can read a const initializer that the runtime graph sees as an object load.
+            a = check_input_builtin_immediates(reader, reader->builtins[token], token, a);
         }
         node = check_input_add(reader, op, token, left, one || arguments ? BUSTER_CHECK_NONE : omitted ? a : b,
                                omitted ? b : op == CHECK_OP_CONDITIONAL || op == CHECK_OP_BUILTIN_OVERFLOW ? c : BUSTER_CHECK_NONE);
