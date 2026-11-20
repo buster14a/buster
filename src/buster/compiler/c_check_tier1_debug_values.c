@@ -97,6 +97,7 @@ struct CheckTier1DebugValues
     uint32_t* region_first;
     CheckTier1DebugSpan* regions;
     uint64_t* region_events;
+    uint32_t* region_previous;
     uint32_t region_event_count;
     uint32_t* record_blocks;
     uint32_t* fresh_first;
@@ -707,7 +708,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
             }
         }
     }
-    valid = valid && check_tier1_debug_value_regions(&proof, emitted, places, record_order, cuts, scratch);
+    valid = valid && check_tier1_debug_value_regions(&proof, emitted, places, record_order, cuts, next, scratch);
     for (uint32_t local = 0; valid && local < locals; local += 1)
     {
         uint32_t limit = count;
@@ -965,6 +966,28 @@ static void check_tier1_debug_local_changed(CheckTier1DebugValueLive* live, uint
     {
         live->local_queued[local] = 1;
         live->changed_locals[live->local_count++] = local;
+    }
+}
+
+// Queue the locals whose region boundaries lie between the two cursors. Every local's first event in the
+// interval has its previous event below first. Later occurrences in the interval would queue it again.
+static void check_tier1_debug_region_changes(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t from, uint32_t to)
+{
+    const uint32_t first = from < to ? from : to;
+    const uint32_t end = from < to ? to : from;
+    const __m512i limit = _mm512_set1_epi32((int)first);
+    for (uint32_t at = first; at < end;)
+    {
+        const uint32_t count = end - at < 16 ? end - at : 16;
+        const __mmask16 active = (__mmask16)((1u << count) - 1);
+        const __m512i previous = _mm512_maskz_loadu_epi32(active, proof->region_previous + at);
+        uint32_t distinct = (uint32_t)_mm512_mask_cmple_epu32_mask(active, previous, limit);
+        for (; distinct != 0; distinct &= distinct - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(distinct);
+            check_tier1_debug_local_changed(live, (uint32_t)proof->region_events[at + lane]);
+        }
+        at += count;
     }
 }
 
@@ -1313,13 +1336,7 @@ static bool check_tier1_debug_value_ranges(const CheckTier1DebugValues* proof, c
                 assigning = own;
                 cursor = next;
                 const uint32_t next_region = check_tier1_debug_value_region_cursor(proof, entry, source);
-                const uint32_t region_begin = region_cursor < next_region ? region_cursor : next_region;
-                const uint32_t region_end = region_cursor < next_region ? next_region : region_cursor;
-                for (uint32_t at = region_begin; at < region_end; at += 1)
-                {
-                    const uint32_t region = (uint32_t)proof->region_events[at];
-                    check_tier1_debug_local_changed(&live, proof->local_index[debug->regions[region].local]);
-                }
+                check_tier1_debug_region_changes(proof, &live, region_cursor, next_region);
                 region_cursor = next_region;
                 previous_entry = entry;
                 previous_source = source;
@@ -1348,11 +1365,7 @@ static bool check_tier1_debug_value_ranges(const CheckTier1DebugValues* proof, c
                     {
                         check_tier1_debug_local_changed(&live, proof->local_index[debug->bindings[proof->instance_events[at]].local]);
                     }
-                    for (uint32_t at = instance_region_cursor < next_region ? instance_region_cursor : next_region;
-                         at < (instance_region_cursor < next_region ? next_region : instance_region_cursor); at += 1)
-                    {
-                        check_tier1_debug_local_changed(&live, proof->local_index[debug->regions[(uint32_t)proof->region_events[at]].local]);
-                    }
+                    check_tier1_debug_region_changes(proof, &live, instance_region_cursor, next_region);
                 }
                 const uint32_t own = instance != BUSTER_IR_NONE && next < proof->instance_event_count && debug->bindings[proof->instance_events[next]].entry == origin ?
                                      proof->local_index[debug->bindings[proof->instance_events[next]].local] : BUSTER_IR_NONE;
