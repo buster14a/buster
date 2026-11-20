@@ -441,7 +441,9 @@ patterns are:
   or floating operand. An F80 constant emits no records at its definition. Each
   consumer loads a 16-byte mergeable, PC-relative literal at the original x87
   waiting point. Signed zero and exact normal binary32 values use `flds`.
-  Other encodings retain their ten bytes and use `fldt`. External stores and
+  Other values exactly representable as normal binary64 use `fldl`. A narrower
+  subnormal load could raise a denormal-operand exception. All remaining
+  encodings retain their ten bytes and use `fldt`. External stores and
   outgoing arguments write all ten bytes. A load and a
   store are `fld` and `fstp` of them through the address; arithmetic loads both
   operands and `faddp` (`fsubp`, `fmulp`, `fdivp`) `st(1), st(0)`; a negation is
