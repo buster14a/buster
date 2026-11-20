@@ -77,6 +77,30 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
 // boundary for each local and keeps an already pending local at its original position.
 static void check_debug_tier1_region_changes(CheckDebugTestTally* tally)
 {
+    // An empty machine window between consecutive source intervals removes both of its own events.
+    // The next witnessed local still needs a start, even when it shares the preceding local's source entry.
+    IrDebugRegion rows[] = {
+        { .local = 0, .begin = 2, .end = 4 }, { .local = 0, .begin = 4, .end = 6 },
+        { .local = 0, .begin = 6, .end = 8 }, { .local = 0, .begin = 8, .end = 10 },
+        { .local = 1, .begin = 10, .end = 12 }, { .local = 1, .begin = 12, .end = 14 },
+    };
+    IrDebugInfo debug = { .regions = rows, .region_count = BUSTER_ARRAY_LENGTH(rows) };
+    const IrFunction ir = { .debug = &debug };
+    uint32_t dense[] = { 3, 1 };
+    CheckTier1DebugSpan spans[] = { { 1, 3 }, { 0 }, { 2, 5 }, { 4, 7 }, { 5, 8 }, { 0 } };
+    const CheckTier1DebugValues windows = { .ir = &ir, .regions = spans, .local_index = dense };
+    uint64_t kept[2 * BUSTER_ARRAY_LENGTH(rows)];
+    const uint32_t entries[] = { 2, 4, 6, 8, 10, 10, 12 };
+    const uint32_t owners[] = { 3, 3, 3, 3, 3, 1, 1 };
+    bool exact = check_tier1_debug_region_events(&windows, kept) == BUSTER_ARRAY_LENGTH(entries);
+    for (uint32_t i = 0; exact && i < BUSTER_ARRAY_LENGTH(entries); i += 1)
+    {
+        exact = kept[i] == ((uint64_t)entries[i] << 32 | owners[i]);
+    }
+    check_debug_test_expect(tally, exact, "only reachable half-open regions create source events", "empty middle and final windows, adjacent live regions and a change of local");
+    memset(spans, 0, sizeof(spans));
+    check_debug_test_expect(tally, check_tier1_debug_region_events(&windows, kept) == 0, "no source event can select a region without a machine record", "all windows empty");
+
     const uint8_t locals[] = {
         5, 5, 1, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 3,
         4, 6, 2, 2, 6, 2, 6, 2, 6, 2, 6, 2, 6, 2, 3, 7, 8, 7, 9,

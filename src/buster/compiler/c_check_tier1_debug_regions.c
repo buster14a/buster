@@ -12,6 +12,29 @@ static uint32_t check_tier1_debug_region_space(const CheckTier1DebugValues* proo
     return proof->local_instances != NULL && local < proof->local_total && proof->local_instances[local] != BUSTER_IR_NONE ? proof->local_instances[local] + 1 : 0;
 }
 
+// The local and source entry of each change that can affect a machine record. Regions are ordered by
+// local and disjoint source interval. Adjacent reachable windows share an endpoint in this order.
+static uint32_t check_tier1_debug_region_events(const CheckTier1DebugValues* proof, uint64_t* events)
+{
+    const IrDebugInfo* debug = proof->ir->debug;
+    uint32_t count = 0;
+    for (uint32_t k = 0; k < debug->region_count; k += 1)
+    {
+        if (proof->regions[k].begin < proof->regions[k].end)
+        {
+            const IrDebugRegion region = debug->regions[k];
+            const uint32_t local = proof->local_index[region.local];
+            const uint64_t start = (uint64_t)region.begin << 32 | local;
+            if (count == 0 || events[count - 1] != start)
+            {
+                events[count++] = start;
+            }
+            events[count++] = (uint64_t)region.end << 32 | local;
+        }
+    }
+    return count;
+}
+
 static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const Tier1EmitResult* emitted,
                                           const uint32_t* places, const uint32_t* record_order, uint8_t* cuts, uint32_t* last_event,
                                           Arena* scratch)
@@ -290,21 +313,9 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
             }
         }
     }
-    for (uint32_t k = 0; valid && k < regions; k += 1)
-    {
-        const IrDebugRegion region = debug->regions[k];
-        // Regions are ordered by local, then disjoint source interval. At equal entries the local has the same
-        // order as its original region index. The cursor needs only that local. Adjacent regions of the same
-        // local have one shared boundary, and it queues the local once.
-        const uint32_t local = proof->local_index[region.local];
-        if (k == 0 || debug->regions[k - 1].local != region.local || debug->regions[k - 1].end != region.begin)
-        {
-            events[proof->region_event_count++] = (uint64_t)region.begin << 32 | local;
-        }
-        events[proof->region_event_count++] = (uint64_t)region.end << 32 | local;
-    }
     if (valid && regions != 0)
     {
+        proof->region_event_count = check_tier1_debug_region_events(proof, events);
         proof->region_events = c_bindings_sort(events, sorting, proof->region_event_count, true, UINT32_MAX);
         // The other sort buffer holds the previous event of each dense local, plus one (zero for its first).
         // The value-range walk uses it to visit each local once per crossed interval, in first-occurrence order.
