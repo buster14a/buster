@@ -303,6 +303,16 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS,
+    // The rows' values: the records each of the values' lists has (BUSTER_NODE_ROWS_LISTS of them, in their order),
+    // the expressions whose calls' rows, labels and temporaries are numbered, the tapes that differ from the
+    // reference's by a value alone, and the values' sweep's ticks, a chunk's first run's and its second's.
+    NODE_FACTS_COUNT_ROWS_LIST,
+    NODE_FACTS_COUNT_ROWS_LIST_LAST = NODE_FACTS_COUNT_ROWS_LIST + 6,
+    NODE_FACTS_COUNT_ROWS_NUMBERED,
+    NODE_FACTS_COUNT_ROWS_NUMBER_STEPS,
+    NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES,
+    NODE_FACTS_COUNT_ROWS_VALUE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_VALUE_TICKS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 

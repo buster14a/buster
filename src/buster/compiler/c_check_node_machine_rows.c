@@ -50,9 +50,15 @@
 // constant converted to a floating class, whose fold reads its value. (A logical operator's and a conditional's
 // value's templates list their expression too: C on the window makes them of no record.) Listing is always safe.
 //
-// The entries' values are not made: the kinds and the classes alone. The reference is X on T's columns at reader
-// time, whose tape the shadow keeps (NodeFrontTypes.tape_kinds and tape_classes): every expression decided on the
-// window and taken here is compared with it, entry by entry (node_rows_window_compare). No compile takes any of it.
+// The entries' values are a third stream, a quadword an entry, made after the rows are placed
+// (node_rows_window_values): zeros, then a list a source of the records whose row has a value that is no zero (its
+// line's object, its destination's, a constant's bits, a member's offset, a stride, the control's label), each
+// written by a loop of its own; and the numbers of the few expressions with two calls, two labels or two postfix
+// updates through an address (node_rows_window_number).
+//
+// The reference is X on T's columns at reader time, whose tape the shadow keeps (NodeFrontTypes.tape_kinds,
+// tape_classes and tape_values): every expression decided on the window and taken here is compared with it, entry by
+// entry (node_rows_window_compare). No compile takes any of it.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_ROWS_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_ROWS_INCLUDED
 
@@ -105,7 +111,11 @@
 // and its branch, where its truth is its sense's. Two a class's width, the odd one where true; the branches' loop
 // writes the shape (node_rows_window_tested).
 #define BUSTER_NODE_ROWS_TESTED 112u
-#define BUSTER_NODE_ROWS_SHAPES 116u
+// An operator evaluated as branches whose turn the branches' loop took (node_rows_window_branch): no entry, its own
+// part's shape; the odd one's has a label of its own (an `&&` branched where true and an `||` where false,
+// node_machine_record_past), which is a number in its expression (node_rows_window_number).
+#define BUSTER_NODE_ROWS_BRANCHED 116u
+#define BUSTER_NODE_ROWS_SHAPES 118u
 // The own shape of a record whose rows are not made here (a template's, NodeRowsTables.templates; a destination's
 // whose own entries leave a postfix update's first row no room): no entry, and its expression is listed.
 #define BUSTER_NODE_ROWS_LATER 127u
@@ -144,10 +154,67 @@ _Static_assert(BUSTER_NODE_ROWS_SHAPES <= BUSTER_NODE_ROWS_LATER && BUSTER_NODE_
 
 _Static_assert(BUSTER_NODE_ROWS_MASK_LISTED > BUSTER_NODE_CONTEXTS_MASK_WIDE && BUSTER_NODE_ROWS_MASK_FLOATED < BUSTER_NODE_CONTEXTS_MASKS, "the rows' masks are a block's last three");
 
+// A record's byte in the senses' column (NodeFactsReader.window_x_senses), which the branches' loop writes: a
+// condition's operand's sense (1: its branch is taken where it holds); and whether its branch's label is an
+// operator's own, the operator that owns it (an `&&` branched where true or an `||` where false, for its first
+// operand), and not the control's. And the reader's bit of an expression's operand's last record
+// (BUSTER_NODE_ROWS_SENSE_TOP), which no turn of the loop writes over: the record is no operand of an operator's.
+#define BUSTER_NODE_ROWS_SENSE_TRUE 0x01u
+#define BUSTER_NODE_ROWS_SENSE_OWNED 0x02u
+
+_Static_assert((BUSTER_NODE_ROWS_SENSE_TOP & (BUSTER_NODE_ROWS_SENSE_TRUE | BUSTER_NODE_ROWS_SENSE_OWNED)) == 0, "a record's sense's byte has a bit each");
+
+// The values' lists (NodeFactsReader.x_lists), the chunk's records' numbers by where their row's values come from
+// (node_rows_window_values):
+// - its record's value (NodeFactsReader.window_x_values: its object's number, its payload, or its member's offset in
+//   bytes), its first entry's: a name's read, an address constant's (its object's address, or its offset alone), an
+//   update's read by name, and a member's offset's CONST;
+// - its first operand's record's value, its one entry's: a store by name;
+// - its record's value by its entry's class, its first entry's: an integer constant's CONST, plain or folded;
+// - its stride (NodeFactsReader.window_c_strides), its PTR_ADD's: a pointer's sum's, its subscript's and its
+//   update's;
+// - the control's label, its last entry's: a tested value's branch that no operator owns, which the branches' loop
+//   lists as it gives the value its test (node_rows_window_tested);
+// - the rest, by its shape (node_rows_window_rest);
+// - and the records with a number of their expression's for a value that are no first such record of it: the
+//   expressions the numbering is asked for (node_rows_window_number), by a record of each.
+#define BUSTER_NODE_ROWS_LIST_FIRST 0u
+#define BUSTER_NODE_ROWS_LIST_STORED 1u
+#define BUSTER_NODE_ROWS_LIST_CONSTANT 2u
+#define BUSTER_NODE_ROWS_LIST_STRIDE 3u
+#define BUSTER_NODE_ROWS_LIST_CONTROLLED 4u
+#define BUSTER_NODE_ROWS_LIST_REST 5u
+#define BUSTER_NODE_ROWS_LIST_SECOND 6u
+
+_Static_assert(BUSTER_NODE_ROWS_LIST_SECOND + 1 == BUSTER_NODE_ROWS_LISTS && NODE_FACTS_COUNT_ROWS_LIST + BUSTER_NODE_ROWS_LIST_SECOND == NODE_FACTS_COUNT_ROWS_LIST_LAST,
+               "the reader's state and the unit's counts have a place a list");
+
+// An own shape's byte in the values' table (NodeRowsTables.value_owns): the lists the sweep puts its record on, a
+// bit each; and that a value of its row's is a number in its expression: an evaluated call's row, an operator's own
+// label and a postfix update's destination through its address's temporaries (node_rows_window_number).
+#define BUSTER_NODE_ROWS_VALUE_FIRST 0x01u
+#define BUSTER_NODE_ROWS_VALUE_STORED 0x02u
+#define BUSTER_NODE_ROWS_VALUE_CONSTANT 0x08u
+#define BUSTER_NODE_ROWS_VALUE_STRIDE 0x20u
+#define BUSTER_NODE_ROWS_VALUE_REST 0x40u
+#define BUSTER_NODE_ROWS_VALUE_NUMBERED 0x80u
+// And its byte of slots (NodeRowsTables.value_slots): its PTR_ADD's entry among its own (a pointer's row's: after a
+// NEG, after an update's step's CONST), whether its first entry is a pointer's update's step's 1, and, for a postfix
+// update's destination through its address, its own entries before the first row's six.
+#define BUSTER_NODE_ROWS_SLOT_STRIDE 0x03u
+#define BUSTER_NODE_ROWS_SLOT_STEP 0x04u
+#define BUSTER_NODE_ROWS_SLOT_KEPT_SHIFT 4u
+
 // A record's bits the reads' loop makes of its line (NodeFactsReader.window_x_bits), each read of the records it is
 // for: a member's offset is not zero; and an address's object is a local's.
 #define BUSTER_NODE_ROWS_BIT_FAR 0x01u
 #define BUSTER_NODE_ROWS_BIT_LOCAL 0x02u
+
+// Where a loop writes a value it has no place for, with no branch on whether it has one: a quadword past the window's
+// records in the records' values' column, and one past a chunk's most entries in the values' stream (each column's
+// room past its chunk's is more: node_facts_reader_begin).
+#define BUSTER_NODE_ROWS_VALUE_NOWHERE (BUSTER_NODE_FRONT_RECORDS + 128u)
+#define BUSTER_NODE_ROWS_ENTRY_NOWHERE (8u * BUSTER_NODE_FRONT_RECORDS + 63u)
 
 // What the rows made of an expression C takes on the window (NodeFactsReader.x_verdicts): nothing (it is not C's);
 // it is listed; or its tape is made.
@@ -197,9 +264,13 @@ struct NodeRowsTables
     _Alignas(64) uint8_t pointer_updates[128];
     // A block's records' places in it, 0 to 63: what the updates' sweep compresses into their list.
     _Alignas(64) uint8_t places[64];
+    // The values' two tables by a record's own shape (BUSTER_NODE_ROWS_VALUE_* and BUSTER_NODE_ROWS_SLOT_*), 128 bytes
+    // each: the first read as two registers.
+    _Alignas(64) uint8_t value_owns[128];
+    _Alignas(64) uint8_t value_slots[128];
 };
 
-_Static_assert(sizeof(NodeRowsTables) <= 2560, "the reader's state has room for the rows' tables (node_facts_reader_begin)");
+_Static_assert(sizeof(NodeRowsTables) <= 3072, "the reader's state has room for the rows' tables (node_facts_reader_begin)");
 _Static_assert(BUSTER_TYPED_SET == BUSTER_TYPED_STORE + 1 && BUSTER_TYPED_STORE_LOCAL == BUSTER_TYPED_STORE + 2 && BUSTER_TYPED_SET_LOCAL == BUSTER_TYPED_STORE + 3 &&
                BUSTER_TYPED_STORE_GLOBAL == BUSTER_TYPED_STORE + 4 && BUSTER_TYPED_SET_GLOBAL == BUSTER_TYPED_STORE + 5 &&
                CHECK_OP_POST_DECREMENT == CHECK_OP_PRE_INCREMENT + 3 && CHECK_OP_POST_DECREMENT == CHECK_OP_POST_INCREMENT + 1,
@@ -503,6 +574,53 @@ static void node_rows_tables(NodeRowsTables* tables)
             node_rows_row(tables, BUSTER_NODE_ROWS_TESTED + 2 * narrow + sense, count, entries);
         }
     }
+    // The values' tables, by a record's own shape, from the rows' own entries' kinds: where each value that is no
+    // zero comes from (node_rows_window_values has the rules).
+    for (uint32_t shape = 1; shape < BUSTER_NODE_ROWS_SHAPES; shape += 1)
+    {
+        const uint8_t first = tables->kinds[0][shape];
+        const bool member = shape == BUSTER_NODE_ROWS_MEMBER || shape == BUSTER_NODE_ROWS_MEMBER + 1;
+        const bool pointer = shape >= BUSTER_NODE_ROWS_POINTER && shape < BUSTER_NODE_ROWS_BOOL;
+        const bool pointer_update = shape >= BUSTER_NODE_ROWS_UPDATE_POINTER && shape < BUSTER_NODE_ROWS_FIRST;
+        const bool kept = shape >= BUSTER_NODE_ROWS_KEPT && shape < BUSTER_NODE_ROWS_KEPT_REST;
+        // A postfix update's destination's own entries, before the first row's six: its base's (node_rows_tables'
+        // `bases`, in the kept rows' order: none; a pointer's sum's; a local's address; a global's; a member's two).
+        static const uint8_t kept_bases[BUSTER_NODE_ROWS_KEPT_REST - BUSTER_NODE_ROWS_KEPT] = { 0, BUSTER_NODE_ROWS_POINTER, BUSTER_NODE_ROWS_ADDRESS + 2, BUSTER_NODE_ROWS_ADDRESS + 6,
+                                                                                               BUSTER_NODE_ROWS_MEMBER };
+        const uint32_t base = kept ? kept_bases[shape - BUSTER_NODE_ROWS_KEPT] : shape;
+        const uint32_t before = kept ? tables->lengths[base] : 0;
+        uint8_t lists = 0;
+        uint8_t slots = (uint8_t)(before << BUSTER_NODE_ROWS_SLOT_KEPT_SHIFT);
+        // Its record's value: a name's read, an address constant's and an update's read by name are their rows' first
+        // entry, an object's or, of an address constant with none, its offset's CONST; and so is a member's offset's
+        // CONST. (A conversion's part's shape has a byte here too, which no one reads: the table is read by a
+        // record's own shape.)
+        const bool object = first == BUSTER_TYPED_LOCAL || first == BUSTER_TYPED_GLOBAL || first == BUSTER_TYPED_LOCAL_ADDRESS || first == BUSTER_TYPED_GLOBAL_ADDRESS;
+        const bool alone = shape == BUSTER_NODE_ROWS_ADDRESS || shape == BUSTER_NODE_ROWS_ADDRESS + 1;
+        lists |= object || alone || member || base == BUSTER_NODE_ROWS_MEMBER ? BUSTER_NODE_ROWS_VALUE_FIRST : 0;
+        lists |= shape == BUSTER_TYPED_STORE_LOCAL || shape == BUSTER_TYPED_STORE_GLOBAL ? BUSTER_NODE_ROWS_VALUE_STORED : 0;
+        lists |= shape == BUSTER_TYPED_CONST || shape == BUSTER_NODE_ROWS_FOLDED ? BUSTER_NODE_ROWS_VALUE_CONSTANT : 0;
+        lists |= pointer || pointer_update || (kept && base == BUSTER_NODE_ROWS_POINTER) ? BUSTER_NODE_ROWS_VALUE_STRIDE : 0;
+        // The rest: an address constant's offset after its object's address, the rows of a local's and of a global's
+        // with one (node_rows_tables' variants 2 and 4, two rows each; a shape before the address constants' has a
+        // variant past them all, the difference of two unsigned numbers).
+        const uint32_t variant = (shape - BUSTER_NODE_ROWS_ADDRESS) / 2;
+        lists |= variant == 2 || variant == 4 ? BUSTER_NODE_ROWS_VALUE_REST : 0;
+        lists |= shape == BUSTER_TYPED_CALL || shape == BUSTER_NODE_ROWS_BRANCHED + 1 || kept ? BUSTER_NODE_ROWS_VALUE_NUMBERED : 0;
+        // Its PTR_ADD's place among its own entries, and a pointer's update's step.
+        uint32_t entries = 0;
+        for (uint32_t slot = 0; slot < BUSTER_NODE_ROWS_SLOTS; slot += 1)
+        {
+            if (tables->kinds[slot][shape] == BUSTER_TYPED_PTR_ADD && (lists & BUSTER_NODE_ROWS_VALUE_STRIDE) != 0)
+            {
+                slots |= (uint8_t)entries;
+            }
+            entries += tables->kinds[slot][shape] != 0 ? 1u : 0u;
+        }
+        slots |= pointer_update && first == BUSTER_TYPED_CONST ? BUSTER_NODE_ROWS_SLOT_STEP : 0;
+        tables->value_owns[shape] = lists;
+        tables->value_slots[shape] = slots;
+    }
 }
 
 typedef struct NodeRowsCounts NodeRowsCounts;
@@ -515,6 +633,8 @@ struct NodeRowsCounts
     uint64_t lines;
     uint64_t updates;
     uint64_t branched;
+    // And the tested values the branches' loop listed for the control's label, the values' (BUSTER_NODE_ROWS_LIST_CONTROLLED).
+    uint32_t controlled;
 };
 
 // The reads of a chunk's `count` records: for the records that need them, a target's class and facts, a first
@@ -602,6 +722,12 @@ static __attribute__((noinline)) void node_rows_window_reads(struct NodeFactsRea
         const bool local = machine->object_symbols[object < machine->object_count ? object : 0] == 0;
         state->window_x_bits[x] = (uint8_t)((record->member_offset != 0 ? BUSTER_NODE_ROWS_BIT_FAR : 0u) | (local ? BUSTER_NODE_ROWS_BIT_LOCAL : 0u));
         state->window_x_operands[x] = node_machine_class(machine, record->converted[0]);
+        // A member's offset in bytes, its row's CONST's value, in its record's value's place: the values' loop reads
+        // it there (node_rows_window_values), and a member's rows read nothing else of it. Another record's is
+        // written nowhere: a branch on which the record is was mispredicted (the 9700X read the loop 1.0 tick a record
+        // swept higher on `sqlite3.c` with one).
+        const uint32_t other = state->window_c_templates[x] != CHECK_LOWER_TEMPLATE_MEMBER ? 1u : 0u;
+        state->window_x_values[x + ((BUSTER_NODE_ROWS_VALUE_NOWHERE - x) & (0u - other))] = record->member_offset / 8;
     }
     counts->words += word_count;
     counts->lines += line_count;
@@ -828,11 +954,14 @@ static inline __attribute__((always_inline)) void node_rows_window_update(struct
 // - A value is tested: its test and its branch are its conversion's part's row, where that part is free
 //   (BUSTER_NODE_ROWS_TESTED: a narrow class's or not, by the sense), and its row has their entries more. A value
 //   with a conversion of its own has no room for them: its row stays as it is, and its expression is listed.
+// `given` is its sense and its owner's bit (BUSTER_NODE_ROWS_SENSE_TRUE and _OWNED). A value that takes its test and
+// whose branch no operator owns goes on the values' list of the control's label, whose count is `*controlled`.
 // A `!`'s one operand takes this twice, with the same sense: the second time its part has the test's shape, which is
 // neither free nor a conversion of its own, and nothing changes. (An operator evaluated as branches has no target
 // and converts nothing, C's loop's rule: its part is free, and stays so.)
-static inline __attribute__((always_inline)) void node_rows_window_tested(struct NodeFactsReader* state, uint32_t o, uint32_t sense)
+static inline __attribute__((always_inline)) void node_rows_window_tested(struct NodeFactsReader* state, uint32_t o, uint32_t given, uint32_t* controlled)
 {
+    const uint32_t sense = given & BUSTER_NODE_ROWS_SENSE_TRUE;
     const uint32_t value = state->window_c_templates[o] != NODE_MACHINE_TEMPLATE_BRANCHES ? 1u : 0u;
     const uint32_t before = state->window_x_conversions[o];
     // (A tested value's class is no void's: the checker takes only a scalar for a logical operator's operand,
@@ -841,10 +970,13 @@ static inline __attribute__((always_inline)) void node_rows_window_tested(struct
     const uint32_t shape = BUSTER_NODE_ROWS_TESTED + 2u * narrow + sense;
     const uint32_t converted = before - 1u < BUSTER_NODE_ROWS_TESTED - 1u ? 1u : 0u;
     const uint32_t takes = 0u - (value & (before == 0 ? 1u : 0u));
-    state->window_x_senses[o] = (uint8_t)sense;
+    // Its sense and whose label its branch has, the control's or an operator's own (BUSTER_NODE_ROWS_SENSE_*).
+    state->window_x_senses[o] = (uint8_t)given;
     // The test's three entries, and a narrow class's CONVERT.
     state->window_x_conversions[o] = (uint8_t)(before | (shape & takes));
     state->window_x_lengths[o] = (uint8_t)(state->window_x_lengths[o] + ((3u + narrow) & takes));
+    state->x_lists[BUSTER_NODE_ROWS_LIST_CONTROLLED][*controlled] = (uint16_t)o;
+    *controlled += takes & (~given >> 1) & 1u;
     // The one branch: a value with no room is rare (none on the three corpora), and a write of the block's mask a
     // call would make each call wait for the one before it.
     if (__builtin_expect(converted != 0, 0))
@@ -861,16 +993,25 @@ static inline __attribute__((always_inline)) void node_rows_window_tested(struct
 //   own sense (to the operator's target, or to its own label past its second operand: the label is the entry's
 //   value, which is not made here); its second operand, the record before it, has the operator's.
 // - A `!`'s operand, the record before it, has the other sense.
-static inline __attribute__((always_inline)) void node_rows_window_branch(struct NodeFactsReader* state, const NodeFront* front, uint32_t c)
+// - And whose label an operand's branch has (node_machine_classify_branches' `owner`): an `&&` branched where true and
+//   an `||` where false have a label of their own, past their second operand, which their first operand's branch
+//   goes to; every other operand has its operator's owner, the control for a condition's own. The operator's own
+//   part's shape says that its turn is taken and whether it has that label (BUSTER_NODE_ROWS_BRANCHED), which the
+//   values read: the shapes' sweep gave it none.
+static inline __attribute__((always_inline)) void node_rows_window_branch(struct NodeFactsReader* state, const NodeFront* front, uint32_t c, uint32_t* controlled)
 {
     const uint32_t op = front->ops[c];
-    const uint32_t sense = state->window_x_senses[c];
+    const uint32_t byte = state->window_x_senses[c];
+    const uint32_t sense = byte & BUSTER_NODE_ROWS_SENSE_TRUE;
+    const uint32_t owned = byte & BUSTER_NODE_ROWS_SENSE_OWNED;
     const uint32_t negated = op == CHECK_OP_NOT ? 1u : 0u;
     const uint32_t either = op == CHECK_OP_LOGICAL_OR ? 1u : 0u;
     const uint32_t last = sense ^ negated;
-    // A `!`'s first operand is its last: the record before it, with the same sense.
-    node_rows_window_tested(state, c - front->window_left[c], (last & (0u - negated)) | (either & (negated - 1u)));
-    node_rows_window_tested(state, c - 1, last);
+    const uint32_t past = (negated ^ 1u) & (either ^ sense);
+    state->window_x_owns[c] = (uint8_t)(BUSTER_NODE_ROWS_BRANCHED + past);
+    // A `!`'s first operand is its last: the record before it, with the same sense and the same owner.
+    node_rows_window_tested(state, c - front->window_left[c], (last & (0u - negated)) | (either & (negated - 1u)) | owned | (past * BUSTER_NODE_ROWS_SENSE_OWNED), controlled);
+    node_rows_window_tested(state, c - 1, last | owned, controlled);
 }
 
 // The updates' rows of a chunk's `count` records, after the shapes' sweep and before the rows' write: a sweep of
@@ -938,12 +1079,14 @@ static __attribute__((noinline)) void node_rows_window_updates(struct NodeFactsR
     {
         node_rows_window_update(state, front, updates[i]);
     }
+    uint32_t controlled = 0;
     for (uint32_t i = branch_count; i-- != 0;)
     {
-        node_rows_window_branch(state, front, branches[i]);
+        node_rows_window_branch(state, front, branches[i], &controlled);
     }
     counts->updates += update_count;
     counts->branched += branch_count;
+    counts->controlled += controlled;
 }
 
 // A slot's registers of a block: the two parts' shapes' entry there, by `table` (NodeRowsTables.kinds or sources, a
@@ -1063,6 +1206,434 @@ static inline uint32_t node_rows_window_place(const struct NodeFactsReader* stat
     return state->x_cursors[x / 8] + state->window_x_offsets[x];
 }
 
+// An integer constant's CONST's value of class `class` (I8 to U64) from the bits `bits`, as node_machine_own's and
+// check_lower_constant_conversion's: masked to the class's width and extended from it by the class's signedness (a
+// signed class's number is odd). Two shifts, the second by the sign: no branch.
+static inline __attribute__((always_inline)) uint64_t node_rows_extend(uint64_t bits, uint32_t class)
+{
+    // 64 less the class's width, by the class: I8's and U8's 56, I16's and U16's 48, I32's and U32's 32, I64's and
+    // U64's none; no other class has an integer constant's CONST here.
+    static const uint8_t shifts[16] = { 0, 56, 56, 48, 48, 32, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const uint32_t shift = shifts[class & 15u];
+    const uint64_t high = bits << shift;
+    return (class & 1u) != 0 ? (uint64_t)((int64_t)high >> shift) : high >> shift;
+}
+
+// A floating constant's CONST's value of class `class` (F32 or F64: C takes no other's, node_machine_constant_takes)
+// from its record's line: check_lower_float_bits' of its long double (node_machine_record_floating), whose significand
+// and whose sign and exponent the line has as its payload and its exponent where its standing says so. A zero's line
+// says no such thing (node_machine_put_value: its payload is its integer's, and its exponent's field what a payload
+// says, node_facts_small), and its value is zero's.
+static uint64_t node_rows_float_bits(const NodeFactsRecord* record, uint8_t class)
+{
+    CheckValue value = { 0 };
+    if ((record->standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING)
+    {
+        value.floating_storage[0] = record->payload;
+        value.floating_storage[1] = record->exponent;
+    }
+    return check_lower_float_bits(NULL, class, value.floating);
+}
+
+// The values of the rest's list's record `x`, by its own shape, a record at a time and out of the lists' loops' way,
+// from its record's line: a floating constant's bits; whether a constant folded to bool is not zero; and an address
+// constant's offset after its object's address.
+static __attribute__((noinline)) void node_rows_window_rest(struct NodeFactsReader* state, uint32_t x)
+{
+    const NodeFactsRecord* record = state->facts.records + x;
+    const uint32_t own = state->window_x_owns[x];
+    const uint32_t place = node_rows_window_place(state, x);
+    uint64_t* values = state->x_values + place;
+    if (own == BUSTER_TYPED_CONST)
+    {
+        values[0] = node_rows_float_bits(record, state->x_classes[place]);
+    }
+    else if (own == BUSTER_NODE_ROWS_FOLDED)
+    {
+        // (A constant's payload is its value's bits of its class's width, or those extended: none is zero in them and
+        // not zero past them.)
+        values[0] = record->payload != 0 ? 1u : 0u;
+    }
+    else
+    {
+        values[1] = record->payload;
+    }
+}
+
+// One of the values' lists: the block's records under `mask`, their places in it (`places`) compressed and widened
+// onto `list` from its `count`, each with the block's first record's number `base`; the list's new count. A register's
+// 32 numbers are stored whatever the mask has, and the other 32 where it has more than 32: a list has their room
+// past a chunk's records.
+static inline __attribute__((always_inline)) uint32_t node_rows_listed(uint16_t* list, uint32_t count, __mmask64 mask, __m512i places, __m512i base)
+{
+    const __m512i packed = _mm512_maskz_compress_epi8(mask, places);
+    const uint32_t more = (uint32_t)_mm_popcnt_u64(mask);
+    _mm512_storeu_si512(list + count, _mm512_add_epi16(base, _mm512_cvtepu8_epi16(_mm512_castsi512_si256(packed))));
+    if (__builtin_expect(more > 32, 0))
+    {
+        _mm512_storeu_si512(list + count + 32, _mm512_add_epi16(base, _mm512_cvtepu8_epi16(_mm512_extracti64x4_epi64(packed, 1))));
+    }
+    return count + more;
+}
+
+// The numbers of the expression whose operand's last record is the window's `top`, one with two records or more
+// whose value is a number in it (node_rows_window_values' marks): by the reference's own rules, over the zeros and
+// the first pair the loops wrote, which are an expression's first of each. Whether it numbered them: an expression
+// the rows take. `*steps` counts the records its labels' walk went over.
+// - A call's row (node_machine_call_own): its preorder number among the expression's evaluated calls, those before
+//   its subtree's first record and those that hold it.
+// - A label (node_machine_number_labels): an operator's own is its preorder number among the expression's operators
+//   with a label, and a tested value's branch has its owner's. An owner comes down from the condition as in the
+//   branches' loop (node_rows_window_branch): an operator with a label owns its first operand, and every other
+//   operand has its operator's owner. The walk goes down from the expression's last operator with a label to the
+//   first record of the first such operator's operands: a value outside them has the control's label, or one's that
+//   is the expression's first, a zero.
+// - A temporary (node_machine_update_first): a postfix update through an address has two, numbered in the order the
+//   updates' first rows are written, their destinations' records'.
+// A record at a time: about one expression in eighty has two such records (the census's count), an expression has a
+// few of each, and their order is the tree's. The reference numbers them a record at a time too.
+static __attribute__((noinline, cold)) bool node_rows_window_number(struct NodeFactsReader* state, const NodeFront* front, uint32_t top, uint64_t* steps)
+{
+    const NodeRowsTables* tables = state->x_tables;
+    const uint32_t size = front->sizes[top];
+    const uint32_t first = top + 1 - size;
+    const uint32_t e = state->window_x_expressions[top];
+    uint64_t* values = state->x_values;
+    uint16_t* owners = state->x_owners;
+    uint16_t* marked = state->x_marked;
+    // Its marked records, in the records' order: the marks' bits from its operand's first record through its last,
+    // two or more (the sweep lists a record after an expression's first marked one, and a record outside the batch's
+    // expressions has no shape: the measurement record's count of this routine's calls).
+    uint32_t marks = 0;
+    for (uint32_t word = first / 64; word <= top / 64; word += 1)
+    {
+        const uint64_t from = word == first / 64 ? ~UINT64_C(0) << (first & 63) : ~UINT64_C(0);
+        const uint64_t through = word == top / 64 ? ~UINT64_C(0) >> (63 - (top & 63)) : ~UINT64_C(0);
+        for (uint64_t bits = state->window_x_marks[word] & from & through; bits != 0; bits &= bits - 1)
+        {
+            marked[marks] = (uint16_t)(64 * word + (uint32_t)_tzcnt_u64(bits));
+            marks += 1;
+        }
+    }
+    const bool numbers = state->c_verdicts[e] == BUSTER_NODE_CONTEXTS_TAKEN && !node_contexts_window_any(state->window_c_masks, BUSTER_NODE_ROWS_MASK_LISTED, first, size);
+    if (numbers)
+    {
+        uint32_t temporaries = 0;
+        // The operators with a label: the walk's records are from the first one's operands' first to the last one.
+        uint32_t walk_first = top;
+        uint32_t walk_last = 0;
+        for (uint32_t i = 0; i < marks; i += 1)
+        {
+            const uint32_t x = marked[i];
+            const uint32_t own = state->window_x_owns[x];
+            if (own == BUSTER_TYPED_CALL)
+            {
+                // The calls before its subtree's first record, and those after it whose subtree holds it: one that
+                // starts no later than its own (a callee's call starts where its caller's does).
+                const uint32_t lowest = x + 1 - front->sizes[x];
+                uint32_t row = 0;
+                for (uint32_t j = 0; j < marks; j += 1)
+                {
+                    const uint32_t other = marked[j];
+                    const bool counted = other < lowest || (other > x && other + 1 - front->sizes[other] <= lowest);
+                    row += state->window_x_owns[other] == BUSTER_TYPED_CALL && counted ? 1u : 0u;
+                }
+                values[node_rows_window_place(state, x)] = row;
+            }
+            else if (own == BUSTER_NODE_ROWS_BRANCHED + 1)
+            {
+                const uint32_t lowest = x + 1 - front->sizes[x];
+                walk_first = lowest < walk_first ? lowest : walk_first;
+                walk_last = x;
+            }
+            else
+            {
+                const uint32_t before = tables->value_slots[own] >> BUSTER_NODE_ROWS_SLOT_KEPT_SHIFT;
+                uint64_t* kept = values + node_rows_window_place(state, x) + before;
+                kept[0] = BUSTER_NODE_MACHINE_TEMPORARY | temporaries;
+                kept[1] = BUSTER_NODE_MACHINE_TEMPORARY | temporaries;
+                kept[3] = BUSTER_NODE_MACHINE_TEMPORARY | (temporaries + 1);
+                kept[4] = BUSTER_NODE_MACHINE_TEMPORARY | temporaries;
+                kept[5] = BUSTER_NODE_MACHINE_TEMPORARY | (temporaries + 1);
+                temporaries += 2;
+            }
+        }
+        // Down the walk's records, consumers before their operands: each operator evaluated as branches gives its
+        // operands their owner (BUSTER_NODE_ROWS_BRANCHED: the shape its turn left); the last operator with a label
+        // has whatever owner, which no record of the walk reads but through an operator with a label of its own.
+        for (uint32_t x = walk_last + 1; x-- > walk_first;)
+        {
+            const uint32_t own = state->window_x_owns[x];
+            if (own >= BUSTER_NODE_ROWS_BRANCHED)
+            {
+                owners[x - 1] = owners[x];
+                owners[x - front->window_left[x]] = own == BUSTER_NODE_ROWS_BRANCHED ? owners[x] : (uint16_t)x;
+            }
+            // A tested value an operator owns: its branch's label is its owner's, the operators with a label before
+            // the owner's subtree's first record and those after it whose subtree holds it.
+            if (state->window_x_conversions[x] >= BUSTER_NODE_ROWS_TESTED && (state->window_x_senses[x] & BUSTER_NODE_ROWS_SENSE_OWNED) != 0)
+            {
+                const uint32_t owner = owners[x];
+                const uint32_t lowest = owner + 1 - front->sizes[owner];
+                uint32_t label = 0;
+                for (uint32_t j = 0; j < marks; j += 1)
+                {
+                    const uint32_t other = marked[j];
+                    const bool counted = other < lowest || (other > owner && other + 1 - front->sizes[other] <= lowest);
+                    label += state->window_x_owns[other] == BUSTER_NODE_ROWS_BRANCHED + 1 && counted ? 1u : 0u;
+                }
+                values[node_rows_window_place(state, x) + state->window_x_lengths[x] - 1u] = label;
+            }
+            *steps += 1;
+        }
+    }
+    return numbers;
+}
+
+// The entries' values of a chunk's `count` records, whose rows the write has just placed (`written` entries): the
+// chunk's third stream, a quadword an entry (X's tape's third column, node_machine_expand's). A census of the values
+// (the measurement record's x-values-2850) found each one a function of what the window has: half are zero, and the
+// others a field of a record's line, a type's stride or a fixed number, but for the numbers of the few expressions
+// with two calls, two labels or two postfix updates through an address (node_rows_window_number).
+// - The stream starts as zeros, and as the 1 of each PTR_ADD: a member's offset's sum's and an address constant's
+//   (node_machine_own, node_machine_address), which no loop then writes; a pointer's stride is written over its own.
+// - A sweep of masks, 64 records a step, over each record's own shape once the updates' and the branches' loops are
+//   done, makes the lists (BUSTER_NODE_ROWS_LIST_*): a record's lists are its own shape's byte of the values' table
+//   (NodeRowsTables.value_owns), but a constant's by its class and its fold (a floating one's and one folded to bool
+//   are the rest's). And the records that are no first of their expression's with a number for a value (the table's
+//   bit), from two masks a block: those records, and the expressions' operands' last records, which the reader
+//   marked in the senses' column.
+// - A loop a list writes its values, each a load or two and a store at its row's place, none waiting for another.
+//   What a loop reads is a column: a record's value (NodeFactsReader.window_x_values: its object's number or its
+//   payload, which the tests' sweep made with the records' bytes, and a member's offset, which the rows' reads left
+//   there) and a pointer's stride (window_c_strides, which C's loop kept as it asked for it). A record's line is 64
+//   bytes, and a loop that read one a record waited for a line of the cache a value (the 9700X's readings are in
+//   docs/node-machine.md).
+// - Two loops go over lists made before: the tested values the branches' loop listed for the control's label, and
+//   the chunk's updates (the updates' loop's list), each for its store by name, its step and its destination's
+//   temporaries.
+// A value's rule is X's (node_machine_own, node_machine_address, node_machine_fold_conversion,
+// node_machine_update_first and _last, node_machine_branch_hook):
+// - an object's number for a LOCAL, a GLOBAL and their addresses (at reader time a global's entry holds its object,
+//   which stands for its symbol until a splice patches it: node_machine_reader_strings, the shadow's comparison), and
+//   a store's and an update's by name their destination's, their first operand's;
+// - an integer constant's bits by its entry's class, after its own class's where its conversion folded; an address
+//   constant's offset;
+// - a member's offset in bytes; a pointer's stride, and its update's step's 1; an arithmetic update's step, one of
+//   the class it is computed in;
+// - the control's label for a tested value no operator owns (BUSTER_NODE_MACHINE_CONTROL_LABEL), and zero, an
+//   expression's first label, for one an operator owns; zero, an expression's first call's row, for a CALL; a postfix
+//   update through an address's two temporaries, an expression's first pair;
+// - and zero for an access (a vector's bytes, and C takes no vector's access), a conversion, an operation and a test.
+// `made` has the two lists' counts; the sweep's lists' counts are added to `listed`, the expressions numbered to
+// `*numbered` and the records their labels' walks went over to `*steps`.
+static __attribute__((noinline)) void node_rows_window_values(struct NodeFactsReader* state, const NodeFront* front, uint32_t count, uint32_t written, const NodeRowsCounts* made,
+                                                              uint32_t* listed, uint32_t* numbered, uint64_t* steps)
+{
+    const NodeRowsTables* tables = state->x_tables;
+    const uint64_t* record_values = state->window_x_values;
+    uint64_t* values = state->x_values;
+    uint16_t* firsts = state->x_lists[BUSTER_NODE_ROWS_LIST_FIRST];
+    uint16_t* stored = state->x_lists[BUSTER_NODE_ROWS_LIST_STORED];
+    uint16_t* constants = state->x_lists[BUSTER_NODE_ROWS_LIST_CONSTANT];
+    uint16_t* strides = state->x_lists[BUSTER_NODE_ROWS_LIST_STRIDE];
+    const uint16_t* controlled = state->x_lists[BUSTER_NODE_ROWS_LIST_CONTROLLED];
+    uint16_t* rest = state->x_lists[BUSTER_NODE_ROWS_LIST_REST];
+    uint16_t* seconds = state->x_lists[BUSTER_NODE_ROWS_LIST_SECOND];
+    uint32_t first_count = 0;
+    uint32_t stored_count = 0;
+    uint32_t constant_count = 0;
+    uint32_t stride_count = 0;
+    uint32_t rest_count = 0;
+    uint32_t second_count = 0;
+    // The stream's zeros and its PTR_ADDs' ones, 64 entries a step from their kinds: through the last step's entries,
+    // within the streams' room past a chunk's most (an entry past the chunk's has whatever kind was there, and no
+    // one reads its value).
+    const __m512i ones = _mm512_set1_epi64(1);
+    for (uint32_t at = 0; at < written; at += 64)
+    {
+        const uint64_t sums = _mm512_cmpeq_epi8_mask(_mm512_loadu_si512(state->x_kinds + at), _mm512_set1_epi8(BUSTER_TYPED_PTR_ADD));
+        for (uint32_t eight = 0; eight < 8; eight += 1)
+        {
+            _mm512_storeu_si512(values + at + 8 * eight, _mm512_maskz_mov_epi64((__mmask8)(sums >> (8 * eight)), ones));
+        }
+    }
+    const __m512i places = _mm512_load_si512(tables->places);
+    const uint32_t blocks = (count + 63) / 64;
+    // Whether the expression that goes on from the block before has a marked record there.
+    uint64_t open = 0;
+    for (uint32_t block = 0; block < blocks; block += 1)
+    {
+        const uint32_t x = block * 64;
+        const __m512i owns = _mm512_loadu_si512(state->window_x_owns + x);
+        const __m512i classes = _mm512_loadu_si512(state->window_c_classes + x);
+        const __m512i senses = _mm512_loadu_si512(state->window_x_senses + x);
+        const __m512i to_facts = _mm512_loadu_si512(state->window_x_facts + x);
+        const __m512i lists = node_window_table(tables->value_owns, owns);
+        // A constant's list by its class and its fold: an integer's CONST is the constants', a floating one's and one
+        // folded to bool the rest's. A folded one is an integer constant with a target of an integer's class
+        // (node_rows_window_shapes): its own class is no floating one, and the reads read its target's facts this
+        // chunk (another record's byte there is an earlier chunk's, which no term here reads).
+        const __mmask64 constant = _mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_CONSTANT));
+        const __mmask64 folded = _mm512_cmpeq_epi8_mask(owns, _mm512_set1_epi8(BUSTER_NODE_ROWS_FOLDED));
+        const __mmask64 floating = constant & _mm512_cmpge_epu8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_F32));
+        const __mmask64 to_bool = folded & _mm512_test_epi8_mask(to_facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_BOOL));
+        const __m512i base = _mm512_set1_epi16((int16_t)x);
+        first_count = node_rows_listed(firsts, first_count, _mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_FIRST)), places, base);
+        stored_count = node_rows_listed(stored, stored_count, _mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_STORED)), places, base);
+        constant_count = node_rows_listed(constants, constant_count, constant & ~floating & ~to_bool, places, base);
+        stride_count = node_rows_listed(strides, stride_count, _mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_STRIDE)), places, base);
+        rest_count = node_rows_listed(rest, rest_count, _mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_REST)) | floating | to_bool, places, base);
+        // The records whose value is a number in its expression, and the expressions' ends: an expression's records
+        // are those after the end before it, through its own (and a root's record between two, which has no such
+        // value). The first marked record of each is found by one subtraction: a borrow from an expression's first
+        // record stops at the first marked bit from there, which is then the one bit that differs. (An expression
+        // with no marked record lends its borrow to the next one's first, the bit that one's own borrow would stop
+        // at, and that one's start's bit, which the borrow set, takes its own: a start is no marked record, since a
+        // call, an operator with a label and an update's destination through an address each come after an operand
+        // of theirs.) The others are the seconds, and so is the first of the expression that goes on from the block
+        // before with a marked record there.
+        const uint64_t marks = _mm512_test_epi8_mask(lists, _mm512_set1_epi8((char)BUSTER_NODE_ROWS_VALUE_NUMBERED));
+        const uint64_t ends = _mm512_test_epi8_mask(senses, _mm512_set1_epi8((char)BUSTER_NODE_ROWS_SENSE_TOP));
+        const uint64_t first_marks = marks & ~(marks - ((ends << 1) | 1));
+        const uint64_t lowest = first_marks & (0 - first_marks);
+        const uint64_t lowest_end = ends & (0 - ends);
+        const uint64_t going_on = lowest & (0 - open) & (0 - (uint64_t)(lowest - 1 <= lowest_end - 1 ? 1 : 0));
+        uint64_t later = (marks & ~first_marks) | going_on;
+        const uint64_t after = ends == 0 ? marks : marks >> (63 - (uint32_t)_lzcnt_u64(ends)) >> 1;
+        open = (after != 0 ? 1u : 0u) | (ends == 0 ? open : 0u);
+        state->window_x_marks[block] = marks;
+        state->window_x_ends[block] = ends;
+        while (__builtin_expect(later != 0, 0))
+        {
+            seconds[second_count] = (uint16_t)(x + (uint32_t)_tzcnt_u64(later));
+            second_count += 1;
+            later &= later - 1;
+        }
+    }
+    // The loops, each a list's: a row's place is the entries before its eight records' and before it among them
+    // (node_rows_window_place), read here from the two columns. One copy of each loop's step: a list is some tens of
+    // records a chunk, and a loop unrolled ends on two branches its count mispredicts, not one.
+    const uint32_t* cursors = state->x_cursors;
+    const uint8_t* offsets = state->window_x_offsets;
+    const uint8_t* owns = state->window_x_owns;
+    const uint8_t* entry_classes = state->x_classes;
+    // Its record's value, its row's first entry's.
+    #pragma clang loop unroll(disable)
+    for (uint32_t i = 0; i < first_count; i += 1)
+    {
+        const uint32_t x = firsts[i];
+        values[cursors[x / 8] + offsets[x]] = record_values[x];
+    }
+    // A store by name's one entry: its destination's record's value, its first operand's.
+    const uint16_t* lefts = front->window_left;
+    #pragma clang loop unroll(disable)
+    for (uint32_t i = 0; i < stored_count; i += 1)
+    {
+        const uint32_t x = stored[i];
+        values[cursors[x / 8] + offsets[x]] = record_values[x - lefts[x]];
+    }
+    // An integer constant's bits by its entry's class, which the rows' write left in the classes' stream: its own
+    // class's, and then its target's for a folded one (the same class again for a plain one).
+    const uint8_t* own_classes = state->window_c_classes;
+    #pragma clang loop unroll(disable)
+    for (uint32_t i = 0; i < constant_count; i += 1)
+    {
+        const uint32_t x = constants[i];
+        const uint32_t place = cursors[x / 8] + offsets[x];
+        values[place] = node_rows_extend(node_rows_extend(record_values[x], own_classes[x]), entry_classes[place]);
+    }
+    // A pointer's stride, its PTR_ADD's: the entry its shape says, after a NEG and after an update's step's CONST,
+    // whose 1 is the row's first entry's (another row's first store is a zero's, or the stride's own place).
+    const uint64_t* record_strides = state->window_c_strides;
+    #pragma clang loop unroll(disable)
+    for (uint32_t i = 0; i < stride_count; i += 1)
+    {
+        const uint32_t x = strides[i];
+        const uint32_t place = cursors[x / 8] + offsets[x];
+        const uint32_t slots = tables->value_slots[owns[x]];
+        values[place] = (slots & BUSTER_NODE_ROWS_SLOT_STEP) != 0 ? 1u : 0u;
+        values[place + (slots & BUSTER_NODE_ROWS_SLOT_STRIDE)] = record_strides[x];
+    }
+    // The control's label, a tested value's branch's, its row's last entry's.
+    const uint8_t* lengths = state->window_x_lengths;
+    const uint32_t controlled_count = made->controlled;
+    #pragma clang loop unroll(disable)
+    for (uint32_t i = 0; i < controlled_count; i += 1)
+    {
+        const uint32_t x = controlled[i];
+        values[cursors[x / 8] + offsets[x] + lengths[x] - 1u] = BUSTER_NODE_MACHINE_CONTROL_LABEL;
+    }
+    // An update's own row and its destination's (node_machine_update_last and _first): its store by name's object,
+    // its destination's record's value, its own part's last entry's (the updates' loop left a by-name store's kind
+    // in the bits' column); an arithmetic update's step, one of the class it is computed in (its entry's: 1, or a
+    // float's or a double's bits); and, of a postfix update through its address, its destination's two temporaries
+    // after its own entries (the address's store and its read, the load, the old value's store, and the two read):
+    // the expression's first pair, which the numbering writes again in an expression with two such updates.
+    const uint32_t* updates = state->x_updates;
+    const uint8_t* stores = state->window_x_bits;
+    const uint32_t update_count = (uint32_t)made->updates;
+    #pragma clang loop unroll(disable)
+    for (uint32_t i = 0; i < update_count; i += 1)
+    {
+        const uint32_t x = updates[i];
+        const uint32_t destination = x - lefts[x];
+        const uint32_t own = owns[x];
+        const uint32_t kept = owns[destination];
+        const uint32_t place = cursors[x / 8] + offsets[x];
+        const uint8_t class = entry_classes[place];
+        const uint64_t one = class == BUSTER_TYPED_CLASS_F32 ? UINT32_C(0x3f800000) : class == BUSTER_TYPED_CLASS_F64 ? UINT64_C(0x3ff0000000000000) : 1u;
+        // (Each of the two is written nowhere where the update has none: its kinds are no pattern a predictor learns.)
+        const uint32_t unstepped = own - (BUSTER_NODE_ROWS_UPDATE + 2) > 1u ? 1u : 0u;
+        const uint32_t through = stores[x] < BUSTER_TYPED_STORE_LOCAL ? 1u : 0u;
+        const uint32_t last = place + tables->lengths[own] - 1u;
+        values[place + ((BUSTER_NODE_ROWS_ENTRY_NOWHERE - place) & (0u - unstepped))] = one;
+        values[last + ((BUSTER_NODE_ROWS_ENTRY_NOWHERE - last) & (0u - through))] = record_values[destination];
+        if (__builtin_expect(kept >= BUSTER_NODE_ROWS_KEPT && kept < BUSTER_NODE_ROWS_KEPT_REST, 0))
+        {
+            uint64_t* six = values + cursors[destination / 8] + offsets[destination] + (tables->value_slots[kept] >> BUSTER_NODE_ROWS_SLOT_KEPT_SHIFT);
+            six[0] = BUSTER_NODE_MACHINE_TEMPORARY;
+            six[1] = BUSTER_NODE_MACHINE_TEMPORARY;
+            six[3] = BUSTER_NODE_MACHINE_TEMPORARY | 1;
+            six[4] = BUSTER_NODE_MACHINE_TEMPORARY;
+            six[5] = BUSTER_NODE_MACHINE_TEMPORARY | 1;
+        }
+    }
+    for (uint32_t i = 0; i < rest_count; i += 1)
+    {
+        node_rows_window_rest(state, rest[i]);
+    }
+    // The expressions with a second marked record: each one's numbers, once. Its operand's last record is the first
+    // end at or after the record.
+    uint32_t numbered_now = 0;
+    uint32_t top_before = UINT32_MAX;
+    for (uint32_t i = 0; i < second_count; i += 1)
+    {
+        const uint32_t x = seconds[i];
+        uint32_t word = x / 64;
+        uint64_t ends = state->window_x_ends[word] >> (x & 63) << (x & 63);
+        while (ends == 0)
+        {
+            word += 1;
+            ends = state->window_x_ends[word];
+        }
+        const uint32_t top = 64 * word + (uint32_t)_tzcnt_u64(ends);
+        if (top != top_before)
+        {
+            numbered_now += node_rows_window_number(state, front, top, steps) ? 1u : 0u;
+            top_before = top;
+        }
+    }
+    listed[BUSTER_NODE_ROWS_LIST_FIRST] += first_count;
+    listed[BUSTER_NODE_ROWS_LIST_STORED] += stored_count;
+    listed[BUSTER_NODE_ROWS_LIST_CONSTANT] += constant_count;
+    listed[BUSTER_NODE_ROWS_LIST_STRIDE] += stride_count;
+    listed[BUSTER_NODE_ROWS_LIST_CONTROLLED] += made->controlled;
+    listed[BUSTER_NODE_ROWS_LIST_REST] += rest_count;
+    listed[BUSTER_NODE_ROWS_LIST_SECOND] += second_count;
+    *numbered += numbered_now;
+}
+
 // Why the window's record `x` lists its expression for X (BUSTER_NODE_ROWS_REASON_*), where it does: by its block's
 // masks, then by what gave it the bit in the two loops. The shadow's count.
 // - An update lists for its own row (a bool's), and its destination for the update's first row, where the
@@ -1114,11 +1685,12 @@ static inline uint32_t node_rows_window_length(const struct NodeFactsReader* sta
 }
 
 // The reference's tape and the window's for the batch's expression `e`, taken here: whether they differ in their
-// number of entries, in an entry's kind or in its class, or the reference refused a row. X on T's columns gave the
-// first, kept by the expression's root's node (the reader's NodeFrontTypes.tape_kinds); `*unkept` where it kept none
-// for want of room, which is compared with nothing. With the control (NodeFactsReader.x_fault), one of the
-// reference's answers is read changed, an expression's first entry's kind, its last's class and its length in turn.
-static bool node_rows_window_compare(struct NodeFactsReader* state, const NodeFront* front, uint32_t e, uint32_t* entries, bool* unkept)
+// number of entries, in an entry's kind or in its class, or the reference refused a row; and `*valued` where they
+// differ in an entry's value and in nothing else. X on T's columns gave the first, kept by the expression's root's
+// node (the reader's NodeFrontTypes.tape_kinds, tape_classes and tape_values); `*unkept` where it kept none for want
+// of room, which is compared with nothing. With the control (NodeFactsReader.x_fault), one of the reference's answers
+// is read changed, an expression's first entry's kind, its last's class, its length and an entry's value in turn.
+static bool node_rows_window_compare(struct NodeFactsReader* state, const NodeFront* front, uint32_t e, uint32_t* entries, bool* unkept, bool* valued)
 {
     const NodeFrontTypes* types = state->types;
     const uint32_t record = state->records[e];
@@ -1134,33 +1706,46 @@ static bool node_rows_window_compare(struct NodeFactsReader* state, const NodeFr
     const uint32_t expected = types->tape_counts[root];
     const uint8_t* kinds = types->tape_kinds + types->tape_firsts[root];
     const uint8_t* classes = types->tape_classes + types->tape_firsts[root];
+    const uint64_t* values = types->tape_values + types->tape_firsts[root];
     bool differs = false;
+    bool value_differs = false;
     *entries = inner + outer;
     *unkept = expected == UINT32_MAX;
     if (expected != UINT32_MAX)
     {
-        const uint32_t turn = state->x_fault ? state->x_fault_turn % 3 : 3;
-        const bool short_turn = expected == 0 && turn < 2;
+        // A tape with no entry has no kind, class or value to change: its length is, in those turns too. The value's
+        // turn changes its lowest bit and its highest, a round of the four turns each, and the tape's first entry's
+        // and its last's, two rounds each; and the class's turn changes the first entry's value too in a tape of two
+        // entries or more, which then differs, and not in a value alone.
+        const uint32_t turn = state->x_fault ? state->x_fault_turn % 4 : 4;
+        const uint32_t round = state->x_fault_turn / 4;
+        const uint64_t bit = UINT64_C(1) << (63u * (round % 2));
+        const bool short_turn = expected == 0 && turn < 4;
         const uint32_t length = expected + (turn == 2 || short_turn ? 1u : 0u);
+        const uint32_t valued_entry = turn == 3 && round / 2 % 2 != 0 ? length - 1 : 0;
+        const bool valued_turn = turn == 3 || (turn == 1 && length > 1);
         differs = types->sweep_refusals[root] != NODE_MACHINE_TAKEN || inner + outer != length;
         for (uint32_t i = 0; !differs && i < length; i += 1)
         {
             const uint32_t at = i < inner ? start + i : node_rows_window_place(state, record) + (i - inner);
             const uint8_t kind = (uint8_t)(kinds[i] ^ (turn == 0 && i == 0 ? 1u : 0u));
             const uint8_t class = (uint8_t)(classes[i] ^ (turn == 1 && i == length - 1 ? 1u : 0u));
+            const uint64_t value = values[i] ^ (valued_turn && i == valued_entry ? bit : 0u);
             differs = state->x_kinds[at] != kind || state->x_classes[at] != class;
+            value_differs = value_differs || state->x_values[at] != value;
         }
         state->x_fault_turn += state->x_fault ? 1u : 0u;
     }
+    *valued = !differs && value_differs;
     return differs;
 }
 
 // X's rows on the window for the chunk C has just answered: the shapes, the updates' rows and the branches' (where
 // C's loop gave a record of the chunk the update's template, or evaluated a `!`, an `&&` or an `||` as branches: a
-// chunk with neither has no sweep for them) and the rows over its records, then each of the batch's expressions' part. Each expression taken here is then
-// compared with the reference's tape, and each listed one counted by its first record's reason. The shadow runs them
-// a second time over the same chunk, for their ticks with their code and their constants at hand: they give the same
-// answers.
+// chunk with neither has no sweep for them), the rows over its records and their entries' values, then each of the
+// batch's expressions' part. Each expression taken here is then compared with the reference's tape, and each listed
+// one counted by its first record's reason. The shadow runs them a second time over the same chunk, for their ticks
+// with their code and their constants at hand: they give the same answers.
 static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFront* front)
 {
     NodeFrontTypes* types = state->types;
@@ -1179,12 +1764,36 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     const uint64_t t1 = __rdtsc();
     const uint32_t written = node_rows_window_write(state, front, count);
     const uint64_t t2 = __rdtsc();
+    uint32_t lists[BUSTER_NODE_ROWS_LISTS] = { 0 };
+    uint32_t numbered = 0;
+    uint64_t steps = 0;
+    node_rows_window_values(state, front, count, written, &read, lists, &numbered, &steps);
+    const uint64_t values_end = __rdtsc();
     node_rows_window_part(state, front);
     const uint64_t t3 = __rdtsc();
     // The first run's streams, kept: the second's are compared with them. A sweep that read what an earlier run left
     // in a column (a sense, a shape) would write the same the second time and another the first.
     memcpy(state->x_first_kinds, state->x_kinds, written);
     memcpy(state->x_first_classes, state->x_classes, written);
+    memcpy(state->x_first_values, state->x_values, (uint64_t)written * sizeof(uint64_t));
+    // That comparison's control (NodeFactsReader.x_fault): one of the first run's answers changed a chunk, in turn its
+    // entries' count, its first entry's kind, its class and its value, the count of the expressions numbered, of their
+    // walks' records and of each list's. A chunk that wrote no entry has no first one: its count is changed in
+    // those turns too. The comparison then counts every chunk.
+    const uint32_t raw_turn = state->x_fault ? state->x_again_turn % (6 + BUSTER_NODE_ROWS_LISTS) : UINT32_MAX;
+    const uint32_t turn = written == 0 && raw_turn >= 1 && raw_turn <= 3 ? 0 : raw_turn;
+    state->x_again_turn += state->x_fault ? 1u : 0u;
+    const uint32_t first_written = written ^ (turn == 0 ? 1u : 0u);
+    state->x_first_kinds[0] = (uint8_t)(state->x_first_kinds[0] ^ (turn == 1 ? 1u : 0u));
+    state->x_first_classes[0] = (uint8_t)(state->x_first_classes[0] ^ (turn == 2 ? 1u : 0u));
+    state->x_first_values[0] ^= turn == 3 ? 1u : 0u;
+    const uint32_t first_numbered = numbered ^ (turn == 4 ? 1u : 0u);
+    const uint64_t first_steps = steps ^ (turn == 5 ? 1u : 0u);
+    uint32_t first_lists[BUSTER_NODE_ROWS_LISTS];
+    for (uint32_t list = 0; list < BUSTER_NODE_ROWS_LISTS; list += 1)
+    {
+        first_lists[list] = lists[list] ^ (turn == 6 + list ? 1u : 0u);
+    }
     const uint64_t later_start = __rdtsc();
     NodeRowsCounts again = { 0 };
     node_rows_window_reads(state, count, &again);
@@ -1198,6 +1807,11 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     const uint64_t t4 = __rdtsc();
     const uint32_t written_again = node_rows_window_write(state, front, count);
     const uint64_t t5 = __rdtsc();
+    uint32_t lists_again[BUSTER_NODE_ROWS_LISTS] = { 0 };
+    uint32_t numbered_again = 0;
+    uint64_t steps_again = 0;
+    node_rows_window_values(state, front, count, written_again, &again, lists_again, &numbered_again, &steps_again);
+    const uint64_t later_values_end = __rdtsc();
     node_rows_window_part(state, front);
     const uint64_t t6 = __rdtsc();
     for (uint32_t e = 0; e < state->expression_count; e += 1)
@@ -1228,12 +1842,14 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
             {
                 uint32_t entries = 0;
                 bool unkept = false;
-                const bool differs = node_rows_window_compare(state, front, e, &entries, &unkept);
+                bool valued = false;
+                const bool differs = node_rows_window_compare(state, front, e, &entries, &unkept, &valued) || valued;
                 counts[NODE_FACTS_COUNT_ROWS_TAKEN] += 1;
                 counts[NODE_FACTS_COUNT_ROWS_TAKEN_RECORDS] += state->counts[e];
                 counts[NODE_FACTS_COUNT_ROWS_ENTRIES] += entries;
                 counts[NODE_FACTS_COUNT_ROWS_UNKEPT] += unkept;
                 counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] += differs;
+                counts[NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES] += valued;
                 counts[NODE_FACTS_COUNT_ROWS_REFERENCE_TICKS] += state->x_ticks[e];
                 if (differs && types->rows_shown < BUSTER_NODE_FRONT_LISTED)
                 {
@@ -1245,8 +1861,17 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     }
     counts[NODE_FACTS_COUNT_ROWS_SWEPT] += count;
     counts[NODE_FACTS_COUNT_ROWS_WRITTEN] += written;
-    counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] += written != written_again || memcmp(state->x_first_kinds, state->x_kinds, written) != 0 ||
-                                                       memcmp(state->x_first_classes, state->x_classes, written) != 0;
+    counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] += first_written != written_again || memcmp(state->x_first_kinds, state->x_kinds, written) != 0 ||
+                                                       memcmp(state->x_first_classes, state->x_classes, written) != 0 ||
+                                                       memcmp(state->x_first_values, state->x_values, (uint64_t)written * sizeof(uint64_t)) != 0 ||
+                                                       first_numbered != numbered_again || first_steps != steps_again ||
+                                                       memcmp(first_lists, lists_again, sizeof(first_lists)) != 0;
+    for (uint32_t list = 0; list < BUSTER_NODE_ROWS_LISTS; list += 1)
+    {
+        counts[NODE_FACTS_COUNT_ROWS_LIST + list] += lists[list];
+    }
+    counts[NODE_FACTS_COUNT_ROWS_NUMBERED] += numbered;
+    counts[NODE_FACTS_COUNT_ROWS_NUMBER_STEPS] += steps;
     counts[NODE_FACTS_COUNT_ROWS_WORDS] += read.words;
     counts[NODE_FACTS_COUNT_ROWS_LINES] += read.lines;
     counts[NODE_FACTS_COUNT_ROWS_UPDATES] += read.updates;
@@ -1255,12 +1880,14 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     counts[NODE_FACTS_COUNT_ROWS_SHAPE_TICKS] += shapes_end - reads_end;
     counts[NODE_FACTS_COUNT_ROWS_UPDATE_TICKS] += t1 - shapes_end;
     counts[NODE_FACTS_COUNT_ROWS_WRITE_TICKS] += t2 - t1;
-    counts[NODE_FACTS_COUNT_ROWS_PART_TICKS] += t3 - t2;
+    counts[NODE_FACTS_COUNT_ROWS_VALUE_TICKS] += values_end - t2;
+    counts[NODE_FACTS_COUNT_ROWS_PART_TICKS] += t3 - values_end;
     counts[NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS] += later_reads_end - later_start;
     counts[NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS] += later_shapes_end - later_reads_end;
     counts[NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS] += t4 - later_shapes_end;
     counts[NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS] += t5 - t4;
-    counts[NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS] += t6 - t5;
+    counts[NODE_FACTS_COUNT_ROWS_LATER_VALUE_TICKS] += later_values_end - t5;
+    counts[NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS] += t6 - later_values_end;
 }
 
 #endif

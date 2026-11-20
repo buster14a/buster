@@ -2891,6 +2891,362 @@ static const char node_rows_test_source[] =
     "    return *o;\n"
     "}\n";
 
+// The entries' values on the window, a line a source of a value (node_rows_window_values' lists and the numbering):
+// - a constant's bits of each class, its own and a folded one's: a negative one's of a narrower class extended, a
+//   wider one's cut to its target's, an unsigned one's not extended, and to bool; a floating one's of either class,
+//   its zeros (whose lines say no floating value) and a negative zero;
+// - an object's number: a local's, a parameter's and a global's read, store and update; an address constant's, with an
+//   offset and without, and one of no object;
+// - a member's offset; a pointer's stride of each element, an element past 4 GB (which its type's row doesn't hold)
+//   and a pointer's update's, its step's 1 and its NEG;
+// - an update's step of each class, a float's and a double's; a postfix update through an address's temporaries, by
+//   each shape of its destination's own entries, and two and three of them in one expression;
+// - a call's row: calls nested in arguments and in a callee, side by side, three deep, in a condition, and beside a
+//   call that is not evaluated (a sizeof's operand);
+// - a branch's label: the control's, an operator's own, two and three operators with a label, nested and side by
+//   side, under each control and under `!`; with calls and with postfix updates as their tested values;
+// - an expression of more than 64 records with its numbered records past the first 64, on both sides of them, and
+//   with one alone; 64 statements each of calls, of labels and of temporaries, a block's end between every two of
+//   their records in turn;
+// - and a postfix update with no room for its first row, whose destination is its expression's first record, after a
+//   statement whose tape is made: the mark of no room is no tested value's shape.
+static const char node_rows_test_values_source[] =
+    "struct pair { int first; long second; char third; _Bool flag; };\n"
+    "struct outer { struct pair inner; struct pair* link; int list[4]; };\n"
+    "struct far { char pad[4294967296]; int tail; long more; };\n"
+    "extern int global;\n"
+    "extern long global_long;\n"
+    "extern double global_double;\n"
+    "extern struct outer global_outer;\n"
+    "extern struct far distant;\n"
+    "extern int table[8];\n"
+    "int callee(int a, long b);\n"
+    "long wider(long a);\n"
+    "int quiet(void);\n"
+    "int (*picker(int which))(int, long);\n"
+    "int values(int a, long b, char c, short h, unsigned char u, int* p, struct outer* o, double d, float f, long* lp, char* cp, char (*rows)[4294967296], unsigned short us,\n"
+    "           unsigned long ul, _Bool t, unsigned int ui, signed char sc, struct far* fp)\n"
+    "{\n"
+    "    int local = 0;\n"
+    "    long wide = 0;\n"
+    "    char narrow = 0;\n"
+    "    _Bool flag = 0;\n"
+    "    double value = 0;\n"
+    "    float single = 0;\n"
+    "    int list[4];\n"
+    "    struct outer whole;\n"
+    "    int* q = 0;\n"
+    // An integer constant of its own class, each class: its bits extended from its width by its sign.
+    "    local = 7;\n"
+    "    local = -1;\n"
+    "    local = -2147483647 - 1;\n"
+    "    ui = 5u;\n"
+    "    ui = 4294967290u;\n"
+    "    wide = 5l;\n"
+    "    wide = -5l;\n"
+    "    ul = 5ul;\n"
+    "    ul = 18446744073709551600ul;\n"
+    "    sc = (signed char)5;\n"
+    "    sc = (signed char)-3;\n"
+    "    u = (unsigned char)250;\n"
+    "    h = (short)-7;\n"
+    "    h = (short)7;\n"
+    "    us = (unsigned short)65530;\n"
+    // One before an entry of a narrower class: its bits are by its own entry's class, not the next one's.
+    "    local = 300 + c;\n"
+    "    local = 70000 + h;\n"
+    "    wide = 4294967296l + a;\n"
+    "    local = -200 + u;\n"
+    // A folded one, its own class's bits and then its target's: a negative int's to a long and to an unsigned long,
+    // an unsigned int's to a long (not extended), a long's to an int and to a char (cut), to each narrow class.
+    "    wide = -1;\n"
+    "    wide = 7;\n"
+    "    ul = -1;\n"
+    "    wide = 4294967295u;\n"
+    "    ul = 4294967295u;\n"
+    "    local = 4294967295l;\n"
+    "    local = 2147483648l;\n"
+    "    ui = -1;\n"
+    "    ui = 4294967296l + 9;\n"
+    "    sc = 200;\n"
+    "    sc = -200;\n"
+    "    u = 300;\n"
+    "    u = -1;\n"
+    "    h = 40000;\n"
+    "    h = 70000;\n"
+    "    us = 70000;\n"
+    "    us = -1;\n"
+    "    wide = (signed char)-3;\n"
+    "    wide = (unsigned char)250;\n"
+    "    ul = (short)-7;\n"
+    "    local = (unsigned short)65530;\n"
+    // To bool: whether it is not zero.
+    "    flag = 0;\n"
+    "    flag = 1;\n"
+    "    flag = 2;\n"
+    "    flag = 256;\n"
+    "    flag = -1;\n"
+    "    flag = 4294967296l;\n"
+    "    flag = 0l;\n"
+    // A floating constant of either class: its bits; a zero's, and a negative zero's.
+    "    value = 2.5;\n"
+    "    value = -2.5;\n"
+    "    value = 0.1;\n"
+    "    value = 1e300;\n"
+    "    value = 0.0;\n"
+    "    value = -0.0;\n"
+    "    single = 1.5f;\n"
+    "    single = -0.1f;\n"
+    "    single = 0.0f;\n"
+    "    single = -0.0f;\n"
+    "    global_double = 6.0;\n"
+    "    value = d + 0.5;\n"
+    "    single = f * 3.0f;\n"
+    // An object's number: a local's, a parameter's and a global's, read and stored.
+    "    local = a;\n"
+    "    a = local;\n"
+    "    global = a;\n"
+    "    local = global;\n"
+    "    global_long = b;\n"
+    "    b = global_long;\n"
+    "    wide = local + global + a;\n"
+    // An address constant's: an object's with no offset and with one, a local's and a global's; and no object's.
+    "    q = &local;\n"
+    "    q = &global;\n"
+    "    q = &list[2];\n"
+    "    q = &table[3];\n"
+    "    lp = &whole.inner.second;\n"
+    "    lp = &global_outer.inner.second;\n"
+    "    q = list;\n"
+    "    q = table;\n"
+    "    q = (int*)16;\n"
+    "    q = (int*)0;\n"
+    "    cp = (char*)-1;\n"
+    "    lp = &((struct pair*)0)->second;\n"
+    "    wide = (long)&table[5];\n"
+    "    wide = (long)&list[1];\n"
+    "    local = (int)(long)&global;\n"
+    // A member's offset in bytes, and its sum's 1.
+    "    local = o->inner.first;\n"
+    "    wide = o->inner.second;\n"
+    "    narrow = o->link->third;\n"
+    "    local = o->list[2];\n"
+    "    o->inner.second = b;\n"
+    "    o->link->third = c;\n"
+    "    lp = &o->inner.second;\n"
+    // And one past 4 GB, a pointer's member's and a global's: a value's upper half.
+    "    local = fp->tail;\n"
+    "    fp->more = b;\n"
+    "    lp = &fp->more;\n"
+    "    local = distant.tail;\n"
+    "    lp = &distant.more;\n"
+    "    fp->tail++;\n"
+    // A pointer's stride: each element's, a difference's NEG before it, and an element past 4 GB.
+    "    q = p + a;\n"
+    "    q = p - a;\n"
+    "    q = a + p;\n"
+    "    local = p[a];\n"
+    "    lp = lp + a;\n"
+    "    wide = lp[a];\n"
+    "    cp = cp + a;\n"
+    "    narrow = cp[a];\n"
+    "    o = o + a;\n"
+    "    local = o[a].list[1];\n"
+    "    cp = (char*)(rows + a);\n"
+    "    cp = (char*)(rows - a);\n"
+    "    cp = rows[a];\n"
+    "    narrow = rows[a][b];\n"
+    "    local = table[a];\n"
+    "    local = list[a];\n"
+    // An update by name: its read's and its store's object, a local's, a parameter's and a global's; its step, one
+    // of the class it is computed in.
+    "    a++;\n"
+    "    --a;\n"
+    "    local += 2;\n"
+    "    local -= a;\n"
+    "    global++;\n"
+    "    --global;\n"
+    "    global_long -= b;\n"
+    "    b += global_long;\n"
+    "    c++;\n"
+    "    u--;\n"
+    "    h += a;\n"
+    "    wide++;\n"
+    "    ul--;\n"
+    "    value++;\n"
+    "    --value;\n"
+    "    single++;\n"
+    "    --single;\n"
+    "    value += d;\n"
+    "    single -= d;\n"
+    "    global_double++;\n"
+    "    local = a++;\n"
+    "    wide = global--;\n"
+    "    value = single++;\n"
+    // A pointer's update: its stride, its step's 1 and its NEG.
+    "    p++;\n"
+    "    ++p;\n"
+    "    p--;\n"
+    "    --p;\n"
+    "    p += a;\n"
+    "    p -= a;\n"
+    "    lp++;\n"
+    "    lp -= b;\n"
+    "    cp++;\n"
+    "    cp += a;\n"
+    "    o++;\n"
+    "    o -= a;\n"
+    "    rows++;\n"
+    "    rows--;\n"
+    "    rows += a;\n"
+    "    rows -= a;\n"
+    "    q = p++;\n"
+    // Through an address: an access's value is zero; a prefix one's step; a postfix one's two temporaries, after
+    // each shape of its destination's own entries.
+    "    *p += a;\n"
+    "    ++*p;\n"
+    "    --*lp;\n"
+    "    o->inner.second += b;\n"
+    "    --o->inner.third;\n"
+    "    p[a] += 1;\n"
+    "    ++p[a];\n"
+    "    ++lp[a];\n"
+    "    (*p)++;\n"
+    "    (*lp)--;\n"
+    "    o->inner.first++;\n"
+    "    o->inner.second--;\n"
+    "    p[a]++;\n"
+    "    lp[a]--;\n"
+    "    cp[a]++;\n"
+    "    list[a]--;\n"
+    "    whole.inner.first++;\n"
+    "    global_outer.inner.first--;\n"
+    "    o->link->first++;\n"
+    "    local = (*p)++;\n"
+    "    wide = o->inner.second--;\n"
+    // Two and three postfix updates through an address in one expression: their temporaries are numbered in the
+    // order of their destinations' records.
+    "    local = (*p)++ + (*q)++;\n"
+    "    local = (*q)-- - (*p)--;\n"
+    "    wide = (*lp)-- + o->inner.second++ + p[a]++;\n"
+    "    local = p[a]++ + list[a]-- + whole.inner.first++ + o->link->first--;\n"
+    "    callee((*p)++, (*lp)--);\n"
+    "    p[(*q)++] = (*p)--;\n"
+    // A call's row: its preorder number among its expression's evaluated calls.
+    "    callee(a, b);\n"
+    "    local = callee(a, b);\n"
+    "    local = callee(callee(a, b), b);\n"
+    "    local = callee(a, wider(b));\n"
+    "    local = callee(callee(a, b), wider(b));\n"
+    "    local = callee(a, b) + callee(c, a);\n"
+    "    local = callee(a, b) + callee(c, a) + callee(h, b);\n"
+    "    local = callee(callee(callee(a, b), b), b);\n"
+    "    wide = wider(wider(wider(b)) + wider(a));\n"
+    "    wide = wider(callee(a, wider(b)) + callee(callee(c, a), wider(wider(b))));\n"
+    "    local = picker(a)(a, b);\n"
+    "    local = picker(a)(callee(a, b), b);\n"
+    "    local = picker(callee(a, b))(callee(c, a), wider(b));\n"
+    "    p[callee(a, b)] = callee(c, a);\n"
+    "    local += callee(a, b) + callee(c, a);\n"
+    // An expression with two calls that C leaves (a conditional's), between two it takes: each one's numbers are by
+    // its own verdict, whatever the next one's and the one's before.
+    "    local = callee(a, b) + callee(h, a);\n"
+    "    local = a ? callee(a, b) + callee(c, a) : 4;\n"
+    "    local = callee(h, b) + callee(c, a);\n"
+    // A call with no argument is its expression's second record, and two records after the end of a condition
+    // before it, which has no call: one such call, two and three.
+    "    if (a) quiet();\n"
+    "    while (b) local = quiet() + quiet();\n"
+    "    if (c) local = quiet() + callee(a, b) + quiet();\n"
+    "    if (h) return quiet();\n"
+    // An expression with two calls that the rows list (a constant to a floating class): its numbers are not made.
+    "    value = d + 2 + callee(a, b) + callee(c, a);\n"
+    // A call that is not evaluated is no call of its expression's: one evaluated call beside it is its first.
+    "    local = (int)sizeof(callee(a, b)) + callee(c, a);\n"
+    "    local = (int)sizeof(callee(callee(a, b), b)) + (int)sizeof(wider(b));\n"
+    "    local = callee(a, (long)sizeof(wider(b))) + callee(c, (long)sizeof(callee(a, b)));\n"
+    // A branch's label: the control's, for a value no operator owns.
+    "    if (a && b) local = 1;\n"
+    "    if (a || b) local = 2;\n"
+    "    while (a && !b) a--;\n"
+    "    do { a++; } while (a < 3 || b);\n"
+    "    for (local = 0; local < 3 && a; local++) wide += local;\n"
+    // An operator's own: an `&&` branched where true and an `||` where false own their first operand's branch. One
+    // such operator's label is its expression's first.
+    "    if ((a || b) && c) local = 3;\n"
+    "    if ((a && b) || c) local = 4;\n"
+    "    if (a && (b || c)) local = 5;\n"
+    "    do { a++; } while ((a < 6 && b) || c);\n"
+    "    do { a++; } while (a < 9 && (b || c));\n"
+    // Two and three with a label: side by side, nested, three deep, and under `!`.
+    "    if ((a || b) && (c || h)) local = 6;\n"
+    "    if ((a && b) || (c && h)) local = 7;\n"
+    "    if ((a || b) && (c || h) && (u || t)) local = 8;\n"
+    "    if (((a || b) && c) || h) local = 9;\n"
+    "    if ((a || (b && (c || h))) && u) local = 10;\n"
+    "    if ((a && (b || (c && h))) || (us && (ul || t))) local = 11;\n"
+    "    if (!(a && b) && !(c && h)) local = 12;\n"
+    "    if (!((a || b) && (c || h)) || u) local = 13;\n"
+    "    while ((a || b) && (c || h)) a--;\n"
+    "    do { a++; } while ((a < 12 && b) || (c && h) || (u && t));\n"
+    "    for (local = 0; (local < 3 || a) && (b || c); local++) wide += local;\n"
+    "    if ((a || b) && ((c || h) && (u || t)) && ((us || ul) && (d || f))) local = 14;\n"
+    // An operator with no label of its own between a tested value and its owner, the expression's second operator
+    // with a label: the owner comes down through it.
+    "    if ((h || u) && ((a || b) || c)) local = 23;\n"
+    "    do { a++; } while ((h && u) || ((a < 30 && b) && c));\n"
+    "    if ((h || u) && (!a || c)) local = 24;\n"
+    // With calls, and with postfix updates through an address, as their tested values: each numbered in its turn.
+    "    if (callee(a, b) && callee(c, a)) local = 15;\n"
+    "    if (callee(a, b) || (callee(c, a) && wider(b))) local = 16;\n"
+    "    if ((a || callee(a, b)) && c) local = 17;\n"
+    "    if ((callee(a, b) || wider(b)) && (callee(c, a) || wider(a))) local = 18;\n"
+    "    if ((*p)++ && (*q)--) local = 19;\n"
+    "    if (((*p)++ || b) && ((*lp)-- || callee(a, b))) local = 20;\n"
+    "    if (callee(callee(a, b), b) && a) local = 21;\n"
+    // More than 64 records: its numbered records past the first 64, on both sides of them, and one alone.
+    "    local = " BUSTER_NODE_CONTEXTS_TEST_SUM " + callee(a, b) + callee(c, a);\n"
+    "    local = callee(a, b) + " BUSTER_NODE_CONTEXTS_TEST_SUM " + callee(c, a);\n"
+    "    local = callee(a, b) + callee(c, a) + " BUSTER_NODE_CONTEXTS_TEST_SUM ";\n"
+    "    local = " BUSTER_NODE_CONTEXTS_TEST_SUM " + callee(c, a);\n"
+    "    local = " BUSTER_NODE_CONTEXTS_TEST_SUM " + " BUSTER_NODE_CONTEXTS_TEST_SUM " + callee(a, b) + callee(c, a) + callee(h, b);\n"
+    "    local = callee(a, b) + " BUSTER_NODE_CONTEXTS_TEST_SUM " + callee(c, a) + " BUSTER_NODE_CONTEXTS_TEST_SUM " + callee(h, b);\n"
+    "    if ((a || b) && " BUSTER_NODE_CONTEXTS_TEST_SUM " && (c || h)) local = 22;\n"
+    // A postfix update with no room for its first row lists its expression: its destination, the expression's first
+    // record, has the mark of no room and no entry, after a statement whose tape is made.
+    "    local = a;\n"
+    "    whole.inner.second--;\n"
+    "    wide = b;\n"
+    "    global_outer.inner.second++;\n"
+    "    local = callee(a, b);\n"
+    "    o->inner.third++;\n"
+    // A block's every lane: a block's end between every two records in turn, for each list and for the numbered.
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    local = callee(callee(a, b), b);\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    if ((a || b) && (c || h)) local++;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    local = (*p)++ + (*q)++;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    wide = o->inner.second + 300;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    q = p - a;\n    global += 2;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    value = 2.5;\n    lp = &global_outer.inner.second;\n    p++;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    if (a && b) flag = 3;\n")
+    "    return local + (int)wide + narrow + flag + (int)value + (int)single + list[0] + *q + (int)*lp + whole.inner.first + (int)ul + ui + sc + us;\n"
+    "}\n"
+    "long returned(void)\n"
+    "{\n"
+    "    return -3;\n"
+    "}\n"
+    "double floated(void)\n"
+    "{\n"
+    "    return 2.5;\n"
+    "}\n"
+    "int* addressed(void)\n"
+    "{\n"
+    "    return &table[2];\n"
+    "}\n"
+    "_Bool told(void)\n"
+    "{\n"
+    "    return 5;\n"
+    "}\n";
+
 // A unit of one chunk with one update: the updates' sweep runs for a chunk that has any.
 static const char node_rows_test_single_source[] =
     "int single(int a, int b)\n"
@@ -2976,8 +3332,9 @@ static bool node_rows_test_tables(void)
         // An update's own row has its store, and one that is no pointer's its operation.
         wrong += own_row && (tables.kinds[3][shape] != BUSTER_NODE_ROWS_KIND_STORE ||
                              (tables.kinds[1][shape] == BUSTER_NODE_ROWS_KIND_OPERATION) != (shape < BUSTER_NODE_ROWS_UPDATE_POINTER));
-        // A shape past the table's rows has no entry: the mark of a template whose rows are not made here among them.
-        wrong += shape >= BUSTER_NODE_ROWS_SHAPES && length != 0;
+        // A shape past the table's rows has no entry: an operator's evaluated as branches, and the mark of a template
+        // whose rows are not made here.
+        wrong += shape >= BUSTER_NODE_ROWS_BRANCHED && length != 0;
         wrong += shape != 0 && shape < BUSTER_NODE_ROWS_TABLE && (length != 1 || tables.kinds[0][shape] != shape || tables.sources[0][shape] != BUSTER_NODE_ROWS_CLASS_OWN);
         rows += shape >= BUSTER_NODE_ROWS_TABLE && length != 0;
     }
@@ -2994,7 +3351,7 @@ static bool node_rows_test_tables(void)
             wrong += made != (rest != BUSTER_NODE_ROWS_LATER);
             if (made && rest != BUSTER_NODE_ROWS_LATER)
             {
-                wrong += own < BUSTER_NODE_ROWS_KEPT || own >= BUSTER_NODE_ROWS_KEPT_REST || rest < BUSTER_NODE_ROWS_KEPT_REST || rest >= BUSTER_NODE_ROWS_SHAPES;
+                wrong += own < BUSTER_NODE_ROWS_KEPT || own >= BUSTER_NODE_ROWS_KEPT_REST || rest < BUSTER_NODE_ROWS_KEPT_REST || rest >= BUSTER_NODE_ROWS_TESTED;
                 wrong += tables.lengths[own & 127] != BUSTER_NODE_ROWS_SLOTS || tables.lengths[own & 127] + tables.lengths[rest & 127] != tables.lengths[base] + 6 + converted;
                 for (uint32_t slot = 0; slot < tables.lengths[base] && slot < BUSTER_NODE_ROWS_SLOTS; slot += 1)
                 {
@@ -3064,11 +3421,74 @@ static bool node_rows_test_tables(void)
     const bool opened = check_test_types_open(&types);
     wrong += !opened || check_lower_type_class(&types.table, BUSTER_TYPE_VOID) != BUSTER_TYPED_CLASS_VOID || check_lower_type_facts(&types.table, BUSTER_TYPE_VOID) != 0;
     check_test_types_close(&types);
-    const bool valid = wrong == 0 && rows == BUSTER_NODE_ROWS_SHAPES - BUSTER_NODE_ROWS_TABLE;
+    // The values' tables, by a record's own shape: the lists the sweep puts its record on and whether a value of its
+    // row's is a number in its expression; and where in its row its stride, its step and its temporaries are. Every
+    // other own shape's bytes are zero: its values are, or are an update's, whose loop goes by its own list.
+    static const uint8_t values[][3] = {
+        { BUSTER_TYPED_CONST, BUSTER_NODE_ROWS_VALUE_CONSTANT, 0 },
+        { BUSTER_TYPED_LOCAL, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_TYPED_GLOBAL, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        // (An address's one entry is no record's own shape: an address constant's rows are the table's, and C on the
+        // window lists a leaf read for its address.)
+        { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_TYPED_STORE_LOCAL, BUSTER_NODE_ROWS_VALUE_STORED, 0 },
+        { BUSTER_TYPED_STORE_GLOBAL, BUSTER_NODE_ROWS_VALUE_STORED, 0 },
+        { BUSTER_TYPED_CALL, BUSTER_NODE_ROWS_VALUE_NUMBERED, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 1, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 2, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 3, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 4, BUSTER_NODE_ROWS_VALUE_FIRST | BUSTER_NODE_ROWS_VALUE_REST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 5, BUSTER_NODE_ROWS_VALUE_FIRST | BUSTER_NODE_ROWS_VALUE_REST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 6, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 7, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 8, BUSTER_NODE_ROWS_VALUE_FIRST | BUSTER_NODE_ROWS_VALUE_REST, 0 },
+        { BUSTER_NODE_ROWS_ADDRESS + 9, BUSTER_NODE_ROWS_VALUE_FIRST | BUSTER_NODE_ROWS_VALUE_REST, 0 },
+        { BUSTER_NODE_ROWS_MEMBER, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_MEMBER + 1, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_POINTER, BUSTER_NODE_ROWS_VALUE_STRIDE, 0 },
+        { BUSTER_NODE_ROWS_POINTER + 1, BUSTER_NODE_ROWS_VALUE_STRIDE, 1 },
+        { BUSTER_NODE_ROWS_POINTER + 2, BUSTER_NODE_ROWS_VALUE_STRIDE, 0 },
+        { BUSTER_NODE_ROWS_FOLDED, BUSTER_NODE_ROWS_VALUE_CONSTANT, 0 },
+        { BUSTER_NODE_ROWS_UPDATE_POINTER, BUSTER_NODE_ROWS_VALUE_STRIDE, 0 },
+        { BUSTER_NODE_ROWS_UPDATE_POINTER + 1, BUSTER_NODE_ROWS_VALUE_STRIDE, 1 },
+        { BUSTER_NODE_ROWS_UPDATE_POINTER + 2, BUSTER_NODE_ROWS_VALUE_STRIDE, BUSTER_NODE_ROWS_SLOT_STEP | 1 },
+        { BUSTER_NODE_ROWS_UPDATE_POINTER + 3, BUSTER_NODE_ROWS_VALUE_STRIDE, BUSTER_NODE_ROWS_SLOT_STEP | 2 },
+        { BUSTER_NODE_ROWS_FIRST, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_FIRST + 1, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_FIRST + 2, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_FIRST + 3, BUSTER_NODE_ROWS_VALUE_FIRST, 0 },
+        { BUSTER_NODE_ROWS_KEPT, BUSTER_NODE_ROWS_VALUE_NUMBERED, 0 },
+        { BUSTER_NODE_ROWS_KEPT + 1, BUSTER_NODE_ROWS_VALUE_STRIDE | BUSTER_NODE_ROWS_VALUE_NUMBERED, 1u << BUSTER_NODE_ROWS_SLOT_KEPT_SHIFT },
+        { BUSTER_NODE_ROWS_KEPT + 2, BUSTER_NODE_ROWS_VALUE_FIRST | BUSTER_NODE_ROWS_VALUE_NUMBERED, 1u << BUSTER_NODE_ROWS_SLOT_KEPT_SHIFT },
+        { BUSTER_NODE_ROWS_KEPT + 3, BUSTER_NODE_ROWS_VALUE_FIRST | BUSTER_NODE_ROWS_VALUE_NUMBERED, 1u << BUSTER_NODE_ROWS_SLOT_KEPT_SHIFT },
+        { BUSTER_NODE_ROWS_KEPT + 4, BUSTER_NODE_ROWS_VALUE_FIRST | BUSTER_NODE_ROWS_VALUE_NUMBERED, 2u << BUSTER_NODE_ROWS_SLOT_KEPT_SHIFT },
+        { BUSTER_NODE_ROWS_BRANCHED + 1, BUSTER_NODE_ROWS_VALUE_NUMBERED, 0 },
+    };
+    uint32_t valued = 0;
+    for (uint32_t shape = 0; shape < 128; shape += 1)
+    {
+        // A conversion's part's shape has bytes that no one reads: the tables are read by a record's own shape.
+        bool conversion = false;
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(conversions); c += 1)
+        {
+            conversion = conversion || conversions[c] == shape;
+        }
+        uint8_t lists = 0;
+        uint8_t slots = 0;
+        for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(values); v += 1)
+        {
+            lists = values[v][0] == shape ? values[v][1] : lists;
+            slots = values[v][0] == shape ? values[v][2] : slots;
+        }
+        valued += !conversion && (tables.value_owns[shape] != lists || tables.value_slots[shape] != slots);
+    }
+    const bool valid = wrong == 0 && valued == 0 && rows == BUSTER_NODE_ROWS_BRANCHED - BUSTER_NODE_ROWS_TABLE;
     if (!valid)
     {
-        fprintf(stderr, "test-checker: node-rows: the tables have %u rows (%u expected) and %u entries, lengths or sources the rows' write does not make\n", rows,
-                BUSTER_NODE_ROWS_SHAPES - BUSTER_NODE_ROWS_TABLE, wrong);
+        fprintf(stderr, "test-checker: node-rows: the tables have %u rows (%u expected) and %u entries, lengths or sources the rows' write does not make; %u shapes' values' bytes are not their rows'\n",
+                rows, BUSTER_NODE_ROWS_BRANCHED - BUSTER_NODE_ROWS_TABLE, wrong, valued);
     }
     return valid;
 }
@@ -3093,11 +3513,22 @@ struct NodeRowsExpected
     uint32_t lines;
     uint32_t updates;
     uint32_t branched;
+    // The records on each of the values' lists (BUSTER_NODE_ROWS_LIST_*), the expressions whose numbers were
+    // numbered and the records their labels' walks went over, and, of the control's tapes, those that differ in a
+    // value alone: every fourth's turn, with an entry. And the chunks its records come in: the control changes one
+    // of a chunk's first run's answers, in thirteen turns, and the second run's comparison counts every chunk.
+    uint32_t lists[BUSTER_NODE_ROWS_LISTS];
+    uint32_t numbered;
+    uint32_t steps;
+    uint32_t control_valued;
+    uint32_t chunks;
 };
 
 // X's rows on the window on fixture `text` (written to `directory` as `name`, read with `options`): every tape they
-// make is X's on T's columns, entry by entry, and their counts are `expected`'s; and with one of the reference's
-// answers changed for each (its first entry's kind, its last's class and its length in turn), every one differs.
+// make is X's on T's columns, entry by entry (its kind, its class and its value), and their counts are `expected`'s;
+// and with one of the reference's answers changed for each (its first entry's kind, its last's class, its length and
+// an entry's value in turn), every one differs; and with one of a chunk's first run's answers changed (the same
+// control), every chunk's second run differs from it.
 static bool node_rows_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, const NodeRowsExpected* expected)
 {
     char path[512];
@@ -3117,7 +3548,13 @@ static bool node_rows_test_fixture(const char* directory, const char* name, cons
     const uint64_t* counts = shadow.reader_facts;
     const uint64_t listed = counts[NODE_FACTS_COUNT_ROWS_LISTED_UPDATE] + counts[NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES] + counts[NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION] +
                             counts[NODE_FACTS_COUNT_ROWS_LISTED_FLOATING];
-    const bool same = counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS] == expected->expressions && counts[NODE_FACTS_COUNT_ROWS_TAKEN] == expected->taken &&
+    bool listed_same = counts[NODE_FACTS_COUNT_ROWS_NUMBERED] == expected->numbered && counts[NODE_FACTS_COUNT_ROWS_NUMBER_STEPS] == expected->steps &&
+                       counts[NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES] == 0;
+    for (uint32_t list = 0; list < BUSTER_NODE_ROWS_LISTS; list += 1)
+    {
+        listed_same = listed_same && counts[NODE_FACTS_COUNT_ROWS_LIST + list] == expected->lists[list];
+    }
+    const bool same = listed_same && counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS] == expected->expressions && counts[NODE_FACTS_COUNT_ROWS_TAKEN] == expected->taken &&
                       counts[NODE_FACTS_COUNT_ROWS_ENTRIES] == expected->entries && counts[NODE_FACTS_COUNT_ROWS_LISTED_UPDATE] == expected->listed_update &&
                       counts[NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES] == expected->listed_branches &&
                       counts[NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION] == expected->listed_conversion &&
@@ -3126,6 +3563,7 @@ static bool node_rows_test_fixture(const char* directory, const char* name, cons
                       counts[NODE_FACTS_COUNT_ROWS_UPDATES] == expected->updates && counts[NODE_FACTS_COUNT_ROWS_BRANCHED] == expected->branched &&
                       counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] == 0 &&
                       counts[NODE_FACTS_COUNT_ROWS_UNKEPT] == 0 && counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] == 0 &&
+                      counts[NODE_FACTS_COUNT_TESTS_CHUNKS] == expected->chunks &&
                       counts[NODE_FACTS_COUNT_ROWS_TAKEN] + listed == counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS] &&
                       counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS] == counts[NODE_FACTS_COUNT_CONTEXTS_DECIDED] - counts[NODE_FACTS_COUNT_CONTEXTS_REFUSED] &&
                       counts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] == 0 &&
@@ -3137,7 +3575,7 @@ static bool node_rows_test_fixture(const char* directory, const char* name, cons
                 " (%u) constant-to-a-floating-class=%" PRIu64 " (%u); entries written=%" PRIu64 " (%u), records read for a target's word=%" PRIu64
                 " (%u), for a line or a table=%" PRIu64 " (%u) and for an update's line=%" PRIu64 " (%u), operators evaluated as branches=%" PRIu64 " (%u); %" PRIu64
                 " tapes differ from X's on T's columns, the reference kept none for %" PRIu64
-                ", %" PRIu64 " chunks' second run wrote other entries, and the reader's verify finds %" PRIu64
+                ", %" PRIu64 " of the %" PRIu64 " chunks' (%u expected) second run wrote other entries, and the reader's verify finds %" PRIu64
                 " bytes wrong (a record the kernel didn't place has none, its type's column's among them)\n",
                 name, valid ? "read" : "NOT READ", counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS], expected->expressions,
                 counts[NODE_FACTS_COUNT_CONTEXTS_DECIDED] - counts[NODE_FACTS_COUNT_CONTEXTS_REFUSED], counts[NODE_FACTS_COUNT_ROWS_TAKEN], expected->taken,
@@ -3146,9 +3584,22 @@ static bool node_rows_test_fixture(const char* directory, const char* name, cons
                 counts[NODE_FACTS_COUNT_ROWS_LISTED_FLOATING], expected->listed_floating, counts[NODE_FACTS_COUNT_ROWS_WRITTEN], expected->written,
                 counts[NODE_FACTS_COUNT_ROWS_WORDS], expected->words, counts[NODE_FACTS_COUNT_ROWS_LINES], expected->lines, counts[NODE_FACTS_COUNT_ROWS_UPDATES],
                 expected->updates, counts[NODE_FACTS_COUNT_ROWS_BRANCHED], expected->branched, counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES], counts[NODE_FACTS_COUNT_ROWS_UNKEPT],
-                counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES], shadow.own_values_wrong);
+                counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES], counts[NODE_FACTS_COUNT_TESTS_CHUNKS], expected->chunks, shadow.own_values_wrong);
+        fprintf(stderr, "test-checker: node-rows %s: the values: %" PRIu64 " tapes differ in a value alone; records on the lists: its record's value=%" PRIu64 " (%u) a store by name's destination's=%"
+                PRIu64 " (%u) a constant's bits=%" PRIu64 " (%u) a stride=%" PRIu64 " (%u) the control's label=%" PRIu64 " (%u) the rest=%" PRIu64
+                " (%u) a number of its expression's after the first=%" PRIu64 " (%u); expressions numbered=%" PRIu64 " (%u), the records their labels' walks went over=%" PRIu64
+                " (%u)\n",
+                name, counts[NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES], counts[NODE_FACTS_COUNT_ROWS_LIST + BUSTER_NODE_ROWS_LIST_FIRST], expected->lists[BUSTER_NODE_ROWS_LIST_FIRST],
+                counts[NODE_FACTS_COUNT_ROWS_LIST + BUSTER_NODE_ROWS_LIST_STORED], expected->lists[BUSTER_NODE_ROWS_LIST_STORED],
+                counts[NODE_FACTS_COUNT_ROWS_LIST + BUSTER_NODE_ROWS_LIST_CONSTANT], expected->lists[BUSTER_NODE_ROWS_LIST_CONSTANT],
+                counts[NODE_FACTS_COUNT_ROWS_LIST + BUSTER_NODE_ROWS_LIST_STRIDE], expected->lists[BUSTER_NODE_ROWS_LIST_STRIDE],
+                counts[NODE_FACTS_COUNT_ROWS_LIST + BUSTER_NODE_ROWS_LIST_CONTROLLED], expected->lists[BUSTER_NODE_ROWS_LIST_CONTROLLED],
+                counts[NODE_FACTS_COUNT_ROWS_LIST + BUSTER_NODE_ROWS_LIST_REST], expected->lists[BUSTER_NODE_ROWS_LIST_REST],
+                counts[NODE_FACTS_COUNT_ROWS_LIST + BUSTER_NODE_ROWS_LIST_SECOND], expected->lists[BUSTER_NODE_ROWS_LIST_SECOND], counts[NODE_FACTS_COUNT_ROWS_NUMBERED],
+                expected->numbered, counts[NODE_FACTS_COUNT_ROWS_NUMBER_STEPS], expected->steps);
     }
-    // The comparison's control: with one of the reference's answers changed for each tape made, every one differs.
+    // The comparisons' control: with one of the reference's answers changed for each tape made, every one differs;
+    // and with one of a chunk's first run's answers changed, every chunk's second run does.
     NodeShadow faulted = {
         .verify = true,
         .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN,
@@ -3161,12 +3612,16 @@ static bool node_rows_test_fixture(const char* directory, const char* name, cons
     const bool faulted_read = valid && node_census_file(&faulted_census, path, options, option_count) && faulted_census.files == 1;
     const uint64_t* faulted_counts = faulted.reader_facts;
     const bool controlled = faulted_read && faulted_counts[NODE_FACTS_COUNT_ROWS_TAKEN] == expected->taken && faulted_counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] == expected->taken &&
-                            expected->taken >= 3;
+                            faulted_counts[NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES] == expected->control_valued && expected->taken >= 3 &&
+                            faulted_counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] == expected->chunks && faulted_counts[NODE_FACTS_COUNT_TESTS_CHUNKS] == expected->chunks;
     if (!controlled)
     {
         fprintf(stderr, "test-checker: node-rows %s: %s: with one of the reference's answers changed for each tape, the comparison counts %" PRIu64 " of the %" PRIu64
-                " tapes made (%u expected: every one)\n",
-                name, faulted_read ? "read" : "NOT READ", faulted_counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES], faulted_counts[NODE_FACTS_COUNT_ROWS_TAKEN], expected->taken);
+                " tapes made (%u expected: every one), %" PRIu64 " of them for a value alone (%u expected); and with one of a chunk's first run's answers changed, %" PRIu64
+                " of the %" PRIu64 " chunks' second run differs (%u expected: every one)\n",
+                name, faulted_read ? "read" : "NOT READ", faulted_counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES], faulted_counts[NODE_FACTS_COUNT_ROWS_TAKEN], expected->taken,
+                faulted_counts[NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES], expected->control_valued, faulted_counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES],
+                faulted_counts[NODE_FACTS_COUNT_TESTS_CHUNKS], expected->chunks);
     }
     unlink(path);
     return valid && same && controlled;
@@ -4554,6 +5009,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .lines = 625,
         .updates = 681,
         .branched = 714,
+        .lists = {
+            [BUSTER_NODE_ROWS_LIST_FIRST] = 2318,
+            [BUSTER_NODE_ROWS_LIST_STORED] = 380,
+            [BUSTER_NODE_ROWS_LIST_CONSTANT] = 115,
+            [BUSTER_NODE_ROWS_LIST_STRIDE] = 31,
+            [BUSTER_NODE_ROWS_LIST_CONTROLLED] = 521,
+            [BUSTER_NODE_ROWS_LIST_REST] = 13,
+            [BUSTER_NODE_ROWS_LIST_SECOND] = 70,
+        },
+        .numbered = 70,
+        .steps = 487,
+        .control_valued = 291,
+        .chunks = 9,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows.c", node_rows_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_expected),
                       "node-rows: X's rows on the window make each shape's entries' kinds and classes as X does on T's columns, and list what they don't make");
@@ -4570,6 +5038,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .lines = 540,
         .updates = 586,
         .branched = 650,
+        .lists = {
+            [BUSTER_NODE_ROWS_LIST_FIRST] = 3831,
+            [BUSTER_NODE_ROWS_LIST_STORED] = 379,
+            [BUSTER_NODE_ROWS_LIST_CONSTANT] = 427,
+            [BUSTER_NODE_ROWS_LIST_STRIDE] = 234,
+            [BUSTER_NODE_ROWS_LIST_CONTROLLED] = 622,
+            [BUSTER_NODE_ROWS_LIST_REST] = 85,
+            [BUSTER_NODE_ROWS_LIST_SECOND] = 73,
+        },
+        .numbered = 68,
+        .steps = 463,
+        .control_valued = 369,
+        .chunks = 15,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_contexts_expected),
                       "node-rows: on C's fixture, X's rows on the window make the tape of each expression C takes there, or list it");
@@ -4586,6 +5067,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .lines = 0,
         .updates = 1,
         .branched = 0,
+        .lists = {
+            [BUSTER_NODE_ROWS_LIST_FIRST] = 3,
+            [BUSTER_NODE_ROWS_LIST_STORED] = 1,
+            [BUSTER_NODE_ROWS_LIST_CONSTANT] = 0,
+            [BUSTER_NODE_ROWS_LIST_STRIDE] = 0,
+            [BUSTER_NODE_ROWS_LIST_CONTROLLED] = 0,
+            [BUSTER_NODE_ROWS_LIST_REST] = 0,
+            [BUSTER_NODE_ROWS_LIST_SECOND] = 0,
+        },
+        .numbered = 0,
+        .steps = 0,
+        .control_valued = 0,
+        .chunks = 1,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-single.c", node_rows_test_single_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_single_expected),
                       "node-rows: in a chunk with one update, X's rows on the window make its two rows");
@@ -4602,9 +5096,51 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .lines = 0,
         .updates = 0,
         .branched = 1,
+        .lists = {
+            [BUSTER_NODE_ROWS_LIST_FIRST] = 2,
+            [BUSTER_NODE_ROWS_LIST_STORED] = 0,
+            [BUSTER_NODE_ROWS_LIST_CONSTANT] = 2,
+            [BUSTER_NODE_ROWS_LIST_STRIDE] = 0,
+            [BUSTER_NODE_ROWS_LIST_CONTROLLED] = 2,
+            [BUSTER_NODE_ROWS_LIST_REST] = 0,
+            [BUSTER_NODE_ROWS_LIST_SECOND] = 0,
+        },
+        .numbered = 0,
+        .steps = 0,
+        .control_valued = 0,
+        .chunks = 1,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-branch.c", node_rows_test_branch_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_branch_expected),
                       "node-rows: in a chunk with one condition evaluated as branches and no update, X's rows on the window make its tested values' tests");
+    static const NodeRowsExpected rows_values_expected = {
+        .expressions = 1063,
+        .taken = 1057,
+        .entries = 9860,
+        .listed_update = 3,
+        .listed_branches = 0,
+        .listed_conversion = 0,
+        .listed_floating = 3,
+        .written = 9919,
+        .words = 350,
+        .lines = 259,
+        .updates = 416,
+        .branched = 355,
+        .lists = {
+            [BUSTER_NODE_ROWS_LIST_FIRST] = 2322,
+            [BUSTER_NODE_ROWS_LIST_STORED] = 618,
+            [BUSTER_NODE_ROWS_LIST_CONSTANT] = 218,
+            [BUSTER_NODE_ROWS_LIST_STRIDE] = 178,
+            [BUSTER_NODE_ROWS_LIST_CONTROLLED] = 325,
+            [BUSTER_NODE_ROWS_LIST_REST] = 220,
+            [BUSTER_NODE_ROWS_LIST_SECOND] = 285,
+        },
+        .numbered = 244,
+        .steps = 718,
+        .control_valued = 264,
+        .chunks = 10,
+    };
+    check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-values.c", node_rows_test_values_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_values_expected),
+                      "node-rows: X's rows on the window make each entry's value as X does on T's columns: a line's field, a stride, a fixed number or its number in its expression");
     if (written)
     {
         unlink(header);
