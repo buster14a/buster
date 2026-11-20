@@ -2301,8 +2301,6 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
     const uint64_t scratch_mark = scratch->length;
     IrOptimizeWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
-    // The memory pass's twin is the caller's: AUTO's size bound picks the other passes' alone (#786).
-    const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
     if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~BUSTER_IR_OPTIMIZE_PASSES) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
@@ -2350,7 +2348,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
         {
             check.error = IR_ERROR_MEMORY;
         }
-        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, BUSTER_SCALAR_PATH(verify_scalar), &work.statistics.forwarded_loads))
+        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, &work.statistics.forwarded_loads))
         {
             check.error = IR_ERROR_MEMORY;
         }

@@ -622,8 +622,12 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
         // (_Bool)((char*)&s + (1ul << 63)) to 1. The flag stays on the lvalue too, but a failed value load must not
         // become "true" just because the object exists. A weak symbol is not a constant.
         const bool nonnull = (value->flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 && value->category != CHECK_LVALUE;
+        // An lvalue's truth is its value's, which the program loads: no address says it, an absolute one's no more
+        // than an object's (#3028: `if (*(int*)4096)` was true for its address). An array's lvalue is no load, and
+        // its truth is its address's.
+        const bool loaded = value->category == CHECK_LVALUE && !type_kind_is_array(type_kind(table, type_strip_aligned(table, value->type)));
         *truth = nonnull || value->offset != 0;
-        known &= value->object == 0 || nonnull;
+        known &= !loaded && (value->object == 0 || nonnull);
     }
     else
     {

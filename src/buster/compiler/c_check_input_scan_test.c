@@ -650,8 +650,7 @@ static void check_test_sparse_wide(CheckTest* test)
 }
 
 // The declaration-start column (check_input_declaration_starts, #1121): random roles with paired struct and enum bodies,
-// the vector path and its scalar twin against check_input_declaration_begin, the walk the column replaces, for every
-// token of every length to 299. A body's own boundary makes the tokens after its close start at the close's successor;
+// against check_input_declaration_begin, the walk the column replaces, for every token of every length to 299. A body's own boundary makes the tokens after its close start at the close's successor;
 // an empty body leaves the declaration before it current.
 static void check_test_declaration_starts(CheckTest* test)
 {
@@ -662,8 +661,7 @@ static void check_test_declaration_starts(CheckTest* test)
     uint8_t roles[MAXIMUM];
     uint8_t opens[MAXIMUM];
     uint32_t expected[MAXIMUM + 1];
-    uint32_t scalar[MAXIMUM + 1];
-    uint32_t vector[MAXIMUM + 1];
+    uint32_t column[MAXIMUM + 1];
     uint32_t stack[MAXIMUM + 1];
     uint32_t differences = 0;
     // This test's own generator, so that its draws leave the default run's seed for the fixtures after it unchanged.
@@ -710,15 +708,14 @@ static void check_test_declaration_starts(CheckTest* test)
         Parser parser = { 0 };
         parser.tokens.count = count;
         parser.tree.roles = roles;
-        check_input_declaration_starts_scalar(&parser, scalar, stack);
-        check_input_declaration_starts_vector(&parser, vector, stack);
+        check_input_declaration_starts(&parser, column, stack);
         for (uint32_t token = 0; token <= count; token += 1)
         {
             expected[token] = check_input_declaration_begin(&parser, token);
-            differences += scalar[token] != expected[token] || vector[token] != expected[token];
+            differences += column[token] != expected[token];
         }
     }
-    check_test_expect(test, differences == 0, "the declaration-start column's paths give the walk's start for every random role");
+    check_test_expect(test, differences == 0, "the declaration-start column gives the walk's start for every random role");
 }
 
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
@@ -900,7 +897,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                 }
             }
         }
-        // count_tokens on a parser of these columns, by both paths, against the test's own counts.
+        // count_tokens on a parser of these columns, against the test's own counts.
         Parser parser = { 0 };
         parser.tokens.count = count;
         parser.tokens.kinds = kinds;
@@ -935,46 +932,43 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             attribute_depth -= roles[i] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
         }
         uint32_t syntax_differences = 0;
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        memset(syntax, 0xa5, (uint64_t)count + 1);
+        memset(visits, 0xa5, (uint64_t)count + 1);
+        const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, visits);
+        char description[200];
+        snprintf(description, sizeof(description), "token counts of %u tokens: subscripts %u (%u), operands %u (%u), group 0 %u (%u), group 3 %u (%u)",
+                 count, counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
+                 expected.groups[0], counts.groups[3], expected.groups[3]);
+        check_test_expect(test, memcmp(&counts, &expected, sizeof(counts)) == 0, description);
+        // Each token's syntax bits, as the test reads its kind, its successor's and its name, and its mark.
+        for (uint32_t i = 0; i < count; i += 1)
         {
-            memset(syntax, 0xa5, (uint64_t)count + 1);
-            memset(visits, 0xa5, (uint64_t)count + 1);
-            const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, visits, scalar != 0);
-            char description[200];
-            snprintf(description, sizeof(description), "token counts of %u tokens by the %s path: subscripts %u (%u), operands %u (%u), group 0 %u (%u), group 3 %u (%u)",
-                     count, scalar != 0 ? "scalar" : "vector", counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
-                     expected.groups[0], counts.groups[3], expected.groups[3]);
-            check_test_expect(test, memcmp(&counts, &expected, sizeof(counts)) == 0, description);
-            // Each token's syntax bits, as the test reads its kind, its successor's and its name, and its mark.
-            for (uint32_t i = 0; i < count; i += 1)
+            uint8_t bits = 0;
+            for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(syntax_names); n += 1)
             {
-                uint8_t bits = 0;
-                for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(syntax_names); n += 1)
-                {
-                    bits |= names[i] == syntax_names[n] ? syntax_bits[n] : 0;
-                }
-                switch (kinds[i])
-                {
-                    case PARSE_KIND_ATTRIBUTE: case PARSE_KIND_ALIGNAS: case PARSE_KIND_ASM: case PARSE_KIND_CALLING_CONVENTION:
-                        bits |= BUSTER_CHECK_SYNTAX_ATTRIBUTE;
-                        break;
-                    case PARSE_KIND_L_SQUARE:
-                        bits |= i + 1 < count && kinds[i + 1] == PARSE_KIND_L_SQUARE ? BUSTER_CHECK_SYNTAX_ATTRIBUTE : 0;
-                        break;
-                    case PARSE_KIND_STRING:
-                        bits |= BUSTER_CHECK_SYNTAX_STRING;
-                        break;
-                    default:
-                        break;
-                }
-                syntax_differences += syntax[i] != bits;
-                mark_differences += visits[i] != check_test_visit_mark(kinds, roles, count, i, bits);
+                bits |= names[i] == syntax_names[n] ? syntax_bits[n] : 0;
             }
-            syntax_differences += syntax[count] != 0;
-            mark_differences += visits[count] != 0;
+            switch (kinds[i])
+            {
+                case PARSE_KIND_ATTRIBUTE: case PARSE_KIND_ALIGNAS: case PARSE_KIND_ASM: case PARSE_KIND_CALLING_CONVENTION:
+                    bits |= BUSTER_CHECK_SYNTAX_ATTRIBUTE;
+                    break;
+                case PARSE_KIND_L_SQUARE:
+                    bits |= i + 1 < count && kinds[i + 1] == PARSE_KIND_L_SQUARE ? BUSTER_CHECK_SYNTAX_ATTRIBUTE : 0;
+                    break;
+                case PARSE_KIND_STRING:
+                    bits |= BUSTER_CHECK_SYNTAX_STRING;
+                    break;
+                default:
+                    break;
+            }
+            syntax_differences += syntax[i] != bits;
+            mark_differences += visits[i] != check_test_visit_mark(kinds, roles, count, i, bits);
         }
+        syntax_differences += syntax[count] != 0;
+        mark_differences += visits[count] != 0;
         mismatches += syntax_differences;
-        // The expressions' classes of a reader of these columns and sparse ones, by both paths: each token's classes must
+        // The expressions' classes of a reader of these columns and sparse ones: each token's classes must
         // be the test's own reading, and its first value NONE where the walk doesn't act at it and as it was elsewhere.
         CheckInput input = { 0 };
         input.expression_regions = check_test_scan_column(mappings[REGIONS] + page, count, 4);
@@ -1032,37 +1026,18 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             marks[i >> 6] |= (uint64_t)((check_test_expression_class(&reader, i) & BUSTER_CHECK_EXPRESSION_SPARSE) != 0) << (i & 63);
         }
         reader.sparse_marks = marks;
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        memset(visits, 0xa5, (uint64_t)count + 1);
+        memset(reader.first_value, 0x5a, (uint64_t)count * sizeof(uint32_t));
+        const uint32_t acting = check_input_expression_classes(&reader);
+        uint32_t expected_acting = 0;
+        for (uint32_t i = 0; i < count; i += 1)
         {
-            parser.options.scalar = scalar != 0;
-            memset(visits, 0xa5, (uint64_t)count + 1);
-            memset(reader.first_value, 0x5a, (uint64_t)count * sizeof(uint32_t));
-            input.visit_misses = 0;
-            const uint32_t acting = check_input_expression_classes(&reader);
-            uint32_t expected_acting = 0;
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint8_t classes = check_test_expression_class(&reader, i);
-                // --scalar's walk, which reads no class code, gets none.
-                const uint8_t uncoded = (uint8_t)(classes & ~BUSTER_CHECK_EXPRESSION_CODE_MASK);
-                const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
-                class_differences += visits[i] != (scalar != 0 ? uncoded : classes) || reader.first_value[i] != first_value;
-                class_differences += check_input_expression_class(&reader, i, true) != classes || check_input_expression_class(&reader, i, false) != uncoded;
-                expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
-            }
-            class_differences += visits[count] != 0xa5 || acting != expected_acting || input.visit_misses != 0;
+            const uint8_t classes = check_test_expression_class(&reader, i);
+            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
+            class_differences += visits[i] != classes || reader.first_value[i] != first_value;
+            expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
         }
-        // A mark the columns contradict, either way, is a miss the scalar path counts.
-        if (count != 0)
-        {
-            const uint32_t wrong = check_test_random(test) % count;
-            marks[wrong >> 6] ^= UINT64_C(1) << (wrong & 63);
-            parser.options.scalar = true;
-            input.visit_misses = 0;
-            check_input_expression_classes(&reader);
-            class_differences += input.visit_misses != 1;
-            marks[wrong >> 6] ^= UINT64_C(1) << (wrong & 63);
-        }
+        class_differences += visits[count] != 0xa5 || acting != expected_acting;
         // The empty representation must agree with an independently read dense zero column, including vector
         // tails at the guard page. No address may be formed from the null asm column, even under a zero mask.
         uint32_t* dense_asms = input.asm_ids;
@@ -1075,27 +1050,21 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             marks[i >> 6] |= (uint64_t)((expected_empty[i] & BUSTER_CHECK_EXPRESSION_SPARSE) != 0) << (i & 63);
         }
         input.asm_ids = NULL;
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        memset(visits, 0xa5, (uint64_t)count + 1);
+        memset(reader.first_value, 0x5a, (uint64_t)count * sizeof(uint32_t));
+        const uint32_t empty_acting = check_input_expression_classes(&reader);
+        uint32_t expected_empty_acting = 0;
+        for (uint32_t i = 0; i < count; i += 1)
         {
-            parser.options.scalar = scalar != 0;
-            memset(visits, 0xa5, (uint64_t)count + 1);
-            memset(reader.first_value, 0x5a, (uint64_t)count * sizeof(uint32_t));
-            const uint32_t acting = check_input_expression_classes(&reader);
-            uint32_t expected_acting = 0;
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint8_t classes = expected_empty[i];
-                const uint8_t uncoded = (uint8_t)(classes & ~BUSTER_CHECK_EXPRESSION_CODE_MASK);
-                const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
-                class_differences += visits[i] != (scalar != 0 ? uncoded : classes) || reader.first_value[i] != first_value;
-                class_differences += check_input_expression_class(&reader, i, true) != classes || check_input_asm_id(&input, i) != 0;
-                expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
-            }
-            class_differences += visits[count] != 0xa5 || acting != expected_acting || check_input_asm_id(&input, count) != 0;
+            const uint8_t classes = expected_empty[i];
+            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
+            class_differences += visits[i] != classes || reader.first_value[i] != first_value;
+            class_differences += check_input_asm_id(&input, i) != 0;
+            expected_empty_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
         }
+        class_differences += visits[count] != 0xa5 || empty_acting != expected_empty_acting || check_input_asm_id(&input, count) != 0;
         input.asm_ids = dense_asms;
-        parser.options.scalar = false;
-        // The coded walk's compaction of these classes (check_input_expression_compact), by both paths: the tokens the walk
+        // The coded walk's compaction of these classes (check_input_expression_compact): the tokens the walk
         // acts at among each range of a postorder (a random permutation of the tokens), in its order, with their bytes;
         // from bytes that end as the reader's do (count + 1 and BUSTER_CHECK_VISITS_PADDING, three past the last token's,
         // the most the gathers reach), and into arrays of exactly the range's room, each ending at a PROT_NONE page.
@@ -1130,10 +1099,10 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             uint32_t* compact_classes = check_test_scan_column(mappings[COMPACT_CLASSES] + page, end - first, 4);
             // Every token the walk acts at, and all but its DROPs, as the coded walk keeps them.
             const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
-            for (uint32_t run = 0; run < 4; run += 1)
+            for (uint32_t run = 0; run < 2; run += 1)
             {
-                const uint32_t skipped = run < 2 ? UINT32_MAX : dropped;
-                const uint32_t acting = check_input_expression_compact(&reader, first, end, compact_tokens, compact_classes, skipped, (run & 1) != 0);
+                const uint32_t skipped = run == 0 ? UINT32_MAX : dropped;
+                const uint32_t acting = check_input_expression_compact(&reader, first, end, compact_tokens, compact_classes, skipped);
                 uint32_t expected = 0;
                 for (uint32_t position = first; position < end; position += 1)
                 {
@@ -1164,11 +1133,11 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
     }
 }
 
-// The coded walk's identifiers' leaves (check_input_expression_identifiers, #1038) by both paths: random chunks of up to
-// 200 acting tokens, an identifier's class among others, over random columns of up to 200 tokens and 40 types, which
-// both paths must turn into the same entries, the identifiers in their order. Every column ends at a PROT_NONE page, the
-// byte columns at every alignment of their ends, so a gather past a column's last dword faults: the vector path reads
-// each byte as the aligned dword that holds it.
+// The coded walk's identifiers' leaves (check_input_expression_identifiers, #1038): random chunks of up to 200 acting
+// tokens, an identifier's class among others, over random columns of up to 200 tokens and 40 types, which it must turn
+// into the entries check_input_identifier_entry makes of each (the fallback past the gathers' signed offsets), the
+// identifiers in their order. Every column ends at a PROT_NONE page, the byte columns at every alignment of their ends,
+// so a gather past a column's last dword faults: the gathers read each byte as the aligned dword that holds it.
 static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -1260,19 +1229,20 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
             tokens[i] = check_test_random(test) % count;
             classes[i] = check_test_random(test) % 3 != 0 ? identifier : BUSTER_CHECK_EXPRESSION_ACTS | (check_test_random(test) % BUSTER_CHECK_EXPRESSION_CODES) << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
         }
-        uint32_t found[2];
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-        {
-            memset(&results[scalar], 0xa5, sizeof(results[scalar]));
-            found[scalar] = check_input_expression_identifiers(&reader, tokens, classes, acting, &results[scalar], scalar != 0);
-        }
+        memset(&results[0], 0xa5, sizeof(results[0]));
+        memset(&results[1], 0xa5, sizeof(results[1]));
+        const uint32_t found = check_input_expression_identifiers(&reader, tokens, classes, acting, &results[1]);
         uint32_t expected = 0;
         for (uint32_t i = 0; i < acting; i += 1)
         {
-            expected += classes[i] == identifier;
+            if (classes[i] == identifier)
+            {
+                check_input_identifier_entry(&reader, tokens[i], &results[0], expected);
+                expected += 1;
+            }
         }
-        differences += found[0] != expected || found[1] != expected;
-        for (uint32_t at = 0; at < expected && found[0] == expected && found[1] == expected; at += 1)
+        differences += found != expected;
+        for (uint32_t at = 0; at < expected && found == expected; at += 1)
         {
             const CheckInputIdentifiers* x = &results[0];
             const CheckInputIdentifiers* y = &results[1];
@@ -1285,7 +1255,7 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
         }
     }
     char description[200];
-    snprintf(description, sizeof(description), "the coded walk's identifiers' leaves by both paths: %u of %u entries differ", differences, entries);
+    snprintf(description, sizeof(description), "the coded walk's identifiers' leaves: %u of %u entries differ from their entries'", differences, entries);
     check_test_expect(test, ready && differences == 0 && entries != 0, description);
     for (uint32_t i = 0; i < COLUMNS; i += 1)
     {
@@ -1296,14 +1266,12 @@ static __attribute__((noinline)) void check_test_identifier_leaves(CheckTest* te
     }
 }
 
-// The coded walk's literals' values (check_input_expression_literals, #1038) by both paths, and against the literals'
-// parser: random chunks of up to 200 acting tokens, a literal's class among others, over up to 200 tokens whose spellings
+// The coded walk's literals' values (check_input_expression_literals, #1038), against the literals' parser: random chunks of up to 200 acting tokens, a literal's class among others, over up to 200 tokens whose spellings
 // lie in three ranges of source, each ending at a PROT_NONE page, so a gather past a spelling's last aligned word faults,
 // the last spelling of each range at its very end. The spellings are plain decimals and others close to them (leading
 // zeros, ten digits, suffixes, hexadecimals, separators, splices, letters), characters, unnamed and named tokens, the
-// preprocessor's ints about INT_MAX, and spellings in no range. Both paths must give the same values; a plain value must be
-// what check_literal_number makes of the spelling (an int of that value and nothing else), and every plain decimal of the
-// spellings must be found.
+// preprocessor's ints about INT_MAX, and spellings in no range. A plain value must be what check_literal_number makes of
+// the spelling (an int of that value and nothing else), and every plain decimal of the spellings must be found.
 static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -1334,7 +1302,7 @@ static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
     const uint32_t literal = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     static const char* const others[] = { "0123", "00", "1234567890", "0x1f", "12u", "7L", "9ll", "1.5", "1e3", "12'34", "1\\\n2", "12a", "0b1", "4294967296" };
     static Preprocessor pp;
-    static CheckInputLiterals results[2];
+    static CheckInputLiterals results[1];
     PPRange ranges[3];
     uint32_t differences = 0;
     uint32_t wrong = 0;
@@ -1428,25 +1396,20 @@ static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
             tokens[i] = check_test_random(test) % count;
             classes[i] = check_test_random(test) % 3 != 0 ? literal : BUSTER_CHECK_EXPRESSION_ACTS | (check_test_random(test) % BUSTER_CHECK_EXPRESSION_CODES) << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
         }
-        uint32_t found[2];
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-        {
-            memset(&results[scalar], 0xa5, sizeof(results[scalar]));
-            found[scalar] = check_input_expression_literals(&reader, tokens, classes, acting, &results[scalar], scalar != 0);
-        }
+        memset(&results[0], 0xa5, sizeof(results[0]));
+        const uint32_t found = check_input_expression_literals(&reader, tokens, classes, acting, &results[0]);
         uint32_t expected = 0;
         for (uint32_t i = 0; i < acting; i += 1)
         {
             expected += classes[i] == literal;
         }
-        differences += found[0] != expected || found[1] != expected;
+        differences += found != expected;
         uint32_t at = 0;
-        for (uint32_t i = 0; i < acting && found[0] == expected && found[1] == expected; i += 1)
+        for (uint32_t i = 0; i < acting && found == expected; i += 1)
         {
             if (classes[i] == literal)
             {
-                const uint32_t value = results[1].values[at];
-                differences += results[0].values[at] != value;
+                const uint32_t value = results[0].values[at];
                 // The literals' parser on the token's spelling, as check_input_literal spells it.
                 const uint32_t token = tokens[i];
                 const uint32_t source = parser.tokens.sources[token];
@@ -1488,7 +1451,7 @@ static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
     }
     char description[240];
     snprintf(description, sizeof(description),
-             "the coded walk's literals' values by both paths: %u of %u entries differ, %u plain values the literals' parser doesn't give, %u plain "
+             "the coded walk's literals' values: %u of %u counts differ, %u plain values the literals' parser doesn't give, %u plain "
              "decimals missed (%u plain)", differences, entries, wrong, missed, plain);
     check_test_expect(test, ready && differences == 0 && wrong == 0 && missed == 0 && entries != 0 && plain != 0, description);
     arena_release(&scratch);
@@ -1501,13 +1464,65 @@ static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
     }
 }
 
-// The coded walk's batch written to the graph (check_input_expression_flush, #1038's stages 2 and 4) by both paths: random
-// batches of up to 200 nodes after up to 40 nodes a visit made, over random token columns of up to 200 tokens, which both
-// paths must write into two graphs column for column and record alike (each node's purity and the graph's counts). Its
-// nodes are operators, leaves, discards and initializers at random tokens, with random operands among the nodes before them, contexts,
-// members and arguments; the unit has a warnings' suppression column or none and a floating-point environment or none.
-// Every token column ends at a PROT_NONE page, the byte columns at every alignment of their ends, so a gather past a
-// column's last dword faults: the vector path reads each byte as the aligned dword that holds it.
+// A batch written to `graph` by its definition (#1038's stages 2 and 4): each node's columns are the batch's, its type the
+// token's query type (an operator's or an initializer's) or void (a discard's), its contexts the batch's with a static
+// initializer's, its source position the token's expression end, its warnings' suppression and floating-point
+// environment the token's; then the graph records the nodes after the last it recorded (check_graph_record_nodes), and
+// the batch is emptied.
+static void check_test_flush_definition(const CheckInputReader* reader, CheckInputBatch* batch, CheckGraph* graph)
+{
+    const CheckInput* input = reader->output;
+    for (uint32_t k = 0; k < batch->count; k += 1)
+    {
+        const uint32_t node = batch->base + k;
+        const uint32_t token = batch->tokens[k];
+        const bool operator = batch->forms[k] == CHECK_INPUT_FORM_OPERATOR;
+        const bool initializer = batch->forms[k] == CHECK_INPUT_FORM_INITIALIZER;
+        graph->ops[node] = (CheckOp)batch->ops[k];
+        graph->tokens[node] = token;
+        graph->operand0[node] = batch->operand0[k];
+        graph->operand1[node] = batch->operand1[k];
+        graph->operand2[node] = batch->operand2[k];
+        graph->leaf_slots[node] = batch->leaf_slots[k];
+        graph->members[node] = batch->members[k];
+        graph->argument_offsets[node] = batch->argument_offsets[k];
+        graph->argument_counts[node] = batch->argument_counts[k];
+        graph->types[node] = operator || initializer ? reader->query_types[token] : batch->forms[k] == CHECK_INPUT_FORM_DISCARD ? BUSTER_TYPE_VOID : 0;
+        const bool initialized = (operator || initializer) && reader->static_initializers[token] != 0;
+        graph->contexts[node] = (uint8_t)((initialized && operator ? BUSTER_CHECK_CONTEXT_STATIC : 0) | (initialized && initializer ? BUSTER_CHECK_CONTEXT_VALUE : 0) |
+                                          batch->contexts[k]);
+        graph->source_positions[node] = check_input_expression_end(reader, token);
+        if (graph->warning_suppressed != NULL)
+        {
+            graph->warning_suppressed[node] = reader->warning_suppressed != NULL ? reader->warning_suppressed[token] : 0;
+        }
+        if (graph->fp_environments != NULL)
+        {
+            const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | BUSTER_CHECK_FP_CONTRACT_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
+            graph->fp_environments[node] = input->fp_environments[token] & mask;
+        }
+    }
+    if (batch->count != 0)
+    {
+        graph->count = batch->base + batch->count;
+        graph->leaf_count = batch->leaf_base + batch->leaves;
+        graph->recorded_ready = false;
+        check_graph_record_nodes(graph);
+    }
+    batch->base = graph->count;
+    batch->leaf_base = graph->leaf_count;
+    batch->count = 0;
+    batch->leaves = 0;
+}
+
+// The coded walk's batch written to the graph (check_input_expression_flush, #1038's stages 2 and 4) against its
+// definition (check_test_flush_definition): random batches of up to 200 nodes after up to 40 nodes a visit made, over
+// random token columns of up to 200 tokens, which both must write into two graphs column for column and record alike
+// (each node's purity and the graph's counts). Its nodes are operators, leaves, discards and initializers at random
+// tokens, with random operands among the nodes before them, contexts, members and arguments; the unit has a warnings'
+// suppression column or none and a floating-point environment or none. Every token column ends at a PROT_NONE page, the
+// byte columns at every alignment of their ends, so a gather past a column's last dword faults: the flush reads each
+// byte as the aligned dword that holds it.
 static __attribute__((noinline)) void check_test_expression_flush(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -1608,31 +1623,31 @@ static __attribute__((noinline)) void check_test_expression_flush(CheckTest* tes
         batches[1] = batches[0];
         const bool suppressions = (round & 1) == 0;
         const bool floating = (round % 5) == 2;
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
-            CheckInput* input = &inputs[scalar];
+            CheckInput* input = &inputs[path];
             CheckGraph* graph = &input->graph;
-            memset(graph_ops[scalar], 0xa5, sizeof(graph_ops[scalar]));
-            memset(graph_words[scalar], 0xa5, sizeof(graph_words[scalar]));
-            memset(graph_types[scalar], 0xa5, sizeof(graph_types[scalar]));
-            memset(graph_bytes[scalar], 0xa5, sizeof(graph_bytes[scalar]));
+            memset(graph_ops[path], 0xa5, sizeof(graph_ops[path]));
+            memset(graph_words[path], 0xa5, sizeof(graph_words[path]));
+            memset(graph_types[path], 0xa5, sizeof(graph_types[path]));
+            memset(graph_bytes[path], 0xa5, sizeof(graph_bytes[path]));
             graph->capacity = CAPACITY;
-            graph->ops = graph_ops[scalar];
-            graph->tokens = graph_words[scalar][0];
-            graph->operand0 = graph_words[scalar][1];
-            graph->operand1 = graph_words[scalar][2];
-            graph->operand2 = graph_words[scalar][3];
-            graph->leaf_slots = graph_words[scalar][4];
-            graph->members = graph_words[scalar][5];
-            graph->argument_offsets = graph_words[scalar][6];
-            graph->argument_counts = graph_words[scalar][7];
-            graph->source_positions = graph_words[scalar][8];
-            graph->types = graph_types[scalar];
-            graph->contexts = graph_bytes[scalar][0];
-            graph->recorded_pure = graph_bytes[scalar][1];
-            graph->warning_suppressed = suppressions ? graph_bytes[scalar][2] : NULL;
-            graph->fp_environments = floating ? graph_bytes[scalar][3] : NULL;
-            graph->dense_leaves = leaves[scalar];
+            graph->ops = graph_ops[path];
+            graph->tokens = graph_words[path][0];
+            graph->operand0 = graph_words[path][1];
+            graph->operand1 = graph_words[path][2];
+            graph->operand2 = graph_words[path][3];
+            graph->leaf_slots = graph_words[path][4];
+            graph->members = graph_words[path][5];
+            graph->argument_offsets = graph_words[path][6];
+            graph->argument_counts = graph_words[path][7];
+            graph->source_positions = graph_words[path][8];
+            graph->types = graph_types[path];
+            graph->contexts = graph_bytes[path][0];
+            graph->recorded_pure = graph_bytes[path][1];
+            graph->warning_suppressed = suppressions ? graph_bytes[path][2] : NULL;
+            graph->fp_environments = floating ? graph_bytes[path][3] : NULL;
+            graph->dense_leaves = leaves[path];
             input->fp_environments = environments;
             // The nodes before the batch: a visit's, none of them recorded yet, and the leaves before the batch's.
             for (uint32_t node = 0; node < before; node += 1)
@@ -1651,11 +1666,18 @@ static __attribute__((noinline)) void check_test_expression_flush(CheckTest* tes
             for (uint32_t slot = 0; slot < CAPACITY; slot += 1)
             {
                 // The same leaves in both graphs: each round's draws are made once, for the first.
-                leaves[scalar][slot] = scalar == 0 ? (CheckValue){ .type = types[check_test_random(test) % BUSTER_ARRAY_LENGTH(types)],
+                leaves[path][slot] = path == 0 ? (CheckValue){ .type = types[check_test_random(test) % BUSTER_ARRAY_LENGTH(types)],
                                                                     .overload_head = check_test_random(test) % 4 == 0 } : leaves[0][slot];
             }
             reader.output = input;
-            check_input_expression_flush(&reader, &batches[scalar], scalar != 0);
+            if (path == 0)
+            {
+                check_test_flush_definition(&reader, &batches[0], graph);
+            }
+            else
+            {
+                check_input_expression_flush(&reader, &batches[1]);
+            }
         }
         const CheckGraph* x = &inputs[0].graph;
         const CheckGraph* y = &inputs[1].graph;
@@ -1690,7 +1712,7 @@ static __attribute__((noinline)) void check_test_expression_flush(CheckTest* tes
         }
     }
     char description[200];
-    snprintf(description, sizeof(description), "the coded walk's batches written by both paths: %u of %u nodes differ", differences, written);
+    snprintf(description, sizeof(description), "the coded walk's batches against their definition: %u of %u nodes differ", differences, written);
     check_test_expect(test, ready && differences == 0 && written != 0, description);
     for (uint32_t i = 0; i < COLUMNS; i += 1)
     {
@@ -1817,7 +1839,7 @@ static __attribute__((noinline)) void check_test_selection_positions(CheckTest* 
     }
 }
 
-// The asm labels' kernels (#877) by both paths, against the test's own reading of the columns: the tokens with
+// The asm labels' kernels (#877), against the test's own reading of the columns: the tokens with
 // attributes (check_input_asm_attributed_tokens), the tokens whose object is labelled (check_input_asm_labelled_tokens)
 // and the uses of labelled declarations (check_input_asm_labelled_uses), on random columns of every length to 200 and
 // some to 1,100, whose objects and declarations fall past the tokens too. Each column ends at a PROT_NONE page, so a
@@ -1904,29 +1926,23 @@ static __attribute__((noinline)) void check_test_asm_label_kernels(CheckTest* te
                 expected_declared[i / 32] |= UINT32_C(1) << (i % 32);
             }
         }
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        const uint32_t found = check_input_asm_attributed_tokens(&input, count, tokens, false);
+        differences += found != expected_count || memcmp(tokens, expected, (uint64_t)found * sizeof(uint32_t)) != 0;
+        memset(declared, 0xa5, (uint64_t)token_words * sizeof(uint32_t));
+        check_input_asm_labelled_tokens(&input, labelled, declared);
+        differences += memcmp(declared, expected_declared, (uint64_t)token_words * sizeof(uint32_t)) != 0;
+        const CheckInputFilter filter = check_input_filter_bits(declared, token_words);
+        for (uint32_t first = 0; first < count; first += 16)
         {
-            // The scalar path's uses are every token, whose declaration the pass tests: a host without the vector set
-            // takes it for both.
-            const bool every = BUSTER_SCALAR_PATH(scalar != 0);
-            const uint32_t found = check_input_asm_attributed_tokens(&input, count, tokens, scalar != 0);
-            differences += found != expected_count || memcmp(tokens, expected, (uint64_t)found * sizeof(uint32_t)) != 0;
-            memset(declared, 0xa5, (uint64_t)token_words * sizeof(uint32_t));
-            check_input_asm_labelled_tokens(&input, labelled, declared, scalar != 0);
-            differences += memcmp(declared, expected_declared, (uint64_t)token_words * sizeof(uint32_t)) != 0;
-            const CheckInputFilter filter = check_input_filter_bits(declared, token_words);
-            for (uint32_t first = 0; first < count; first += 16)
+            uint32_t mask = 0;
+            for (uint32_t lane = 0; lane < 16 && first + lane < count; lane += 1)
             {
-                uint32_t mask = 0;
-                for (uint32_t lane = 0; lane < 16 && first + lane < count; lane += 1)
-                {
-                    const uint32_t declaration = declarations[first + lane];
-                    const bool marked = declaration < count && ((expected_declared[declaration / 32] >> (declaration % 32)) & 1) != 0;
-                    mask |= marked || every ? UINT32_C(1) << lane : 0;
-                    uses += marked && scalar == 0;
-                }
-                differences += check_input_asm_labelled_uses(&input, declared, &filter, first, count, scalar != 0) != mask;
+                const uint32_t declaration = declarations[first + lane];
+                const bool marked = declaration < count && ((expected_declared[declaration / 32] >> (declaration % 32)) & 1) != 0;
+                mask |= marked ? UINT32_C(1) << lane : 0;
+                uses += marked;
             }
+            differences += check_input_asm_labelled_uses(&input, declared, &filter, first, count) != mask;
         }
     }
     char description[160];

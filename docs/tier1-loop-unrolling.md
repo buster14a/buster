@@ -20,8 +20,8 @@ sends a loop of no iteration straight to the original; inside it, each copy's ow
 to pass and becomes a jump, copy k's induction is the main induction plus k
 steps (folded into its addresses' displacements), and an exact integer
 reduction is split into accumulators that the main loop's exit combines. Every
-step that looks at many instructions has a vector path and an exact scalar
-twin, and the two give identical functions. On the 9700X at `-march=x86-64`,
+step that looks at many instructions is data-parallel (#2924 deleted its
+scalar twins). On the 9700X at `-march=x86-64`,
 #2743's 19 vectorizable loops run 1.41 times as fast, clang's whole unrolling
 component, and its six controls 1.05 times, at each of four placements, with no
 kernel slower anywhere. The pass is off by default (`--tier1-passes=+unroll`)
@@ -192,7 +192,7 @@ vectorizer's entry and a vector reduction split (the reduction rules take
 integer scalars), each with its own tests, and the remainders refused by a mark
 rather than by their shape.
 
-## Data-parallel parts and their twins
+## Data-parallel parts
 
 - **Classes.** One 64-byte masked load of the opcodes and one byte permute of a
   128-entry class table per 64 instructions (`ir_unroll_classify`), which also
@@ -205,9 +205,10 @@ rather than by their shape.
   does) and three masked gathers from the old-to-new map
   (`ir_unroll_remap`).
 
-Each has a scalar twin, the reference the tests compare against, and a host
-without the whole AVX-512 set takes the scalars. The rest is per loop and
-small: its blocks, its header's phis, its test and its liveness walk, bounded by
+Each is checked against its definition on random columns (#2924, which
+deleted their scalar twins); the remap of a function past `INT32_MAX`
+instructions, whose indices a signed gather can't take, goes one at a time.
+The rest is per loop and small: its blocks, its header's phis, its test and its liveness walk, bounded by
 1,024 instructions, and the CFG and phi construction of its copies. The
 vectorized parts are the ones that run over every instruction of a function
 (the classes) or of every copy (the remap).
@@ -215,8 +216,9 @@ vectorized parts are the ones that run over every instruction of a function
 ## Tests
 
 - **`test-ir-unroll`** builds loops in the IR's text form from a builder that
-  names values, parses them, and runs each by both twins: the same function,
-  outcomes and counts, scratch returned. An unrolled function must verify with
+  names values, parses them, and runs each: its function, outcomes and counts
+  folded into a digest frozen where the twins agreed (with the default seed and
+  shapes), scratch returned. An unrolled function must verify with
   dominance, pass Tier 1's optimizer, and execute as the original did on the
   shared independent executor (return, status and every store), on 98
   parameters: 0 to 25, for zero, partial and whole main iterations, and windows
@@ -238,13 +240,12 @@ vectorized parts are the ones that run over every instruction of a function
   it. Testing `<=` as `<` passes, as it should: the
   main loop then leaves one iteration early, to the remainder.
 - **`test-ir-optimize`** runs `tests/ir/optimize/unroll-loops-*.ir`: a store
-  loop and a sum, the reviewed after text byte for byte, both twins and the
-  executor.
-- **`test-ir-source --passes`** runs both twins on every function of
+  loop and a sum, the reviewed after text byte for byte and the executor.
+- **`test-ir-source --passes`** runs the pass on every function of
   c-testsuite's subset, the frozen `sqlite3.c` and musl, as Tier 1 gives them
-  to the pass (the optimizer's form with truth values simplified): all agree;
-  5, 26 and 45 functions unroll.
-- **`test-checker-driver`'s passes fixture** builds with `+unroll`, both paths,
+  to the pass (the optimizer's form with truth values simplified): every
+  unrolled function verifies with dominance; 5, 26 and 45 functions unroll.
+- **`test-checker-driver`'s passes fixture** builds with `+unroll`,
   `--verify`, and prints clang's output; `+all` unrolls too and the default
   doesn't.
 - **Programs.** `test-c-testsuite --tier1` with `+unroll` (through

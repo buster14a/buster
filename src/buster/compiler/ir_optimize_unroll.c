@@ -31,11 +31,12 @@
 // `factor` whose copies' estimated cost (the instructions live in a copy, minus the free ones) fits `budget`, and a
 // function grows by at most `growth` instructions.
 //
-// Data-parallel parts with exact scalar twins: the opcode classes (one byte permute of a 128-entry table per 64
-// instructions), each loop block's class union (64-byte masked loads, or-reduced) and the operand remap of every
-// copied range (16 instructions at a time: the operand tables' masks and masked gathers from the old-to-new map). The
-// per-loop recognition and the CFG and phi construction are the small ordered part: a loop's blocks, its header's phis
-// and its liveness walk, bounded by BUSTER_IR_UNROLL_LOOP_LIMIT instructions. Both twins give identical functions.
+// Data-parallel parts: the opcode classes (one byte permute of a 128-entry table per 64 instructions), each loop block's
+// class union (64-byte masked loads, or-reduced) and the operand remap of every copied range (16 instructions at a time:
+// the operand tables' masks and masked gathers from the old-to-new map; a function past INT32_MAX instructions, whose
+// indices a signed gather can't take, remaps one at a time). The per-loop recognition and the CFG and phi construction
+// are the small ordered part: a loop's blocks, its header's phis and its liveness walk, bounded by
+// BUSTER_IR_UNROLL_LOOP_LIMIT instructions.
 //
 // Contract: as ir_thread's. The input is never mutated. The result is unverified, valid SSA that the optimizer which
 // follows verifies (the tests verify it with dominance); it borrows the input's immutable tables (slots, addresses,
@@ -131,7 +132,6 @@ struct IrUnrollOptions
     uint32_t budget;
     uint32_t accumulators;
     uint32_t growth;
-    bool scalar;
 };
 
 typedef struct IrUnrollResult IrUnrollResult;
@@ -256,65 +256,38 @@ static const uint8_t ir_unroll_classes[BUSTER_IR_OP_TABLE] = {
 
 // Every instruction's class, and whether the function has a phi: without one no loop has an induction, and nothing
 // else is built.
-static bool ir_unroll_classify(const IrFunction* f, uint8_t* classes, bool scalar)
+static bool ir_unroll_classify(const IrFunction* f, uint8_t* classes)
 {
     const uint32_t count = f->instruction_count;
-    bool phis = false;
-    if (!scalar)
+    const __m512i low = _mm512_loadu_si512(ir_unroll_classes);
+    const __m512i high = _mm512_loadu_si512(ir_unroll_classes + 64);
+    uint64_t found = 0;
+    for (uint64_t first = 0; first < count; first += BUSTER_IR_UNROLL_BATCH)
     {
-        const __m512i low = _mm512_loadu_si512(ir_unroll_classes);
-        const __m512i high = _mm512_loadu_si512(ir_unroll_classes + 64);
-        uint64_t found = 0;
-        for (uint64_t first = 0; first < count; first += BUSTER_IR_UNROLL_BATCH)
-        {
-            const uint64_t lanes = count - first < BUSTER_IR_UNROLL_BATCH ? count - first : BUSTER_IR_UNROLL_BATCH;
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_UNROLL_BATCH - lanes);
-            const __m512i operations = _mm512_maskz_loadu_epi8(valid, f->op + first);
-            const __m512i looked = _mm512_maskz_permutex2var_epi8(valid, low, operations, high);
-            _mm512_mask_storeu_epi8(classes + first, valid, looked);
-            found |= _mm512_test_epi8_mask(looked, _mm512_set1_epi8(BUSTER_IR_UNROLL_PHI));
-        }
-        phis = found != 0;
+        const uint64_t lanes = count - first < BUSTER_IR_UNROLL_BATCH ? count - first : BUSTER_IR_UNROLL_BATCH;
+        const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_UNROLL_BATCH - lanes);
+        const __m512i operations = _mm512_maskz_loadu_epi8(valid, f->op + first);
+        const __m512i looked = _mm512_maskz_permutex2var_epi8(valid, low, operations, high);
+        _mm512_mask_storeu_epi8(classes + first, valid, looked);
+        found |= _mm512_test_epi8_mask(looked, _mm512_set1_epi8(BUSTER_IR_UNROLL_PHI));
     }
-    else
-    {
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            classes[i] = ir_unroll_classes[f->op[i]];
-            phis = phis || (classes[i] & BUSTER_IR_UNROLL_PHI) != 0;
-        }
-    }
-    (void)scalar;
-    return phis;
+    return found != 0;
 }
 
 // The union of the classes of instructions [first, end).
-static uint32_t ir_unroll_block_classes(const uint8_t* classes, uint32_t first, uint32_t end, bool scalar)
+static uint32_t ir_unroll_block_classes(const uint8_t* classes, uint32_t first, uint32_t end)
 {
-    uint32_t result = 0;
-    if (!scalar)
+    __m512i any = _mm512_setzero_si512();
+    for (uint64_t at = first; at < end; at += BUSTER_IR_UNROLL_BATCH)
     {
-        __m512i any = _mm512_setzero_si512();
-        for (uint64_t at = first; at < end; at += BUSTER_IR_UNROLL_BATCH)
-        {
-            const uint64_t lanes = end - at < BUSTER_IR_UNROLL_BATCH ? end - at : BUSTER_IR_UNROLL_BATCH;
-            any = _mm512_or_si512(any, _mm512_maskz_loadu_epi8(UINT64_MAX >> (BUSTER_IR_UNROLL_BATCH - lanes), classes + at));
-        }
-        uint64_t word = (uint64_t)_mm512_reduce_or_epi64(any);
-        word |= word >> 32;
-        word |= word >> 16;
-        word |= word >> 8;
-        result = (uint32_t)(word & 0xff);
+        const uint64_t lanes = end - at < BUSTER_IR_UNROLL_BATCH ? end - at : BUSTER_IR_UNROLL_BATCH;
+        any = _mm512_or_si512(any, _mm512_maskz_loadu_epi8(UINT64_MAX >> (BUSTER_IR_UNROLL_BATCH - lanes), classes + at));
     }
-    else
-    {
-        for (uint32_t at = first; at < end; at += 1)
-        {
-            result |= classes[at];
-        }
-    }
-    (void)scalar;
-    return result;
+    uint64_t word = (uint64_t)_mm512_reduce_or_epi64(any);
+    word |= word >> 32;
+    word |= word >> 16;
+    word |= word >> 8;
+    return (uint32_t)(word & 0xff);
 }
 
 static uint64_t ir_unroll_mask(uint32_t type)
@@ -691,7 +664,7 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
             const uint32_t first = f->block_offsets[block];
             const uint32_t end = f->block_offsets[(uint64_t)block + 1];
             instructions += end - first;
-            classes |= ir_unroll_block_classes(work->classes, first, end, BUSTER_SCALAR_PATH(options.scalar));
+            classes |= ir_unroll_block_classes(work->classes, first, end);
             labeled = labeled || work->labeled[block] != 0;
             for (uint32_t edge = cfg->successor_offsets[block]; edge < cfg->successor_offsets[(uint64_t)block + 1]; edge += 1)
             {
@@ -952,13 +925,13 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
 // The fixed operands of instructions [first, first + count) of `f`, through `map` where they are values, into `a`, `b`
 // and `c` from `out`; their opcode, type, flags and alignment copied. Phis', calls' and extra values' operands, which
 // the extra array holds, are the caller's.
-static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count, const uint32_t* map, IrFunction* view, uint32_t out, bool scalar)
+static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count, const uint32_t* map, IrFunction* view, uint32_t out)
 {
     memcpy(view->op + out, f->op + first, count);
     memcpy(view->type + out, f->type + first, count);
     memcpy(view->flags + out, f->flags + first, count);
     memcpy(view->alignment_log2 + out, f->alignment_log2 + first, count);
-    if (!scalar && f->instruction_count <= INT32_MAX)
+    if (f->instruction_count <= INT32_MAX)
     {
         const __m512i none = _mm512_set1_epi32(-1);
         const __m512i one = _mm512_set1_epi32(1);
@@ -994,7 +967,6 @@ static void ir_unroll_remap(const IrFunction* f, uint32_t first, uint32_t count,
             view->c[out + k] = (mask & 4) != 0 ? map[f->c[i]] : f->c[i];
         }
     }
-    (void)scalar;
 }
 
 // The rewrite's state: the new function's columns and the next free extra word, call and constant.
@@ -1146,7 +1118,7 @@ static uint32_t ir_unroll_clone(const IrUnrollWork* work, const IrUnrollLoop* lo
 // One admitted loop's part of the rewrite, after the original blocks: its preheader's additions and branch, its header's
 // phis entered from MX, then MH and the copies, and MX. `map` holds `values` on entry and on return; `blocks_map` is
 // scratch of a word per original block.
-static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* loop, IrUnrollEmit* emit, const uint32_t* offsets, const uint32_t* values, uint32_t* map, uint32_t* blocks_map, Arena* scratch, bool scalar)
+static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* loop, IrUnrollEmit* emit, const uint32_t* offsets, const uint32_t* values, uint32_t* map, uint32_t* blocks_map, Arena* scratch)
 {
     const IrFunction* const f = work->function;
     IrFunction* view = emit->view;
@@ -1274,8 +1246,8 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
                 const uint32_t prefix = t == 0 ? (copy == 0 ? loop->main_phis : 2u) : 0u;
                 const uint32_t terminator = offsets[(uint64_t)out_block + 1] - 1u;
                 const uint32_t branch = end - 1u;
-                ir_unroll_remap(f, first, branch - first, map, view, offsets[out_block] + prefix, scalar);
-                ir_unroll_remap(f, branch, 1, map, view, terminator, scalar);
+                ir_unroll_remap(f, first, branch - first, map, view, offsets[out_block] + prefix);
+                ir_unroll_remap(f, branch, 1, map, view, terminator);
                 ir_unroll_extras(emit, f, first, branch, offsets[out_block] + prefix, map, blocks_map);
                 for (uint32_t i = first; view->debug != NULL && i < end; i += 1)
                 {
@@ -1413,7 +1385,7 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
 }
 
 // The rewritten function: original blocks in place, the preheaders' additions, then each loop's new blocks.
-static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scratch, bool scalar, IrFunction* result)
+static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scratch, IrFunction* result)
 {
     const IrFunction* const f = work->function;
     const uint64_t mark = output->length;
@@ -1545,14 +1517,14 @@ static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scrat
         {
             const uint32_t first = f->block_offsets[b];
             const uint32_t end = f->block_offsets[(uint64_t)b + 1];
-            ir_unroll_remap(f, first, end - first - 1, values, &view, offsets[b], scalar);
-            ir_unroll_remap(f, end - 1, 1, values, &view, offsets[(uint64_t)b + 1] - 1, scalar);
+            ir_unroll_remap(f, first, end - first - 1, values, &view, offsets[b]);
+            ir_unroll_remap(f, end - 1, 1, values, &view, offsets[(uint64_t)b + 1] - 1);
             ir_unroll_extras(&emit, f, first, end - 1, offsets[b], values, NULL);
             ir_unroll_extras(&emit, f, end - 1, end, offsets[(uint64_t)b + 1] - 1, values, NULL);
         }
         for (uint32_t k = 0; error == IR_OK && k < work->accepted_count; k += 1)
         {
-            error = ir_unroll_rewrite_loop(work, &work->accepted[k], &emit, offsets, values, map, blocks_map, scratch, scalar);
+            error = ir_unroll_rewrite_loop(work, &work->accepted[k], &emit, offsets, values, map, blocks_map, scratch);
         }
         view.extra_count = emit.extra;
         view.call_count = emit.call;
@@ -1576,7 +1548,6 @@ static __attribute__((unused)) IrCheck ir_optimize_unroll(const IrFunction* func
 {
     const uint64_t om = output->length;
     const uint64_t sm = scratch->length;
-    const bool scalar = BUSTER_SCALAR_PATH(options.scalar);
     IrUnrollWork work = { .function = function };
     work.statistics.function = *function;
     IrCheck check = ir_check(output != scratch ? IR_OK : IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0);
@@ -1585,7 +1556,7 @@ static __attribute__((unused)) IrCheck ir_optimize_unroll(const IrFunction* func
     bool ok = check.error == IR_OK;
     work.classes = ir_allocate(scratch, count, 1, &ok);
     check.error = check.error == IR_OK && !ok ? IR_ERROR_MEMORY : check.error;
-    const bool phis = check.error == IR_OK && count != 0 && ir_unroll_classify(function, work.classes, scalar);
+    const bool phis = check.error == IR_OK && count != 0 && ir_unroll_classify(function, work.classes);
     if (check.error == IR_OK && phis)
     {
         check.error = ir_cfg_validated(function, scratch, scratch, &work.cfg);
@@ -1659,7 +1630,7 @@ static __attribute__((unused)) IrCheck ir_optimize_unroll(const IrFunction* func
     if (check.error == IR_OK && work.accepted_count != 0)
     {
         IrFunction rewritten = { 0 };
-        check.error = ir_unroll_rewrite(&work, output, scratch, scalar, &rewritten);
+        check.error = ir_unroll_rewrite(&work, output, scratch, &rewritten);
         work.statistics.function = rewritten;
     }
     if (check.error == IR_OK || check.error == IR_ERROR_UNSUPPORTED)

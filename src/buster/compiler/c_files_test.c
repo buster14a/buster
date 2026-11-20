@@ -312,7 +312,7 @@ static bool files_test_run(const FilesTestWork* work, uint32_t lanes, const char
         }
         for (uint32_t k = 0; result && k < 2; k += 1)
         {
-            out->text[k] = pp_test_print(&unit, !options.scalar, k != 0, &out->text_length[k]);
+            out->text[k] = pp_test_print(&unit, k != 0, &out->text_length[k]);
             result = out->text[k] != 0;
         }
         pp_release(&unit);
@@ -747,7 +747,7 @@ static bool files_test_tree(const char* directory, const uint32_t* lanes, uint32
     const char* includes[3] = { directories[0], directories[1], directories[2] };
     const char* systems[1] = { directories[3] };
     FilesTestWork work = {
-        .name = vectorized && split ? "tree, split once" : vectorized ? "tree" : split ? "tree, split once (scalar kernels)" : "tree (scalar kernels)",
+        .name = vectorized && split ? "tree, split once" : vectorized ? "tree" : split ? "tree, split once (scalar body scan)" : "tree (scalar body scan)",
         .thresholds = true,
         .lane_bytes = 0,
         .split_bytes = split ? UINT64_MAX : 0,

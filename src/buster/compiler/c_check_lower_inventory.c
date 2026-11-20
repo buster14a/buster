@@ -619,7 +619,7 @@ struct LowerSource
 // PPOptions.node_front for the sources lower_source_open opens (measure-node-machine --shadow --front, #2524); 0 for none.
 static uint8_t lower_source_node_front;
 // PPOptions.node_reader for them (measure-node-machine --shadow --front-tests); 0 for none.
-static uint8_t lower_source_node_reader;
+static uint16_t lower_source_node_reader;
 
 // Opens `file`, read with `options`, into `source`, with the backend's tables built: whether its options could be read
 // (source->prepared says whether it reached its selected program).

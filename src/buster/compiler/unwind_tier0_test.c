@@ -434,7 +434,7 @@ static bool unwind_tier0_test_fixture(UnwindTier0Fixture* fixture, uint8_t saved
 static bool unwind_tier0_test_measure(UnwindTier0Fixture* fixture)
 {
     bool valid = x86_validate(fixture->records, fixture->code.count) == fixture->code.count;
-    const int64_t size = valid ? x86_measure_scalar(fixture->records, fixture->code.count, fixture->offsets) : -1;
+    const int64_t size = valid ? x86_measure(fixture->records, fixture->code.count, fixture->offsets) : -1;
     valid = valid && size > 0 && size <= INT32_MAX;
     if (valid)
     {
@@ -1192,7 +1192,7 @@ static void unwind_tier0_test_terminal(UnwindTier0Test* test, Arena* arena)
         const uint64_t mark = arena->length;
         const CBuiltinTerminalHelper helper = cbuiltin_terminal_helper(ids[i], arena);
         uint32_t offsets[2] = { 0 };
-        const int64_t size = helper.code.error == TIER0_OK ? x86_measure_scalar(helper.code.records, helper.code.count, offsets) : -1;
+        const int64_t size = helper.code.error == TIER0_OK ? x86_measure(helper.code.records, helper.code.count, offsets) : -1;
         const bool ready = unwind_tier0_test_expect(test, helper.code.error == TIER0_OK && helper.code.count == 1 && size == 2, "build the terminal builtins' helper", 7000 + i);
         const UnwindFunction expected = {
             .size = 2,

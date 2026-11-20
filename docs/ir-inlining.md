@@ -134,9 +134,9 @@ address, vector constant, machine row and slot rows. The default
 maximum is 32 cost units. This is a provisional size rule, not a measurement
 of instruction bytes, latency or profitability.
 
-A masked 16-lane unsigned AVX-512 sweep compares cost against the threshold.
-The scalar twin uses the same unsigned comparison. The last batch reads and
-writes only active elements. Call-order admission then enforces:
+A masked 16-lane unsigned AVX-512 sweep compares cost against the threshold
+(#2924 deleted its scalar twin). The last batch reads and writes only active
+elements. Call-order admission then enforces:
 
 - At most 256 additional instructions per function by default.
 - At most 2²² instructions across the input plus admitted growth by default.
@@ -190,7 +190,7 @@ wrapper's operands until #2750 (an SSE2 loop ran 15 times slower than Tier 0's
 on the 9700X, with 14 store-to-load conflicts an iteration);
 `test-checker-driver`'s vector copies' fixture holds x86-64's and x86-64-v3's
 frames to x86-64-v4's. `test-ir-inline` runs a by-value unit on the IR's
-interpreter before and after inlining (both copy kinds, both twins), after SROA
+interpreter before and after inlining (both copy kinds), after SROA
 and after promotion, which leaves only the parameter's two loads and its store;
 and checks a rows fixture's columns (the interpreter has no model of x86
 records). The original aggregates fixture runs its expansions with stores and
@@ -210,7 +210,7 @@ The caller's own nodes move by a step function of the expanded sites before
 them: a caller with at most `IrInlineOptions.add_sites` sites (8, #2541 step 3's
 measurement) rebases its runs 16 nodes a vector by a compare and masked add a
 site, one with more by gathers through its destination tables; both write the
-scalar twin's columns, and `test-ir-inline` runs each unit both ways.
+same columns, which `test-ir-inline` compares on every unit.
 
 Under `-g` (a caller and a callee with source sidecars and a call with an
 origin), an expansion is an instance (`IrDebugInline`, #2541 step 3): its
@@ -276,8 +276,9 @@ boundaries; it does not account for temporary peaks released inside shared
 verification helpers or transient use of the output tail by those helpers.
 
 The handoff is columnar and directly consumable by the existing IR passes.
-The graph protocol, indexed operand remapping and growth admission are
-currently scalar. Only the cost-threshold sweep has a separate vector path.
+The graph protocol and growth admission are scalar. The cost-threshold sweep,
+the caller's runs and the splice of a callee whose parameters begin it are
+AVX-512 alone; any other callee is spliced a node at a time (below).
 Target measurements and further work on column rebasing are required before
 claiming the complete data-parallel or throughput acceptance of #139.
 
@@ -320,19 +321,21 @@ labels name its first part, and its successors' phis name its last part as
 their predecessor. A debug region of a split block has no single block any
 more and becomes unavailable; regions of other blocks follow their new IDs.
 
-The callee's operand columns have two twins. The scalar one
-(`ir_inline_splice_scalar`) rewrites a node at a time through
-`ir_inline_node`, which rebases rows by operation. The vector one
-(`ir_inline_splice_vector`), taken where the callee's parameters are the first
-nodes of its body and number 16 or fewer, copies the four byte columns 16 nodes
+The callee's operand columns are rewritten one of two ways. Any callee but the
+vector splice's goes a node at a time (`ir_inline_splice_scalar`) through
+`ir_inline_node`, which rebases rows by operation: a fallback, which #2924's
+phase D vectorizes. The vector splice (`ir_inline_splice_vector`), taken where
+the callee's parameters are the first nodes of its body and number 16 or fewer,
+copies the four byte columns 16 nodes
 a vector, looks each operand column's kinds up by opcode (`ir_lookup_bytes`
 over tables built from the IR's own operand tables: a value, an optional value,
 a block, or a constant, vector, slot or address row), moves values past the
 parameters by the run's shift, makes parameters their arguments by a permute,
 and adds each other kind's base by a permute of the bases' row. Both then
 rebuild phis', switches' and calls' slices and the returns in node order
-(`ir_inline_rebuild`), so the two write the same columns, which
-`test-ir-inline` compares on every unit.
+(`ir_inline_rebuild`). Until #2924 a scalar twin spliced every callee a node
+at a time; `test-ir-inline` folds every unit's result into a digest frozen where
+the two agreed.
 
 The interpreter's tests cover it ("Validation", below), and the Tier 1 driver's
 `test-checker-driver` fixture builds always_inline helpers with two returns, a
@@ -370,13 +373,14 @@ as before. The decision tests add four calls whose signatures aren't their
 callees' prototypes' (#2721): an unprototyped call of the callee's own
 argument, which is taken; a variadic callee's call with an argument past its
 parameter; an unprototyped call with one; and a call through a declaration of
-another type, each kept, its caller as it was, by both twins. Separate transitive-closure tests check 64 call graphs,
+another type, each kept, its caller as it was. Separate transitive-closure tests check 64 call graphs,
 while guarded pages cover
 empty and partial unsigned cost batches through 65 entries. Disabled mode,
 exact thresholds, growth budgets (32,769 calls whose constant rows would
 pass 2²⁰ among them), malformed metadata and many arena-failure
-capacities exercise explicit decisions and transactional rollback. Scalar
-and vector outputs must match in every retained body and audit column.
+capacities exercise explicit decisions and transactional rollback. Every
+retained body and audit column goes into the digest (above), and the caller's
+two run forms must match in each.
 
 #2541's fixtures (`ir_optimize_inline_cfg_test.c`) generate units from text
 templates with random constants, at `i32` and `i64`: nine callees (a diamond,
@@ -386,7 +390,10 @@ leaf, slots with and without lifetime markers, an unreachable path, parameters
 that don't begin the body, and stores to memory through an address row) into
 six callers (from the entry, from a loop's latch, twice from a phi's block,
 before a branch whose successor's phi names the call's block, beside a guarded
-call of a callee that never returns, and from a switch's targets). Each unit is
+call of a callee that never returns, and from a switch's targets). Each callee
+also runs with a constant ahead of its parameters, which sends it to the
+node-at-a-time splice (#2924), and a diamond of 16 and one of 17 parameters, the
+vector splice's bound, run from a caller of their own. Each unit is
 inlined without `control_flow` (every such call `IR_INLINE_BODY`) and with it
 (every call expanded but the external one's), and runs on the shared IR
 interpreter before inlining, after it, and after SROA and promotion of the
@@ -398,8 +405,8 @@ loads that copy the result out of those objects, which the interpreter, giving
 each slot bytes of its own, can't see. Each of ten mutants of the splice fails
 the suite: one return's phi operand, a callee phi's block base, the caller's
 predecessor remap, a switch case's constant rebase, a parameter's binding, the
-vector path's value shift and one entry of its kind tables, the scalar twin's
-`cbr` block base, the lifetime ends before the result's copy, and a caller
+vector path's value shift and one entry of its kind tables, the node-at-a-time
+splice's `cbr` block base, the lifetime ends before the result's copy, and a caller
 branch's remap.
 
 The per-callee limits and the caller-only rewrite (`IrInlineUnit.limits` and

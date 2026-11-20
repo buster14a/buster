@@ -113,7 +113,8 @@ static void cc_compat_response_files(CCCompatibilityTest* test)
     }
     cc_compat_expect(test, files, "write overdeep response chain");
     cc_compat_response_failure(test, "response nesting is bounded", "@rsp-depth-0.rsp", "nesting limit");
-    const size_t arguments = 65537;
+    // Three command-line operands reach the exact limit. cc_compat_response_failure supplies four.
+    const size_t arguments = 65536 - 3;
     char* many = malloc(arguments * 2);
     if (many != NULL)
     {
@@ -125,7 +126,12 @@ static void cc_compat_response_files(CCCompatibilityTest* test)
     }
     files = many != NULL && cc_compat_response_bytes(test, "rsp-many.rsp", many, arguments * 2);
     free(many);
-    cc_compat_expect(test, files, "write response argument-count overflow");
+    cc_compat_expect(test, files, "write response argument-count boundary");
+    const char* const maximum[] = { "x", "@rsp-many.rsp", "x", "-dumpversion", NULL };
+    information = cc_compat_run(test, test->compiler, NULL, maximum);
+    cc_compat_expect(test, information.status == 0 && information.output != NULL && strcmp(information.output, "0.0.0\n") == 0,
+                     "exactly 65536 expanded operands retain the trailing information probe");
+    cc_compat_release(&information);
     cc_compat_response_failure(test, "expanded response argument count is bounded", "@rsp-many.rsp", "argument limit");
     snprintf(path, sizeof(path), "%s/rsp-large.rsp", test->directory);
     const int large = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);

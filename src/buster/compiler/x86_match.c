@@ -9,9 +9,9 @@
 // pattern the field's sign extension gives back, so that `add eax, 0xffffffff` takes the imm8 (-1), as GNU as has it.
 // Any other immediate (a count, a control byte) takes the field's bits, signed or unsigned, as GNU as takes them.
 // Initialize one caller-owned index for one X86Target, after x86_semantics_initialize, then probe a mnemonic bucket,
-// never the whole catalogue per instruction. Target-ineligible forms are excluded at initialization, including from
-// the scalar path. Candidate operand templates and immediate ranges are compared sixteen at a time, with an exact
-// scalar twin. Both paths run x86_validate at the frontend boundary. No compiler expression optimization is done here.
+// never the whole catalogue per instruction. Target-ineligible forms are excluded at initialization. Candidate operand
+// templates and immediate ranges are compared sixteen at a time, and every candidate that survives runs x86_validate at
+// the frontend boundary. No compiler expression optimization is done here.
 
 #define BUSTER_X86_MATCH_BUCKETS 4096
 #define BUSTER_X86_MATCH_OPERANDS 4
@@ -75,7 +75,7 @@ struct X86MatchIndex
     uint32_t broadcast[X86_FORM_COUNT];
     // The AT&T suffix's width (x86_match_suffix_width) in bits 0..7; spelling, family and EVEX predicates above it.
     uint32_t attributes[X86_FORM_COUNT];
-    // The values an immediate takes (x86_match_immediate's, as intervals): from immediate_min (signed) to immediate_max
+    // The values an immediate takes (#221's rule, x86_immediate_encodes, as intervals): from immediate_min (signed) to immediate_max
     // (unsigned), and for a value whose field is narrower than its width, the unsigned spellings of its negative
     // values at the width too, from immediate_spelling to immediate_spelling + immediate_max (0 without them).
     int64_t immediate_min[X86_FORM_COUNT];
@@ -583,148 +583,9 @@ static void x86_match_field(uint32_t form, const X86Operand* operand, X86Instruc
     }
 }
 
-// Whether an immediate operand fits a form's immediate (the scalar path's rule, the vector path's oracle): a symbol in a
-// field of 4 bytes or more; a value as #221's rule takes it (x86_immediate_encodes), once it is a value of the
-// operation's width (an __int128 past it is none, though its low 64 bits might be); any other immediate's bits in the
-// field, as x86_match_range says.
-static bool x86_match_immediate(const X86FormDescription* form, const X86Operand* operand)
-{
-    const uint32_t number = (uint32_t)(form - x86_form_descriptions);
-    const uint32_t bytes = form->immediate_bytes;
-    bool fits = false;
-    if (operand->symbolic)
-    {
-        fits = bytes >= 4;
-    }
-    else if (x86_match_value(number))
-    {
-        const uint32_t width = x86_effects(number)->width;
-        const __int128 low = -((__int128)1 << (8 * width - 1));
-        const __int128 high = ((__int128)1 << (8 * width)) - 1;
-        fits = operand->value >= low && operand->value <= high && x86_immediate_encodes(number, (int64_t)operand->value);
-    }
-    else if (bytes != 0)
-    {
-        const X86MatchRange range = x86_match_range(number);
-        fits = operand->value >= range.min && operand->value <= (__int128)range.max;
-    }
-    return operand->kind == X86_OPERAND_IMMEDIATE && bytes != 0 && fits;
-}
-
-static bool x86_match_operand(const X86Operand* operand, uint16_t descriptor, uint8_t width, X86Instruction* instruction, uint8_t role)
-{
-    bool result = false;
-    if (operand->kind == X86_OPERAND_REGISTER)
-    {
-        result = (descriptor & BUSTER_X86_OPERAND_REGISTER) != 0 && operand->class == (descriptor & BUSTER_X86_OPERAND_CLASS);
-        if (role == X86_MATCH_RM)
-        {
-            instruction->rm = operand->reg;
-        }
-        else if (role == X86_MATCH_REG)
-        {
-            instruction->reg = operand->reg;
-        }
-        else
-        {
-            instruction->vvvv = operand->reg;
-        }
-    }
-    else if (role == X86_MATCH_RM && operand->kind == X86_OPERAND_MEMORY)
-    {
-        result = (descriptor & BUSTER_X86_OPERAND_MEMORY) != 0 && (operand->width == 0 || operand->width == width);
-        // A VSIB operand's index is a vector register of the descriptor's class; any other memory's, a general one.
-        result &= (descriptor & BUSTER_X86_OPERAND_VSIB) != 0 ? operand->vsib == (descriptor & BUSTER_X86_OPERAND_CLASS) : operand->vsib == 0;
-        result &= operand->symbolic || (operand->value >= INT32_MIN && operand->value <= INT32_MAX);
-        instruction->rm = operand->base;
-        instruction->index = operand->index;
-        instruction->mode = operand->mode;
-        instruction->displacement = operand->symbolic ? INT32_MIN : (int32_t)operand->value;
-        // An SS override (3) takes a form below BUSTER_X86_FORM_SS_ROWS (x86_form_has_segment).
-        result &= x86_form_has_segment(instruction->form, operand->segment);
-        instruction->form = result ? (uint16_t)(instruction->form + operand->segment * X86_FORM_COUNT) : instruction->form;
-    }
-    return result;
-}
-
-static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86Instruction* instruction)
-{
-    const X86FormDescription* form = &x86_form_descriptions[f];
-    uint8_t roles[4];
-    // The target-specific index contains only supported, eligible forms. pushw is also push's 16-bit register and
-    // memory forms, as in GNU as.
-    bool result = x86_match_name(request->mnemonic, form->mnemonic) || (x86_match_name(request->mnemonic, "mov") && strcmp(form->mnemonic, "movabs") == 0) || (x86_match_name(request->mnemonic, "pushw") && strcmp(form->mnemonic, "push") == 0 && form->operand_bytes == 2);
-    result &= x86_match_roles(form->syntax, roles) == request->count;
-    result &= request->width == 0 || request->width == x86_match_suffix_width(form);
-    result &= ((form->evex & BUSTER_X86_EVEX_BROADCAST) != 0) == (request->broadcast != 0);
-    result &= ((form->evex & BUSTER_X86_EVEX_ROUNDING) != 0) == request->rounding;
-    result &= (form->evex & (BUSTER_X86_EVEX_SAE | BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_SOURCE_CONDITION)) == 0;
-    if (request->decorations != 0 && form->family != BUSTER_X86_FAMILY_EVEX)
-    {
-        result = false;
-    }
-    *instruction = (X86Instruction){.form = f, .decorations = request->decorations};
-    for (uint32_t i = 0; result && i < request->count; i += 1)
-    {
-        const X86Operand* operand = &request->operands[i];
-        const uint8_t role = roles[i];
-        switch (role)
-        {
-        case X86_MATCH_REG:
-            result = x86_match_operand(operand, form->reg, form->operand_bytes, instruction, role);
-            break;
-        case X86_MATCH_RM:
-            result = x86_match_operand(operand, form->rm, (form->evex & BUSTER_X86_EVEX_BROADCAST) ? form->disp8_scale : form->operand_bytes, instruction, role);
-            break;
-        case X86_MATCH_VVVV:
-            result = x86_match_operand(operand, form->vvvv, form->operand_bytes, instruction, role);
-            break;
-        case X86_MATCH_IMM:
-            result = x86_match_immediate(form, operand);
-            x86_match_field(f, operand, instruction);
-            break;
-        case X86_MATCH_REL:
-        {
-            result = operand->kind == X86_OPERAND_IMMEDIATE && operand->symbolic;
-            instruction->displacement = 0;
-        }
-        break;
-        case X86_MATCH_ACC:
-            result = operand->kind == X86_OPERAND_REGISTER && operand->class <= BUSTER_X86_CLASS_GPR64 && operand->reg == 0 && operand->width == form->operand_bytes;
-            break;
-        case X86_MATCH_CL:
-            result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_GPR8 && operand->reg == 1;
-            break;
-        case X86_MATCH_ONE:
-            result = operand->kind == X86_OPERAND_IMMEDIATE && !operand->symbolic && operand->value == 1;
-            break;
-        case X86_MATCH_IS4:
-            result = operand->kind == X86_OPERAND_REGISTER && operand->class == (form->reg & BUSTER_X86_OPERAND_CLASS);
-            instruction->immediate = (int32_t)((uint32_t)operand->reg << 4);
-            break;
-        case X86_MATCH_XMM0:
-            result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_XMM && operand->reg == 0;
-            break;
-        case X86_MATCH_ST0:
-            result = operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_ST && operand->reg == 0;
-            break;
-        default:
-            result = false;
-            break;
-        }
-    }
-    if (result && request->broadcast != 0)
-    {
-        result = request->broadcast == (uint32_t)form->operand_bytes / form->disp8_scale;
-    }
-    result = result && x86_validate(instruction, 1) == 1;
-    return result;
-}
-
 // Sixteen candidate forms of one mnemonic bucket. All operand kind/class/width, fixed-register, ISA, broadcast and
 // immediate-extension predicates are evaluated in columns. Only survivors construct records and run the encoder's
-// detailed legality boundary (high-byte/REX combinations, address and EVEX restrictions). The scalar path below does
-// not use these templates: its independent semantic matcher is also their oracle.
+// detailed legality boundary (high-byte/REX combinations, address and EVEX restrictions).
 static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X86MatchRequest* request, uint32_t first, uint32_t count)
 {
     const __mmask16 valid = (1u << count) - 1;
@@ -752,8 +613,8 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
             const __m512i fixed = _mm512_srli_epi32(templates, 24);
             const __mmask16 accumulator = _mm512_cmpeq_epi32_mask(roles, _mm512_set1_epi32(X86_MATCH_ACC));
             const __mmask16 class_match = _mm512_cmpeq_epi32_mask(classes, _mm512_set1_epi32(value->class));
-            // The scalar accumulator rule sizes its implicit register from width, even for a malformed direct
-            // request whose class disagrees. Keep that predicate exact; the parser itself emits consistent pairs.
+            // The accumulator's implicit register is sized from width, even for a malformed direct request whose
+            // class disagrees. Keep that predicate exact; the parser itself emits consistent pairs.
             mask &= (accumulator & (value->class <= BUSTER_X86_CLASS_GPR64 ? 65535u : 0)) | (~accumulator & class_match);
             mask &= _mm512_cmpeq_epi32_mask(fixed, _mm512_setzero_si512()) | _mm512_cmpeq_epi32_mask(fixed, _mm512_set1_epi32(value->reg + 1));
             const __m512i widths = _mm512_and_epi32(_mm512_srli_epi32(templates, 8), _mm512_set1_epi32(255));
@@ -810,7 +671,6 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
 
 // Only the vector predicate's survivors reach here. The role columns replace decoding the syntax and repeating
 // every operand/name comparison. Full encoder legality still runs before any untrusted record can be encoded.
-// x86_match_candidate remains the independent scalar semantic matcher.
 static bool x86_match_candidate_indexed(const X86MatchIndex* index, const X86MatchRequest* request, uint32_t at, X86Instruction* instruction)
 {
     const uint32_t f = index->forms[at];
@@ -855,10 +715,8 @@ static bool x86_match_candidate_indexed(const X86MatchIndex* index, const X86Mat
     return x86_validate(instruction, 1) == 1;
 }
 
-static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* request, bool vectorized)
+static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* request)
 {
-    (void)vectorized;
-
     X86Match result = {0};
     const uint32_t bucket = x86_match_bucket(index, request->mnemonic);
     uint32_t memory_width = 0;
@@ -871,24 +729,13 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
     {
         const uint32_t left = index->begin[bucket + 1] - first;
         const uint32_t n = left < 16 ? left : 16;
-        uint32_t mask = 0;
-        if (BUSTER_VECTOR_PATH(vectorized))
-        {
-            mask = x86_match_candidates_vector(index, request, first, n);
-        }
-        else
-        {
-            for (uint32_t i = 0; i < n; i += 1)
-            {
-                mask |= (uint32_t)(index->counts[first + i] == request->count) << i;
-            }
-        }
+        uint32_t mask = x86_match_candidates_vector(index, request, first, n);
         while (mask != 0)
         {
             const uint32_t at = first + __builtin_ctz(mask);
             mask &= mask - 1;
             X86Instruction instruction;
-            bool accepted = BUSTER_VECTOR_PATH(vectorized) ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
+            bool accepted = x86_match_candidate_indexed(index, request, at, &instruction);
             // XCHG of EAX with itself isn't 90, which is NOP and leaves RAX's upper half as it was: its form is 87's, as GNU as
             // encodes it (#1134 admits the accumulator's 90+r forms). RAX's with itself is a NOP either way: 48 90, where
             // GNU as writes 90.
@@ -903,8 +750,8 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                     memory_width = form->operand_bytes;
                 }
                 uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-                // Both candidate builders have crossed the complete x86_validate boundary. The scalar API would
-                // repeat that validation merely to get this length; no record changes between the two boundaries.
+                // The candidate has crossed the complete x86_validate boundary, and its record doesn't change after
+                // it: encode_one gives its length.
                 const uint32_t length = encode_one(&instruction, bytes, X86_ENCODER_MODE_64);
                 // At the same length, GNU as's choice: SSE2's movq between memory and an XMM register in its own form
                 // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too;

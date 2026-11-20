@@ -79,6 +79,9 @@ struct PPFuzzTally
     // Differences minimized and saved, and the ones reported.
     uint64_t saved;
     uint64_t reported;
+    // The sum of the cases' vectorized runs' digests (pp_kernel_digest), as -E and as a compile runs them: the cases'
+    // outputs, whatever the workers' shares, which must be the recorded sum at the default seed, count and start.
+    uint64_t digest;
 };
 
 // A worker's preprocessors (the vectorized kernels' and the scalar twins'), and their intern tables, which each case
@@ -902,26 +905,23 @@ static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char
     for (uint32_t markers = 0; result == BUSTER_PPF_EQUAL && markers < 2; markers += 1)
     {
         size_t vector_length = 0;
-        size_t scalar_length = 0;
-        char* vector_text = pp_test_print(&runs[0], true, markers != 0, &vector_length);
-        char* scalar_text = pp_test_print(&runs[0], false, markers != 0, &scalar_length);
-        if (vector_text == 0 || scalar_text == 0 || vector_length != scalar_length || memcmp(vector_text, scalar_text, vector_length) != 0)
+        char* vector_text = pp_test_print(&runs[0], markers != 0, &vector_length);
+        if (vector_text == 0)
         {
             result = BUSTER_PPF_KERNEL_PRINTERS;
             if (!pp_test_quiet)
             {
-                printf("%s: the printers differ%s (%zu and %zu bytes)\n", name, markers ? " with line markers" : "", vector_length, scalar_length);
+                printf("%s: -E can't print the run%s\n", name, markers ? " with line markers" : "");
             }
         }
         free(vector_text);
-        free(scalar_text);
     }
     if (result == BUSTER_PPF_EQUAL && !pp_fuzz_unprintable(&runs[0], state))
     {
         PPSpellings ours = { 0 };
         PPSpellings printed = { 0 };
         size_t length = 0;
-        char* text = pp_test_print(&runs[0], true, false, &length);
+        char* text = pp_test_print(&runs[0], false, &length);
         const bool lexed = text != 0 && pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &printed);
         char label[160];
         snprintf(label, sizeof(label), "%s (printed)", name);
@@ -1292,6 +1292,7 @@ static bool pp_fuzz_case(Arena* arena, Arena* scratch, const PPFuzzOptions* opti
         const PreprocessorFuzzDifference kernels = pp_fuzz_kernels(&pp_fuzz_state, name);
         pp_test_quiet = quiet;
         tally->unprintable += pp_fuzz_state.unprintable;
+        tally->digest += pp_kernel_digest(&pp_fuzz_state.runs[0]) + 31 * pp_kernel_digest(&pp_fuzz_state.runs[2]);
         *ours = pp_fuzz_output(&pp_fuzz_state.runs[0], pp_fuzz_state.ran[0], arena, lost);
         tally->accepted += ours->valid && ours->accepted;
         test_case->isolated |= pp_fuzz_leaks(&pp_fuzz_state.runs[0]);
@@ -1768,6 +1769,7 @@ static void pp_fuzz_add(PPFuzzTally* total, const PPFuzzTally* part)
     total->unprintable += part->unprintable;
     total->saved += part->saved;
     total->reported += part->reported;
+    total->digest += part->digest;
 }
 
 // Reads a worker's counts from its pipe. Returns false if it can't read them all.
@@ -1937,7 +1939,10 @@ static bool pp_fuzz_batch(const PPFuzzOptions* options)
             }
             printf("\n");
             const bool compared = !options->with_clang || (total->compared == total->cases && total->unverified == 0);
-            result = result && total->cases == options->count && compared && total->kernels == 0 && total->differences == 0 && total->oracle == 0 && total->invalid == 0;
+            const bool frozen = options->seed == 1 && options->first == 0 && options->count == BUSTER_PP_FUZZ_CASES;
+            const bool recorded = !frozen || pp_kernel_digest_matches(total->digest, "fuzz", mode == 1 ? "c23" : "c17");
+            result = result && total->cases == options->count && compared && total->kernels == 0 && total->differences == 0 && total->oracle == 0 && total->invalid == 0 &&
+                     recorded;
         }
     }
     pp_fuzz_epoch_end(saved_epoch);

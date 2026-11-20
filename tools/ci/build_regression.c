@@ -1308,7 +1308,7 @@ static const char ownership_backend_units[] = "main_unit_backend.c main_unit_che
 static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/c_checker_test.c", ownership_checker_units, "comparison helpers for checker, builtin and backend consumers", UINT64_C(0xd9302eb5f10668a6) },
     { "src/buster/compiler/c_parser_test.c", ownership_main_units, "parser construction and subprocess helpers used by shared parser/checker roots", UINT64_C(0xe85650d00dd1a0ba) },
-    { "src/buster/compiler/c_preprocessor_test.c", ownership_main_units, "preprocessor input and result builders used by shared parser helpers", UINT64_C(0x530f34f7bb6a2975) },
+    { "src/buster/compiler/c_preprocessor_test.c", ownership_main_units, "preprocessor input and result builders used by shared parser helpers, and the digest tables (TestDigests) the parser's and the checker's tests read", UINT64_C(0x20dc465340221dac) },
     { "src/buster/compiler/c_preprocessor_history_test.c", "main_unit_frontend.c main_unit_checker.c", "history matcher for preprocessor and checker pragma tests", UINT64_C(0x338bcc2b5286ad74) },
     { "src/buster/compiler/foreign_test.c", "main_unit_executable.c main_unit_checker.c", "foreign executable and checker debug/unwind builders", UINT64_C(0x3932f8b6055a62cb) },
     { "src/buster/compiler/ir_source_test.c", "main_unit_backend.c main_unit_checker.c", "source preparation interface for IR commands; CHECKER owns its implementation", UINT64_C(0x8366575ba00f1461) },
@@ -1335,7 +1335,7 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/snapshot_test.c", "main_unit_executable.c main_unit_checker.c", "executable patch checks shared with checker debug tests", UINT64_C(0xf83ab1966416eae8) },
     { "src/buster/compiler/static_test.c", "main_unit_executable.c main_unit_dynamic.c", "static executable writer shared by executable and dynamic tests", UINT64_C(0xe0e54572562aaf20) },
     { "src/buster/compiler/tier0_benchmark_measure.c", "main_unit_backend.c main_unit_checker.c", "counter utilities for backend IR and checker source benchmarks", UINT64_C(0x16670544301d2354) },
-    { "src/buster/compiler/x86_64_encoder_test.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_assembler.c main_unit_link.c main_unit_backend.c", "encoding/execute helpers for these six test families", UINT64_C(0xb84cf97ab4156949) },
+    { "src/buster/compiler/x86_64_encoder_test.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_assembler.c main_unit_link.c main_unit_backend.c", "encoding/execute helpers for these six test families", UINT64_C(0xc4d128a61e85c6d3) },
     { "src/buster/compiler/x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c", "object reading and instruction decoding for checker AMX and intrinsic tests", UINT64_C(0x83a1dc58c44b290a) },
     { "src/buster/compiler/x86_semantics_test.c", ownership_main_units, "form names for DRIVER/BACKEND and six forced-emission globals retained in all units", UINT64_C(0x929ee4e6ddcf62ef) },
     { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization for production/profile and test subprocesses", UINT64_C(0x433189fdd139cffd) },
@@ -1522,6 +1522,10 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
         { "src/buster/compiler/c_check_node_machine_facts.c", "main_unit_checker.c", false },
         // #2850's step 2's census of what reads T's record, beside it.
         { "src/buster/compiler/c_check_node_machine_reads.c", "main_unit_checker.c", false },
+        // #2850's step 2, C on the window, beside them.
+        { "src/buster/compiler/c_check_node_machine_window.c", "main_unit_checker.c", false },
+        // #2850's step 2, X's rows on the window, after it.
+        { "src/buster/compiler/c_check_node_machine_rows.c", "main_unit_checker.c", false },
         // Its own front (step 1b) is the reader's, included by the coded walk beside whose chunks it runs.
         { "src/buster/compiler/c_check_node_machine_front.c", source, false },
         { "src/buster/compiler/c_check_node_machine_flat.c", source, false },

@@ -397,6 +397,38 @@ static SnapshotStatus snapshot_test_load(Runtime* runtime, const char* directory
     return snapshot_load(runtime, path, kind, compiler, 0);
 }
 
+// Loading rebases pointers in the private mapping. Compare the raw file, including the directory and piece hashes,
+// against the same import written over dirty memory.
+static void snapshot_test_image(SnapshotTestTally* tally, const char* path, const Runtime* imported, const RuntimeProbe* compiler)
+{
+    Scratch scratch = scratch_begin(0);
+    const String8 file = executable_test_read(scratch.arena, path);
+    uint8_t* buffer = file.length > sizeof(SnapshotHeader) ? arena_push(scratch.arena, file.length, BUSTER_SNAPSHOT_ALIGNMENT) : 0;
+    snapshot_test_expect(tally, buffer != 0, "room for the raw snapshot", 0);
+    if (buffer != 0)
+    {
+        Arena arena = {
+            .base = buffer,
+            .capacity = file.length - 1,
+        };
+        uint64_t bytes = UINT64_MAX;
+        snapshot_test_expect(tally, snapshot_image(imported, compiler, &arena, &bytes) == 0 && bytes == 0, "one byte short refuses the image", 0);
+        arena.capacity = file.length;
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            arena.length = 0;
+            memset(buffer, pass == 0 ? 0xa5 : 0x5a, file.length);
+            const uint8_t* image = snapshot_image(imported, compiler, &arena, &bytes);
+            snapshot_test_expect(tally, image == buffer && bytes == file.length && memcmp(buffer, file.pointer, bytes) == 0, "every raw byte over poison", pass);
+        }
+        Runtime missing = *imported;
+        missing.global_names.strings = 0;
+        arena.length = 0;
+        snapshot_test_expect(tally, snapshot_image(&missing, compiler, &arena, &bytes) == 0 && bytes == 0, "incomplete strings refuse the image", 0);
+    }
+    scratch_end(scratch);
+}
+
 // The runtime written as a snapshot in a directory of its own, `name`, and loaded back, as the check `check`.
 static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, const Runtime* imported, const RuntimeProbe* compiler, const char* check, const char* name)
 {
@@ -404,9 +436,15 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
         .check = check,
     };
     char place[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     snapshot_test_path(place, directory->path, name);
+    snapshot_test_path(path, place, snapshot_name(imported->kind));
     const bool written = snapshot_test_write(imported, place, compiler);
     snapshot_test_expect(&tally, written, "the snapshot written", 0);
+    if (written)
+    {
+        snapshot_test_image(&tally, path, imported, compiler);
+    }
     Runtime loaded;
     const SnapshotStatus status = written ? snapshot_test_load(&loaded, place, imported->kind, compiler) : SNAPSHOT_STATUS_MISSING;
     snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_LOADED, "the snapshot loaded", status);
@@ -430,8 +468,6 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
         }
         runtime_release(&loaded);
     }
-    char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
-    snapshot_test_path(path, place, snapshot_name(imported->kind));
     if (!directory->keep)
     {
         unlink(path);
@@ -1624,10 +1660,12 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
 //
 // Each kind's runtime has a snapshot of its own beside the others' (snapshot_name), and the loader checks the kind.
 
-// runtime_open_static and runtime_open_static_pie in a directory of their own: each imported and written, then loaded,
-// with its kind's records; runtime_open beside them, the three snapshots side by side; each kind's snapshot loaded as
-// each other kind, stale; and each kind's snapshot renamed to the next kind's name in turn (a dynamic PIE's to a static
-// executable's, that to a static PIE's, that to a dynamic PIE's), stale there, imported again and written over.
+// runtime_open_static, runtime_open_static_pie, runtime_open_shared and the position-dependent executable's opener in a
+// directory of their own: each imported and written, then loaded, with its kind's records; runtime_open beside them,
+// every kind's snapshot side by side; each kind's snapshot loaded as each other kind, stale; and each kind's snapshot
+// renamed to the next kind's name in turn (a dynamic PIE's to a static executable's, that to a static PIE's, that to a
+// shared library's, that to a position-dependent executable's, that to a dynamic PIE's), stale there, imported again
+// and written over.
 // `runtimes` holds each kind's imported runtime, by RuntimeKind.
 static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const Runtime* const* runtimes, const RuntimeProbe* compiler)
 {
@@ -1641,11 +1679,13 @@ static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const 
     {
         snapshot_test_path(paths[kind], place, snapshot_name((RuntimeKind)kind));
     }
-    // The kinds whose entry points open them here; the dynamic PIE's after them.
+    // The kinds whose entry points open them here (the position-dependent executable's through the opener that takes a
+    // kind, with this executable's identity); the dynamic PIE's after them.
     const RuntimeKind others[] = {
         RUNTIME_KIND_STATIC,
         RUNTIME_KIND_STATIC_PIE,
         RUNTIME_KIND_SHARED,
+        RUNTIME_KIND_NO_PIE,
     };
     for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(others); s += 1)
     {
@@ -1656,7 +1696,8 @@ static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const 
             Runtime runtime;
             const SnapshotResult result = kind == RUNTIME_KIND_STATIC       ? runtime_open_static(&runtime, place)
                                           : kind == RUNTIME_KIND_STATIC_PIE ? runtime_open_static_pie(&runtime, place)
-                                                                            : runtime_open_shared(&runtime, place);
+                                          : kind == RUNTIME_KIND_SHARED     ? runtime_open_shared(&runtime, place)
+                                                                            : runtime_open_as(&runtime, place, kind, compiler);
             const SnapshotStatus expected = round == 0 ? SNAPSHOT_STATUS_MISSING : SNAPSHOT_STATUS_LOADED;
             snapshot_test_expect(&tally, result.status == expected && result.error == RUNTIME_ERROR_NONE && (round == 1 || result.written),
                                  round == 0 ? "a kind's runtime imported, and written" : "loaded, the second time", s * 2 + round);
@@ -1708,6 +1749,7 @@ static bool snapshot_test_kinds(const ExecutableTestDirectory* directory, const 
         RUNTIME_KIND_STATIC,
         RUNTIME_KIND_STATIC_PIE,
         RUNTIME_KIND_SHARED,
+        RUNTIME_KIND_NO_PIE,
     };
     for (uint32_t way = 0; way < RUNTIME_KINDS; way += 1)
     {
@@ -2019,18 +2061,25 @@ static int run_snapshot_tests(int argc, char** argv)
         Runtime static_runtime;
         Runtime static_pie_runtime;
         Runtime shared_runtime;
+        // And a position-dependent dynamic executable's (-no-pie, #1503): a dynamic PIE's libraries behind crt1.o,
+        // crtbegin.o and crtend.o.
+        Runtime no_pie_runtime;
         const RuntimeError static_imported = runtime_import_static(&static_runtime);
         const RuntimeError static_pie_imported = runtime_import_static_pie(&static_pie_runtime);
         const RuntimeError shared_imported = runtime_import_shared(&shared_runtime);
+        const RuntimeError no_pie_imported = runtime_import_kind(&no_pie_runtime, RUNTIME_KIND_NO_PIE);
         const bool statics = static_imported == RUNTIME_ERROR_NONE;
         const bool static_pies = static_pie_imported == RUNTIME_ERROR_NONE;
         const bool shareds = shared_imported == RUNTIME_ERROR_NONE;
+        const bool no_pies = no_pie_imported == RUNTIME_ERROR_NONE;
         printf("%s", !statics ? "static round trip: the static runtime didn't import\n" : "");
         printf("%s", !static_pies ? "static PIE round trip: the static PIE's runtime didn't import\n" : "");
         printf("%s", !shareds ? "shared round trip: the shared library's runtime didn't import\n" : "");
+        printf("%s", !no_pies ? "no-PIE round trip: the position-dependent executable's runtime didn't import\n" : "");
         passed = statics && snapshot_test_round_trip(&directory, &static_runtime, &compiler, "static round trip", "static-round-trip") && passed;
         passed = static_pies && snapshot_test_round_trip(&directory, &static_pie_runtime, &compiler, "static PIE round trip", "static-pie-round-trip") && passed;
         passed = shareds && snapshot_test_round_trip(&directory, &shared_runtime, &compiler, "shared round trip", "shared-round-trip") && passed;
+        passed = no_pies && snapshot_test_round_trip(&directory, &no_pie_runtime, &compiler, "no-PIE round trip", "no-pie-round-trip") && passed;
         passed = snapshot_test_links(&directory, &runtime, &compiler, seed, (uint32_t)functions, "links", "links") && passed;
         passed = statics && snapshot_test_links(&directory, &static_runtime, &compiler, seed, (uint32_t)functions, "static links", "static-links") && passed;
         passed = static_pies && snapshot_test_links(&directory, &static_pie_runtime, &compiler, seed, (uint32_t)functions, "static PIE links", "static-pie-links") && passed;
@@ -2040,8 +2089,9 @@ static int run_snapshot_tests(int argc, char** argv)
             [RUNTIME_KIND_STATIC] = &static_runtime,
             [RUNTIME_KIND_STATIC_PIE] = &static_pie_runtime,
             [RUNTIME_KIND_SHARED] = &shared_runtime,
+            [RUNTIME_KIND_NO_PIE] = &no_pie_runtime,
         };
-        passed = statics && static_pies && shareds && snapshot_test_kinds(&directory, runtimes, &compiler) && passed;
+        passed = statics && static_pies && shareds && no_pies && snapshot_test_kinds(&directory, runtimes, &compiler) && passed;
         passed = snapshot_test_staleness(&directory, &runtime, &compiler) && passed;
         passed = snapshot_test_deferred(&directory, &runtime, &compiler) && passed;
         passed = shareds && snapshot_test_deferred(&directory, &shared_runtime, &compiler) && passed;
@@ -2063,6 +2113,10 @@ static int run_snapshot_tests(int argc, char** argv)
         if (shareds)
         {
             runtime_release(&shared_runtime);
+        }
+        if (no_pies)
+        {
+            runtime_release(&no_pie_runtime);
         }
         result = passed ? 0 : 1;
         if (keep)

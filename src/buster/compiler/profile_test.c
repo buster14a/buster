@@ -11,7 +11,8 @@
 // success:
 //   - hot-loops: a function with a loop nested in another, an indirect jump and samples of another function, of a
 //     symbol whose name only starts with the function's, and of none; the loops' ranking, the smallest loop with half
-//     the samples and its instructions; --loops 1; a function that isn't there; and a disassembly out of order;
+//     the samples and its instructions; tied ranks at the cutoff, zero samples and counts from zero past the number of
+//     loops; a function that isn't there; and a disassembly out of order;
 //   - label-spills: spills and reloads inside the function (whose label has clang's comment), folded ones among them,
 //     labeled in order, and none of another function's, one whose name starts with the function's among them; source
 //     paths and another comment that hold the words, which aren't spills; the static function renamed everywhere, and
@@ -344,6 +345,58 @@ static void profile_test_check(ProfileTest* test, const char* name, bool succeed
     test->report.arena.length = 0;
     test->report.full = false;
     test->arena.length = 0;
+}
+
+static void profile_test_loop_ranks(ProfileTest* test)
+{
+    const String8 disassembly = profile_test_string(BUSTER_PROFILE_TEST_IMAGE
+        "0000000000001000 <f>:\n"
+        "    1000:\tnop\n"
+        "    1001:\tjne    1000 <f>\n"
+        "    1003:\tjne    1003 <f+0x3>\n"
+        "    1005:\tjne    1005 <f+0x5>\n"
+        "    1007:\tjne    1007 <f+0x7>\n"
+        "    1009:\tjne    1000 <f>\n"
+        "0000000000002000 <f>:\n"
+        "    2000:\tret\n");
+    const String8 samples = profile_test_string("401005 f+0x5 (/t/bin+0x1005)\n"
+                                                "401007 f+0x7 (/t/bin+0x1007)\n"
+                                                "402000 f+0x0 (/t/bin+0x2000)\n");
+    static const char header[] = "hot-loops: 2 samples in f (6 instructions, 5 loops), the copy at 1000, the busiest of 2 (1 samples in the others)\n"
+                                 "loops by samples:\n";
+    static const char rows[] = "  1000-1009: 6 instructions, 0 stack references, 100.0% of the samples\n"
+                               "  1005-1005: 1 instructions, 0 stack references, 50.0% of the samples\n"
+                               "  1007-1007: 1 instructions, 0 stack references, 50.0% of the samples\n"
+                               "  1003-1003: 1 instructions, 0 stack references, 0.0% of the samples\n"
+                               "  1000-1001: 2 instructions, 0 stack references, 0.0% of the samples\n";
+    static const char half[] = "the smallest loop with half the samples:\n"
+                               "  1005-1005: 1 instructions, 0 stack references, 50.0% of the samples\n"
+                               "         1  1005  jne    1005 <f+0x5>\n";
+    const uint64_t limits[] = { 0, 1, 2, 5, UINT64_MAX };
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(limits); i += 1)
+    {
+        const char* end = rows;
+        for (uint64_t row = 0; row < limits[i] && *end != '\0'; row += 1)
+        {
+            end = strchr(end, '\n') + 1;
+        }
+        char expected[sizeof(header) + sizeof(rows) + sizeof(half)];
+        snprintf(expected, sizeof(expected), "%s%.*s%s", header, (int)(end - rows), rows, half);
+        char name[80];
+        snprintf(name, sizeof(name), "hot-loops tied ranks, limit %llu", (unsigned long long)limits[i]);
+        const bool ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), disassembly, samples, limits[i]);
+        profile_test_check(test, name, ok, true, profile_report_text(&test->report), expected);
+    }
+    const bool ok = profile_hot_loops(&test->arena, &test->report, profile_test_string("f"), disassembly, profile_test_string(""), 5);
+    profile_test_check(test, "hot-loops tied ranks with zero samples", ok, true, profile_report_text(&test->report),
+                       "hot-loops: 0 samples in f (6 instructions, 5 loops), the copy at 1000, the busiest of 2 (0 samples in the others)\n"
+                       "loops by samples:\n"
+                       "  1003-1003: 1 instructions, 0 stack references, 0.0% of the samples\n"
+                       "  1005-1005: 1 instructions, 0 stack references, 0.0% of the samples\n"
+                       "  1007-1007: 1 instructions, 0 stack references, 0.0% of the samples\n"
+                       "  1000-1001: 2 instructions, 0 stack references, 0.0% of the samples\n"
+                       "  1000-1009: 6 instructions, 0 stack references, 0.0% of the samples\n"
+                       "no loop has half the samples\n");
 }
 
 static void profile_test_text_tools(ProfileTest* test)
@@ -1430,6 +1483,7 @@ static int run_profile_tests(int argc, char** argv)
         };
         printf("test-profile:\n");
         profile_test_text_tools(&test);
+        profile_test_loop_ranks(&test);
         profile_test_trace_symbols(&test);
         profile_test_start_trace(&test);
         profile_test_branch_growth(&test);

@@ -174,6 +174,12 @@ The original section titles are retained in their owning guides.
 - [Node machine census (#2524)](lowering.md#node-machine-census-2524).
 - [The node machine's shadow (step 1)](lowering.md#the-shadow-step-1).
 - [The fact words (#2850's step 1)](lowering.md#the-fact-words-2850s-step-1).
+- [C on the window (#2850)](lowering.md#c-on-the-window-2850).
+- [A call's arguments in the kernel, and C's call (#2850)](lowering.md#a-calls-arguments-in-the-kernel-and-cs-call-2850).
+- [An update on the window (#2850)](lowering.md#an-update-on-the-window-2850).
+- [A condition's branches on the window (#2850)](lowering.md#a-conditions-branches-on-the-window-2850).
+- [The records' bytes' columns (#2850)](lowering.md#the-records-bytes-columns-2850).
+- [X's rows on the window (#2850)](lowering.md#xs-rows-on-the-window-2850).
 - [Type tests](types.md#type-tests).
 - [Type benchmark](types.md#type-benchmark).
 - [Checker corpus and semantic mutations](checker-corpus.md#checker-corpus-and-semantic-mutations).

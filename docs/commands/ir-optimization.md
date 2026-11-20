@@ -13,8 +13,9 @@ requirements. [Command index](README.md).
   semantic fixtures and the upstream SSA promoter (`test-ir-inline`'s #1282
   fixtures: SIMD callees' rows, vector constants and slots, and by-value vectors
   run on the IR's interpreter through inlining, SROA's `simd`/`flagged` options
-  and promotion; #2541's generated units of callees with control flow, by both
-  splice twins, through the same steps, and its per-callee limits and caller-only
+  and promotion; #2541's generated units of callees with control flow, by the
+  vector splice and the node-at-a-time one (a callee whose parameters don't
+  begin it), through the same steps, and its per-callee limits and caller-only
   rewrite); `test-ir-optimize` also runs
   #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
   through both parser paths, both twins, the canonical printer and the
@@ -36,9 +37,10 @@ requirements. [Command index](README.md).
   `BUSTER_IR_OPTIMIZE_MEMORY`): `test-ir-optimize` runs its six
   `tests/ir/optimize/memory-*.ir` pairs and `ir_optimize_memory_test.c`'s 400
   generated programs, whose interpreter's calls rewrite every escaped byte,
-  through both twins (exact) and an overflow fixture.
-  [Its guide](../../docs/ir-memory-value-numbering.md) has the rules, the twins
-  and the measurements.
+  folded into a frozen digest (the default seed; its scalar twin went in #2924),
+  and an overflow fixture. `benchmark-ir-source --passes` times its `memory`
+  row once. [Its guide](../../docs/ir-memory-value-numbering.md) has the rules,
+  the vector phases and the measurements.
 - #139's acceptance on real C: `test-ir-source --passes` runs every pass's
   vector and scalar versions on every function of c-testsuite's subset, the
   frozen `sqlite3.c` and musl in the correctness list, and
@@ -66,9 +68,10 @@ two loops and a nested one; and one fixture per refusal (a prefix sum, a
 histogram, a strided store, the induction as data, a call, a volatile load, a
 division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
 than the limit, a reduction's partial value read, an early exit, a step of two).
-Each runs by both parser paths and both of the pass's paths at three targets of
-every operation the IR has, at most 64, 32 and 16 bytes wide, which must give
-the same function and counts; a fixture expects how many loops each width
+Each runs by both parser paths and the pass at three targets of every operation
+the IR has, at most 64, 32 and 16 bytes wide, its result and counts folded into
+a frozen digest (#2924); the kinds and the refusing kinds' scan are checked
+against their definitions; a fixture expects how many loops each width
 vectorizes, or its refusal's reason. Each changed result, and its form after
 the ordinary optimizer (whose final verification checks dominance), runs in the
 shared interpreter against the input on one buffer, its pointers placed apart,
@@ -112,16 +115,19 @@ loop as its remainder. [The design](../../docs/tier1-loop-unrolling.md) has its
 rules, budgets, refusals and the 9700X's record.
 
 `./build/compiler test-ir-unroll [--seed N] [--shapes N]` builds loops in the
-IR's text form (a builder that names values), runs each by both twins and
-requires the same function, outcomes and counts; an unrolled one verifies with
+IR's text form (a builder that names values), runs each and folds its function,
+outcomes and counts into a digest frozen for the default seed and shapes
+(#2924), and checks the classes, their union and the operand remap against
+their definitions; an unrolled one verifies with
 dominance, passes Tier 1's optimizer and executes as the original did (return,
 status and stores) on the shared executor, on parameters around zero and the
 main loop's size and at each type's signed and unsigned limits. Every loop
 form, predicate, operand order, branch sense, reduction kind and width, then
 `--shapes` random ones (400 by default), each refusal, the budgets and every
 short output arena are covered. `test-ir-optimize` runs its text pair
-(`tests/ir/optimize/unroll-loops-*.ir`), and `test-ir-source --passes` its twins
-on c-testsuite's subset, the frozen `sqlite3.c` and musl.
+(`tests/ir/optimize/unroll-loops-*.ir`), and `test-ir-source --passes` the pass
+on c-testsuite's subset, the frozen `sqlite3.c` and musl, where each unrolled
+function must verify with dominance.
 
 ## Vectors assembled in memory (#1344)
 
@@ -243,8 +249,9 @@ not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
 the rules.
 
 `test-ir-optimize` runs `ir_if_convert_test.c`: complete SSA verification,
-independent execution before/after cleanup, exact scalar/vector output, every
-guarded candidate-scan tail, multi-phi edge polarity, both triangle
+independent execution before/after cleanup, every result folded into a frozen
+digest (#2924), the scans (conditional branches, barriers, keys' filter)
+against their definitions on random columns, every guarded candidate-scan tail, multi-phi edge polarity, both triangle
 orientations, sequential, nested and three-predecessor regions over rounds,
 loop-carried values, shared switch/call side-table words, allocation rollback,
 refusal of unsafe or expensive speculation, the reload and truth fixtures,

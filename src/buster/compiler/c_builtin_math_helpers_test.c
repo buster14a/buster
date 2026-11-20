@@ -92,7 +92,7 @@ static uint16_t cbuiltin_math_test_control(void)
     return result;
 }
 
-static bool cbuiltin_math_test_map(CBuiltinMathTestTally* tally, const Tier0Code* helper, const Tier0Code* caller, bool scalar, CBuiltinMathTestProgram* program, uint32_t item)
+static bool cbuiltin_math_test_map(CBuiltinMathTestTally* tally, const Tier0Code* helper, const Tier0Code* caller, CBuiltinMathTestProgram* program, uint32_t item)
 {
     X86Instruction records[BUSTER_CBUILTIN_MATH_TEST_RECORDS];
     uint32_t offsets[BUSTER_CBUILTIN_MATH_TEST_RECORDS + 1];
@@ -111,8 +111,7 @@ static bool cbuiltin_math_test_map(CBuiltinMathTestTally* tally, const Tier0Code
     {
         memcpy(records, helper->records, helper->count * sizeof(*records));
         const BranchSizing sized = size_branches(records, helper->count, helper->branches, helper->targets, helper->branch_count, offsets);
-        const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 : scalar ? x86_encode_scalar(records, helper->count, program->mapping, helper_capacity, NULL, NULL)
-                                                                          : x86_encode(records, helper->count, program->mapping, helper_capacity, NULL, NULL);
+        const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 : x86_encode(records, helper->count, program->mapping, helper_capacity, NULL, NULL);
         result = cbuiltin_math_test_expect(tally, encoded > 0, "helper sizing and encoding", item);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
@@ -139,8 +138,7 @@ static bool cbuiltin_math_test_map(CBuiltinMathTestTally* tally, const Tier0Code
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
-            const int64_t encoded_caller = scalar ? x86_encode_scalar(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends)
-                                                  : x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
+            const int64_t encoded_caller = x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
             result = cbuiltin_math_test_expect(tally, encoded_caller > 0 && caller->reference_count == 1 && caller->references[0].target == 1 && caller->references[0].kind == BUSTER_LINK_FIXUP_CALL &&
                 caller->references[0].field == X86_FIXUP_DISPLACEMENT && caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "ordinary helper CALL reference", item);
             if (result)
@@ -226,7 +224,7 @@ static bool cbuiltin_math_test_caller(CBuiltinMathTestTally* tally, Arena* arena
         result = cbuiltin_math_test_expect(tally, code.error == TIER0_OK && code.branch_count == 0 && code.reference_count == 1, "ordinary Tier 0 caller compiled", item);
         if (result)
         {
-            result = cbuiltin_math_test_map(tally, &helper->code, &code, path == 0, programs + path, item);
+            result = cbuiltin_math_test_map(tally, &helper->code, &code, programs + path, item);
         }
     }
     arena_pop_to(arena, mark);
@@ -678,7 +676,7 @@ static bool cbuiltin_math_test_tail(CBuiltinMathTestTally* tally, CBuiltinId id,
                 CBuiltinMathTestProgram programs[2] = { 0 };
                 for (uint32_t path = 0; path < 2; path += 1)
                 {
-                    result = cbuiltin_math_test_map(tally, &helper.code, NULL, path == 0, programs + path, item) && result;
+                    result = cbuiltin_math_test_map(tally, &helper.code, NULL, programs + path, item) && result;
                     if (programs[path].mapping != NULL && programs[path].mapping != MAP_FAILED)
                     {
                         munmap(programs[path].mapping, programs[path].mapping_bytes);
@@ -754,7 +752,7 @@ static int run_builtin_math_helper_tests(int argc, char** argv)
         }
         for (uint32_t path = 0; valid && path < 2; path += 1)
         {
-            valid = cbuiltin_math_test_map(&tally, &helper.code, NULL, path == 0, &native.direct[path][h], h);
+            valid = cbuiltin_math_test_map(&tally, &helper.code, NULL, &native.direct[path][h], h);
         }
         if (valid)
         {

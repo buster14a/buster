@@ -31,10 +31,9 @@
 // it: ir_vectorize_target.c): the widest width at which every row is legal and no value is narrower than 16 bytes.
 //
 // Data-parallel parts: every row's admission kind is an opcode table's lookup 64 rows at a time (vpermi2b), with the
-// volatile and atomic flags folded in, and each loop's rows are scanned for a refusing kind 64 at a time; both have
-// exact scalar twins (ir_vectorize_kinds_scalar, ir_vectorize_forbidden_scalar). The classification of one loop's
-// needed rows, their order and the emission are the small ordered part, shared by both paths, so both give the same
-// function byte for byte. Rows are counted first and then written by the same replay (IrVectorizeBuild.counting).
+// volatile and atomic flags folded in, and each loop's rows are scanned for a refusing kind 64 at a time. The
+// classification of one loop's needed rows, their order and the emission are the small ordered part. Rows are counted
+// first and then written by the same replay (IrVectorizeBuild.counting).
 
 #ifndef BUSTER_IR_VECTORIZE_LOOPS_C
 #define BUSTER_IR_VECTORIZE_LOOPS_C
@@ -126,7 +125,6 @@ typedef struct IrVectorizeOptions IrVectorizeOptions;
 struct IrVectorizeOptions
 {
     const IrVectorizeTarget* target;
-    bool scalar;
     uint32_t mutation;
 };
 
@@ -299,7 +297,7 @@ static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
 // Every row's admission kind: its opcode's in the table, and FORBID for a load or a store with any access flag
 // (volatile, atomic, a segment). 64 rows at a time: one two-register byte lookup of the opcodes and one compare of the
 // flags.
-static void ir_vectorize_kinds_vector(const IrFunction* f, uint8_t* kinds)
+static void ir_vectorize_kinds(const IrFunction* f, uint8_t* kinds)
 {
     const __m512i low = _mm512_loadu_si512(ir_vectorize_kind_table);
     const __m512i high = _mm512_loadu_si512(ir_vectorize_kind_table + 64);
@@ -318,40 +316,18 @@ static void ir_vectorize_kinds_vector(const IrFunction* f, uint8_t* kinds)
     }
 }
 
-static void ir_vectorize_kinds_scalar(const IrFunction* f, uint8_t* kinds)
-{
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
-    {
-        const uint32_t kind = f->op[i] < BUSTER_IR_OP_TABLE ? ir_vectorize_kind_table[f->op[i]] : BUSTER_IR_VECTORIZE_KIND_FORBID;
-        const uint32_t base = kind & 7;
-        const bool flagged = (base == BUSTER_IR_VECTORIZE_KIND_LOAD || base == BUSTER_IR_VECTORIZE_KIND_STORE) && (f->flags[i] & BUSTER_IR_ACCESS_FLAGS) != 0;
-        kinds[i] = (uint8_t)(flagged ? BUSTER_IR_VECTORIZE_KIND_FORBID : kind);
-    }
-}
-
-// Whether rows [first, end) hold a refusing kind: 64 at a time, or by the scalar twin.
-static bool ir_vectorize_forbidden(const uint8_t* kinds, uint32_t first, uint32_t end, bool scalar)
+// Whether rows [first, end) hold a refusing kind, 64 at a time.
+static bool ir_vectorize_forbidden(const uint8_t* kinds, uint32_t first, uint32_t end)
 {
     bool forbidden = false;
-    if (!scalar)
+    for (uint64_t at = first; at < end; at += BUSTER_IR_VECTORIZE_BATCH)
     {
-        for (uint64_t at = first; at < end; at += BUSTER_IR_VECTORIZE_BATCH)
-        {
-            const uint64_t left = end - at;
-            const __mmask64 valid = left >= BUSTER_IR_VECTORIZE_BATCH ? UINT64_MAX : (UINT64_C(1) << left) - 1;
-            const __m512i kind = _mm512_maskz_loadu_epi8(valid, kinds + at);
-            const __mmask64 bad = valid & _mm512_cmpeq_epi8_mask(_mm512_and_si512(kind, _mm512_set1_epi8(7)), _mm512_setzero_si512());
-            forbidden = forbidden || bad != 0;
-        }
+        const uint64_t left = end - at;
+        const __mmask64 valid = left >= BUSTER_IR_VECTORIZE_BATCH ? UINT64_MAX : (UINT64_C(1) << left) - 1;
+        const __m512i kind = _mm512_maskz_loadu_epi8(valid, kinds + at);
+        const __mmask64 bad = valid & _mm512_cmpeq_epi8_mask(_mm512_and_si512(kind, _mm512_set1_epi8(7)), _mm512_setzero_si512());
+        forbidden = forbidden || bad != 0;
     }
-    else
-    {
-        for (uint32_t at = first; at < end; at += 1)
-        {
-            forbidden = forbidden || (kinds[at] & 7) == BUSTER_IR_VECTORIZE_KIND_FORBID;
-        }
-    }
-    (void)scalar;
     return forbidden;
 }
 
@@ -1482,7 +1458,7 @@ static uint32_t ir_vectorize_dependences(IrVectorizeWork* work, uint32_t loop, I
 }
 
 // The plan for one innermost loop: its refusal, or IR_VECTORIZE_REFUSALS and a complete plan.
-static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan, bool scalar)
+static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
     uint32_t refusal = ir_vectorize_shape(work, loop, plan) ? IR_VECTORIZE_REFUSALS : IR_VECTORIZE_REFUSE_SHAPE;
@@ -1491,7 +1467,7 @@ static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVector
     {
         const uint32_t first = f->block_offsets[block];
         const uint32_t end = f->block_offsets[(uint64_t)block + 1];
-        refusal = ir_vectorize_forbidden(work->kinds, first, end, scalar) ? IR_VECTORIZE_REFUSE_OPERATION : refusal;
+        refusal = ir_vectorize_forbidden(work->kinds, first, end) ? IR_VECTORIZE_REFUSE_OPERATION : refusal;
         const uint32_t next = f->op[end - 1] == IR_BR ? f->a[end - 1] : ir_vectorize_block_inside(work, loop, f->b[end - 1]) ? f->b[end - 1] : f->c[end - 1];
         block = next == plan->header ? BUSTER_IR_NONE : next;
     }
@@ -1984,13 +1960,13 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
 
 // Plans every loop header the walk found and emits the accepted loops: once counting, once writing. Both replays
 // decide alike.
-static void ir_vectorize_replay(IrVectorizeWork* work, IrVectorizeBuild* build, bool scalar)
+static void ir_vectorize_replay(IrVectorizeWork* work, IrVectorizeBuild* build)
 {
     for (uint32_t loop = 0; loop < work->header_count; loop += 1)
     {
         {
             IrVectorizeLoop plan = { 0 };
-            const uint32_t refusal = ir_vectorize_plan(work, loop, &plan, scalar);
+            const uint32_t refusal = ir_vectorize_plan(work, loop, &plan);
             if (build->counting)
             {
                 work->statistics.loops += 1;
@@ -2074,7 +2050,6 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
 {
     const uint64_t om = output->length;
     const uint64_t sm = scratch->length;
-    const bool path = BUSTER_SCALAR_PATH(options->scalar);
     IrVectorizeWork work = { .function = function, .target = options->target, .mutation = options->mutation };
     IrCheck check = ir_check(output != scratch ? IR_OK : IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     const bool candidate = check.error == IR_OK && function->label_count == 0 && function->block_count != 0 && ir_vectorize_candidate(function);
@@ -2125,16 +2100,9 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         memset(work.splats, 0xff, n * 4);
         memset(work.ones, 0xff, n * 4);
         memset(work.zeros, 0xff, n * 4);
-        if (path)
-        {
-            ir_vectorize_kinds_scalar(function, work.kinds);
-        }
-        else
-        {
-            ir_vectorize_kinds_vector(function, work.kinds);
-        }
+        ir_vectorize_kinds(function, work.kinds);
         IrVectorizeBuild counting = { .counting = true, .rows = function->instruction_count, .blocks = function->block_count, .extras = function->extra_count, .constants = function->constant_count };
-        ir_vectorize_replay(&work, &counting, path);
+        ir_vectorize_replay(&work, &counting);
         if (work.statistics.vectorized != 0)
         {
             const uint64_t rows = counting.rows;
@@ -2178,7 +2146,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
                 ir_debug_remap(function, &view, NULL, NULL, NULL);
                 IrVectorizeBuild build = { .counting = false, .view = &view, .rows = function->instruction_count, .blocks = function->block_count, .extras = function->extra_count, .constants = function->constant_count };
                 const IrVectorizeResult counted = work.statistics;
-                ir_vectorize_replay(&work, &build, path);
+                ir_vectorize_replay(&work, &build);
                 work.statistics = counted;
                 view.block_offsets[view.block_count] = view.instruction_count;
                 check.error = build.rows == counting.rows && build.blocks == counting.blocks && build.extras == counting.extras && build.constants == counting.constants ? IR_OK : IR_ERROR_STRUCTURE;
