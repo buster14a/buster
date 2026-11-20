@@ -585,6 +585,124 @@ static void ir_unroll_test_shapes(IrOptimizeTest* test, uint32_t random_shapes)
     }
 }
 
+// The independent executor's store trace. The fixture writes i at byte addresses 65, 61, ..., 1; its 18th store faults.
+static uint64_t ir_unroll_test_countdown_trace(uint32_t start, uint32_t writes)
+{
+    uint64_t trace = 0;
+    for (uint32_t k = 0; k < writes && k < 17; k += 1)
+    {
+        const uint32_t address = 65u - 4u * k;
+        trace = trace * 65537u + address * 17u + (start - k);
+    }
+    return trace;
+}
+
+static void ir_unroll_test_countdown_runs(IrOptimizeTest* test, IrFunction* unrolled, Arena* scratch, uint32_t factor)
+{
+    uint64_t parameters[128];
+    const uint32_t count = ir_unroll_test_parameters(32, parameters, BUSTER_ARRAY_LENGTH(parameters));
+    for (uint32_t probe = 0; probe < 2; probe += 1)
+    {
+        if (probe != 0)
+        {
+            // Return the induction at the original header. This observes the real chunk guards, including a start
+            // in the unsigned upper half that an incorrect signed guard would send straight to the remainder.
+            const uint32_t branch = unrolled->block_offsets[2] - 1u;
+            unrolled->op[branch] = IR_RET;
+            unrolled->a[branch] = unrolled->block_offsets[1];
+            unrolled->b[branch] = BUSTER_IR_NONE;
+            unrolled->c[branch] = BUSTER_IR_NONE;
+        }
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            const uint32_t n = (uint32_t)parameters[k];
+            const uint32_t tail = probe != 0 ? n % factor : 0;
+            const uint32_t writes = n - tail;
+            const IrOptimizeExecution run = ir_optimize_test_execute(unrolled, scratch, n, 0);
+            const bool stopped = writes > 17 ? run.status == 2 : run.status == 1 && run.value == tail;
+            char label[128];
+            snprintf(label, sizeof(label), "countdown from %#010" PRIx32 ", factor %u: ordered stores and %s", n, factor, probe != 0 ? "exact remainder" : "result");
+            ir_optimize_test_expect(test, stopped && run.effects == ir_unroll_test_countdown_trace(n, writes), label);
+        }
+    }
+}
+
+static void ir_unroll_test_countdown(IrOptimizeTest* test)
+{
+    static const struct
+    {
+        const char* comparison;
+        const char* update;
+        bool inverted;
+        IrUnrollRefusal outcome;
+    } cases[] = {
+        { "icmp.i1 {i}, {zero} ne", "sub.i32 {i}, {one}", false, IR_UNROLL_UNROLLED },
+        { "icmp.i1 {zero}, {i} eq", "add.i32 {minus}, {i}", true, IR_UNROLL_UNROLLED },
+        { "icmp.i1 {i}, {one} ne", "sub.i32 {i}, {one}", false, IR_UNROLL_PREDICATE },
+        { "icmp.i1 {i}, {zero} ne", "sub.i32 {i}, {two}", false, IR_UNROLL_INDUCTION_REFUSED },
+        { "icmp.i1 {i}, {zero} ne", "sub.i32 {one}, {i}", false, IR_UNROLL_INDUCTION_REFUSED },
+        { "icmp.i1 {i}, {zero} ne", "add.i32 {i}, {one}", false, IR_UNROLL_INDUCTION_REFUSED },
+    };
+    Arena input = arena_reserve(UINT64_C(1) << 20);
+    Arena output = arena_reserve(UINT64_C(1) << 20);
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(cases); k += 1)
+    {
+        IrUnrollTestText text = { .header = "function (i32) -> i32 {\n  slot $0 size=68 align=4 type=void flags=0x00" };
+        ir_unroll_test_label(&text, 0);
+        ir_unroll_test_line(&text, "n", "param.i32 0");
+        ir_unroll_test_constant(&text, "zero", "i32", 32, 0);
+        ir_unroll_test_constant(&text, "one", "i32", 32, 1);
+        ir_unroll_test_constant(&text, "two", "i32", 32, 2);
+        ir_unroll_test_constant(&text, "minus", "i32", 32, UINT32_MAX);
+        ir_unroll_test_constant(&text, "z64", "i64", 64, 0);
+        ir_unroll_test_line(&text, "slot", "stack_addr.ptr $0");
+        ir_unroll_test_line(&text, "wide", "zext.i64 {n}");
+        ir_unroll_test_line(&text, "bias", "sub.i64 {z64}, {wide}");
+        ir_unroll_test_line(&text, "base", "address.ptr {slot} + {bias} * 4 offset=68");
+        ir_unroll_test_line(&text, "", "br.void b1");
+        ir_unroll_test_label(&text, 1);
+        ir_unroll_test_line(&text, "i", "phi.i32 [{n}, b0], [{next}, b2]");
+        ir_unroll_test_line(&text, "test", "%s", cases[k].comparison);
+        ir_unroll_test_line(&text, "", cases[k].inverted ? "cbr.void {test}, b3, b2" : "cbr.void {test}, b2, b3");
+        ir_unroll_test_label(&text, 2);
+        ir_unroll_test_line(&text, "last", "sub.i32 {i}, {one}");
+        ir_unroll_test_line(&text, "idx", "zext.i64 {last}");
+        ir_unroll_test_line(&text, "elem", "address.ptr {base} + {idx} * 4 offset=0");
+        ir_unroll_test_line(&text, "", "store.void {elem}, {i} align=4");
+        ir_unroll_test_line(&text, "next", "%s", cases[k].update);
+        ir_unroll_test_line(&text, "", "br.void b1");
+        ir_unroll_test_label(&text, 3);
+        ir_unroll_test_line(&text, "", "ret.void {i}");
+        IrFunction source = { 0 };
+        const bool parsed = ir_unroll_test_parse(&text, &input, &scratch, &source);
+        ir_optimize_test_expect(test, parsed, "countdown fixture parses");
+        IrUnrollOptions options = ir_unroll_options();
+        for (uint32_t factor = 2; parsed && factor <= BUSTER_IR_UNROLL_FACTOR; factor *= 2)
+        {
+            options.factor = factor;
+            IrUnrollResult result = { 0 };
+            const IrCheck check = ir_optimize_unroll(&source, &output, &scratch, options, &result);
+            const bool expected = check.error == IR_OK && result.outcomes[cases[k].outcome] == 1;
+            ir_optimize_test_expect(test, expected, "countdown recognition requires the zero test and unit decrement");
+            if (expected && cases[k].outcome == IR_UNROLL_UNROLLED)
+            {
+                const IrCheck verified = ir_optimize_verify_result(&result.function, &input, &scratch);
+                ir_optimize_test_expect(test, verified.error == IR_OK && result.copies == factor, "countdown verifies with the requested factor");
+                if (verified.error == IR_OK)
+                {
+                    ir_unroll_test_countdown_runs(test, &result.function, &scratch, factor);
+                }
+            }
+            arena_pop_to(&output, 0);
+        }
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 // A refusal fixture's common start: p, the constants, n = p & 15, and the header's phis i (from 0 by one) and s (s + i),
 // both taking their latch values from block `latch`.
 static void ir_unroll_test_prefix(IrUnrollTestText* text, uint32_t latch, const char* induction_type)
@@ -1130,6 +1248,7 @@ static __attribute__((unused)) int run_ir_unroll_tests(int argc, char** argv)
         ir_unroll_test_refusals(&test);
         ir_unroll_test_limits(&test);
         ir_unroll_test_rollback(&test);
+        ir_unroll_test_countdown(&test);
         // The digest's random shapes are the default seed's 400.
         if (frozen)
         {
