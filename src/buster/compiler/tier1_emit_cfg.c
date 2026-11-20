@@ -3119,6 +3119,7 @@ static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const 
     Tier1SelectHoles holes = tier1_select_holes(plan, registers, node);
     holes.scale = holes.rule == TIER1_RULE_ALLOCA || holes.rule == TIER1_RULE_ALLOCA_IMMEDIATE ? tier1_emit_cfg_stack_alignment(emitted) : holes.scale;
     holes.vex = emitted->prepared.vex;
+    holes.unsigned_dword_memory_forms = emitted->prepared.unsigned_dword_memory_forms;
     holes.avx2 = emitted->prepared.avx2;
     holes.sse = emitted->prepared.sse;
     return holes;
@@ -4934,6 +4935,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     // A target without AVX512VL (#1281) has no EVEX form of a 16- or 32-byte vector: its moves, spills and kernels take
     // VEX ones, and machine rows their roles below xmm16.
     emitted->prepared.vex = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_X_XM128);
+    emitted->prepared.unsigned_dword_memory_forms = tier1_emit_unsigned_dword_memory_forms(allowed_forms);
     emitted->prepared.avx2 = x86_target_form_allowed(allowed_forms, X86_FORM_VPCMPEQD_Y_Y_YM256);
     // A target without AVX (#141's SSE targets) allows no VEX move of an xmm register.
     emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
