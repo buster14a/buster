@@ -20,7 +20,8 @@ is never written, as clang -O0 doesn't emit it (#1108, the lowering guide's
 among them, is neither selected nor checked for target features. A statement
 after a `return`, `break`, `continue`, `goto` or `__builtin_unreachable()` is
 left out the same way (#2987, "Statements no control reaches"), so
-`return 0; missing();` does not select `missing`. That is why
+`return 0; missing();` does not select `missing`. An automatic local that
+statement declares still has a place when an emitted statement names it. That is why
 `main.c`'s units emit no other unit's commands and a baseline build no
 `BUSTER_VECTOR_PATH` kernel. `c_lowering_symbols.c`
 compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`

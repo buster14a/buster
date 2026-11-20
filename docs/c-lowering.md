@@ -245,9 +245,12 @@ definition. Its flags and edges:
   neither does the statement after a `do`: clang -O0 still names a function
   only that statement calls. A `switch` jumps to a case, so a statement before
   its first case is left out, and a body no case or label can enter is left out
-  whole. What only the dropped statement reaches is not selected and is not
-  checked for target features. A cleanup whose declaration was dropped does not
-  run.
+  whole. An automatic local that dropped statement declares still has a place
+  when a statement that is emitted names it: a later case, or a label after a
+  `goto`. Clang allocates that local and does not emit its initializer. A
+  local nothing emitted names stays dropped, so its cleanup is not run. What only the dropped
+  statement reaches is not selected and is not checked for target features. A
+  cleanup whose declaration was dropped does not run.
 - **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
   section, not a member, so no edge reaches the members nothing else does — a
   static registry entry first — but GNU ld's bounds still cover them. After

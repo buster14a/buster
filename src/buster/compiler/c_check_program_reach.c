@@ -4,11 +4,12 @@
 // Statements clang -O0 does not emit (#2987). Included after check_control_enterable, check_control_drop and the
 // constant-switch collector. A block is walked in source order. A statement with no insertion point and no label or
 // outer case (check_control_enterable, clang's ContainsLabel) is left out with the constant if's dropped ranges, so
-// its calls, statics and locals are not selected. What follows a return, break, continue, goto or
+// its calls and statics are not selected. What follows a return, break, continue, goto or
 // __builtin_unreachable() has no insertion point. An if whose taken arms both end that way, and a while or for whose
 // condition is constantly true and that no break leaves, end the same way. __builtin_trap() does not, and a do's
-// following statement stays: clang -O0 still names a function only that statement calls. The walk is ordered because
-// each statement's insertion point is the one before it. The statement tree is an explicit stack
+// following statement stays: clang -O0 still names a function only that statement calls. An automatic local the
+// dropped statement declares keeps its place when an emitted statement names it; its initializer is not emitted.
+// The walk is ordered because each statement's insertion point is the one before it. The statement tree is an explicit stack
 // (BUSTER_CHECK_REACH_DEPTH frames): past that, the following statements stay, which keeps a reachable call.
 
 #define BUSTER_CHECK_REACH_DEPTH 128u
@@ -461,6 +462,75 @@ static bool check_control_completes(CheckControlWriter* writer, uint32_t token, 
     return result;
 }
 
+// An automatic local (`check_lower_local_declaration`'s test).
+static bool check_control_reach_local(const CheckControlWriter* writer, uint32_t token)
+{
+    const CheckInput* input = writer->program->input;
+    const bool result = token < input->token_count && input->declarations != NULL && input->declarations[token] == token &&
+                        check_sparse_get(input->declaration_bodies, token) < input->token_count &&
+                        input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                        !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC);
+    return result;
+}
+
+// Whether `used` (declaration tokens an emitted statement names) holds `token`.
+static bool check_control_reach_used(const uint32_t* used, uint32_t used_count, uint32_t token)
+{
+    bool found = false;
+    for (uint32_t i = 0; !found && i < used_count; i += 1)
+    {
+        found = used[i] == token;
+    }
+    return found;
+}
+
+// Drops `low` through `high`. An automatic local in `used` stays out of the range, so it keeps a place while the
+// statement that declared it is not emitted and its initializer does not run.
+static void check_control_drop_unreachable(CheckControlWriter* writer, uint32_t low, uint32_t high, const uint32_t* used, uint32_t used_count)
+{
+    uint32_t cursor = low;
+    const uint32_t limit = writer->parser->tokens.count;
+    for (uint32_t token = low; token <= high; token += 1)
+    {
+        const bool keep = check_control_reach_local(writer, token) && check_control_reach_used(used, used_count, token);
+        if (keep)
+        {
+            if (cursor < token && writer->dropped_range_count < limit)
+            {
+                check_control_drop(writer, cursor, token - 1);
+            }
+            cursor = token + 1;
+        }
+    }
+    if (cursor <= high && writer->dropped_range_count < limit)
+    {
+        check_control_drop(writer, cursor, high);
+    }
+}
+
+// Declaration tokens of automatic locals that `child` names, appended to `used`.
+static void check_control_reach_uses(const CheckControlWriter* writer, uint32_t child, uint32_t* used, uint32_t* used_count, uint32_t room)
+{
+    uint32_t low = 0;
+    uint32_t high = 0;
+    check_control_extent(writer, child, &low, &high);
+    const CheckInput* input = writer->program->input;
+    for (uint32_t token = low; token <= high && *used_count < room; token += 1)
+    {
+        const uint32_t declaration = token < input->token_count && input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
+        const bool named = declaration != token && declaration != BUSTER_CHECK_NONE && check_control_reach_local(writer, declaration);
+        bool seen = false;
+        for (uint32_t i = 0; named && !seen && i < *used_count; i += 1)
+        {
+            seen = used[i] == declaration;
+        }
+        if (named && !seen)
+        {
+            used[(*used_count)++] = declaration;
+        }
+    }
+}
+
 // The statements of `parent` after `after`, in source order. One with no insertion point and no label or outer case
 // is dropped. The ones that stay are pushed last-to-first, which is the order the writer's stack emits them.
 static void check_control_emit_sequence(CheckControlWriter* writer, uint32_t parent, uint32_t stop, uint32_t repeat, bool entered, uint32_t after, bool skip_final)
@@ -470,25 +540,25 @@ static void check_control_emit_sequence(CheckControlWriter* writer, uint32_t par
     const uint32_t room = writer->parser->tokens.count + 1;
     uint32_t* list = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room);
     uint8_t* at = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, room);
+    uint32_t* dropped = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room);
     bool ip = entered;
     uint32_t count = 0;
-    if (list == NULL || at == NULL)
+    uint32_t drop_count = 0;
+    if (list == NULL || at == NULL || dropped == NULL)
     {
         check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, parent);
     }
-    for (uint32_t child = list != NULL && at != NULL ? writer->first[parent] : BUSTER_CHECK_NONE; child != BUSTER_CHECK_NONE; child = writer->next[child])
+    for (uint32_t child = list != NULL && at != NULL && dropped != NULL ? writer->first[parent] : BUSTER_CHECK_NONE; child != BUSTER_CHECK_NONE; child = writer->next[child])
     {
         const bool kept = check_control_sequence_child(writer, child) && child > after && !(skip_final && child == writer->region_final);
         if (kept)
         {
             if (!ip && !check_control_enterable(writer, child))
             {
-                uint32_t low = 0;
-                uint32_t high = 0;
-                check_control_extent(writer, child, &low, &high);
-                if (low <= high && writer->dropped_range_count < writer->parser->tokens.count)
+                if (drop_count < room)
                 {
-                    check_control_drop(writer, low, high);
+                    dropped[drop_count] = child;
+                    drop_count += 1;
                 }
             }
             else if (count < room)
@@ -498,6 +568,28 @@ static void check_control_emit_sequence(CheckControlWriter* writer, uint32_t par
                 count += 1;
                 ip = check_control_completes(writer, child, ip);
             }
+        }
+    }
+    // A local the dropped statement declares keeps a place when an emitted statement names it (a declaration before
+    // the first case, or between a goto and its label). One nothing emitted names stays dropped, cleanup included.
+    uint32_t* used = drop_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room) : NULL;
+    uint32_t used_count = 0;
+    if (drop_count != 0 && used == NULL)
+    {
+        check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, parent);
+    }
+    for (uint32_t i = 0; used != NULL && i < count; i += 1)
+    {
+        check_control_reach_uses(writer, list[i], used, &used_count, room);
+    }
+    for (uint32_t i = 0; used != NULL && i < drop_count; i += 1)
+    {
+        uint32_t low = 0;
+        uint32_t high = 0;
+        check_control_extent(writer, dropped[i], &low, &high);
+        if (low <= high)
+        {
+            check_control_drop_unreachable(writer, low, high, used, used_count);
         }
     }
     for (uint32_t i = count; i-- > 0;)
