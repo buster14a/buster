@@ -726,6 +726,29 @@ static void ir_inline_test_general_limits(IrInlineTest* test, Arena* input, Aren
         IrInlineUnit beyond = unit;
         beyond.only = 6;
         ir_inline_test_expect(test, ir_optimize_inline(&beyond, output, scratch, options, &refused, &failed).error == IR_ERROR_STRUCTURE, "an only function past the unit is refused");
+
+        // The sole caller's diamond needs no callee summary, even when its slot lifetime marks would exhaust scratch.
+        IrFunction caller = functions[1];
+        caller.slot_count = 8192;
+        caller.slots = BUSTER_ARENA_PUSH_ARRAY(input, IrSlot, caller.slot_count);
+        ir_inline_test_expect(test, caller.slots != NULL, "allocate the sole caller's slots");
+        if (caller.slots != NULL)
+        {
+            for (uint32_t slot = 0; slot < caller.slot_count; slot += 1)
+            {
+                caller.slots[slot] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64 };
+            }
+            IrInlineUnit single = unit;
+            single.functions = &caller;
+            single.count = 1;
+            options.trusted = true;
+            const uint64_t capacity = scratch->capacity;
+            scratch->capacity = scratch->length + 4096;
+            IrInlineResult single_result = { 0 };
+            const IrCheck check = ir_optimize_inline(&single, output, scratch, options, &single_result, &failed);
+            scratch->capacity = capacity;
+            ir_inline_test_expect(test, check.error == IR_OK && single_result.functions[0].slot_count == caller.slot_count, "a sole caller needs no scratch proportional to its slots");
+        }
     }
     arena_pop_to(input, 0);
     arena_pop_to(output, 0);
