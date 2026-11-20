@@ -1556,6 +1556,51 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
 #include "assembler_programs_test.c"
 #include "assembler_round_trip_test.c"
 
+// A late fill of slot zero shadows an indexed spelling. Earlier file rows keep their original directory numbers.
+static void asm_test_line_directories(AsmTest* test)
+{
+    const String8 file = BUSTER_S8("unit.c");
+    const String8 missing = {0};
+    for (uint32_t implicit = 0; implicit < 2; implicit += 1)
+    {
+        uint8_t storage[8192];
+        memset(storage, 0xa5, sizeof(storage));
+        Arena arena = {.base = storage, .capacity = sizeof(storage)};
+        AsmParser parser = {.arena = &arena, .instruction_capacity = 40, .line_dwarf5 = true};
+        char names[17][8];
+        bool okay = asm_line_tables(&parser, 0);
+        if (okay)
+        {
+            asm_line_slot(&parser, 0, 1, missing, file, 0);
+            asm_line_slot(&parser, 0, 1, BUSTER_S8("hidden"), file, 0);
+            okay = parser.line_directory_count == 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+            {
+                const int length = snprintf(names[i], sizeof(names[i]), "d%02u//", i);
+                asm_line_slot(&parser, 0, i + 2, (String8){.pointer = names[i], .length = length}, file, 0);
+            }
+            asm_line_slot(&parser, 0, 19, missing, BUSTER_S8("d07//alias.c"), 0);
+            okay = okay && parser.line_directory_count == 18 && parser.line_directories[0].pointer == 0 && parser.line_files[19].directory == 8;
+            if (implicit)
+            {
+                asm_line_slot(&parser, 0, 1, missing, BUSTER_S8("d07//unit.c"), 0);
+            }
+            else
+            {
+                asm_line_slot(&parser, 0, 1, BUSTER_S8("d07/"), file, 0);
+            }
+            asm_line_slot(&parser, 0, 0, BUSTER_S8("d07//"), BUSTER_S8("root.c"), 0);
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+            {
+                asm_line_slot(&parser, 0, i + 20, (String8){.pointer = names[i], .length = sizeof("d00//") - 1}, file, 0);
+                okay = okay && parser.line_files[i + 2].directory == i + 1 && parser.line_files[i + 20].directory == (i == 7 ? 0 : i + 1);
+            }
+            okay = okay && parser.result.error == 0 && parser.line_directory_count == 18 && parser.line_files[0].directory == 0 && asm_line_same(parser.line_directories[0], BUSTER_S8("d07/"));
+        }
+        asm_test_check(test, okay, "directory aliases across growth and a late slot-zero fill", parser.result.error);
+    }
+}
+
 static int run_assembler_tests(int count, char** arguments)
 {
     const bool epoch = oracle_epoch_begin();
@@ -1841,6 +1886,7 @@ static int run_assembler_tests(int count, char** arguments)
         }
         asm_test_lex_guard(&test);
         test.digesting = false;
+        asm_test_line_directories(&test);
         if (seed == 1 && fuzz == 2000)
         {
             char detail[64];

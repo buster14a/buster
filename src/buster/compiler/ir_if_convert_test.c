@@ -619,6 +619,69 @@ static void ir_if_convert_test_scans(IrOptimizeTest* test)
     ir_optimize_test_expect(test, filters, "if-conversion's keys' filter, against its definition");
 }
 
+// Both triangle orientations, both operand orders, and a second phi that also needs the arm's original value.
+// The original table has no zero. Its otherwise unused second constant can already hold the width's identity.
+static void ir_if_convert_test_and(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch, uint32_t type, uint32_t shape, bool swap, bool existing, bool shared)
+{
+    const uint64_t im = input->length;
+    const uint64_t om = output->length;
+    const uint64_t sm = scratch->length;
+    IrFunction f = { 0 };
+    const bool created = ir_if_convert_test_fixture(input, &f, type, shape, shared ? 2 : 1, 1, 0);
+    ir_optimize_test_expect(test, created, "conditional AND fixture allocation");
+    if (created)
+    {
+        const uint64_t masks[] = { UINT8_MAX, UINT16_MAX, UINT32_MAX, UINT64_MAX };
+        const uint64_t mask = masks[type - IR_I8];
+        f.constants[1].low = existing ? mask : 1;
+        ir_optimize_test_instruction(&f, 5, IR_AND, type, swap ? 2 : 1, swap ? 1 : 2, BUSTER_IR_NONE);
+        f.extra[3] = 1;
+        if (shared)
+        {
+            f.extra[7] = 5;
+            f.extra[5] = 2;
+        }
+        IrIfConvertResult result = { 0 };
+        const IrCheck before = ir_verify_complete(&f, scratch);
+        const IrCheck check = before.error == IR_OK ? ir_if_convert(&f, output, scratch, &result) : before;
+        const IrFunction* const g = &result.function;
+        const bool valid = check.error == IR_OK && result.regions == 1 && result.sunk == !shared && ir_verify_complete(g, scratch).error == IR_OK;
+        ir_optimize_test_expect(test, valid, "conditional AND conversion, shared-arm refusal and complete SSA");
+        if (valid)
+        {
+            ir_optimize_test_expect(test, (g->constants == f.constants) == (shared || existing) &&
+                                    g->constant_count == f.constant_count + (!existing && !shared) && f.constants[1].low == (existing ? mask : 1),
+                                    "conditional AND borrows existing identities and preserves the input table");
+            if (!shared)
+            {
+                const uint32_t update = g->a[g->instruction_count - 1];
+                const uint32_t select = g->b[update];
+                bool shaped = g->op[update] == IR_AND && g->op[g->a[update]] == IR_PARAM && g->a[g->a[update]] == 1 &&
+                              select < g->instruction_count && g->op[select] == IR_SELECT;
+                if (shaped)
+                {
+                    const uint32_t identity = shape == 1 ? g->c[select] : g->b[select];
+                    const uint32_t x = shape == 1 ? g->b[select] : g->c[select];
+                    shaped = g->op[x] == IR_CONST && g->constants[g->a[x]].low == 7 && g->op[identity] == IR_CONST &&
+                             g->type[identity] == type && g->constants[g->a[identity]].low == mask && g->constants[g->a[identity]].high == 0;
+                }
+                ir_optimize_test_expect(test, shaped, "only AND reads the accumulator and its select has the exact typed identity on the inactive edge");
+            }
+            const uint64_t parameters[] = { 0, 1, 6, 7, mask >> 1, mask - 1, mask };
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(parameters); k += 1)
+            {
+                const IrOptimizeExecution source = ir_optimize_test_execute(&f, scratch, parameters[k], 0);
+                const IrOptimizeExecution converted = ir_optimize_test_execute(g, scratch, parameters[k], 0);
+                ir_optimize_test_expect(test, source.status == 1 && converted.status == 1 && source.value == converted.value && source.effects == converted.effects,
+                                        "conditional AND preserves the full-width result on both edges");
+            }
+        }
+    }
+    ir_optimize_test_expect(test, scratch->length == sm, "conditional AND restores scratch");
+    arena_pop_to(output, om);
+    arena_pop_to(input, im);
+}
+
 static void ir_if_convert_tests(IrOptimizeTest* test)
 {
     ir_if_convert_test_scans(test);
@@ -631,6 +694,35 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
     ir_if_convert_test_guards(test);
     if (ready)
     {
+        for (uint32_t type = IR_I8; type <= IR_I64; type += 1)
+        {
+            for (uint32_t shape = 1; shape <= 2; shape += 1)
+            {
+                for (uint32_t swap = 0; swap <= 1; swap += 1)
+                {
+                    ir_if_convert_test_and(test, &input, &vector, &scratch, type, shape, swap != 0, false, false);
+                    ir_if_convert_test_and(test, &input, &vector, &scratch, type, shape, swap != 0, true, false);
+                    ir_if_convert_test_and(test, &input, &vector, &scratch, type, shape, swap != 0, false, true);
+                }
+            }
+        }
+        for (uint32_t variant = 0; variant <= 3; variant += 1)
+        {
+            IrFunction f = { 0 };
+            const bool created = ir_if_convert_test_reload(&input, &f, variant);
+            ir_optimize_test_expect(test, created, "conditional AND reload fixture allocation");
+            if (created)
+            {
+                f.op[11] = IR_AND;
+                IrIfConvertResult result = { 0 };
+                const IrCheck check = ir_if_convert(&f, &vector, &scratch, &result);
+                ir_optimize_test_expect(test, check.error == IR_OK && result.sunk == 0 && result.regions == (variant < 2) &&
+                                        ir_verify_complete(&result.function, &scratch).error == IR_OK,
+                                        "conditional AND skips reused, speculated and volatile arm loads and loads after a call");
+            }
+            arena_pop_to(&vector, 0);
+            arena_pop_to(&input, 0);
+        }
         const uint8_t types[] = { IR_I1, IR_I8, IR_I16, IR_I32, IR_I64, IR_PTR, IR_F64 };
         for (uint32_t type = 0; type < sizeof(types); type += 1)
         {
