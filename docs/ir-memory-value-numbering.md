@@ -78,6 +78,13 @@ overlapped). The source's value is the load's, or the value the store stored. A
 store of an `undef` is no source: a load reads one value of it, and each use of
 an `undef` may be another.
 
+A plain `i8` or `i16` load can also take the operand of a `zext` when the
+preceding memory event in its block stored that extension. On x86-64 the low
+bytes start at the store's address. The family and offset must match, and the
+extension's operand must have the load's exact type and must not resolve to `undef`.
+The wider store still writes all its bytes. The walk records the narrow value
+under the load's ordinary key so later reads can reuse it by the usual rules.
+
 ## The walk
 
 `ir_memory_walk` visits the dominator tree in preorder, each block's
@@ -181,7 +188,9 @@ The whole pass by each version, each over the corpus in runs of its own
   block's forwarding (a load's value, a store's, a family's other offset, a
   call and another family's store between); the clobbers (an overlapping store,
   another type at one offset, volatile and atomic loads, a fence, an `undef`'s
-  store, a slot's marker); private slots (a call between, an escape to a call
+  store, a slot's marker); byte and word loads after a zero-extended store,
+  including wrong offsets, widths, observable accesses and a block boundary;
+  private slots (a call between, an escape to a call
   and through a stored address, markers, an indexed store of the same slot);
   blocks (a diamond's clean and written arms, a loop's header, latch and exit);
   addresses (an index's family, a constant index, a constant out of

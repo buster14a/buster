@@ -717,10 +717,63 @@ static void tier1_select_test_load_addition(Tier1SelectTest* test)
     arena_release(&input);
 }
 
+static void tier1_select_test_product_index(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    const uint8_t factors[] = { 2, 4, 8, 3, 16 };
+    const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .constant_count = 1, .parameter_count = 2 };
+    IrFunction function;
+    const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+    tier1_select_test_expect(test, created, "create integer scaled-product fixture");
+    for (uint32_t width = 4; created && width <= 8; width += 4)
+    {
+        const uint8_t type = width == 4 ? IR_I32 : IR_I64;
+        function.result_type = type;
+        function.block_offsets[1] = sizes.instruction_count;
+        function.parameter_types[0] = type;
+        function.parameter_types[1] = type;
+        tier1_select_test_node(&function, 0, IR_PARAM, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, IR_CONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(factors); k += 1)
+        {
+            function.constants[0].low = factors[k];
+            for (uint32_t multiply = 0; multiply < 2; multiply += 1)
+            {
+                tier1_select_test_node(&function, 3, IR_MUL, type, multiply ? 2 : 1, multiply ? 1 : 2, BUSTER_IR_NONE);
+                // The third addition uses the same product twice, so it must remain a separate value.
+                for (uint32_t add = 0; add < 3; add += 1)
+                {
+                    tier1_select_test_node(&function, 4, IR_ADD, type, add == 0 ? 0 : 3, add == 1 ? 0 : 3, BUSTER_IR_NONE);
+                    Tier1SelectPlan plan;
+                    uint32_t node = BUSTER_IR_NONE;
+                    const bool selected = tier1_select_plan(&function, 0, &output, &scratch, &plan, &node) == TIER1_SELECT_OK;
+                    const bool fold = add < 2 && (factors[k] == 2 || factors[k] == 4 || factors[k] == 8);
+                    tier1_select_test_expect(test, selected && (plan.covered[3] != 0) == fold, "only an encodable single-use product folds");
+                    if (selected && fold)
+                    {
+                        const Tier1SelectPattern* sum = &plan.patterns[4];
+                        tier1_select_test_expect(test, sum->rule == TIER1_RULE_LEA_ADD && sum->values[0] == 0 && sum->values[1] == 1 &&
+                                                 sum->scale <= 3 && (1u << sum->scale) == factors[k], "the LEA reads the base and the unscaled index");
+                    }
+                    arena_pop_to(&output, 0);
+                }
+            }
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static void tier1_select_test_address_arithmetic(Tier1SelectTest* test)
 {
     tier1_select_test_load_addition(test);
     tier1_select_test_power_multiplication(test);
+    tier1_select_test_product_index(test);
     tier1_select_test_signed_loads(test);
     tier1_select_test_added_address(test);
     tier1_select_test_shared_address(test);

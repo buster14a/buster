@@ -6392,11 +6392,13 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
             const uint64_t swept = counts[NODE_FACTS_COUNT_ROWS_SWEPT];
             const uint64_t reads = counts[NODE_FACTS_COUNT_ROWS_READ_TICKS];
             const uint64_t shapes = counts[NODE_FACTS_COUNT_ROWS_SHAPE_TICKS];
+            const uint64_t updates = counts[NODE_FACTS_COUNT_ROWS_UPDATE_TICKS];
             const uint64_t write = counts[NODE_FACTS_COUNT_ROWS_WRITE_TICKS];
             const uint64_t part = counts[NODE_FACTS_COUNT_ROWS_PART_TICKS];
             const uint64_t reference = counts[NODE_FACTS_COUNT_ROWS_REFERENCE_TICKS];
             const uint64_t later_reads = counts[NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS];
             const uint64_t later_shapes = counts[NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS];
+            const uint64_t later_updates = counts[NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS];
             const uint64_t later_write = counts[NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS];
             const uint64_t later_part = counts[NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS];
             const double per = swept != 0 ? 1.0 / (double)swept : 0.0;
@@ -6411,20 +6413,21 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
                    counts[NODE_FACTS_COUNT_ROWS_LISTED_UPDATE], counts[NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES], counts[NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION],
                    counts[NODE_FACTS_COUNT_ROWS_LISTED_FLOATING]);
             printf("node-shadow: window rows records read a record at a time: a target's word=%" PRIu64 " (%.2f%% of the records swept) a line or a table=%" PRIu64
-                   " (%.2f%%)\n",
+                   " (%.2f%%) an update's line=%" PRIu64 " (%.2f%%)\n",
                    counts[NODE_FACTS_COUNT_ROWS_WORDS], node_census_share(counts[NODE_FACTS_COUNT_ROWS_WORDS], swept), counts[NODE_FACTS_COUNT_ROWS_LINES],
-                   node_census_share(counts[NODE_FACTS_COUNT_ROWS_LINES], swept));
-            const uint64_t sum = reads + shapes + write + part;
-            const uint64_t later_sum = later_reads + later_shapes + later_write + later_part;
+                   node_census_share(counts[NODE_FACTS_COUNT_ROWS_LINES], swept), counts[NODE_FACTS_COUNT_ROWS_UPDATES],
+                   node_census_share(counts[NODE_FACTS_COUNT_ROWS_UPDATES], swept));
+            const uint64_t sum = reads + shapes + updates + write + part;
+            const uint64_t later_sum = later_reads + later_shapes + later_updates + later_write + later_part;
             printf("node-shadow: window rows ticks=%" PRIu64 " (%.2f a record swept, %.2f a record of the taken): the reads=%" PRIu64 " (%.2f) the shapes=%" PRIu64
-                   " (%.2f) the rows=%" PRIu64 " (%.2f) an expression's part=%" PRIu64 " (%.2f); the reference's X on the taken expressions=%" PRIu64
-                   " (%.2f a record of theirs)\n",
-                   sum, (double)sum * per, (double)sum * per_taken, reads, (double)reads * per, shapes, (double)shapes * per, write, (double)write * per, part,
-                   (double)part * per, reference, (double)reference * per_taken);
+                   " (%.2f) the updates=%" PRIu64 " (%.2f) the rows=%" PRIu64 " (%.2f) an expression's part=%" PRIu64
+                   " (%.2f); the reference's X on the taken expressions=%" PRIu64 " (%.2f a record of theirs)\n",
+                   sum, (double)sum * per, (double)sum * per_taken, reads, (double)reads * per, shapes, (double)shapes * per, updates, (double)updates * per, write,
+                   (double)write * per, part, (double)part * per, reference, (double)reference * per_taken);
             printf("node-shadow: window rows a second run over the same chunk, not counted: ticks=%" PRIu64 " (%.2f a record swept, %.2f a record of the taken): the reads=%"
-                   PRIu64 " (%.2f) the shapes=%" PRIu64 " (%.2f) the rows=%" PRIu64 " (%.2f) an expression's part=%" PRIu64 " (%.2f)\n",
+                   PRIu64 " (%.2f) the shapes=%" PRIu64 " (%.2f) the updates=%" PRIu64 " (%.2f) the rows=%" PRIu64 " (%.2f) an expression's part=%" PRIu64 " (%.2f)\n",
                    later_sum, (double)later_sum * per, (double)later_sum * per_taken, later_reads, (double)later_reads * per, later_shapes, (double)later_shapes * per,
-                   later_write, (double)later_write * per, later_part, (double)later_part * per);
+                   later_updates, (double)later_updates * per, later_write, (double)later_write * per, later_part, (double)later_part * per);
         }
         printf("node-shadow: reader-time fact words chunks' ends: waiting values kept whole=%" PRIu64 " (their records %" PRIu64 ") kept as their place alone, cut=%" PRIu64
                "; the calls' arguments' list at most=%" PRIu64 " (room %u)\n",

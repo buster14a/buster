@@ -158,9 +158,13 @@ typedef enum Tier1SelectRule
     // result, ucomis and setcc, and for == and != the parity flag's setcc and their and or or, since unordered sets ZF. A branch
     // on one, < and <= with its operands swapped, `condition` the unsigned condition (UGT, UGE, or their negations ULE and
     // ULT) whose jump reads ucomis's flags: ja and jae are false for unordered operands, and jbe and jb, !(a > b) and
-    // !(a >= b), true. The conversions (FLOAT_CONVERT, `scale` its kind: BUSTER_TIER1_FLOAT_FROM_SIGNED and the others,
-    // `width` and `source_width` the result's and the operand's bytes, an integer's by its memory width). A return of
-    // values[0] in xmm0. Only the CFG consumer takes them.
+    // !(a >= b), true. A select of one (FLOAT_SELECT_COMPARE, #2791), whose integer result is a general register's:
+    // values[0] and values[1] the ucomis's operands and `condition` as the branch's; values[2] and values[3] the select's
+    // values where the comparison holds and where it doesn't, `width` the select's and `source_width` the comparison's
+    // (tier1_select_expand's records). The conversions
+    // (FLOAT_CONVERT, `scale` its kind: BUSTER_TIER1_FLOAT_FROM_SIGNED and the others, `width` and `source_width` the
+    // result's and the operand's bytes, an integer's by its memory width). A return of values[0] in xmm0. Only the CFG
+    // consumer takes them.
     TIER1_RULE_FLOAT_CONSTANT,
     TIER1_RULE_FLOAT_COPY,
     TIER1_RULE_FLOAT_BINARY,
@@ -176,6 +180,7 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_STORE_ADDRESS,
     TIER1_RULE_FLOAT_COMPARE,
     TIER1_RULE_FLOAT_BRANCH_COMPARE,
+    TIER1_RULE_FLOAT_SELECT_COMPARE,
     TIER1_RULE_FLOAT_CONVERT,
     TIER1_RULE_FLOAT_CONVERT_WIDE,
     TIER1_RULE_FLOAT_RETURN,
@@ -250,6 +255,8 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ASM,
     // A signed i32 or i64 in memory converted directly into an xmm register (#2829). Its scale belongs to the address.
     TIER1_RULE_FLOAT_CONVERT_LOAD,
+    // a * [base + index * scale + displacement] + c. The register operands a and c precede the address's two values.
+    TIER1_RULE_FLOAT_FMA_LOAD,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -458,7 +465,7 @@ static bool tier1_select_mask_rule(uint32_t rule)
 // Whether a rule is a floating value's (#141), which only the CFG consumer takes, its vector class's.
 static bool tier1_select_float_rule(uint32_t rule)
 {
-    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || rule == TIER1_RULE_FLOAT_CONVERT_LOAD;
+    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || (rule >= TIER1_RULE_FLOAT_CONVERT_LOAD && rule <= TIER1_RULE_FLOAT_FMA_LOAD);
 }
 
 // Register-only leaf bodies use caller-saved registers. R11 is reserved for a destructive instruction's second
@@ -868,6 +875,22 @@ static X86Instruction tier1_select_shift(X86Operation operation, uint32_t width,
     const uint16_t form = operation == X86_OPERATION_SAR ? (width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8) : (width == 8 ? X86_FORM_SHR_RM64_IMM8 : X86_FORM_SHR_RM32_IMM8);
     const X86Instruction result = { .immediate = (int32_t)count, .rm = reg, .form = form };
     return result;
+}
+
+// A fused select's records past its comparison's (#2676, #2791): a move of the value the destination doesn't hold, then a
+// cmov of the other value by the comparison's condition, inverted where the destination holds the value it chooses.
+// Neither writes the flags, as the xor zero idiom would.
+static void tier1_select_fused_moves(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination, uint32_t width)
+{
+    const bool inverse = destination == holes->third;
+    const uint8_t initial = inverse ? holes->third : holes->fourth;
+    const uint8_t alternate = inverse ? holes->fourth : holes->third;
+    const uint8_t condition = inverse ? tier1_select_negations[holes->condition] : holes->condition;
+    if (destination != initial)
+    {
+        tier1_select_append(result, tier1_select_move(width, destination, initial));
+    }
+    tier1_select_append(result, tier1_select_register_record(tier1_select_condition_moves[width == 8][condition], destination, alternate));
 }
 
 static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
@@ -2388,19 +2411,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_SELECT_COMPARE:
     {
         // The comparison at its own width first, which reads its operands before the move can overwrite one in the
-        // destination; then the move and the cmov, neither of which writes the flags (#2676). The xor zero idiom would.
+        // destination; then the move and the cmov (#2676).
         Tier1SelectHoles comparison = *holes;
         comparison.width = holes->source_width;
         tier1_select_compare(&result, &comparison);
-        const bool inverse = destination == holes->third;
-        const uint8_t initial = inverse ? holes->third : holes->fourth;
-        const uint8_t alternate = inverse ? holes->fourth : holes->third;
-        const uint8_t condition = inverse ? tier1_select_negations[holes->condition] : holes->condition;
-        if (destination != initial)
-        {
-            tier1_select_append(&result, tier1_select_move(width, destination, initial));
-        }
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_condition_moves[width == 8][condition], destination, alternate));
+        tier1_select_fused_moves(&result, holes, destination, width);
         break;
     }
     case TIER1_RULE_JUMP:
@@ -2935,47 +2950,48 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     }
     case TIER1_RULE_FLOAT_FMA:
+    case TIER1_RULE_FLOAT_FMA_LOAD:
     {
         // a * b + c: x86's FMA3 forms take a NaN in the formula's order whatever their form (IR_FMA), so the form is the
         // one whose destination holds an operand already: 213 where it is b's (x = a * x + c), 231 where it
-        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c); otherwise b's copy into the destination, then
-        // 213. vvvv and rm are the other two, in the formula's order.
+        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c). A fresh destination starts from a copy
+        // of b for a register 213, or of c for a memory 231. vvvv and rm preserve the formula's operand order.
         static const uint16_t forms[2][3] = {
             { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
             { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
         };
         const uint8_t x = destination & 15;
         const uint8_t a = holes->left & 15;
-        const uint8_t b = holes->right & 15;
-        const uint8_t c = holes->third & 15;
+        const bool memory = holes->rule == TIER1_RULE_FLOAT_FMA_LOAD;
+        const uint8_t b = memory ? BUSTER_TIER1_SELECT_NO_REGISTER : holes->right & 15;
+        const uint8_t c = (memory ? holes->right : holes->third) & 15;
         const uint32_t d = width == 8 ? 1 : 0;
-        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : 0;
+        // With b in memory, use a's register for 132 or c's for 231. In a fresh register copy c and keep a in vvvv.
+        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : memory ? 1 : 0;
         if (x != b && x != c && x != a)
         {
-            tier1_select_append(&result, tier1_select_float_move(x, b));
+            tier1_select_append(&result, tier1_select_float_move(x, memory ? c : b));
         }
-        const X86Instruction record = {
-            .form = forms[d][kind],
-            .reg = x,
-            .vvvv = kind == 2 ? c : a,
+        X86Instruction record = memory ? holes->memory : (X86Instruction){
             .rm = kind == 0 ? c : b,
             .mode = BUSTER_X86_REGISTER_DIRECT,
         };
+        record.form = forms[d][kind];
+        record.reg = x;
+        record.vvvv = kind == 2 ? c : a;
         tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_FLOAT_NEGATE:
     {
-        // The sign bit in the vector class's scratch register, through the scratch general register, and the value's
-        // copy in the destination xor it: the value stays in its class, and its other bits as they were.
+        // When the source stays live in another register the destination can hold the sign mask itself. For an
+        // in-place negate the vector scratch holds the mask. XOR leaves every other bit of the source unchanged.
         const uint8_t x = destination & 15;
+        const uint8_t source = holes->left & 15;
+        const uint8_t mask = x == source ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : x;
         tier1_select_request(&result, X86_OPERATION_MOV, width, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(UINT64_C(1) << (width * 8 - 1)), 0);
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, BUSTER_TIER1_SELECT_FLOAT_SCRATCH, BUSTER_TIER1_SELECT_SCRATCH));
-        if (x != (holes->left & 15))
-        {
-            tier1_select_append(&result, tier1_select_float_move(x, holes->left & 15));
-        }
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, BUSTER_TIER1_SELECT_FLOAT_SCRATCH));
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, mask, BUSTER_TIER1_SELECT_SCRATCH));
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x == source ? mask : source));
         break;
     }
     // One movss or movsd each, the node's last record, which the CFG consumer's frame-object patch rewrites; a masked
@@ -3042,6 +3058,14 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
+    case TIER1_RULE_FLOAT_SELECT_COMPARE:
+    {
+        // ucomis, then the select's mov and cmov (#2791), whose condition is the branch's: true for unordered operands only
+        // negated. The comparison's operands are in the vector class, so the general destination holds neither.
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(holes->source_width)->compare, holes->left & 15, holes->right & 15));
+        tier1_select_fused_moves(&result, holes, destination, width);
+        break;
+    }
     case TIER1_RULE_FLOAT_CONVERT:
     {
         const uint32_t source_width = holes->source_width;
@@ -3096,12 +3120,19 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_FLOAT_CONVERT_LOAD:
     {
-        const uint8_t x = destination & 15;
         X86Instruction record = holes->memory;
-        record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
-        record.reg = x;
-        // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+        record.reg = destination & 15;
+        if (holes->condition == BUSTER_TIER1_FLOAT_FROM_SIGNED)
+        {
+            record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
+            // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, record.reg, record.reg));
+        }
+        else
+        {
+            // Truncate to a general register. An unsigned I32 fits in the signed 64-bit conversion's result.
+            record.form = tier1_select_float_forms(holes->source_width)->to_integer[width == 8 || holes->condition == BUSTER_TIER1_FLOAT_TO_UNSIGNED];
+        }
         tier1_select_append(&result, record);
         break;
     }
@@ -4984,9 +5015,11 @@ static bool tier1_select_constant(const IrFunction* function, uint32_t value, ui
 // zero again, `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source nests. The walk follows such a
 // chain back from `value`, an I1, to the value it tests, through links that only `root`'s pattern uses, at most
 // BUSTER_TIER1_SELECT_WALK of them: each a zero extension, a zero and their comparison in consecutive nodes, right after
-// the value it extends, so that nothing the pattern doesn't compute runs between the test and the root. It returns the
-// node it stops at, counts the nodes it passed among the pattern's folds, and says whether an odd number of the links
-// were `eq`, where the root's truth is the stopped node's negation.
+// the value it extends, so that nothing the pattern doesn't compute runs between the test and the root. A link may also
+// be an I1 copy of the floating comparison right before it: if-conversion's truth simplification makes a test of one,
+// which no integer comparison can take the place of, its copy (ir_truth.c's values variant, #2791). It returns the node
+// it stops at, counts the nodes it passed among the pattern's folds, and says whether an odd number of the links were
+// `eq`, where the root's truth is the stopped node's negation.
 static uint32_t tier1_select_truth(const Tier1SelectForest* forest, uint32_t root, uint32_t value, Tier1SelectPattern* pattern, bool* negated)
 {
     const IrFunction* function = forest->function;
@@ -5005,6 +5038,13 @@ static uint32_t tier1_select_truth(const Tier1SelectForest* forest, uint32_t roo
             odd ^= function->c[value] == IR_EQ;
             pattern->fold_count += 3;
             value = function->a[extended];
+        }
+        else if (function->op[value] == IR_COPY && function->type[value] == IR_I1 && function->a[value] + 1 == value && function->op[function->a[value]] == IR_FCMP &&
+                 tier1_select_tree_child(forest, root, value))
+        {
+            walking = true;
+            pattern->fold_count += 1;
+            value = function->a[value];
         }
     }
     *negated = odd;
@@ -5124,7 +5164,10 @@ static inline __attribute__((always_inline)) void tier1_select_add_comparison(co
 // pattern's own (#141, TIER1_RULE_FLOAT_BRANCH_COMPARE): ucomis of its operands, swapped for < and <=, and the unsigned
 // condition that reads its flags, UGT (ja) for a strict one and UGE (jae) for the other, which are false for unordered
 // operands; with `negated`, their negations ULE and ULT (jbe and jb), which are true for them, as !(a > b) and
-// !(a >= b) are. == and != read the parity flag too, which a single jump can't: their truth value is tested instead.
+// !(a >= b) are. == and != read the parity flag too, which a single jump can't: their truth value is tested instead. A
+// select of one takes the same (TIER1_RULE_FLOAT_SELECT_COMPARE, #2791): two cmovs could read both flags, as clang's
+// select of an `fcmp oeq` does, but both are on the path from the select's values to its result, which a loop's
+// accumulator recurs through (docs/tier1-selection.md has the measurement).
 static bool tier1_select_float_comparison(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, Tier1SelectPattern* pattern)
 {
     const IrFunction* function = forest->function;
@@ -5282,6 +5325,37 @@ struct Tier1SelectAddress
     uint8_t folds;
     bool rip;
 };
+
+// A register-register LEA can encode one operand's multiplication in its SIB byte (#2700). Both operations have
+// the addition's width, so wrapping the product before the addition gives the same low 32 or 64 bits.
+static void tier1_select_product_index(const Tier1SelectForest* forest, uint32_t node, Tier1SelectPattern* lea)
+{
+    const IrFunction* function = forest->function;
+    for (uint32_t side = 0; side < 2; side += 1)
+    {
+        const uint32_t product = lea->values[1 - side];
+        if (function->op[product] == IR_MUL && tier1_select_tree_child(forest, node, product))
+        {
+            uint32_t index = function->a[product];
+            uint32_t factor = function->b[product];
+            if (function->op[factor] != IR_CONST)
+            {
+                factor = index;
+                index = function->b[product];
+            }
+            uint64_t value = 0;
+            if (tier1_select_constant(function, factor, &value) && (value == 2 || value == 4 || value == 8))
+            {
+                lea->values[0] = lea->values[side];
+                lea->values[1] = index;
+                lea->scale = (uint8_t)tier1_select_log2(value);
+                tier1_select_fold(forest, node, product, lea);
+                tier1_select_fold(forest, node, factor, lea);
+                break;
+            }
+        }
+    }
+}
 
 // An address's index through single-use I64 arithmetic in its block, at most BUSTER_TIER1_SELECT_WALK nodes: additions
 // and subtractions of constants join the displacement at the current scale; shifts and power-of-two multiplies join
@@ -6163,6 +6237,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[2] = c;
         base.intrinsic_cost = 4;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // The r/m multiplicand of both 132 and 231 is b. Swapping a and b would change which NaN payload wins.
+        if (tier1_select_load_folds(forest, node, b))
+        {
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_FLOAT_FMA_LOAD;
+            folded.values[1] = c;
+            tier1_select_fold(forest, node, b, &folded);
+            tier1_select_memory(forest, node, function->a[b], &folded, 2);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (float_width != 0 && op == IR_FNEG)
     {
@@ -6327,10 +6411,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
-        if (op == IR_SITOFP && (source == IR_I32 || source == IR_I64) && tier1_select_load_folds(forest, node, a))
+        const bool from_integer = op == IR_SITOFP && (source == IR_I32 || source == IR_I64);
+        const bool to_integer = (op == IR_FPTOSI && (type == IR_I32 || type == IR_I64)) || (op == IR_FPTOUI && type == IR_I32);
+        if ((from_integer || to_integer) && tier1_select_load_folds(forest, node, a))
         {
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_FLOAT_CONVERT_LOAD;
+            // The selected address takes scale. Keep the conversion kind in condition.
+            folded.condition = base.scale;
             tier1_select_fold(forest, node, a, &folded);
             tier1_select_memory(forest, node, function->a[a], &folded, 0);
             tier1_select_add_candidate(forest, node, &candidates, folded);
@@ -6745,6 +6833,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             Tier1SelectPattern lea = base;
             lea.rule = TIER1_RULE_LEA_ADD;
             lea.intrinsic_cost = 1;
+            if (function->op[b] == IR_MUL || function->op[a] == IR_MUL)
+            {
+                tier1_select_product_index(forest, node, &lea);
+            }
             tier1_select_add_candidate(forest, node, &candidates, lea);
         }
         uint32_t constant = b;
@@ -7103,6 +7195,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[3] = c;
             tier1_select_add_comparison(forest, node, &candidates, folded, base.width);
         }
+        // A floating comparison by <, <=, > or >= (#2791): its ucomis, then the select's mov and cmovCC.
+        else if (tier1_select_float_comparison(forest, node, tested, negated, &folded))
+        {
+            folded.rule = TIER1_RULE_FLOAT_SELECT_COMPARE;
+            folded.source_width = folded.width;
+            folded.width = base.width;
+            folded.values[2] = b;
+            folded.values[3] = c;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (op == IR_BR)
     {
@@ -7339,6 +7441,7 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const T
         case TIER1_RULE_MASK_LOAD_ADDRESS:
         case TIER1_RULE_MASK_STORE_ADDRESS:
         case TIER1_RULE_FLOAT_BRANCH_COMPARE:
+        case TIER1_RULE_FLOAT_SELECT_COMPARE:
         case TIER1_RULE_FLOAT_LOAD_ADDRESS:
         case TIER1_RULE_FLOAT_STORE_ADDRESS:
             rank = 8;
@@ -7346,6 +7449,7 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const T
         case TIER1_RULE_LOAD_OPERAND:
         case TIER1_RULE_FLOAT_LOAD_OPERAND:
         case TIER1_RULE_FLOAT_CONVERT_LOAD:
+        case TIER1_RULE_FLOAT_FMA_LOAD:
             rank = 7;
             break;
         case TIER1_RULE_MULTIPLY_LEA:
@@ -7950,8 +8054,9 @@ static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1S
                       (rule == TIER1_RULE_INTRINSIC && pattern->immediate == BUSTER_IR_INTRINSIC_BSWAP) || rule == TIER1_RULE_FLOAT_COPY || rule == TIER1_RULE_FLOAT_BINARY ||
                       rule == TIER1_RULE_FLOAT_LOAD_OPERAND || rule == TIER1_RULE_FLOAT_NEGATE;
     const bool select = rule == TIER1_RULE_SELECT;
-    // A fused select's values are past its comparison's (#2676): where its comparison holds in values[2], else values[3].
-    const bool fused = rule == TIER1_RULE_SELECT_COMPARE;
+    // A fused select's values are past its comparison's (#2676, #2791): where its comparison holds in values[2], else
+    // values[3].
+    const bool fused = rule == TIER1_RULE_SELECT_COMPARE || rule == TIER1_RULE_FLOAT_SELECT_COMPARE;
     // An address from a register (#2592): `lea d(%r),%r` costs what a lea into another register does, and an incremented
     // pointer, Lua's `pc + 1` in OP_LFALSESKIP, keeps the register its dispatch takes it in.
     const bool address = rule == TIER1_RULE_ADDRESS && !pattern->rip && pattern->stack_object == BUSTER_IR_NONE;
@@ -8040,6 +8145,9 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_LOAD_OPERAND:
     case TIER1_RULE_FLOAT_LOAD_OPERAND:
         holes.memory = tier1_select_memory_holes(pattern, registers, 1);
+        break;
+    case TIER1_RULE_FLOAT_FMA_LOAD:
+        holes.memory = tier1_select_memory_holes(pattern, registers, 2);
         break;
     default:
         break;

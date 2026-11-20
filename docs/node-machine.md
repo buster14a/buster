@@ -5821,6 +5821,197 @@ the loop over the targets' words 0.35 and 0.32, and the loop over the lines
 **What is next:** an update's rows (its plan on the window), the branches'
 (the states, the senses and the labels), and the entries' values.
 
+### An update's rows on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x-update-rows-2850-2026-11-20).
+Its [specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7030649938)
+had five gates: exact (U1), how much (U2), cost (U3), that nothing else moves
+(U4) and faults (U5).
+
+The piece before listed every expression with an update: 3,394 of the
+49,155 `sqlite3.c` has that C takes on the window, 742 of Lua's 9,909 and
+3,530 of musl's 39,712. X writes an update two rows, by
+`node_machine_update_plan`'s choices: the first after its destination's row
+(`node_machine_update_first`: the old value's read, by name or through the
+address its destination's entries left, and its CONVERT to the class the
+operation is computed in), the last where its own record is
+(`node_machine_update_last`: the step's CONST for `++` and `--`, the
+operation, the result's CONVERT back and the store). This piece makes the
+kinds and the classes of both on the window. No compile takes any of it.
+
+**Each row where its record has free slots.** A record's row is two parts of
+four slots, its own entries' and its conversion's (the piece before). An
+update's two rows are shapes of the same table, in the slots its two records
+don't use:
+
+| row | where | entries |
+| --- | --- | --- |
+| its own, 87 to 90 | the update's record's own part | a CONST of the computation's class for `++` and `--`; the operation; a CONVERT back to the destination's class where the two differ; the store |
+| a pointer's own, 91 to 94 | the same | its step's CONST for `++` and `--`; a NEG for `--` and `-=`; the PTR_ADD; the store |
+| its first by name, 95 to 98, and 99 | its destination's record's two parts: a destination by name is not evaluated, and has no entry | the read, a local's or a global's, and a postfix update's DUP in the own part; the CONVERT in the conversion's |
+| its first through an address, 100 and 101 | its destination's record's conversion's part: a record read for its address converts nothing | a DUP of the address, the LOAD, the CONVERT |
+| a postfix update's first through an address, 102 to 111 | both parts of its destination's record, after the destination's own entries | six entries (the address kept in a temporary and read back, the old value loaded and kept in another, and the two read for the store and for the value) and the CONVERT |
+
+A row's slots are fixed, with none where an entry is not written: the write's
+compress drops an empty slot as it joins the parts. Two of the own row's
+entries have a kind that is the record's to say, the operation's (by the
+operator's code) and the store's (a local's, a global's or through its
+address; a SET for a postfix update): each is a mark in the table, which the
+write resolves with one masked move, as it does a class's source. A first
+row's CONVERT is its part's last slot's in each row, so one slot of a
+conversion's part reads the computation's class.
+
+**What it lists.** A bool's update, whose result is tested (the conversion
+back is the test's entries, which the four slots have no room for); and a
+postfix update through an address whose destination's own entries leave the
+six no room: an address and its offset's three, or a member's offset's two
+with the CONVERT. 73 of `sqlite3.c`'s expressions, 10 of Lua's and
+4 of musl's.
+
+**A sweep and a loop of their own**, after the shapes' sweep and before the
+rows' write (`node_rows_window_updates`), in a chunk where C's loop gave a
+record the update's template. A sweep of masks, 64 records a step, compresses
+the chunk's updates' numbers into a list: their places in the block as bytes,
+one compress, the first 16 widened onto the list, and another turn for a
+block with more. A loop over the list then writes each update's two rows'
+shapes over what the shapes' sweep made of its record and of its
+destination's, with their lengths; its store's kind and the class its
+operation is computed in (T's conversion of its first operand, one read of
+the update's line), where the write reads them; and, where its rows are not
+made, the bit that lists its expression. Each choice is a bit and each shape
+a sum or a table's byte, with no branch on an update's bits. The reads' and
+the shapes' sweeps have no term of an update, and an update has no column of
+its own.
+
+**The terms that are no term here.** The plan asks more than this reads; for
+what C on the window takes an update by, each is said by a byte the loop has
+already (the comments there):
+
+- **The stored class and facts**, the destination's type's, are the update's
+  own record's and its destination's record's alike: an update's type is its
+  destination's value's.
+- **The class the operation is computed in** is its computation's: the plan's
+  other case is a narrow class's, a `_BitInt`'s alone (C promotes the others),
+  and C takes no update of a `_BitInt`.
+- **A pointer's computation** is its own class's: no pointer's update has the
+  CONVERT.
+- **A destination by name** has an object, and one through its address
+  converts nothing.
+- **A division or a remainder by a power of two**, a shift or a mask in the
+  plan: C on the window lists every compound division and remainder by an
+  integer constant.
+
+**How it came to its cost.** Builds on the 9700X, TSC ticks a record swept,
+three readings each: the rows' sweeps with the update's rows on, and what
+they read more than the piece before's executable in the same readings.
+
+| build | `sqlite3.c`, with the update's rows | more than the piece before's | Lua, with them | more |
+| --- | ---: | ---: | ---: | ---: |
+| first: the update's loop in the reads' sweep, each shape chosen by branches; four columns of its own | 5.16 | +1.02 | 6.52 | +1.30 |
+| each shape a sum of bits, with no branch | 5.21 | +1.11 | 6.98 | +1.89 |
+| no column of its own: the shapes into the two the sweeps write | 4.84 | +0.62 | 6.18 | +1.06 |
+| both rows' shapes as masks in the shapes' sweep; the loop carries what crosses the two records | 4.75 | +0.57 | 6.40 | +1.27 |
+| a sweep and a loop of their own, after the shapes' sweep | 4.75 | +0.61 | 6.15 | +0.99 |
+| that loop with no table of its own (not kept) | 4.79 | +0.70 | 6.10 | +0.95 |
+| the fifth's, in a chunk with an update alone, and a row's entries' number one byte (seven readings) | **4.71** | **+0.67** | **6.11** | **+0.94** |
+
+- **A shape chosen by branches is mispredicted.** The first build's loop chose each shape by branches: the reads
+  read 0.57 ticks a record more with the update's rows on than off on `sqlite3.c`, 49.1 an update; as sums of bits,
+  0.43 and 37.0.
+- **A column of its own is one more a block, in every chunk.** With four (the two shapes', the operation's kind and
+  the store's), the reads read 0.34 ticks a record more than the piece before's on `sqlite3.c` and 1.01 on Lua with
+  the update's rows off; with none, 0.14 and 0.44.
+- **A term in a big sweep is every block's.** The fourth build made both rows' shapes of masks in the shapes' sweep,
+  its loop carrying only what crosses the two records. The shapes' sweep read 0.22 ticks a record more than the
+  piece before's on `sqlite3.c` and 0.49 on Lua, 0.18 and 0.47 of it with the update's rows off; and the reads, with
+  the list and the loop in them, 0.29 and 0.67 more.
+- **A sweep and a loop of their own leave the others theirs.** In the fifth build the reads read +0.00 and +0.02 against
+  the piece before's and the shapes +0.01 and +0.01. The updates' own counter reads 0.53 and 0.89, of which 0.11 and 0.30
+  are the list's sweep with no update to make (the switch), and 0.35 and 0.34 on a chunk's second run.
+- **The loop with no table of its own read no less**, 0.58 and 0.96: a sum of bits for each shape and each length
+  is more instructions than the lookups it replaces.
+
+**Measured.** The 9700X, CPU 2, Release, each run its own hold of the lock,
+TSC ticks, seven readings; in each reading one executable with the update's
+rows on, off (an experiment's switch: an update's template lists its
+expression, as the piece before had it), the piece before's executable
+twice, then off and on again.
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions C takes on the window | 49,155 | 9,909 | 39,712 |
+| their tapes made here | 47,027 (95.67%) | 9,689 (97.78%) | 38,705 (97.46%) |
+| the piece before's | 43,719 (88.94%) | 8,961 (90.43%) | 35,194 (88.62%) |
+| of the expressions C decides | 95.37% | 96.13% | 92.69% |
+| listed for an update | 73 | 10 | 4 |
+| listed for branches | 2,046 | 200 | 790 |
+| listed for a refused conversion | 1 | 0 | 20 |
+| listed for a constant to a floating class | 8 | 10 | 193 |
+| tapes that differ from X's on T's columns | 0 | 0 | 0 |
+| updates | 3,734 (1.16% of the records swept) | 861 (0.94% of the records swept) | 3,969 (1.05% of the records swept) |
+| **the rows' sweeps and the part, a record swept** | **4.71 (4.61 to 4.93)** | **6.11 (5.99 to 8.12)** | **11.97 (9.87 to 14.39)** |
+| the piece before's executable, in the same readings | 4.12 | 5.15 | 10.59 |
+| **more than the piece before's** | **+0.67 (+0.47 to +0.81)** | **+0.94 (+0.87 to +1.99)** | **+1.27 (-1.11 to +4.23)** |
+| with the update's rows off | 4.37 | 5.54 | 11.68 |
+| the reads | 1.62 | 1.81 | 3.58 |
+| the shapes | 0.62 | 1.02 | 2.10 |
+| the updates; with none to make | 0.52; 0.11 | 0.81; 0.27 | 1.55; 0.69 |
+| the rows | 0.98 | 1.44 | 3.16 |
+| an expression's part | 0.99 | 0.99 | 1.51 |
+| a second run over the same chunk; the piece before's | 3.81; 3.29 | 3.54; 3.15 | 4.70; 4.04 |
+| the updates in it; with none to make | 0.36; 0.09 | 0.33; 0.12 | 0.53; 0.30 |
+| the updates, ticks an update: a first run; a second | 45; 31 | 86; 35 | 147; 50 |
+| a record of the taken expressions | 6.22 | 9.51 | 25.20 |
+| X on T's columns, a record of theirs, with its values | 26.64 | 24.78 | 29.25 |
+| records a chunk; updates a chunk | 526; 6.1 | 379; 3.6 | 127; 1.3 |
+
+**Against its gates.**
+
+- **U1, exact: met.** No tape made differs from X's on T's columns in its number of entries, a kind or a class, on
+  the three corpora on the 9700X, with the update's rows on and off. In the cloud
+  container the same on the three and on the compiler's own source (36,721 tapes there), with the default warnings and
+  with `-Wall -Wextra`. The rows' fixture has a line an update's case (629 tapes with the first piece's lines), a
+  unit of one chunk with one update has 3, and C's fixture 1,253 more; with one of the reference's answers changed
+  for each tape the comparison counts every tape of the three. And 618 one-statement programs, each a file of its
+  own, 369 of them an update's cases, read as X on T's columns does.
+- **U2, how much: met.** 3,308 tapes more on `sqlite3.c`, 728 on Lua and 3,511 on musl (2,900, 600 and 3,400 asked;
+  refuted under 2,500, 500 and 3,000): 95.67%, 97.78% and 97.46% of the expressions C takes, and 95.37%, 96.13% and 92.69%
+  of those it decides. Of the 438, 115 and 80 expressions with a postfix update
+  through an address (the count before the specification), 73, 10 and 4 are listed still, for the entries of their
+  destination's own.
+- **U3, cost: not met.** The rows' sweeps and the part read +0.67 ticks a record swept more
+  than the piece before's executable on `sqlite3.c` (+0.47 to +0.81) and +0.94 on Lua (+0.87 to +1.99), where 0.5 was asked
+  and 1.0 refutes; +1.27 on musl (-1.11 to +4.23), which the gate did not name. Of it the updates' sweep and loop are 0.52,
+  0.81 and 1.55, and the rows' write, with the update's marks and sources in it, +0.12, +0.17 and +0.22. On a chunk's second
+  run the whole reads +0.52, +0.40 and +0.67 more.
+- **U4, nothing else moves: met.** By the switch, on less off, on `sqlite3.c` and Lua: the kernel in place -0.10 and
+  -0.04; the records' bytes -0.01 and +0.00, the tests' loop +0.03 and +0.00, their expression's part -0.02 and +0.00, their sweep on
+  T's records -0.06 and -0.12; C's three sweeps +0.01 and -0.07 (0.3 asked).
+- **U5, faults: met.** Four rounds: each term of the updates' loop's bits and shapes, each of its stores, the list's sweep, the
+  write's new resolutions and marks and each new row of the tables changed alone, a build and the fixture's tests a
+  fault. The first round's 174 faults left 3: one that gives a pointer's row a CONVERT, which no pointer's update
+  has, so it changes nothing (dropped); the two parts' lengths of a row swapped, which no one read apart (they became
+  a row's entries' number, one byte); and the list taking records that are not evaluated, whose case, a folded
+  `&&`'s dead operand, got its lines. The second's 181, on the changed code, left 3: a row's entries' number read by
+  its low bits, and two that skip a chunk with one update (a unit of one chunk with one update). The third's 181 left
+  the first of those still: the line it had got, an address constant's cast converted to bool, makes rows of four
+  and of five entries and none of eight. Run against the fault's build, a narrow destination's `++` whose value is
+  converted to bool does (its own four and the conversion's four, an expression's last record's), and that is the
+  fixture's line now. The fourth's 181, on the code as it is, are all caught.
+
+**What stays a record at a time, and why.** The updates' loop, for 1.16% of
+`sqlite3.c`'s records swept, 0.94% of Lua's and 1.05% of musl's. An update's
+two records are apart by a distance only its own record has; its
+computation's class is a load by its line's type's number; and its shapes
+are bytes stored at the two records. As masks in the shapes' sweep (the
+fourth build), an update's terms are every block's, for one record in some
+ninety: the shapes' sweep read 0.22 ticks a record more on `sqlite3.c` and 0.49
+on Lua with them, 0.18 and 0.47 of it with no update to make; the loop of its own reads 0.52 and 0.81, and leaves
+the sweep where it was.
+
+**What is next:** the branches' rows (the states, the senses and the
+labels), then the entries' values.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken

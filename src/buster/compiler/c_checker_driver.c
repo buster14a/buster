@@ -8139,7 +8139,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         }
     }
     valid = valid && (selected || input.report_count != 0) && !input.resource;
-    const CheckOptions check_options = { .scalar = scalar };
+    const CheckOptions check_options = { 0 };
     CheckStream stream = { 0 };
     // The reading's own errors: its reader's (a recovered one's unit is valid), whose reports stand without the graph, which
     // may not run after them, and its graph's.
@@ -12638,7 +12638,6 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             else if (input_valid || input.diagnostic_graph)
             {
                 const CheckOptions check_options = {
-                    .scalar = scalar,
                     .verify = verify,
                     .transitions = command->check_transitions,
                     .verify_transitions = verify,

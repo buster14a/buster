@@ -9,7 +9,7 @@
 // of its rows (the measurement record's x-rows-census-2850) found each part of a row a table's row by a key of the
 // record's own bytes and its target's.
 //
-// Three sweeps over a chunk's records:
+// Three sweeps over a chunk's records, and the updates' loop:
 // - The reads (node_rows_window_reads): what the window's bytes don't hold, read for the records that need it, into
 //   columns. A target's type's class and facts, where an evaluated record has a target that is not its type (the
 //   types' words by the type; a record's type is a column the tests' sweep makes with the records' bytes, compared
@@ -24,8 +24,11 @@
 //   the fold of an integer constant's conversion into its CONST, node_machine_fold_conversion): each of their terms
 //   that a record on the window separates is a mask, and the comments there say of the others what makes them. A
 //   shape below BUSTER_NODE_ROWS_TABLE is one entry of that kind and the record's class, or none; another is a row of
-//   the table (NodeRowsTables), which has each entry's kind and its class's source. With them the two parts' lengths,
-//   and the records that list their expression for X.
+//   the table (NodeRowsTables), which has each entry's kind and its class's source. With them a row's entries'
+//   number, and the records that list their expression for X.
+// - Between the two, the updates' rows (node_rows_window_updates): an update's own row and its first row, which
+//   comes after its destination's entries, are shapes of rows of the table too, written over the shapes' sweep's for
+//   its record and its destination's by a loop over a list of the chunk's updates.
 // - The rows (node_rows_window_write, 64 records a step): each part has four slots, an entry each; a slot's kinds and
 //   classes of a block's 64 records are one lookup of the shapes each, the classes then made from their sources; the
 //   eight slots' registers are transposed into eight records' rows a register; and each register's entries, the bytes
@@ -34,8 +37,9 @@
 //   entries before it.
 // An expression's tape is then its operand's records' rows, in a row in the streams, and its root's.
 //
-// What is listed for X, and left to the reference as C's listed expressions are: an expression with an update or an
-// operator evaluated as branches (their rows, and what follows a row, are not made here); a conversion from or to a
+// What is listed for X, and left to the reference as C's listed expressions are: an expression with an operator
+// evaluated as branches (its rows, and what follows a row, are not made here), with a bool's update or with a postfix
+// update whose destination's entries leave its first row no room; a conversion from or to a
 // class past double's (a long double's, a 128-bit integer's, a half-precision one's, and an aggregate's and a complex
 // type's, which have no class's number), which the templates refuse; and an integer constant converted to a floating
 // class, whose fold reads its value. Listing is always safe.
@@ -64,22 +68,55 @@
 #define BUSTER_NODE_ROWS_BOOL 83u
 #define BUSTER_NODE_ROWS_CONVERT 85u
 #define BUSTER_NODE_ROWS_FOLDED 86u
-#define BUSTER_NODE_ROWS_SHAPES 87u
-// The own shape of a record whose template's rows are not made here (NodeRowsTables.templates): no entry, and its
-// expression is listed.
+// An update's two rows (node_machine_update_first's and node_machine_update_last's), each in the slots its record has
+// free; their slots are fixed, with none where an entry is not written, which the write's compress drops:
+// - Its own row, the update's record's own part: `++`'s or `--`'s CONST of the class the operation is computed in, the
+//   operation, the result's CONVERT back to the destination's class, and the store; two a variant, the odd one with
+//   the CONVERT. A pointer's: its step's CONST, a NEG, the PTR_ADD and the store.
+// - Its first row by name, in its destination's record, which is not evaluated and has no entry of its own in either
+//   part: the read, a local's or a global's, and a postfix update's DUP, the own part's (BUSTER_NODE_ROWS_FIRST: two a
+//   variant, the odd one with the DUP); and the old value's CONVERT to the computation's class, the conversion's
+//   part's (BUSTER_NODE_ROWS_FIRST_CONVERT).
+// - Its first row through an address, its destination's record's conversion's part (a record read for its address
+//   converts nothing): a DUP of the address, the LOAD and the CONVERT.
+// - A postfix update's first row through an address keeps the address and the old value in two temporaries, six
+//   entries and the CONVERT: after its destination's own entries, in the slots they leave of its own part and then
+//   its conversion's. Its destination's own part is then a row of its own entries and the first of the six
+//   (BUSTER_NODE_ROWS_KEPT: none of its own and four; one, of each of three kinds, and three; a member's two, and
+//   two), and its conversion's part the others (BUSTER_NODE_ROWS_KEPT_REST: three rows, two with the CONVERT), each
+//   by the destination's own shape (NodeRowsTables.kept_owns and kept_conversions).
+// A first row's CONVERT is its part's last slot's in each: the one slot of a conversion's part that reads the
+// computation's class. The updates' loop writes the shapes (node_rows_window_update).
+#define BUSTER_NODE_ROWS_UPDATE 87u
+#define BUSTER_NODE_ROWS_UPDATE_POINTER 91u
+#define BUSTER_NODE_ROWS_FIRST 95u
+#define BUSTER_NODE_ROWS_FIRST_CONVERT 99u
+#define BUSTER_NODE_ROWS_FIRST_ADDRESS 100u
+#define BUSTER_NODE_ROWS_KEPT 102u
+#define BUSTER_NODE_ROWS_KEPT_REST 107u
+#define BUSTER_NODE_ROWS_SHAPES 112u
+// The own shape of a record whose rows are not made here (a template's, NodeRowsTables.templates; a destination's
+// whose own entries leave a postfix update's first row no room): no entry, and its expression is listed.
 #define BUSTER_NODE_ROWS_LATER 127u
 // An entry's class's source, in a row of the table: the class itself, or the record's, its target's, or its first
-// operand's conversion's.
+// operand's conversion's (an update's computation's, which is that conversion's; its destination's too, whose first
+// row converts to it).
 #define BUSTER_NODE_ROWS_CLASS_OWN 0x80u
 #define BUSTER_NODE_ROWS_CLASS_TARGET 0x81u
 #define BUSTER_NODE_ROWS_CLASS_OPERAND 0x82u
+// An entry's kind's mark, in an update's own row: the kind is the record's, its operation's (a binary operator's by
+// its operator, ADD and SUB for `++` and `--`: NodeRowsTables.operations) or its store's (by name a local's or a
+// global's, through its address; a SET for a postfix update), which the updates' loop leaves in the bits' column.
+#define BUSTER_NODE_ROWS_KIND_OPERATION 0x40u
+#define BUSTER_NODE_ROWS_KIND_STORE 0x41u
 // A part's slots, its most entries (an address constant's four; a conversion to bool's four), and a record's two
 // parts': X's row's most (BUSTER_NODE_MACHINE_ROW_MOST), a quadword's bytes.
 #define BUSTER_NODE_ROWS_SLOTS 4u
 #define BUSTER_NODE_ROWS_MOST 8u
 
-_Static_assert(BUSTER_NODE_ROWS_SHAPES <= BUSTER_NODE_ROWS_LATER && BUSTER_NODE_ROWS_LATER < 128 && BUSTER_TYPED_JUMP_VALUE < BUSTER_NODE_ROWS_TABLE &&
-               2 * BUSTER_NODE_ROWS_SLOTS == BUSTER_NODE_ROWS_MOST &&
+_Static_assert(BUSTER_NODE_ROWS_SHAPES <= BUSTER_NODE_ROWS_LATER && BUSTER_NODE_ROWS_LATER < 128 &&
+               BUSTER_TYPED_JUMP_VALUE < BUSTER_NODE_ROWS_TABLE &&
+               BUSTER_TYPED_KINDS <= BUSTER_NODE_ROWS_KIND_OPERATION && 2 * BUSTER_NODE_ROWS_SLOTS == BUSTER_NODE_ROWS_MOST &&
                BUSTER_NODE_ROWS_MOST == BUSTER_NODE_MACHINE_ROW_MOST && BUSTER_TYPED_CLASS_F64 == BUSTER_TYPED_CLASS_F32 + 1 && BUSTER_TYPED_CLASSES < BUSTER_NODE_ROWS_CLASS_OWN &&
                BUSTER_TYPED_CLASS_VOID == 0 && NODE_MACHINE_TEMPLATE_BRANCHES < 64 && BUSTER_TYPED_CONST != 0,
                "a shape is a typed kind's number or a row of the table, a record's two parts are a quadword, a class is no source's number, and void's is zero");
@@ -131,9 +168,28 @@ struct NodeRowsTables
     // The order the rows' write reads a block's records in, so that its transposition's registers hold eight records
     // in a row each: the unpacks interleave within a lane of 16 bytes.
     _Alignas(64) uint8_t order[64];
+    // A postfix update's destination through its address: its own part's shape and its conversion's part's by the
+    // shape of its own entries, without its first row's CONVERT and with it; BUSTER_NODE_ROWS_LATER where the first
+    // row has no room after them. 128 bytes each, read as two registers.
+    _Alignas(64) uint8_t kept_owns[2][128];
+    _Alignas(64) uint8_t kept_conversions[2][128];
+    // An update's operation's kind by its operator's code: a compound assignment's binary operator's, ADD for `++` and
+    // SUB for `--`.
+    _Alignas(64) uint8_t operations[128];
+    // An update's own row's shape by its operator's code: an arithmetic one's, before its CONVERT's one more (two more
+    // for `++` and `--`, with their CONST); and a pointer's (the same two, and one for the NEG of `--` and `-=`). 128
+    // bytes each, read as two registers.
+    _Alignas(64) uint8_t updates[128];
+    _Alignas(64) uint8_t pointer_updates[128];
+    // A block's records' places in it, 0 to 63: what the updates' sweep compresses into their list.
+    _Alignas(64) uint8_t places[64];
 };
 
-_Static_assert(sizeof(NodeRowsTables) <= 1408, "the reader's state has room for the rows' tables (node_facts_reader_begin)");
+_Static_assert(sizeof(NodeRowsTables) <= 2560, "the reader's state has room for the rows' tables (node_facts_reader_begin)");
+_Static_assert(BUSTER_TYPED_SET == BUSTER_TYPED_STORE + 1 && BUSTER_TYPED_STORE_LOCAL == BUSTER_TYPED_STORE + 2 && BUSTER_TYPED_SET_LOCAL == BUSTER_TYPED_STORE + 3 &&
+               BUSTER_TYPED_STORE_GLOBAL == BUSTER_TYPED_STORE + 4 && BUSTER_TYPED_SET_GLOBAL == BUSTER_TYPED_STORE + 5 &&
+               CHECK_OP_POST_DECREMENT == CHECK_OP_PRE_INCREMENT + 3 && CHECK_OP_POST_DECREMENT == CHECK_OP_POST_INCREMENT + 1,
+               "an update's store's kind is a sum of its bits (node_rows_window_update), and `++` and `--` are four operators in a row, the postfix two last");
 
 // The table's row `shape`: `count` entries, each a kind and its class's source.
 static void node_rows_row(NodeRowsTables* tables, uint32_t shape, uint32_t count, const uint8_t (*entries)[2])
@@ -144,6 +200,14 @@ static void node_rows_row(NodeRowsTables* tables, uint32_t shape, uint32_t count
         tables->sources[i][shape] = entries[i][1];
     }
     tables->lengths[shape] = (uint8_t)count;
+}
+
+// One entry of the table's row `shape`, in its slot `slot`: a row whose entries have fixed slots.
+static void node_rows_place(NodeRowsTables* tables, uint32_t shape, uint32_t slot, uint8_t kind, uint8_t source)
+{
+    tables->kinds[slot][shape] = kind;
+    tables->sources[slot][shape] = source;
+    tables->lengths[shape] += 1;
 }
 
 static void node_rows_tables(NodeRowsTables* tables)
@@ -165,6 +229,10 @@ static void node_rows_tables(NodeRowsTables* tables)
             tables->order[16 * lane + 2 * i + 1] = (uint8_t)(8 * i + 2 * lane + 1);
         }
     }
+    for (uint32_t place = 0; place < 64; place += 1)
+    {
+        tables->places[place] = (uint8_t)place;
+    }
     tables->templates[CHECK_LOWER_TEMPLATE_CONSTANT] = BUSTER_TYPED_CONST;
     tables->templates[CHECK_LOWER_TEMPLATE_LOCAL] = BUSTER_TYPED_LOCAL;
     tables->templates[CHECK_LOWER_TEMPLATE_GLOBAL] = BUSTER_TYPED_GLOBAL;
@@ -172,16 +240,23 @@ static void node_rows_tables(NodeRowsTables* tables)
     tables->templates[CHECK_LOWER_TEMPLATE_STORE_GLOBAL] = BUSTER_TYPED_STORE_GLOBAL;
     tables->templates[CHECK_LOWER_TEMPLATE_STORE] = BUSTER_TYPED_STORE;
     tables->templates[NODE_MACHINE_TEMPLATE_CALL] = BUSTER_TYPED_CALL;
-    // The templates whose rows are not made here: an update's, an operator's evaluated as branches, and a logical
-    // operator's and a conditional's value's three, which C on the window makes of no record yet (it lists them).
+    // The templates whose rows are not made here: an operator's evaluated as branches, and a logical operator's and a
+    // conditional's value's three, which C on the window makes of no record yet (it lists them). An update's template
+    // gives no shape: its record's is the updates' loop's to write (node_rows_window_update).
     tables->templates[NODE_MACHINE_TEMPLATE_BRANCH] = BUSTER_NODE_ROWS_LATER;
     tables->templates[NODE_MACHINE_TEMPLATE_DECIDED] = BUSTER_NODE_ROWS_LATER;
     tables->templates[NODE_MACHINE_TEMPLATE_SECOND] = BUSTER_NODE_ROWS_LATER;
-    tables->templates[NODE_MACHINE_TEMPLATE_UPDATE] = BUSTER_NODE_ROWS_LATER;
     tables->templates[NODE_MACHINE_TEMPLATE_BRANCHES] = BUSTER_NODE_ROWS_LATER;
     for (uint32_t op = 0; op < CHECK_OP_COUNT && op < 128; op += 1)
     {
         tables->binaries[op] = check_lower_binary((CheckOp)op);
+        tables->operations[op] = op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT ? BUSTER_TYPED_ADD :
+                                 op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT ? BUSTER_TYPED_SUB :
+                                                                                                 check_lower_binary((CheckOp)op);
+        const uint32_t stepped = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT ? 2u : 0u;
+        const uint32_t negated = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT || op == CHECK_OP_SUBTRACT_ASSIGN ? 1u : 0u;
+        tables->updates[op] = (uint8_t)(BUSTER_NODE_ROWS_UPDATE + stepped);
+        tables->pointer_updates[op] = (uint8_t)(BUSTER_NODE_ROWS_UPDATE_POINTER + stepped + negated);
     }
     // An address's rows (node_machine_address): a constant's alone; a local's or a global's, and its offset's two
     // entries; then, for a constant that is an rvalue of an integer's class, its CONVERT.
@@ -278,15 +353,128 @@ static void node_rows_tables(NodeRowsTables* tables)
         node_rows_row(tables, BUSTER_NODE_ROWS_CONVERT, 1, convert);
         node_rows_row(tables, BUSTER_NODE_ROWS_FOLDED, 1, folded);
     }
+    // An update's own row (node_machine_update_last), an entry a slot: `++`'s or `--`'s CONST; the operation; the
+    // result's CONVERT back; the store. And a pointer's: its step's CONST, a NEG for a subtraction, the PTR_ADD, the
+    // store.
+    for (uint32_t stepped = 0; stepped < 2; stepped += 1)
+    {
+        for (uint32_t second = 0; second < 2; second += 1)
+        {
+            const uint32_t shape = BUSTER_NODE_ROWS_UPDATE + 2 * stepped + second;
+            const uint32_t pointer = BUSTER_NODE_ROWS_UPDATE_POINTER + 2 * stepped + second;
+            if (stepped != 0)
+            {
+                node_rows_place(tables, shape, 0, BUSTER_TYPED_CONST, BUSTER_NODE_ROWS_CLASS_OPERAND);
+                node_rows_place(tables, pointer, 0, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64);
+            }
+            node_rows_place(tables, shape, 1, BUSTER_NODE_ROWS_KIND_OPERATION, BUSTER_NODE_ROWS_CLASS_OPERAND);
+            if (second != 0)
+            {
+                node_rows_place(tables, shape, 2, BUSTER_TYPED_CONVERT, BUSTER_NODE_ROWS_CLASS_OWN);
+                node_rows_place(tables, pointer, 1, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64);
+            }
+            node_rows_place(tables, pointer, 2, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64);
+            node_rows_place(tables, shape, 3, BUSTER_NODE_ROWS_KIND_STORE, BUSTER_NODE_ROWS_CLASS_OWN);
+            node_rows_place(tables, pointer, 3, BUSTER_NODE_ROWS_KIND_STORE, BUSTER_NODE_ROWS_CLASS_OWN);
+        }
+    }
+    // Its first row (node_machine_update_first), an entry a slot. By name: the read and a postfix update's DUP, the
+    // destination's own part's, and the old value's CONVERT, its conversion's part's. Through an address: the
+    // address's DUP, the LOAD and the CONVERT, the conversion's part's. A CONVERT is its part's last slot's.
+    for (uint32_t global = 0; global < 2; global += 1)
+    {
+        for (uint32_t postfix = 0; postfix < 2; postfix += 1)
+        {
+            const uint32_t shape = BUSTER_NODE_ROWS_FIRST + 2 * global + postfix;
+            node_rows_place(tables, shape, 0, global != 0 ? BUSTER_TYPED_GLOBAL : BUSTER_TYPED_LOCAL, BUSTER_NODE_ROWS_CLASS_OWN);
+            if (postfix != 0)
+            {
+                node_rows_place(tables, shape, 1, BUSTER_TYPED_DUP, BUSTER_NODE_ROWS_CLASS_OWN);
+            }
+        }
+    }
+    node_rows_place(tables, BUSTER_NODE_ROWS_FIRST_CONVERT, BUSTER_NODE_ROWS_SLOTS - 1, BUSTER_TYPED_CONVERT, BUSTER_NODE_ROWS_CLASS_OPERAND);
+    for (uint32_t converted = 0; converted < 2; converted += 1)
+    {
+        const uint32_t shape = BUSTER_NODE_ROWS_FIRST_ADDRESS + converted;
+        node_rows_place(tables, shape, 0, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64);
+        node_rows_place(tables, shape, 1, BUSTER_TYPED_LOAD, BUSTER_NODE_ROWS_CLASS_OWN);
+        if (converted != 0)
+        {
+            node_rows_place(tables, shape, BUSTER_NODE_ROWS_SLOTS - 1, BUSTER_TYPED_CONVERT, BUSTER_NODE_ROWS_CLASS_OPERAND);
+        }
+    }
+    // A postfix update's first row through an address (node_machine_update_first's six entries: the address kept in a
+    // temporary and read back, the old value loaded, kept in another, and the two read for the store and the value),
+    // after its destination's own entries: `own` of them (0 to 2) in the own part's first slots, the six from there on.
+    // A destination's own entries are an address's: none (a dereference's, a member's at no offset); one (a
+    // subscript's PTR_ADD, a local's or a global's address); or two (a member's offset's). One with three (an address
+    // and its offset) leaves the six no room; a pointer's difference is no lvalue; and C on the window decides no
+    // update through an address constant with no object.
+    {
+        const uint8_t six[6][2] = {
+            { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64 },   { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64 },
+            { BUSTER_TYPED_LOAD, BUSTER_NODE_ROWS_CLASS_OWN },    { BUSTER_TYPED_STORE_LOCAL, BUSTER_NODE_ROWS_CLASS_OWN },
+            { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64 },       { BUSTER_TYPED_LOCAL, BUSTER_NODE_ROWS_CLASS_OWN },
+        };
+        // A destination's own shapes, by the entries of their own: the kept row's number after each.
+        const uint8_t bases[BUSTER_NODE_ROWS_KEPT_REST - BUSTER_NODE_ROWS_KEPT][2] = {
+            { 0, 0 },
+            { BUSTER_NODE_ROWS_POINTER, 1 },
+            { BUSTER_NODE_ROWS_ADDRESS + 2, 1 },
+            { BUSTER_NODE_ROWS_ADDRESS + 6, 1 },
+            { BUSTER_NODE_ROWS_MEMBER, 2 },
+        };
+        memset(tables->kept_owns, BUSTER_NODE_ROWS_LATER, sizeof(tables->kept_owns));
+        memset(tables->kept_conversions, BUSTER_NODE_ROWS_LATER, sizeof(tables->kept_conversions));
+        // The conversion's part's three rows, by the destination's own entries: the six's last two, three or four; and
+        // the first two with the CONVERT after them, in the part's last slot.
+        for (uint32_t own = 0; own < 3; own += 1)
+        {
+            for (uint32_t converted = 0; converted < 2 - own / 2; converted += 1)
+            {
+                const uint32_t shape = BUSTER_NODE_ROWS_KEPT_REST + 2 * own + converted;
+                for (uint32_t i = 4 - own; i < 6; i += 1)
+                {
+                    node_rows_place(tables, shape, i - (4 - own), six[i][0], six[i][1]);
+                }
+                if (converted != 0)
+                {
+                    node_rows_place(tables, shape, BUSTER_NODE_ROWS_SLOTS - 1, BUSTER_TYPED_CONVERT, BUSTER_NODE_ROWS_CLASS_OPERAND);
+                }
+            }
+        }
+        for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(bases); b += 1)
+        {
+            const uint32_t base = bases[b][0];
+            const uint32_t own = bases[b][1];
+            const uint32_t shape = BUSTER_NODE_ROWS_KEPT + b;
+            for (uint32_t slot = 0; slot < own; slot += 1)
+            {
+                node_rows_place(tables, shape, slot, tables->kinds[slot][base], tables->sources[slot][base]);
+            }
+            for (uint32_t slot = own; slot < BUSTER_NODE_ROWS_SLOTS; slot += 1)
+            {
+                node_rows_place(tables, shape, slot, six[slot - own][0], six[slot - own][1]);
+            }
+            for (uint32_t converted = 0; converted < 2 - own / 2; converted += 1)
+            {
+                tables->kept_owns[converted][base] = (uint8_t)shape;
+                tables->kept_conversions[converted][base] = (uint8_t)(BUSTER_NODE_ROWS_KEPT_REST + 2 * own + converted);
+            }
+        }
+    }
 }
 
 typedef struct NodeRowsCounts NodeRowsCounts;
 struct NodeRowsCounts
 {
     // The records the reads' two loops read for: a target's word, where the target is not the record's type, and a line
-    // or a table of the unit's (a member's, a truth's, an address constant's).
+    // or a table of the unit's (a member's, a truth's, an address constant's). And the updates, which their own loop
+    // reads for.
     uint64_t words;
     uint64_t lines;
+    uint64_t updates;
 };
 
 // The reads of a chunk's `count` records: for the records that need them, a target's class and facts, a first
@@ -379,8 +567,8 @@ static __attribute__((noinline)) void node_rows_window_reads(struct NodeFactsRea
     counts->lines += line_count;
 }
 
-// The shapes of a chunk's `count` records, 64 a step: each record's own shape and its conversion's and their lengths
-// (a nibble each), into the reader's columns; and a block's three masks. From the window's bytes and the reads'
+// The shapes of a chunk's `count` records, 64 a step: each record's own shape and its conversion's and its row's
+// entries' number, into the reader's columns; and a block's three masks. From the window's bytes and the reads'
 // columns and masks, with no load a record.
 static __attribute__((noinline, aligned(64))) void node_rows_window_shapes(struct NodeFactsReader* state, const NodeFront* front, uint32_t count)
 {
@@ -509,12 +697,12 @@ static __attribute__((noinline, aligned(64))) void node_rows_window_shapes(struc
         conversion = _mm512_mask_mov_epi8(conversion, converted & to_bool,
                                           _mm512_mask_mov_epi8(_mm512_set1_epi8(BUSTER_NODE_ROWS_BOOL), narrow, _mm512_set1_epi8(BUSTER_NODE_ROWS_BOOL + 1)));
         own = _mm512_maskz_mov_epi8(alive, own);
-        // The two parts' lengths, a nibble each.
+        // Its row's entries: its two parts' lengths' sum.
         const __m512i own_lengths = node_window_table(tables->lengths, own);
         const __m512i conversion_lengths = node_window_table(tables->lengths, conversion);
         _mm512_storeu_si512(state->window_x_owns + x, own);
         _mm512_storeu_si512(state->window_x_conversions + x, conversion);
-        _mm512_storeu_si512(state->window_x_lengths + x, _mm512_or_si512(own_lengths, _mm512_slli_epi16(conversion_lengths, 4)));
+        _mm512_storeu_si512(state->window_x_lengths + x, _mm512_add_epi8(own_lengths, conversion_lengths));
         // A record with such a template lists its expression whether it is evaluated or not. One that is not
         // evaluated converts nothing (the reads' mask), and in an expression C takes it is a store's or an update's
         // named destination, a callee called directly or a folded constant's operand (the rows of C's loop): none on
@@ -524,6 +712,110 @@ static __attribute__((noinline, aligned(64))) void node_rows_window_shapes(struc
         masks[BUSTER_NODE_ROWS_MASK_REFUSED] = refused;
         masks[BUSTER_NODE_ROWS_MASK_FLOATED] = floated;
     }
+}
+
+// The two rows of the update at the window's record `x` (node_machine_update_plan's choices, which
+// node_machine_update_first and node_machine_update_last write), as shapes, over what the shapes' sweep made of its
+// record and of its destination's, with their lengths; the kind its store's mark stands for and the class its
+// operation is computed in, which both rows' entries take, where the rows' write reads them; and, where its rows are
+// not made, the bit that lists its expression.
+// From the window's bytes, the shapes' columns and one read of its line: T's conversion of its first operand, the
+// computation's type. What the plan asks more is no term here, for what C on the window takes an update by (its
+// loop's masks):
+// - The stored class and facts, its destination's type's, are the update's own record's and its destination's
+//   record's alike: an update's type is its destination's value's.
+// - The class the operation is computed in is its computation's: check_lower_computed's other case is a narrow
+//   class's, a _BitInt's alone (C promotes the others), and C takes no update of a _BitInt. The computation's type
+//   is no bool, a promoted one.
+// - A pointer's computation is its own class's, and a compound assignment's operator has a binary kind.
+// - A destination by name has an object, and one through its address converts nothing (it has no target).
+// - A division or a remainder by a power of two is a shift or a mask in the plan; C on the window lists every
+//   compound division and remainder by an integer constant, so no update here has it.
+// Each choice is a bit and each shape a sum or a table's byte, with no branch: an update's bits are no pattern a
+// predictor learns, and the first build's selections read 49 ticks an update on `sqlite3.c`.
+static inline __attribute__((always_inline)) void node_rows_window_update(struct NodeFactsReader* state, const NodeFront* front, uint32_t x)
+{
+    const NodeRowsTables* tables = state->x_tables;
+    const uint32_t op = front->ops[x] & 0x7fu;
+    const uint32_t destination = x - front->window_left[x];
+    const uint32_t postfix = op - CHECK_OP_POST_INCREMENT <= (uint32_t)(CHECK_OP_POST_DECREMENT - CHECK_OP_POST_INCREMENT) ? 1u : 0u;
+    // A destination by name is its object's leaf: a global's by its symbol's flag, as a store by name's is in C's loop
+    // (its own template there is an address constant's, which nothing evaluates).
+    const uint32_t named = (front->ops[destination] & 0x7fu) == CHECK_OP_VALUE ? 1u : 0u;
+    const uint32_t global = (state->window_c_flags[destination] & BUSTER_NODE_CONTEXTS_SYMBOL) != 0 ? 1u : 0u;
+    const uint32_t stored = state->window_c_classes[x];
+    const uint32_t facts = state->window_c_facts[x];
+    const uint32_t pointer = (facts & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0 ? 1u : 0u;
+    const uint32_t calculated = node_machine_class(state->facts.machine, state->facts.records[x].converted[0]);
+    // Where the computation's class is not the record's own, the old value's CONVERT to it and the result's back.
+    const uint32_t computed = calculated != stored ? 1u : 0u;
+    // Its own row, the update's record's own part: by its operator (`++`'s and `--`'s CONST), one more with the
+    // CONVERT back; a pointer's by its type's fact, its NEG by the operator. A bool's update tests its result (the
+    // conversion back is the test's entries), which these slots have no room for: its expression is listed. (Its two
+    // records have their rows all the same, which no one reads.)
+    const uint32_t tested = (facts & BUSTER_CHECK_LOWER_TYPE_BOOL) != 0 ? 1u : 0u;
+    const uint32_t own = ((tables->updates[op] + computed) & (pointer - 1u)) | (tables->pointer_updates[op] & (0u - pointer));
+    uint64_t* masks = state->window_c_masks + BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(x / 64);
+    state->window_x_owns[x] = (uint8_t)own;
+    // (Its record's own part had no entry: an update's template gives no shape. Its conversion's stay.)
+    state->window_x_lengths[x] = (uint8_t)(state->window_x_lengths[x] + tables->lengths[own]);
+    state->window_x_bits[x] = (uint8_t)(BUSTER_TYPED_STORE + postfix + named * (BUSTER_TYPED_STORE_LOCAL - BUSTER_TYPED_STORE + 2u * global));
+    state->window_x_operands[x] = (uint8_t)calculated;
+    masks[BUSTER_NODE_ROWS_MASK_LISTED] |= (uint64_t)tested << (x & 63);
+    // Its first row, its destination's record's: an operand's, before its own, which no other update writes. A
+    // destination by name is not evaluated and has no entry in either part: the read and a postfix update's DUP are
+    // its own part's, the CONVERT its conversion's part's. One through its address has its own entries and no
+    // conversion: the row is its conversion's part's, and a postfix update's is the two parts' rows by the shape of
+    // the destination's own entries, or the mark of no room, which lists its expression.
+    const uint32_t entries = state->window_x_owns[destination];
+    const uint32_t by_name = 0u - named;
+    const uint32_t kept = 0u - postfix;
+    const uint32_t pointed_own = (tables->kept_owns[computed][entries] & kept) | (entries & ~kept);
+    const uint32_t pointed_conversion = (tables->kept_conversions[computed][entries] & kept) | ((BUSTER_NODE_ROWS_FIRST_ADDRESS + computed) & ~kept);
+    const uint32_t first_own = ((BUSTER_NODE_ROWS_FIRST + 2u * global + postfix) & by_name) | (pointed_own & ~by_name);
+    const uint32_t first_conversion = ((BUSTER_NODE_ROWS_FIRST_CONVERT * computed) & by_name) | (pointed_conversion & ~by_name);
+    uint64_t* destination_masks = state->window_c_masks + BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(destination / 64);
+    state->window_x_owns[destination] = (uint8_t)first_own;
+    state->window_x_conversions[destination] = (uint8_t)first_conversion;
+    state->window_x_lengths[destination] = (uint8_t)(tables->lengths[first_own] + tables->lengths[first_conversion]);
+    state->window_x_operands[destination] = (uint8_t)calculated;
+    destination_masks[BUSTER_NODE_ROWS_MASK_LISTED] |= (uint64_t)(first_own == BUSTER_NODE_ROWS_LATER ? 1u : 0u) << (destination & 63);
+}
+
+// The updates' rows of a chunk's `count` records, after the shapes' sweep and before the rows' write: a sweep of
+// masks, 64 records a step, which compresses the updates' numbers into a list (an evaluated record with the update's
+// template: a folded `&&`'s dead operand has the template too, and no row), then a loop over the list, an update at a
+// time (node_rows_window_update). A sweep and a loop of their own: an update is one record in some ninety, and a
+// term of its masks in the shapes' sweep is a term of every block's (the 9700X's readings are in
+// docs/node-machine.md).
+static __attribute__((noinline)) void node_rows_window_updates(struct NodeFactsReader* state, const NodeFront* front, uint32_t count, NodeRowsCounts* counts)
+{
+    uint32_t* updates = state->x_updates;
+    uint32_t update_count = 0;
+    const __m512i places = _mm512_load_si512(state->x_tables->places);
+    const uint32_t blocks = (count + 63) / 64;
+    for (uint32_t block = 0; block < blocks; block += 1)
+    {
+        const uint32_t x = block * 64;
+        const __mmask64 alive = state->window_c_masks[BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)block + BUSTER_NODE_CONTEXTS_MASK_ALIVE];
+        const __mmask64 updated = _mm512_mask_cmpeq_epi8_mask(alive, _mm512_loadu_si512(state->window_c_templates + x), _mm512_set1_epi8((char)NODE_MACHINE_TEMPLATE_UPDATE));
+        // Few a block: their places in it are compressed as bytes, once, and widened onto the list 16 a turn, which
+        // has a register's room past a chunk's records; a block with more than 16 takes another turn.
+        __m512i update_places = _mm512_maskz_compress_epi8(updated, places);
+        const uint32_t update_end = update_count + (uint32_t)_mm_popcnt_u64(updated);
+        do
+        {
+            _mm512_storeu_si512(updates + update_count, _mm512_add_epi32(_mm512_set1_epi32((int32_t)x), _mm512_cvtepu8_epi32(_mm512_castsi512_si128(update_places))));
+            update_places = _mm512_shuffle_i64x2(update_places, update_places, 0x39);
+            update_count += 16;
+        } while (update_count < update_end);
+        update_count = update_end;
+    }
+    for (uint32_t i = 0; i < update_count; i += 1)
+    {
+        node_rows_window_update(state, front, updates[i]);
+    }
+    counts->updates += update_count;
 }
 
 // A slot's registers of a block: the two parts' shapes' entry there, by `table` (NodeRowsTables.kinds or sources, a
@@ -565,7 +857,7 @@ static inline __attribute__((always_inline)) void node_rows_transpose(const __m5
 // The rows of a chunk's `count` records, 64 a step, into the chunk's streams (NodeFactsReader.x_kinds and x_classes);
 // the entries before each eight records' (x_cursors) and, in a record's eight, before its own (window_x_offsets): a
 // row's place is the two together (node_rows_window_place). How many entries it wrote.
-static __attribute__((noinline, aligned(64))) uint32_t node_rows_window_write(struct NodeFactsReader* state, uint32_t count)
+static __attribute__((noinline, aligned(64))) uint32_t node_rows_window_write(struct NodeFactsReader* state, const NodeFront* front, uint32_t count)
 {
     const NodeRowsTables* tables = state->x_tables;
     const __m512i order = _mm512_load_si512(tables->order);
@@ -584,26 +876,38 @@ static __attribute__((noinline, aligned(64))) uint32_t node_rows_window_write(st
         const __m512i own_classes = _mm512_permutexvar_epi8(order, _mm512_loadu_si512(state->window_c_classes + x));
         const __m512i target_classes = _mm512_permutexvar_epi8(order, _mm512_loadu_si512(state->window_x_targets + x));
         const __m512i operand_classes = _mm512_permutexvar_epi8(order, _mm512_loadu_si512(state->window_x_operands + x));
-        // Each slot's kinds, and its classes from their sources: the record's own class in any slot of its own part
-        // and its conversion's first; its target's in each part's first (a folded constant's and a CONVERT's, whose
-        // targets' words the reads read); its operand's conversion's in its own part's first (a truth's). The other
-        // slots' are classes themselves.
+        // An update's two marks' kinds: its operation's by its operator's code (the lookup reads an index's low seven
+        // bits, an operator's code without the byte's flag), and its store's, which the updates' loop left where a
+        // member's and an address's bits are.
+        const __m512i operations = node_window_table(tables->operations, _mm512_permutexvar_epi8(order, _mm512_loadu_si512(front->ops + x)));
+        const __m512i stores = _mm512_permutexvar_epi8(order, _mm512_loadu_si512(state->window_x_bits + x));
+        // Each slot's kinds, and its classes from their sources: the record's own class in any slot of either part;
+        // its target's in each part's first (a folded constant's and a CONVERT's, whose targets' words the reads
+        // read); its first operand's conversion's in its own part's first two (a truth's; an update's CONST and
+        // operation) and its conversion's last (an update's first row's CONVERT). The other slots' are classes
+        // themselves. A source's mark is no class's number, so each is looked for in what the ones before left. And an
+        // update's own row's two marks, each in its one slot: the operation's kind and the store's.
         __m512i kinds[BUSTER_NODE_ROWS_MOST];
         __m512i classes[BUSTER_NODE_ROWS_MOST];
         for (uint32_t slot = 0; slot < BUSTER_NODE_ROWS_SLOTS; slot += 1)
         {
             kinds[slot] = node_rows_slot(tables->kinds[slot], owns);
             kinds[BUSTER_NODE_ROWS_SLOTS + slot] = node_rows_slot(tables->kinds[slot], conversions);
-            const __m512i sources = node_rows_slot(tables->sources[slot], owns);
-            classes[slot] = _mm512_mask_mov_epi8(sources, _mm512_cmpeq_epi8_mask(sources, own_source), own_classes);
-            classes[BUSTER_NODE_ROWS_SLOTS + slot] = node_rows_slot(tables->sources[slot], conversions);
+            const __m512i own_sources = node_rows_slot(tables->sources[slot], owns);
+            const __m512i conversion_sources = node_rows_slot(tables->sources[slot], conversions);
+            classes[slot] = _mm512_mask_mov_epi8(own_sources, _mm512_cmpeq_epi8_mask(own_sources, own_source), own_classes);
+            classes[BUSTER_NODE_ROWS_SLOTS + slot] = _mm512_mask_mov_epi8(conversion_sources, _mm512_cmpeq_epi8_mask(conversion_sources, own_source), own_classes);
         }
         const __m512i first_sources = classes[0];
+        const __m512i conversion_firsts = classes[BUSTER_NODE_ROWS_SLOTS];
+        const __m512i conversion_lasts = classes[BUSTER_NODE_ROWS_MOST - 1];
         classes[0] = _mm512_mask_mov_epi8(classes[0], _mm512_cmpeq_epi8_mask(first_sources, target_source), target_classes);
         classes[0] = _mm512_mask_mov_epi8(classes[0], _mm512_cmpeq_epi8_mask(first_sources, operand_source), operand_classes);
-        const __m512i conversion_sources = classes[BUSTER_NODE_ROWS_SLOTS];
-        classes[BUSTER_NODE_ROWS_SLOTS] = _mm512_mask_mov_epi8(conversion_sources, _mm512_cmpeq_epi8_mask(conversion_sources, own_source), own_classes);
-        classes[BUSTER_NODE_ROWS_SLOTS] = _mm512_mask_mov_epi8(classes[BUSTER_NODE_ROWS_SLOTS], _mm512_cmpeq_epi8_mask(conversion_sources, target_source), target_classes);
+        classes[1] = _mm512_mask_mov_epi8(classes[1], _mm512_cmpeq_epi8_mask(classes[1], operand_source), operand_classes);
+        classes[BUSTER_NODE_ROWS_SLOTS] = _mm512_mask_mov_epi8(conversion_firsts, _mm512_cmpeq_epi8_mask(conversion_firsts, target_source), target_classes);
+        classes[BUSTER_NODE_ROWS_MOST - 1] = _mm512_mask_mov_epi8(conversion_lasts, _mm512_cmpeq_epi8_mask(conversion_lasts, operand_source), operand_classes);
+        kinds[1] = _mm512_mask_mov_epi8(kinds[1], _mm512_cmpeq_epi8_mask(kinds[1], _mm512_set1_epi8(BUSTER_NODE_ROWS_KIND_OPERATION)), operations);
+        kinds[3] = _mm512_mask_mov_epi8(kinds[3], _mm512_cmpeq_epi8_mask(kinds[3], _mm512_set1_epi8(BUSTER_NODE_ROWS_KIND_STORE)), stores);
         __m512i kind_rows[8];
         __m512i class_rows[8];
         node_rows_transpose(kinds, kind_rows);
@@ -619,8 +923,7 @@ static __attribute__((noinline, aligned(64))) uint32_t node_rows_window_write(st
             cursor += (uint32_t)_mm_popcnt_u64(entries);
         }
         // In each eight, the entries before each record: its eight's lengths' prefix sum, a quadword's product.
-        const __m512i totals = _mm512_add_epi8(_mm512_and_si512(lengths, _mm512_set1_epi8(0x0f)), _mm512_and_si512(_mm512_srli_epi16(lengths, 4), _mm512_set1_epi8(0x0f)));
-        _mm512_storeu_si512(state->window_x_offsets + x, _mm512_mullo_epi64(totals, _mm512_set1_epi64(0x0101010101010100)));
+        _mm512_storeu_si512(state->window_x_offsets + x, _mm512_mullo_epi64(lengths, _mm512_set1_epi64(0x0101010101010100)));
     }
     return cursor;
 }
@@ -638,10 +941,12 @@ static uint8_t node_rows_window_reason(const struct NodeFactsReader* state, uint
 {
     const uint64_t* masks = state->window_c_masks + BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(x / 64);
     const uint64_t bit = UINT64_C(1) << (x & 63);
-    return (masks[BUSTER_NODE_ROWS_MASK_REFUSED] & bit) != 0                 ? BUSTER_NODE_ROWS_REASON_CONVERSION :
-           (masks[BUSTER_NODE_ROWS_MASK_FLOATED] & bit) != 0                 ? BUSTER_NODE_ROWS_REASON_FLOATING :
-           state->window_c_templates[x] == BUSTER_NODE_MACHINE_TEMPLATE_UPDATE ? BUSTER_NODE_ROWS_REASON_UPDATE :
-                                                                               BUSTER_NODE_ROWS_REASON_BRANCHES;
+    // A template with the table's mark is an operator's evaluated as branches. Another record that lists is an
+    // update's, or its destination's, whose own entries left its first row no room.
+    return (masks[BUSTER_NODE_ROWS_MASK_REFUSED] & bit) != 0                                         ? BUSTER_NODE_ROWS_REASON_CONVERSION :
+           (masks[BUSTER_NODE_ROWS_MASK_FLOATED] & bit) != 0                                         ? BUSTER_NODE_ROWS_REASON_FLOATING :
+           state->x_tables->templates[state->window_c_templates[x] & 63] == BUSTER_NODE_ROWS_LATER ? BUSTER_NODE_ROWS_REASON_BRANCHES :
+                                                                                                       BUSTER_NODE_ROWS_REASON_UPDATE;
 }
 
 // An expression's part, for each of the batch's expressions C takes on the window: it is listed for X where one of
@@ -670,11 +975,10 @@ static __attribute__((noinline)) void node_rows_window_part(struct NodeFactsRead
     }
 }
 
-// The entries of the window's record `x`'s row: its two parts' lengths.
+// The entries of the window's record `x`'s row.
 static inline uint32_t node_rows_window_length(const struct NodeFactsReader* state, uint32_t x)
 {
-    const uint8_t lengths = state->window_x_lengths[x];
-    return (uint32_t)(lengths & 0x0f) + (lengths >> 4);
+    return state->window_x_lengths[x];
 }
 
 // The reference's tape and the window's for the batch's expression `e`, taken here: whether they differ in their
@@ -719,8 +1023,9 @@ static bool node_rows_window_compare(struct NodeFactsReader* state, const NodeFr
     return differs;
 }
 
-// X's rows on the window for the chunk C has just answered: the shapes and the rows over its records, then each of
-// the batch's expressions' part. Each expression taken here is then compared with the reference's tape, and each
+// X's rows on the window for the chunk C has just answered: the shapes, the updates' rows (where C's loop gave a
+// record of the chunk the update's template: a chunk with none has no sweep for them) and the rows over its records,
+// then each of the batch's expressions' part. Each expression taken here is then compared with the reference's tape, and each
 // listed one counted by its first record's reason. The shadow runs the three a second time over the same chunk, for
 // their ticks with their code and their constants at hand: they give the same answers.
 static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFront* front)
@@ -733,8 +1038,13 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     node_rows_window_reads(state, count, &read);
     const uint64_t reads_end = __rdtsc();
     node_rows_window_shapes(state, front, count);
+    const uint64_t shapes_end = __rdtsc();
+    if (state->c_updates_now != 0)
+    {
+        node_rows_window_updates(state, front, count, &read);
+    }
     const uint64_t t1 = __rdtsc();
-    const uint32_t written = node_rows_window_write(state, count);
+    const uint32_t written = node_rows_window_write(state, front, count);
     const uint64_t t2 = __rdtsc();
     node_rows_window_part(state, front);
     const uint64_t t3 = __rdtsc();
@@ -742,8 +1052,13 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     node_rows_window_reads(state, count, &again);
     const uint64_t later_reads_end = __rdtsc();
     node_rows_window_shapes(state, front, count);
+    const uint64_t later_shapes_end = __rdtsc();
+    if (state->c_updates_now != 0)
+    {
+        node_rows_window_updates(state, front, count, &again);
+    }
     const uint64_t t4 = __rdtsc();
-    const uint32_t written_again = node_rows_window_write(state, count);
+    const uint32_t written_again = node_rows_window_write(state, front, count);
     const uint64_t t5 = __rdtsc();
     node_rows_window_part(state, front);
     const uint64_t t6 = __rdtsc();
@@ -795,12 +1110,15 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] += written != written_again;
     counts[NODE_FACTS_COUNT_ROWS_WORDS] += read.words;
     counts[NODE_FACTS_COUNT_ROWS_LINES] += read.lines;
+    counts[NODE_FACTS_COUNT_ROWS_UPDATES] += read.updates;
     counts[NODE_FACTS_COUNT_ROWS_READ_TICKS] += reads_end - t0;
-    counts[NODE_FACTS_COUNT_ROWS_SHAPE_TICKS] += t1 - reads_end;
+    counts[NODE_FACTS_COUNT_ROWS_SHAPE_TICKS] += shapes_end - reads_end;
+    counts[NODE_FACTS_COUNT_ROWS_UPDATE_TICKS] += t1 - shapes_end;
     counts[NODE_FACTS_COUNT_ROWS_WRITE_TICKS] += t2 - t1;
     counts[NODE_FACTS_COUNT_ROWS_PART_TICKS] += t3 - t2;
     counts[NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS] += later_reads_end - t3;
-    counts[NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS] += t4 - later_reads_end;
+    counts[NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS] += later_shapes_end - later_reads_end;
+    counts[NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS] += t4 - later_shapes_end;
     counts[NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS] += t5 - t4;
     counts[NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS] += t6 - t5;
 }

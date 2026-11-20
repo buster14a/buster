@@ -178,11 +178,6 @@ static void foreign_unwind_test_terminator(ForeignUnwindTestInput* fixture, bool
     fixture->record_count += 1;
 }
 
-static bool foreign_unwind_test_same_relocation(const Elf64_Rela* left, const Elf64_Rela* right)
-{
-    return left->r_offset == right->r_offset && left->r_info == right->r_info && left->r_addend == right->r_addend;
-}
-
 static void foreign_unwind_test_kept(ForeignTestTally* tally, const ForeignUnwindTestInput* fixture, Arena* arena, const char* detail)
 {
     uint8_t original[sizeof(*fixture)];
@@ -215,7 +210,7 @@ static void foreign_unwind_test_kept(ForeignTestTally* tally, const ForeignUnwin
         for (uint32_t r = 0; r < fixture->record_count; r += 1)
         {
             const ForeignUnwindTestRecord* record = &fixture->records[r];
-            if (record->kept && relocation->r_offset >= record->offset && relocation->r_offset < record->offset + record->length)
+            if (ELF64_R_TYPE(relocation->r_info) != R_X86_64_NONE && record->kept && relocation->r_offset >= record->offset && relocation->r_offset < record->offset + record->length)
             {
                 relocations[count] = *relocation;
                 relocations[count].r_offset = positions[r] + relocation->r_offset - record->offset;
@@ -265,17 +260,8 @@ static void foreign_unwind_test_kept(ForeignTestTally* tally, const ForeignUnwin
             mapped = mapped && foreign_unwind_offset(&output, input.bytes.length, &end) && end == length &&
                      !foreign_unwind_offset(&output, input.bytes.length + 1, &outside) && !foreign_unwind_offset(&output, UINT64_MAX, &outside);
             foreign_test_expect(tally, mapped, "every retained byte and section end translate; removed bytes do not", detail);
-            bool relocated = output.relocation_count == count && (count == 0 || output.relocations != 0);
-            for (uint32_t i = 0; relocated && i < count; i += 1)
-            {
-                uint32_t matches = 0;
-                for (uint32_t j = 0; j < output.relocation_count; j += 1)
-                {
-                    matches += foreign_unwind_test_same_relocation(&relocations[i], &output.relocations[j]) ? 1 : 0;
-                }
-                relocated = matches == 1;
-            }
-            foreign_test_expect(tally, relocated, "all live relocations move once with unchanged symbols and addends", detail);
+            const bool relocated = output.relocation_count == count && (count == 0 || (output.relocations != 0 && memcmp(output.relocations, relocations, count * sizeof(Elf64_Rela)) == 0));
+            foreign_test_expect(tally, relocated, "retained relocation bytes match in original input order", detail);
         }
         arena_pop_to(arena, saved);
     }
@@ -289,6 +275,18 @@ static void foreign_unwind_test_successes(ForeignTestTally* tally, Arena* arena)
     foreign_unwind_test_fde(&fixture, cie, 1, false, true, 1, 101);
     foreign_unwind_test_fde(&fixture, cie, 1, false, true, 1, 101);
     foreign_unwind_test_kept(tally, &fixture, arena, "all-live zR");
+    foreign_unwind_test_relocate(&fixture, (uint32_t)fixture.relocations[1].r_offset, 0, R_X86_64_NONE, 0);
+    foreign_unwind_test_relocate(&fixture, UINT32_MAX, 0, R_X86_64_NONE, 0);
+    foreign_unwind_test_fde(&fixture, cie, 1, false, true, 1, 101);
+    foreign_unwind_test_kept(tally, &fixture, arena, "NONE at an equal offset and beyond the section before another live field");
+
+    foreign_unwind_test_begin(&fixture);
+    foreign_unwind_test_cie(&fixture, false, false);
+    foreign_unwind_test_cie(&fixture, false, false);
+    cie = foreign_unwind_test_cie(&fixture, false, true);
+    foreign_unwind_test_fde(&fixture, cie, 1, false, true, 1, 101);
+    foreign_unwind_test_fde(&fixture, cie, 1, false, true, 1, 101);
+    foreign_unwind_test_kept(tally, &fixture, arena, "ordered fields after a gap of unreferenced CIEs");
 
     foreign_unwind_test_begin(&fixture);
     cie = foreign_unwind_test_cie(&fixture, true, true);
@@ -364,7 +362,7 @@ static void foreign_unwind_test_successes(ForeignTestTally* tally, Arena* arena)
     }
 }
 
-static void foreign_unwind_test_refused(ForeignTestTally* tally, const ForeignUnwindTestInput* fixture, const ForeignUnwindInput* input, Arena* arena, const char* detail)
+static ForeignUnwindResult foreign_unwind_test_refused(ForeignTestTally* tally, const ForeignUnwindTestInput* fixture, const ForeignUnwindInput* input, Arena* arena, const char* detail)
 {
     uint8_t original[sizeof(*fixture)];
     memcpy(original, fixture, sizeof(original));
@@ -392,6 +390,42 @@ static void foreign_unwind_test_refused(ForeignTestTally* tally, const ForeignUn
         foreign_test_expect(tally, memcmp(fixture, original, sizeof(original)) == 0, "refusal preserves input storage", detail);
         arena_pop_to(arena, saved);
     }
+    return exact;
+}
+
+static void foreign_unwind_test_order_errors(ForeignTestTally* tally, Arena* arena)
+{
+    ForeignUnwindTestInput fixture;
+    foreign_unwind_test_begin(&fixture);
+    const uint32_t cie = foreign_unwind_test_cie(&fixture, false, true);
+    const uint32_t fde = foreign_unwind_test_fde(&fixture, cie, 1, false, true, 1, 101);
+    const uint32_t field = fixture.records[fde].offset + 17;
+    foreign_unwind_test_relocate(&fixture, field, 3, R_X86_64_PC32, 1);
+    foreign_unwind_test_relocate(&fixture, field, 0, R_X86_64_NONE, 0);
+    foreign_unwind_test_relocate(&fixture, field, 3, R_X86_64_PC32, 2);
+    ImportSymbols symbols;
+    ForeignUnwindInput input = foreign_unwind_test_input(&fixture, &symbols);
+    ForeignUnwindResult result = foreign_unwind_test_refused(tally, &fixture, &input, arena, "sorted overlapping CFI fields");
+    foreign_test_expect(tally, result.error == FOREIGN_UNWIND_ERROR_MALFORMED && result.offset == field && result.relocation == 4, "second tied field is the witness", 0);
+
+    // Move pc_begin behind the ties. Stable sorting puts the second field fourth, but its input index is now two.
+    const Elf64_Rela pc = fixture.relocations[0];
+    memmove(fixture.relocations, fixture.relocations + 1, 3 * sizeof(pc));
+    fixture.relocations[3] = pc;
+    result = foreign_unwind_test_refused(tally, &fixture, &input, arena, "unordered overlapping CFI fields");
+    foreign_test_expect(tally, result.error == FOREIGN_UNWIND_ERROR_MALFORMED && result.offset == field && result.relocation == 3, "stable overlap reports the original index", 0);
+
+    // Per-entry validation finishes before the overlap check, even with an earlier pair of equal offsets.
+    foreign_unwind_test_relocate(&fixture, fixture.length, 1, R_X86_64_PC32, 0);
+    input.relocation_count = fixture.relocation_count;
+    result = foreign_unwind_test_refused(tally, &fixture, &input, arena, "field starts at the end of the section");
+    foreign_test_expect(tally, result.error == FOREIGN_UNWIND_ERROR_MALFORMED && result.offset == fixture.length && result.relocation == 5, "out-of-record field takes precedence over overlap", 0);
+
+    fixture.relocations[4].r_offset = UINT64_MAX;
+    input.relocations = fixture.relocations + 3;
+    input.relocation_count = 2;
+    result = foreign_unwind_test_refused(tally, &fixture, &input, arena, "increasing offsets run past the last record");
+    foreign_test_expect(tally, result.error == FOREIGN_UNWIND_ERROR_MALFORMED && result.offset == UINT64_MAX && result.relocation == 2, "sorted out-of-record witness", 0);
 }
 
 static void foreign_unwind_test_failures(ForeignTestTally* tally, Arena* arena)
@@ -541,6 +575,7 @@ static bool foreign_unwind_test(void)
     {
         foreign_unwind_test_successes(&tally, &arena);
         foreign_unwind_test_failures(&tally, &arena);
+        foreign_unwind_test_order_errors(&tally, &arena);
     }
     arena_release(&arena);
     return foreign_test_report(&tally);

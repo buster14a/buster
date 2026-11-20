@@ -34,7 +34,7 @@ requirements. [Command index](README.md).
   `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
 - Value numbering with memory (#2718, `ir_optimize_memory.c`, the optimizer's
-  `BUSTER_IR_OPTIMIZE_MEMORY`): `test-ir-optimize` runs its six
+  `BUSTER_IR_OPTIMIZE_MEMORY`): `test-ir-optimize` runs its
   `tests/ir/optimize/memory-*.ir` pairs and `ir_optimize_memory_test.c`'s 400
   generated programs, whose interpreter's calls rewrite every escaped byte,
   folded into a frozen digest (the default seed; its scalar twin went in #2924),
@@ -242,7 +242,10 @@ regions (a nested `?:`, `&&` and `||` values), with `ir_truth_simplify_values`
 turning the truth values' selects into i1 `and`s and `or`s of them (#2677). A condition
 that reads the value the join carries round a loop (a running max) keeps its
 branch, and an accumulation's select sinks below its addition
-(`s + (c ? x : 0)`). Each arm moves
+(`s + (c ? x : 0)`). If both arms compute the same integer addition,
+subtraction, OR or XOR on a common operand, the join can compute
+`s op (c ? x : y)`. Both results must be private to the phi, and subtraction
+requires `s` on the left in both arms. Each arm moves
 at most four non-constant rows, each join takes at most four selects, and the
 moved rows' cost plus two per select is at most eight. These are policy bounds,
 not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
