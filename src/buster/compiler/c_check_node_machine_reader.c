@@ -82,6 +82,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
 // whether it ran (0: it didn't; 1: it took the expression; 2: it refused it for a template), its ticks, and the
 // root's target.
 static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target);
+static void node_facts_reader_rows(struct NodeFactsReader* state, uint64_t ticks);
 static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
                                          uint32_t operand, bool taken);
 static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front);
@@ -597,7 +598,13 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                             const uint8_t ran = swept == NODE_MACHINE_TAKEN ? BUSTER_NODE_CONTEXTS_RAN_TAKEN : BUSTER_NODE_CONTEXTS_RAN_REFUSED;
                             node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target);
                         }
+                        const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
+                        if (pass != 0 && typer->facts != NULL)
+                        {
+                            // The reference of X's rows on the window: this run's ticks; its tape is kept below.
+                            node_facts_reader_rows(typer->facts, __rdtsc() - expand_start);
+                        }
                         if (pass != 0)
                         {
                             const bool taken = swept == NODE_MACHINE_TAKEN;
