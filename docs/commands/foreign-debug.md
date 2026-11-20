@@ -19,3 +19,11 @@ requirements. [Command index](README.md).
   `-g` fixtures by both paths and on lanes, against lld with
   `llvm-dwarfdump --verify` and gdb, and checks the relocation kernels' twins.
   The driver's contract ("Debug information") has the details.
+
+A complete uncompressed section can use the input object's own bytes through
+the final write. This requires the section to have no relocation fields, to
+cover the entire output of its kind, and to be disjoint from file-backed link
+atoms that the writer can patch. The other sections use link-arena storage.
+The planner clears only their alignment gaps, including padding introduced by
+a final empty input section. Every compressed stream is checked, even one
+that contributes zero bytes beside a borrowed section.

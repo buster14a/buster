@@ -558,6 +558,13 @@ static void node_reads_note(NodeReads* reads, uint64_t at, uint32_t reader, cons
     }
 }
 
+// A record's exponent as a wide value of its own: a floating value's. What another record's exponent says
+// (node_facts_small) is its payload's, and is compared with it.
+static inline uint16_t node_reads_exponent(const NodeFactsRecord* record)
+{
+    return (record->standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING ? record->exponent : 0;
+}
+
 // How record `made` differs from `kept`, a consumer's as its rule made it again: 0 not at all; 1 in a wide value alone
 // (its type's identity, its object, its payload, a member's offset, a conversion's type's identity: which, into
 // `fields` as BUSTER_NODE_READS_NEED_*) or in the flags `passed` alone (a flag of its operand's that it hands on); 2 in
@@ -570,7 +577,7 @@ static uint32_t node_reads_record_differs(const NodeFactsView* view, const NodeF
                          node_facts_word_of(view, made->converted[0]) != node_facts_word_of(view, kept->converted[0]) ||
                          node_facts_word_of(view, made->converted[1]) != node_facts_word_of(view, kept->converted[1]);
     const uint32_t wide = (made->type != kept->type ? BUSTER_NODE_READS_NEED_TYPE : 0) | (made->object != kept->object ? BUSTER_NODE_READS_NEED_OBJECT : 0) |
-                          (made->payload != kept->payload || made->exponent != kept->exponent ? BUSTER_NODE_READS_NEED_PAYLOAD : 0) |
+                          (made->payload != kept->payload || node_reads_exponent(made) != node_reads_exponent(kept) ? BUSTER_NODE_READS_NEED_PAYLOAD : 0) |
                           (made->member_offset != kept->member_offset ? BUSTER_NODE_READS_NEED_OFFSET : 0) |
                           (made->converted[0] != kept->converted[0] || made->converted[1] != kept->converted[1] ? BUSTER_NODE_READS_NEED_CONVERTED : 0);
     *fields = wide;
@@ -801,8 +808,8 @@ static void node_reads_consumers(NodeReads* reads, NodeFacts* facts, uint32_t wi
                         changed_payloads |= change->field == BUSTER_NODE_READS_CHANGE_PAYLOAD ? 1u << k : 0;
                         if (change->field == BUSTER_NODE_READS_CHANGE_PAYLOAD && differs != 2)
                         {
-                            const bool moved = records[c].payload != kept.payload || records[c].exponent != kept.exponent;
-                            const bool exact = records[c].payload == change->value && records[c].exponent == kept.exponent;
+                            const bool moved = records[c].payload != kept.payload || node_reads_exponent(records + c) != node_reads_exponent(&kept);
+                            const bool exact = records[c].payload == change->value && node_reads_exponent(records + c) == node_reads_exponent(&kept);
                             tried |= 1u << k;
                             followed |= moved && exact ? 1u << k : 0;
                             other |= moved && !exact ? 1u << k : 0;

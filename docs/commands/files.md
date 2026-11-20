@@ -59,8 +59,8 @@ the guard spelled the same, and the walk must do what it did:
   and a macro redefined. The counts are exact: 13 files prepared (each identity
   once) in 4 rounds, 1 unused, 2 requests not found (no diagnostic), the units'
   errors and warnings, and their system calls after the walk (only the
-  computed include's). It runs with the vectorized kernels and with their
-  scalar twins, cut into parts and split once, on every lane
+  computed include's). It runs with `PPOptions.scalar` off and on (the
+  scalar body scan alone, #2924), cut into parts and split once, on every lane
   (`FilesRun.lane_bytes` 0);
 - spellings: 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, long names, line splices and UCNs) prepared
@@ -81,7 +81,20 @@ the guard spelled the same, and the walk must do what it did:
 - listings (#653): a walk whose second round's candidates a listed search
   directory rules out leaves the cache the same paths, each with a file or none
   and the same error, as a walk with listings off, on every lane count and
-  before any unit runs; a unit of its root then opens no path through either;
+  before any unit runs; a unit of its root then opens no path through either.
+  Whether candidates must be ruled out comes from the file system of the test's
+  directory (#2945), as in `test-preprocessor`'s directory checks: `statfs` of
+  the first search directory, then `file_cache_exact_names` of its type. On a
+  type it takes (ext4, XFS, Btrfs, tmpfs and the others it names) the walk with
+  listings must rule out at least one candidate; on any other (NFS, FUSE, 9p,
+  vfat, NTFS) it must rule out none, and the caches must still agree. Its line
+  says which: `listed`, or that this file system's directories aren't listed;
+- asks (#2873): a walk whose first round fails ten probes under a subdirectory
+  its first search directory lacks asks that directory once, and its answer
+  rules out the second round's ten candidates there; the cache then holds the
+  same paths, each with a file or none and the same error, as a walk with the
+  asks off, on every lane count and before any unit runs, and a unit of its
+  root opens no path through either;
 - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
   probe mustn't block) and an active one names (an error, as alone), and a
   quoted name of 2,400 bytes in a directory of 2,539, three requests of which

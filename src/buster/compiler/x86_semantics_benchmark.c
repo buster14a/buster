@@ -34,7 +34,6 @@
 // and run_x86_semantics_benchmark.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -657,8 +656,8 @@ static bool x86_semantics_benchmark_choice(uint64_t seed, uint64_t count, uint32
                 const X86Instruction chosen = x86_choice_instruction(data.forms[i], target, data.values[i]);
                 const X86Instruction naive = x86_choice_instruction(longest, target, data.values[i]);
                 uint8_t bytes[2 * BUSTER_X86_ENCODER_CAPACITY(1)];
-                const int64_t chosen_length = x86_encode_scalar(&chosen, 1, bytes, sizeof(bytes), 0, 0);
-                const int64_t naive_length = x86_encode_scalar(&naive, 1, bytes, sizeof(bytes), 0, 0);
+                const int64_t chosen_length = x86_validate(&chosen, 1) == 1 ? x86_encode(&chosen, 1, bytes, sizeof(bytes), 0, 0) : -1;
+                const int64_t naive_length = x86_validate(&naive, 1) == 1 ? x86_encode(&naive, 1, bytes, sizeof(bytes), 0, 0) : -1;
                 if (chosen_length > 0 && naive_length > 0)
                 {
                     chosen_bytes += (uint64_t)chosen_length;
@@ -803,7 +802,8 @@ static bool x86_semantics_benchmark_code(X86SemanticsBenchmarkCounters* counters
         }
         // The block's length, then the loop: dec rcx; jnz to the start (rel32); ret.
         uint8_t block[BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK)];
-        const int64_t block_length = x86_encode_scalar(records, BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK, block, sizeof(block), 0, 0);
+        const int64_t block_length = x86_validate(records, BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK) == BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK ?
+                                         x86_encode(records, BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK, block, sizeof(block), 0, 0) : -1;
         records[BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK] = (X86Instruction){
             .form = X86_FORM_DEC_RM64,
             .rm = X86_REGISTER_RCX,
@@ -815,8 +815,9 @@ static bool x86_semantics_benchmark_code(X86SemanticsBenchmarkCounters* counters
         records[BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK + 2] = (X86Instruction){
             .form = X86_FORM_RET,
         };
-        const int64_t length = block_length > 0 ? x86_encode_scalar(records, BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK + 3, code, page, 0, 0) : -1;
-        valid = length > 0 && x86_validate(records, BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK + 3) == BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK + 3;
+        valid = block_length > 0 && x86_validate(records, BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK + 3) == BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK + 3;
+        const int64_t length = valid ? x86_encode(records, BUSTER_X86_SEMANTICS_BENCHMARK_BLOCK + 3, code, page, 0, 0) : -1;
+        valid = valid && length > 0;
         double nanoseconds[BUSTER_X86_SEMANTICS_BENCHMARK_PASSES];
         double cycles[BUSTER_X86_SEMANTICS_BENCHMARK_PASSES];
         for (uint32_t pass = 0; valid && pass < BUSTER_X86_SEMANTICS_BENCHMARK_PASSES; pass += 1)
@@ -955,11 +956,3 @@ int run_x86_semantics_benchmark(int argc, char** argv)
     return valid ? 0 : 1;
 }
 
-#else
-int run_x86_semantics_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

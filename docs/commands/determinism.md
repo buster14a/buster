@@ -7,9 +7,10 @@ requirements. [Command index](README.md).
 ## Deterministic output tests
 
 `./build/compiler test-diagnostics` checks the buffered diagnostic merge:
-the AVX-512 radix sort against stable insertion sort, guard-page tails,
-complete 64-bit keys, grouped notes, the earliest fatal cutoff, and bounded
-allocation failures. Jobs run in forward and reverse order with delayed
+the sort against its definition (every record once, ordered by source and
+sequence, equal keys in input order) at every count through 319, around the
+count sort's cutoff of 512 and past 4,096, guard-page tails, complete 64-bit keys, grouped notes, the earliest
+fatal cutoff, and bounded allocation failures. Jobs run in forward and reverse order with delayed
 completion at 1, 2, 3 and 8 lanes; the bytes must agree.
 
 `test-preprocessor` (without files), `test-object-writer`, `test-executable`,
@@ -39,11 +40,10 @@ the same correctness inventory, perturbs IDs for single- and multi-file
 mixed-tier compilations at every available lane count through eight and
 requires actual team receipts.
 
-`./build/compiler benchmark-diagnostics [--only scalar|selected]
-[--after-scalar MS]` compares the
-ordering paths with 21 interleaved samples, in ns/key and invariant-TSC
-ticks/key. Run both isolated `--only selected` and
-`--only selected --after-scalar 100`, across several processes pinned to CPU 2
-under the host's lock. [The determinism guide](../../docs/determinism.md) specifies
+`./build/compiler benchmark-diagnostics [--after-scalar MS]` times
+`diagnostic_sort` in 21 samples, in ns/key and invariant-TSC ticks/key, and
+checks each sample's result against the sort's definition. Run it with and
+without `--after-scalar 100`, across several processes pinned to CPU 2 under
+the host's lock. [The determinism guide](../../docs/determinism.md) specifies
 the caller's source-order and lifetime contracts and the integrated source
 driver checks for #151 and #152.

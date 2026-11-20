@@ -170,14 +170,10 @@ _Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, object
 // Always inlined (#880), as profile-guided builds do; hot callers: check_stream_value_to and check_action_operand_value.
 static inline __attribute__((always_inline)) void check_value_copy(CheckValue* destination, const CheckValue* source)
 {
-#if BUSTER_HOST_VECTOR
     uint8_t* bytes = (uint8_t*)destination;
     const uint8_t* from = (const uint8_t*)source;
     _mm512_storeu_si512(bytes, _mm512_loadu_si512(from));
     _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_loadu_si256((const __m256i*)(from + 64)));
-#else
-    *destination = *source;
-#endif
 }
 
 // A value's two x87 payloads as their ten meaningful bytes, the significand and the sign and exponent, copied as
@@ -626,8 +622,12 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
         // (_Bool)((char*)&s + (1ul << 63)) to 1. The flag stays on the lvalue too, but a failed value load must not
         // become "true" just because the object exists. A weak symbol is not a constant.
         const bool nonnull = (value->flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 && value->category != CHECK_LVALUE;
+        // An lvalue's truth is its value's, which the program loads: no address says it, an absolute one's no more
+        // than an object's (#3028: `if (*(int*)4096)` was true for its address). An array's lvalue is no load, and
+        // its truth is its address's.
+        const bool loaded = value->category == CHECK_LVALUE && !type_kind_is_array(type_kind(table, type_strip_aligned(table, value->type)));
         *truth = nonnull || value->offset != 0;
-        known &= value->object == 0 || nonnull;
+        known &= !loaded && (value->object == 0 || nonnull);
     }
     else
     {

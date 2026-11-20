@@ -14,17 +14,26 @@ is the loop header. It does not synthesize preheaders or change CFG edges.
 Nested loops are processed from smallest to largest. An instruction moved
 out of an inner loop may subsequently move through the outer preheader.
 
+Each loop is walked over its own blocks, once, rather than the whole function
+for each loop (#2781, #2979). In reverse postorder a value comes after its
+operands (a phi's aside, and a phi doesn't move), so one forward availability
+walk finds the loop's movable values; the unrestricted motion sends every one of
+them to the preheader. On the largest functions of sqlite3.c, Lua and musl under
+`+licm`, the whole-function sweeps this replaced took up to 1.6 times the
+worklist's ticks, and the worklist itself scanned the whole function for each
+loop.
+
 `IrLicmOptions.vectors` (#2781) restricts that motion to vector- and mask-typed
 values and the movable operands they need. Tier 1 enables it by default for a
 function that has such values, unless `+licm` requests unrestricted motion. A
-loop with no safe vector or mask value is skipped. The other loops use a forward
-availability walk and backward operand-closure walk over their own blocks rather
-than scanning the whole function for each loop. `IrLicmOptions.whole` retains the
-original whole-function algorithm with the same filter as an exact test oracle.
-If nothing moves, the result borrows the input function and writes no output.
-`test-ir-licm` compares both walks and host paths on SIMD, width-change,
-permute2 and nested-loop fixtures, checks their interpreted behavior, and checks
-that scalar-only loops are skipped without an output rewrite.
+loop with no safe vector or mask value is skipped. The other loops take the
+forward walk, then a backward operand-closure walk over their own blocks.
+`IrLicmOptions.whole` retains the original whole-function algorithm, below, as
+the exact test oracle of both policies' walks. If nothing moves, the result
+borrows the input function and writes no output. `test-ir-licm` compares the
+walks with it on SIMD, width-change, permute2 and nested-loop fixtures, checks
+their interpreted behavior, and checks that scalar-only loops are skipped without
+an output rewrite.
 Candidate operations are total, pure computations: integer wrapping
 arithmetic and bit operations, comparisons, selects, exact conversions,
 floating sign negation, constants, parameters and address calculations.
@@ -44,8 +53,9 @@ lane flags. A loop fixture checks the complete dependency chain on both paths,
 its interpreted result, and the unmoved floating effects; an undef variant
 checks that the chain stays in place.
 
-For one loop, a value is initially available if its current definition lies
-outside the loop and dominates the preheader. A candidate becomes invariant
+The whole-function oracle (`whole`): for one loop, a value is initially
+available if its current definition lies outside the loop and dominates the
+preheader. A candidate becomes invariant
 when all its operands are available. The vector path tests 16 candidates at
 a time, with exact masked dword operand loads and masked availability gathers.
 Only semantically present operands are gathered; no `NONE` index is accessed.
@@ -76,14 +86,15 @@ their original relative order and execution condition.
 
 `test-ir-licm [--seed N]` calls `run_ir_licm_tests(argc, argv)`, with the
 command in `argv[0]`. Include its file after `ir_optimize_licm.c` and
-`ir_optimize_test.c`. Fixtures check exact vector/worklist/fallback output,
+`ir_optimize_test.c`. Fixtures check the walk's output against the oracle's
+sweeps, worklist and forced worklist completion,
 the independent bounded interpreter, dependent arithmetic chains, nested
 hoisting, missing dedicated preheaders, zero-iteration faulting division and
 loads, undef dependence, no-loop functions, random arithmetic loops, every
 guarded readiness tail and partial allocation rollback. Whole-pass progress
 fixtures cover thin, wide, mixed and phi-dependent chains at 255/256/257/4096
 lengths, asserting identical output and motion with bounded sweeps, visits
-and fallback. The current motion policy has no profitability model, and its
+and fallback for the oracle, and one visit of each loop instruction for the walk. The current motion policy has no profitability model, and its
 generated-code measurement says it needs one (below).
 
 ## In `--tier1`

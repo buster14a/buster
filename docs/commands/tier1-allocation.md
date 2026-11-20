@@ -15,7 +15,8 @@ requirements. [Command index](README.md).
   `tier1_emit_cfg_recipes`). `test-tier1-allocation` includes native execution,
   guarded tails, and constrained hint traces for unused recipes, simultaneous
   register claims and stored-value continuations. `benchmark-tier1-allocation`
-  measures full preparation and allocation; `test-checker-driver`'s Tier 1
+  measures full preparation and allocation (`--after-scalar MS` runs scalar
+  integer work before each sample); `test-checker-driver`'s Tier 1
   fixture runs every recipe through `--tier1` against clang.
   [The allocation guide](../../docs/tier1-allocation.md)
   records producer constraints and the corpora's spills with and without
@@ -27,7 +28,8 @@ requirements. [Command index](README.md).
   use (#2768) but not where its hint names another value's range (#2784), and a
   victim that continues in its slot and a range following an interval evicted
   where it starts (#2774: `continuation_intervals`, which the random inputs take
-  with required uses too) have their traces in
+  with required uses too) and a range of its own value named to another value's
+  recipe, which takes the recipe's register only (#2834) have their traces in
   `tier1_allocate_hints_test.c`, as does a range's alternate (#2734:
   `alternate_intervals`, taken where its interval's value still holds the
   register and it is free), which the random inputs and their reference model

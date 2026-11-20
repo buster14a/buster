@@ -529,10 +529,64 @@ static void foreign_driver_test_structure(ForeignTestTally* tally, String8 bytes
 
 #include "buster/compiler/foreign_driver_symbols_test.c"
 
+// A position-dependent dynamic executable's (-no-pie) image: every PT_LOAD at BUSTER_EXECUTABLE_BASE or above, at its
+// file offset's place from it, a PT_DYNAMIC, and no DF_1_PIE, DT_RELR or RELATIVE relocation, as GNU ld writes one.
+static void foreign_driver_test_position_dependent(ForeignTestTally* tally, String8 bytes, const char* name)
+{
+    Elf64_Ehdr header = { 0 };
+    const bool valid = bytes.pointer != 0 && bytes.length >= sizeof(header);
+    if (valid)
+    {
+        memcpy(&header, bytes.pointer, sizeof(header));
+    }
+    const bool programs = valid && header.e_phoff <= bytes.length && (uint64_t)header.e_phnum * sizeof(Elf64_Phdr) <= bytes.length - header.e_phoff;
+    const bool sections = valid && header.e_shoff <= bytes.length && (uint64_t)header.e_shnum * sizeof(Elf64_Shdr) <= bytes.length - header.e_shoff;
+    bool placed = programs;
+    bool dynamic = false;
+    uint64_t dynamic_offset = 0;
+    uint64_t dynamic_size = 0;
+    for (uint32_t p = 0; programs && p < header.e_phnum; p += 1)
+    {
+        Elf64_Phdr segment;
+        memcpy(&segment, bytes.pointer + header.e_phoff + p * sizeof(segment), sizeof(segment));
+        placed = placed && (segment.p_type != PT_LOAD || (segment.p_vaddr >= BUSTER_EXECUTABLE_BASE && segment.p_vaddr - BUSTER_EXECUTABLE_BASE == segment.p_offset));
+        dynamic = dynamic || segment.p_type == PT_DYNAMIC;
+        dynamic_offset = segment.p_type == PT_DYNAMIC ? segment.p_offset : dynamic_offset;
+        dynamic_size = segment.p_type == PT_DYNAMIC ? segment.p_filesz : dynamic_size;
+    }
+    foreign_test_expect(tally, placed && dynamic && header.e_entry >= BUSTER_EXECUTABLE_BASE, "-no-pie's image at the fixed base, with .dynamic", name);
+    bool position_independent = false;
+    const bool inside = dynamic && dynamic_offset <= bytes.length && dynamic_size <= bytes.length - dynamic_offset;
+    for (uint64_t at = 0; inside && at + sizeof(Elf64_Dyn) <= dynamic_size; at += sizeof(Elf64_Dyn))
+    {
+        Elf64_Dyn entry;
+        memcpy(&entry, bytes.pointer + dynamic_offset + at, sizeof(entry));
+        position_independent = position_independent || (entry.d_tag == DT_FLAGS_1 && (entry.d_un.d_val & DF_1_PIE) != 0) || entry.d_tag == DT_RELR ||
+                               entry.d_tag == DT_RELACOUNT;
+    }
+    uint64_t relative = 0;
+    for (uint32_t index = 0; sections && index < header.e_shnum; index += 1)
+    {
+        Elf64_Shdr section;
+        memcpy(&section, bytes.pointer + header.e_shoff + index * sizeof(section), sizeof(section));
+        const bool rela = section.sh_type == SHT_RELA && section.sh_offset <= bytes.length && section.sh_size <= bytes.length - section.sh_offset;
+        for (uint64_t at = 0; rela && at + sizeof(Elf64_Rela) <= section.sh_size; at += sizeof(Elf64_Rela))
+        {
+            Elf64_Rela relocation;
+            memcpy(&relocation, bytes.pointer + section.sh_offset + at, sizeof(relocation));
+            relative += ELF64_R_TYPE(relocation.r_info) == R_X86_64_RELATIVE ? 1 : 0;
+        }
+    }
+    foreign_test_expect(tally, inside && sections && !position_independent && relative == 0, "-no-pie has no DF_1_PIE, RELR or RELATIVE relocation", name);
+}
+
+// Each fixture by both paths and every lane count, into the same bytes, which run: a static executable, one after GC, a
+// dynamic PIE, a position-dependent dynamic executable (-no-pie, #1503: the last of -pie and -no-pie counts), and a
+// dynamic PIE again with -pie after -no-pie.
 static void foreign_driver_test_paths(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, String8 interpreter)
 {
     uint64_t baseline_text_size = UINT64_MAX;
-    for (uint32_t fixture = 0; fixture < 3; fixture += 1)
+    for (uint32_t fixture = 0; fixture < 5; fixture += 1)
     {
         String8 reference = { 0 };
         for (uint32_t path = 0; path < 2; path += 1)
@@ -545,7 +599,9 @@ static void foreign_driver_test_paths(ForeignTestTally* tally, const char* direc
                 uint32_t count = 0;
                 snprintf(name, sizeof(name), "paths_%u_%u_%u", fixture, path, foreign_test_lanes[l]);
                 snprintf(lanes, sizeof(lanes), "%u", foreign_test_lanes[l]);
-                arguments[count++] = files->objects[fixture == 2 ? FOREIGN_DRIVER_TEST_CALL : FOREIGN_DRIVER_TEST_START];
+                const bool dynamic = fixture >= 2;
+                const bool position_dependent = fixture == 3;
+                arguments[count++] = files->objects[dynamic ? FOREIGN_DRIVER_TEST_CALL : FOREIGN_DRIVER_TEST_START];
                 arguments[count++] = (char*)"--lanes";
                 arguments[count++] = lanes;
                 if (path == 0)
@@ -557,15 +613,23 @@ static void foreign_driver_test_paths(ForeignTestTally* tally, const char* direc
                     arguments[count++] = files->objects[FOREIGN_DRIVER_TEST_DEAD];
                     arguments[count++] = (char*)"--gc-sections";
                 }
-                else if (fixture == 2)
+                else if (dynamic)
                 {
-                    arguments[count++] = (char*)"-pie";
+                    arguments[count++] = (char*)(fixture == 4 ? "-no-pie" : "-pie");
+                    if (fixture >= 3)
+                    {
+                        arguments[count++] = (char*)(fixture == 3 ? (l % 2 == 0 ? "-no-pie" : "--no-pie") : "-pie");
+                    }
                     arguments[count++] = (char*)(l % 2 == 0 ? "-dynamic-linker" : "--dynamic-linker");
                     arguments[count++] = interpreter.pointer;
                     arguments[count++] = files->needed;
                 }
                 const String8 bytes = foreign_driver_test_invoke(tally, directory, name, l % 2 == 0 ? "-o" : "--output", arguments, count, true, 42, arena);
-                foreign_driver_test_structure(tally, bytes, fixture == 2 ? ET_DYN : ET_EXEC, fixture == 2 ? interpreter : (String8){ 0 }, name);
+                foreign_driver_test_structure(tally, bytes, dynamic && !position_dependent ? ET_DYN : ET_EXEC, dynamic ? interpreter : (String8){ 0 }, name);
+                if (position_dependent && path == 0 && l == 0)
+                {
+                    foreign_driver_test_position_dependent(tally, bytes, name);
+                }
                 if (path == 0 && l == 0)
                 {
                     reference = bytes;

@@ -42,7 +42,7 @@ static void check_test_enum_metadata(CheckTest* test)
         if (ready)
         {
             CheckStream stream = { 0 };
-            const CheckOptions check_options = { .scalar = parse_options.scalar };
+            const CheckOptions check_options = { 0 };
             check_test_expect(test, check_graph_run(&types.table, &input.graph, &checked_storage, &scratch, &check_options, &stream) && stream.report_count == 0,
                               "C17 and C23 enum graph semantics accept both completed type forms");
             uint32_t declaration = BUSTER_CHECK_NONE;

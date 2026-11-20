@@ -13,8 +13,8 @@
 // scheduler's own barriers. The symbolic references follow their records, sorted by them again as the encoder's fixup
 // ends expect (link_add_code_fixups pairs them in order).
 //
-// With `verify` (--verify), each scheduled block's order must pass tier1_schedule_verify, the scalar reference, which
-// rebuilds every dependency from the original records: a refusal is the compile's internal failure.
+// With `verify` (--verify), each scheduled block's order must pass tier1_schedule_verify, the independent verifier,
+// which rebuilds every dependency from the original records: a refusal is the compile's internal failure.
 
 typedef struct CheckTier1ScheduleCode CheckTier1ScheduleCode;
 struct CheckTier1ScheduleCode
@@ -58,7 +58,7 @@ static void check_tier1_schedule_cut(uint8_t* cuts, uint32_t count, uint32_t bou
 }
 
 // Schedules `code` in place, its records and references, with scratch from `scratch` (popped before it returns).
-static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const CheckTier1ScheduleCode* code, bool vector, bool verify)
+static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const CheckTier1ScheduleCode* code, bool verify)
 {
     CheckTier1ScheduleResult result = { .verified = true };
     const uint64_t mark = scratch->length;
@@ -110,7 +110,7 @@ static CheckTier1ScheduleResult check_tier1_schedule_code(Arena* scratch, const 
                     .count = end - start,
                 };
                 Tier1ScheduleStats stats = { 0 };
-                const bool scheduled = input.count >= 2 && tier1_schedule_block(input, graph, order, BUSTER_TIER1_SCHEDULE_MAX_RECORDS, vector, &stats) == TIER1_SCHEDULE_OK;
+                const bool scheduled = input.count >= 2 && tier1_schedule_block(input, graph, order, BUSTER_TIER1_SCHEDULE_MAX_RECORDS, &stats) == TIER1_SCHEDULE_OK;
                 result.blocks += scheduled;
                 if (scheduled && verify)
                 {

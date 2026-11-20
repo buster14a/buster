@@ -83,7 +83,7 @@ struct CheckInputFpPragma
     bool valid;
 };
 
-static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, bool* quiet);
+static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, uint32_t id, bool* quiet);
 
 static uint8_t check_input_fp_environment(CheckFpState state)
 {
@@ -336,6 +336,12 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                         .error = directive && end == source + 5 && placement && !complex && !contract && on && !precise ? CHECK_FP_ERROR_FENV_PRECISE : 0,
                         .valid = accepted,
                     };
+                    if (!recognized)
+                    {
+                        // clang's -Wunknown-pragmas (ext_on_off_switch_syntax, #1970): its command line's policy here.
+                        CheckInputFpPragma* record = input->fp_pragmas + input->fp_pragma_count - 1;
+                        record->warning_severity = check_input_fp_warning_policy(reader->pp, source + 2, CHECK_WARNING_ID_UNKNOWN_PRAGMA, &record->warning_quiet);
+                    }
                     handled[pragma] = accepted ? 2 : 3;
                 }
                 else
@@ -422,7 +428,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                         if (empty)
                         {
                             CheckInputFpPragma* record = input->fp_pragmas + input->fp_pragma_count - 1;
-                            record->warning_severity = check_input_fp_warning_policy(reader->pp, source + 2, &record->warning_quiet);
+                            record->warning_severity = check_input_fp_warning_policy(reader->pp, source + 2, CHECK_WARNING_ID_IGNORED_PRAGMA, &record->warning_quiet);
                         }
                         handled[pragma] = accepted ? 2 : 3;
                     }

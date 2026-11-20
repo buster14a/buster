@@ -599,11 +599,10 @@ struct CheckTier1Inline
     uint32_t* sites;
     // Per body (#2541 step 2), whether the unit stage holds its code back for the last pass (check_tier1_inline_stage), and
     // whether the last pass let it go on (check_program_emit_last); whether the run holds any back (`holding`, which the
-    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm). And the scalar twins' choice.
+    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm).
     uint8_t* held;
     uint8_t* released;
     bool holding;
-    bool scalar;
     // Whether the run writes -g's source rows: summaries then carry their source identities, which their expansions
     // keep as instances (IrDebugInline, #2541 step 3).
     bool sources;
@@ -1034,6 +1033,10 @@ static void check_tier1_lane_release(CheckTier1Lane* lane);
 static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, bool scalar, Arena* arena,
                                      CheckTier1Inline* table);
 static void check_tier1_inline_release(CheckTier1Inline* table);
+// Defined in c_check_tier1_inline.c (#2541 step 2): one body's entries that take a candidate's address, marked in `addressed`
+// (test-tier0-inline checks it against its definition).
+static void check_tier1_inline_addressed_entries(const uint8_t* kinds, const uint64_t* values, uint32_t count, const uint32_t* candidates, uint32_t symbol_count, uint32_t body_count,
+                                                 uint8_t* addressed);
 // Gives `table` a new generation, which no lane's cache is valid for: its bodies are lowered again.
 static void check_tier1_inline_renew(CheckTier1Inline* table);
 // Defined in c_check_tier1_inline.c (#2541 step 2): the candidates the emission gives no code, once every body's is made.
@@ -1384,7 +1387,7 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
             .error = TIER0_OK,
         };
         UnwindFunction proven;
-        const UnwindError analyzed = scalar ? unwind_tier0_scalar(&records, offsets, (uint32_t)length, &proven) : unwind_tier0(&records, offsets, (uint32_t)length, &proven);
+        const UnwindError analyzed = unwind_tier0(&records, offsets, (uint32_t)length, &proven);
         const EmittedSame same = analyzed != UNWIND_OK ? EMITTED_SAME : emitted_unwind_same(&proven, frame, scratch);
         status = same == EMITTED_SAME ? status : same == EMITTED_SAME_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
         *reason = same == EMITTED_SAME ? 0 : same == EMITTED_SAME_MEMORY ? "no room to compare a function's unwind table with Tier 0's analyzer's" : mismatch;
@@ -1757,13 +1760,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     {
         // The branch columns alone, which sizing reads and writes by: the code generators' records are valid by
         // construction, which x86_validate checks above only with `verify` (#532).
-        const BranchSizingCheck shape = run->scalar ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
-                                                      branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+        const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
         check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
-        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
-                               run->scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
-                                             x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
         check_clock_lap(run->stage_clock, CHECK_STAGE_ENCODE);
         valid = length >= 0;
         if (valid && run->sources)
@@ -3452,13 +3452,13 @@ static UnwindError check_asm_unit_frame(uint32_t saved, uint32_t frame, uint32_t
     uint32_t sizes_count = 0;
     for (uint32_t r = 0; valid && r < prologue_count; r += 1)
     {
-        const int64_t encoded = x86_encode_scalar(prologue + r, 1, bytes, sizeof(bytes), 0, 0);
+        const int64_t encoded = x86_validate(prologue + r, 1) == 1 ? x86_encode(prologue + r, 1, bytes, sizeof(bytes), 0, 0) : -1;
         valid = encoded > 0;
         sizes[sizes_count++] = encoded > 0 ? (uint32_t)encoded : 0;
     }
     for (uint32_t r = 0; valid && r < epilogue_length; r += 1)
     {
-        const int64_t encoded = x86_encode_scalar(epilogue + r, 1, bytes, sizeof(bytes), 0, 0);
+        const int64_t encoded = x86_validate(epilogue + r, 1) == 1 ? x86_encode(epilogue + r, 1, bytes, sizeof(bytes), 0, 0) : -1;
         valid = encoded > 0;
         sizes[sizes_count++] = encoded > 0 ? (uint32_t)encoded : 0;
     }
@@ -5506,12 +5506,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             if (encodes)
             {
-                const BranchSizingCheck shape = BUSTER_SCALAR_PATH(scalar) ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
-                                                         branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+                const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
                 const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
-                const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
-                                       BUSTER_SCALAR_PATH(scalar) ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
-                                                x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+                const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
                 encodes = length >= 0;
                 if (encodes && unwind)
                 {

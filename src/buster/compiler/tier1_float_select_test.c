@@ -10,12 +10,13 @@
 //   infinities, a subnormal and the largest finite value among them.
 // - The plans of a comparison by each predicate whose select reads it directly, through its I1 copy right after it
 //   (if-conversion's truth simplification's), through a copy past another node, or through one or two of C's truth
-//   values' links, by both paths, must fold exactly the shapes the grammar takes: every one of an ordered predicate but
+//   values' links must fold exactly the shapes the grammar takes: every one of an ordered predicate but
 //   the distant copy, and == and != directly and through their copy.
 // - tier1_select_recurrent (#2922) finds a select's values' recurrence through an operation, directly, through a phi of
 //   phis and where the walk reaches the phi through phis alone first, up to its bound of rows and not past it; and none
 //   through phis and copies alone (a running choice), nor where only the select's result or its condition reaches the
 //   phi.
+
 
 // Whether a floating select's `condition` holds for `left` and `right`, the operands' bits at `width` bytes (a float's in
 // the low half), by C's own comparisons of their values.
@@ -221,7 +222,7 @@ static void tier1_select_test_float_select_plan(Tier1SelectTest* test, uint32_t 
     IrFunction function;
     const bool created = ir_create(input, &sizes, &function) == IR_OK;
     tier1_select_test_expect(test, created, "create a floating select's fixture");
-    Tier1SelectPlan plans[2];
+    Tier1SelectPlan plans[1];
     uint32_t root = BUSTER_IR_NONE;
     uint32_t chain_end = 0;
     if (created)
@@ -268,7 +269,7 @@ static void tier1_select_test_float_select_plan(Tier1SelectTest* test, uint32_t 
         function.instruction_count = next;
         function.block_offsets[1] = next;
     }
-    if (created && tier1_select_test_walk_plans(test, &function, 0, root, output, scratch, plans, "a floating select's fixture selects") == 2)
+    if (created && tier1_select_test_walk_plans(test, &function, 0, output, scratch, plans, "a floating select's fixture selects") == 1)
     {
         const bool equality = predicate == IR_EQ || predicate == IR_NE;
         const bool fused = shape != 2 && (!equality || shape <= 1);

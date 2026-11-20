@@ -15,7 +15,6 @@
         "CMAKE_DEFAULT_BUILD_TYPE": "Develop",
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "BUSTER_HOST_RUNTIME": "",
         "BUSTER_DEBUG_INFO": "1",
         "BUSTER_LINKER": "auto",
         "BUSTER_BUILD_DEFINES": "",
@@ -36,15 +35,6 @@
       "binaryDir": "${sourceDir}/build/cmake/native",
       "cacheVariables": {
         "BUSTER_HOST_ARCH": "native"
-      }
-    },
-    {
-      "name": "x86-64",
-      "displayName": "The baseline x86-64 ISA, scalar host paths",
-      "inherits": "base",
-      "binaryDir": "${sourceDir}/build/cmake/x86-64",
-      "cacheVariables": {
-        "BUSTER_HOST_ARCH": "x86-64"
       }
     },
     {
@@ -71,21 +61,6 @@
     {
       "name": "develop",
       "configurePreset": "native",
-      "configuration": "Develop"
-    },
-    {
-      "name": "x86-64-debug",
-      "configurePreset": "x86-64",
-      "configuration": "Debug"
-    },
-    {
-      "name": "x86-64-release",
-      "configurePreset": "x86-64",
-      "configuration": "Release"
-    },
-    {
-      "name": "x86-64-develop",
-      "configurePreset": "x86-64",
       "configuration": "Develop"
     },
     {
@@ -141,24 +116,6 @@
       "name": "develop",
       "inherits": "test-base",
       "configurePreset": "native",
-      "configuration": "Develop"
-    },
-    {
-      "name": "x86-64-debug",
-      "inherits": "test-base",
-      "configurePreset": "x86-64",
-      "configuration": "Debug"
-    },
-    {
-      "name": "x86-64-release",
-      "inherits": "test-base",
-      "configurePreset": "x86-64",
-      "configuration": "Release"
-    },
-    {
-      "name": "x86-64-develop",
-      "inherits": "test-base",
-      "configurePreset": "x86-64",
       "configuration": "Develop"
     },
     {

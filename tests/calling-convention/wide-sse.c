@@ -8,7 +8,9 @@
 // next power of two: 24 to 39 bytes in a ymm register, 40 to 63 in a zmm one, the bytes past those doubles lost. A
 // variadic call's named one, and one LLVM has no vector register left for, goes on the stack as that vector, in a slot of
 // its register's width; byval copies (no vector register left in clang's count, va_arg's overflow area) keep every byte.
-// Past the target's width the records are MEMORY. Only the bytes each convention defines are checked.
+// Past the target's width the records are MEMORY. Only the bytes each convention defines are checked. A record that ends
+// where readable memory does, before a PROT_NONE page, is returned from its address and passed from it (#2798): a load
+// of its payload that reads past the record faults.
 
 typedef float Vector __attribute__((vector_size(16)));
 #define BUSTER_WIDE_SSE_UNION(name, count, ...) \
@@ -93,6 +95,12 @@ int atomic20(_Atomic double a, _Atomic double b, _Atomic double c, _Atomic doubl
 int atomic31(_Atomic double a, _Atomic double b, _Atomic double c, _Atomic double d, _Atomic double e, _Atomic double f, _Atomic double g, _Atomic double h,
              Wide31 value, long i, long j, long k, long l, long m, long n, long tail);
 int overflow(int tag, ...);
+Wide24 peek24(const Wide24* value);
+Wide31 peek31(const Wide31* value);
+Wide40 peek40(const Wide40* value);
+Wide48 peek48(const Wide48* value);
+Wide56 peek56(const Wide56* value);
+Wide63 peek63(const Wide63* value);
 
 #if BUSTER_WIDE_SSE_CALLEE
 Wide24 round24(Wide24 value)
@@ -237,7 +245,64 @@ int overflow(int tag, ...)
     return check(a.bytes, sizeof(a), 24) + check(b.bytes, sizeof(b), 31) + check(c.bytes, sizeof(c), 48) + check(d.bytes, sizeof(d), 63) + (tag != 2) +
            (integers != 15) + (doubles != 36) + (tail != 2049) + (next != 99.5);
 }
+
+// Each result loaded from the record's address, which may end where readable memory does.
+Wide24 peek24(const Wide24* value)
+{
+    return *value;
+}
+
+Wide31 peek31(const Wide31* value)
+{
+    return *value;
+}
+
+Wide40 peek40(const Wide40* value)
+{
+    return *value;
+}
+
+Wide48 peek48(const Wide48* value)
+{
+    return *value;
+}
+
+Wide56 peek56(const Wide56* value)
+{
+    return *value;
+}
+
+Wide63 peek63(const Wide63* value)
+{
+    return *value;
+}
 #else
+// Linux x86-64's mmap and mprotect, declared here: the fixture includes no header.
+void* mmap(void* address, unsigned long length, int protection, int flags, int descriptor, long offset);
+int mprotect(void* address, unsigned long length, int protection);
+
+// The first byte of a PROT_NONE page after a readable one, or 0.
+static unsigned char* guard_edge(void)
+{
+    const unsigned long page = 4096;
+    unsigned char* pages = mmap(0, 2 * page, 1 | 2, 0x02 | 0x20, -1, 0);
+    const int usable = pages != (unsigned char*)-1 && mprotect(pages + page, page, 0) == 0;
+    return usable ? pages + page : 0;
+}
+
+// A record that ends at `edge`, where readable memory does: the callee's result loaded from its address, then the record
+// passed by value from it, each load of its payload inside it or a fault.
+#define BUSTER_WIDE_SSE_EDGE(type, peek, round, seed)                                                  \
+    do                                                                                                 \
+    {                                                                                                  \
+        type* at = (type*)(edge - sizeof(type));                                                       \
+        fill((unsigned char*)at, sizeof(type), seed);                                                  \
+        type peeked = peek(at);                                                                        \
+        failures += check((unsigned char*)&peeked, BUSTER_WIDE_SSE_PASSED(sizeof(peeked)), seed);      \
+        type passed = round(*at);                                                                      \
+        failures += check((unsigned char*)&passed, BUSTER_WIDE_SSE_PASSED(sizeof(passed)), seed);      \
+    } while (0)
+
 #define BUSTER_WIDE_SSE_ROUND(type, function, seed)                                                     \
     do                                                                                                  \
     {                                                                                                   \
@@ -286,6 +351,17 @@ int main(void)
     failures += atomic20(1, 2, 3, 4, 5, 6, 7, 8, s20, 1, 2, 3, 4, 5, 6, 8193);
     failures += atomic31(1, 2, 3, 4, 5, 6, 7, 8, w31, 1, 2, 3, 4, 5, 6, 16385);
     failures += overflow(2, 1L, 2L, 3L, 4L, 5L, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, w24, w31, w48, w63, 2049L, 99.5);
+    unsigned char* edge = guard_edge();
+    failures += edge == 0;
+    if (edge != 0)
+    {
+        BUSTER_WIDE_SSE_EDGE(Wide24, peek24, round24, 124);
+        BUSTER_WIDE_SSE_EDGE(Wide31, peek31, round31, 131);
+        BUSTER_WIDE_SSE_EDGE(Wide40, peek40, round40, 140);
+        BUSTER_WIDE_SSE_EDGE(Wide48, peek48, round48, 148);
+        BUSTER_WIDE_SSE_EDGE(Wide56, peek56, round56, 156);
+        BUSTER_WIDE_SSE_EDGE(Wide63, peek63, round63, 163);
+    }
     return failures != 0;
 }
 #endif

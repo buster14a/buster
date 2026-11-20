@@ -3,7 +3,7 @@
 //
 // The direct path's executables: a link (link.c) laid out, patched and written as an executable, in one call that every
 // lane of a group makes (docs/object-writer-and-linker.md, "The direct path (no -c)", "Layout", "Patching and writing",
-// "The first executables", "The dynamic PIE", "The static executable with libc" and "The static PIE"). It writes four
+// "The first executables", "The dynamic PIE", "The static executable with libc" and "The static PIE"). It writes six
 // kinds:
 //   - a static executable at a fixed address, without libc, crt objects or dynamic sections (step 4 of the plan): the
 //     program's _start makes its system calls;
@@ -35,9 +35,11 @@
 //     the startup has relocated it;
 //   - a shared library (step 6), with preemptible exports, initial-exec TLS slots, a distinct two-word TLSGD GOT
 //     pair per referenced symbol and one TLSLD module pair. The loader fills DTPMOD64 module IDs and, for preemptible
-//     TLSGD targets, DTPOFF64 offsets; a local TLSGD offset and a TLSLD access's DTPOFF32 are module-relative.
+//     TLSGD targets, DTPOFF64 offsets; a local TLSGD offset and a TLSLD access's DTPOFF32 are module-relative;
+//   - a position-dependent dynamic executable (-no-pie, #1503: ExecutableDynamic.position_dependent): a dynamic PIE's
+//     dynamic metadata in an ET_EXEC at BUSTER_EXECUTABLE_BASE, whose own symbols' addresses need no relocation.
 // The linker defines __init_array_start, __init_array_end, __fini_array_start, __fini_array_end and
-// _GLOBAL_OFFSET_TABLE_ for all five, and _DYNAMIC for the dynamic images.
+// _GLOBAL_OFFSET_TABLE_ for all six, and _DYNAMIC for the dynamic images.
 //
 // The image, at BUSTER_EXECUTABLE_BASE (or a PIE's at 0, which the loader places), is lld's: four PT_LOAD segments in
 // lld's order, each from the next page at its file offset's place in a page. File offsets equal virtual offsets from
@@ -567,6 +569,15 @@ struct ExecutableDynamic
     // soname for DT_SONAME (empty for none).
     bool shared;
     String8 soname;
+    // Whether the output is a position-dependent dynamic executable (-no-pie, #1503): an ET_EXEC at
+    // BUSTER_EXECUTABLE_BASE, which the loader maps where it was linked, so that the image's own addresses are the
+    // link's. It has a dynamic PIE's interpreter, libraries, dynamic symbols, stubs, GOT and TLS relaxation, and no
+    // RELATIVE relocation, RELR or DF_1_PIE; the fields a PIE refuses because the loader moves them (an ABS32 or a
+    // text ABS64 to the image, a PC32 to address 0 or to an absolute symbol) hold their values, and a field the loader
+    // doesn't relocate takes a weak reference to nothing at address 0, as GNU ld and lld resolve it; its calls reach
+    // address 0 too when a PC32, PC64, ABS32 or ABS32S takes it (executable_check_direct), as GNU ld's do. Not with
+    // `shared` or the static runtime.
+    bool position_dependent;
     // Optional runtime search path. A non-null pointer requests a tag even for an empty path; bytes are borrowed.
     String8 runpath;
     bool old_dtags;

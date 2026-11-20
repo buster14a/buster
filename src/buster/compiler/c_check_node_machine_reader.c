@@ -78,20 +78,32 @@ struct NodeMachineReader
 // has run on each of a chunk's roots, the kernel on the chunk's windows, checked against T's records and timed.
 struct NodeFactsReader;
 static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader, NodeMachine* machine, NodeFrontTypes* types);
+// What the reference's C did with the expression at hand, for C on the window (BUSTER_NODE_READER_WINDOW_CONTEXTS):
+// whether it ran (0: it didn't; 1: it took the expression; 2: it refused it for a template), its ticks, and the
+// root's target.
+static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target, bool sense);
+static void node_facts_reader_rows(struct NodeFactsReader* state, uint64_t ticks);
 static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
                                          uint32_t operand, bool taken);
 static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front);
+// The unit's tests' state given to the kernel's, which then runs the tests on each chunk's window too
+// (BUSTER_NODE_READER_WINDOW_TESTS).
+static void node_facts_reader_tests(struct NodeFactsReader* state, struct NodeCensusReader* tests);
 
 // The census's tests at reader time (c_check_node_census.c, which follows this file in the unit): their state for the
 // unit `reader` reads, whose machine there is `machine`, with columns for `node_capacity` nodes and the unit's policy
 // kept in `types`; the reader's warning events since the last chunk taken in; and the tests of the
 // machine's current expression, which T has just taken, whose root is node `root`, made by the front's root of operator
 // `op` at token `token`, an initialization's of the object declared at `declaration` (BUSTER_CHECK_NONE otherwise) with
-// type `declared`: their bits, and into `kind` the root's kind.
+// type `declared`: their bits, and into `kind` the root's kind. They are the census's code's on T's records; or, where
+// `given` is what the tests' loop on the window made of the expression (node_tests_window_chunk), the machine's own
+// form's from that.
 struct NodeCensusReader;
 static struct NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader, const NodeMachine* machine, NodeFrontTypes* types, uint32_t node_capacity);
 static void node_census_reader_chunk(struct NodeCensusReader* tests, const CheckInputReader* reader);
-static uint64_t node_census_reader_expression(struct NodeCensusReader* tests, uint32_t root, CheckOp op, uint32_t token, uint32_t declaration, TypeId declared, uint8_t* kind);
+struct NodeTestsLoop;
+static uint64_t node_census_reader_expression(struct NodeCensusReader* tests, uint32_t root, CheckOp op, uint32_t token, uint32_t declaration, TypeId declared, uint8_t* kind,
+                                              const struct NodeTestsLoop* given);
 typedef struct NodeMachineReader NodeMachineReader;
 _Static_assert(NODE_MACHINE_REFUSALS <= 16 && NODE_MACHINE_REFUSALS <= BUSTER_NODE_FRONT_TYPED_REFUSAL + 1, "a refusal is NodeFrontTypes.refusals' low four bits");
 
@@ -347,7 +359,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     room = room && (!sweeps || (sweep_refusals != NULL && targets != NULL && root_objects != NULL && tape_firsts != NULL && tape_counts != NULL && side_digests != NULL &&
                                 tape_kinds != NULL && tape_classes != NULL && tape_values != NULL));
     // The census's tests' results by root node.
-    const uint8_t options = reader->pp->options.node_reader;
+    const uint16_t options = reader->pp->options.node_reader;
     const bool tested = (options & BUSTER_NODE_READER_TESTS) != 0;
     uint64_t* tests = tested ? arena_push_array(reader->arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
     uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
@@ -403,6 +415,10 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         {
             // It reads the lean front's records. Without room for its windows it doesn't run, and the shadow reports that.
             typer->facts = node_facts_reader_begin(reader, &typer->machine, types);
+            if (typer->facts != NULL && typer->tests != NULL && (options & BUSTER_NODE_READER_WINDOW_TESTS) != 0)
+            {
+                node_facts_reader_tests(typer->facts, typer->tests);
+            }
         }
         types->setup_ticks = __rdtsc() - start;
         shadow->types = room ? types : NULL;
@@ -538,6 +554,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     // take: the two steps in the order the unit's options give.
                     uint64_t verdict = 0;
                     NodeMachineRefusal swept = NODE_MACHINE_TAKEN;
+                    if (typer->facts != NULL)
+                    {
+                        node_facts_reader_contexts(typer->facts, BUSTER_NODE_CONTEXTS_RAN_NONE, 0, 0, false);
+                    }
                     for (uint32_t step = 0; step < 2; step += 1)
                     {
                     if ((step == 0) != last && tested && refusal == NODE_MACHINE_TAKEN && (!last || swept == NODE_MACHINE_TAKEN || pass != 0))
@@ -547,7 +567,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         const uint32_t declaration = initialization && token < reader->parser->tokens.count ? reader->initializer_declarations[token] : BUSTER_CHECK_NONE;
                         const TypeId declared = declaration < reader->output->token_count ? reader->declared_types[declaration] : 0;
                         uint8_t kind = 0;
-                        verdict = node_census_reader_expression(typer->tests, root, (CheckOp)front->ops[record], token, declaration, declared, &kind);
+                        verdict = node_census_reader_expression(typer->tests, root, (CheckOp)front->ops[record], token, declaration, declared, &kind, NULL);
                         if (pass != 0)
                         {
                             types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_TESTED;
@@ -570,8 +590,21 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         TypeId target = 0;
                         uint32_t object = 0;
                         const uint8_t context = node_machine_reader_root(typer, front, reader, record, &target, &object);
+                        const uint64_t contexts_start = __rdtsc();
                         swept = node_machine_contexts(machine, context, target, object);
+                        if (pass != 0 && typer->facts != NULL)
+                        {
+                            // The reference of C on the window: this run's answers, which the kernel's hook below keeps.
+                            const uint8_t ran = swept == NODE_MACHINE_TAKEN ? BUSTER_NODE_CONTEXTS_RAN_TAKEN : BUSTER_NODE_CONTEXTS_RAN_REFUSED;
+                            node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target, (context & BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE) != 0);
+                        }
+                        const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
+                        if (pass != 0 && typer->facts != NULL)
+                        {
+                            // The reference of X's rows on the window: this run's ticks; its tape is kept below.
+                            node_facts_reader_rows(typer->facts, __rdtsc() - expand_start);
+                        }
                         if (pass != 0)
                         {
                             const bool taken = swept == NODE_MACHINE_TAKEN;

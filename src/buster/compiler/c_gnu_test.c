@@ -408,7 +408,6 @@ static void gnu_test_candidates(GnuTest* test)
                     expected |= 1ull << (first + 1);
                 }
                 gnu_test_expect(test, gnu_syntax_candidates(guard.data, count) == expected, "masked vector candidate positions");
-                gnu_test_expect(test, gnu_syntax_candidates_scalar(guard.data, count) == expected, "scalar candidate positions");
                 static const uint32_t widths[] = { 1, 3, 16, 31, 64 };
                 for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(widths); w += 1)
                 {
@@ -469,58 +468,55 @@ static void gnu_test_guarded(GnuTest* test, const Parser* parser, const GnuSynta
             .attribute_capacity = expected->attribute_count,
             .asm_label_capacity = expected->asm_label_count,
         };
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        GnuSyntaxStatus status = gnu_syntax_collect(&tokens, &tree, &output, false);
+        gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_equal(&output, expected), "guarded columns and exact output capacities");
+        for (uint32_t column = 0; column < 3; column += 1)
         {
-            GnuSyntaxStatus status = gnu_syntax_collect(&tokens, &tree, &output, scalar != 0, false);
-            gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_equal(&output, expected), "guarded columns and exact output capacities");
-            for (uint32_t column = 0; column < 3; column += 1)
+            GnuSyntax short_output = output;
+            uint32_t* capacity = column == 0 ? &short_output.group_capacity : column == 1 ? &short_output.attribute_capacity : &short_output.asm_label_capacity;
+            if (*capacity != 0)
             {
-                GnuSyntax short_output = output;
-                uint32_t* capacity = column == 0 ? &short_output.group_capacity : column == 1 ? &short_output.attribute_capacity : &short_output.asm_label_capacity;
-                if (*capacity != 0)
-                {
-                    *capacity -= 1;
-                    status = gnu_syntax_collect(&tokens, &tree, &short_output, scalar != 0, false);
-                    gnu_test_expect(test, status == GNU_SYNTAX_CAPACITY && gnu_test_zero(&short_output), "short output capacity leaves no valid rows");
-                }
+                *capacity -= 1;
+                status = gnu_syntax_collect(&tokens, &tree, &short_output, false);
+                gnu_test_expect(test, status == GNU_SYNTAX_CAPACITY && gnu_test_zero(&short_output), "short output capacity leaves no valid rows");
             }
-            GnuSyntax measured = { .group_capacity = UINT32_MAX, .attribute_capacity = UINT32_MAX, .asm_label_capacity = UINT32_MAX };
-            status = gnu_syntax_collect(&tokens, &tree, &measured, scalar != 0, true);
-            gnu_test_expect(test, status == GNU_SYNTAX_OK && measured.group_count == expected->group_count && measured.attribute_count == expected->attribute_count &&
-                            measured.asm_label_count == expected->asm_label_count, "measurement ignores output arrays and capacities");
-            GnuSyntax absent = { .group_capacity = 1 };
-            status = gnu_syntax_collect(&tokens, &tree, &absent, scalar != 0, false);
-            gnu_test_expect(test, status == GNU_SYNTAX_CAPACITY && gnu_test_zero(&absent), "missing output array rejected");
-            if (expected->group_count != 0)
-            {
-                const uint32_t open = expected->groups[0].keyword + 1;
-                const uint32_t saved = tree.parents[open];
-                tree.parents[open] = count;
-                status = gnu_syntax_collect(&tokens, &tree, &output, scalar != 0, false);
-                gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&output), "out-of-bounds group closer rejected");
-                tree.parents[open] = saved;
-            }
-            if (expected->attribute_count != 0)
-            {
-                const uint32_t name = expected->attributes[0].name;
-                const uint32_t saved = tokens.names[name];
-                tokens.names[name] = 0;
-                status = gnu_syntax_collect(&tokens, &tree, &output, scalar != 0, false);
-                gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&output), "missing attribute name rejected");
-                tokens.names[name] = saved;
-            }
-            if (expected->asm_label_count != 0)
-            {
-                const uint32_t string = expected->asm_labels[0].string_begin;
-                const uint8_t saved = tokens.kinds[string];
-                tokens.kinds[string] = PARSE_KIND_NUMBER;
-                status = gnu_syntax_collect(&tokens, &tree, &output, scalar != 0, false);
-                gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&output), "non-string asm label rejected");
-                tokens.kinds[string] = saved;
-            }
-            status = gnu_syntax_collect(&tokens, &tree, &output, scalar != 0, false);
-            gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_equal(&output, expected), "collection recovers after failed calls");
         }
+        GnuSyntax measured = { .group_capacity = UINT32_MAX, .attribute_capacity = UINT32_MAX, .asm_label_capacity = UINT32_MAX };
+        status = gnu_syntax_collect(&tokens, &tree, &measured, true);
+        gnu_test_expect(test, status == GNU_SYNTAX_OK && measured.group_count == expected->group_count && measured.attribute_count == expected->attribute_count &&
+                        measured.asm_label_count == expected->asm_label_count, "measurement ignores output arrays and capacities");
+        GnuSyntax absent = { .group_capacity = 1 };
+        status = gnu_syntax_collect(&tokens, &tree, &absent, false);
+        gnu_test_expect(test, status == GNU_SYNTAX_CAPACITY && gnu_test_zero(&absent), "missing output array rejected");
+        if (expected->group_count != 0)
+        {
+            const uint32_t open = expected->groups[0].keyword + 1;
+            const uint32_t saved = tree.parents[open];
+            tree.parents[open] = count;
+            status = gnu_syntax_collect(&tokens, &tree, &output, false);
+            gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&output), "out-of-bounds group closer rejected");
+            tree.parents[open] = saved;
+        }
+        if (expected->attribute_count != 0)
+        {
+            const uint32_t name = expected->attributes[0].name;
+            const uint32_t saved = tokens.names[name];
+            tokens.names[name] = 0;
+            status = gnu_syntax_collect(&tokens, &tree, &output, false);
+            gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&output), "missing attribute name rejected");
+            tokens.names[name] = saved;
+        }
+        if (expected->asm_label_count != 0)
+        {
+            const uint32_t string = expected->asm_labels[0].string_begin;
+            const uint8_t saved = tokens.kinds[string];
+            tokens.kinds[string] = PARSE_KIND_NUMBER;
+            status = gnu_syntax_collect(&tokens, &tree, &output, false);
+            gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&output), "non-string asm label rejected");
+            tokens.kinds[string] = saved;
+        }
+        status = gnu_syntax_collect(&tokens, &tree, &output, false);
+        gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_equal(&output, expected), "collection recovers after failed calls");
     }
     for (uint32_t g = 0; g < BUSTER_ARRAY_LENGTH(guards); g += 1)
     {
@@ -535,32 +531,29 @@ static void gnu_test_build_limits(GnuTest* test, const Parser* parser, const Gnu
     const uint64_t mark = 13;
     Arena full = { .base = storage, .length = mark, .capacity = sizeof(storage) };
     GnuSyntax built;
-    GnuSyntaxStatus status = gnu_syntax_build(&parser->tokens, &parser->tree, &full, &built, false);
+    GnuSyntaxStatus status = gnu_syntax_build(&parser->tokens, &parser->tree, &full, &built);
     gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_equal(&built, expected), "arena build in existing caller allocation");
     const uint64_t required = full.length;
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    for (uint64_t capacity = mark; capacity < required; capacity += 1)
     {
-        for (uint64_t capacity = mark; capacity < required; capacity += 1)
+        Arena limited = { .base = storage, .length = mark, .capacity = capacity };
+        status = gnu_syntax_build(&parser->tokens, &parser->tree, &limited, &built);
+        gnu_test_expect(test, status == GNU_SYNTAX_MEMORY && limited.length == mark && gnu_test_empty(&built), "every insufficient arena capacity rolls back");
+        bool preserved = true;
+        for (uint32_t i = 0; i < mark; i += 1)
         {
-            Arena limited = { .base = storage, .length = mark, .capacity = capacity };
-            status = gnu_syntax_build(&parser->tokens, &parser->tree, &limited, &built, scalar != 0);
-            gnu_test_expect(test, status == GNU_SYNTAX_MEMORY && limited.length == mark && gnu_test_empty(&built), "every insufficient arena capacity rolls back");
-            bool preserved = true;
-            for (uint32_t i = 0; i < mark; i += 1)
-            {
-                preserved &= storage[i] == 0x5a;
-            }
-            gnu_test_expect(test, preserved, "caller bytes before arena checkpoint preserved");
+            preserved &= storage[i] == 0x5a;
         }
-        Arena exact = { .base = storage, .length = mark, .capacity = required };
-        status = gnu_syntax_build(&parser->tokens, &parser->tree, &exact, &built, scalar != 0);
-        gnu_test_expect(test, status == GNU_SYNTAX_OK && exact.length == required && gnu_test_equal(&built, expected), "exact arena capacity succeeds");
-        ParseTokens invalid = parser->tokens;
-        invalid.kinds = 0;
-        Arena unchanged = { .base = storage, .length = mark, .capacity = sizeof(storage) };
-        status = gnu_syntax_build(&invalid, &parser->tree, &unchanged, &built, scalar != 0);
-        gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && unchanged.length == mark && gnu_test_empty(&built), "invalid input rolls back build and result");
+        gnu_test_expect(test, preserved, "caller bytes before arena checkpoint preserved");
     }
+    Arena exact = { .base = storage, .length = mark, .capacity = required };
+    status = gnu_syntax_build(&parser->tokens, &parser->tree, &exact, &built);
+    gnu_test_expect(test, status == GNU_SYNTAX_OK && exact.length == required && gnu_test_equal(&built, expected), "exact arena capacity succeeds");
+    ParseTokens invalid = parser->tokens;
+    invalid.kinds = 0;
+    Arena unchanged = { .base = storage, .length = mark, .capacity = sizeof(storage) };
+    status = gnu_syntax_build(&invalid, &parser->tree, &unchanged, &built);
+    gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && unchanged.length == mark && gnu_test_empty(&built), "invalid input rolls back build and result");
 }
 
 static void gnu_test_fixture(GnuTest* test, const GnuTestFixture* fixture, const char* path, const char* clang)
@@ -570,36 +563,32 @@ static void gnu_test_fixture(GnuTest* test, const GnuTestFixture* fixture, const
     const PPOptions options = parse_test_snippet_options(&snippet);
     static InternTable table;
     static Preprocessor pp;
-    static Parser parsers[2];
-    Arena arenas[2] = { arena_reserve(1ull << 20), arena_reserve(1ull << 20) };
-    GnuSyntax syntax[2] = { 0 };
+    static Parser parser_storage;
+    Parser* parser = &parser_storage;
+    Arena arena = arena_reserve(1ull << 20);
+    GnuSyntax syntax = { 0 };
     const bool prepared = parse_test_write(path, fixture->source, strlen(fixture->source)) && intern_initialize(&table) && pp_initialize(&pp, &options, &table) && pp_run(&pp, path);
     gnu_test_expect(test, prepared, "fixture preprocessing");
-    for (uint32_t scalar = 0; prepared && scalar < 2; scalar += 1)
+    if (prepared)
     {
-        Parser* parser = &parsers[scalar];
-        const ParseOptions parse_options = { .scalar = scalar != 0, .extension_metadata = true };
+        const ParseOptions parse_options = { .extension_metadata = true };
         const bool parsed = parse_initialize(parser, &parse_options, options.language) && parse_translation_unit(parser, &pp) && parser->errors == 0;
         gnu_test_expect(test, parsed, "fixture parsing");
         if (parsed)
         {
-            GnuSyntaxStatus status = gnu_syntax_build(&parser->tokens, &parser->tree, &arenas[scalar], &syntax[scalar], scalar != 0);
+            GnuSyntaxStatus status = gnu_syntax_build(&parser->tokens, &parser->tree, &arena, &syntax);
             gnu_test_expect(test, status == GNU_SYNTAX_OK, "metadata build succeeds");
             if (status == GNU_SYNTAX_OK)
             {
-                gnu_test_expected(test, fixture, &pp, parser, &syntax[scalar]);
-                gnu_test_expect(test, gnu_test_equal(&parser->gnu, &syntax[scalar]), "parser opt-in matches explicit metadata build");
-                gnu_test_guarded(test, parser, &syntax[scalar]);
+                gnu_test_expected(test, fixture, &pp, parser, &syntax);
+                gnu_test_expect(test, gnu_test_equal(&parser->gnu, &syntax), "parser opt-in matches explicit metadata build");
+                gnu_test_guarded(test, parser, &syntax);
                 if (fixture->arena_limits)
                 {
-                    gnu_test_build_limits(test, parser, &syntax[scalar]);
+                    gnu_test_build_limits(test, parser, &syntax);
                 }
             }
         }
-    }
-    if (prepared)
-    {
-        gnu_test_expect(test, gnu_test_equal(&syntax[0], &syntax[1]), "scalar and vector parser metadata agree");
     }
     if (prepared && clang != 0)
     {
@@ -611,12 +600,9 @@ static void gnu_test_fixture(GnuTest* test, const GnuTestFixture* fixture, const
         const bool accepted = parse_test_clang(clang, arguments, 1, paths, 1, &theirs) && !theirs.rejected;
         gnu_test_expect(test, accepted, "original fixture accepted by Clang");
     }
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-    {
-        parse_release(&parsers[scalar]);
-        gnu_test_expect(test, gnu_test_empty(&parsers[scalar].gnu), "parser release clears retained metadata");
-        arena_release(&arenas[scalar]);
-    }
+    parse_release(parser);
+    gnu_test_expect(test, gnu_test_empty(&parser->gnu), "parser release clears retained metadata");
+    arena_release(&arena);
     pp_release(&pp);
     intern_release(&table);
     remove(path);
@@ -659,22 +645,19 @@ static void gnu_test_invalid_inputs(GnuTest* test)
 {
     test->fixture = "empty and invalid inputs";
     const ParseTree tree = { 0 };
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-    {
-        ParseTokens tokens = { 0 };
-        GnuSyntax syntax = { .group_count = 17, .attribute_count = 19, .asm_label_count = 23 };
-        GnuSyntaxStatus status = gnu_syntax_collect(&tokens, &tree, &syntax, scalar != 0, false);
-        gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_empty(&syntax), "empty input needs no arrays");
-        Arena arena = { 0 };
-        status = gnu_syntax_build(&tokens, &tree, &arena, &syntax, scalar != 0);
-        gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_empty(&syntax) && arena.length == 0, "empty build needs no arena allocation");
-        tokens.count = 1;
-        status = gnu_syntax_collect(&tokens, &tree, &syntax, scalar != 0, true);
-        gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&syntax), "missing nonempty token columns rejected");
-        tokens.count = BUSTER_PARSE_MAX_TOKENS + 1;
-        status = gnu_syntax_collect(&tokens, &tree, &syntax, scalar != 0, true);
-        gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&syntax), "oversized token count rejected before reading");
-    }
+    ParseTokens tokens = { 0 };
+    GnuSyntax syntax = { .group_count = 17, .attribute_count = 19, .asm_label_count = 23 };
+    GnuSyntaxStatus status = gnu_syntax_collect(&tokens, &tree, &syntax, false);
+    gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_empty(&syntax), "empty input needs no arrays");
+    Arena arena = { 0 };
+    status = gnu_syntax_build(&tokens, &tree, &arena, &syntax);
+    gnu_test_expect(test, status == GNU_SYNTAX_OK && gnu_test_empty(&syntax) && arena.length == 0, "empty build needs no arena allocation");
+    tokens.count = 1;
+    status = gnu_syntax_collect(&tokens, &tree, &syntax, true);
+    gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&syntax), "missing nonempty token columns rejected");
+    tokens.count = BUSTER_PARSE_MAX_TOKENS + 1;
+    status = gnu_syntax_collect(&tokens, &tree, &syntax, true);
+    gnu_test_expect(test, status == GNU_SYNTAX_INVALID_TREE && gnu_test_zero(&syntax), "oversized token count rejected before reading");
 }
 
 static void gnu_test_parser_lifetime(GnuTest* test, const char* path)
@@ -683,40 +666,37 @@ static void gnu_test_parser_lifetime(GnuTest* test, const char* path)
     const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
     static const char source[] = "int x __attribute__((unused));\n";
     static const char invalid[] = "int x __attribute__((unused)); int y = ;\n";
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    static InternTable table;
+    static Preprocessor pp;
+    static Parser parser;
+    const ParseOptions parse_options = { .tree_only = true, .extension_metadata = true };
+    bool prepared = parse_test_write(path, source, sizeof(source) - 1) && intern_initialize(&table) && pp_initialize(&pp, &options, &table) &&
+                    pp_run(&pp, path) && parse_initialize(&parser, &parse_options, options.language);
+    gnu_test_expect(test, prepared, "lifetime fixture initialization");
+    if (prepared)
     {
-        static InternTable table;
-        static Preprocessor pp;
-        static Parser parser;
-        const ParseOptions parse_options = { .scalar = scalar != 0, .tree_only = true, .extension_metadata = true };
-        bool prepared = parse_test_write(path, source, sizeof(source) - 1) && intern_initialize(&table) && pp_initialize(&pp, &options, &table) &&
-                        pp_run(&pp, path) && parse_initialize(&parser, &parse_options, options.language);
-        gnu_test_expect(test, prepared, "lifetime fixture initialization");
+        bool parsed = parse_translation_unit(&parser, &pp);
+        gnu_test_expect(test, parsed && parser.gnu.group_count == 1 && parser.gnu.attribute_count == 1 && parser.postorder == 0 && parser.sizes == 0,
+                        "tree-only parse retains metadata without a postorder");
+        parser.options.extension_metadata = false;
+        parsed = parse_translation_unit(&parser, &pp);
+        gnu_test_expect(test, parsed && gnu_test_empty(&parser.gnu) && parser.gnu_arena.base == 0, "ordinary syntax-only reparse clears metadata and its arena");
+        parser.options.extension_metadata = true;
+        parsed = parse_translation_unit(&parser, &pp);
+        gnu_test_expect(test, parsed && parser.gnu.group_count == 1 && parser.gnu.attribute_count == 1, "metadata can be enabled again on a reused parser");
+        pp_release(&pp);
+        prepared = parse_test_write(path, invalid, sizeof(invalid) - 1) && pp_initialize(&pp, &options, &table) && pp_run(&pp, path);
+        gnu_test_expect(test, prepared, "invalid lifetime fixture preprocessing");
         if (prepared)
         {
-            bool parsed = parse_translation_unit(&parser, &pp);
-            gnu_test_expect(test, parsed && parser.gnu.group_count == 1 && parser.gnu.attribute_count == 1 && parser.postorder == 0 && parser.sizes == 0,
-                            "tree-only parse retains metadata without a postorder");
-            parser.options.extension_metadata = false;
             parsed = parse_translation_unit(&parser, &pp);
-            gnu_test_expect(test, parsed && gnu_test_empty(&parser.gnu) && parser.gnu_arena.base == 0, "ordinary syntax-only reparse clears metadata and its arena");
-            parser.options.extension_metadata = true;
-            parsed = parse_translation_unit(&parser, &pp);
-            gnu_test_expect(test, parsed && parser.gnu.group_count == 1 && parser.gnu.attribute_count == 1, "metadata can be enabled again on a reused parser");
-            pp_release(&pp);
-            prepared = parse_test_write(path, invalid, sizeof(invalid) - 1) && pp_initialize(&pp, &options, &table) && pp_run(&pp, path);
-            gnu_test_expect(test, prepared, "invalid lifetime fixture preprocessing");
-            if (prepared)
-            {
-                parsed = parse_translation_unit(&parser, &pp);
-                gnu_test_expect(test, !parsed && parser.errors != 0 && gnu_test_empty(&parser.gnu) && parser.gnu_arena.base == 0,
-                                "failed reparse never exposes stale metadata");
-            }
+            gnu_test_expect(test, !parsed && parser.errors != 0 && gnu_test_empty(&parser.gnu) && parser.gnu_arena.base == 0,
+                            "failed reparse never exposes stale metadata");
         }
-        parse_release(&parser);
-        pp_release(&pp);
-        intern_release(&table);
     }
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&table);
     remove(path);
 }
 

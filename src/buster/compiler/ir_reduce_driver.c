@@ -171,13 +171,12 @@ static IrReducePublication ir_reduce_driver_replay(const char* path, IrReduceOra
             result = IR_REDUCE_PUBLICATION_REFUSED;
             if (parsed.error == IR_PARSE_OK && parsed.consumed == source.length)
             {
-                const IrCheck vector = ir_verify_complete(&function, &checks, true);
-                const IrCheck scalar = ir_verify_complete(&function, &checks, false);
-                if (ir_reduce_resource(vector.error) || ir_reduce_resource(scalar.error))
+                const IrCheck verified = ir_verify_complete(&function, &checks);
+                if (ir_reduce_resource(verified.error))
                 {
                     result = IR_REDUCE_PUBLICATION_UNAVAILABLE;
                 }
-                else if (vector.error == IR_OK && scalar.error == IR_OK)
+                else if (verified.error == IR_OK)
                 {
                     IrReduceProcess process = {
                         .predicate = ir_reduce_oracle,

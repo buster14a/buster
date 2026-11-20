@@ -49,8 +49,7 @@ independent rebuilding control.
 The C driver's `ir_if_convert.c` runs after SSA promotion, wide-value splitting,
 integer truth simplification and truth threading, before the ordinary optimizer
 prepares any analysis. It finds conditional terminators with a bounded 64-byte
-opcode mask and an exact scalar twin. A function without one needs no CFG or
-output allocation.
+opcode mask. A function without one needs no CFG or output allocation.
 
 A region is a reachable head ending in a conditional branch whose two sides
 reach one join. Each side is the join itself (a triangle) or an arm: a chain of
@@ -66,13 +65,13 @@ address. So each arm row is first numbered against the earlier arm rows and the
 head's rows. A row whose operation, type, flags, fields and represented
 operands equal an earlier row's takes that row's value, comparing an address's
 scale and offset by content. The head's rows are filtered 16 at a time
-(AVX-512 compares of the operation, type, flags and operand columns, with a
-scalar twin), latest first, and each candidate is checked whole. A load takes
+(AVX-512 compares of the operation, type, flags and operand columns), latest
+first, and each candidate is checked whole. A load takes
 an earlier value only from a plain load of the same address and type after the
 head's last write. A write here is a store, an atomic, a fence, a call, a stack
 restore, a lifetime marker or an observable load; no arm row writes. The
 barrier scan is one `vpermi2b` lookup of a 128-entry opcode class table per 64
-rows, with a scalar twin.
+rows.
 
 Then only the rows the join's phis need, through their represented operands,
 move to the head's end, before its branch. Each needed row must be total:
@@ -94,7 +93,7 @@ Each phi takes a new select row in the head for the region's two entries, which
 become one entry from the head. That is the shape of LLVM SimplifyCFG's
 `FoldTwoEntryPHINode` and `SpeculativelyExecuteBB`, for the C lowering's
 nested `?:`. The head then branches to the join. Rows are permuted, and the
-only new rows are the folded selects and the sunk accumulations' zeros (below).
+only new rows are the folded selects and the sunk accumulations' identity constants (below).
 
 Two cost rules keep a branch or move a select:
 
@@ -109,15 +108,18 @@ Two cost rules keep a branch or move a select:
   selection, and clang -O2 keeps branches there.
 - **An accumulation's select sinks below its operation.** An in-place phi may
   take `s op x` on one edge and `s` on the other: an addition, a subtraction
-  from `s`, an or or a xor of integers, which nothing else reads. The
-  operation's row then selects `x` or zero instead, and the phi becomes
-  `s op select`, as InstCombine folds a select of a binary operation. A
-  conditional sum's accumulator then waits for one addition per element, not
-  for the `cmov` as well, and a predictable condition costs no more than its
-  branch did. The zero is a new constant row in the head that names a zero the
-  constant table already has; a function whose table has none keeps the select
-  outside. A variable binding of the operation's row, whose value changed,
-  becomes unavailable.
+  from `s`, an or or a xor of integers, which nothing else reads. For these
+  operations the arm row selects `x` or zero, and the phi becomes `s op select`.
+  They need a zero already in the constant table. A one-arm AND of i8, i16,
+  i32 or i64 instead selects `x` or all ones at that width. It admits a boolean
+  parameter or a direct integer comparison and requires a region without
+  reused or speculated arm loads. Copies and extensions in a comparison can
+  hide a floating truth test, so this fold leaves them alone. A saved value in the head can feed the AND. A C arm
+  reload can arrive without its volatile flag ([the IR guide](ir.md)), so the
+  AND fold skips it. The pass reuses each required mask in the constant table
+  or appends a missing width once to a private copy. In both orientations the
+  accumulator waits only for the operation. A binding of the repurposed arm
+  row becomes unavailable.
 
 A converted head whose single-predecessor chain climbs to a conditional branch
 may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
@@ -157,7 +159,7 @@ unchanged.
 SSA and distinct output/scratch arenas; scratch must own none of the input.
 The output arena may already contain the input. A changed result owns fresh
 row columns, block offsets, extra words and call records for each round,
-borrowing immutable tables from the input until the ordinary optimizer
+borrowing immutable tables (apart from an extended constant table) from the input until the ordinary optimizer
 materializes its output. Both lifetimes must cover that consumption. Shared or
 overlapping `extra` slices are never remapped in place: original switch/label
 words stay intact, and surviving phi/call occurrences get appended value
