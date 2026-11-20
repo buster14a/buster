@@ -64,22 +64,28 @@ product, the four other integer reductions, an if-converted conditional sum
 with its unreachable stub, an `int` induction's clamp, byte arithmetic through
 32-bit lanes, population counts, a stencil whose exit test is `i + 1 < n`, an
 in-place `y[i] += k * x[i]`, an invariant start and index offset, a uniform load,
-two loops and a nested one; and one fixture per refusal (a prefix sum, a
+a sum of a uniform (no vector load or store), two loops and a nested one; and one fixture per refusal (a prefix sum, a
 histogram, a strided store, the induction as data, a call, a volatile load, a
 division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
 than the limit, a reduction's partial value read, an early exit, a step of two).
-Each runs by both parser paths and the pass at three targets of every operation
-the IR has, at most 64, 32 and 16 bytes wide, its result and counts folded into
-a frozen digest (#2924); the kinds and the refusing kinds' scan are checked
-against their definitions; a fixture expects how many loops each width
-vectorizes, or its refusal's reason. Each changed result, and its form after
+Each runs by both parser paths and the pass at six targets of every operation
+the IR has: at most 64, 32 and 16 bytes wide with masked moves, 64 bytes without
+them or masks from a general register, 64 bytes with them but no select of 32-
+or 64-bit lanes, and 64 bytes with them but no mask of 8 lanes or fewer from a
+general register (an AVX512F target without DQ's `kmovb`) (#2807). Its
+result and counts are folded into a frozen digest (#2924), and the kinds and the
+refusing kinds' scan are checked against their definitions. A fixture expects how
+many loops each width vectorizes, or its refusal's reason, and how many of them
+have a masked tail: every integer loop's where the target has masked moves (a
+reduction's only where it has the selects too, and a loop of 8-byte lanes only
+where it has the byte mask), and none of a floating loop's. Each changed result, and its form after
 the ordinary optimizer (whose final verification checks dominance), runs in the
 shared interpreter against the input on one buffer, its pointers placed apart,
 at one address, a byte, an element and a vector apart either way, at lengths
 around the vectors' boundaries (signed bounds negative too): the same bytes,
-value and status. Four mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
-test, an unrounded tail, a wrong reduction identity, lanes of the wrong width)
-must each be rejected on some fixture. `--print NAME` prints a fixture's
+value and status. Five mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
+test, an unrounded tail, a wrong reduction identity, lanes of the wrong width, a
+masked tail's mask of one lane more) must each be rejected on some fixture. `--print NAME` prints a fixture's
 64-byte result. `test-checker-driver`'s inlining unit compiles a C fixture of
 loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 by
 both paths, checks the loops each target vectorizes and that both paths give one
