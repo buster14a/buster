@@ -167,6 +167,7 @@ static ForeignLinkResult foreign_link_finish_unwind(ForeignLink* output, const F
 static ImportResult foreign_link_unwind_references(const ForeignLink* output, const Foreign* foreign, uint32_t id, uint32_t section, String8 entries)
 {
     ImportResult result = { 0 };
+    uint64_t visits[3] = { 0 };
     const Link* link = &output->link;
     const ImportObject* object = &output->objects[id];
     for (uint64_t r = 0; output->unwind != 0 && result.error == IMPORT_ERROR_NONE && r < entries.length / sizeof(Elf64_Rela); r += 1)
@@ -180,6 +181,7 @@ static ImportResult foreign_link_unwind_references(const ForeignLink* output, co
         bool changed = false;
         for (const ForeignLinkUnwind* frame = owner < foreign->object_count ? output->unwind[owner] : 0; frame != 0 && !changed; frame = frame->next)
         {
+            visits[relocation.r_addend == 0 ? 0 : ELF64_R_TYPE(relocation.r_info) == R_X86_64_NONE ? 1 : 2] += 1;
             changed = output->objects[owner].section_atoms[frame->section] == atom && frame->plan.bytes.length != frame->plan.old_length;
         }
         if (changed && relocation.r_addend != 0 && ELF64_R_TYPE(relocation.r_info) != R_X86_64_NONE)
@@ -189,6 +191,16 @@ static ImportResult foreign_link_unwind_references(const ForeignLink* output, co
             result.relocation = (uint32_t)r;
             result.symbol = (uint32_t)index;
             result.type = (uint32_t)ELF64_R_TYPE(relocation.r_info);
+        }
+    }
+    if (getenv("BUSTER_TRACE_UNWIND_3166") != 0)
+    {
+        fprintf(stderr, "VIS3166 %u %u %llu %llu %llu %u %u %u %u %llu\n", id, section,
+                (unsigned long long)visits[0], (unsigned long long)visits[1], (unsigned long long)visits[2],
+                (unsigned)result.error, result.section, result.relocation, result.symbol, (unsigned long long)result.offset);
+        if (result.error != IMPORT_ERROR_NONE)
+        {
+            fprintf(stderr, "ERR3166 %u %u %u %u %u %llu\n", id, result.section, result.relocation, result.symbol, result.type, (unsigned long long)result.offset);
         }
     }
     return result;

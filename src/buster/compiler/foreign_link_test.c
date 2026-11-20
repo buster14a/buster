@@ -595,6 +595,18 @@ static bool foreign_link_test(const char* directory, Arena* arena, bool cross_ch
     ForeignTestTally tally = {
         .check = "foreign executable handoff",
     };
+    ForeignTestPath probe_log;
+    ForeignTestPath probe_err;
+    char probe_compiler[64];
+    snprintf(probe_log, sizeof(probe_log), "%s/3166.log", directory);
+    snprintf(probe_err, sizeof(probe_err), "%s/3166.err", directory);
+    snprintf(probe_compiler, sizeof(probe_compiler), "/proc/%ld/exe", (long)getpid());
+    char* probe_argv[] = { (char*)"bash", (char*)"tests/foreign-unwind-references/run.sh", probe_compiler, 0 };
+    const int probe_status = object_test_run(probe_argv, probe_log, probe_err);
+    const String8 probe_out = foreign_test_read(arena, probe_log);
+    const String8 probe_errors = foreign_test_read(arena, probe_err);
+    printf("%.*s%.*s", (int)probe_out.length, probe_out.pointer, (int)probe_errors.length, probe_errors.pointer);
+    foreign_test_expect(&tally, probe_status == 0, "COMDAT unwind relocation reference fixture", 0);
     if (foreign_link_test_compile(directory, &tally))
     {
         foreign_link_test_program(&tally, directory, arena, cross_check);
