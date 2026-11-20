@@ -2214,29 +2214,33 @@ static X86Instruction tier1_emit_cfg_x87_memory(uint32_t form, uint8_t base, int
     return (X86Instruction){ .form = (uint16_t)form, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = displacement };
 }
 
-// A private F80 literal can use a four-byte load when binary32 reproduces its exact bits and
-// exception behavior. Restrict this to signed zero and normal finite binary32 values. In particular a
-// binary32 subnormal could raise the x87 denormal-operand exception when loaded from a narrower representation.
-static uint64_t tier1_emit_cfg_x87_binary32(const IrFunction* function, uint32_t value)
+// The exact binary32 or binary64 encoding of a finite normal (and signed zero), or the original
+// extended significand. A narrower subnormal would introduce a denormal-operand exception on FLD.
+static uint16_t tier1_emit_cfg_x87_literal_bits(IrConstant constant, uint64_t* bits)
 {
-    if (function->op[value] != IR_CONST)
-    {
-        return UINT64_MAX;
-    }
-    const IrConstant constant = function->constants[function->a[value]];
     const uint32_t exponent = (uint16_t)constant.high & 0x7fffu;
-    const uint32_t sign = ((uint32_t)constant.high & 0x8000u) << 16;
+    const uint64_t sign = (uint16_t)constant.high >> 15;
+    const bool normal = (constant.low >> 63) != 0;
+    uint16_t form = X86_FORM_FLD_M80;
+    *bits = constant.low;
     if (exponent == 0 && constant.low == 0)
     {
-        return sign;
+        *bits = sign << 31;
+        form = X86_FORM_FLD_M32;
     }
-    // The explicit integer bit must be set, and the low 40 significand bits must be zero.
-    if (exponent < 16383 - 126 || exponent > 16383 + 127 ||
-        (constant.low >> 63) == 0 || (constant.low & ((UINT64_C(1) << 40) - 1)) != 0)
+    else if (normal && exponent >= 16383 - 126 && exponent <= 16383 + 127 && (constant.low & ((UINT64_C(1) << 40) - 1)) == 0)
     {
-        return UINT64_MAX;
+        const uint64_t fraction = (constant.low >> 40) & 0x7fffffu;
+        *bits = (sign << 31) | ((uint64_t)(exponent - (16383 - 127)) << 23) | fraction;
+        form = X86_FORM_FLD_M32;
     }
-    return sign | ((exponent - (16383 - 127)) << 23) | ((uint32_t)(constant.low >> 40) & 0x7fffffu);
+    else if (normal && exponent >= 16383 - 1022 && exponent <= 16383 + 1023 && (constant.low & 0x7ffu) == 0)
+    {
+        const uint64_t fraction = (constant.low >> 11) & ((UINT64_C(1) << 52) - 1);
+        *bits = (sign << 63) | ((uint64_t)(exponent - (16383 - 1023)) << 52) | fraction;
+        form = X86_FORM_FLD_M64;
+    }
+    return form;
 }
 
 // A constant is loaded at the original x87 use. Until the record is appended its displacement names the
@@ -2251,15 +2255,13 @@ static X86Instruction tier1_emit_cfg_x87_load(Tier1EmitResult* emitted, uint32_t
     const uint32_t index = function->a[value];
     const bool valid = index < function->constant_count && emitted->x87_literal_of != NULL &&
                        emitted->symbol_access_count <= BUSTER_TIER1_EMIT_LITERAL;
-    const uint64_t single = valid ? tier1_emit_cfg_x87_binary32(function, value) : UINT64_MAX;
+    const IrConstant constant = valid ? function->constants[index] : (IrConstant){ 0 };
+    uint64_t bits = 0;
+    const uint16_t form = tier1_emit_cfg_x87_literal_bits(constant, &bits);
     uint32_t literal = valid ? emitted->x87_literal_of[index] : 0;
     if (valid && literal == 0 && emitted->literal_count < emitted->literal_capacity)
     {
-        const IrConstant constant = function->constants[index];
-        const IrSimdValue bytes = { .words = {
-            single != UINT64_MAX ? single : constant.low,
-            single != UINT64_MAX ? 0 : (uint16_t)constant.high,
-        } };
+        const IrSimdValue bytes = { .words = { bits, form == X86_FORM_FLD_M80 ? (uint16_t)constant.high : 0 } };
         const uint32_t k = emitted->literal_count++;
         emitted->literals[k] = bytes;
         emitted->literal_widths[k] = 16;
@@ -2267,7 +2269,7 @@ static X86Instruction tier1_emit_cfg_x87_load(Tier1EmitResult* emitted, uint32_t
         emitted->x87_literal_of[index] = literal;
     }
     return (X86Instruction){
-        .form = (uint16_t)((single != UINT64_MAX ? X86_FORM_FLD_M32 : X86_FORM_FLD_M80) | BUSTER_X86_FORM_FIXUP),
+        .form = (uint16_t)(form | BUSTER_X86_FORM_FIXUP),
         .mode = BUSTER_X86_MEMORY_RIP,
         .displacement = literal != 0 ? (int32_t)(literal - 1) : -1,
     };
