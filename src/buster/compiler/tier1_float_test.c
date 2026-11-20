@@ -690,11 +690,13 @@ static void tier1_float_unsigned_i32_storage(Tier1EmitTest* test)
                 const Tier1SelectRecords result = tier1_select_expand(&holes);
                 const bool clear = source == 1;
                 const uint16_t form = tier1_select_float_forms(target == IR_F32 ? 4 : 8)->from_integer[1];
-                tier1_emit_test_expect(test, result.count == 2u + clear &&
-                                      (!clear || (result.records[0].form == X86_FORM_MOV_R32_RM32 && result.records[0].rm == X86_REGISTER_RSI)) &&
-                                      result.records[clear].form == X86_FORM_XORPS_X_XM128 && result.records[1 + clear].form == form &&
-                                      result.records[1 + clear].rm == (clear ? BUSTER_TIER1_SELECT_SCRATCH : X86_REGISTER_RAX),
-                                      "only an uncertified I32 needs a zero-extending move before signed qword conversion");
+                // A parameter's conversion keeps the register path's zero-extending move; a loaded operand's folds into
+                // FLOAT_CONVERT_LOAD, whose dword memory reads into the scratch and whose qword converts as signed.
+                tier1_emit_test_expect(test, result.count == 3 &&
+                                      result.records[0].form == X86_FORM_MOV_R32_RM32 && result.records[0].rm == (clear ? X86_REGISTER_RSI : X86_REGISTER_RDI) &&
+                                      result.records[1].form == X86_FORM_XORPS_X_XM128 && result.records[2].form == form &&
+                                      result.records[2].rm == BUSTER_TIER1_SELECT_SCRATCH,
+                                      "an uncertified or folded I32 operand zero-extends through the scratch before signed qword conversion");
             }
             arena_pop_to(&test->output, 0);
         }
