@@ -1576,6 +1576,8 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "int h(void) __attribute__((noinline)) __attribute__((unused)) { return 0; }\n",
         "int f(void) __attribute__((noinline)) _Alignas(8) __attribute__((cold)) { return 1; }\n",
         "int f(void) __attribute__((noinline)) [[gnu::cold]] __attribute__((used)) { return 2; }\n",
+        // A declarator that a later group's arguments keep from completing: each group's warning is the run's reading's.
+        "int f(void) __attribute__((noinline)) __attribute__((cold)) __attribute__((used)) __attribute__((regparm(9))) { return 0; }\n",
         // target diagnostics name the decoded unsupported fragment, including permitted escapes.
         "int f(void) __attribute__((target(\"bo\\\\gus\")));\n",
         "int f(void) __attribute__((target(\"bo\\tgus\")));\n",
