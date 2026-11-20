@@ -98,6 +98,7 @@ struct CheckTier1DebugValues
     CheckTier1DebugSpan* regions;
     uint64_t* region_events;
     uint32_t* region_previous;
+    uint32_t* region_last_if_first;
     uint32_t region_event_count;
     uint32_t* record_blocks;
     uint32_t* fresh_first;
@@ -984,18 +985,22 @@ static void check_tier1_debug_local_changed(CheckTier1DebugValueLive* live, uint
 }
 
 // Queue the locals whose region boundaries lie between the two cursors. Every local's first event in the
-// interval has its previous event below first. Later occurrences in the interval would queue it again.
+// interval has its previous event below first. If the interval crosses all of a local's reachable
+// boundaries, its source windows are closed at both cursors and cannot change its location.
 static void check_tier1_debug_region_changes(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t from, uint32_t to)
 {
     const uint32_t first = from < to ? from : to;
     const uint32_t end = from < to ? to : from;
     const __m512i limit = _mm512_set1_epi32((int)first);
+    const __m512i stop = _mm512_set1_epi32((int)end);
     for (uint32_t at = first; at < end;)
     {
         const uint32_t count = end - at < 16 ? end - at : 16;
         const __mmask16 active = (__mmask16)((1u << count) - 1);
         const __m512i previous = _mm512_maskz_loadu_epi32(active, proof->region_previous + at);
-        uint32_t distinct = (uint32_t)_mm512_mask_cmple_epu32_mask(active, previous, limit);
+        const __mmask16 first_in_range = _mm512_mask_cmple_epu32_mask(active, previous, limit);
+        const __m512i last = _mm512_maskz_loadu_epi32(active, proof->region_last_if_first + at);
+        uint32_t distinct = (uint32_t)_mm512_mask_cmpge_epu32_mask(first_in_range, last, stop);
         for (; distinct != 0; distinct &= distinct - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(distinct);

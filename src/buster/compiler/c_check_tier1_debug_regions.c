@@ -35,6 +35,25 @@ static uint32_t check_tier1_debug_region_events(const CheckTier1DebugValues* pro
     return count;
 }
 
+// The two halves of the spare sort buffer index first occurrences and complete lifetimes.
+static void check_tier1_debug_region_links(CheckTier1DebugValues* proof, uint32_t* spare, uint32_t* last_event)
+{
+    proof->region_previous = spare;
+    proof->region_last_if_first = spare + proof->region_event_count;
+    memset(last_event, 0, (uint64_t)proof->local_count * sizeof(*last_event));
+    for (uint32_t at = 0; at < proof->region_event_count; at += 1)
+    {
+        const uint32_t local = (uint32_t)proof->region_events[at];
+        proof->region_previous[at] = last_event[local];
+        last_event[local] = at + 1;
+    }
+    for (uint32_t at = 0; at < proof->region_event_count; at += 1)
+    {
+        const uint32_t local = (uint32_t)proof->region_events[at];
+        proof->region_last_if_first[at] = proof->region_previous[at] == 0 ? last_event[local] - 1 : UINT32_MAX;
+    }
+}
+
 static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const Tier1EmitResult* emitted,
                                           const uint32_t* places, const uint32_t* record_order, uint8_t* cuts, uint32_t* last_event,
                                           Arena* scratch)
@@ -317,16 +336,7 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     {
         proof->region_event_count = check_tier1_debug_region_events(proof, events);
         proof->region_events = c_bindings_sort(events, sorting, proof->region_event_count, true, UINT32_MAX);
-        // The other sort buffer holds the previous event of each dense local, plus one (zero for its first).
-        // The value-range walk uses it to visit each local once per crossed interval, in first-occurrence order.
-        proof->region_previous = (uint32_t*)(proof->region_events == events ? sorting : events);
-        memset(last_event, 0, (uint64_t)proof->local_count * sizeof(*last_event));
-        for (uint32_t at = 0; at < proof->region_event_count; at += 1)
-        {
-            const uint32_t local = (uint32_t)proof->region_events[at];
-            proof->region_previous[at] = last_event[local];
-            last_event[local] = at + 1;
-        }
+        check_tier1_debug_region_links(proof, (uint32_t*)(proof->region_events == events ? sorting : events), last_event);
     }
     return valid;
 }
