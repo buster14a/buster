@@ -435,6 +435,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
     uint8_t* required = 0;
     uint8_t* interval_remat = 0;
     uint32_t* hints = 0;
+    uint8_t* register_hints = 0;
     uint8_t* returned = 0;
     uint8_t* operations = 0;
     uint8_t* widths = 0;
@@ -457,6 +458,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         required = ir_allocate(output, uses, 1, &ok);
         interval_remat = ir_allocate(output, source->count, 1, &ok);
         hints = ir_allocate(output, (uint64_t)source->count + 1, 4, &ok);
+        register_hints = ir_allocate(output, (uint64_t)source->count + 1, 1, &ok);
         returned = ir_allocate(output, (uint64_t)count + 1, 1, &ok);
         operations = ir_allocate(output, count, 1, &ok);
         widths = ir_allocate(output, count, 1, &ok);
@@ -547,6 +549,34 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
                 hints[interval] = hints[interval] == BUSTER_IR_NONE && ends ? ties[k] : hints[interval];
             }
             tied |= hints[interval] != BUSTER_IR_NONE;
+            register_hints[interval] = UINT8_MAX;
+        }
+        // A value whose interval ends at a call that reads it in a register takes that register where no tie names
+        // another (#2646, Tier1AllocationInput.register_hints), as the CFG consumer's do: the call's moves then move nothing
+        // for it. A value passed twice takes its first argument's.
+        bool named = false;
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            const bool call = tier1_select_function_call(plan->function, node);
+            const IrCall* called = call ? &plan->function->calls[plan->function->b[node]] : 0;
+            const uint32_t arguments = call ? called->argument_count + (plan->function->op[node] == IR_CALL_INDIRECT) : 0;
+            Tier1SelectPlaces places = { 0 };
+            for (uint32_t argument = 0; argument < arguments; argument += 1)
+            {
+                const Tier1SelectPlace place = argument < called->argument_count ? tier1_select_argument_place(plan->function, called, argument, &places) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_STACK };
+                const uint8_t reg = argument == called->argument_count ? tier1_select_callee_register(plan->function, called) :
+                                    place.kind == BUSTER_TIER1_PLACE_GENERAL ? tier1_select_parameter_registers[place.index] :
+                                    place.kind == BUSTER_TIER1_PLACE_VECTOR ? place.index : UINT8_MAX;
+                const uint32_t use = plan->effective_use_offsets[node] + argument;
+                const uint32_t value = use < plan->effective_use_offsets[node + 1] ? plan->effective_use_values[use] : BUSTER_IR_NONE;
+                const uint32_t interval = value < count ? prepared.value_intervals[value] : BUSTER_IR_NONE;
+                const bool ends = interval < source->count && source->values[interval] == value && source->ends[interval] == 2 * node + 1;
+                if (reg != UINT8_MAX && ends && register_hints[interval] == UINT8_MAX)
+                {
+                    register_hints[interval] = reg;
+                    named = true;
+                }
+            }
         }
         // The prospective spill set contains every selected definition. Its alignment determines frame-base
         // reservations before allocation; reducing it to actual spills later cannot add a reservation.
@@ -583,8 +613,9 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             prepared.allocation.use_required = required;
             prepared.allocation.use_count = use;
             prepared.allocation.rematerializable = interval_remat;
-            // Without a tie, no hints: the allocator's copy without them is the cheaper.
-            prepared.allocation.hint_values = tied ? hints : 0;
+            // Without a tie or a call's register, no hints: the allocator's copy without them is the cheaper.
+            prepared.allocation.hint_values = tied || named ? hints : 0;
+            prepared.allocation.register_hints = named ? register_hints : 0;
         }
     }
     if (error == TIER1_EMIT_OK)
