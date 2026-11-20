@@ -269,7 +269,7 @@ typedef enum NodeFactsCount
     // and their records; those whose tape it made, their records and their entries; the listed ones by their first
     // record's reason (BUSTER_NODE_ROWS_REASON_*, in its order); the made tapes that differ from the reference's, and
     // those the reference kept no tape of; the chunks' records its sweeps ran over and the entries they wrote; the
-    // chunks whose second run wrote another number of entries; the records its loops read for (a target's word,
+    // chunks whose second run wrote other entries than its first; the records its loops read for (a target's word,
     // where the target is not the record's type; a line or a table of the unit's; an update's plan) and the updates
     // whose rows it made;
     // and its ticks: the reads, the shapes, the rows' write, an expression's part, and the reference's X on the
@@ -291,6 +291,7 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_ROWS_WORDS,
     NODE_FACTS_COUNT_ROWS_LINES,
     NODE_FACTS_COUNT_ROWS_UPDATES,
+    NODE_FACTS_COUNT_ROWS_BRANCHED,
     NODE_FACTS_COUNT_ROWS_READ_TICKS,
     NODE_FACTS_COUNT_ROWS_SHAPE_TICKS,
     NODE_FACTS_COUNT_ROWS_UPDATE_TICKS,

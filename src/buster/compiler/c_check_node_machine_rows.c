@@ -29,6 +29,11 @@
 // - Between the two, the updates' rows (node_rows_window_updates): an update's own row and its first row, which
 //   comes after its destination's entries, are shapes of rows of the table too, written over the shapes' sweep's for
 //   its record and its destination's by a loop over a list of the chunk's updates.
+// - And the branches' rows (node_rows_window_branch): a value that an operator evaluated as branches tests has its
+//   test and its branch after its row, a shape of the table in its conversion's part, which converts nothing; the
+//   branch's kind is by its sense, which comes down from the condition's root. A loop down a list of the chunk's
+//   `!`, `&&` and `||` evaluated as branches, from its end, gives each one's operands their senses and their tests'
+//   shapes.
 // - The rows (node_rows_window_write, 64 records a step): each part has four slots, an entry each; a slot's kinds and
 //   classes of a block's 64 records are one lookup of the shapes each, the classes then made from their sources; the
 //   eight slots' registers are transposed into eight records' rows a register; and each register's entries, the bytes
@@ -37,12 +42,13 @@
 //   entries before it.
 // An expression's tape is then its operand's records' rows, in a row in the streams, and its root's.
 //
-// What is listed for X, and left to the reference as C's listed expressions are: an expression with an operator
-// evaluated as branches (its rows, and what follows a row, are not made here), with a bool's update or with a postfix
-// update whose destination's entries leave its first row no room; a conversion from or to a
-// class past double's (a long double's, a 128-bit integer's, a half-precision one's, and an aggregate's and a complex
-// type's, which have no class's number), which the templates refuse; and an integer constant converted to a floating
-// class, whose fold reads its value. Listing is always safe.
+// What is listed for X, and left to the reference as C's listed expressions are: an expression with a value an
+// operator evaluated as branches tests after a conversion of its own (its test has no room in its conversion's
+// part), with a bool's update or with a postfix update whose destination's entries leave its first row no room; a
+// conversion from or to a class past double's (a long double's, a 128-bit integer's, a half-precision one's, and an
+// aggregate's and a complex type's, which have no class's number), which the templates refuse; and an integer
+// constant converted to a floating class, whose fold reads its value. (A logical operator's and a conditional's
+// value's templates list their expression too: C on the window makes them of no record.) Listing is always safe.
 //
 // The entries' values are not made: the kinds and the classes alone. The reference is X on T's columns at reader
 // time, whose tape the shadow keeps (NodeFrontTypes.tape_kinds and tape_classes): every expression decided on the
@@ -94,10 +100,18 @@
 #define BUSTER_NODE_ROWS_FIRST_ADDRESS 100u
 #define BUSTER_NODE_ROWS_KEPT 102u
 #define BUSTER_NODE_ROWS_KEPT_REST 107u
-#define BUSTER_NODE_ROWS_SHAPES 112u
+// A tested value's segment (node_machine_branch_hook's), its conversion's part's where it converts nothing: its test
+// (node_machine_put_truth of its class, which is its target's there: a narrow one's CONVERT to I32, a CONST and NE)
+// and its branch, where its truth is its sense's. Two a class's width, the odd one where true; the branches' loop
+// writes the shape (node_rows_window_tested).
+#define BUSTER_NODE_ROWS_TESTED 112u
+#define BUSTER_NODE_ROWS_SHAPES 116u
 // The own shape of a record whose rows are not made here (a template's, NodeRowsTables.templates; a destination's
 // whose own entries leave a postfix update's first row no room): no entry, and its expression is listed.
 #define BUSTER_NODE_ROWS_LATER 127u
+
+_Static_assert(BUSTER_TYPED_BRANCH_TRUE == BUSTER_TYPED_BRANCH_FALSE + 1 && BUSTER_TYPED_CLASS_I8 == BUSTER_TYPED_CLASS_VOID + 1,
+               "a tested value's branch's kind is its sense's sum (node_rows_tables), and the narrow classes are the first after void's (node_rows_window_tested)");
 // An entry's class's source, in a row of the table: the class itself, or the record's, its target's, or its first
 // operand's conversion's (an update's computation's, which is that conversion's; its destination's too, whose first
 // row converts to it).
@@ -240,13 +254,13 @@ static void node_rows_tables(NodeRowsTables* tables)
     tables->templates[CHECK_LOWER_TEMPLATE_STORE_GLOBAL] = BUSTER_TYPED_STORE_GLOBAL;
     tables->templates[CHECK_LOWER_TEMPLATE_STORE] = BUSTER_TYPED_STORE;
     tables->templates[NODE_MACHINE_TEMPLATE_CALL] = BUSTER_TYPED_CALL;
-    // The templates whose rows are not made here: an operator's evaluated as branches, and a logical operator's and a
-    // conditional's value's three, which C on the window makes of no record yet (it lists them). An update's template
-    // gives no shape: its record's is the updates' loop's to write (node_rows_window_update).
+    // The templates whose rows are not made here: a logical operator's and a conditional's value's three, which C on
+    // the window makes of no record yet (it lists them). An update's template gives no shape: its record's is the
+    // updates' loop's to write (node_rows_window_update). Nor does an operator's evaluated as branches, which writes
+    // no entry of its own: its operands' tests are after their rows (node_rows_window_tested).
     tables->templates[NODE_MACHINE_TEMPLATE_BRANCH] = BUSTER_NODE_ROWS_LATER;
     tables->templates[NODE_MACHINE_TEMPLATE_DECIDED] = BUSTER_NODE_ROWS_LATER;
     tables->templates[NODE_MACHINE_TEMPLATE_SECOND] = BUSTER_NODE_ROWS_LATER;
-    tables->templates[NODE_MACHINE_TEMPLATE_BRANCHES] = BUSTER_NODE_ROWS_LATER;
     for (uint32_t op = 0; op < CHECK_OP_COUNT && op < 128; op += 1)
     {
         tables->binaries[op] = check_lower_binary((CheckOp)op);
@@ -464,6 +478,31 @@ static void node_rows_tables(NodeRowsTables* tables)
             }
         }
     }
+    // A tested value's test and its branch (node_machine_branch_hook: node_machine_put_truth of its target's class,
+    // then the branch where its truth is its sense's). In a conversion's part that is free the class tested is the
+    // record's own.
+    for (uint32_t narrow = 0; narrow < 2; narrow += 1)
+    {
+        for (uint32_t sense = 0; sense < 2; sense += 1)
+        {
+            uint8_t entries[4][2];
+            uint32_t count = 0;
+            if (narrow != 0)
+            {
+                entries[count][0] = BUSTER_TYPED_CONVERT;
+                entries[count][1] = BUSTER_TYPED_CLASS_I32;
+                count += 1;
+            }
+            entries[count][0] = BUSTER_TYPED_CONST;
+            entries[count][1] = narrow != 0 ? BUSTER_TYPED_CLASS_I32 : BUSTER_NODE_ROWS_CLASS_OWN;
+            entries[count + 1][0] = BUSTER_TYPED_NE;
+            entries[count + 1][1] = BUSTER_TYPED_CLASS_I32;
+            entries[count + 2][0] = (uint8_t)(BUSTER_TYPED_BRANCH_FALSE + sense);
+            entries[count + 2][1] = BUSTER_TYPED_CLASS_I32;
+            count += 3;
+            node_rows_row(tables, BUSTER_NODE_ROWS_TESTED + 2 * narrow + sense, count, entries);
+        }
+    }
 }
 
 typedef struct NodeRowsCounts NodeRowsCounts;
@@ -471,10 +510,11 @@ struct NodeRowsCounts
 {
     // The records the reads' two loops read for: a target's word, where the target is not the record's type, and a line
     // or a table of the unit's (a member's, a truth's, an address constant's). And the updates, which their own loop
-    // reads for.
+    // reads for, and the operators evaluated as branches that take a turn of theirs.
     uint64_t words;
     uint64_t lines;
     uint64_t updates;
+    uint64_t branched;
 };
 
 // The reads of a chunk's `count` records: for the records that need them, a target's class and facts, a first
@@ -782,40 +822,128 @@ static inline __attribute__((always_inline)) void node_rows_window_update(struct
     destination_masks[BUSTER_NODE_ROWS_MASK_LISTED] |= (uint64_t)(first_own == BUSTER_NODE_ROWS_LATER ? 1u : 0u) << (destination & 63);
 }
 
+// A condition's operand, the window's record `o`, with its sense `sense` (1: its branch is taken where it holds):
+// what its consumer, an operator evaluated as branches, gives it (node_machine_branch_operand).
+// - One that is such an operator in its turn (its template) keeps the sense for its own operands' turn.
+// - A value is tested: its test and its branch are its conversion's part's row, where that part is free
+//   (BUSTER_NODE_ROWS_TESTED: a narrow class's or not, by the sense), and its row has their entries more. A value
+//   with a conversion of its own has no room for them: its row stays as it is, and its expression is listed.
+// A `!`'s one operand takes this twice, with the same sense: the second time its part has the test's shape, which is
+// neither free nor a conversion of its own, and nothing changes. (An operator evaluated as branches has no target
+// and converts nothing, C's loop's rule: its part is free, and stays so.)
+static inline __attribute__((always_inline)) void node_rows_window_tested(struct NodeFactsReader* state, uint32_t o, uint32_t sense)
+{
+    const uint32_t value = state->window_c_templates[o] != NODE_MACHINE_TEMPLATE_BRANCHES ? 1u : 0u;
+    const uint32_t before = state->window_x_conversions[o];
+    // (A tested value's class is no void's: the checker takes only a scalar for a logical operator's operand,
+    // check_action_logic.)
+    const uint32_t narrow = state->window_c_classes[o] <= BUSTER_TYPED_CLASS_U16 ? 1u : 0u;
+    const uint32_t shape = BUSTER_NODE_ROWS_TESTED + 2u * narrow + sense;
+    const uint32_t converted = before - 1u < BUSTER_NODE_ROWS_TESTED - 1u ? 1u : 0u;
+    const uint32_t takes = 0u - (value & (before == 0 ? 1u : 0u));
+    state->window_x_senses[o] = (uint8_t)sense;
+    // The test's three entries, and a narrow class's CONVERT.
+    state->window_x_conversions[o] = (uint8_t)(before | (shape & takes));
+    state->window_x_lengths[o] = (uint8_t)(state->window_x_lengths[o] + ((3u + narrow) & takes));
+    // The one branch: a value with no room is rare (none on the three corpora), and a write of the block's mask a
+    // call would make each call wait for the one before it.
+    if (__builtin_expect(converted != 0, 0))
+    {
+        state->window_c_masks[BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(o / 64) + BUSTER_NODE_ROWS_MASK_LISTED] |= UINT64_C(1) << (o & 63);
+    }
+}
+
+// The turn of the window's record `c`, an `&&`, an `||` or a `!` evaluated as branches
+// (node_machine_classify_branches): its operands' senses, from its own, which its consumer's turn left in the senses'
+// column. (A statement's CONDITION's is its statement's, and its one operand's the same: the reader writes it at the
+// operand's record, node_facts_reader_expression, and the CONDITION has no turn.)
+// - An `&&`'s first operand branches away where it doesn't hold, and an `||`'s where it does, whatever the operator's
+//   own sense (to the operator's target, or to its own label past its second operand: the label is the entry's
+//   value, which is not made here); its second operand, the record before it, has the operator's.
+// - A `!`'s operand, the record before it, has the other sense.
+static inline __attribute__((always_inline)) void node_rows_window_branch(struct NodeFactsReader* state, const NodeFront* front, uint32_t c)
+{
+    const uint32_t op = front->ops[c];
+    const uint32_t sense = state->window_x_senses[c];
+    const uint32_t negated = op == CHECK_OP_NOT ? 1u : 0u;
+    const uint32_t either = op == CHECK_OP_LOGICAL_OR ? 1u : 0u;
+    const uint32_t last = sense ^ negated;
+    // A `!`'s first operand is its last: the record before it, with the same sense.
+    node_rows_window_tested(state, c - front->window_left[c], (last & (0u - negated)) | (either & (negated - 1u)));
+    node_rows_window_tested(state, c - 1, last);
+}
+
 // The updates' rows of a chunk's `count` records, after the shapes' sweep and before the rows' write: a sweep of
 // masks, 64 records a step, which compresses the updates' numbers into a list (an evaluated record with the update's
 // template: a folded `&&`'s dead operand has the template too, and no row), then a loop over the list, an update at a
 // time (node_rows_window_update). A sweep and a loop of their own: an update is one record in some ninety, and a
 // term of its masks in the shapes' sweep is a term of every block's (the 9700X's readings are in
 // docs/node-machine.md).
+// And the branches' rows: the sweep compresses the chunk's operators evaluated as branches into a second list in the
+// same pass, and a loop goes down that list from its end (node_rows_window_branch): a record's consumer is a later
+// record, whose turn gave it its sense. An update that is a tested value has its own row from the updates' loop and
+// its test from this one, in either order: the one writes its own part and the other its conversion's, and each adds
+// its entries to the row's length. In this function, with no call of its own (the builds' readings on the 9700X are
+// in docs/node-machine.md).
 static __attribute__((noinline)) void node_rows_window_updates(struct NodeFactsReader* state, const NodeFront* front, uint32_t count, NodeRowsCounts* counts)
 {
     uint32_t* updates = state->x_updates;
+    uint32_t* branches = state->x_branches;
     uint32_t update_count = 0;
+    uint32_t branch_count = 0;
+    // The second list, in a chunk with an operator that takes a turn (C's loop's count): the same in every block of a
+    // chunk.
+    const bool branching = state->c_branches_now != 0;
     const __m512i places = _mm512_load_si512(state->x_tables->places);
     const uint32_t blocks = (count + 63) / 64;
+    // One copy of the step. The compiler unrolls this loop by four, with a remainder's copies (2,145 bytes of
+    // function for 1,223). A chunk has some eight blocks, and on Lua its first run read 0.43 ticks a record swept
+    // more unrolled, and its second 0.02 more (the 9700X's readings are in docs/node-machine.md).
+    #pragma clang loop unroll(disable)
     for (uint32_t block = 0; block < blocks; block += 1)
     {
         const uint32_t x = block * 64;
         const __mmask64 alive = state->window_c_masks[BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)block + BUSTER_NODE_CONTEXTS_MASK_ALIVE];
-        const __mmask64 updated = _mm512_mask_cmpeq_epi8_mask(alive, _mm512_loadu_si512(state->window_c_templates + x), _mm512_set1_epi8((char)NODE_MACHINE_TEMPLATE_UPDATE));
+        const __m512i templates = _mm512_loadu_si512(state->window_c_templates + x);
+        const __mmask64 updated = _mm512_mask_cmpeq_epi8_mask(alive, templates, _mm512_set1_epi8((char)NODE_MACHINE_TEMPLATE_UPDATE));
+        const __m512i base = _mm512_set1_epi32((int32_t)x);
         // Few a block: their places in it are compressed as bytes, once, and widened onto the list 16 a turn, which
         // has a register's room past a chunk's records; a block with more than 16 takes another turn.
         __m512i update_places = _mm512_maskz_compress_epi8(updated, places);
         const uint32_t update_end = update_count + (uint32_t)_mm_popcnt_u64(updated);
         do
         {
-            _mm512_storeu_si512(updates + update_count, _mm512_add_epi32(_mm512_set1_epi32((int32_t)x), _mm512_cvtepu8_epi32(_mm512_castsi512_si128(update_places))));
+            _mm512_storeu_si512(updates + update_count, _mm512_add_epi32(base, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(update_places))));
             update_places = _mm512_shuffle_i64x2(update_places, update_places, 0x39);
             update_count += 16;
         } while (update_count < update_end);
         update_count = update_end;
+        if (branching)
+        {
+            // A statement's CONDITION takes no turn: its one operand's sense is its own, which the reader wrote there.
+            const __mmask64 branched = _mm512_mask_cmpeq_epi8_mask(alive, templates, _mm512_set1_epi8((char)NODE_MACHINE_TEMPLATE_BRANCHES)) &
+                                       _mm512_cmpneq_epi8_mask(_mm512_loadu_si512(front->ops + x), _mm512_set1_epi8(CHECK_OP_CONDITION));
+            __m512i branch_places = _mm512_maskz_compress_epi8(branched, places);
+            const uint32_t branch_end = branch_count + (uint32_t)_mm_popcnt_u64(branched);
+            do
+            {
+                _mm512_storeu_si512(branches + branch_count, _mm512_add_epi32(base, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(branch_places))));
+                branch_places = _mm512_shuffle_i64x2(branch_places, branch_places, 0x39);
+                branch_count += 16;
+            } while (branch_count < branch_end);
+            branch_count = branch_end;
+        }
     }
     for (uint32_t i = 0; i < update_count; i += 1)
     {
         node_rows_window_update(state, front, updates[i]);
     }
+    for (uint32_t i = branch_count; i-- != 0;)
+    {
+        node_rows_window_branch(state, front, branches[i]);
+    }
     counts->updates += update_count;
+    counts->branched += branch_count;
 }
 
 // A slot's registers of a block: the two parts' shapes' entry there, by `table` (NodeRowsTables.kinds or sources, a
@@ -936,17 +1064,22 @@ static inline uint32_t node_rows_window_place(const struct NodeFactsReader* stat
 }
 
 // Why the window's record `x` lists its expression for X (BUSTER_NODE_ROWS_REASON_*), where it does: by its block's
-// masks, then by its template. The shadow's count.
+// masks, then by what gave it the bit in the two loops. The shadow's count.
+// - An update lists for its own row (a bool's), and its destination for the update's first row, where the
+//   destination's own entries leave it no room: the destination's own shape is then the mark.
+// - Any other record that lists by neither mask is a value an operator evaluated as branches tests, with no room for
+//   its test.
+// (A record with a template whose rows are not made here, a logical operator's or a conditional's value's, has the
+// mark too, and would count with the updates: C on the window gives no record one.)
 static uint8_t node_rows_window_reason(const struct NodeFactsReader* state, uint32_t x)
 {
     const uint64_t* masks = state->window_c_masks + BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(x / 64);
     const uint64_t bit = UINT64_C(1) << (x & 63);
-    // A template with the table's mark is an operator's evaluated as branches. Another record that lists is an
-    // update's, or its destination's, whose own entries left its first row no room.
-    return (masks[BUSTER_NODE_ROWS_MASK_REFUSED] & bit) != 0                                         ? BUSTER_NODE_ROWS_REASON_CONVERSION :
-           (masks[BUSTER_NODE_ROWS_MASK_FLOATED] & bit) != 0                                         ? BUSTER_NODE_ROWS_REASON_FLOATING :
-           state->x_tables->templates[state->window_c_templates[x] & 63] == BUSTER_NODE_ROWS_LATER ? BUSTER_NODE_ROWS_REASON_BRANCHES :
-                                                                                                       BUSTER_NODE_ROWS_REASON_UPDATE;
+    const bool updated = (state->window_c_templates[x] & 63u) == NODE_MACHINE_TEMPLATE_UPDATE || state->window_x_owns[x] == BUSTER_NODE_ROWS_LATER;
+    return (masks[BUSTER_NODE_ROWS_MASK_REFUSED] & bit) != 0 ? BUSTER_NODE_ROWS_REASON_CONVERSION :
+           (masks[BUSTER_NODE_ROWS_MASK_FLOATED] & bit) != 0 ? BUSTER_NODE_ROWS_REASON_FLOATING :
+           updated                                           ? BUSTER_NODE_ROWS_REASON_UPDATE :
+                                                               BUSTER_NODE_ROWS_REASON_BRANCHES;
 }
 
 // An expression's part, for each of the batch's expressions C takes on the window: it is listed for X where one of
@@ -955,9 +1088,8 @@ static uint8_t node_rows_window_reason(const struct NodeFactsReader* state, uint
 // `sqlite3.c`: 1.45 for 1.26.)
 // A root's record of its own (a statement's discard, a control's CONDITION or a `switch`'s value, a `return`'s
 // conversion) asks no test here. It has no target (node_contexts_window_part gives it its expression's, which only an
-// initialization has, and that has no record of its own), so no conversion of its lists it; and of the templates whose
-// rows are not made here C gives it one alone, a CONDITION's over `&&` or `||` (BUSTER_NODE_MACHINE_TEMPLATE_BRANCHES),
-// whose operand C then takes with that template too, or doesn't take the expression: the operand's record lists it.
+// initialization has, and that has no record of its own), so no conversion of its lists it; C gives it none of the
+// templates whose rows are not made here; and it is no operand: no update's destination and no tested value.
 static __attribute__((noinline)) void node_rows_window_part(struct NodeFactsReader* state, const NodeFront* front)
 {
     for (uint32_t e = 0; e < state->expression_count; e += 1)
@@ -1023,11 +1155,12 @@ static bool node_rows_window_compare(struct NodeFactsReader* state, const NodeFr
     return differs;
 }
 
-// X's rows on the window for the chunk C has just answered: the shapes, the updates' rows (where C's loop gave a
-// record of the chunk the update's template: a chunk with none has no sweep for them) and the rows over its records,
-// then each of the batch's expressions' part. Each expression taken here is then compared with the reference's tape, and each
-// listed one counted by its first record's reason. The shadow runs the three a second time over the same chunk, for
-// their ticks with their code and their constants at hand: they give the same answers.
+// X's rows on the window for the chunk C has just answered: the shapes, the updates' rows and the branches' (where
+// C's loop gave a record of the chunk the update's template, or evaluated a `!`, an `&&` or an `||` as branches: a
+// chunk with neither has no sweep for them) and the rows over its records, then each of the batch's expressions' part. Each expression taken here is then
+// compared with the reference's tape, and each listed one counted by its first record's reason. The shadow runs them
+// a second time over the same chunk, for their ticks with their code and their constants at hand: they give the same
+// answers.
 static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFront* front)
 {
     NodeFrontTypes* types = state->types;
@@ -1039,7 +1172,7 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     const uint64_t reads_end = __rdtsc();
     node_rows_window_shapes(state, front, count);
     const uint64_t shapes_end = __rdtsc();
-    if (state->c_updates_now != 0)
+    if ((state->c_updates_now | state->c_branches_now) != 0)
     {
         node_rows_window_updates(state, front, count, &read);
     }
@@ -1048,12 +1181,17 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     const uint64_t t2 = __rdtsc();
     node_rows_window_part(state, front);
     const uint64_t t3 = __rdtsc();
+    // The first run's streams, kept: the second's are compared with them. A sweep that read what an earlier run left
+    // in a column (a sense, a shape) would write the same the second time and another the first.
+    memcpy(state->x_first_kinds, state->x_kinds, written);
+    memcpy(state->x_first_classes, state->x_classes, written);
+    const uint64_t later_start = __rdtsc();
     NodeRowsCounts again = { 0 };
     node_rows_window_reads(state, count, &again);
     const uint64_t later_reads_end = __rdtsc();
     node_rows_window_shapes(state, front, count);
     const uint64_t later_shapes_end = __rdtsc();
-    if (state->c_updates_now != 0)
+    if ((state->c_updates_now | state->c_branches_now) != 0)
     {
         node_rows_window_updates(state, front, count, &again);
     }
@@ -1107,16 +1245,18 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     }
     counts[NODE_FACTS_COUNT_ROWS_SWEPT] += count;
     counts[NODE_FACTS_COUNT_ROWS_WRITTEN] += written;
-    counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] += written != written_again;
+    counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] += written != written_again || memcmp(state->x_first_kinds, state->x_kinds, written) != 0 ||
+                                                       memcmp(state->x_first_classes, state->x_classes, written) != 0;
     counts[NODE_FACTS_COUNT_ROWS_WORDS] += read.words;
     counts[NODE_FACTS_COUNT_ROWS_LINES] += read.lines;
     counts[NODE_FACTS_COUNT_ROWS_UPDATES] += read.updates;
+    counts[NODE_FACTS_COUNT_ROWS_BRANCHED] += read.branched;
     counts[NODE_FACTS_COUNT_ROWS_READ_TICKS] += reads_end - t0;
     counts[NODE_FACTS_COUNT_ROWS_SHAPE_TICKS] += shapes_end - reads_end;
     counts[NODE_FACTS_COUNT_ROWS_UPDATE_TICKS] += t1 - shapes_end;
     counts[NODE_FACTS_COUNT_ROWS_WRITE_TICKS] += t2 - t1;
     counts[NODE_FACTS_COUNT_ROWS_PART_TICKS] += t3 - t2;
-    counts[NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS] += later_reads_end - t3;
+    counts[NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS] += later_reads_end - later_start;
     counts[NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS] += later_shapes_end - later_reads_end;
     counts[NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS] += t4 - later_shapes_end;
     counts[NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS] += t5 - t4;
