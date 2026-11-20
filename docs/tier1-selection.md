@@ -337,10 +337,11 @@ patterns are:
   `cvtsd2ss`, and a bitcast is `movd` or `movq`. A conversion to a floating value
   zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
   alone, which would otherwise wait for the register's last writer. An unsigned
-  64-bit integer's conversions, whose values past `INT64_MAX` no single
-  conversion takes, are sequences of the fixed-register path's room
-  (`TIER1_RULE_FLOAT_CONVERT_WIDE`, through the scratch registers alone). To a
-  floating value, the source converts as a signed value where its sign bit is
+  64-bit integer's conversions use the fixed-register path
+  (`TIER1_RULE_FLOAT_CONVERT_WIDE`). For integer to floating, an output target
+  admitting the unsigned qword register form uses `xorps` followed by
+  `vcvtusi2ss` or `vcvtusi2sd` with MXCSR rounding. On other targets the
+  source converts as a signed value where its sign bit is
   clear. Otherwise it is halved with its last bit kept as a sticky bit, so
   rounding the half rounds the source, then converted, and `paddq` or `paddd`
   adds 1 to the result's exponent. From a floating value, one truncation runs,

@@ -211,6 +211,8 @@ struct Tier1EmitPrepared
     uint32_t x87_count;
     // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
     const IrFunction* function;
+    // Allowed register forms for converting an unsigned qword to float or double.
+    uint8_t unsigned_i64_float_forms;
 };
 
 // The CFG consumer's vector encoding level (BUSTER_TIER1_ENCODING_*): legacy SSE's, VEX's or EVEX's.
@@ -1578,8 +1580,15 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     return error;
 }
 
+static uint8_t tier1_emit_unsigned_i64_float_forms(const uint8_t* allowed_forms)
+{
+    return (uint8_t)(x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SS_X_X_RM64) |
+                     (x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SD_X_X_RM64) << 1));
+}
+
 static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
+    const uint8_t unsigned_i64_float_forms = tier1_emit_unsigned_i64_float_forms(allowed_forms);
     const uint32_t count = plan->function->instruction_count;
     // The nodes of fixed-register rules, whose sequences and saves take records past their share (tier1_emit_prepare's).
     result->fixed_count = result->prepared.fixed_count;
@@ -1693,6 +1702,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             else if (!calls)
             {
                 holes = tier1_select_holes(plan, transitions.registers, node);
+                holes.unsigned_i64_float_forms = unsigned_i64_float_forms;
             }
         }
         if (error == TIER1_EMIT_OK)

@@ -433,9 +433,9 @@ typedef enum Tier1SelectRule
 // - FROM_BITS and TO_BITS, a bitcast between an F32 and an I32 or an F64 and an I64: movd or movq.
 // Each conversion to a floating value zeroes its destination first (xorps), but a resize: cvtsi2s* writes its low
 // element alone, which would otherwise wait for the register's last writer.
-// TIER1_RULE_FLOAT_CONVERT_WIDE is an unsigned I64's (#141), FROM_UNSIGNED or TO_UNSIGNED by its `scale`, whose values
-// past INT64_MAX no single conversion takes: a sequence longer than a node's room, through the fixed-register path's
-// (tier1_select_fixed), which names the scratch register alone, holding no value (tier1_select_fixed_registers).
+// TIER1_RULE_FLOAT_CONVERT_WIDE is an unsigned I64's (#141), FROM_UNSIGNED or TO_UNSIGNED by its `scale`.
+// The fixed-register path (tier1_select_fixed) holds the software sequence or, for FROM_UNSIGNED on targets
+// admitting its EVEX register form, a cleared destination and a direct conversion using MXCSR rounding.
 #define BUSTER_TIER1_FLOAT_FROM_SIGNED 0
 #define BUSTER_TIER1_FLOAT_FROM_UNSIGNED 1
 #define BUSTER_TIER1_FLOAT_TO_SIGNED 2
@@ -798,6 +798,8 @@ struct Tier1SelectHoles
     bool sse;
     // The target has AVX2 (Tier1EmitPrepared.avx2): without it, a VEX target's 32-byte vectors take AVX's forms alone.
     bool avx2;
+    // Bits 0 and 1 allow the target's unsigned qword register conversion to float and double.
+    uint8_t unsigned_i64_float_forms;
 };
 
 static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
@@ -3305,6 +3307,18 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
         {
             records[count++] = tier1_select_move(8, holes->destination, X86_REGISTER_RDX);
         }
+    }
+    else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED &&
+             (holes->unsigned_i64_float_forms & (width == 4 ? 1u : 2u)) != 0)
+    {
+        // A zero merge source breaks the destination dependency and clears the other scalar lanes.
+        // The register form uses MXCSR rounding, including when a large positive integer rounds up.
+        const uint8_t x = holes->destination & 15;
+        const uint16_t form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM64 : X86_FORM_VCVTUSI2SD_X_X_RM64;
+        records[count++] = tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x);
+        X86Instruction conversion = tier1_select_register_record(form, x, holes->left);
+        conversion.vvvv = x;
+        records[count++] = conversion;
     }
     else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
     {
