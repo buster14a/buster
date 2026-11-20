@@ -211,6 +211,8 @@ struct Tier1EmitPrepared
     uint32_t x87_count;
     // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
     const IrFunction* function;
+    // Allowed register forms for converting an unsigned qword to float or double.
+    uint8_t unsigned_i64_float_forms;
 };
 
 // The CFG consumer's vector encoding level (BUSTER_TIER1_ENCODING_*): legacy SSE's, VEX's or EVEX's.
@@ -288,7 +290,7 @@ struct Tier1EmitResult
     // The references' room: a call's each, and in the CFG consumer a symbol's address's each too, with its options'
     // symbols' access (Tier1EmitOptions.symbol_access).
     uint32_t reference_capacity;
-    // The literals its code loads (#2744, tier1_emit_cfg_literal): each one of the function's vector constants
+    // The literals its code loads (#2744, #1387): an F80 constant at its selected format or one of the function's vector constants
     // (IrFunction.vector_constants) at one width, `literal_count` of them, its bytes past the width zero; a reference whose
     // target is BUSTER_TIER1_EMIT_LITERAL + k is to literal k (the emitted code's EmittedLiteral, which the C driver's
     // merge places in the unit's pool). And by constant, each width's literal (16, 32 and 64 bytes, three entries a
@@ -298,6 +300,8 @@ struct Tier1EmitResult
     uint32_t literal_count;
     uint32_t literal_capacity;
     uint32_t* literal_of;
+    // Private F80 constants' pool indices plus one, indexed by the scalar constant table.
+    uint32_t* x87_literal_of;
     // The nodes of fixed-register rules (tier1_select_fixed_registers), whose sequences take records past a node's share.
     uint32_t fixed_count;
     // In the CFG consumer, the callee-saved registers its values may take (live across a call), and those they took,
@@ -1621,8 +1625,15 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     return error;
 }
 
+static uint8_t tier1_emit_unsigned_i64_float_forms(const uint8_t* allowed_forms)
+{
+    return (uint8_t)(x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SS_X_X_RM64) |
+                     (x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SD_X_X_RM64) << 1));
+}
+
 static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
+    const uint8_t unsigned_i64_float_forms = tier1_emit_unsigned_i64_float_forms(allowed_forms);
     const uint32_t count = plan->function->instruction_count;
     // The nodes of fixed-register rules, whose sequences and saves take records past their share (tier1_emit_prepare's).
     result->fixed_count = result->prepared.fixed_count;
@@ -1736,6 +1747,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             else if (!calls)
             {
                 holes = tier1_select_holes(plan, transitions.registers, node);
+                holes.unsigned_i64_float_forms = unsigned_i64_float_forms;
             }
         }
         if (error == TIER1_EMIT_OK)

@@ -316,11 +316,13 @@ static void tier1_symbol_fold_straight(Tier1EmitTest* test)
 }
 
 // #2601: three indexed accesses of one global in one block, each made by the lowering with its own symbol's address and
-// its own sign extension of the index i: t[i] += v, then t[i + 8] read, the sum of both returned. Every pattern reads
-// the block's first address and extension, so neither repeats in the code: no node computes the later ones. `pad`
-// unused zero constants after the parameters move the accesses later: 62 puts the first address at node 64, the first
-// of the leaves' scan's second 64.
-static bool tier1_symbol_fold_repeated_function(Tier1EmitTest* test, IrFunction* function, uint32_t pad)
+// its own extension of the index i, `extension` (IR_ZEXT or IR_SEXT): t[i] += v, then t[i + 8] read, the sum of both
+// returned. Every pattern reads the block's first address and zero extension, so neither repeats in the code: no node
+// computes the later ones. The sign extensions request the parameter's signed storage (tier1_select_sign_parameter), so
+// its register holds their value, and every pattern reads the parameter itself (#2843): no node computes any of them.
+// `pad` unused zero constants after the parameters move the accesses later: 62 puts the first address at node 64, the
+// first of the leaves' scan's second 64.
+static bool tier1_symbol_fold_repeated_function(Tier1EmitTest* test, IrFunction* function, uint8_t extension, uint32_t pad)
 {
     const IrSizes sizes = {
         .instruction_count = 17 + pad,
@@ -351,7 +353,7 @@ static bool tier1_symbol_fold_repeated_function(Tier1EmitTest* test, IrFunction*
         for (uint32_t access = 0; access < 3; access += 1)
         {
             const uint32_t table = tier1_select_test_append(function, &next, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            const uint32_t extended = tier1_select_test_append(function, &next, IR_SEXT, IR_I64, index, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t extended = tier1_select_test_append(function, &next, extension, IR_I64, index, BUSTER_IR_NONE, BUSTER_IR_NONE);
             const uint32_t element = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, table, extended, access == 2 ? 1 : 0);
             if (access == 0)
             {
@@ -384,30 +386,33 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_symbol_fold_call_
 
 static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
 {
-    for (uint32_t variant = 0; variant < 4; variant += 1)
+    for (uint32_t variant = 0; variant < 8; variant += 1)
     {
         const uint32_t vector = variant & 1;
         // The nodes past the parameters' move by the padding.
         const uint32_t at = (variant & 2) != 0 ? 62 : 0;
+        const uint8_t extension = (variant & 4) != 0 ? IR_SEXT : IR_ZEXT;
         IrFunction function;
-        const bool created = tier1_symbol_fold_repeated_function(test, &function, at);
+        const bool created = tier1_symbol_fold_repeated_function(test, &function, extension, at);
         const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
         tier1_emit_test_expect(test, valid, "the repeated indexed accesses' fixture is valid IR");
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
         const bool planned = valid && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         // Unpadded, nodes 2 and 3 are the first address and extension, 7 and 8 the second's, 11 and 12 the third's; 10
-        // the store, and 6 and 15 the additions that take the loads 5 and 14 as their memory operands (#2602).
-        bool shared = planned && !plan.covered[at + 2] && !plan.covered[at + 3] && plan.covered[at + 7] && plan.covered[at + 8] && plan.covered[at + 11] && plan.covered[at + 12] &&
+        // the store, and 6 and 15 the additions that take the loads 5 and 14 as their memory operands (#2602). The index
+        // each access reads is the first zero extension, or the parameter 0 for the sign extensions (#2843).
+        const uint32_t index = extension == IR_SEXT ? 0 : at + 3;
+        bool shared = planned && !plan.covered[at + 2] && plan.covered[at + 3] == (extension == IR_SEXT) && plan.covered[at + 7] && plan.covered[at + 8] && plan.covered[at + 11] && plan.covered[at + 12] &&
                       plan.covered[at + 5] && plan.covered[at + 14] && plan.patterns[at + 6].rule == TIER1_RULE_LOAD_OPERAND && plan.patterns[at + 15].rule == TIER1_RULE_LOAD_OPERAND;
         const uint32_t accesses[3] = { at + 6, at + 10, at + 15 };
         for (uint32_t k = 0; shared && k < 3; k += 1)
         {
             const Tier1SelectPattern* pattern = &plan.patterns[accesses[k]];
             const uint32_t first = k == 1 ? 0 : 1;
-            shared = pattern->values[first] == at + 2 && pattern->values[first + 1] == at + 3 && pattern->displacement == (k == 2 ? 64 : 0) && !pattern->rip;
+            shared = pattern->values[first] == at + 2 && pattern->values[first + 1] == index && pattern->displacement == (k == 2 ? 64 : 0) && !pattern->rip;
         }
-        tier1_emit_test_expect(test, shared, "every indexed access reads its block's first symbol address and index extension");
+        tier1_emit_test_expect(test, shared, "every indexed access reads its block's first symbol address and index extension, or the index whose register holds it");
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
             .vector = vector != 0,
