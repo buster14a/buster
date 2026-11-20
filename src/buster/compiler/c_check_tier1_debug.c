@@ -814,9 +814,8 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     valid = valid && (bindings || check_tier1_debug_constants(debug, scratch, &constants));
     const uint64_t parameter_ranges = valid && !bindings ? check_tier1_debug_parameter_ranges(&parameters, NULL) : 0;
     const uint64_t constant_ranges = valid && !bindings ? check_tier1_debug_constant_ranges(&constants, entries, safe, body, epilogue, NULL) : 0;
-    const uint64_t value_ranges = valid && bindings ? check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, NULL) : 0;
     const uint64_t object_ranges = valid ? check_tier1_debug_object_ranges(homes, local_slots, locals, spans, span_count, object_clips, NULL) : 0;
-    const uint64_t ranges = object_ranges + parameter_ranges + constant_ranges + value_ranges;
+    const uint64_t ranges = object_ranges + parameter_ranges + constant_ranges;
     valid = valid && ranges <= UINT32_MAX;
     if (valid)
     {
@@ -854,10 +853,10 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
         {
             candidate.local_range_count += (uint32_t)check_tier1_debug_constant_ranges(&constants, entries, safe, body, epilogue, candidate.local_ranges + candidate.local_range_count);
         }
-        if (value_ranges != 0)
-        {
-            candidate.local_range_count += (uint32_t)check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, candidate.local_ranges + candidate.local_range_count);
-        }
+        valid = !bindings || check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, output, &candidate);
+    }
+    if (valid)
+    {
         *result = candidate;
     }
     else
