@@ -29,7 +29,8 @@
 //    every such value is live out at once; each phi to its operand's at the exit of a chosen predecessor; and a value
 //    that a phi takes, to the first register of the phi, or of the next phi along, that has one before it. A range of a
 //    loop's body laid out before its header, with no anchor, takes the hint of its phi's at the header, back to the first
-//    range of another value before it (tier1_cfg_body_hints, #2784). Each value then stays where control from its
+//    range of another value before it (tier1_cfg_body_hints, #2784), and a phi's first range there that the chain leaves
+//    unhinted takes an operand's register at the loop's entry (#2834). Each value then stays where control from its
 //    definition brings it, and an edge moves what its own source block changed. A range live out of its block names the
 //    range whose opening is the value's place at its first successor's entry, where that one comes first (#2774): a
 //    value whose place there is its slot is the first the allocator evicts.
@@ -1330,6 +1331,15 @@ static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, 
 // them through the scratch register twice on its loop's path for a plain character. A hint back to the value's own
 // earlier range adds nothing to the register it follows anyway; and one to an exit in a slot never makes the range wait
 // in its own (tier1_allocate_scan_uses).
+//
+// Where the chain reaches no such range (#2834), a phi's first range in layout takes an operand's register at the exit
+// of a predecessor of the phi's block, the nearest in layout that ends before the range: the loop's entry, where the
+// value comes in. patterns_gsub's latch, whose join's ranges are their values' first, is laid out between the body and
+// the header, so that the chain led back to the body's own range, which then took the lowest free register and swapped
+// two values with the header's on every iteration. The value's later ranges keep its own last place: a phi of
+// sqlite3VdbeExec's opcode loop that rested in its slot through the handlers took its entry's register in each of them
+// instead, and the dispatch, short of one, stored the step counter on every opcode. A recipe's exit without a register
+// names no place (tier1_allocation_value_hint).
 static void tier1_cfg_body_hints(const Tier1CfgInput* input, const uint32_t* offsets, Tier1CfgPieces* pieces)
 {
     for (uint32_t v = 0; v < input->value_count; v += 1)
@@ -1350,6 +1360,30 @@ static void tier1_cfg_body_hints(const Tier1CfgInput* input, const uint32_t* off
             if (before && pieces->values[earlier] != v && pieces->classes[earlier] == pieces->classes[i])
             {
                 pieces->hint_intervals[i] = named;
+            }
+        }
+    }
+    for (uint32_t b = 0; b < input->block_count; b += 1)
+    {
+        const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
+        for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
+        {
+            const uint32_t v = input->phi_values[k];
+            const uint32_t first = offsets[v];
+            const bool open = first != offsets[v + 1] && pieces->starts[first] < input->definitions[v] && pieces->hint_intervals[first] == BUSTER_TIER1_CFG_NONE && pieces->hints[first] == v;
+            uint32_t nearest = BUSTER_TIER1_CFG_NONE;
+            for (uint32_t j = 0; open && j < degree; j += 1)
+            {
+                const uint32_t predecessor = input->predecessors[input->predecessor_offsets[b] + j];
+                const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
+                const uint32_t exit = input->block_starts[predecessor + 1] - 1;
+                const uint32_t taken = operand != BUSTER_TIER1_CFG_NONE && operand != v ? tier1_cfg_piece_at(pieces, offsets[operand], offsets[operand + 1], exit) : BUSTER_TIER1_CFG_NONE;
+                const bool fits = taken != BUSTER_TIER1_CFG_NONE && pieces->ends[taken] <= pieces->starts[first] && pieces->classes[taken] == pieces->classes[first];
+                nearest = fits && (nearest == BUSTER_TIER1_CFG_NONE || pieces->ends[taken] > pieces->ends[nearest]) ? taken : nearest;
+            }
+            if (nearest != BUSTER_TIER1_CFG_NONE)
+            {
+                pieces->hint_intervals[first] = nearest | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
             }
         }
     }

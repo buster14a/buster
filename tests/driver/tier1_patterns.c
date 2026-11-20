@@ -256,7 +256,9 @@ spilled_halt:
 
 // #2784: Lua's str_gsub, a loop that replaces a match through a call or copies a plain character and advances the
 // source. Its body precedes its header in layout. The pattern waits in its slot until the call reads it, and its
-// eviction after the reload stored it back into the same slot.
+// eviction after the reload stored it back into the same slot. #2834: the latch that joins n and lastmatch is laid out
+// between the body and the header, and the body's ranges of the two took registers crossed against the header's, which
+// each iteration swapped through r11; they now take their registers where the loop is entered.
 struct patterns_buffer
 {
     char* data;
@@ -1286,6 +1288,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     unsigned loaded = 0;
     // Stores of a register into the memory the instruction before loaded it from (#2784).
     unsigned stored_back = 0;
+    // Instructions that name r11, the scratch register through which edges' moves break their cycles (#2834).
+    unsigned scratch = 0;
     // Stores of a zero immediate to memory: an object's clear's (#2745).
     unsigned zeros = 0;
     // Moves of a register into another (#2843).
@@ -1308,6 +1312,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         const bool jump = strcmp(operation, "jmp") == 0;
         indirect += jump && operands[0] == '*';
         increments += strncmp(operation, "add", 3) == 0 && strncmp(operands, "$0x4,%", 6) == 0;
+        scratch += strstr(operands, "%r11") != NULL;
         const PatternsInstruction* before = i != 0 ? &body->instructions[i - 1] : NULL;
         const bool moved = before != NULL && strcmp(before->operation, "mov") == 0 && before->operands[0] == '%' && !patterns_memory(before->operands);
         copies += strcmp(operation, "mov") == 0 && operands[0] == '%' && !patterns_memory(operands);
@@ -1361,7 +1366,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         valid = valid && zeros == 8;
         break;
     case PATTERNS_GSUB:
-        valid = valid && stored_back == 0;
+        valid = valid && stored_back == 0 && scratch == 0;
         break;
     case PATTERNS_ARMS:
         valid = valid && moves >= 1 && copies == 0;
@@ -1369,8 +1374,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u register-copies=%u\n",
-                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back, copies);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u register-copies=%u r11=%u\n",
+                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back, copies, scratch);
     }
     return valid;
 }
