@@ -99,7 +99,18 @@ patterns are:
   index's sign extension too: a pattern reads its block's first symbol address,
   or sign or zero extension to I64, of the same operand in their place
   (`tier1_select_symbol_firsts`, #2601), so a block's accesses of one table
-  share one `lea` and one index register. An extension to I32 stays its own:
+  share one `lea` and one index register. An extension to I64 that selection
+  takes as a copy of its operand, whose storage already holds the 64-bit
+  value (a sign-stored I32's sign extension; a zero extension, or a sign
+  extension known nonnegative, of a narrow value or an I32 whose bits past
+  its width are zero), is that operand where the operand has other uses
+  (`tier1_select_extension_forwards`, #2843): a pattern reads the operand's
+  register in its place, so nothing computes the extension. Its copy had
+  moved the value into a register of its own while the operand stayed live,
+  `movslq (%rdi,%rcx,4),%rdx; mov %rdx,%r8` before `test %edx,%edx` and
+  `cmovg %r8,%r9`, where #2838's arms extend `p[i]` in `s += p[i] > 0 ?
+  p[i] : 1`. A single-use operand is left to its extension, which folds a
+  load into its `movsx` or takes the dying operand's register. An extension to I32 stays its own:
   `tier1_select_storage.c`'s column keeps each I32 sign-extended,
   zero-extended or neither above its 32 bits by its own users, so two of one
   operand can differ (`sqlite3LogEstAdd`'s `a + x[a - b]`, whose index read
