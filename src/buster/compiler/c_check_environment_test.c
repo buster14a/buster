@@ -401,11 +401,7 @@ static void check_test_environment_counts(CheckTest* test)
         }
         parser.tree.roles = roles;
         parser.tokens.count = count;
-        parser.options.scalar = true;
-        const uint32_t scalar = check_environment_body_count(&parser);
-        parser.options.scalar = false;
-        check_test_expect(test, scalar == expected && check_environment_body_count(&parser) == expected,
-                          "guarded production body-count scalar/vector mismatch");
+        check_test_expect(test, check_environment_body_count(&parser) == expected, "guarded production body count");
     }
     if (mapping != MAP_FAILED)
     {

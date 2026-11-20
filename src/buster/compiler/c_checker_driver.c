@@ -9031,7 +9031,6 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .identifiers = identifiers,
                 .types = program->types,
                 .output = output,
-                .scalar = parser->options.scalar,
                 .internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1,
                 .object_size_compat = candidate->object_sizes != NULL,
             };

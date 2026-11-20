@@ -921,11 +921,10 @@ static uint32_t check_unseq_first(const CheckGraph* graph, uint32_t root)
 // modification, and each usage names its variable through an identifier of its own (a read's, a modification's
 // target's; a modification of a modification's target takes one more): so a root whose node range (the subtree's, its
 // unevaluated operands' and statement expressions' values' with it: a superset) holds no modified variable's name more
-// than once, counting its modifications, can't report. Most roots modify a variable they name nowhere else. The vector
-// path finds the range's modifications and values 16 nodes at a time by operator; the scalar path, its twin, tests every
-// node. A brace initializer's list, and a range with more modified names than the list holds, are walked.
-static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser, const uint32_t* starts, const bool* reads, uint32_t count,
-                                bool vector)
+// than once, counting its modifications, can't report. Most roots modify a variable they name nowhere else. The
+// range's modifications and values are found 16 nodes at a time by operator. A brace initializer's list, and a range
+// with more modified names than the list holds, are walked.
+static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser, const uint32_t* starts, const bool* reads, uint32_t count)
 {
     const CheckGraph* graph = checker->graph;
     const uint32_t root = count == 1 && reads == NULL ? starts[0] : BUSTER_CHECK_NONE;
@@ -942,15 +941,12 @@ static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser,
         {
             const uint32_t live = end - base < 16 ? end - base : 16;
             uint32_t selected = live == 16 ? 0xffffu : (1u << live) - 1;
-            if (vector)
-            {
-                const __mmask16 lanes = (__mmask16)selected;
-                const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + base);
-                selected = pass == 0 ? (_mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_PRE_INCREMENT)) &
-                                        _mm512_mask_cmple_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BIT_XOR_ASSIGN))) |
-                                           _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN)) :
-                                       _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VALUE));
-            }
+            const __mmask16 lanes = (__mmask16)selected;
+            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + base);
+            selected = pass == 0 ? (_mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_PRE_INCREMENT)) &
+                                    _mm512_mask_cmple_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BIT_XOR_ASSIGN))) |
+                                       _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN)) :
+                                   _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VALUE));
             for (; selected != 0 && !repeats; selected &= selected - 1)
             {
                 const uint32_t node = base + (uint32_t)__builtin_ctz(selected);
@@ -1003,8 +999,6 @@ struct CheckUnseqStorage
     // The count's stack and the statement expressions' values, room for the whole graph's nodes, made once.
     uint32_t* stack;
     uint32_t* inner;
-    // The vector path's or the scalar path's prefilter (check_unseq_repeats).
-    bool vector;
 };
 
 // Room for a full expression of `nodes` nodes, the tables grown to at least twice the last size: false where scratch
@@ -1038,10 +1032,9 @@ static bool check_unseq_reserve(CheckUnseqStorage* storage, uint32_t nodes, Aren
 }
 
 // The unit's marks (BUSTER_CHECK_UNSEQ_MODIFIES): each modification's node and every node above it, to its root. The
-// vector path finds the modifications 16 nodes at a time by operator; the scalar path, its twin, tests every node. Each
-// climb stops at a node already marked, so the marks cost O(nodes). Null where the unit has no modification (or scratch
-// has no room, which `*failed` says).
-static uint8_t* check_unseq_marks(const CheckGraph* graph, const uint32_t* parents, bool vector, Arena* scratch, bool* failed)
+// modifications are found 16 nodes at a time by operator. Each climb stops at a node already marked, so the marks cost
+// O(nodes). Null where the unit has no modification (or scratch has no room, which `*failed` says).
+static uint8_t* check_unseq_marks(const CheckGraph* graph, const uint32_t* parents, Arena* scratch, bool* failed)
 {
     uint8_t* marks = NULL;
     *failed = false;
@@ -1049,14 +1042,11 @@ static uint8_t* check_unseq_marks(const CheckGraph* graph, const uint32_t* paren
     {
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
         uint32_t selected = live == 16 ? 0xffffu : (1u << live) - 1;
-        if (vector)
-        {
-            const __mmask16 lanes = (__mmask16)selected;
-            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
-            selected = _mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_PRE_INCREMENT)) &
-                       _mm512_mask_cmple_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BIT_XOR_ASSIGN));
-            selected |= _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN));
-        }
+        const __mmask16 lanes = (__mmask16)selected;
+        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+        selected = _mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_PRE_INCREMENT)) &
+                   _mm512_mask_cmple_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BIT_XOR_ASSIGN));
+        selected |= _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN));
         for (; selected != 0 && !*failed; selected &= selected - 1)
         {
             const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
@@ -1131,7 +1121,7 @@ static void check_unseq_check(CheckCommonEmission* emission, CheckUnseqStorage* 
         }
         bool valid = checker->known != NULL;
         // (Most full expressions modify a variable they use nowhere else: no walk can report in them.)
-        modifies = !valid || check_unseq_repeats(checker, parser, starts, reads, count, storage->vector);
+        modifies = !valid || check_unseq_repeats(checker, parser, starts, reads, count);
         uint32_t inner_count = 0;
         uint32_t nodes = 0;
         for (uint32_t i = 0; valid && modifies && i < count; i += 1)

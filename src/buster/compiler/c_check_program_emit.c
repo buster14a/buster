@@ -4486,7 +4486,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         .identifiers = identifiers,
         .types = program->types,
         .output = scratch,
-        .scalar = scalar,
     };
     Scratch mangle_scratch = { 0 };
     for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
