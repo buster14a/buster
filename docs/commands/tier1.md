@@ -367,9 +367,9 @@ store of a zero immediate may be left; a volatile object and a union whose
 designator moves to another member after the vector's keep their eight. In
 #2922's selects of floating `==` and `!=` (one of each, a loop's sum of them
 and a running last match), a `cmov` of the parity flag and no `setcc` must be
-left, and in a conditional count by `==`, whose accumulator recurs through the
-select's values by an addition, the truth value's `setcc`s and no parity
-`cmov`. In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
+left, and in a conditional scale by `==` (`c = p[i] == t ? c * 3 : c + 1`),
+whose accumulator recurs through the select's values by an operation, the truth
+value's `setcc`s and no parity `cmov`. In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
 stored back into the memory the instruction before loaded it from:
 #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
 into the memory the instruction before loaded it from. In #2843's conditional

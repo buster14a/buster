@@ -20,8 +20,9 @@
 //   whose outer test stays a branch): ucomis and a cmov or jump of its flags for each, no setcc;
 // - #2922's selects of floating == and != (a select of each, a loop's sum of selects of two invariant values, and a
 //   running last match by !=, whose recurrence is its own earlier results alone): a cmov of the parity flag too, no
-//   setcc; and where the loop's accumulator recurs through a select's values by an operation (a conditional count by
-//   ==), its truth value instead, no cmov of the parity flag; the oracle checks all of them on unordered operands too;
+//   setcc; and where the loop's accumulator recurs through a select's values by an operation (a conditional scale by
+//   ==, `c = p[i] == t ? c * 3 : c + 1`, whose two arms #2932's fold can't make one operation), its truth value
+//   instead, no cmov of the parity flag; the oracle checks all of them on unordered operands too;
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
@@ -502,16 +503,16 @@ __attribute__((noinline)) long patterns_float_equal_sum(const double* p, int n, 
 
 __attribute__((noinline)) long patterns_float_equal_count(const double* p, int n, double t)
 {
-    long c = 0;
+    long c = 1;
     for (int i = 0; i < n; i += 1)
     {
         if (p[i] == t)
         {
-            c += 5;
+            c = c * 3;
         }
         else
         {
-            c += 1;
+            c = c + 1;
         }
     }
     return c;
@@ -1091,7 +1092,7 @@ int main(void)
         valid = patterns_float_sign(reals[i]) == (reals[i] < 0 ? -1 : reals[i] > 0 ? 1 : 0) && valid;
         long counted = 0;
         long summed_equal = 0;
-        long counted_equal = 0;
+        long counted_equal = 1;
         int last = -1;
         float narrowed[sizeof(reals) / sizeof(reals[0])];
         for (int n = 0; n < real_count; n += 1)
@@ -1106,7 +1107,7 @@ int main(void)
             valid = patterns_float_last_unequal(narrowed, n, narrowed[i]) == last && valid;
             counted += reals[n] >= reals[i] ? 3 : -1;
             summed_equal += reals[n] == reals[i] ? 11 : -(long)i;
-            counted_equal += reals[n] == reals[i] ? 5 : 1;
+            counted_equal = reals[n] == reals[i] ? counted_equal * 3 : counted_equal + 1;
             last = narrowed[n] != narrowed[i] ? n : last;
         }
     }

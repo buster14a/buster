@@ -340,7 +340,9 @@ patterns are:
   each loop at four placements in a 64-byte line):
   `if (p[i] == t) c += 5; else c += 1;`, an addition and both `cmov`s on its
   chain, runs 260.0 Mcycles at every placement, and its truth value 217.1 to
-  217.3 at two placements (260.0 and 343.8 at the others); `b = p[i] == t ? i
+  217.3 at two placements (260.0 and 343.8 at the others), as if-conversion made
+  it then; #2932's fold has since made it `c += p[i] == t ? 5 : 1`, a select
+  of constants off the chain, which fuses; `b = p[i] == t ? i
   : b`, whose chain is the `cmov`s alone (its value the phi's), runs 176.0 by
   two `cmov`s at every placement, clang -O2's cycles, and 181.1 to 181.3 by its
   truth value; and `s += p[i] == t ? x : y`, whose select isn't on the chain,
@@ -393,8 +395,8 @@ patterns are:
   must cost its pattern's 3 or 4. The driver's pattern test requires `ucomis` and a
   `cmov` or jump of its flags, no `setcc`, in four C selects of ordered
   comparisons, a parity `cmov` in three of `==` and `!=` (a loop's sum and a
-  running last match among them), and the truth value in a conditional count
-  by `==`. #2922 fuses 2 selects in `sqlite3.c`'s object
+  running last match among them), and the truth value in a conditional scale
+  by `==` (`c = p[i] == t ? c * 3 : c + 1`). #2922 fuses 2 selects in `sqlite3.c`'s object
   (`sqlite3_str_vappendf`), 8 fewer records and 16 fewer bytes, and none in
   Lua's or musl's 312 sources; its compile runs the same instructions within
   0.04% and 0.36% fewer cycles (11 runs). Such selects are rare in

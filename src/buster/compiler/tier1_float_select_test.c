@@ -10,13 +10,12 @@
 //   infinities, a subnormal and the largest finite value among them.
 // - The plans of a comparison by each predicate whose select reads it directly, through its I1 copy right after it
 //   (if-conversion's truth simplification's), through a copy past another node, or through one or two of C's truth
-//   values' links must fold exactly the shapes the grammar takes: every one of an ordered predicate but
-//   the distant copy, and == and != directly and through their copy.
+//   values' links must fold exactly the shapes the grammar takes: every one of an ordered predicate but the distant
+//   copy, and == and != directly and through their copy. Each plan joins the selection's frozen digest.
 // - tier1_select_recurrent (#2922) finds a select's values' recurrence through an operation, directly, through a phi of
 //   phis and where the walk reaches the phi through phis alone first, up to its bound of rows and not past it; and none
 //   through phis and copies alone (a running choice), nor where only the select's result or its condition reaches the
 //   phi.
-
 
 // Whether a floating select's `condition` holds for `left` and `right`, the operands' bits at `width` bytes (a float's in
 // the low half), by C's own comparisons of their values.
