@@ -1916,7 +1916,7 @@ static uint8_t* check_test_return_facts_definition(CheckProgram* program, Arena*
     const uint32_t count = program->input->graph.count;
     uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     uint32_t* unknowns = NULL;
-    const bool ready = facts != NULL && check_program_return_unknowns(program, scratch, &unknowns, false);
+    const bool ready = facts != NULL && check_program_return_unknowns(program, scratch, &unknowns);
     const uint8_t* names = ready ? check_program_return_library_names(program->identifiers, scratch) : NULL;
     for (uint32_t node = 0; ready && node < count; node += 1)
     {

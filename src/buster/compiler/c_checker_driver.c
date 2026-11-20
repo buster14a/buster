@@ -4863,9 +4863,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         const CheckSparseWide attributes = input->attributes;
         const bool attributed = show_warnings && attribute_warnings && check_sparse_wide_present(attributes);
-        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned, scalar) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned, scalar))
+        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned))
         {
-            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned, scalar);
+            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);

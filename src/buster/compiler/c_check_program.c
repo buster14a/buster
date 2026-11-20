@@ -3572,15 +3572,15 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
 // CheckProgram.object_labelled: the objects of the declarations with an asm label not ignored (check_input_attribute_of's),
 // by one scan of the tokens
 // with attributes (CheckInput.attributes), in a unit with an asm keyword alone; false where the column has no room.
-static bool check_program_labelled_objects(CheckProgram* program, Arena* output, bool scalar)
+static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     bool room = true;
-    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count, scalar) : count; room && first < count;
-         first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
+    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
+         first = check_input_attributed_next(input->attributes, first + 16, count))
     {
-        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count, scalar);
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
         for (uint32_t selected = lanes; room && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -6178,7 +6178,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
                                     check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
     valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
     // The labelled library declarations, which a computed call's test reads in the references' pass below.
-    valid = valid && check_program_labelled_objects(program, output, BUSTER_SCALAR_PATH(options.scalar));
+    valid = valid && check_program_labelled_objects(program, output);
     // The candidates as the pass before the bodies' controls finds them (#2536's step 2.2, census_pass): the constant ifs'
     // left-out tokens (check_program_constant_arms), then the pruned scan without them, timed together.
     if (valid && (options.selection_census || options.candidates) && program->status == CHECK_PROGRAM_OK)

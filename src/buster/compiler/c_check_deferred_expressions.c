@@ -918,7 +918,7 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
             CheckSparseColumn columns[] = { input->initializer_nodes, input->evaluation_nodes, input->case_ranges };
             for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
             {
-                const uint32_t entries = check_sparse_entries(columns[c], part->first_token, part->end_token, !BUSTER_SCALAR_PATH(deferred->scalar_merge), positions);
+                const uint32_t entries = check_sparse_entries(columns[c], part->first_token, part->end_token, positions);
                 for (uint32_t e = 0; e < entries; e += 1)
                 {
                     const uint32_t token = positions[e];
