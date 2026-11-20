@@ -105,7 +105,11 @@ struct IrIfConvertRegion
     uint32_t false_from;
     // The region's rows moving to the head, a slice of IrIfConvertWork.moved.
     uint32_t moved;
-    uint32_t moved_count;
+    uint8_t moved_count;
+    // One bit per in-place phi records a two-arm fold and its common operand in each arm.
+    uint8_t pairs;
+    uint8_t true_right;
+    uint8_t false_right;
     uint32_t phis;
     // The region's new rows, a slice of IrIfConvertWork.fresh: its sunk accumulations' identities, then a folded join's
     // selects, the first of which is `selects` (BUSTER_IR_NONE where the join's phis become the selects).
@@ -181,6 +185,7 @@ struct IrIfConvertWork
     uint32_t recurrences;
     // An accepted head could be an arm of an outer region in the next round.
     bool nested;
+    bool paired;
 };
 
 _Static_assert(IR_OP_COUNT == 70, "a new operation needs its class in ir_if_convert_barriers");
@@ -668,6 +673,44 @@ static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint
     }
 }
 
+// A pair of private arm operations can distribute over their join's select. Record operand order
+// while the current arms are marked, before permuting the rows into their final blocks.
+static void ir_if_convert_plan_pairs(IrIfConvertWork* work, IrIfConvertRegion* region, uint32_t join_first)
+{
+    _Static_assert(2 * BUSTER_IR_IF_CONVERT_ARM_ROWS <= UINT8_MAX, "the two arm row lists fit the moved count");
+    _Static_assert(BUSTER_IR_IF_CONVERT_PHI_LIMIT <= 8, "the pair masks hold one bit per phi");
+    const IrFunction* f = work->function;
+    for (uint32_t p = 0; p < region->phis; p += 1)
+    {
+        const uint32_t phi = join_first + p;
+        const uint32_t yes = work->alias[ir_if_convert_incoming(f, phi, region->true_from)];
+        const uint32_t no = work->alias[ir_if_convert_incoming(f, phi, region->false_from)];
+        const uint32_t op = f->op[yes];
+        if (yes != no && op == f->op[no] && (op == IR_ADD || op == IR_SUB || op == IR_OR || op == IR_XOR) &&
+            f->type[phi] >= IR_I8 && f->type[phi] <= IR_I64 && work->moving[yes] != 0 && work->moving[no] != 0 &&
+            work->arms[work->cfg.instruction_blocks[yes]] == 2 && work->arms[work->cfg.instruction_blocks[no]] == 2)
+        {
+            const uint32_t ya = work->alias[f->a[yes]];
+            const uint32_t yb = work->alias[f->b[yes]];
+            const uint32_t na = work->alias[f->a[no]];
+            const uint32_t nb = work->alias[f->b[no]];
+            const bool commute = op != IR_SUB;
+            const bool left = ya == na || (commute && ya == nb);
+            const bool right = commute && (yb == na || yb == nb);
+            const uint32_t* moved = work->moved + region->moved;
+            if ((left || right) && !ir_if_convert_shared(work, moved, region->moved_count, join_first, region->phis, phi, yes) &&
+                !ir_if_convert_shared(work, moved, region->moved_count, join_first, region->phis, phi, no))
+            {
+                work->paired = true;
+                region->pairs |= 1u << p;
+                region->true_right |= (uint32_t)!left << p;
+                region->false_right |= (uint32_t)(na != (left ? ya : yb)) << p;
+                work->sunk_count += 1;
+            }
+        }
+    }
+}
+
 static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
 {
     const IrFunction* const f = work->function;
@@ -858,6 +901,10 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
             }
         }
         region.moved_count = work->moved_count - region.moved;
+        if (!fold && sides[0].count != 0 && sides[1].count != 0 && region.moved_count >= 2)
+        {
+            ir_if_convert_plan_pairs(work, &region, join_first);
+        }
         if (!fold)
         {
             ir_if_convert_sink(work, rows, row_count, join_first, &region, loads != 0);
@@ -913,6 +960,40 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
             {
                 work->arms[sides[s].blocks[k]] = work->arms[sides[s].blocks[k]] == 2 ? 0 : work->arms[sides[s].blocks[k]];
             }
+        }
+    }
+}
+
+// With both arm operands in their final order, the later operation can select either differing
+// operand. The join applies the common operation, and normal DCE drops the earlier arm operation.
+static void ir_if_convert_rewrite_pairs(const IrIfConvertWork* work, IrFunction* view, const uint32_t* order)
+{
+    for (uint32_t r = 0; r < work->region_count; r += 1)
+    {
+        const IrIfConvertRegion* region = work->regions + r;
+        uint32_t pairs = region->pairs;
+        while (pairs != 0)
+        {
+            const uint32_t p = (uint32_t)__builtin_ctz(pairs);
+            const uint32_t phi = view->block_offsets[region->join] + p;
+            const uint32_t yes = view->b[phi];
+            const uint32_t no = view->c[phi];
+            const uint32_t select = yes > no ? yes : no;
+            const bool true_right = (region->true_right & (1u << p)) != 0;
+            const bool false_right = (region->false_right & (1u << p)) != 0;
+            const uint32_t common = true_right ? view->b[yes] : view->a[yes];
+            const uint32_t x = true_right ? view->a[yes] : view->b[yes];
+            const uint32_t y = false_right ? view->a[no] : view->b[no];
+            view->op[phi] = view->op[yes];
+            view->op[select] = IR_SELECT;
+            view->a[select] = view->a[phi];
+            view->b[select] = x;
+            view->c[select] = y;
+            view->a[phi] = common;
+            view->b[phi] = select;
+            view->c[phi] = BUSTER_IR_NONE;
+            work->sunk[order[select]] = order[phi];
+            pairs &= pairs - 1;
         }
     }
 }
@@ -1202,27 +1283,6 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
             }
         }
         ir_debug_remap(f, &view, values, NULL, NULL);
-        // A sunk accumulation's operation row now holds its select, not the value a binding of it described.
-        for (uint32_t k = 0; view.debug != NULL && work->sunk_count != 0 && k < view.debug->binding_count; k += 1)
-        {
-            IrDebugBinding* binding = view.debug->bindings + k;
-            const uint32_t row = binding->kind == IR_DEBUG_BIND_VALUE && binding->value < total ? order[binding->value] : BUSTER_IR_NONE;
-            if (row < count && work->sunk[row] != BUSTER_IR_NONE && f->op[row] != IR_PHI)
-            {
-                binding->kind = IR_DEBUG_BIND_UNAVAILABLE;
-                binding->value = BUSTER_IR_NONE;
-            }
-        }
-        for (uint32_t k = 0; view.debug != NULL && work->sunk_count != 0 && k < view.debug->region_count; k += 1)
-        {
-            IrDebugRegion* scope = view.debug->regions + k;
-            const uint32_t row = scope->kind == IR_DEBUG_BIND_VALUE && scope->value < total ? order[scope->value] : BUSTER_IR_NONE;
-            if (row < count && work->sunk[row] != BUSTER_IR_NONE && f->op[row] != IR_PHI)
-            {
-                scope->kind = IR_DEBUG_BIND_UNAVAILABLE;
-                scope->value = BUSTER_IR_NONE;
-            }
-        }
         uint32_t extra = f->extra_count;
         for (uint32_t out = 0; out < total; out += 1)
         {
@@ -1249,6 +1309,31 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
             else
             {
                 extra = ir_if_convert_row(work, &view, values, fresh, i, out, extra);
+            }
+        }
+        if (work->paired)
+        {
+            ir_if_convert_rewrite_pairs(work, &view, order);
+        }
+        // A sunk accumulation's operation row now holds its select, not the value a binding of it described.
+        for (uint32_t k = 0; view.debug != NULL && work->sunk_count != 0 && k < view.debug->binding_count; k += 1)
+        {
+            IrDebugBinding* binding = view.debug->bindings + k;
+            const uint32_t row = binding->kind == IR_DEBUG_BIND_VALUE && binding->value < total ? order[binding->value] : BUSTER_IR_NONE;
+            if (row < count && work->sunk[row] != BUSTER_IR_NONE && f->op[row] != IR_PHI)
+            {
+                binding->kind = IR_DEBUG_BIND_UNAVAILABLE;
+                binding->value = BUSTER_IR_NONE;
+            }
+        }
+        for (uint32_t k = 0; view.debug != NULL && work->sunk_count != 0 && k < view.debug->region_count; k += 1)
+        {
+            IrDebugRegion* scope = view.debug->regions + k;
+            const uint32_t row = scope->kind == IR_DEBUG_BIND_VALUE && scope->value < total ? order[scope->value] : BUSTER_IR_NONE;
+            if (row < count && work->sunk[row] != BUSTER_IR_NONE && f->op[row] != IR_PHI)
+            {
+                scope->kind = IR_DEBUG_BIND_UNAVAILABLE;
+                scope->value = BUSTER_IR_NONE;
             }
         }
         view.arena_bytes = output->length - mark;
