@@ -192,6 +192,14 @@ static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
     check_debug_test_expect(tally, valid, "the dynamic backedge trace constructs the real bounded region and machine proof", "fresh phi and repeated definition identities");
     if (valid)
     {
+        check_debug_test_expect(tally, check_tier1_debug_value_region(&proof, 0, 3, 10) == BUSTER_IR_NONE &&
+                                check_tier1_debug_value_region(&proof, 1, 3, 9) == BUSTER_IR_NONE &&
+                                check_tier1_debug_value_region(&proof, 1, 3, 10) == 0 &&
+                                check_tier1_debug_value_region(&proof, 1, 3, 19) == 0 &&
+                                check_tier1_debug_value_region(&proof, 1, 3, 20) == BUSTER_IR_NONE &&
+                                check_tier1_debug_value_region(&proof, 1, 3, UINT32_MAX) == BUSTER_IR_NONE &&
+                                check_tier1_debug_value_region(&proof, 1, 1, 19) == BUSTER_IR_NONE,
+                                "a local is visible only inside its half-open source and machine regions", "empty list, source endpoints, maximum entry and other block");
         CheckTier1DebugValueLive live = { 0 };
         check_tier1_debug_value_start(&proof, &live);
         memset(proof.winner, 0xff, ((uint64_t)proof.value_count + 1) * 4);
