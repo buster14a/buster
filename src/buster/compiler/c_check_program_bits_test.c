@@ -152,8 +152,36 @@ static __attribute__((noinline)) void check_test_bits_sources(CheckTest* test, c
     }
 }
 
+static void check_test_bits_rotate_counts(CheckTest* test, const char* clang)
+{
+    CBuiltinLowerRecipe recipe = { 0 };
+    cbuiltin_bits_amount(&recipe, 1, 0, 64 | BUSTER_CBUILTIN_SIGNED, 37);
+    uint32_t remainders = 0;
+    uint32_t signed_remainders = 0;
+    for (uint32_t i = 0; i < recipe.count; i += 1)
+    {
+        if (recipe.kinds[i] == BUSTER_TYPED_MOD)
+        {
+            remainders += 1;
+            signed_remainders += recipe.classes[i] == BUSTER_TYPED_CLASS_I64;
+        }
+    }
+    check_test_expect(test, remainders == 1 && signed_remainders == 1, "an odd-width signed rotate count takes one signed remainder");
+
+    // The expected distance of each count moves a single set bit around a 37-bit ring.
+    check_test_program_against(test,
+        "int tested(int n){static const struct {long long count; unsigned distance;} cases[]={"
+        "{0,0},{37,0},{-37,0},{38,1},{-38,36},{0x7fffffffffffffffLL,5},{-0x7fffffffffffffffLL-1,31}};"
+        "unsigned bit=(unsigned)n%37; unsigned _BitInt(37) x=(unsigned _BitInt(37))1<<bit;"
+        "for(unsigned i=0;i<sizeof cases/sizeof cases[0];i++){long long k=cases[i].count;unsigned d=cases[i].distance;"
+        "if(__builtin_stdc_rotate_left(x,k)!=(1ULL<<((bit+d)%37)))return 1;"
+        "if(__builtin_stdc_rotate_right(x,k)!=(1ULL<<((bit+37-d)%37)))return 2;}return 0;}",
+        "int tested(int n){return 0;}", false, "bits-signed-rotate-count-boundaries", clang);
+}
+
 static __attribute__((noinline)) void check_test_bits_programs(CheckTest* test, const char* clang)
 {
+    check_test_bits_rotate_counts(test, clang);
     check_test_program_source(test,
         "static const unsigned long long values[]={0,1,2,3,0x7f,0x80,0xff,0x100,0x7fff,0x8000,0xffff,0x12345678,0x7fffffff,0x80000000,0xffffffff,"
         "0x100000000ull,0x123456789abcdef0ull,0x7fffffffffffffffull,0x8000000000000000ull,0xffffffffffffffffull,0x5555555555555555ull,37};"
