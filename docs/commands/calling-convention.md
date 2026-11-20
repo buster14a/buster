@@ -127,10 +127,12 @@ aligned to 16, a 56-byte one aligned to 8, records of one alone), and checks
 arguments and results in ymm and zmm registers, byval copies once vector
 registers run out, a variadic call's named ones in their register's width on
 the stack, ones LLVM has no vector register left for after `_Atomic` doubles,
-and `va_arg`'s overflow copies; Tier 1 leaves its records' functions to Tier
-0 (#2798), without `--tier1-strict`. Register transport compares the payload clang
-defines (`<size / 8 x double>`); byval and overflow copies compare every C
-byte, and following scalars check the strides. Every target is compiled and
+`va_arg`'s overflow copies, and records that end before a `PROT_NONE` page,
+returned from their address and passed by value from it, so that a payload's
+load that reads past its record faults; with strict Tier 1 too since #2798.
+Register transport compares the payload clang defines (`<size / 8 x
+double>`); byval and overflow copies compare every C byte, and following
+scalars check the strides. Every target is compiled and
 linked; execution is skipped only when the host lacks its features. Run from
 the repository root so the fixture paths resolve.
 
