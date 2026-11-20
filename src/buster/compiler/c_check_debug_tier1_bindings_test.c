@@ -108,13 +108,15 @@ static void check_debug_tier1_region_changes(CheckDebugTestTally* tally)
     uint32_t last[10] = { 0 };
     uint64_t events[BUSTER_ARRAY_LENGTH(locals)];
     uint32_t previous[BUSTER_ARRAY_LENGTH(locals)];
+    uint32_t later[BUSTER_ARRAY_LENGTH(locals)];
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(locals); i += 1)
     {
         events[i] = ((uint64_t)(i + 1) << 32) | locals[i];
         previous[i] = last[locals[i]];
+        later[i] = UINT32_MAX;
         last[locals[i]] = i + 1;
     }
-    const CheckTier1DebugValues proof = { .region_events = events, .region_previous = previous };
+    const CheckTier1DebugValues proof = { .region_events = events, .region_previous = previous, .region_last_if_first = later };
     const uint32_t expected[] = { 4, 5, 1, 2, 3, 6, 7, 8, 9 };
     for (uint32_t direction = 0; direction < 2; direction += 1)
     {
@@ -135,6 +137,43 @@ static void check_debug_tier1_region_changes(CheckDebugTestTally* tally)
     check_tier1_debug_region_changes(&proof, &live, 16, 33);
     check_debug_test_expect(tally, live.local_count == BUSTER_ARRAY_LENGTH(middle) && memcmp(changed, middle, sizeof(middle)) == 0,
                             "a preceding boundary outside this interval still queues its local", "unaligned start and one trailing event");
+    // Compare the real boundary index with an independent search outside each crossed interval.
+    uint32_t links[2 * BUSTER_ARRAY_LENGTH(locals)];
+    CheckTier1DebugValues indexed = { .region_events = events, .region_event_count = BUSTER_ARRAY_LENGTH(locals), .local_count = 10 };
+    check_tier1_debug_region_links(&indexed, links, last);
+    bool matches = true;
+    for (uint32_t from = 0; matches && from <= indexed.region_event_count; from += 1)
+    {
+        for (uint32_t to = 0; matches && to <= indexed.region_event_count; to += 1)
+        {
+            const uint32_t first = from < to ? from : to;
+            const uint32_t end = from < to ? to : from;
+            uint32_t wanted[10] = { 4 };
+            uint32_t count = 1;
+            uint32_t seen = 1u << 4;
+            for (uint32_t at = first; at < end; at += 1)
+            {
+                const uint32_t local = locals[at];
+                bool outside = false;
+                for (uint32_t k = 0; k < indexed.region_event_count; k += 1)
+                {
+                    outside |= (k < first || k >= end) && locals[k] == local;
+                }
+                if (outside && (seen & (1u << local)) == 0)
+                {
+                    wanted[count++] = local;
+                    seen |= 1u << local;
+                }
+            }
+            memset(queued, 0, sizeof(queued));
+            live.local_count = 0;
+            check_tier1_debug_local_changed(&live, 4);
+            check_tier1_debug_region_changes(&indexed, &live, from, to);
+            matches = live.local_count == count && memcmp(changed, wanted, count * sizeof(*wanted)) == 0;
+        }
+    }
+    check_debug_test_expect(tally, matches, "crossing an entire source lifetime leaves both endpoints inaccessible",
+                            "every cursor pair, existing pending local, partial and complete lifetimes");
 }
 
 // Compare sparse restoration with a dense row, including the reverse links used by the publisher.
