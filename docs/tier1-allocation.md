@@ -2146,10 +2146,10 @@ and an indirect callee's `r10` isn't among the registers its range may take.
 | c-testsuite's 220 programs | 48,365 | 45,227 | 47,293 |
 | `sqlite3.c`'s register-to-register moves | 40,142 | 33,335 | 6,813 |
 
-(The x86-64 host path's objects and the AVX-512 host path's are the same bytes.)
+(Measured before #2924 removed the x86-64 host; its objects and the AVX-512 host's were the same bytes.)
 
-**Tests.** `tier1_cfg_test.c`'s use-registers fixture allocates, by both paths
-and on both the coloring path and the scan, a call's argument in the register
+**Tests.** `tier1_cfg_test.c`'s use-registers fixture allocates, on both the
+coloring path and the scan, a call's argument in the register
 it is read in where the lowest free one is another; a second argument whose
 register a recipe holds, which it doesn't take; a value read by the call that
 lives on, which takes no hint; and a range that enters a block in its value's
