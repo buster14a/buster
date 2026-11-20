@@ -235,10 +235,10 @@ changed SSA users and instructions affected by newly executable edges, phis in a
 queue of their own (below). Integer
 operations support all IR integer widths, including scalar i128 handling.
 Copies, phis, selects, integer/pointer conversions, bitcasts and floating sign
-negation preserve exact constant bits. Scalar floating arithmetic, floating
-comparisons and numeric floating conversions remain overdefined because their
-results can depend on the runtime floating environment; SIMD floating lanes fold
-where they can't (below). Unknown values remaining in an executable region are
+negation preserve exact constant bits. Floating arithmetic, comparisons and
+numeric conversions fold only where the runtime floating environment can't
+change their bits: SIMD lanes as below, scalar operations under a stricter rule
+of their own (below). Unknown values remaining in an executable region are
 promoted to overdefined and propagated before rewriting.
 
 A join of n arms (a long `?:` chain's, nested ifs') is queued again by each
@@ -310,6 +310,36 @@ compiler's MXCSR set to an unusual value that must come back unchanged. A
 one-off run of 409,600 pairs also passed. Tier 1's existing native MXCSR fixture
 (`test-tier1-masks`) still sees round-upward, FTZ and DAZ results after SCCP.
 
+### Scalar floating operations (#2720)
+
+Scalar `fadd`, `fsub`, `fmul`, `fdiv` and `fcmp` of `f32` and `f64` fold as a
+one-lane vector of the transfer above, so a result folds only where every
+floating environment gives the same bits. A folded scalar row is a kind-2 root
+(`ir_optimize_roots`): its constant discharges it and the row goes, so nothing
+is left to raise a flag. A scalar operation therefore folds only where it raises
+no exception flag at all: beyond the lanes' rule (an exact, normal result of
+normal operands), no operand may be a NaN (a signaling one raises invalid, and
+two quiet ones' payload would follow the operands' order in the emitted
+instruction), the result may not be one (an invalid operation's default NaN),
+and no division may be by zero. Those operations stay at run time, unfolded.
+
+The numeric conversions fold under the same rule. `sitofp` and `uitofp` of an
+8- to 64-bit integer fold where the format holds the value exactly; `fptosi`
+and `fptoui` where the floating value is an integer the target holds, or a zero
+of either sign; `fext` (`f32` to `f64`) and `ftrunc` (`f64` to `f32`) where the
+operand is a zero, an infinity or a normal value that the target holds exactly
+as a normal value. A NaN or a subnormal operand stays unfolded. `f80` and the
+x87 are left alone.
+
+`test-ir-optimize`'s oracle for these is the hardware: each random operation
+runs by its own instruction (`addsd`, `comiss`, `cvttsd2si`, `vcvtusi2sd` and
+the rest) in one asm statement that loads MXCSR, runs it, stores MXCSR and
+restores it, under round to nearest, down, up and toward zero and under FTZ with
+DAZ. An operation must fold exactly where all five give the same bits and raise
+no flag and no operand is a NaN, to those bits, and the interpreter must give
+the same result before and after: 22,000 random cases over the eleven
+operations, each of which both folds and refuses.
+
 The fold boundary receives complete `IrSimdValue` cells with all 64 bytes
 readable, independently of logical vector width. No function column needs
 padding; per-lane batches use bounded masks. Inputs are immutable during a
@@ -322,8 +352,9 @@ Dead-code removal classifies roots by a vector opcode-table lookup, skips
 empty liveness batches, and propagates dependencies backwards. A separate
 worklist implementation supplies the exact scalar result and completes a
 bounded sweep. It skips dependencies of folded values and removed conditional
-branches, and follows only executable phi edges. Floating operations stay
-roots, folded or not, so their dependencies stay live.
+branches, and follows only executable phi edges. Vector floating operations
+stay roots, folded or not, so their dependencies stay live; a scalar one stays
+a root until it folds, which it does only where it raises no flag (#2720).
 
 CFG cleanup compacts unreachable blocks, collapses single-successor
 conditionals, and threads transparent jumps. Pointer jumping and propagated
@@ -679,8 +710,6 @@ an issue of its own:
   #2718 ([its guide](ir-memory-value-numbering.md)).
 - **A policy under which LICM and the solver pay** (register pressure, values
   Tier 1 recomputes kept at their users): #2719.
-- **Scalar floating folding** under #1450's floating-environment contract:
-  #2720.
 - **Inlining callees with control flow, its classes and budgets:** #2541 and its
   steps. A variadic or unprototyped call is the call's decision, not the unit's
   error (#2721).

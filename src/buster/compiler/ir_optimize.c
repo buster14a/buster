@@ -824,7 +824,133 @@ static const uint8_t ir_optimize_transfer_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_PTRTOINT] = 5,
     [IR_BITCAST] = 5,
     [IR_FNEG] = 5,
+    [IR_FADD] = 6,
+    [IR_FSUB] = 6,
+    [IR_FMUL] = 6,
+    [IR_FDIV] = 6,
+    [IR_FCMP] = 6,
+    [IR_SITOFP] = 7,
+    [IR_UITOFP] = 7,
+    [IR_FPTOSI] = 7,
+    [IR_FPTOUI] = 7,
+    [IR_FEXT] = 7,
+    [IR_FTRUNC] = 7,
 };
+
+static bool ir_optimize_simd_float(uint32_t op, uint32_t width, uint32_t bits, uint32_t predicate, const IrSimdValue* left, const IrSimdValue* right, bool scalar, IrSimdValue* output);
+static bool ir_optimize_simd_float_encode(uint64_t sign, unsigned __int128 m, int32_t e, uint32_t width, uint64_t* value);
+
+// Scalar floating operations (#2720) fold as a one-lane vector of ir_optimize_simd_float, where every floating
+// environment gives the same bits, and further only where the operation raises no exception flag: a folded scalar row
+// is no root (ir_optimize_roots' kind 2), so nothing is left to raise one. So no operand is a NaN (a signaling one
+// raises invalid, and two quiet ones' payload would depend on the operands' order in the emitted instruction), the
+// result isn't one (an invalid operation's default NaN) and no division is by zero. f80 stays with the x87 at run time.
+static bool ir_optimize_float_binary(uint32_t op, uint32_t width, uint32_t predicate, uint64_t a, uint64_t b, bool scalar, uint64_t* value)
+{
+    const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+    const uint64_t fraction = width == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
+    const uint64_t magnitude = exponent | fraction;
+    const bool operand_nan = (a & magnitude) > exponent || (b & magnitude) > exponent;
+    const bool divisor_zero = op == IR_FDIV && (b & magnitude) == 0;
+    const IrSimdValue left = { .words = { a } };
+    const IrSimdValue right = { .words = { b } };
+    IrSimdValue output = { 0 };
+    bool result = !operand_nan && !divisor_zero && ir_optimize_simd_float(op == IR_FCMP ? IR_VCMP : op, width, width, predicate, &left, &right, scalar, &output);
+    if (result)
+    {
+        *value = op == IR_FCMP ? output.words[0] & 1 : output.words[0];
+        result = op == IR_FCMP || (*value & magnitude) <= exponent;
+    }
+    return result;
+}
+
+// A conversion's exact value (#2720) under the same rule: no NaN or subnormal operand, an integer that the format holds
+// exactly, a floating value that is an integer the target holds, and a narrowing that loses no bit and stays normal.
+// Each raises no flag where it folds. Integer operands and results are 8 to 64 bits wide, floating ones f32 or f64.
+static bool ir_optimize_float_conversion(uint32_t op, uint32_t from, uint32_t to, uint64_t bits, uint64_t* value)
+{
+    const bool floating_source = op == IR_FPTOSI || op == IR_FPTOUI || op == IR_FEXT || op == IR_FTRUNC;
+    const uint32_t width = floating_source ? from : to;
+    const uint32_t precision = width == 32 ? 24 : 53;
+    const int32_t bias = width == 32 ? 127 : 1023;
+    const uint64_t sign = floating_source ? UINT64_C(1) << (from - 1) : 0;
+    const uint64_t fraction = (UINT64_C(1) << (precision - 1)) - 1;
+    const uint64_t exponent = (UINT64_C(1) << (from - 1)) - 1 - fraction;
+    const bool zero = floating_source && (bits & ~sign) == 0;
+    const bool infinite = floating_source && (bits & ~sign) == exponent;
+    const bool special = floating_source && ((bits & exponent) == exponent || (bits & exponent) == 0);
+    const uint64_t significand = (bits & fraction) | (fraction + 1);
+    const int32_t scale = (int32_t)((bits & exponent) >> (precision - 1)) - bias - (int32_t)(precision - 1);
+    bool result = false;
+    if (op == IR_SITOFP || op == IR_UITOFP)
+    {
+        const uint64_t source_sign = UINT64_C(1) << (from - 1);
+        const bool negative = op == IR_SITOFP && (bits & source_sign) != 0;
+        const uint64_t source_mask = UINT64_MAX >> (64 - from);
+        const uint64_t magnitude = negative ? (~bits + 1) & source_mask : bits & source_mask;
+        const uint64_t target_sign = UINT64_C(1) << (to - 1);
+        result = magnitude == 0 || ir_optimize_simd_float_encode(negative ? target_sign : 0, magnitude, 0, to, value);
+        *value = magnitude == 0 ? 0 : *value;
+    }
+    else if (op == IR_FEXT || op == IR_FTRUNC)
+    {
+        const uint64_t target_sign = (bits & sign) != 0 ? UINT64_C(1) << (to - 1) : 0;
+        const uint64_t target_exponent = to == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+        result = zero || infinite || (!special && ir_optimize_simd_float_encode(target_sign, significand, scale, to, value));
+        *value = zero ? target_sign : infinite ? target_sign | target_exponent : *value;
+    }
+    else if (!special)
+    {
+        // An integer's value: past the significand's bits the scale is a left shift, which the target's width bounds;
+        // below them the shifted-out bits must be zero.
+        const uint32_t right = scale < 0 ? (uint32_t)-scale : 0;
+        const bool integral = right < 64 && (significand & ((UINT64_C(1) << right) - 1)) == 0;
+        const uint32_t left = scale > 0 ? (uint32_t)scale : 0;
+        const uint64_t whole = integral ? (significand >> right) : 0;
+        const uint32_t length = 64 - (uint32_t)__builtin_clzll(whole | 1);
+        const bool negative = (bits & sign) != 0;
+        // A signed target holds magnitudes below 2^(to - 1), and its minimum itself; an unsigned one below 2^to, never
+        // negative.
+        const uint32_t room = op == IR_FPTOSI ? to - 1 : to;
+        const bool minimum = op == IR_FPTOSI && negative && length + left == to && whole == (UINT64_C(1) << (length - 1));
+        result = integral && whole != 0 && (length + left <= room || minimum) && !(op == IR_FPTOUI && negative);
+        const uint64_t magnitude = result ? whole << left : 0;
+        const uint64_t mask = UINT64_MAX >> (64 - to);
+        *value = (negative ? ~magnitude + 1 : magnitude) & mask;
+    }
+    else
+    {
+        result = zero;
+        *value = 0;
+    }
+    return result;
+}
+
+static uint8_t ir_optimize_float_transfer(const IrOptimizeWork* work, uint32_t i, IrConstant* value)
+{
+    const IrFunction* f = work->function;
+    const uint32_t op = f->op[i];
+    const uint32_t a = f->a[i];
+    const bool binary = ir_optimize_transfer_kinds[op] == 6;
+    const uint32_t from = ir_type_bits[f->type[a]];
+    const uint32_t to = ir_type_bits[f->type[i]];
+    const uint32_t floating = binary || op == IR_FPTOSI || op == IR_FPTOUI || op == IR_FEXT || op == IR_FTRUNC ? from : to;
+    const uint32_t integer = op == IR_SITOFP || op == IR_UITOFP ? from : op == IR_FPTOSI || op == IR_FPTOUI ? to : 64;
+    const bool sized = (floating == 32 || floating == 64) && (to == 32 || to == 64 || !(op == IR_FEXT || op == IR_FTRUNC)) && integer >= 8 &&
+                       integer <= 64 && (integer & (integer - 1)) == 0;
+    const uint8_t left = work->states[a];
+    const uint8_t right = binary ? work->states[f->b[i]] : IROPT_CONSTANT;
+    uint8_t result = left == IROPT_OVERDEFINED || right == IROPT_OVERDEFINED || !sized ? IROPT_OVERDEFINED : left == IROPT_UNKNOWN || right == IROPT_UNKNOWN ? IROPT_UNKNOWN : IROPT_CONSTANT;
+    if (result == IROPT_CONSTANT)
+    {
+        uint64_t bits = 0;
+        const bool folded = binary ? ir_optimize_float_binary(op, from, op == IR_FCMP ? f->c[i] : IR_EQ, work->values[a].low, work->values[f->b[i]].low, work->scalar, &bits)
+                                   : ir_optimize_float_conversion(op, from, to, work->values[a].low, &bits);
+        result = folded ? IROPT_CONSTANT : IROPT_OVERDEFINED;
+        *value = (IrConstant){ .low = bits };
+    }
+    return result;
+}
 
 // `examined` counts a phi's incoming values looked at (IrOptimizeResult.sccp_phi_incoming).
 static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrConstant* value, uint64_t* examined)
@@ -908,6 +1034,10 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
             }
             *value = ir_optimize_constant(bits, width);
         }
+    }
+    else if (kind >= 6)
+    {
+        result = ir_optimize_float_transfer(work, i, value);
     }
     else
     {
