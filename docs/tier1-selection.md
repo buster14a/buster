@@ -321,17 +321,36 @@ patterns are:
   `cmov` are #2676's (`tier1_select_fused_moves`), inverted where the
   destination holds the chosen value. `int f(double a, double b, int x, int y)
   { return a < b ? x : y; }` is `ucomisd %xmm0,%xmm1; mov %esi,%eax; cmova
-  %edi,%eax`, clang -O2's instructions. `==` and `!=` keep their truth value:
-  two `cmov`s, `cmovne` and `cmovp` as clang's select of an `fcmp oeq` is,
-  would shorten the path from the comparison to the result but put both on the
-  path from the select's values, which a loop's accumulator recurs through. On
-  the 9700X, `if (p[i] == t) c += 5; else c += 1;` with both on its
-  accumulator ran 3.1 cycles an element at every placement of its loop, and
-  main's `sete; setnp; and; test; cmovne` 2.6 where its placement doesn't bound
-  it, while `a == b ? x : y` called in a loop ran 8.1% fewer cycles with the
-  two `cmov`s ([the record](https://github.com/buster14a/buster-performance/tree/546d9633ba0d06a908c5b9a1e5029e00a2cdc485/docs/measurements/tier1-float-select-2791-2026-11-17)).
-  An ordered predicate's single `cmov` is on the values' path either way: that
-  loop by `>` runs 0.3% fewer cycles at every placement.
+  %edi,%eax`, clang -O2's instructions. `==` and `!=` read the parity flag too
+  (#2922): their select is `ucomis`, a `mov` of the value equal operands choose
+  (`==`'s true value, `!=`'s false one), then `cmovne` and `cmovp` of the other,
+  as clang's select of an `fcmp oeq` is; where the destination holds the other
+  value, the scratch register keeps it past a `cmove` of the equal one. `a == b
+  ? x : y` is `ucomisd %xmm1,%xmm0; mov %edi,%eax; cmovne %esi,%eax; cmovp
+  %esi,%eax`, where it was `xor; ucomisd; sete; setnp; and; test; mov;
+  cmovne`. Both `cmov`s are on the path from each value to the result, where
+  the truth value's sequence has one, so a select whose values recur through it
+  by an operation keeps the truth value (`tier1_select_recurrent`): a walk back
+  from its two values, through their operands and the incoming values of the
+  phis it meets, reaches the select within 16 rows (if-conversion's bound for a
+  condition's recurrence) along a path through a row that is neither a phi nor
+  a copy. Its condition isn't walked, since two `cmov`s shorten the
+  comparison's own path. On the 9700X, over 2^20 doubles 80 times ([the
+  record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-float-equality-select-2922-2026-11-17),
+  each loop at four placements in a 64-byte line):
+  `if (p[i] == t) c += 5; else c += 1;`, an addition and both `cmov`s on its
+  chain, runs 260.0 Mcycles at every placement, and its truth value 217.1 to
+  217.3 at two placements (260.0 and 343.8 at the others), as if-conversion made
+  it then; #2932's fold has since made it `c += p[i] == t ? 5 : 1`, a select
+  of constants off the chain, which fuses; `b = p[i] == t ? i
+  : b`, whose chain is the `cmov`s alone (its value the phi's), runs 176.0 by
+  two `cmov`s at every placement, clang -O2's cycles, and 181.1 to 181.3 by its
+  truth value; and `s += p[i] == t ? x : y`, whose select isn't on the chain,
+  126.9 to 176.1 by two `cmov`s against 195.0 to 260.0. `a == b ? x : y`
+  called in a loop runs 2.5% fewer cycles than by its truth value, `a != b`
+  4.1% fewer, both clang -O2's. An ordered predicate's single `cmov` is on the
+  values' path either way: #2791's loop by `>` runs 0.3% fewer cycles at every
+  placement ([#2791's record](https://github.com/buster14a/buster-performance/tree/546d9633ba0d06a908c5b9a1e5029e00a2cdc485/docs/measurements/tier1-float-select-2791-2026-11-17)).
   If-conversion's truth simplification makes a test of a floating comparison
   its `i1` copy, where it rewrites an integer comparison's test into the
   comparison ([ir-optimization.md](ir-optimization.md)), in every function it
@@ -341,29 +360,52 @@ patterns are:
   (`TIER1_BURS_OP_COPY_TRUTH`), so such a branch is `ucomis` and `ja`, `jae`,
   `jbe` or `jb` too, where it was `xor; ucomis; setcc; test; jne`. The grammar's
   integer select takes the ordered comparisons' `FCOND` at 3, directly, through
-  their copy and through C's truth values' links; the copy reads a nonterminal
-  of the comparison itself (`FCMP`), not every state's `FCOND`, which would
-  take the tables to 1032 states: they have 1015 of their 1024 (main's 1006).
+  their copy and through C's truth values' links, and `==` and `!=`'s `ECOND`
+  (their own operator, `TIER1_BURS_OP_FCMP_EQ`) at 4, directly or through their
+  copy, never through the links, whose patterns would take the tables to 1033
+  states. The copy reads a nonterminal of the comparison itself (`FCMP`,
+  `ECMP`), not every state's `FCOND`, which would take them to 1032. A floating
+  `==` or `!=`'s class is `FCMP_EQ` unless the select that reads it, directly or
+  through its copy (its last user), recurs (`tier1_burs_equality`): then it is
+  the REG leaf's, and the select tests munch's truth value, as
+  `tier1_select_candidates` makes no fused candidate of such a select; both
+  paths ask the same walk of the same select, the classifiers' scalar rare
+  case. The tables have 1018 of their 1024 states (main's 1006).
   `test-tier1-select` runs the rule's records natively for each condition,
   precision and select width, with the comparison's operands in two registers
   or one and the destination its own, the chosen value's, the other value's or
   both values' one register, on NaNs, signed zeros, infinities and a subnormal
   against C's comparisons; and plans each predicate's select directly, through
   its copy, past a copy that isn't the comparison's own and through one or two
-  links, each plan in the selection's frozen digest. `test-tier1-emit` compiles
-  such functions, and branches of each shape, through the CFG consumer with both
-  frame planners, with every register and few, with and without a frame pointer,
-  and with the select's values ending at it, where its result takes the register
-  of the value it keeps, and runs them natively. `tests/ir/float-selects.ir` is
-  among the IR fixtures whose states and rules the grammar's test checks against
-  their equations (before the rule, one of its selects took munch's fallback),
-  and the driver's pattern test requires `ucomis` and a `cmov` or jump of its
-  flags, no `setcc`, in four C selects of floating comparisons. Such selects
-  are rare in the measured programs: `sqlite3.c`'s object has 2 more and 31 more
-  such branches, with 33 fewer `setcc`s and `test`s, 111 fewer records and 256
-  fewer bytes; Lua's has 5 branches (two in `luaV_execute`), and 8 of musl's
-  312 math, stdlib, printf, scanf and time sources change. speedtest1 runs
-  0.038% fewer instructions, and Lua's five scripts the same within their runs'
+  links, each plan in the selection's frozen digest; and checks `tier1_select_recurrent`'s walk on its own: a
+  value's additions up to its bound and not past it, a phi of phis with an
+  addition, a phi the walk reaches through phis alone before its addition, and
+  no recurrence through phis or copies alone, or where only the select's result
+  or its condition reaches the phi. `test-tier1-emit` compiles such functions,
+  and branches of each shape, through the CFG consumer with both frame planners, with every
+  register and few, with and without a frame pointer, and with the select's
+  values ending at it, where its result takes the register of the value it
+  keeps, and runs them natively; and a loop of each predicate's select whose
+  accumulator recurs through an addition (directly or through another phi),
+  through phis alone or only through its result, where `==` and `!=` fuse but
+  for the first and maximal munch's cover chooses the same.
+  `tests/ir/float-selects.ir` and `float-select-loops.ir` are among the
+  grammar's twin fixtures (main's grammar took munch's fallback for one of the
+  first's selects), which must take no fallback; a fused select's candidate
+  must cost its pattern's 3 or 4. The driver's pattern test requires `ucomis` and a
+  `cmov` or jump of its flags, no `setcc`, in four C selects of ordered
+  comparisons, a parity `cmov` in three of `==` and `!=` (a loop's sum and a
+  running last match among them), and the truth value in a conditional scale
+  by `==` (`c = p[i] == t ? c * 3 : c + 1`). #2922 fuses 2 selects in `sqlite3.c`'s object
+  (`sqlite3_str_vappendf`), 8 fewer records and 16 fewer bytes, and none in
+  Lua's or musl's 312 sources; its compile runs the same instructions within
+  0.04% and 0.36% fewer cycles (11 runs). Such selects are rare in
+  the measured programs: `sqlite3.c`'s object has 2 more and 31 more such
+  branches, with 33 fewer `setcc`s and `test`s, 111 fewer records and 256 fewer
+  bytes; Lua's has 5 branches (two in `luaV_execute`), and 8 of musl's 312
+  math, stdlib, printf, scanf and time sources change. speedtest1 runs 0.038%
+  fewer instructions, and Lua's five scripts the same within their runs'
+
   variation (callgrind).
 - Labels and indirect jumps (#789): GNU C's labels as values and computed gotos,
   and the jump tables C's switches lower to. A label's address is its symbol's
@@ -403,7 +445,7 @@ patterns are:
   truth values into `jbe` or `jb`, which are true for unordered operands as
   `!(a > b)` is: the unsigned conditions, whose negations the integer table
   already has. `==` and `!=` read the parity flag too, which one jump can't, so
-  a branch tests their truth value, and so does a select (#2791, above). The conversions from and to integers of 8
+  a branch tests their truth value; a select's two `cmov`s can (#2922, above). The conversions from and to integers of 8
   to 64 bits are `cvtsi2s*` and `cvtts*2si`, a narrow signed operand
   sign-extended into the scratch register first and an unsigned `I32` converted
   as its zero extension's 64 bits; the precisions convert by `cvtss2sd` and
@@ -830,7 +872,8 @@ negative bypass paths and unsafe unsigned bounds.
 Comparisons used by a branch or a select alone do not produce `setcc`. A
 branch's comparison and conditional jump are consecutive records, and a
 select's comparison, `mov` and `cmov` (#2676), an ordered floating one's
-`ucomis`, `mov` and `cmov` (#2791). A comparison producing a value uses
+`ucomis`, `mov` and `cmov` (#2791), and a floating `==` or `!=`'s `ucomis`,
+`mov`, `cmovne` and `cmovp` where its values don't recur through it (#2922). A comparison producing a value uses
 canonical 32-bit storage and `setcc`. An independent destination is cleared with
 `xor` before `cmp`/`test`; an aliased input is read by the comparison first, then
 `mov r32, 0` clears the destination while preserving the flags. A floating
@@ -923,12 +966,13 @@ a nonterminal's derivation from an operator and its children's nonterminals, or
 from another nonterminal, at the structural cost below; a pattern stands for one
 candidate kind of `tier1_select_candidates`, an inner one (an address's piece,
 an immediate, a scaled index, a truth value's link) folding into its root's. Its
-nineteen nonterminals are a statement, a register, the constants' classes (an
+twenty-one nonterminals are a statement, a register, the constants' classes (an
 immediate, a lea's scale, a power of two, 3, 5 or 9, a shift's count, zero, a
 disp32), a load a consumer folds, a shift a lea scales, addresses without an
 index and with one, an index, the comparisons a branch, a select (#2676)
-or a truth value takes, integer and floating, their zero extensions, and an
-ordered floating comparison itself, which its `i1` copy takes (#2791).
+or a truth value takes, integer and floating, their zero extensions, an
+ordered floating comparison itself, which its `i1` copy takes (#2791), and a
+floating `==` or `!=` a select takes and one itself (#2922).
 
 `tier1_select_initialize` compiles the grammar into state tables once, by burg's
 algorithm: a state is each nonterminal's cheapest rule and its cost, normalized

@@ -365,6 +365,12 @@ In #2745's objects that a 64-byte vector's value initializes whole (a struct's,
 a union's, a compound literal's, and a union's other member read back), no
 store of a zero immediate may be left; a volatile object and a union whose
 designator moves to another member after the vector's keep their eight. In
+#2922's selects of floating `==` and `!=` (one of each, a loop's sum of them
+and a running last match), a `cmov` of the parity flag and no `setcc` must be
+left, and in a conditional scale by `==` (`c = p[i] == t ? c * 3 : c + 1`),
+whose accumulator recurs through the select's values by an operation, the truth
+value's `setcc`s and no parity `cmov`. In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
+stored back into the memory the instruction before loaded it from:
 #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
 into the memory the instruction before loaded it from. In #2843's conditional
 sums, `s += p[i] > 0 ? p[i] : 1` over an `int`, an `unsigned` and an
@@ -373,6 +379,7 @@ extension, each must have a cmov and no register moved into another. #2870's
 `patterns_sector`, SQLite's `pagerWriteLargeSector` cut down, leaves out a
 store into a slot two blocks after its reload, which the code's certificate
 must prove from the run's entries:
+
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"
