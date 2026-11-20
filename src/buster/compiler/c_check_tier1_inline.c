@@ -588,42 +588,70 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     const uint64_t mark = scratch->length;
     // The callees, each once (a byte a body marks the ones taken, cleared after), as keys of their symbol in the high half
     // and their body in the low, and the caller's own last.
-    const uint64_t room = (uint64_t)lowered->call_count + 1;
-    uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
-    uint64_t* sorting = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
-    uint8_t* taken = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)inlining->body_count + 1);
-    const bool fits = keys != 0 && sorting != 0 && taken != 0;
-    if (taken != 0)
+    uint64_t* keys = NULL;
+    uint64_t* sorting = NULL;
+    uint8_t* taken = NULL;
+    if (lowered->call_count != 0)
     {
-        memset(taken, 0, (uint64_t)inlining->body_count + 1);
+        const uint64_t room = (uint64_t)lowered->call_count + 1;
+        keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
+        sorting = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
+        taken = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)inlining->body_count + 1);
+        if (taken != NULL)
+        {
+            memset(taken, 0, (uint64_t)inlining->body_count + 1);
+        }
     }
+    const bool fits = keys != NULL && sorting != NULL && taken != NULL;
     // A callee is taken (1) where it is offered and every call of it matches its signature, which the inliner checks at
     // each call and refuses the whole unit for (ir_inline_signature): a call that doesn't match leaves it out (2), and its
     // calls stay calls.
     uint32_t taken_count = 0;
-    for (uint32_t node = 0; fits && node < lowered->instruction_count; node += 1)
+    for (uint32_t first = 0; fits && first < lowered->instruction_count;)
     {
-        const bool direct = lowered->op[node] == IR_CALL && lowered->calls[lowered->b[node]].row == 0 && lowered->calls[lowered->b[node]].body == 0 && lowered->a[node] < inlining->symbol_count;
-        const uint32_t candidate = direct ? inlining->candidates[lowered->a[node]] : 0;
-        const uint32_t b = candidate - 1;
-        if (candidate != 0 && b != caller && taken[b] != 2)
+        const uint32_t left = lowered->instruction_count - first;
+        const uint32_t length = left < 64 ? left : 64;
+        const __mmask64 lanes = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+        const __m512i ops = _mm512_maskz_loadu_epi8(lanes, lowered->op + first);
+        __mmask64 calls = _mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_CALL));
+        for (; calls != 0; calls &= calls - 1)
         {
-            const bool first = taken[b] == 0;
-            const bool offered = !first || (inlining->cyclic[b] == 0 && check_tier1_inline_offered(inlining, b, target));
-            const bool matches = offered && ir_inline_signature(lowered, node, check_tier1_inline_function(inlining, b), check_tier1_inline_flags(inlining, b));
-            keys[taken_count] = (uint64_t)program->object_symbols[program->bodies[b].object] << 32 | b;
-            taken_count += first && matches ? 1 : 0;
-            taken[b] = matches ? 1 : 2;
+            const uint32_t node = first + (uint32_t)__builtin_ctzll(calls);
+            const IrCall call = lowered->calls[lowered->b[node]];
+            const bool direct = call.row == 0 && call.body == 0 && lowered->a[node] < inlining->symbol_count;
+            const uint32_t candidate = direct ? inlining->candidates[lowered->a[node]] : 0;
+            const uint32_t b = candidate - 1;
+            if (candidate != 0 && b != caller && taken[b] != 2)
+            {
+                const bool first = taken[b] == 0;
+                const bool offered = !first || (inlining->cyclic[b] == 0 && check_tier1_inline_offered(inlining, b, target));
+                const bool matches = offered && ir_inline_signature(lowered, node, check_tier1_inline_function(inlining, b), check_tier1_inline_flags(inlining, b));
+                keys[taken_count] = (uint64_t)program->object_symbols[program->bodies[b].object] << 32 | b;
+                taken_count += first && matches ? 1 : 0;
+                taken[b] = matches ? 1 : 2;
+            }
         }
-    }
-    // The callees taken, each once.
-    uint32_t count = 0;
-    for (uint32_t k = 0; k < taken_count; k += 1)
-    {
-        keys[count] = keys[k];
-        count += taken[(uint32_t)keys[k]] == 1 ? 1 : 0;
+        first += length;
     }
     const SymbolId own = program->bodies[caller].object <= program->input->token_count ? program->object_symbols[program->bodies[caller].object] : 0;
+    // Compute the varying symbol bits while compacting the accepted keys. The caller is also
+    // a member, so the bits differing from its symbol cover every radix digit the sort needs.
+    uint32_t count = 0;
+    uint32_t varying = 0;
+    uint32_t previous = 0;
+    bool ordered = true;
+    for (uint32_t k = 0; k < taken_count; k += 1)
+    {
+        const uint64_t key = keys[k];
+        if (taken[(uint32_t)key] == 1)
+        {
+            const uint32_t symbol = (uint32_t)(key >> 32);
+            keys[count++] = key;
+            varying |= symbol ^ own;
+            ordered = ordered && previous <= symbol;
+            previous = symbol;
+        }
+    }
     IrFunction current = *lowered;
     bool aggregates = false;
     if (count != 0 && own != 0 && own < inlining->symbol_count)
@@ -631,7 +659,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         // The unit: the caller and its callees, by symbol (a radix sort of the keys, as the bindings' are).
         keys[count] = (uint64_t)own << 32 | UINT32_MAX;
         const uint32_t members = count + 1;
-        const uint64_t* sorted = c_bindings_sort(keys, sorting, members, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX);
+        const uint64_t* sorted = ordered && previous <= own ? keys : c_bindings_sort(keys, sorting, members, !BUSTER_SCALAR_PATH(scalar), varying);
         // The unit's columns precede the inliner's output (steps[4]), whose unused tail its inputs mustn't share, as they
         // mustn't its scratch.
         Arena* columns = &lane->steps[4];
