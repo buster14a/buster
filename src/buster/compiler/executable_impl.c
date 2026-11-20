@@ -6445,7 +6445,7 @@ static void executable_eh_frame_table(const Link* link, ExecutableShared* shared
 // either way. Returns false if the arena has no room for the sort.
 static bool executable_eh_frame_sort(uint8_t* bytes, uint64_t fdes, bool exact, Arena* arena, bool* in_order)
 {
-    int32_t* table = (int32_t*)(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES);
+    uint8_t* table = bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES;
     const __m512i evens = _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
     bool sorted = true;
     // The last group's initial locations, whose last lane the next group's first must be at or after.
@@ -6454,8 +6454,9 @@ static bool executable_eh_frame_sort(uint8_t* bytes, uint64_t fdes, bool exact, 
     {
         const uint32_t n = fdes - i < 16 ? (uint32_t)(fdes - i) : 16;
         const uint32_t words = 2 * n;
-        const __m512i first = _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(0xffff, words), table + 2 * i);
-        const __m512i second = _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(0xffff, words > 16 ? words - 16 : 0), table + 2 * i + 16);
+        const uint8_t* group = table + 8 * i;
+        const __m512i first = _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(0xffff, words), group);
+        const __m512i second = words > 16 ? _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(0xffff, words - 16), group + 64) : _mm512_setzero_si512();
         const __m512i initial = _mm512_permutex2var_epi32(first, evens, second);
         const __m512i before = _mm512_alignr_epi32(initial, last, 15);
         sorted = _mm512_mask_cmpgt_epi32_mask((__mmask16)_bzhi_u32(0xffff, n), before, initial) == 0;
@@ -6465,23 +6466,19 @@ static bool executable_eh_frame_sort(uint8_t* bytes, uint64_t fdes, bool exact, 
     bool result = true;
     if (!sorted || exact)
     {
-        uint64_t* entries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, 2 * fdes);
-        result = entries != 0;
-        uint64_t* from = entries;
-        uint64_t* to = entries != 0 ? entries + fdes : 0;
-        if (result)
-        {
-            memcpy(from, table, 8 * fdes);
-        }
-        // Each entry as 64 bits: its initial location in the low 32, which a pass's digit comes from, with the sign bit
-        // flipped so that unsigned order is the signed one.
+        // The table follows a 12-byte header. Move entries as bytes: each has a little-endian sdata4 key followed
+        // by its FDE offset. Four passes put the entries back in the table.
+        uint8_t* from = table;
+        uint8_t* to = arena_push_array(arena, fdes, sizeof(uint64_t), _Alignof(uint64_t));
+        result = to != 0;
         for (uint32_t pass = 0; result && pass < 4; pass += 1)
         {
             uint64_t starts[257] = { 0 };
-            const uint32_t shift = 8 * pass;
+            const uint32_t sign = pass == 3 ? 0x80 : 0;
             for (uint64_t e = 0; e < fdes; e += 1)
             {
-                starts[((((uint32_t)from[e] ^ 0x80000000u) >> shift) & 0xff) + 1] += 1;
+                const uint32_t digit = from[8 * e + pass] ^ sign;
+                starts[digit + 1] += 1;
             }
             for (uint32_t digit = 0; digit < 256; digit += 1)
             {
@@ -6489,18 +6486,14 @@ static bool executable_eh_frame_sort(uint8_t* bytes, uint64_t fdes, bool exact, 
             }
             for (uint64_t e = 0; e < fdes; e += 1)
             {
-                const uint32_t digit = (((uint32_t)from[e] ^ 0x80000000u) >> shift) & 0xff;
-                to[starts[digit]] = from[e];
+                const uint8_t* entry = from + 8 * e;
+                const uint32_t digit = entry[pass] ^ sign;
+                memcpy(to + 8 * starts[digit], entry, 8);
                 starts[digit] += 1;
             }
-            uint64_t* swapped = from;
+            uint8_t* swapped = from;
             from = to;
             to = swapped;
-        }
-        // An even number of passes: the entries are back where they were copied to first.
-        if (result)
-        {
-            memcpy(table, from, 8 * fdes);
         }
     }
     return result;

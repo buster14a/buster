@@ -4699,19 +4699,25 @@ struct NodeFactsReader
     uint8_t c_ran_now;
     uint64_t c_ticks_now;
     TypeId c_target_now;
+    // The chunk at hand's updates, the records C's loop gave the update's template: X's rows' updates' sweep runs
+    // for a chunk that has any.
+    uint64_t c_updates_now;
     // test-checker's control of the comparison (BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT), and its turn.
     bool c_fault;
     uint32_t c_fault_turn;
     // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS; c_check_node_machine_rows.c), or null tables.
-    // - The window's columns, as C's: a record's own shape and its conversion's, their two lengths (a nibble each),
+    // - The window's columns, as C's: a record's own shape and its conversion's, its row's entries' number,
     //   its target's class and facts and its first operand's conversion's class, and the entries before its row in
     //   its eight records'; its type, which the tests' sweep makes with the records' bytes
     //   (node_tests_window_bytes_by); three bits of its line (BUSTER_NODE_ROWS_BIT_*); and two masks a block, the
     //   records that convert and those of them whose target's word the reads read.
     // - The chunk's streams: its entries' kinds and their classes, a register's room past a chunk's most entries; and
     //   the entries before each eight records'.
-    // - The reads' two lists: the numbers of the chunk's records whose target's word is read, and of those whose line
-    //   is, a register's room past a chunk's records.
+    // - The reads' two lists, the numbers of the chunk's records whose target's word is read and of those whose line
+    //   is, and the updates' list, each a register's room past a chunk's records.
+    //   The loop over the updates' writes an update's two rows' shapes over the shapes' sweep's, its store's kind in
+    //   the bits' column and its computation's class in the first operand's conversion's (node_rows_window_update):
+    //   an update has no column of its own.
     // - By the batch's expression: what the rows made of it (BUSTER_NODE_ROWS_LISTED or _TAKEN), and the reference's
     //   X's ticks on it; and the expression at hand's ticks, from the reader's hook.
     struct NodeRowsTables* x_tables;
@@ -4728,6 +4734,7 @@ struct NodeFactsReader
     uint32_t* x_cursors;
     uint32_t* x_words;
     uint32_t* x_lines;
+    uint32_t* x_updates;
     uint8_t* x_kinds;
     uint8_t* x_classes;
     uint8_t* x_verdicts;
@@ -4884,16 +4891,18 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->x_cursors = arena_push_array(arena, padded / 8, sizeof(uint32_t), 64);
         state->x_words = arena_push_array(arena, padded, sizeof(uint32_t), 64);
         state->x_lines = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        state->x_updates = arena_push_array(arena, padded, sizeof(uint32_t), 64);
         state->window_x_types = arena_push_array(arena, padded, sizeof(TypeId), 64);
         state->x_kinds = arena_push_array(arena, stream, 1, 64);
         state->x_classes = arena_push_array(arena, stream, 1, 64);
         state->x_verdicts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->x_ticks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
-        state->x_tables = arena_push_array(arena, 1, 1408, 64);
+        state->x_tables = arena_push_array(arena, 1, 2560, 64);
         uint8_t** columns[] = { &state->window_x_owns,  &state->window_x_conversions, &state->window_x_lengths, &state->window_x_targets,
                                 &state->window_x_facts, &state->window_x_operands,    &state->window_x_offsets, &state->window_x_bits };
-        room = state->window_x_reads != NULL && state->x_cursors != NULL && state->x_words != NULL && state->x_lines != NULL && state->window_x_types != NULL && state->x_kinds != NULL && state->x_classes != NULL && state->x_verdicts != NULL &&
-               state->x_ticks != NULL && state->x_tables != NULL;
+        room = state->window_x_reads != NULL && state->x_cursors != NULL && state->x_words != NULL && state->x_lines != NULL && state->x_updates != NULL &&
+               state->window_x_types != NULL && state->x_kinds != NULL && state->x_classes != NULL && state->x_verdicts != NULL && state->x_ticks != NULL &&
+               state->x_tables != NULL;
         for (uint32_t c = 0; room && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
         {
             uint8_t* column = arena_push_array(arena, padded, 1, 64);
@@ -4911,6 +4920,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
             memset(state->x_cursors, 0, padded / 8 * sizeof(uint32_t));
             memset(state->x_words, 0, padded * sizeof(uint32_t));
             memset(state->x_lines, 0, padded * sizeof(uint32_t));
+            memset(state->x_updates, 0, padded * sizeof(uint32_t));
             memset(state->window_x_types, 0, padded * sizeof(TypeId));
             memset(state->x_kinds, 0, stream);
             memset(state->x_classes, 0, stream);

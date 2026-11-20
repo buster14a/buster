@@ -269,8 +269,9 @@ typedef enum NodeFactsCount
     // and their records; those whose tape it made, their records and their entries; the listed ones by their first
     // record's reason (BUSTER_NODE_ROWS_REASON_*, in its order); the made tapes that differ from the reference's, and
     // those the reference kept no tape of; the chunks' records its sweeps ran over and the entries they wrote; the
-    // chunks whose second run wrote another number of entries; the records its two loops read for (a target's word,
-    // where the target is not the record's type, and a line or a table of the unit's);
+    // chunks whose second run wrote another number of entries; the records its loops read for (a target's word,
+    // where the target is not the record's type; a line or a table of the unit's; an update's plan) and the updates
+    // whose rows it made;
     // and its ticks: the reads, the shapes, the rows' write, an expression's part, and the reference's X on the
     // expressions taken; then the four's in a second run over the same chunk.
     NODE_FACTS_COUNT_ROWS_EXPRESSIONS,
@@ -289,13 +290,16 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES,
     NODE_FACTS_COUNT_ROWS_WORDS,
     NODE_FACTS_COUNT_ROWS_LINES,
+    NODE_FACTS_COUNT_ROWS_UPDATES,
     NODE_FACTS_COUNT_ROWS_READ_TICKS,
     NODE_FACTS_COUNT_ROWS_SHAPE_TICKS,
+    NODE_FACTS_COUNT_ROWS_UPDATE_TICKS,
     NODE_FACTS_COUNT_ROWS_WRITE_TICKS,
     NODE_FACTS_COUNT_ROWS_PART_TICKS,
     NODE_FACTS_COUNT_ROWS_REFERENCE_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS,
     NODE_FACTS_COUNTS,

@@ -489,6 +489,52 @@ static bool tier1_emit_test_saves_loaded(const Tier1EmitResult* emitted)
     return loaded && pending == 0;
 }
 
+// Every kind that adds space beyond the per-node bound, across a full chunk and a partial one. Two calls use
+// one ABI descriptor; the covered call still counts records, but only the uncovered one can need references.
+static void tier1_emit_test_capacity(Tier1EmitTest* test)
+{
+    uint8_t operations[130] = { [0] = IR_VCONST, [63] = IR_CALL, [64] = IR_CALL_INDIRECT, [65] = IR_CALL, [126] = IR_CALL, [127] = IR_ALLOCA, [128] = IR_RET, [129] = IR_VCONST };
+    uint32_t descriptors[130] = { [65] = 1, [126] = 2 };
+    uint8_t covered[130] = { [64] = 1 };
+    IrCall calls[] = {
+        { .abi = 1, .argument_count = 3 },
+        { .row = 1 },
+        { .body = 1 },
+    };
+    IrAbiCall abi = { .call.stack_bytes = 16 };
+    IrAsmBody body = { .count = 5, .branch_count = 3, .passed = 2 };
+    IrFunction function = {
+        .op = operations,
+        .b = descriptors,
+        .instruction_count = 130,
+        .calls = calls,
+        .call_count = 3,
+        .abi_calls = &abi,
+        .abi_call_count = 1,
+        .asm_bodies = &body,
+        .asm_body_count = 1,
+        .vector_constant_count = 1,
+        .parameter_passed = 1,
+        .parameter_count = 2,
+        .result_size = 12,
+    };
+    const Tier1SelectPlan plan = { .function = &function, .covered = covered };
+    const uint32_t call = 4 + 4 * 3 + 5 * (BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS) + 16;
+    const uint32_t assembly = 5 + 4 + 2 + 2 * (BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 15 + 7);
+    const uint32_t records = 6 + 2 * call + BUSTER_TIER1_EMIT_ROW_RECORDS + assembly + 35 + 4;
+    const Tier1EmitCfgCapacity plain = tier1_emit_cfg_capacity(&plan, false);
+    const Tier1EmitCfgCapacity probed = tier1_emit_cfg_capacity(&plan, true);
+    tier1_emit_test_expect(test, plain.records == records && plain.branches == 3 && plain.references == 7 && plain.literals == 2, "size each call occurrence and both vector literals");
+    tier1_emit_test_expect(test, probed.records == records + 4 * 7 + BUSTER_TIER1_EMIT_PROBE_RECORDS && probed.branches == 3 + 2 + BUSTER_TIER1_EMIT_PROBE_BRANCHES &&
+                                 probed.references == plain.references && probed.literals == plain.literals, "probe the dynamic allocation and the outgoing areas of function calls");
+    function.instruction_count = 64;
+    const Tier1EmitCfgCapacity full = tier1_emit_cfg_capacity(&plan, false);
+    tier1_emit_test_expect(test, full.records == 6 + call + 2 && full.branches == 0 && full.references == 6 && full.literals == 1, "the last call in a complete 64-node chunk contributes");
+    function.instruction_count = 0;
+    const Tier1EmitCfgCapacity empty = tier1_emit_cfg_capacity(&plan, true);
+    tier1_emit_test_expect(test, empty.records == 6 && empty.branches == 0 && empty.references == 0 && empty.literals == 0, "only the argument records contribute with no nodes");
+}
+
 // The call-save rows' helpers (Tier1EmitSaves) on random rows, owners and masks against their definitions: a reset leaves
 // every row none and nothing owed; `kept` is the saved registers whose rows hold their owners; after a call the saved
 // rows hold their owners and those registers are owed; after a fixed registers' sequence their rows are none. A third
@@ -588,6 +634,7 @@ static void tier1_emit_test_calls_before(Tier1EmitTest* test)
 #include "tier1_induction_test.c"
 #include "tier1_storage_test.c"
 #include "tier1_branch_layout_test.c"
+#include "tier1_float_select_emit_test.c"
 #include "tier1_address_sink_test.c"
 #include "tier1_hot_recipes_test.c"
 #include "tier1_symbol_fold_test.c"
@@ -1491,6 +1538,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_emit_test_objects(&test);
             tier1_emit_test_lifetimes(&test);
             tier1_emit_test_object_overflow(&test);
+            tier1_emit_test_capacity(&test);
             tier1_emit_test_saves_rows(&test);
             tier1_emit_test_calls_before(&test);
             tier1_call_tests(&test);
@@ -1516,6 +1564,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_storage_midpoint_tests(&test);
             tier1_storage_parameter_tests(&test);
             tier1_branch_layout_tests(&test);
+            tier1_float_select_tests(&test);
             tier1_address_sink_tests(&test);
             tier1_hot_recipes_tests(&test);
             tier1_symbol_fold_tests(&test);

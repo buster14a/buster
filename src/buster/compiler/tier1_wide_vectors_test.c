@@ -246,7 +246,11 @@ static void tier1_wide_vector_program(Tier1WideTest* test, const Tier1WideVector
     {
         const uint64_t mark = test->output.length;
         IrVectorSplitResult vector = { 0 };
+        // Even a four-piece load needs just one scratch ID per source row. The suite's scratch arena is empty and page-aligned.
+        const uint64_t capacity = test->scratch.capacity;
+        test->scratch.capacity = (uint64_t)function.instruction_count * sizeof(uint32_t);
         const IrCheck split = ir_vector_split(&function, pieces[w], &test->output, &test->scratch, &vector);
+        test->scratch.capacity = capacity;
         bool piece_ok = tier1_wide_test_expect(test, split.error == IR_OK && vector.split, "the split takes the wide vectors");
         if (!piece_ok)
         {

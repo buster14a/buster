@@ -441,11 +441,14 @@ static void cbuiltin_bits_amount(CBuiltinLowerRecipe* recipe, uint32_t amount, u
             cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
             cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, width);
             cbuiltin_lower_emit(recipe, BUSTER_TYPED_MOD, BUSTER_TYPED_CLASS_I64, 0);
+            // -width < r < width. Add width once when r's sign mask is all ones.
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_I64, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 63);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_I64, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, width);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I64, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I64, 0);
             cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
-            cbuiltin_lower_constant(recipe, width);
-            cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
-            cbuiltin_lower_constant(recipe, width);
-            cbuiltin_lower_operation(recipe, BUSTER_TYPED_MOD);
         }
         else
         {

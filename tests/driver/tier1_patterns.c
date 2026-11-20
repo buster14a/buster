@@ -16,6 +16,9 @@
 // - #2676's selects of comparisons (a maximum, a clamp, a loop's conditional sum, a comparison of a load with an
 //   immediate and with a register, a doubleword's comparison choosing quadwords, an unsigned one): a cmov of the
 //   comparison's flags for each, no setcc;
+// - #2791's selects of floating comparisons (<, a negated >, a loop's conditional count by >=, and a sign's nested `?:`,
+//   whose outer test stays a branch): ucomis and a cmov or jump of its flags for each, no setcc (== and != keep their
+//   truth values, whose selects the oracle checks on unordered operands too);
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
@@ -440,6 +443,48 @@ __attribute__((noinline)) unsigned patterns_unsigned(unsigned a, unsigned b, uns
     return a >= b ? x : 0;
 }
 
+__attribute__((noinline)) int patterns_float_less(double a, double b, int x, int y)
+{
+    return a < b ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_not_greater(float a, float b, long x, long y)
+{
+    return !(a > b) ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_count(const double* p, int n, double t)
+{
+    long c = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        if (p[i] >= t)
+        {
+            c += 3;
+        }
+        else
+        {
+            c -= 1;
+        }
+    }
+    return c;
+}
+
+__attribute__((noinline)) int patterns_float_sign(double x)
+{
+    return x < 0 ? -1 : x > 0 ? 1 : 0;
+}
+
+__attribute__((noinline)) int patterns_float_equal(double a, double b, int x, int y)
+{
+    return a == b ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_unequal(float a, float b, long x)
+{
+    return a != b ? x : 0;
+}
+
 typedef long long patterns_vector __attribute__((vector_size(64)));
 typedef struct
 {
@@ -527,6 +572,12 @@ unsigned patterns_unsigned(unsigned a, unsigned b, unsigned x);
 long patterns_arms_signed(const int* p, long n);
 unsigned long patterns_arms_unsigned(const unsigned* p, long n);
 long patterns_arms_half(const unsigned short* p, long n);
+int patterns_float_less(double a, double b, int x, int y);
+long patterns_float_not_greater(float a, float b, long x, long y);
+long patterns_float_count(const double* p, int n, double t);
+int patterns_float_sign(double x);
+int patterns_float_equal(double a, double b, int x, int y);
+long patterns_float_unequal(float a, float b, long x);
 struct patterns_state
 {
     long* base;
@@ -976,6 +1027,30 @@ int main(void)
         valid = patterns_sum(summed, n) == sum && valid;
         sum += n < 8 && summed[n] > 128 ? summed[n] : 0;
     }
+    // #2791's floating selects, on NaN, zeros of both signs and infinities among the operands.
+    const double reals[] = { -__builtin_inf(), -2.5, -0.0, 0.0, 1.0, 2.5, __builtin_inf(), __builtin_nan(""), -__builtin_nan("") };
+    const int real_count = (int)(sizeof(reals) / sizeof(reals[0]));
+    for (int i = 0; i < real_count; i += 1)
+    {
+        for (int j = 0; j < real_count; j += 1)
+        {
+            const double a = reals[i];
+            const double b = reals[j];
+            const float f = (float)a;
+            const float g = (float)b;
+            valid = patterns_float_less(a, b, i, j + 100) == (a < b ? i : j + 100) && valid;
+            valid = patterns_float_not_greater(f, g, (long)i << 40, -(long)j) == (!(f > g) ? (long)i << 40 : -(long)j) && valid;
+            valid = patterns_float_equal(a, b, i + 7, j - 9) == (a == b ? i + 7 : j - 9) && valid;
+            valid = patterns_float_unequal(f, g, (long)i * 3 + 1) == (f != g ? (long)i * 3 + 1 : 0) && valid;
+        }
+        valid = patterns_float_sign(reals[i]) == (reals[i] < 0 ? -1 : reals[i] > 0 ? 1 : 0) && valid;
+        long counted = 0;
+        for (int n = 0; n < real_count; n += 1)
+        {
+            valid = patterns_float_count(reals, n, reals[i]) == counted && valid;
+            counted += reals[n] >= reals[i] ? 3 : -1;
+        }
+    }
     const long values[] = { 4, 9, -3, 9, 12 };
     for (long n = -1; n <= 5; n += 1)
     {
@@ -1150,6 +1225,10 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_loaded_other", PATTERNS_SELECT },
     { "patterns_mixed", PATTERNS_SELECT },
     { "patterns_unsigned", PATTERNS_SELECT },
+    { "patterns_float_less", PATTERNS_SELECT },
+    { "patterns_float_not_greater", PATTERNS_SELECT },
+    { "patterns_float_count", PATTERNS_SELECT },
+    { "patterns_float_sign", PATTERNS_SELECT },
     { "patterns_whole_literal", PATTERNS_WHOLE },
     { "patterns_whole_declaration", PATTERNS_WHOLE },
     { "patterns_whole_union", PATTERNS_WHOLE },

@@ -2061,12 +2061,13 @@ finds wrong (`own_values_wrong`, pinned at zero).
 
 `--window-rows` adds X's rows to `--window-contexts`' run. For each
 expression C takes on the window, the kinds and the classes of each evaluated
-record's own entries and of its conversion's are made from C's answers there,
-64 records a step, and compared entry by entry with X's tape on T's columns
-at reader time (`node_machine_expand`), their reference. An entry's value is
-not made yet. No compile takes any of it. [The
-design](../node-machine.md#xs-rows-on-the-window-first-their-shapes) has what
-it measured.
+record's own entries and of its conversion's, and of an update's two rows,
+are made from C's answers there, 64 records a step, and compared entry by
+entry with X's tape on T's columns at reader time (`node_machine_expand`),
+their reference. An entry's value is not made yet. No compile takes any of
+it. The design has what it measured: [the
+shapes](../node-machine.md#xs-rows-on-the-window-first-their-shapes) and [an
+update's rows](../node-machine.md#an-updates-rows-on-the-window).
 
 - **A shape a part** (`c_check_node_machine_rows.c`): a byte for a record's
   own entries and one for its conversion's. Below 64 it is a typed kind's
@@ -2099,14 +2100,41 @@ it measured.
   where one of its operand's records is; else its tape is its operand's
   records' rows, in a row in the streams, and its root's. A root's own record
   never lists it alone (the comment there).
-- **What is listed**, and left to X on T's columns: an update's template and
-  an operator's evaluated as branches; a conversion from or to a class past
-  double's (a long double's, a 128-bit integer's, a half-precision one's, an
-  aggregate's, a complex type's), which X's rules refuse; and an integer
-  constant converted to float or double, whose fold reads its value.
+- **What is listed**, and left to X on T's columns: an operator's template
+  evaluated as branches; a conversion from or to a class past double's (a
+  long double's, a 128-bit integer's, a half-precision one's, an aggregate's,
+  a complex type's), which X's rules refuse; an integer constant converted
+  to float or double, whose fold reads its value; a bool's update, whose
+  result is tested; and a postfix update through an address whose
+  destination's own entries leave its first row no room (an address and its
+  offset; a member's offset's two and a CONVERT).
 - **A record's type is a column** with `--window-rows`: the records' bytes'
   sweep makes it with its four (`node_tests_window_bytes_by`,
   `window_x_types`), so a target and a type are compared in registers.
+- **An update's two rows** (`node_rows_window_updates`, after the shapes'
+  sweep and before the rows' write): a sweep of masks compresses the chunk's
+  updates' numbers into a list, and a loop over the list writes an update's
+  two rows' shapes over what the shapes' sweep made of its record and of its
+  destination's, with their lengths (`node_rows_window_update`). Each row
+  goes where its record has free slots. Its own row
+  (`BUSTER_NODE_ROWS_UPDATE`, `_UPDATE_POINTER`) is the update's record's own
+  part, with two marks the write resolves a record: the operation's kind, by
+  the operator's code (`NodeRowsTables.operations`), and the store's
+  (`BUSTER_NODE_ROWS_KIND_OPERATION`, `_STORE`). Its first row is its
+  destination's record's: for one read by name, which is not evaluated, the
+  read and a postfix update's DUP in its own part (`BUSTER_NODE_ROWS_FIRST`)
+  and the CONVERT in its conversion's (`_FIRST_CONVERT`); the conversion's
+  part of one read through its address (`_FIRST_ADDRESS`); and for a postfix
+  update through an address, whose first row is six entries, both parts, by
+  the shape of the destination's own entries (`BUSTER_NODE_ROWS_KEPT`,
+  `NodeRowsTables.kept_owns` and `kept_conversions`). The loop reads the
+  update's line for its computation's class (T's conversion of its first
+  operand). An update has no column of its own: the shapes go into the
+  shapes' two columns, the store's kind where a member's and an address's
+  bits are (`window_x_bits`), the computation's class into the first
+  operand's conversion's column, and a bool's update's and a destination's
+  with no room's bit into the block's mask of the records that list their
+  expression. The reads' and the shapes' sweeps have no term of an update.
 
 The report adds:
 
@@ -2122,15 +2150,15 @@ The report adds:
   reason: update=N branches=N refused-conversion=N
   constant-to-a-floating-class=N`.
 - `node-shadow: window rows records read a record at a time: a target's
-  word=N (P% of the records swept) a line or a table=N (P%)`: the two lists'
-  records.
+  word=N (P% of the records swept) a line or a table=N (P%) an update's
+  line=N (P%)`: the reads' two lists' records and the updates' list's.
 - `node-shadow: window rows ticks=N (T a record swept, T a record of the
-  taken): the reads=N (T) the shapes=N (T) the rows=N (T) an expression's
-  part=N (T); the reference's X on the taken expressions=N (T a record of
-  theirs)`: TSC ticks. The reference's are with its entries' values, which
-  the rows here don't make.
+  taken): the reads=N (T) the shapes=N (T) the updates=N (T) the rows=N (T)
+  an expression's part=N (T); the reference's X on the taken expressions=N
+  (T a record of theirs)`: TSC ticks. The reference's are with its entries'
+  values, which the rows here don't make.
 - `node-shadow: window rows a second run over the same chunk, not counted:
-  ...`: the same four parts over the chunk once more, their code and tables
+  ...`: the same five parts over the chunk once more, their code and tables
   at hand.
 - `node-shadow: window rows difference file=F line=N token=N`, with `--list
   N`: where a tape that differs is.
@@ -2141,17 +2169,23 @@ number of entries.
 `test-checker` (part 5 of 8) reads the rows' fixture
 (`node_rows_test_source`): a line a shape, a line a term's case (a `_BitInt`'s
 target, the targets past double's, an aggregate converted to an aggregate, a
-store of a constant, records that are not evaluated), and two groups of
-statements 64 times each for the blocks' ends. It reads C on the window's
+store of a constant, records that are not evaluated), an update's rows (by
+name and through an address, prefix and postfix, each operator, a narrow, a
+floating and a pointer's destination, its value used, an update below
+another, and the four it lists), two groups of statements 64 times each
+for the blocks' ends, and five update statements 64 times each (an update
+and its destination on either side of a block's end, and more than 16
+updates in a block). It reads C on the window's
 fixture through the rows too. Every tape made is X's on T's columns; the
 reader's verify finds no byte of the window wrong, the types' column's among
 them; the expressions, the tapes, their entries, the listed ones by reason,
-the entries written and the records read for are pinned
-(`NodeRowsExpected`); and with one
+the entries written and the records read for (an update's plan among them)
+are pinned (`NodeRowsExpected`); and with one
 of the reference's answers changed for each tape
 (`BUSTER_NODE_READER_WINDOW_ROWS_FAULT`: its first entry's kind, its last's
 class and its length in turn) the comparison counts every tape.
 `node_rows_test_tables` checks the tables: each shape's entries and length,
-the classes' sources the write resolves, each template's shape with the mark
-of those whose rows are not made here, the order's permutation, and void's
-word, which the reads don't read.
+the classes' sources and the two marks the write resolves, by part and
+slot; a postfix update's destination's two parts by its own entries' shape;
+each template's shape with the mark of those whose rows are not made here,
+the order's permutation, and void's word, which the reads don't read.
