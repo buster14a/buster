@@ -361,7 +361,10 @@ patterns are:
   consumer reads them from the IR's operands' objects (`tier1_emit_cfg_x87`), and
   the plan marks them needed as it marks a pattern's values. The values are the
   other operands alone: a load's and a store's address, a conversion's integer
-  or floating operand. A constant stores its 10 bytes as immediates. A load and a
+  or floating operand. For signed zero or an exactly representable normal binary32
+  constant, one 32-bit immediate store fills its private home and each use loads it
+  with `flds`. An external store or outgoing argument still writes all ten bytes.
+  Other constants store their ten bytes as immediates and use `fldt`. A load and a
   store are `fld` and `fstp` of them through the address; arithmetic loads both
   operands and `faddp` (`fsubp`, `fmulp`, `fdivp`) `st(1), st(0)`; a negation is
   `fchs`. A comparison is `fucomip` of the operands in the order that makes

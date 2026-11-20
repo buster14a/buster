@@ -1492,11 +1492,13 @@ static bool tier1_emit_cfg_slot(const Tier1EmitResult* emitted, uint32_t locatio
 static bool tier1_emit_cfg_x87_offset(const IrFunction* function, const Tier1EmitResult* emitted, uint32_t node, int32_t* offset);
 static X86Instruction tier1_emit_cfg_x87_memory(uint32_t form, uint8_t base, int32_t displacement);
 
+static X86Instruction tier1_emit_cfg_x87_load(const IrFunction* function, uint32_t value, uint8_t base, int32_t offset);
+
 static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, uint32_t value, uint32_t position, uint32_t slot, Tier1EmitBuffer* buffer)
 {
     const uint8_t base = (uint8_t)emitted->frame.base_register;
     const IrFunction* function = emitted->prepared.function;
-    // A long double (#141): its object's 10 bytes into its 16, through the x87 stack.
+    // A long double (#141): its object's 10 bytes into its 16, through the x87 stack, expanding an exact binary32 constant.
     const bool x87 = value < function->instruction_count && function->type[value] == IR_F80;
     const uint32_t v = emitted->node_values[value];
     uint32_t location = BUSTER_TIER1_CFG_NONE;
@@ -1508,7 +1510,7 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
     uint16_t form = X86_FORM_MOV_RM64_R64;
     if (error == TIER1_EMIT_OK && x87)
     {
-        error = tier1_emit_append(buffer, tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, offset)) ? error : TIER1_EMIT_MEMORY;
+        error = tier1_emit_append(buffer, tier1_emit_cfg_x87_load(function, value, base, offset)) ? error : TIER1_EMIT_MEMORY;
         form = X86_FORM_FSTP_M80;
     }
     else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REGISTER && tier1_emit_cfg_vector_location(location))
@@ -2211,6 +2213,38 @@ static X86Instruction tier1_emit_cfg_x87_memory(uint32_t form, uint8_t base, int
     return (X86Instruction){ .form = (uint16_t)form, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = displacement };
 }
 
+// A private F80 constant can use a four-byte home when loading binary32 reproduces its exact bits and
+// exception behavior. Restrict this to signed zero and normal finite binary32 values. In particular a
+// binary32 subnormal could raise the x87 denormal-operand exception when loaded from its narrower home.
+static uint64_t tier1_emit_cfg_x87_binary32(const IrFunction* function, uint32_t value)
+{
+    if (function->op[value] != IR_CONST)
+    {
+        return UINT64_MAX;
+    }
+    const IrConstant constant = function->constants[function->a[value]];
+    const uint32_t exponent = (uint16_t)constant.high & 0x7fffu;
+    const uint32_t sign = ((uint32_t)constant.high & 0x8000u) << 16;
+    if (exponent == 0 && constant.low == 0)
+    {
+        return sign;
+    }
+    // The explicit integer bit must be set, and the low 40 significand bits must be zero.
+    if (exponent < 16383 - 126 || exponent > 16383 + 127 ||
+        (constant.low >> 63) == 0 || (constant.low & ((UINT64_C(1) << 40) - 1)) != 0)
+    {
+        return UINT64_MAX;
+    }
+    return sign | ((exponent - (16383 - 127)) << 23) | ((uint32_t)(constant.low >> 40) & 0x7fffffu);
+}
+
+// Read only a private F80 value's home. External objects and outgoing ABI slots keep their 80-bit format.
+static X86Instruction tier1_emit_cfg_x87_load(const IrFunction* function, uint32_t value, uint8_t base, int32_t offset)
+{
+    const uint32_t form = tier1_emit_cfg_x87_binary32(function, value) != UINT64_MAX ? X86_FORM_FLD_M32 : X86_FORM_FLD_M80;
+    return tier1_emit_cfg_x87_memory(form, base, offset);
+}
+
 // An x87 register's record of `form` (st(i)).
 static X86Instruction tier1_emit_cfg_x87_register(uint32_t form, uint32_t i)
 {
@@ -2348,17 +2382,27 @@ static Tier1EmitError tier1_emit_cfg_x87(const IrFunction* function, const Tier1
     const X86Instruction store = tier1_emit_cfg_x87_memory(X86_FORM_FSTP_M80, base, own);
     if (valid && kind == BUSTER_TIER1_X87_CONSTANT)
     {
-        // Its 10 bytes as immediates: the significand's halves, then the sign and the exponent.
-        const IrConstant constant = function->constants[holes->immediate];
-        X86Instruction low = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, own);
-        X86Instruction high = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, own + 4);
-        X86Instruction exponent = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM16_IMM16, base, own + 8);
-        low.immediate = (int32_t)(uint32_t)constant.low;
-        high.immediate = (int32_t)(uint32_t)(constant.low >> 32);
-        exponent.immediate = (int32_t)(uint16_t)constant.high;
-        records[count++] = low;
-        records[count++] = high;
-        records[count++] = exponent;
+        const uint64_t single = tier1_emit_cfg_x87_binary32(function, node);
+        if (single != UINT64_MAX)
+        {
+            X86Instruction bits = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, own);
+            bits.immediate = (int32_t)(uint32_t)single;
+            records[count++] = bits;
+        }
+        else
+        {
+            // Its 10 bytes as immediates: the significand's halves, then the sign and the exponent.
+            const IrConstant constant = function->constants[holes->immediate];
+            X86Instruction low = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, own);
+            X86Instruction high = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, own + 4);
+            X86Instruction exponent = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM16_IMM16, base, own + 8);
+            low.immediate = (int32_t)(uint32_t)constant.low;
+            high.immediate = (int32_t)(uint32_t)(constant.low >> 32);
+            exponent.immediate = (int32_t)(uint16_t)constant.high;
+            records[count++] = low;
+            records[count++] = high;
+            records[count++] = exponent;
+        }
     }
     else if (valid && kind == BUSTER_TIER1_X87_LOAD)
     {
@@ -2367,12 +2411,12 @@ static Tier1EmitError tier1_emit_cfg_x87(const IrFunction* function, const Tier1
     }
     else if (valid && kind == BUSTER_TIER1_X87_STORE)
     {
-        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, right);
+        records[count++] = tier1_emit_cfg_x87_load(function, b, base, right);
         records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FSTP_M80, holes->left, 0);
     }
     else if (valid && (kind == BUSTER_TIER1_X87_COPY || kind == BUSTER_TIER1_X87_NEGATE))
     {
-        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, left);
+        records[count++] = tier1_emit_cfg_x87_load(function, a, base, left);
         if (kind == BUSTER_TIER1_X87_NEGATE)
         {
             records[count++] = (X86Instruction){ .form = X86_FORM_FCHS };
@@ -2383,8 +2427,8 @@ static Tier1EmitError tier1_emit_cfg_x87(const IrFunction* function, const Tier1
     {
         // a into st1 and b into st0, then faddp (fsubp, fmulp, fdivp) st(1), st(0), whose st(1) − st(0) is a − b.
         static const uint16_t operations[4] = { X86_FORM_FADDP_ST_ST0, X86_FORM_FSUBP_ST_ST0, X86_FORM_FMULP_ST_ST0, X86_FORM_FDIVP_ST_ST0 };
-        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, left);
-        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, right);
+        records[count++] = tier1_emit_cfg_x87_load(function, a, base, left);
+        records[count++] = tier1_emit_cfg_x87_load(function, b, base, right);
         records[count++] = tier1_emit_cfg_x87_register(operations[holes->operation & 3], 1);
         records[count++] = store;
     }
@@ -2397,8 +2441,8 @@ static Tier1EmitError tier1_emit_cfg_x87(const IrFunction* function, const Tier1
         const bool swapped = condition == IR_LT || condition == IR_LE;
         const uint8_t d = holes->destination;
         valid = d < 16 && condition <= IR_GE;
-        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, swapped ? left : right);
-        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, swapped ? right : left);
+        records[count++] = tier1_emit_cfg_x87_load(function, swapped ? a : b, base, swapped ? left : right);
+        records[count++] = tier1_emit_cfg_x87_load(function, swapped ? b : a, base, swapped ? right : left);
         records[count++] = tier1_emit_cfg_x87_register(X86_FORM_FUCOMIP_ST0_ST, 1);
         records[count++] = tier1_emit_cfg_x87_register(X86_FORM_FSTP_ST, 0);
         if (condition == IR_EQ || condition == IR_NE)
@@ -2427,7 +2471,7 @@ static Tier1EmitError tier1_emit_cfg_x87(const IrFunction* function, const Tier1
     {
         const bool single = holes->width == 4;
         const uint8_t x = (uint8_t)(holes->destination & 15);
-        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, left);
+        records[count++] = tier1_emit_cfg_x87_load(function, a, base, left);
         records[count++] = tier1_emit_cfg_x87_memory(single ? X86_FORM_FSTP_M32 : X86_FORM_FSTP_M64, base, temporary + 8);
         records[count++] = (X86Instruction){ .form = single ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64, .reg = x, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 8 };
     }
@@ -2469,7 +2513,7 @@ static Tier1EmitError tier1_emit_cfg_x87(const IrFunction* function, const Tier1
         records[count++] = (X86Instruction){ .form = X86_FORM_OR_RM32_IMM32, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 0x0c00 };
         records[count++] = (X86Instruction){ .form = X86_FORM_MOV_RM16_R16, .reg = scratch, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = temporary + 2 };
         records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLDCW_M16, base, temporary + 2);
-        records[count++] = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, left);
+        records[count++] = tier1_emit_cfg_x87_load(function, a, base, left);
         if (bytes == 8 && !is_signed)
         {
             X86Instruction limit = tier1_emit_cfg_x87_memory(X86_FORM_MOV_RM32_IMM32, base, temporary + 4);
@@ -3023,7 +3067,7 @@ static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, const 
         error = error != TIER1_EMIT_OK || !copied || (tier1_emit_cfg_x87_offset(function, emitted, incoming, &from) && tier1_emit_cfg_x87_offset(function, emitted, node, &destinations[copies])) ? error : TIER1_EMIT_FRAME;
         if (error == TIER1_EMIT_OK && copied)
         {
-            error = tier1_emit_append(buffer, tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, from)) ? error : TIER1_EMIT_MEMORY;
+            error = tier1_emit_append(buffer, tier1_emit_cfg_x87_load(function, incoming, base, from)) ? error : TIER1_EMIT_MEMORY;
             copies += 1;
         }
     }
@@ -4269,7 +4313,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     {
                         int32_t result_offset = 0;
                         error = tier1_emit_cfg_x87_offset(function, emitted, function->a[node], &result_offset) ? error : TIER1_EMIT_FRAME;
-                        error = error != TIER1_EMIT_OK || tier1_emit_append(&buffer, tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, (uint8_t)emitted->frame.base_register, result_offset)) ? error : TIER1_EMIT_MEMORY;
+                        error = error != TIER1_EMIT_OK || tier1_emit_append(&buffer, tier1_emit_cfg_x87_load(function, function->a[node], (uint8_t)emitted->frame.base_register, result_offset)) ? error : TIER1_EMIT_MEMORY;
                     }
                     if (error == TIER1_EMIT_OK && returns_here && r + 1 == selected_records.count && tier1_frame_emit(&emitted->frame, true, &buffer) != TIER1_FRAME_EMIT_OK)
                     {

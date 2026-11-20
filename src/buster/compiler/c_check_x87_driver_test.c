@@ -11,6 +11,12 @@ static const char check_test_x87_source[] =
     "void x87_chain(long double *out, const long double *p) { *out = p[0] * p[1] + p[2]; }\n"
     "void x87_order(long double *out, const long double *p) { *out = (p[0] - p[1]) / (p[2] - p[3]); }\n"
     "void x87_affine(long double *out, const long double *p) { *out = p[0] * 0.5L + p[1]; }\n"
+    "long double x87_single_min(void) { return 0x1p-126L; }\n"
+    "long double x87_single_max(void) { return -0x1.fffffep127L; }\n"
+    "long double x87_negative_zero(void) { return -0.0L; }\n"
+    "long double x87_below_single_normal(void) { return 0x1p-127L; }\n"
+    "long double x87_above_single_max(void) { return 0x1p128L; }\n"
+    "long double x87_extra_fraction(void) { return 0x1.000001p0L; }\n"
     "void x87_literals(long double *out) {\n"
     "out[0]=0.0L; out[1]=-0.0L; out[2]=0.5L; out[3]=-1.5L;\n"
     "out[4]=0x1.0000000000000002p+0L; out[5]=0x1p-16382L; out[6]=0x1p-16445L; }\n"
@@ -127,6 +133,31 @@ static void check_test_driver_x87(CheckTest* test, const char* clang, const char
                 fprintf(stderr, "%s", text);
             }
             free(text);
+        }
+        if (status == 0 && tier1)
+        {
+            // The consumer must load the representation stored in the private home, including at both ends
+            // of binary32's normal range. Keeping denormals in extended format preserves the exception flags.
+            static const struct { const char* name; uint32_t form; } widths[] = {
+                { "x87_single_min", X86_FORM_FLD_M32 },
+                { "x87_single_max", X86_FORM_FLD_M32 },
+                { "x87_negative_zero", X86_FORM_FLD_M32 },
+                { "x87_below_single_normal", X86_FORM_FLD_M80 },
+                { "x87_above_single_max", X86_FORM_FLD_M80 },
+                { "x87_extra_fraction", X86_FORM_FLD_M80 },
+            };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths); i += 1)
+            {
+                X86Decoded records[32];
+                uint32_t offsets[32], types[32], relocations = 0;
+                const uint32_t n = check_test_tier1_function(object, widths[i].name, records, BUSTER_ARRAY_LENGTH(records), offsets, types, &relocations);
+                uint32_t loads = 0;
+                for (uint32_t r = 0; r < n; r += 1)
+                {
+                    loads += (records[r].instruction.form & BUSTER_X86_FORM_NUMBER) == widths[i].form;
+                }
+                check_test_expect(test, n != 0 && loads == 1 && relocations == 0, widths[i].name);
+            }
         }
         char captured[128] = "";
         const bool ran = status == 0 && check_test_driver_capture(output, captured, sizeof(captured));
