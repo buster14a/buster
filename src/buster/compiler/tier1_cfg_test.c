@@ -2255,26 +2255,26 @@ static void tier1_cfg_test_given_tree(Tier1CfgTestTally* tally, const Tier1CfgIn
 }
 
 // #2611: the given tree is the one tier1_cfg_anchors reads. The join's CFG (0 -> 1, 0 -> 2, 1 -> 2) given the tree of a
-// chain 0 -> 1 -> 2, in which 1 dominates 2, anchors 2 at 1, its nearest predecessor; given a tree of another size, the
-// anchors are the analysis's, 2 anchored at its dominator 0.
+// chain 0 -> 1 -> 2, in which 1 dominates 2, anchors 2 at 1, its nearest predecessor; given the tree of a longer chain
+// 0 -> 1 -> 2 -> 3, of another size, the anchors are the analysis's, 2 anchored at its dominator 0.
 static void tier1_cfg_test_tree_read(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
-    // The chain's views, and its first two blocks' (0 -> 1).
-    static const uint32_t chain_successor_offsets[2][4] = { { 0, 1, 2, 2 }, { 0, 1, 1, 0 } };
-    static const uint32_t chain_successors[] = { 1, 2 };
-    static const uint32_t chain_predecessor_offsets[2][4] = { { 0, 0, 1, 2 }, { 0, 0, 1, 0 } };
-    static const uint32_t chain_predecessors[] = { 0, 1 };
+    // The chain's views, and the longer chain's.
+    static const uint32_t chain_successor_offsets[2][5] = { { 0, 1, 2, 2, 0 }, { 0, 1, 2, 3, 3 } };
+    static const uint32_t chain_successors[] = { 1, 2, 3 };
+    static const uint32_t chain_predecessor_offsets[2][5] = { { 0, 0, 1, 2, 0 }, { 0, 0, 1, 2, 3 } };
+    static const uint32_t chain_predecessors[] = { 0, 1, 2 };
     DominatorOptions options = dominators_options();
     options.outputs = 0;
     Dominators trees[2] = { { 0 } };
     for (uint32_t t = 0; t < 2; t += 1)
     {
-        // The chain, and its first two blocks alone (another size).
+        // The chain, and the longer one (another size).
         const DominatorCfg chain = {
-            .block_count = 3 - t,
-            .edge_count = 2 - t,
+            .block_count = 3 + t,
+            .edge_count = 2 + t,
             .entry = 0,
             .successor_offsets = chain_successor_offsets[t],
             .successors = chain_successors,
