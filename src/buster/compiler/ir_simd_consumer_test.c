@@ -25,8 +25,11 @@ static void ir_simd_scan_test(IrTestTally* tally)
         ready = ready && columns[k] != MAP_FAILED && mprotect(columns[k] + page, page, PROT_NONE) == 0;
     }
     ir_test_expect(tally, ready, "guarded SIMD scan columns");
-    static const uint8_t markers[4][2] = {
+    // Every vector type (#2924's C9a: the scans' bounds), and each vector operation of a scalar type.
+    static const uint8_t markers[6][2] = {
+        { IR_ADD, IR_V4I32 },
         { IR_ADD, IR_V8I32 },
+        { IR_ADD, IR_V16I32 },
         { IR_VCONST, IR_I32 },
         { IR_VCMP, IR_I32 },
         { IR_VSELECT, IR_I32 },
@@ -38,17 +41,17 @@ static void ir_simd_scan_test(IrTestTally* tally)
         memset(op, IR_ADD, count);
         memset(type, IR_I32, count);
         const IrFunction function = { .op = op, .type = type, .instruction_count = count };
-        ir_test_expect(tally, !ir_function_has_simd(&function) && !ir_function_has_simd_scalar(&function), "a scalar function's columns hold no vector or mask");
-        ir_test_expect(tally, !ir_function_has_vectors_path(&function, true) && !ir_function_has_vectors_path(&function, false), "a scalar function's columns hold no vector");
+        ir_test_expect(tally, !ir_function_has_simd(&function), "a scalar function's columns hold no vector or mask");
+        ir_test_expect(tally, !ir_function_has_vectors(&function), "a scalar function's columns hold no vector");
         for (uint32_t place = 0; place < count; place += 1)
         {
-            for (uint32_t m = 0; m < 4; m += 1)
+            for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(markers); m += 1)
             {
                 op[place] = markers[m][0];
                 type[place] = markers[m][1];
-                ir_test_expect(tally, ir_function_has_simd(&function) && ir_function_has_simd_scalar(&function), "a vector type or operation at any place, the tail's last among them");
-                ir_test_expect(tally, ir_function_has_vectors_path(&function, true) && ir_function_has_vectors_path(&function, false),
-                               "a vector type or operation at any place is a vector, by both paths");
+                ir_test_expect(tally, ir_function_has_simd(&function), "a vector type or operation at any place, the tail's last among them");
+                ir_test_expect(tally, ir_function_has_vectors(&function),
+                               "a vector type or operation at any place is a vector");
                 op[place] = IR_ADD;
                 type[place] = IR_I32;
             }
@@ -56,9 +59,8 @@ static void ir_simd_scan_test(IrTestTally* tally)
             {
                 op[place] = IR_NOT;
                 type[place] = (uint8_t)(IR_M8 + w);
-                ir_test_expect(tally, ir_function_has_simd(&function) && ir_function_has_simd_scalar(&function) && !ir_function_has_vectors_path(&function, true) &&
-                                          !ir_function_has_vectors_path(&function, false),
-                               "a mask at any place is SIMD but no vector, by both paths");
+                ir_test_expect(tally, ir_function_has_simd(&function) && !ir_function_has_vectors(&function),
+                               "a mask at any place is SIMD but no vector");
                 op[place] = IR_ADD;
                 type[place] = IR_I32;
             }
@@ -71,7 +73,7 @@ static void ir_simd_scan_test(IrTestTally* tally)
             munmap(columns[k], page * 2);
         }
     }
-    // The metadata: each place a type can be outside the columns, a mask's (no vector) and a vector's (one), by both paths.
+    // The metadata: each place a type can be outside the columns, a mask's (no vector) and a vector's (one).
     static const uint8_t metadata_types[2] = { IR_M16, IR_V8I32 };
     for (uint32_t t = 0; t < 2; t += 1)
     {
@@ -105,7 +107,7 @@ static void ir_simd_scan_test(IrTestTally* tally)
                 .slot_count = 1,
             };
             const bool vector = t == 1;
-            ir_test_expect(tally, ir_function_has_vectors_path(&function, true) == vector && ir_function_has_vectors_path(&function, false) == vector,
+            ir_test_expect(tally, ir_function_has_vectors(&function) == vector,
                            "a mask's type as a parameter's, a call's argument's or result's or a slot's is no vector, and a vector's is one");
         }
     }
@@ -136,8 +138,8 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
             ir_test_instruction(&function, 2, IR_NOT, mask, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_test_instruction(&function, 3, IR_STORE, IR_VOID, 0, 2, BUSTER_IR_NONE);
             ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            ir_test_expect(tally, ir_function_has_simd(&function) && !ir_function_has_vectors(&function) && !ir_function_has_vectors_path(&function, false),
-                           "a function of masks alone has SIMD values but no vectors, by both paths");
+            ir_test_expect(tally, ir_function_has_simd(&function) && !ir_function_has_vectors(&function),
+                           "a function of masks alone has SIMD values but no vectors");
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
                 IrFunction promoted = { 0 };
@@ -148,12 +150,10 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 IrOptimizeOptions options = ir_optimize_options();
                 options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                 checked = ir_optimize(&function, output, scratch, options, &optimized);
-                ir_test_expect(tally, checked.error == IR_OK && ir_verify_scalar(&optimized.function, scratch, NULL).error == IR_OK && scratch->length == 0,
+                ir_test_expect(tally, checked.error == IR_OK && ir_verify(&optimized.function, scratch, NULL).error == IR_OK && scratch->length == 0,
                                "SCCP, dead code and CFG cleanup take a function of masks alone, into a function that verifies");
                 arena_pop_to(output, 0);
-                // GVN and LICM now model masks (#1450). SROA's default admission still finds them by the requested
-                // scan path (#141's review): a scalar run takes its scalar twin alone.
-                const uint64_t scans = ir_scan_vector_paths;
+                // GVN and LICM now model masks (#1450).
                 IrGvnResult gvn = { .function.instruction_count = 123 };
                 IrGvnOptions gvn_options = ir_gvn_options();
                 gvn_options.scalar = scalar != 0;
@@ -175,14 +175,10 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 function.symbol_count = 2;
                 const IrInlineUnit unit = { .functions = &function, .symbols = symbols, .flags = flags, .count = 1, .symbol_count = 2 };
                 IrInlineResult inlined = { .function_count = 123 };
-                IrInlineOptions inline_options = ir_inline_options();
-                inline_options.scalar = scalar != 0;
-                checked = ir_optimize_inline(&unit, output, scratch, inline_options, &inlined, NULL);
+                checked = ir_optimize_inline(&unit, output, scratch, ir_inline_options(), &inlined, NULL);
                 ir_test_expect(tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].instruction_count == function.instruction_count && scratch->length == 0,
                                "the inliner takes masks (#1282)");
                 arena_pop_to(output, 0);
-                ir_test_expect(tally, scalar != 0 ? ir_scan_vector_paths == scans : !BUSTER_HOST_VECTOR || ir_scan_vector_paths > scans,
-                               "the passes' scans for SIMD values take the requested path: none the vector path on a scalar run");
                 function.symbol_count = 0;
             }
         }
@@ -235,7 +231,7 @@ static void ir_simd_vector_consumer_test(IrTestTally* tally, Arena* input, Arena
             ir_test_instruction(&function, 8, IR_VCMP, mask, 7, 5, IR_EQ);
             ir_test_instruction(&function, 9, IR_COPY, mask, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_test_instruction(&function, 10, IR_RET, IR_VOID, 9, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            ir_test_expect(tally, ir_verify_scalar(&function, scratch, NULL).error == IR_OK && ir_function_has_vectors(&function), "the vector consumer fixture verifies and has vectors");
+            ir_test_expect(tally, ir_verify(&function, scratch, NULL).error == IR_OK && ir_function_has_vectors(&function), "the vector consumer fixture verifies and has vectors");
             arena_pop_to(scratch, 0);
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
@@ -258,7 +254,7 @@ static void ir_simd_vector_consumer_test(IrTestTally* tally, Arena* input, Arena
                 {
                     vector_values += ((BUSTER_IR_VECTORS >> optimized.function.type[i]) & 1) != 0;
                 }
-                ir_test_expect(tally, checked.error == IR_OK && ir_verify_scalar(&optimized.function, scratch, NULL).error == IR_OK && vector_values == 0 && optimized.function.instruction_count == 2 &&
+                ir_test_expect(tally, checked.error == IR_OK && ir_verify(&optimized.function, scratch, NULL).error == IR_OK && vector_values == 0 && optimized.function.instruction_count == 2 &&
                                           optimized.function.vector_constant_count == 2 && memcmp(optimized.function.vector_constants, function.vector_constants, 2 * sizeof(IrSimdValue)) == 0,
                                "SCCP folds promoted constant lanes through compare and select to a verified constant mask");
                 arena_pop_to(scratch, 0);
@@ -343,8 +339,7 @@ static int run_ir_simd_tests(int argc, char** argv)
             const uint8_t flags[1] = { BUSTER_IR_INLINE_INTERNAL };
             const IrInlineUnit unit = { .functions = &function, .symbols = symbols, .flags = flags, .count = 1, .symbol_count = 2 };
             IrInlineResult inlined = { .function_count = 123 };
-            IrInlineOptions inline_options = ir_inline_options();
-            inline_options.scalar = scalar != 0;
+            const IrInlineOptions inline_options = ir_inline_options();
             checked = ir_optimize_inline(&unit, &output, &scratch, inline_options, &inlined, NULL);
             ir_test_expect(&tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].vector_constant_count == 1 &&
                                        memcmp(inlined.functions[0].vector_constants, function.vector_constants, sizeof(IrSimdValue)) == 0 && scratch.length == 0,
@@ -371,7 +366,7 @@ static int run_ir_simd_tests(int argc, char** argv)
             memset(&selected, 0xa5, sizeof(selected));
             const Tier1SelectPlan before = selected;
             uint32_t failed = BUSTER_IR_NONE;
-            const Tier1SelectError selection = tier1_select_plan(&function, NULL, &output, &scratch, scalar == 0, &selected, &failed);
+            const Tier1SelectError selection = tier1_select_plan(&function, NULL, &output, &scratch, &selected, &failed);
             ir_test_expect(&tally, selection == TIER1_SELECT_ERROR_UNSUPPORTED && memcmp(&selected, &before, sizeof(selected)) == 0 && output.length == 0 && scratch.length == 0,
                            "native Tier 1 refuses SIMD without using the host ISA to authorize output instructions");
         }

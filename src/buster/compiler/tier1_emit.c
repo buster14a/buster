@@ -108,6 +108,7 @@ struct Tier1EmitOptions
     // With BUSTER_TIER1_FRAME_KEEP_POINTER in `frame_flags`: a function without calls keeps no frame pointer
     // (-momit-leaf-frame-pointer's leaf rule, #177; tier1_emit_frame_flags).
     bool omit_leaf_frame_pointer;
+    // The frame colorer's path (#2699): its vector path, or with false its scalar twin.
     bool vector;
     bool rematerialize;
     // Retain each record's IR origin for source/debug publication, without changing allocation or code generation.
@@ -363,6 +364,12 @@ struct Tier1EmitResult
     // for an unknown row. Null without call-save rows or certification. These are untrusted entry assertions, not
     // proof: the code certificate checks each row's bytes on every incoming edge, alongside the allocated locations.
     uint32_t* entry_rows;
+    // Under certify, each block's values whose slots hold them at its start besides the registers their intervals put
+    // them in (#2870): block b's are entry_slots[entry_slot_offsets[b] .. entry_slot_offsets[b + 1]), the values (the CFG
+    // problem's) whose slot stamps a run of blocks carries into b (tier1_emit_phase), where a store into the slot is then
+    // left out. Untrusted entry assertions too, each proved on b's incoming edge from the predecessor's records.
+    uint32_t* entry_slots;
+    uint32_t* entry_slot_offsets;
     // Each node whose definition the consumer left out (tier1_emit_cfg_dead_definition), 1, else 0.
     uint8_t* dropped;
     // Each machine row's placement as the consumer claims it (#1284, tier1_emit_cfg_row), by node, in a function with rows;
@@ -491,10 +498,10 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         };
         prepared.recipe_values = values;
         // The model's costs, where it has them, before the marks read them (tier1_rematerialization_model_costs).
-        const bool costed = tier1_rematerialization_model_costs(&prepared.recipes, X86_REGISTER_RSP, costs, reload_costs, options->vector);
+        const bool costed = tier1_rematerialization_model_costs(&prepared.recipes, X86_REGISTER_RSP, costs, reload_costs);
         prepared.recipes.costs = costs;
         prepared.recipes.reload_costs = reload_costs;
-        const bool marked = costed && (BUSTER_VECTOR_PATH(options->vector) ? tier1_rematerialization_marks(&prepared.recipes, marks) : tier1_rematerialization_marks_scalar(&prepared.recipes, marks));
+        const bool marked = costed && tier1_rematerialization_marks(&prepared.recipes, marks);
         if (!marked)
         {
             error = TIER1_EMIT_INVALID;
@@ -946,33 +953,21 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
 // rows (tier1_emit_cfg_records); the code certificate proves the additional homes. A register is owed while its owner
 // is unchanged, so whatever would
 // change the owner, or read or store the register, takes the value back first (tier1_emit_owed).
-// The rows are the 16 general registers' lanes of a vector, and the owners' first 16 locations are theirs, so the vector
-// path compares and blends them whole; `vector` picks it or its scalar twin, which gives the same rows and masks.
+// The rows are the 16 general registers' lanes of a vector, and the owners' first 16 locations are theirs, so the
+// helpers compare and blend them whole.
 typedef struct Tier1EmitSaves Tier1EmitSaves;
 struct Tier1EmitSaves
 {
     uint32_t owed;
-    bool vector;
     uint32_t rows[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
 };
 
 _Static_assert(BUSTER_TIER1_EMIT_GENERAL_REGISTERS == 16, "the call-save rows are one vector of 16 lanes");
 
-static void tier1_emit_saves_reset(Tier1EmitSaves* saves, bool vector)
+static void tier1_emit_saves_reset(Tier1EmitSaves* saves)
 {
     saves->owed = 0;
-    saves->vector = vector;
-    if (BUSTER_VECTOR_PATH(vector))
-    {
-        _mm512_storeu_si512(saves->rows, _mm512_set1_epi32((int)BUSTER_IR_NONE));
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-        {
-            saves->rows[reg] = BUSTER_IR_NONE;
-        }
-    }
+    _mm512_storeu_si512(saves->rows, _mm512_set1_epi32((int)BUSTER_IR_NONE));
 }
 
 // The owed registers whose values node needs back before its records: every one at the straight-line code's last node,
@@ -1028,53 +1023,21 @@ static Tier1EmitError tier1_emit_repay(Tier1EmitResult* result, Tier1EmitSaves* 
 // The `saved` registers whose rows hold their owners already, which a call needn't store.
 static uint32_t tier1_emit_kept(const Tier1EmitSaves* saves, const Tier1EmitTransitions* transitions, uint32_t saved)
 {
-    uint32_t kept = 0;
-    if (BUSTER_VECTOR_PATH(saves->vector))
-    {
-        kept = _mm512_mask_cmpeq_epi32_mask((__mmask16)saved, _mm512_loadu_si512(saves->rows), _mm512_loadu_si512(transitions->owners));
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-        {
-            kept |= ((saved >> reg) & 1) != 0 && saves->rows[reg] == transitions->owners[reg] ? 1u << reg : 0;
-        }
-    }
-    return kept;
+    return _mm512_mask_cmpeq_epi32_mask((__mmask16)saved, _mm512_loadu_si512(saves->rows), _mm512_loadu_si512(transitions->owners));
 }
 
 // After a call that saved `saved`: their rows hold their owners, and their loads are owed. An owed register the call
 // didn't save is a value nothing reads past it, dropped.
 static void tier1_emit_saved(Tier1EmitSaves* saves, const Tier1EmitTransitions* transitions, uint32_t saved)
 {
-    if (BUSTER_VECTOR_PATH(saves->vector))
-    {
-        _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)saved, _mm512_loadu_si512(transitions->owners)));
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-        {
-            saves->rows[reg] = ((saved >> reg) & 1) != 0 ? transitions->owners[reg] : saves->rows[reg];
-        }
-    }
+    _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)saved, _mm512_loadu_si512(transitions->owners)));
     saves->owed = saved;
 }
 
 // After a fixed registers' sequence, whose saves stored those registers' rows over whatever they held.
 static void tier1_emit_fixed_rows(Tier1EmitSaves* saves, uint32_t fixed)
 {
-    if (BUSTER_VECTOR_PATH(saves->vector))
-    {
-        _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)fixed, _mm512_set1_epi32((int)BUSTER_IR_NONE)));
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-        {
-            saves->rows[reg] = ((fixed >> reg) & 1) != 0 ? BUSTER_IR_NONE : saves->rows[reg];
-        }
-    }
+    _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)fixed, _mm512_set1_epi32((int)BUSTER_IR_NONE)));
 }
 
 // The allocator has already split ordinary spills. Call preservation is local to a bounded machine-register set:
@@ -1615,7 +1578,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     return error;
 }
 
-static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const uint32_t count = plan->function->instruction_count;
     // The nodes of fixed-register rules, whose sequences and saves take records past their share (tier1_emit_prepare's).
@@ -1630,7 +1593,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     Tier1SelectCode* code = &result->code;
     Tier1EmitBuffer buffer = { .capacity = (uint32_t)capacity, .branch_capacity = branch_capacity };
     Tier1EmitTransitions transitions = {0};
-    Tier1SelectRequests requests = { .vector = vector };
+    Tier1SelectRequests requests = { 0 };
     if (error == TIER1_EMIT_OK)
     {
         bool ok = true;
@@ -1671,7 +1634,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     result->body_record = buffer.count;
     // The calls' saves (Tier1EmitSaves, #1116): the chain is straight-line code from its entry to its end.
     Tier1EmitSaves saves;
-    tier1_emit_saves_reset(&saves, vector);
+    tier1_emit_saves_reset(&saves);
     for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count; node += 1)
     {
         code->node_first[node] = buffer.count;
@@ -1957,7 +1920,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     }
     if (error == TIER1_EMIT_OK && chain)
     {
-        const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, BUSTER_VECTOR_PATH(options->vector), &emitted.liveness);
+        const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, &emitted.liveness);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_LIVENESS, live);
         error = live == TIER1_LIVENESS_OK ? TIER1_EMIT_OK : live == TIER1_LIVENESS_MEMORY ? TIER1_EMIT_MEMORY : live == TIER1_LIVENESS_LIMIT ? TIER1_EMIT_LIMIT : live == TIER1_LIVENESS_UNSUPPORTED ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
     }
@@ -1968,7 +1931,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     Tier1AllocationError allocated = TIER1_ALLOCATION_OK;
     if (error == TIER1_EMIT_OK && chain)
     {
-        allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation) : tier1_allocate_scalar(&emitted.prepared.allocation, output, &emitted.allocation);
+        allocated = tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_ALLOCATION, allocated);
         error = allocated == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : allocated == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
     }
@@ -2060,7 +2023,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     }
     if (error == TIER1_EMIT_OK && chain)
     {
-        error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->sources, output, scratch, &emitted, error_node);
+        error = tier1_emit_records(plan, allowed_forms, options->sources, output, scratch, &emitted, error_node);
     }
     if (error == TIER1_EMIT_OK && chain && options->sources)
     {

@@ -90,7 +90,7 @@ static bool check_input_expression_commas_vector(CheckInputReader* reader)
 
 static void check_input_expression_commas(CheckInputReader* reader)
 {
-    if (BUSTER_SCALAR_PATH(reader->parser->options.scalar) || !check_input_expression_commas_vector(reader))
+    if (!check_input_expression_commas_vector(reader))
     {
         check_input_expression_commas_scalar(reader);
     }

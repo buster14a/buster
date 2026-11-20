@@ -77,7 +77,7 @@ static void cbuiltin_atomic_test_store(volatile void* pointer, uint32_t bytes, u
     }
 }
 
-static bool cbuiltin_atomic_test_map(CBuiltinAtomicHelperTest* test, const CBuiltinAtomicHelper* helper, Tier0Code* caller, bool scalar, CBuiltinAtomicTestProgram* program, uint32_t item)
+static bool cbuiltin_atomic_test_map(CBuiltinAtomicHelperTest* test, const CBuiltinAtomicHelper* helper, Tier0Code* caller, CBuiltinAtomicTestProgram* program, uint32_t item)
 {
     const uint64_t helper_capacity = BUSTER_X86_ENCODER_CAPACITY(helper->code.count);
     const uint64_t caller_offset = (helper_capacity + 15) & ~UINT64_C(15);
@@ -88,16 +88,14 @@ static bool cbuiltin_atomic_test_map(CBuiltinAtomicHelperTest* test, const CBuil
     bool result = cbuiltin_atomic_test_expect(test, program->mapping != MAP_FAILED, "native mapping", item);
     if (result)
     {
-        const int64_t encoded = scalar ? x86_encode_scalar(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL)
-                                       : x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
+        const int64_t encoded = x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
         result = cbuiltin_atomic_test_expect(test, encoded > 0, "helper encoding", item);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
-            const int64_t caller_bytes = scalar ? x86_encode_scalar(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends)
-                                               : x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
+            const int64_t caller_bytes = x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
             result = cbuiltin_atomic_test_expect(test, caller_bytes > 0 && caller->reference_count == 1 && caller->references[0].target == 1 &&
                 caller->references[0].field == X86_FIXUP_DISPLACEMENT && caller->references[0].kind == BUSTER_LINK_FIXUP_CALL &&
                 caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "Tier 0 helper reference", item);
@@ -306,7 +304,7 @@ static int run_builtin_atomic_helper_tests(int argc, char** argv)
         }
         for (uint32_t path = 0; valid && path < 2; path += 1)
         {
-            valid = cbuiltin_atomic_test_map(&test, &helper, NULL, path == 0, &native.direct[path][i], i);
+            valid = cbuiltin_atomic_test_map(&test, &helper, NULL, &native.direct[path][i], i);
         }
         if (valid)
         {
@@ -446,7 +444,7 @@ static bool cbuiltin_atomic_test_caller(CBuiltinAtomicHelperTest* test, Arena* a
         result = cbuiltin_atomic_test_expect(test, code.error == TIER0_OK && code.branch_count == 0 && code.reference_count == 1, "Tier 0 helper CALL compiled", item);
         if (result)
         {
-            result = cbuiltin_atomic_test_map(test, helper, &code, path == 0, programs + path, item);
+            result = cbuiltin_atomic_test_map(test, helper, &code, programs + path, item);
         }
     }
     arena_pop_to(arena, mark);

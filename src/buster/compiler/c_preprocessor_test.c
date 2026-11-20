@@ -295,6 +295,141 @@ static bool pp_test_clang_reference(void)
     return result;
 }
 
+// FNV-1a of `size` bytes, from `digest`: the tests' recorded digests (TestDigests) fold their cases' outputs with it.
+static uint64_t pp_kernel_fold(uint64_t digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* at = bytes;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        digest = (digest ^ at[i]) * 0x100000001b3ull;
+    }
+    return digest;
+}
+
+static uint64_t pp_kernel_fold_u64(uint64_t digest, uint64_t value)
+{
+    return pp_kernel_fold(digest, &value, sizeof(value));
+}
+
+// A table of recorded digests, read from the repository's root (`path`): a line a comparison, its key (the comparison's
+// site, '/', the case's name), a tab and the digest, recorded where the vectorized kernels and their scalar twins agreed
+// (#2924). With the environment variable `record` set to a file, each comparison appends its line there instead, and the
+// lines, sorted, make the table again. A case whose outputs hold its temporary directory's name (an interned path) has
+// '-' for its digest, which any digest matches: two recordings with $TMPDIR of other lengths find them. The
+// preprocessor's (pp_kernel_digests), the parser's (parse_kernel_digests) and the checker's (check_source_digests)
+// share this. A table with `unrecorded` set lets a case it has no line for pass, once it has loaded lines: the
+// checker's, whose cases added after the twins went have no agreement to record; `matched` and `unlisted` count its
+// cases with and without a line.
+typedef struct TestDigests TestDigests;
+struct TestDigests
+{
+    const char* path;
+    const char* record;
+    char* text;
+    char** keys;
+    uint64_t* digests;
+    bool* any;
+    uint32_t count;
+    uint32_t matched;
+    uint32_t unlisted;
+    bool loaded;
+    bool unrecorded;
+};
+
+static void test_digests_load(TestDigests* table)
+{
+    table->loaded = true;
+    FILE* file = fopen(table->path, "rb");
+    long size = -1;
+    if (file != 0 && fseek(file, 0, SEEK_END) == 0)
+    {
+        size = ftell(file);
+    }
+    if (size > 0 && fseek(file, 0, SEEK_SET) == 0)
+    {
+        table->text = malloc((size_t)size + 1);
+        const bool read = table->text != 0 && fread(table->text, 1, (size_t)size, file) == (size_t)size;
+        uint32_t lines = 0;
+        for (long i = 0; read && i < size; i += 1)
+        {
+            lines += table->text[i] == '\n';
+        }
+        table->keys = read ? malloc(sizeof(char*) * (lines + 1)) : 0;
+        table->digests = read ? malloc(sizeof(uint64_t) * (lines + 1)) : 0;
+        table->any = read ? malloc(sizeof(bool) * (lines + 1)) : 0;
+        if (table->keys != 0 && table->digests != 0 && table->any != 0)
+        {
+            table->text[size] = 0;
+            char* line = table->text;
+            while (*line != 0)
+            {
+                char* end = strchr(line, '\n');
+                char* tab = strrchr(line, '\t');
+                if (end != 0)
+                {
+                    *end = 0;
+                    tab = strrchr(line, '\t');
+                }
+                if (tab != 0)
+                {
+                    *tab = 0;
+                    table->keys[table->count] = line;
+                    table->digests[table->count] = strtoull(tab + 1, 0, 16);
+                    table->any[table->count] = tab[1] == '-';
+                    table->count += 1;
+                }
+                line = end != 0 ? end + 1 : line + strlen(line);
+            }
+        }
+    }
+    if (file != 0)
+    {
+        fclose(file);
+    }
+}
+
+// Whether `digest`, the comparison `site`'s on the case `name`, is the one `table` recorded (or, recording, whether its
+// line was written). A case without a recorded digest fails, unless the table lets it pass (`unrecorded`) and has
+// loaded lines; unless `quiet`, a failure says why.
+static bool test_digest_matches(TestDigests* table, uint64_t digest, const char* site, const char* name, bool quiet)
+{
+    char key[4400];
+    snprintf(key, sizeof(key), "%s/%s", site, name);
+    for (char* c = key; *c != 0; c += 1)
+    {
+        *c = *c == '\t' || *c == '\n' ? ' ' : *c;
+    }
+    const char* record = getenv(table->record);
+    bool result = false;
+    if (record != 0 && *record != 0)
+    {
+        FILE* file = fopen(record, "a");
+        result = file != 0 && fprintf(file, "%s\t%016llx\n", key, (unsigned long long)digest) > 0;
+        result = file != 0 && fclose(file) == 0 && result;
+    }
+    else
+    {
+        if (!table->loaded)
+        {
+            test_digests_load(table);
+        }
+        uint32_t found = UINT32_MAX;
+        for (uint32_t i = 0; found == UINT32_MAX && i < table->count; i += 1)
+        {
+            found = strcmp(table->keys[i], key) == 0 ? i : found;
+        }
+        table->matched += found != UINT32_MAX;
+        table->unlisted += found == UINT32_MAX;
+        result = found != UINT32_MAX ? table->any[found] || table->digests[found] == digest : table->unrecorded && table->count != 0;
+        if (!result && !quiet)
+        {
+            printf("%s: %s %016llx (%s)\n", key, found == UINT32_MAX ? "no recorded digest for the vectorized kernels' outputs, which are" : "the vectorized kernels' outputs aren't their recorded digest, but",
+                   (unsigned long long)digest, table->path);
+        }
+    }
+    return result;
+}
+
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
@@ -348,6 +483,14 @@ static void pp_spellings_add(PPSpellings* spellings, const uint8_t* bytes, uint3
         spellings->length += length;
         spellings->count += 1;
     }
+}
+
+// Whether -E spells an output token of `kind` at place `state` (pp_pragma_state) as written: an identifier of a pragma
+// line after its name. The printer's own test of it is its step 0 (pp_print_vector_mode); the tests read the rule here.
+static bool pp_spelled_as_written(uint32_t state, uint8_t kind)
+{
+    const bool identifier = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT);
+    return state == BUSTER_PP_PRAGMA_TOKENS && identifier;
 }
 
 // The spellings of a preprocessor's output stream (without the pragmas' end markers), as -E spells them: a pragma
@@ -430,12 +573,24 @@ static uint32_t pp_test_lex_flags(const Preprocessor* pp)
     return (pp->refine_flags & ~(uint32_t)C_TOKENIZER_TRIGRAPHS) | (pp_dollar_punctuation(&pp->options) ? C_TOKENIZER_NO_DOLLARS : 0);
 }
 
+// The tokens of `count` that `split` (pp_split_kinds) splits, a token at a time: the rule pp_count_splits_vector keeps,
+// which the expected and clang's texts are lexed by, apart from the stream's preparation.
+static uint32_t pp_test_count_splits(const uint8_t* bytes, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint32_t count, uint64_t split)
+{
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        result += pp_splits_kind(split, kinds[i]) || ((kinds[i] & 0x7F) == C_TOKEN_UNKNOWN && pp_splits_unknown(bytes, starts[i], ends[i], split));
+    }
+    return result;
+}
+
 // Lexes a text as the language mode does: c_tokenize with the mode's `flags` (pp_test_lex_flags), then the prefixed
 // literals the mode doesn't have split, by `split` (pp_split_kinds). Returns the count, or -1.
 static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, uint32_t flags, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
 {
     int64_t result = c_tokenize(text, length, kinds, starts, ends, flags);
-    const uint32_t splits = result > 0 ? pp_count_splits_scalar(text, kinds, starts, ends, (uint32_t)result, split) : 0;
+    const uint32_t splits = result > 0 ? pp_test_count_splits(text, kinds, starts, ends, (uint32_t)result, split) : 0;
     result = splits != 0 ? pp_split_prefixes(text, kinds, starts, ends, (uint32_t)result, splits, split) : result;
     return result;
 }
@@ -568,6 +723,68 @@ static bool pp_same_directive_tables(const Preprocessor* a, const Preprocessor* 
         printf("%s: the kernels read %u and %u files\n", name, a->data_count, b->data_count);
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The vectorized kernels' recorded outputs (#2924)
+
+#define BUSTER_PP_KERNEL_DIGESTS "tests/preprocessor-kernels/digests.tsv"
+
+// What the comparisons of the vectorized kernels with their scalar twins read of a run (pp_same_streams,
+// pp_same_directive_tables, the diagnostics' counts), FNV-1a: the errors and warnings, the stream token for token
+// (kind, flags, value, location), the expansion history, and each file's directive table and raw errors. Every field is
+// a count, an id or an offset into the run's own columns, never an address, so a digest is the same in every process.
+static uint64_t pp_kernel_digest(const Preprocessor* pp)
+{
+    uint64_t digest = 0xcbf29ce484222325ull;
+    const PPTokens* output = &pp->output;
+    digest = pp_kernel_fold_u64(digest, (uint64_t)pp->errors << 32 | pp->warnings);
+    digest = pp_kernel_fold_u64(digest, output->count);
+    digest = pp_kernel_fold(digest, output->kinds, output->count);
+    digest = pp_kernel_fold(digest, output->flags, output->count);
+    digest = pp_kernel_fold(digest, output->values, (uint64_t)output->count * sizeof(uint32_t));
+    digest = pp_kernel_fold(digest, output->locations, (uint64_t)output->count * sizeof(uint32_t));
+    digest = pp_kernel_fold_u64(digest, (uint64_t)pp->history_count << 32 | pp->substitution_count);
+    digest = pp_kernel_fold_u64(digest, (uint64_t)pp->generated_count << 32 | pp->history_source_count);
+    digest = pp_kernel_fold_u64(digest, pp->history_run_count);
+    digest = pp_kernel_fold(digest, pp->history, (uint64_t)pp->history_count * sizeof(PPExpansion));
+    digest = pp_kernel_fold(digest, pp->substitutions, (uint64_t)pp->substitution_count * sizeof(PPSubstitution));
+    digest = pp_kernel_fold(digest, pp->generated, (uint64_t)pp->generated_count * sizeof(PPGenerated));
+    digest = pp_kernel_fold(digest, pp->history_sources, (uint64_t)pp->history_source_count * sizeof(PPSource));
+    digest = pp_kernel_fold(digest, pp->history_runs, (uint64_t)pp->history_run_count * sizeof(PPHistoryRun));
+    digest = pp_kernel_fold_u64(digest, pp->data_count);
+    for (uint32_t f = 0; f < pp->data_count; f += 1)
+    {
+        const PPFileData* data = &pp->datas[f];
+        digest = pp_kernel_fold_u64(digest, (uint64_t)data->prepared << 63 | (uint64_t)data->directive_count << 32 | data->raw_error_count);
+        digest = pp_kernel_fold_u64(digest, data->guard);
+        for (uint32_t e = 0; e < data->raw_error_count; e += 1)
+        {
+            digest = pp_kernel_fold_u64(digest, (uint64_t)data->raw_errors[e].token << 32 | data->raw_errors[e].offset);
+            digest = pp_kernel_fold_u64(digest, data->raw_errors[e].kind);
+        }
+        const uint32_t directives = data->prepared ? data->directive_count : 0;
+        digest = pp_kernel_fold(digest, data->directive_hash, (uint64_t)directives * sizeof(uint32_t));
+        digest = pp_kernel_fold(digest, data->directive_end, (uint64_t)directives * sizeof(uint32_t));
+        digest = pp_kernel_fold(digest, data->directive_kind, directives);
+        digest = pp_kernel_fold(digest, data->directive_next, (uint64_t)directives * sizeof(uint32_t));
+    }
+    return digest;
+}
+
+static TestDigests pp_kernel_digests = { .path = BUSTER_PP_KERNEL_DIGESTS, .record = "BUSTER_PP_RECORD_DIGESTS" };
+
+
+// Whether `digest`, the comparison `site`'s on the case `name`, is the preprocessor's recorded one.
+static bool pp_kernel_digest_matches(uint64_t digest, const char* site, const char* name)
+{
+    return test_digest_matches(&pp_kernel_digests, digest, site, name, pp_test_quiet);
+}
+
+// Whether the vectorized run `pp` of the comparison `site` on the case `name` gives its recorded digest.
+static bool pp_kernel_digest_check(const Preprocessor* pp, const char* site, const char* name)
+{
+    return pp_kernel_digest_matches(pp_kernel_digest(pp), site, name);
 }
 
 // Preprocesses `path` with `options`, in a fresh table: `pp` must be released by the caller. Returns whether it ran
@@ -794,7 +1011,7 @@ static bool pp_test_invocation_places(const Preprocessor* a, const char* label)
 // takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
 // the statistics (but the timing ones) must agree in this configuration too, and the vectorized run's with its history
 // deferred, as the drivers run it (pp_test_deferred_history). Returns whether they do.
-static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name)
+static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name, bool frozen)
 {
     static InternTable tables[2];
     static Preprocessor runs[2];
@@ -811,7 +1028,7 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
     }
     char label[4200];
     snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
-    bool result = ready[0] && ready[1] && pp_same_streams(&runs[0], &runs[1], label);
+    bool result = ready[0] && ready[1] && pp_same_streams(&runs[0], &runs[1], label) && (!frozen || pp_kernel_digest_check(&runs[0], "compile", name));
     if (result && (ran[0] != ran[1] || runs[0].errors != runs[1].errors || runs[0].warnings != runs[1].warnings))
     {
         printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", label, runs[0].errors, runs[1].errors, runs[0].warnings,
@@ -841,13 +1058,13 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
     return result && pp_test_deferred_history(options, path, label);
 }
 
-// The text one of the printers gives for a run, in memory (null if it fails); `free` it.
-static char* pp_test_print(Preprocessor* pp, bool vector, bool markers, size_t* length)
+// The text -E prints for a run, in memory (null if it fails); `free` it.
+static char* pp_test_print(Preprocessor* pp, bool markers, size_t* length)
 {
     char* result = 0;
     *length = 0;
     FILE* stream = open_memstream(&result, length);
-    const bool printed = stream != 0 && (vector ? pp_print_vector(pp, stream, markers) : pp_print_scalar(pp, stream, markers));
+    const bool printed = stream != 0 && pp_print(pp, stream, markers);
     if (stream != 0)
     {
         fclose(stream);
@@ -884,32 +1101,22 @@ static bool pp_compare_printed_spellings(Preprocessor* pp, const PPSpellings* ou
     return result;
 }
 
-// The text -E prints for a run, which must lex into the stream's spellings (with the EOF boundary above); the vectorized printer's must be the scalar
-// printer's byte for byte, with line markers and without.
-static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name)
+// The text -E prints for a run, which must lex into the stream's spellings (with the EOF boundary above), and with a
+// built-in case's `key` give its recorded digest; the text with line markers must print too (clang checks the markers:
+// pp_test_markers).
+static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name, const char* key)
 {
     size_t length = 0;
-    char* text = pp_test_print(pp, true, false, &length);
-    bool result = text != 0;
-    for (uint32_t markers = 0; result && markers < 2; markers += 1)
+    char* text = pp_test_print(pp, false, &length);
+    size_t marked_length = 0;
+    char* marked = pp_test_print(pp, true, &marked_length);
+    bool result = text != 0 && marked != 0;
+    if (!result && !pp_test_quiet)
     {
-        size_t vector_length = 0;
-        size_t scalar_length = 0;
-        char* vector_text = pp_test_print(pp, true, markers != 0, &vector_length);
-        char* scalar_text = pp_test_print(pp, false, markers != 0, &scalar_length);
-        result = vector_text != 0 && scalar_text != 0 && vector_length == scalar_length && memcmp(vector_text, scalar_text, vector_length) == 0;
-        if (!result && !pp_test_quiet)
-        {
-            size_t at = 0;
-            while (vector_text != 0 && scalar_text != 0 && at < vector_length && at < scalar_length && vector_text[at] == scalar_text[at])
-            {
-                at += 1;
-            }
-            printf("%s: the printers differ%s at byte %zu of %zu/%zu\n", name, markers ? " with line markers" : "", at, vector_length, scalar_length);
-        }
-        free(vector_text);
-        free(scalar_text);
+        printf("%s: -E can't print the run%s\n", name, text != 0 ? " with line markers" : "");
     }
+    result = result && (key == 0 || pp_kernel_digest_matches(pp_kernel_fold(0xcbf29ce484222325ull, text, length), "print", key));
+    free(marked);
     PPSpellings printed = { 0 };
     result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &printed);
     if (result)
@@ -1299,7 +1506,7 @@ static bool pp_compare_placed(const PPPlaced* ours, const PPPlaced* theirs, cons
 static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char* name)
 {
     size_t length = 0;
-    char* text = pp_test_print(pp, true, true, &length);
+    char* text = pp_test_print(pp, true, &length);
     PPPlaced ours = { 0 };
     const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
@@ -2209,6 +2416,16 @@ static const PPTestCase pp_test_cases[] = {
     // pasting them forms two tokens there, and one in C23.
     { "a prefix pasted onto an empty character constant before C23", "#define P(a, b) a ## b\nP(u8,'')\n", 0, "c17", "", true, 0 },
     { "a prefix pasted onto an empty character constant in C23", "#define P(a, b) a ## b\nP(u8,'')\n", 0, "c23", "\nu8''\n", false, 0 },
+    // An unknown token that such a prefix starts (an empty character constant, or an unterminated literal) is the prefix
+    // and an unknown token from the quote too, as clang lexes it (pp_splits_unknown), alone in a file or after a literal
+    // the mode splits.
+    { "unknown tokens that a prefix C99 doesn't have starts", "#define u [u]\n#define U [U]\n#define u8 [u8]\nu\"abc\nU'x\nu8'' tail\nu8\"s\nu'a' u\"b\n", 0, "c99",
+      "[u]\"abc\n[U]'x\n[u8]'' tail\n[u8]\"s\n[u]'a' [u]\"b\n", false, 0 },
+    { "unknown tokens that u8 starts before C23", "#define u8 [u8]\nu8'' u8'x\nu8\"s\" u8'a'\n", 0, "c17", "[u8]'' [u8]'x\nu8\"s\" [u8]'a'\n", false, 0 },
+    // -E's space between a pp-number and a + or - after it (pp_separation_table): without it, an exponent's sign joins
+    // the number (1e+1 is one pp-number), where the two tokens came from different places.
+    { "a pp-number before a + or - that an exponent would take", "#define E 1e\n#define P 0x1p\n#define N 1\nE+1 P-2 N+3 E-x\n1+2 3-4\n", 0, "c17",
+      "1e + 1 0x1p - 2 1 + 3 1e - x\n1 + 2 3 - 4\n", false, 0 },
     // Among a macro's arguments clang's macro expansion is off, and only #if and #elif turn it back on: #line's and
     // #ident's operands stay as written.
     { "#line among a macro's arguments, unexpanded", "#define F(x) [x]\n#define N 10\nF(\n#line N\n)\n", 0, "c17", "", true, 0 },
@@ -2959,7 +3176,7 @@ static int pp_test_arguments(const PPTestCase* test, const char* directory, cons
 static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char* directory)
 {
     size_t length = 0;
-    char* text = pp_test_print(pp, true, true, &length);
+    char* text = pp_test_print(pp, true, &length);
     char* wanted = 0;
     size_t wanted_length = 0;
     FILE* stream = open_memstream(&wanted, &wanted_length);
@@ -3095,8 +3312,31 @@ static bool pp_test_system_case_levels(const char* directory)
     return failures == 0;
 }
 
+// A built-in case's key among the recorded digests: its name and a hash of what it preprocesses (its sources, files,
+// standard, options and markers), since cases that loops make share their names.
+static void pp_test_case_key(const PPTestCase* test, char* key, uint64_t capacity)
+{
+    const char* const texts[] = { test->source, test->other, test->standard, test->options, test->markers };
+    uint64_t hash = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(texts); i += 1)
+    {
+        hash = pp_kernel_fold(hash, texts[i] != 0 ? texts[i] : "", texts[i] != 0 ? strlen(texts[i]) + 1 : 1);
+    }
+    for (const PPTestFile* file = test->files; file != 0 && file->path != 0; file += 1)
+    {
+        hash = pp_kernel_fold(hash, file->path, strlen(file->path) + 1);
+        const uint64_t length = file->text == 0 ? 0 : file->length != 0 ? file->length : strlen(file->text);
+        hash = pp_kernel_fold_u64(hash, length);
+        hash = pp_kernel_fold(hash, file->text, length);
+    }
+    hash = pp_kernel_fold_u64(hash, (uint64_t)test->fails << 32 | test->warnings);
+    snprintf(key, capacity, "%s #%016llx", test->name, (unsigned long long)hash);
+}
+
 static bool pp_test_case(const PPTestCase* test, const char* directory, bool with_clang)
 {
+    char key[4200];
+    pp_test_case_key(test, key, sizeof(key));
     char path[4096];
     bool result = pp_test_write_case(test, directory, path, sizeof(path));
     char text[16384];
@@ -3122,7 +3362,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     if (result)
     {
         result = pp_same_streams(&runs[0], &runs[1], test->name) && pp_same_directive_tables(&runs[0], &runs[1], test->name) && ran[0] == ran[1] &&
-                 ran[0] != test->fails && pp_test_compile_kernels(&options, path, test->name);
+                 ran[0] != test->fails && pp_test_compile_kernels(&options, path, key, true) && pp_kernel_digest_check(&runs[0], "case", key);
         if (ran[0] == test->fails)
         {
             printf("%s: %s\n", test->name, test->fails ? "should fail but doesn't" : "fails");
@@ -3146,7 +3386,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
         result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &expected) &&
-                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name) &&
+                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name, key) &&
                  (test->markers == 0 || pp_test_markers(&runs[0], test, directory));
         if (result && with_clang)
         {
@@ -3408,7 +3648,8 @@ static bool pp_test_lookup_accounting(const char* directory)
         }
         if (result && k != 0)
         {
-            result = pp_same_streams(&runs[0], pp, "lookup accounting") && pp_same_directive_tables(&runs[0], pp, "lookup accounting");
+            result = pp_same_streams(&runs[0], pp, "lookup accounting") && pp_same_directive_tables(&runs[0], pp, "lookup accounting") &&
+                     (k != 1 || pp_kernel_digest_check(&runs[0], "lookup", "accounting"));
         }
     }
     if (result)
@@ -3559,6 +3800,7 @@ static bool pp_test_directory_listings(const char* directory)
     if (result)
     {
         units[1].cache->listing_misses = 0;
+        units[1].cache->asking_misses = 0;
     }
     uint64_t expected_opens = 0;
     uint64_t expected_listed = 0;
@@ -3675,6 +3917,379 @@ static bool pp_test_directory_listings(const char* directory)
     printf("directory listings: %s (%s; skipped opens, names a listing can't rule out, a shared cache, a name past ASCII, a large directory)\n",
            result ? "as expected" : "WRONG",
            listable ? "listed" : "this file system's directories aren't listed");
+    return result;
+}
+
+// A path's first component's key (file_cache_component_key, #2873): each case's path, after a directory of one byte,
+// with its component's length (0 for none) and its key: the name's bytes and zeros after them, sixteen in all. Each
+// path's bytes end where a page that can't be read begins, so that a load past them faults; and a case's `tail`
+// follows its path's bytes in a second run, in memory that can be read: a '/' or a dot there, past the path's end,
+// changes nothing.
+static bool pp_test_component_keys(void)
+{
+    static const struct
+    {
+        const char* path;
+        uint32_t component;
+        const char* name;
+        const char* tail;
+    } cases[] = {
+        { "d/bits/a.h", 4, "bits", "/b" },
+        { "d/b/a.h", 1, "b", "/" },
+        // Names in the directory itself: of one byte, of fifteen, of sixteen and of more.
+        { "d/z", 0, "", "/x/y" },
+        { "d/zz.h", 0, "", "/x.h" },
+        { "d/fifteen-bytes-x", 0, "", "/x" },
+        { "d/sixteen-bytes-xy", 0, "", "/x" },
+        { "d/a-name-of-more-than-sixteen-bytes.h", 0, "", "/x" },
+        // As many bytes as a slot holds, and one more.
+        { "d/fifteen-bytes-x/a.h", 15, "fifteen-bytes-x", "/" },
+        { "d/sixteen-bytes-xy/a.h", 0, "", "/" },
+        { "d/fifteen-bytes-x/", 15, "fifteen-bytes-x", "x" },
+        // No component, "." and "..", and names with a dot.
+        { "d//a.h", 0, "", "/" },
+        { "d/./a.h", 0, "", "/" },
+        { "d/../a.h", 0, "", "/" },
+        { "d/.a/a.h", 2, ".a", "." },
+        { "d/a./a.h", 2, "a.", "." },
+        { "d/.../a.h", 3, "...", "." },
+        { "d/.", 0, "", "./" },
+        { "d/..", 0, "", "/" },
+        // Nothing after the directory's '/'.
+        { "d/", 0, "", "bits/a.h" },
+        // A name past ASCII, and the next component's bytes, which are no part of the key.
+        { "d/\xc3\xa9/a.h", 2, "\xc3\xa9", "/" },
+        { "d/sys/types/more.h", 3, "sys", "/" },
+    };
+    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
+    char* mapping = mmap(0, 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool result = mapping != MAP_FAILED && mprotect(mapping + page_bytes, page_bytes, PROT_NONE) == 0;
+    const FileCacheDirectory directory = { .length = 1 };
+    uint32_t failures = 0;
+    for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const uint32_t length = (uint32_t)strlen(cases[c].path);
+        const uint32_t tail = (uint32_t)strlen(cases[c].tail);
+        uint8_t expected[16] = { 0 };
+        memcpy(expected, cases[c].name, strlen(cases[c].name));
+        for (uint32_t run = 0; run < 2; run += 1)
+        {
+            // The path's last byte is the page's last, or its tail's is.
+            char* path = mapping + page_bytes - length - (run == 0 ? 0 : tail);
+            memcpy(path, cases[c].path, length);
+            memcpy(path + length, cases[c].tail, run == 0 ? 0 : tail);
+            uint32_t component = UINT32_MAX;
+            uint8_t key[16];
+            _mm_storeu_si128((__m128i*)(void*)key, file_cache_component_key(&directory, path, length, &component));
+            // Where a path has no component to count, its key is not read.
+            const bool same = component == cases[c].component && (component == 0 || memcmp(key, expected, sizeof(key)) == 0);
+            if (!same)
+            {
+                printf("component keys: %s%s: a component of %u bytes (%u)\n", cases[c].path, run == 0 ? "" : " with bytes after it", component, cases[c].component);
+            }
+            failures += !same;
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page_bytes);
+    }
+    result = result && failures == 0;
+    printf("component keys: %s (%u cases, each at the end of a page and with bytes after it)\n", result ? "as expected" : "WRONG", (uint32_t)BUSTER_ARRAY_LENGTH(cases));
+    return result;
+}
+
+// A search directory asked for a subdirectory (FileCacheDirectory.component_names, #2873). After
+// BUSTER_FILE_CACHE_ASKING_MISSES failed probes under one first component of a search directory, the cache asks the
+// directory for the component, once: a stat of the component's own path. A directory without it then gives ENOENT for
+// every path under it, without an open. The test searches paths by groups under one component, each of new names,
+// and expects after every group the opens, the asks and the answers the rule gives for what its two directories have
+// there (the table's counts, with the asks at a component's third miss). Every search also finds what it finds with
+// the asks off: the same cache with asking_misses 0 gives the same paths, files and errors, and opens every candidate
+// an answer spared. What an ask can't rule out is still opened: a component the directory has, a regular file by its
+// name (ENOTDIR, which counts no miss), another spelling of a component it lacks, a name it begins with and one that
+// begins with it, "." and "..", and a component longer than a name can be. A dangling link and a name past ASCII are
+// asked for as any other, and a name without a '/' never. A directory counts BUSTER_FILE_CACHE_COMPONENTS components,
+// of names up to BUSTER_FILE_CACHE_COMPONENT_NAME bytes: one past either is opened every time, and a component's
+// count stops at 255, so that it is asked for once. A second unit that shares the cache uses the answers at once. A
+// directory with a listing is asked nothing more: its listing answers (file_cache_listed_absent).
+static bool pp_test_directory_asks(const char* directory)
+{
+    // The asks' threshold the table's counts are for.
+    const uint32_t asking = 3;
+    char first[4200];
+    char second[4200];
+    char have[4300];
+    char bits[4300];
+    char path[4400];
+    snprintf(first, sizeof(first), "%s/ask-first", directory);
+    snprintf(second, sizeof(second), "%s/ask-second", directory);
+    snprintf(have, sizeof(have), "%s/have", first);
+    snprintf(bits, sizeof(bits), "%s/bits", second);
+    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(have, 0700) == 0 && mkdir(bits, 0700) == 0;
+    snprintf(path, sizeof(path), "%s/inner.h", have);
+    result = result && pp_test_write_file(path, "int inner;\n");
+    snprintf(path, sizeof(path), "%s/plain", first);
+    result = result && pp_test_write_file(path, "int plain;\n");
+    snprintf(path, sizeof(path), "%s/gone", first);
+    result = result && symlink("nowhere", path) == 0;
+    // `second`'s headers under `bits`: one for each search of the first group, and one for the unit that shares the cache.
+    for (uint32_t h = 0; result && h < 5; h += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%u.h", bits, h);
+        result = pp_test_write_file(path, "int header;\n");
+    }
+    // A component longer than a name can be.
+    static char long_component[300];
+    memset(long_component, 'a', 298);
+    long_component[298] = 0;
+    // The groups: a first component (none for names in the directories themselves), the names searched under it by
+    // their turn's number, whether a search finds its file, the searches, and what they add to the unit's opens, asks
+    // and answers. `first` is searched before `second`; a directory's third miss under a component asks it.
+    static const struct
+    {
+        const char* component;
+        const char* file;
+        bool found;
+        uint16_t turns;
+        uint16_t opens;
+        uint16_t asks;
+        uint16_t answered;
+    } groups[] = {
+        // `first` has no `bits`, `second` has it with these headers: `first` is opened three times, asked at the
+        // third, and answers the fourth.
+        { "bits", "h%u.h", true, 4, 7, 1, 1 },
+        // Headers `second`'s `bits` lacks: `first` answers every time; `second` is opened every time, asked at its
+        // third miss, and has the component.
+        { "bits", "x%u.h", false, 4, 4, 1, 4 },
+        // A component neither has: both are opened three times and asked, and both answer the fourth.
+        { "none", "a%u.h", false, 4, 6, 2, 2 },
+        // Another spelling of it, a name it begins with and one that begins with it are other components: opened.
+        { "None", "a%u.h", false, 1, 2, 0, 0 },
+        { "non", "a%u.h", false, 1, 2, 0, 0 },
+        { "nonesuch", "a%u.h", false, 1, 2, 0, 0 },
+        // A component `first` has, with its header: one open, and no miss.
+        { "have", "inner.h", true, 1, 1, 0, 0 },
+        // Headers `first`'s `have` lacks: `first` is opened every time and asked at its third miss; `second`, without
+        // the component, is opened three times, asked, and answers the fourth.
+        { "have", "x%u.h", false, 4, 7, 2, 1 },
+        // A regular file by the component's name in `first`: ENOTDIR every time, which is no miss and asks nothing;
+        // `second` lacks the component.
+        { "plain", "a%u.h", false, 4, 7, 1, 1 },
+        // A dangling link in `first` is a component it lacks.
+        { "gone", "a%u.h", false, 4, 6, 2, 2 },
+        // "." and ".." are no components to ask for, whatever follows them: every candidate is opened.
+        { "./none", "e%u.h", false, 4, 8, 0, 0 },
+        { "../nowhere", "a%u.h", false, 4, 8, 0, 0 },
+        { "../ask-second/bits", "h0.h", true, 1, 1, 0, 0 },
+        // A name of two bytes with one dot is a component as any other.
+        { ".a", "a%u.h", false, 4, 6, 2, 2 },
+        { "a.", "a%u.h", false, 4, 6, 2, 2 },
+        // A name past ASCII.
+        { "\xc3\xa9", "a%u.h", false, 4, 6, 2, 2 },
+        // Names in the directories themselves, and paths under the long component (ENAMETOOLONG): opened every time.
+        { "", "z%u.h", false, 4, 8, 0, 0 },
+        { long_component, "a%u.h", false, 2, 4, 0, 0 },
+        // Two names that differ past their eighth byte are two components: a slot's halves are both compared.
+        { "samehead-a", "a%u.h", false, 4, 6, 2, 2 },
+        { "samehead-b", "a%u.h", false, 1, 2, 0, 0 },
+        // A name of as many bytes as a slot holds, and one of a byte more, which is not counted.
+        { "fifteen-bytes-x", "a%u.h", false, 4, 6, 2, 2 },
+        { "sixteen-bytes-xy", "a%u.h", false, 4, 8, 0, 0 },
+        // The slots: `first` counts thirteen components by here (`plain` is none of its) and `second` fourteen, so
+        // `first` has slots for three of these and `second` for two: a component without a slot is opened every time.
+        { "c00", "a%u.h", false, 4, 6, 2, 2 },
+        { "c01", "a%u.h", false, 4, 6, 2, 2 },
+        { "c02", "a%u.h", false, 4, 7, 1, 1 },
+        { "c03", "a%u.h", false, 4, 8, 0, 0 },
+        { "c04", "a%u.h", false, 4, 8, 0, 0 },
+        // Headers `second`'s `bits` lacks, more than a count holds: `first` answers, `second` is opened, and is not
+        // asked for the component again when its count stops.
+        { "bits", "m%u.h", false, 260, 260, 0, 260 },
+    };
+    const char* const directories[] = { first, second };
+    PPOptions options = {
+        .language = {
+            .standard = 2023,
+        },
+        .no_standard_includes = true,
+        .include_directories = directories,
+        .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
+        .quiet = true,
+    };
+    // Units 0 (asks) and 1 (the asks off) search every name, with listings off; unit 2 shares unit 0's cache; units 3
+    // (asks and listings) and 4 (both off) search until the directories are listed, and after.
+    static InternTable tables[5];
+    static Preprocessor units[5];
+    for (uint32_t u = 0; u < 5; u += 1)
+    {
+        units[u] = (Preprocessor){ 0 };
+        options.files = u == 2 ? units[0].cache : 0;
+        result = result && intern_initialize(&tables[u]) && pp_initialize(&units[u], &options, u == 2 ? &tables[0] : &tables[u]);
+    }
+    result = result && units[0].cache->asking_misses == asking;
+    if (result)
+    {
+        units[0].cache->listing_misses = 0;
+        units[1].cache->listing_misses = 0;
+        units[1].cache->asking_misses = 0;
+        units[4].cache->listing_misses = 0;
+        units[4].cache->asking_misses = 0;
+    }
+    uint64_t expected_opens = 0;
+    uint64_t expected_asks = 0;
+    uint64_t expected_answered = 0;
+    for (uint32_t g = 0; result && g < BUSTER_ARRAY_LENGTH(groups); g += 1)
+    {
+        static char name[400];
+        for (uint32_t turn = 0; result && turn < groups[g].turns; turn += 1)
+        {
+            const int prefix = snprintf(name, sizeof(name), "%s%s", groups[g].component, groups[g].component[0] != 0 ? "/" : "");
+            snprintf(name + prefix, sizeof(name) - (size_t)prefix, groups[g].file, turn);
+            uint32_t found[2];
+            uint32_t files[2];
+            for (uint32_t u = 0; u < 2; u += 1)
+            {
+                files[u] = pp_find_include(&units[u], (const uint8_t*)name, (uint32_t)strlen(name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found[u],
+                                           BUSTER_PP_NONE);
+            }
+            // The asks change no search's result, and an answer is an open the unit without them makes.
+            result = (files[0] != BUSTER_PP_NONE) == groups[g].found && (files[1] != BUSTER_PP_NONE) == groups[g].found && found[0] == found[1] &&
+                     units[0].probes.listings == 0 && units[1].probes.opens == units[0].probes.opens + units[0].probes.listed && units[1].probes.asks == 0 &&
+                     units[1].probes.listed == 0;
+        }
+        expected_opens += groups[g].opens;
+        expected_asks += groups[g].asks;
+        expected_answered += groups[g].answered;
+        result = result && units[0].probes.opens == expected_opens && units[0].probes.asks == expected_asks && units[0].probes.listed == expected_answered;
+        if (!result)
+        {
+            printf("directory asks: group %u, to %.40s: found %u, opens %lu/%lu, asks %lu/%lu, answered %lu/%lu, the opens without asks %lu\n", g, name,
+                   groups[g].found, (unsigned long)units[0].probes.opens, (unsigned long)expected_opens, (unsigned long)units[0].probes.asks,
+                   (unsigned long)expected_asks, (unsigned long)units[0].probes.listed, (unsigned long)expected_answered, (unsigned long)units[1].probes.opens);
+        }
+    }
+    result = result && pp_test_same_lookups(&units[0], &units[1]);
+    // The unit that shares the cache: `first` answers for `bits` at once, and both answer for `none`, without an ask.
+    if (result)
+    {
+        uint32_t found;
+        const uint32_t shared = pp_find_include(&units[2], (const uint8_t*)"bits/h4.h", 9, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+        const uint64_t opens = units[2].probes.opens;
+        const uint32_t absent = pp_find_include(&units[2], (const uint8_t*)"none/z.h", 8, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
+        result = shared != BUSTER_PP_NONE && opens == 1 && absent == BUSTER_PP_NONE && units[2].probes.opens == 1 && units[2].probes.listed == 3 &&
+                 units[2].probes.asks == 0 && units[2].files[units[2].file_count - 2].error == ENOENT && units[2].files[units[2].file_count - 1].error == ENOENT;
+        if (!result)
+        {
+            printf("directory asks: the shared cache: opens %lu, answered %lu, asks %lu\n", (unsigned long)units[2].probes.opens,
+                   (unsigned long)units[2].probes.listed, (unsigned long)units[2].probes.asks);
+        }
+    }
+    // With listings. Four searches under `none`: both directories are asked at its third miss and answer the fourth.
+    // Then names in the directories themselves, which no ask answers, bring each directory to its
+    // BUSTER_FILE_CACHE_LISTING_MISSES-th miss (three of them `none`'s) and its listing, which answers every name
+    // after that one. Then `none` again, which the asks answer; and four searches under `have`, which `first` has
+    // and `second` lacks: `second`'s listing answers them all, so that a listed directory is asked for nothing; where
+    // this file system's directories aren't listed (lookups a listing can't answer for), `second` is opened three
+    // times, asked, and answers the fourth, as `first` is opened every time and asked at its third miss.
+    struct statfs system;
+    const bool listable = result && statfs(first, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
+    const uint32_t flat = 40;
+    const uint32_t listed_from = BUSTER_FILE_CACHE_LISTING_MISSES - asking;
+    result = result && listed_from + 2 < flat;
+    expected_opens = 0;
+    expected_asks = 0;
+    expected_answered = 0;
+    uint64_t plain_opens = 0;
+    for (uint32_t c = 0; result && c < 4 + flat + 5; c += 1)
+    {
+        char name[64];
+        uint32_t opens = 2;
+        uint32_t asks = 0;
+        uint32_t answered = 0;
+        uint32_t looks = 0;
+        if (c < 4)
+        {
+            snprintf(name, sizeof(name), "none/a%u.h", c);
+            opens = c < 3 ? 2 : 0;
+            asks = c == 2 ? 2 : 0;
+            answered = c < 3 ? 0 : 2;
+        }
+        else if (c < 4 + flat)
+        {
+            // The name that is a directory's listing-th miss is opened, and lists it; the names after it are answered.
+            const uint32_t q = c - 4;
+            snprintf(name, sizeof(name), "q%02u.h", q);
+            const bool listed = listable && q >= listed_from;
+            opens = listed ? 0 : 2;
+            answered = listed ? 2 : 0;
+            looks = q + 1 >= listed_from ? 2 : 0;
+        }
+        else if (c == 4 + flat)
+        {
+            snprintf(name, sizeof(name), "none/b.h");
+            opens = 0;
+            answered = 2;
+            looks = 2;
+        }
+        else
+        {
+            const uint32_t a = c - 4 - flat;
+            snprintf(name, sizeof(name), "have/v%u.h", a);
+            opens = listable || a > 3 ? 1 : 2;
+            asks = !listable && a == 3 ? 2 : 0;
+            answered = listable || a > 3 ? 1 : 0;
+            looks = 2;
+        }
+        expected_opens += opens;
+        expected_asks += asks;
+        expected_answered += answered;
+        plain_opens += opens + answered;
+        uint32_t found[2];
+        uint32_t files[2];
+        for (uint32_t u = 0; u < 2; u += 1)
+        {
+            files[u] = pp_find_include(&units[3 + u], (const uint8_t*)name, (uint32_t)strlen(name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found[u],
+                                       BUSTER_PP_NONE);
+        }
+        result = files[0] == BUSTER_PP_NONE && files[1] == BUSTER_PP_NONE && units[3].probes.opens == expected_opens && units[3].probes.asks == expected_asks &&
+                 units[3].probes.listed == expected_answered && units[3].probes.listings == looks && units[4].probes.opens == plain_opens &&
+                 units[4].probes.asks == 0 && units[4].probes.listed == 0 && units[4].probes.listings == 0;
+        if (!result)
+        {
+            printf("directory asks: with listings, %s: found %u/%u, opens %lu/%lu, asks %lu/%lu, answered %lu/%lu, listings %lu/%u, the opens without either %lu/%lu\n",
+                   name, files[0] != BUSTER_PP_NONE, files[1] != BUSTER_PP_NONE, (unsigned long)units[3].probes.opens, (unsigned long)expected_opens,
+                   (unsigned long)units[3].probes.asks, (unsigned long)expected_asks, (unsigned long)units[3].probes.listed, (unsigned long)expected_answered,
+                   (unsigned long)units[3].probes.listings, looks, (unsigned long)units[4].probes.opens, (unsigned long)plain_opens);
+        }
+    }
+    result = result && pp_test_same_lookups(&units[3], &units[4]);
+    for (uint32_t u = 5; u > 0; u -= 1)
+    {
+        pp_release(&units[u - 1]);
+    }
+    for (uint32_t u = 0; u < 5; u += 1)
+    {
+        intern_release(&tables[u]);
+    }
+    for (uint32_t h = 0; h < 5; h += 1)
+    {
+        snprintf(path, sizeof(path), "%s/h%u.h", bits, h);
+        unlink(path);
+    }
+    snprintf(path, sizeof(path), "%s/inner.h", have);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/plain", first);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/gone", first);
+    unlink(path);
+    rmdir(have);
+    rmdir(bits);
+    rmdir(first);
+    rmdir(second);
+    printf("directory asks: %s (%s; a component a directory lacks, one it has, a file, a dangling link, other spellings, dots, a name past ASCII, a "
+           "long one, the slots, a shared cache, listings)\n",
+           result ? "as expected" : "WRONG", listable ? "listed" : "this file system's directories aren't listed");
     return result;
 }
 
@@ -3952,7 +4567,10 @@ static bool pp_test_final_copy_accounting(void)
             }
             if (result && k != 0)
             {
-                result = pp_same_streams(&runs[0], pp, "final copy accounting") && pp_same_directive_tables(&runs[0], pp, "final copy accounting");
+                char source[32];
+                snprintf(source, sizeof(source), "source %u", s);
+                result = pp_same_streams(&runs[0], pp, "final copy accounting") && pp_same_directive_tables(&runs[0], pp, "final copy accounting") &&
+                         (k != 1 || pp_kernel_digest_check(&runs[0], "final-copy", source));
             }
         }
         for (uint32_t k = 0; k < 3; k += 1)
@@ -4032,153 +4650,6 @@ static bool pp_test_trailing_splices(void)
     }
     printf("trailing splices: %u of %lu runs fail\n", failures, 2 * (unsigned long)BUSTER_ARRAY_LENGTH(cases));
     return failures == 0;
-}
-
-// The scalar loop must not need the vector path's cached macro-name bits. Prepare every identifier first, define the
-// macros, then make every known name's bit disagree with macro_of before each use file. Repeating this after undef
-// and redefine prevents their normal bit updates from hiding a lookup through the cache. The third run selects the
-// scalar kernel directly, as the benchmarks do, without changing PPOptions.scalar.
-static bool pp_test_scalar_reference(const char* directory)
-{
-    static const char* const names[] =
-    {
-        "scalar-definitions.c",
-        "scalar-use.c",
-        "scalar-changed.c",
-    };
-    static const char* const sources[] =
-    {
-        "#define A 7\n#define ALIAS A\n#define ID(x) x\n#define SELF SELF\n#define F(x) x + F(x)\n"
-        "#define PLAIN ordinary\n#define ATTR noreturn\n#define CHANGE 1\n#define GONE 2\n#define EMPTY\n"
-        "#define POISONED bad\n#pragma GCC poison bad\n",
-        "ordinary A ALIAS ID(A) ID(SELF) F(A) PLAIN\n__COUNTER__ __LINE__\n"
-        "#if defined(A) && !defined(ordinary) && __has_attribute(ATTR)\ncondition\n#endif\nPOISONED\n"
-        "#undef GONE\n#undef CHANGE\n#define CHANGE 3\n#define NEW 4\nGONE CHANGE NEW\n"
-        "#embed <scalar-reference.bin> limit(1) prefix(A,) suffix(,ID(CHANGE))\n",
-        "A ALIAS ID(CHANGE) GONE NEW SELF __COUNTER__\n#if !defined(GONE) && defined(CHANGE)\nchanged\n#endif\n"
-        "#pragma GCC poison later\n__has_c_attribute(x EMPTY)\nbad later\n",
-    };
-    static const char expected[] =
-        "ordinary 7 7 7 SELF 7 + F(7) ordinary 0 2 condition bad GONE 3 4 7, 65, 3\n"
-        "7 7 3 GONE 4 SELF 1 changed 0 bad later\n";
-    char bytes[4096];
-    snprintf(bytes, sizeof(bytes), "%s/scalar-reference.bin", directory);
-    const char* directories[] =
-    {
-        directory,
-    };
-    static InternTable tables[3];
-    static Preprocessor runs[3];
-    char* diagnostics[3] = { 0 };
-    bool result = pp_test_write_file(bytes, "AB");
-    for (uint32_t k = 0; result && k < 3; k += 1)
-    {
-        size_t length = 0;
-        FILE* stream = open_memstream(&diagnostics[k], &length);
-        const PPOptions options =
-        {
-            .language =
-            {
-                .standard = 2023,
-                .gnu = true,
-            },
-            .scalar = k == 1,
-            .no_standard_includes = true,
-            .clang_features = true,
-            .embed_directories = directories,
-            .embed_directory_count = BUSTER_ARRAY_LENGTH(directories),
-            .expansion_starts = true,
-            .diagnostics = stream,
-        };
-        Preprocessor* pp = &runs[k];
-        result = stream != 0 && intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
-        if (result)
-        {
-            const bool vectorized = BUSTER_HOST_VECTOR && !options.scalar;
-            result = pp_prepare_options(&options).vectorized == vectorized && pp->vectorized == vectorized &&
-                     pp->cache->prepare.vectorized == vectorized;
-            if (!result)
-            {
-                printf("scalar reference: run %u: preparation does not follow host and scalar option\n", k);
-            }
-        }
-        uint32_t files[BUSTER_ARRAY_LENGTH(sources)];
-        if (result)
-        {
-            pp->vectorized = k == 0;
-        }
-        for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
-        {
-            files[s] = pp_virtual_file(pp, names[s], sources[s], (uint32_t)strlen(sources[s]), BUSTER_PP_USER_FILE);
-            result = files[s] != BUSTER_PP_NONE && pp_prepare_data(pp, &pp->datas[pp->files[files[s]].data], names[s]);
-        }
-        result = result && pp_run_prelude(pp);
-        if (result)
-        {
-            pp_run_file(pp, files[0]);
-            result = pp->errors == 0 && pp->warnings == 0 && !pp->fatal;
-        }
-        for (uint32_t s = 1; result && s < BUSTER_ARRAY_LENGTH(sources); s += 1)
-        {
-            if (!pp->vectorized)
-            {
-                for (IdentId id = 0; id < pp->table->count; id += 1)
-                {
-                    const uint64_t bit = 1ull << (id % 64);
-                    if (pp->macro_of[id] != 0)
-                    {
-                        pp->is_macro[id / 64] &= ~bit;
-                    }
-                    else
-                    {
-                        pp->is_macro[id / 64] |= bit;
-                    }
-                }
-            }
-            const bool ran = pp_run_main(pp, files[s]);
-            // EMPTY must remain unexpanded after the scoped query's first name, making its operand invalid. The
-            // preexisting poisoned sentinel `bad` and newly poisoned `later` each diagnose one use on the last line.
-            result = ran == (s == 1) && pp->errors == (s == 1 ? 0u : 3u) && pp->warnings == 0 && !pp->fatal;
-            if (!result)
-            {
-                printf("scalar reference: run %u file %u: ran %u, errors %u, warnings %u, fatal %u\n", k, s, ran, pp->errors, pp->warnings, pp->fatal);
-            }
-        }
-        if (stream != 0)
-        {
-            fclose(stream);
-        }
-        result = result && diagnostics[k] != 0 && strstr(diagnostics[k], "builtin feature check macro requires a parenthesized identifier") != 0 &&
-                 strstr(diagnostics[k], "attempt to use a poisoned identifier") != 0;
-        if (result && k != 0)
-        {
-            result = pp_same_streams(&runs[0], pp, "scalar reference") && pp_same_directive_tables(&runs[0], pp, "scalar reference") &&
-                     strcmp(diagnostics[0], diagnostics[k]) == 0;
-        }
-    }
-    if (result)
-    {
-        PPSpellings ours = { 0 };
-        PPSpellings wanted = { 0 };
-        result = pp_stream_spellings(&runs[0], &ours) &&
-                 pp_text_spellings((const uint8_t*)expected, sizeof(expected) - 1, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &wanted) &&
-                 pp_compare_spellings(&runs[0], &ours, &wanted, "scalar reference", "wanted");
-        arena_release(&ours.arena);
-        arena_release(&wanted.arena);
-    }
-    for (uint32_t k = 0; k < 3; k += 1)
-    {
-        if (!result && diagnostics[k] != 0)
-        {
-            printf("scalar reference run %u diagnostics:\n%s", k, diagnostics[k]);
-        }
-        free(diagnostics[k]);
-        pp_release(&runs[k]);
-        intern_release(&tables[k]);
-    }
-    unlink(bytes);
-    printf("scalar reference: %s (inverted macro-name bits, definitions, captures, builtins, poison and kernel override)\n", result ? "as expected" : "WRONG");
-    return result;
 }
 
 // c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
@@ -4358,17 +4829,17 @@ static bool pp_test_assembly_printing(const char* directory)
             options.scalar = kernel != 0;
             ran[kernel] = pp_test_run(&runs[kernel], &tables[kernel], &options, path);
         }
-        passed = passed && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], name) && pp_same_directive_tables(&runs[0], &runs[1], name);
+        char key[512];
+        snprintf(key, sizeof(key), "%u %s", i, name);
+        passed = passed && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], name) && pp_same_directive_tables(&runs[0], &runs[1], name) &&
+                 pp_kernel_digest_check(&runs[0], "assembly", key);
         for (uint32_t kernel = 0; passed && kernel < 2; kernel += 1)
         {
             for (uint32_t marking = 0; passed && marking < 2; marking += 1)
             {
                 size_t vector_length = 0;
-                size_t scalar_length = 0;
-                char* vector_text = pp_test_print(&runs[kernel], true, marking != 0, &vector_length);
-                char* scalar_text = pp_test_print(&runs[kernel], false, marking != 0, &scalar_length);
-                passed = vector_text != 0 && scalar_text != 0 && vector_length == scalar_length && memcmp(vector_text, scalar_text, vector_length) == 0;
-                passed = passed && (marking != 0 || (vector_length == strlen(expected) && memcmp(vector_text, expected, vector_length) == 0));
+                char* vector_text = pp_test_print(&runs[kernel], marking != 0, &vector_length);
+                passed = vector_text != 0 && (marking != 0 || (vector_length == strlen(expected) && memcmp(vector_text, expected, vector_length) == 0));
                 if (!passed)
                 {
                     printf("%s: dollar-printing case %u (%u leading tokens), %s kernels%s differs\n", name, i, prefix,
@@ -4379,7 +4850,6 @@ static bool pp_test_assembly_printing(const char* directory)
                     }
                 }
                 free(vector_text);
-                free(scalar_text);
             }
         }
         failures += !passed;
@@ -4411,10 +4881,10 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
         ran[k] = pp_test_run(&runs[k], &tables[k], &options, path);
     }
     bool result = ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], path) && pp_same_directive_tables(&runs[0], &runs[1], path) &&
-                  pp_test_compile_kernels(&options, path, path);
+                  pp_test_compile_kernels(&options, path, path, false);
     *tokens += runs[0].output.count;
     PPSpellings ours = { 0 };
-    result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path);
+    result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path, 0);
     if (result && with_clang)
     {
         PPPlaced theirs = { 0 };
@@ -5659,7 +6129,7 @@ static bool pp_test_raw_recovery_failures(void)
 // #595's review: an argument expanded in place (pp_expand_argument_in_place) that runs out of room, as the history records
 // it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
 // starts with, so expanding F(X)'s argument grows its origins first. The direct path expands in pp->arguments; the
-// capture path — the scalar request, or every run on a scalar host — first captures the expansion. Limit the buffer
+// capture path — the scalar request — first captures the expansion. Limit the buffer
 // each path actually fills: each fault must give one
 // fatal error and no output token. The control, with nothing taken away, gives F's whole expansion in both modes.
 static bool pp_test_direct_argument_failures(void)
@@ -6287,7 +6757,10 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         }
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
-        result = result && pp_same_streams(&preprocessors[0], &preprocessors[1], test.name) && pp_stream_spellings(&preprocessors[0], &ours) &&
+        char key[512];
+        snprintf(key, sizeof(key), "%u %s", r, test.name);
+        result = result && pp_same_streams(&preprocessors[0], &preprocessors[1], test.name) && pp_kernel_digest_check(&preprocessors[0], "timestamps", key) &&
+                 pp_stream_spellings(&preprocessors[0], &ours) &&
                  pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), preprocessors[0].split_kinds, pp_test_lex_flags(&preprocessors[0]), &expected) &&
                  pp_compare_spellings(&preprocessors[0], &ours, &expected, test.name, "wanted");
         if (result && with_clang)
@@ -6354,8 +6827,7 @@ struct PPFuzzOptions
     uint32_t jobs;
 };
 
-// The text of an #embed's data: pp_embed_text_vector must write pp_embed_text_scalar's bytes, which must be the values
-// in decimal separated by ", " (from snprintf), for every count to 300 of random bytes and of every value in turn, with
+// The text of an #embed's data: pp_embed_text_vector must write the values in decimal separated by ", " (from snprintf), for every count to 300 of random bytes and of every value in turn, with
 // and without a separator first; and at the end of a readable page before a PROT_NONE one, where a read past the bytes
 // faults. The output has the vector kernel's 64 bytes of slack.
 static bool pp_test_embed_text(uint64_t seed)
@@ -6364,7 +6836,6 @@ static bool pp_test_embed_text(uint64_t seed)
     uint8_t* mapping = mmap(0, 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     bool result = mapping != MAP_FAILED && mprotect(mapping + page_bytes, page_bytes, PROT_NONE) == 0;
     static uint8_t vector[5 * 300 + 64];
-    static uint8_t scalar[5 * 300 + 64];
     static char reference[5 * 300 + 64];
     uint32_t checks = 0;
     uint32_t failures = 0;
@@ -6382,18 +6853,16 @@ static bool pp_test_embed_text(uint64_t seed)
             for (uint32_t separated = 0; separated < 2; separated += 1)
             {
                 const uint64_t vector_length = pp_embed_text_vector(bytes, count, separated != 0, vector);
-                const uint64_t scalar_length = pp_embed_text_scalar(bytes, count, separated != 0, scalar);
                 uint64_t reference_length = 0;
                 for (uint32_t i = 0; i < count; i += 1)
                 {
                     reference_length += (uint64_t)snprintf(reference + reference_length, sizeof(reference) - reference_length, "%s%u", separated || i != 0 ? ", " : "", bytes[i]);
                 }
-                const bool same = vector_length == scalar_length && scalar_length == reference_length && memcmp(vector, scalar, scalar_length) == 0 &&
-                                  memcmp(scalar, reference, reference_length) == 0;
+                const bool same = vector_length == reference_length && memcmp(vector, reference, reference_length) == 0;
                 if (!same && failures < 5)
                 {
-                    printf("embed text: %u bytes (%s, %s): vector %.*s\n  scalar %.*s\n  wanted %.*s\n", count, pattern == 0 ? "random" : "in turn",
-                           separated ? "separated" : "first", (int)vector_length, (const char*)vector, (int)scalar_length, (const char*)scalar, (int)reference_length, reference);
+                    printf("embed text: %u bytes (%s, %s): ours %.*s\n  wanted %.*s\n", count, pattern == 0 ? "random" : "in turn",
+                           separated ? "separated" : "first", (int)vector_length, (const char*)vector, (int)reference_length, reference);
                 }
                 failures += !same;
                 checks += 1;
@@ -6745,14 +7214,14 @@ static bool pp_test_parameter_index(void)
     Scratch descriptor = scratch_begin(0);
     const uint64_t descriptor_capacity = descriptor.arena->capacity;
     descriptor.arena->capacity = descriptor.arena->length;
-    PPParameterIndex* allocated = pp_parameter_index_allocate(true);
+    PPParameterIndex* allocated = pp_parameter_index_allocate();
     result = result && allocated == 0 && descriptor.arena->length == descriptor.length;
     descriptor.arena->capacity = descriptor_capacity;
     scratch_end(descriptor);
     if (result)
     {
         Scratch outer = scratch_begin(0);
-        allocated = pp_parameter_index_allocate(true);
+        allocated = pp_parameter_index_allocate();
         result = allocated != 0;
         for (uint32_t p = 0; result && p < BUSTER_PP_SMALL_PARAMETERS; p += 1)
         {
@@ -6781,46 +7250,43 @@ static bool pp_test_parameter_index(void)
         }
         const uint64_t capacity = outer.arena->capacity;
         outer.arena->capacity = outer.arena->length + sizeof(PPParameterIndex) + _Alignof(PPParameterIndex);
-        allocated = pp_parameter_index_build(names, BUSTER_ARRAY_LENGTH(names), true);
+        allocated = pp_parameter_index_build(names, BUSTER_ARRAY_LENGTH(names));
         result = allocated == 0 && outer.arena->length == outer.length;
         outer.arena->capacity = capacity;
         scratch_end(outer);
     }
-    for (uint32_t mode = 0; mode < 2; mode += 1)
+    PPParameterIndex index = { 0 };
+    for (uint32_t p = 0; result && p < BUSTER_PP_MAX_PARAMETERS; p += 1)
     {
-        PPParameterIndex index = { .vectorized = mode == 0 };
-        for (uint32_t p = 0; result && p < BUSTER_PP_MAX_PARAMETERS; p += 1)
+        const IdentId id = p * 8192;
+        uint32_t previous;
+        result = pp_parameter_insert(&index, id, p, &previous) && previous == BUSTER_PP_NONE;
+        for (uint32_t q = 0; result && q <= p; q += 1)
         {
-            const IdentId id = p * 8192;
-            uint32_t previous;
-            result = pp_parameter_insert(&index, id, p, &previous) && previous == BUSTER_PP_NONE;
-            for (uint32_t q = 0; result && q <= p; q += 1)
-            {
-                result = pp_parameter_index(&index, q * 8192) == q && pp_parameter_index(&index, q * 8192 + 1) == BUSTER_PP_NONE;
-            }
-            result = result && pp_parameter_insert(&index, id, p + 1, &previous) && previous == p && index.count == p + 1;
+            result = pp_parameter_index(&index, q * 8192) == q && pp_parameter_index(&index, q * 8192 + 1) == BUSTER_PP_NONE;
         }
-        pp_parameter_index_end(&index);
+        result = result && pp_parameter_insert(&index, id, p + 1, &previous) && previous == p && index.count == p + 1;
     }
+    pp_parameter_index_end(&index);
     for (uint32_t count = BUSTER_PP_SMALL_PARAMETERS; result && count <= 2 * BUSTER_PP_SMALL_PARAMETERS; count *= 2)
     {
-        PPParameterIndex index = { .vectorized = true };
+        PPParameterIndex grown = { 0 };
         uint32_t previous;
         for (uint32_t p = 0; result && p < count; p += 1)
         {
-            result = pp_parameter_insert(&index, p, p, &previous);
+            result = pp_parameter_insert(&grown, p, p, &previous);
         }
         Scratch scratch = scratch_begin(0);
         const uint64_t capacity = scratch.arena->capacity;
         scratch.arena->capacity = scratch.arena->length;
-        result = result && !pp_parameter_insert(&index, count, count, &previous) && index.count == count;
+        result = result && !pp_parameter_insert(&grown, count, count, &previous) && grown.count == count;
         scratch.arena->capacity = capacity;
         for (uint32_t p = 0; result && p < count; p += 1)
         {
-            result = pp_parameter_index(&index, p) == p;
+            result = pp_parameter_index(&grown, p) == p;
         }
         scratch_end(scratch);
-        pp_parameter_index_end(&index);
+        pp_parameter_index_end(&grown);
     }
     printf("macro parameter index: %s (guarded small views, sparse ids, first ordinals, misses and failed growth)\n", result ? "pass" : "FAIL");
     return result;
@@ -8936,7 +9402,8 @@ static bool pp_test_pragma_origins(const char* directory, bool with_clang)
                     strcmp(file, "pragma-origin-input.c") == 0 && line == fixtures[fixture].line && column != 0;
             passed &= valid;
         }
-        passed = passed && pp_same_streams(runs, runs + 1, fixtures[fixture].name) && strcmp(diagnostics[0], diagnostics[1]) == 0;
+        passed = passed && pp_same_streams(runs, runs + 1, fixtures[fixture].name) && strcmp(diagnostics[0], diagnostics[1]) == 0 &&
+                 pp_kernel_digest_check(runs, "pragma-origin", fixtures[fixture].name);
         for (uint32_t token = 0; passed && token < runs[0].output.count; token += 1)
         {
             passed = pp_history_at(runs, token) == pp_history_at(runs + 1, token);
@@ -9174,10 +9641,11 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 1, pp_test_lookup_accounting(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_reads(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_listings(directory));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_component_keys());
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_asks(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_listing_descriptors(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_final_copy_accounting());
     passed &= PP_TEST_SECTION(deal, 1, pp_test_trailing_splices());
-    passed &= PP_TEST_SECTION(deal, 1, pp_test_scalar_reference(directory));
     passed &= PP_TEST_SECTION(deal, 19, pp_test_windows(fuzz->seed));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_line_ends());
     passed &= PP_TEST_SECTION(deal, 5, pp_test_window_units(directory, fuzz->seed));

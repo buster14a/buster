@@ -20,7 +20,7 @@
 // source events through reverse lists, without rescanning every local at every machine instruction.
 //
 // Inputs remain immutable and disjoint from output/scratch throughout. Every column is bounded by its logical count;
-// no padding is read. Source-run compaction has exact scalar/vector paths, with masked final batches. Retained work
+// no padding is read. Source-run compaction is AVX-512, with masked final batches. Retained work
 // is proportional to records, locals, physical slots and the location ranges actually emitted, never a local-by-
 // instruction matrix. Without -g this module is not called and its emitter metadata is not allocated.
 
@@ -142,53 +142,28 @@ static CheckTier1DebugTransfer check_tier1_debug_transfer(const X86Instruction* 
 }
 
 // The dependency between machine instructions remains ordered. The bounded carrier set is the data-parallel part:
-// every kill and every CFG meet operates on all 32 bytes together, with an exact scalar twin and no padded read.
-static void check_tier1_debug_step(const CheckTier1DebugParameters* parameters, CheckTier1DebugTransfer transfer, bool vector, uint8_t* state)
+// every kill and every CFG meet operates on all 32 bytes together, with no padded read.
+static void check_tier1_debug_step(const CheckTier1DebugParameters* parameters, CheckTier1DebugTransfer transfer, uint8_t* state)
 {
     const uint32_t value = transfer.bytes != 0 ? state[transfer.from] : BUSTER_CHECK_TIER1_DEBUG_UNKNOWN;
-    if (BUSTER_VECTOR_PATH(vector))
-    {
-        const __m512i before = _mm512_maskz_loadu_epi8(UINT32_MAX, state);
-        const __m512i after = _mm512_mask_mov_epi8(before, transfer.killed, _mm512_set1_epi8(-1));
-        _mm512_mask_storeu_epi8(state, UINT32_MAX, after);
-    }
-    else
-    {
-        uint32_t killed = transfer.killed;
-        while (killed != 0)
-        {
-            const uint32_t reg = (uint32_t)__builtin_ctz(killed);
-            state[reg] = BUSTER_CHECK_TIER1_DEBUG_UNKNOWN;
-            killed &= killed - 1;
-        }
-    }
+    const __m512i before = _mm512_maskz_loadu_epi8(UINT32_MAX, state);
+    const __m512i after = _mm512_mask_mov_epi8(before, transfer.killed, _mm512_set1_epi8(-1));
+    _mm512_mask_storeu_epi8(state, UINT32_MAX, after);
     if (value < parameters->count && parameters->values[value].bytes <= transfer.bytes)
     {
         state[transfer.to] = (uint8_t)value;
     }
 }
 
-static bool check_tier1_debug_meet(const uint8_t* incoming, bool vector, uint8_t* state)
+static bool check_tier1_debug_meet(const uint8_t* incoming, uint8_t* state)
 {
     bool changed = false;
-    if (BUSTER_VECTOR_PATH(vector))
-    {
-        const __m512i before = _mm512_maskz_loadu_epi8(UINT32_MAX, state);
-        const __m512i other = _mm512_maskz_loadu_epi8(UINT32_MAX, incoming);
-        const __mmask64 different = _mm512_cmpneq_epi8_mask(before, other) & UINT32_MAX;
-        const __m512i after = _mm512_mask_mov_epi8(before, different, _mm512_set1_epi8(-1));
-        changed = (_mm512_cmpneq_epi8_mask(before, after) & UINT32_MAX) != 0;
-        _mm512_mask_storeu_epi8(state, UINT32_MAX, after);
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_CHECK_TIER1_DEBUG_CARRIERS; reg += 1)
-        {
-            const bool lost = state[reg] != BUSTER_CHECK_TIER1_DEBUG_UNKNOWN && state[reg] != incoming[reg];
-            changed |= lost;
-            state[reg] = lost ? BUSTER_CHECK_TIER1_DEBUG_UNKNOWN : state[reg];
-        }
-    }
+    const __m512i before = _mm512_maskz_loadu_epi8(UINT32_MAX, state);
+    const __m512i other = _mm512_maskz_loadu_epi8(UINT32_MAX, incoming);
+    const __mmask64 different = _mm512_cmpneq_epi8_mask(before, other) & UINT32_MAX;
+    const __m512i after = _mm512_mask_mov_epi8(before, different, _mm512_set1_epi8(-1));
+    changed = (_mm512_cmpneq_epi8_mask(before, after) & UINT32_MAX) != 0;
+    _mm512_mask_storeu_epi8(state, UINT32_MAX, after);
     return changed;
 }
 
@@ -197,7 +172,7 @@ static bool check_tier1_debug_meet(const uint8_t* incoming, bool vector, uint8_t
 // Backedges therefore reach a fixed point before any location is published. No allocation interval participates.
 // Indirect/external jumps and unmodelled control omit parameter locations, retaining the other debug information.
 static bool check_tier1_debug_parameters(const Tier0Function* function, const IrDebugInfo* debug, const Tier1EmitResult* emitted,
-                                        const uint32_t* record_order, bool vector, Arena* scratch, CheckTier1DebugParameters* result)
+                                        const uint32_t* record_order, Arena* scratch, CheckTier1DebugParameters* result)
 {
     const uint32_t count = emitted->code.count;
     const uint32_t branch_count = emitted->code.branch_count;
@@ -308,7 +283,7 @@ static bool check_tier1_debug_parameters(const Tier0Function* function, const Ir
             memcpy(state, states + (uint64_t)block * BUSTER_CHECK_TIER1_DEBUG_CARRIERS, sizeof(state));
             for (uint32_t r = first[block]; r < first[block + 1]; r += 1)
             {
-                check_tier1_debug_step(&candidate, transfers[r], vector, state);
+                check_tier1_debug_step(&candidate, transfers[r], state);
             }
             const uint32_t last = first[block + 1] - 1;
             const uint32_t control = transfers[last].control;
@@ -328,7 +303,7 @@ static bool check_tier1_debug_parameters(const Tier0Function* function, const Ir
                     }
                     else
                     {
-                        changed = check_tier1_debug_meet(state, vector, destination);
+                        changed = check_tier1_debug_meet(state, destination);
                     }
                     if (changed && queued[next] == 0)
                     {
@@ -357,7 +332,7 @@ static bool check_tier1_debug_parameters(const Tier0Function* function, const Ir
 // Count or write the proven register runs. At a call's own PC, a suspended caller cannot recover a caller-saved
 // register from the callee, even when that register still held the value just before calling. Prefer preserved
 // copies and publish no caller-saved carrier for the call record. The following state also kills those registers.
-static uint64_t check_tier1_debug_parameter_ranges(const CheckTier1DebugParameters* parameters, bool vector, EmittedLocalRange* output)
+static uint64_t check_tier1_debug_parameter_ranges(const CheckTier1DebugParameters* parameters, EmittedLocalRange* output)
 {
     const uint32_t parameter_count = parameters->count;
     const uint32_t block_count = parameters->block_count;
@@ -382,18 +357,8 @@ static uint64_t check_tier1_debug_parameter_ranges(const CheckTier1DebugParamete
             for (uint32_t p = 0; p < parameter_count; p += 1)
             {
                 uint32_t carriers = 0;
-                if (BUSTER_VECTOR_PATH(vector))
-                {
-                    const __m256i values = _mm256_loadu_si256((const __m256i*)state);
-                    carriers = _mm256_cmpeq_epi8_mask(values, _mm256_set1_epi8((int8_t)p));
-                }
-                else
-                {
-                    for (uint32_t reg = 0; reg < BUSTER_CHECK_TIER1_DEBUG_CARRIERS; reg += 1)
-                    {
-                        carriers |= (uint32_t)(state[reg] == p) << reg;
-                    }
-                }
+                const __m256i values = _mm256_loadu_si256((const __m256i*)state);
+                carriers = _mm256_cmpeq_epi8_mask(values, _mm256_set1_epi8((int8_t)p));
                 const uint32_t preserved = carriers & BUSTER_CHECK_TIER1_DEBUG_PRESERVED;
                 carriers = call || preserved != 0 ? preserved : carriers;
                 const uint32_t chosen = carriers != 0 ? (uint32_t)__builtin_ctz(carriers) : BUSTER_CHECK_TIER1_DEBUG_UNKNOWN;
@@ -416,7 +381,7 @@ static uint64_t check_tier1_debug_parameter_ranges(const CheckTier1DebugParamete
                     begins[p] = r;
                 }
             }
-            check_tier1_debug_step(parameters, parameters->transfers[r], vector, state);
+            check_tier1_debug_step(parameters, parameters->transfers[r], state);
         }
     }
     for (uint32_t p = 0; p < parameter_count; p += 1)
@@ -628,40 +593,25 @@ static bool check_tier1_debug_frame_base(const Tier1EmitResult* emitted, const u
 
 // Compact changes in the final records' source origins. The first record is a boundary even if its origin is unknown;
 // unknown runs stay explicit so later lexical/location consumers cannot bridge them by borrowing a nearby token.
-static uint32_t check_tier1_debug_sources(const uint32_t* entries, uint32_t first, uint32_t end, bool vector, uint32_t* records, uint32_t* origins)
+static uint32_t check_tier1_debug_sources(const uint32_t* entries, uint32_t first, uint32_t end, uint32_t* records, uint32_t* origins)
 {
     uint32_t count = 0;
-    if (BUSTER_VECTOR_PATH(vector))
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m512i previous_lanes = _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14);
+    uint32_t previous = BUSTER_EMISSION_NO_ORIGIN;
+    for (uint32_t at = first; at < end;)
     {
-        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        const __m512i previous_lanes = _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14);
-        uint32_t previous = BUSTER_EMISSION_NO_ORIGIN;
-        for (uint32_t at = first; at < end;)
-        {
-            const uint32_t live = end - at < 16 ? end - at : 16;
-            const __mmask16 mask = (__mmask16)((1u << live) - 1);
-            const __m512i values = _mm512_maskz_loadu_epi32(mask, entries + at);
-            const __m512i before = _mm512_mask_mov_epi32(_mm512_permutexvar_epi32(previous_lanes, values), 1, _mm512_set1_epi32((int32_t)previous));
-            const __mmask16 changed = (_mm512_cmpneq_epi32_mask(values, before) | (at == first ? 1 : 0)) & mask;
-            const __m512i positions = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)at));
-            _mm512_mask_compressstoreu_epi32(records + count, changed, positions);
-            _mm512_mask_compressstoreu_epi32(origins + count, changed, values);
-            count += (uint32_t)__builtin_popcount((uint32_t)changed);
-            previous = entries[at + live - 1];
-            at += live;
-        }
-    }
-    else
-    {
-        for (uint32_t at = first; at < end; at += 1)
-        {
-            if (at == first || entries[at] != entries[at - 1])
-            {
-                records[count] = at;
-                origins[count] = entries[at];
-                count += 1;
-            }
-        }
+        const uint32_t live = end - at < 16 ? end - at : 16;
+        const __mmask16 mask = (__mmask16)((1u << live) - 1);
+        const __m512i values = _mm512_maskz_loadu_epi32(mask, entries + at);
+        const __m512i before = _mm512_mask_mov_epi32(_mm512_permutexvar_epi32(previous_lanes, values), 1, _mm512_set1_epi32((int32_t)previous));
+        const __mmask16 changed = (_mm512_cmpneq_epi32_mask(values, before) | (at == first ? 1 : 0)) & mask;
+        const __m512i positions = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)at));
+        _mm512_mask_compressstoreu_epi32(records + count, changed, positions);
+        _mm512_mask_compressstoreu_epi32(origins + count, changed, values);
+        count += (uint32_t)__builtin_popcount((uint32_t)changed);
+        previous = entries[at + live - 1];
+        at += live;
     }
     records[count] = end;
     return count;
@@ -713,7 +663,7 @@ static uint32_t check_tier1_debug_instance_of(const IrDebugInfo* debug, uint32_t
 }
 
 static bool check_tier1_debug(const Tier0Function* function, const IrFunction* ir, const Tier1EmitResult* emitted, const uint32_t* record_order, uint32_t epilogue,
-                             bool vector, Arena* output, Arena* scratch, CheckTier1Debug* result)
+                             Arena* output, Arena* scratch, CheckTier1Debug* result)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -855,16 +805,16 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
         local_slots[local] = BUSTER_IR_NONE;
     }
     CheckTier1DebugSpan* object_clips = NULL;
-    valid = valid && (!framed || check_tier1_debug_object_clips(function, ir, emitted, record_order, uses, local_slots, homes, vector, scratch, &object_clips));
+    valid = valid && (!framed || check_tier1_debug_object_clips(function, ir, emitted, record_order, uses, local_slots, homes, scratch, &object_clips));
     CheckTier1DebugParameters parameters = { 0 };
     CheckTier1DebugConstants constants = { 0 };
     CheckTier1DebugValues values = { 0 };
-    valid = valid && (!bindings || check_tier1_debug_values(function, ir, emitted, record_order, instances, raw, vector, scratch, &values));
-    valid = valid && (bindings || check_tier1_debug_parameters(function, debug, emitted, record_order, vector, scratch, &parameters));
+    valid = valid && (!bindings || check_tier1_debug_values(function, ir, emitted, record_order, instances, raw, scratch, &values));
+    valid = valid && (bindings || check_tier1_debug_parameters(function, debug, emitted, record_order, scratch, &parameters));
     valid = valid && (bindings || check_tier1_debug_constants(debug, scratch, &constants));
-    const uint64_t parameter_ranges = valid && !bindings ? check_tier1_debug_parameter_ranges(&parameters, vector, NULL) : 0;
+    const uint64_t parameter_ranges = valid && !bindings ? check_tier1_debug_parameter_ranges(&parameters, NULL) : 0;
     const uint64_t constant_ranges = valid && !bindings ? check_tier1_debug_constant_ranges(&constants, entries, safe, body, epilogue, NULL) : 0;
-    const uint64_t value_ranges = valid && bindings ? check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, vector, NULL) : 0;
+    const uint64_t value_ranges = valid && bindings ? check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, NULL) : 0;
     const uint64_t object_ranges = valid ? check_tier1_debug_object_ranges(homes, local_slots, locals, spans, span_count, object_clips, NULL) : 0;
     const uint64_t ranges = object_ranges + parameter_ranges + constant_ranges + value_ranges;
     valid = valid && ranges <= UINT32_MAX;
@@ -877,7 +827,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     }
     if (valid)
     {
-        candidate.source_count = check_tier1_debug_sources(raw, body, epilogue, vector, candidate.source_records, candidate.source_origins);
+        candidate.source_count = check_tier1_debug_sources(raw, body, epilogue, candidate.source_records, candidate.source_origins);
         for (uint32_t k = 0; k < debug->inline_count; k += 1)
         {
             const IrDebugInline instance = debug->inlines[k];
@@ -898,7 +848,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
         }
         if (parameter_ranges != 0)
         {
-            candidate.local_range_count += (uint32_t)check_tier1_debug_parameter_ranges(&parameters, vector, candidate.local_ranges + candidate.local_range_count);
+            candidate.local_range_count += (uint32_t)check_tier1_debug_parameter_ranges(&parameters, candidate.local_ranges + candidate.local_range_count);
         }
         if (constant_ranges != 0)
         {
@@ -906,7 +856,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
         }
         if (value_ranges != 0)
         {
-            candidate.local_range_count += (uint32_t)check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, vector, candidate.local_ranges + candidate.local_range_count);
+            candidate.local_range_count += (uint32_t)check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, candidate.local_ranges + candidate.local_range_count);
         }
         *result = candidate;
     }

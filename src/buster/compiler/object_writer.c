@@ -2451,7 +2451,6 @@ static ObjectError object_write_file(const char* path, const uint8_t* bytes, uin
     else if (S_ISREG(stats.st_mode) && stats.st_nlink > 1)
     {
         close(fd);
-        fd = -1;
         const char* slash = strrchr(path, '/');
         const int directory_bytes = slash != 0 ? (int)(slash - path) + 1 : 0;
         const int length = snprintf(temporary, sizeof(temporary), "%.*s%s", directory_bytes, path, BUSTER_OBJECT_TEMPORARY_NAME);

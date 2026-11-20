@@ -497,12 +497,8 @@ static CBuiltinLowerResult cbuiltin_varargs_lower_scalar(CBuiltinLowerBuffer* bu
 
 static CBuiltinLowerResult cbuiltin_varargs_lower(CBuiltinLowerBuffer* buffer, const CBuiltinVaLowerCall* call)
 {
-#if !BUSTER_HOST_VECTOR
-    return cbuiltin_varargs_lower_scalar(buffer, call);
-#else
     const CBuiltinLowerResult result = cbuiltin_varargs_append(buffer, call, true);
     return result;
-#endif
 }
 
 static CBuiltinLowerResult cbuiltin_varargs_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinVaLowerCall* call)

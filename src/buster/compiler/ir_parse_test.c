@@ -141,7 +141,7 @@ static IrParseResult ir_parse_test_pair(IrParseTest* test, String8 source, Arena
         ir_parse_test_expect(test, function->arena_bytes == output->length - output_mark && twin.arena_bytes == twin_output->length - twin_mark,
                              "parser arena byte count differs from the published allocation");
         const IrCheck checked = ir_verify(function, scratch, 0);
-        const IrCheck checked_scalar = ir_verify_scalar(&twin, scratch, 0);
+        const IrCheck checked_scalar = ir_verify(&twin, scratch, 0);
         ir_parse_test_expect(test, checked.error == IR_OK && checked_scalar.error == IR_OK && scratch->length == scratch_mark, "published function fails an independent verifier");
     }
     else

@@ -91,7 +91,7 @@ struct Tier1PipelineTest
     uint32_t native_results;
     uint32_t clang_results;
     uint32_t resolved_calls;
-    // The bottom-up rewrite's twins on every function planned (tier1_burs_check_function, #141).
+    // The bottom-up rewrite's definitions on every function planned (tier1_burs_check_function, #141).
     Tier1BursCheck burs;
     // The CFG consumer's functions, and what their edges took.
     uint32_t general;
@@ -725,7 +725,7 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
     {
         const Tier0Function* entry = &functions->functions[function_index];
         const uint32_t symbols = program->global_count + program->function_count + 1;
-        const IrCheck check = test->vector ? ir_lower_typed(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered) : ir_lower_typed_scalar(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
+        const IrCheck check = ir_lower_typed(entry, IR_I64, symbols, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real typed-stream lowering succeeds");
         if (!ok)
         {
@@ -770,7 +770,6 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
             .predecessors = cfg.predecessors,
         };
         DominatorOptions options = dominators_options();
-        options.path = test->vector ? DOMINATOR_VECTOR : DOMINATOR_SCALAR;
         options.outputs = 0;
         Dominators result;
         ok = tier1_pipeline_expect(test, dominators_analyze(&test->arenas[TIER1_PIPELINE_DERIVED], scratch, &graph, options, &result) == DOMINATOR_OK, "rebuild dominance after optimization");
@@ -781,9 +780,8 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
                 .leave = result.subtree_end,
                 .block_count = result.block_count,
             };
-            const IrCheck vector = ir_verify(optimized, scratch, dominance);
-            const IrCheck scalar = ir_verify_scalar(optimized, scratch, dominance);
-            ok = tier1_pipeline_expect(test, vector.error == IR_OK && scalar.error == IR_OK && vector.dominance_checked && scalar.dominance_checked, "both IR verifiers accept the optimized dominance handoff");
+            const IrCheck verified = ir_verify(optimized, scratch, dominance);
+            ok = tier1_pipeline_expect(test, verified.error == IR_OK && verified.dominance_checked, "the IR verifier accepts the optimized dominance handoff");
         }
     }
     tier1_pipeline_expect(test, scratch->length == 0, "upstream stages return scratch");
@@ -1087,11 +1085,9 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
     }
     *mapped = (capacity + 4095) & ~UINT64_C(4095);
     uint8_t* machine = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint8_t* scalar = malloc(capacity);
     uint32_t* offsets = malloc(((uint64_t)maximum_records + 1) * sizeof(uint32_t));
     uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(maximum_references) * sizeof(uint32_t));
-    uint32_t* scalar_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(maximum_references) * sizeof(uint32_t));
-    ok = tier1_pipeline_expect(test, capacity < INT32_MAX && machine != MAP_FAILED && scalar != 0 && offsets != 0 && ends != 0 && scalar_ends != 0, "allocate native encoder and symbolic-fixup buffers") && ok;
+    ok = tier1_pipeline_expect(test, capacity < INT32_MAX && machine != MAP_FAILED && offsets != 0 && ends != 0, "allocate native encoder and symbolic-fixup buffers") && ok;
     for (uint32_t f = 0; ok && f < program->function_count; f += 1)
     {
         Tier1SelectCode* code = &emitted[f].code;
@@ -1126,8 +1122,7 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
         if (ok)
         {
             vector_size = x86_encode(code->records, code->count, machine + starts[f], capacities[f], 0, ends);
-            const int64_t scalar_size = x86_encode_scalar(code->records, code->count, scalar + starts[f], capacities[f], 0, scalar_ends);
-            ok = tier1_pipeline_expect(test, vector_size > 0 && (uint64_t)vector_size <= capacities[f] && vector_size == scalar_size && memcmp(machine + starts[f], scalar + starts[f], (uint64_t)vector_size) == 0 && memcmp(ends, scalar_ends, (uint64_t)marked * sizeof(uint32_t)) == 0, "scalar and vector encoders agree on bytes and symbolic field ends");
+            ok = tier1_pipeline_expect(test, vector_size > 0 && (uint64_t)vector_size <= capacities[f], "the function encodes within its capacity");
         }
         for (uint32_t reference = 0; ok && reference < marked; reference += 1)
         {
@@ -1144,7 +1139,6 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
                 {
                     const int32_t relative = (int32_t)displacement;
                     memcpy(machine + starts[f] + end - distance, &relative, sizeof(relative));
-                    memcpy(scalar + starts[f] + end - distance, &relative, sizeof(relative));
                     test->resolved_calls += 1;
                 }
             }
@@ -1154,10 +1148,8 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
     {
         ok = tier1_pipeline_expect(test, mprotect(machine, *mapped, PROT_READ | PROT_EXEC) == 0, "make generated code executable");
     }
-    free(scalar);
     free(offsets);
     free(ends);
-    free(scalar_ends);
     if (!ok && machine != MAP_FAILED)
     {
         munmap(machine, *mapped);
@@ -1401,9 +1393,9 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
         tier1_pipeline_fixture(&fixture, shape);
         tier1_pipeline_reset(test);
         const bool frozen = tier1_pipeline_freeze(test, &fixture, &original);
-        for (uint32_t path = 0; frozen && path < 2; path += 1)
+        if (frozen)
         {
-            test->vector = path != 0;
+            test->vector = true;
             for (uint32_t remat = 0; remat < 2; remat += 1)
             {
                 test->rematerialize = remat != 0;
@@ -1435,7 +1427,7 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                     {
                         // As the driver's --tier1 plans the optimizer's verified result, without verifying it again: the
                         // plan tier1_select_plan's verification gives (#141).
-                        const Tier1SelectError error = tier1_select_plan_verified(&function, &dominance, 0, 0, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], test->vector, &plan, &node);
+                        const Tier1SelectError error = tier1_select_plan_verified(&function, &dominance, 0, 0, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], &plan, &node);
                         ok = tier1_pipeline_expect(test, error == TIER1_SELECT_OK, "select the actual optimized SSA function");
                         if (!ok)
                         {
@@ -1443,12 +1435,10 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                         }
                         ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_again(&function, &dominance, &plan, true, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH]),
                                                          "the verified function's plan is the verifying plan's");
-                        ok = ok && tier1_pipeline_expect(test, tier1_select_test_plan_twin(&function, &dominance, &plan, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH]),
-                                                         "both host paths publish the same selected plan and effective uses");
                         const uint64_t mismatches = test->burs.mismatches + test->burs.uncovered;
                         tier1_burs_check_function(&test->burs, &function, &dominance, &test->arenas[TIER1_PIPELINE_SCRATCH]);
                         ok = ok && tier1_pipeline_expect(test, test->burs.mismatches + test->burs.uncovered == mismatches,
-                                                         "the bottom-up rewrite's twins classify, label and choose alike, every covered class with a candidate");
+                                                         "the bottom-up rewrite's children, states and rules hold their definitions, every covered class with a candidate");
                     }
                     Tier1EmitResult* emitted = &bodies[f];
                     if (ok)
@@ -1756,9 +1746,9 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             {
                 tier1_pipeline_clang(&test, clang);
             }
-            tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 4 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
-            tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 4, "every supported call path resolves its original local helper symbol");
-            tier1_pipeline_expect(&test, test.general == 9 * 4 && test.edge_moves != 0 && test.edge_stubs != 0,
+            tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
+            tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 2, "every supported call path resolves its original local helper symbol");
+            tier1_pipeline_expect(&test, test.general == 9 * 2 && test.edge_moves != 0 && test.edge_stubs != 0,
                                   "every control-flow fixture, the floating one and the dynamic stack's go through the CFG consumer, whose edges move values, critical ones through stubs");
             tier1_pipeline_expect(&test, test.certified != 0 && test.certificate_facts != 0, "the emitter certified its allocations, CFG ones with block-entry facts");
             tier1_pipeline_expect(&test, test.code_certified + test.code_uncertified == test.general && test.code_certified != 0 && test.mutants_refused != 0 && test.mutants_run != 0, "the CFG consumer's code is certified, and its mutants refused or harmless");
@@ -1768,7 +1758,7 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
                 tier1_pipeline_expect(&test, test.clang_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "both Clang optimization levels check every original fixture/input");
             }
         }
-        printf("tier1 pipeline bottom-up rewrite: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64 " twin mismatches\n", test.burs.functions,
+        printf("tier1 pipeline bottom-up rewrite: %" PRIu64 " functions, %" PRIu64 " nodes, %" PRIu64 " rules' candidates, %" PRIu64 " munch's, %" PRIu64 " broken definitions\n", test.burs.functions,
                test.burs.nodes, test.burs.matched, test.burs.fallbacks, test.burs.mismatches);
         printf("tier1 pipeline: %" PRIu64 " checks, %" PRIu64 " failures; native=%u clang=%u calls=%u stores=%" PRIu64 " reloads=%" PRIu64 " call-stores=%" PRIu64 " call-reloads=%" PRIu64 " rematerializations=%" PRIu64 " general=%u edge-moves=%" PRIu64 " edge-stubs=%" PRIu64 " certified=%" PRIu64 " certificate-facts=%" PRIu64 " code-certified=%" PRIu64 "/%" PRIu64  " mutants=%" PRIu64 " refused=%" PRIu64 " accepted-run=%" PRIu64 " prologue-mutants=%" PRIu64 "/%" PRIu64 " epilogue-mutants=%" PRIu64 "/%" PRIu64 " seed=%" PRIu64 "\n", test.checks, test.failures, test.native_results, test.clang_results, test.resolved_calls, test.stores, test.loads, test.call_stores, test.call_loads, test.rematerializations, test.general, test.edge_moves, test.edge_stubs, test.certified, test.certificate_facts, test.code_certified, (uint64_t)test.general, test.mutants, test.mutants_refused, test.mutants_run, test.frame_refused[0], test.frame_mutants[0], test.frame_refused[1], test.frame_mutants[1], seed);
         for (uint32_t a = 0; a < BUSTER_TIER1_PIPELINE_ARENAS; a += 1)

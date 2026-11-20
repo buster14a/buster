@@ -299,7 +299,7 @@ static uint8_t x86_zen5_id(const X86Instruction* instruction)
 
 // Every byte indexes a slot; the slots past the rows are unknown. Inputs and outputs are disjoint bounded slices; zero
 // count touches neither. Columns must be one of X86CostColumn; keeping that invariant out of the loop is deliberate.
-static __attribute__((noinline)) void x86_zen5_lookup_scalar(const uint8_t* restrict ids, uint64_t count, X86CostColumn column, uint16_t* restrict output)
+static __attribute__((noinline, unused)) void x86_zen5_lookup_scalar(const uint8_t* restrict ids, uint64_t count, X86CostColumn column, uint16_t* restrict output)
 {
     const uint16_t* table = x86_zen5_columns[column];
     #pragma clang loop vectorize(disable) interleave(disable)
@@ -309,7 +309,6 @@ static __attribute__((noinline)) void x86_zen5_lookup_scalar(const uint8_t* rest
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // 32 IDs: a 64-entry permute per bank (index bits 0 to 5), the banks chosen by bits 6 and 7.
 static inline __m512i x86_zen5_lookup_keys(__m512i keys, const __m512i* banks)
 {
@@ -323,13 +322,9 @@ static inline __m512i x86_zen5_lookup_keys(__m512i keys, const __m512i* banks)
     const __m512i high = _mm512_mask_blend_epi16(bit6, third, fourth);
     return _mm512_mask_blend_epi16(bit7, low, high);
 }
-#endif
 
 static __attribute__((noinline)) void x86_zen5_lookup(const uint8_t* restrict ids, uint64_t count, X86CostColumn column, uint16_t* restrict output)
 {
-#if !BUSTER_HOST_VECTOR
-    x86_zen5_lookup_scalar(ids, count, column, output);
-#else
     __m512i banks[8];
     for (uint32_t b = 0; b < 8; b += 1)
     {
@@ -348,7 +343,6 @@ static __attribute__((noinline)) void x86_zen5_lookup(const uint8_t* restrict id
         const __m512i keys = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(active, ids + full));
         _mm512_mask_storeu_epi16(output + full, active, x86_zen5_lookup_keys(keys, banks));
     }
-#endif
 }
 
 // Whether dense ID `id` accounts for every column of `required` (BUSTER_X86_COST_ALL_COLUMNS bits): measured, derived

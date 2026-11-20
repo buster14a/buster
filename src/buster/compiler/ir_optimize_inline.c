@@ -21,8 +21,8 @@
 // block's branches in go to its first part and its edges out leave its last, which its successors' phis name. The
 // callee's slots without lifetime markers, and the aggregate arguments' copies, are bracketed by a start in the head and an
 // end in the continuation, after the result's copy. Its calls keep their ABI records, appended to the caller's. The callee's
-// operand columns are rebased 16 nodes a vector by kind tables looked up by opcode, with a scalar twin a node at a time
-// (ir_inline_splice_vector, ir_inline_splice_scalar); both write the same columns.
+// operand columns are rebased 16 nodes a vector by kind tables looked up by opcode (ir_inline_splice_vector), where the
+// callee's parameters begin it and are at most 16; any other callee is spliced a node at a time (ir_inline_splice_scalar).
 //
 // #1282 takes SIMD functions, the x86 intrinsic wrappers': a callee's vectors, masks and machine rows are copied with it
 // (its vector constants and rows appended to the caller's, IR_VCONST's index and IrCall.row rebased, a row call staying a
@@ -36,7 +36,7 @@
 // copies values (ir_optimize_sroa.c's `flagged`).
 //
 // Costs are structural units: cloned instructions plus copied constant/address rows, not measured cycles or bytes.
-// Per-call cost columns receive one masked 16-lane threshold sweep, with an exact scalar twin. Caller/unit growth
+// Per-call cost columns receive one masked 16-lane threshold sweep. Caller/unit growth
 // admission and graph walks are deterministic scalar protocols. No profitable threshold is claimed without target
 // measurement. Disabled mode still validates and clones the unit, retaining every original call.
 //
@@ -86,7 +86,6 @@ struct IrInlineOptions
     // bit 1 32, bit 2 64, which the target's vectors must have (AVX-512F, and VL for 16 and 32). 0 copies by integers.
     uint8_t vector_copies;
     bool enabled;
-    bool scalar;
     // Whether a callee of any control flow is a candidate (#2541): its blocks spliced at the call (ir_inline_expand_general)
     // rather than one straight line of them cloned in place. Off by default, where such a body is IR_INLINE_BODY.
     bool control_flow;
@@ -417,7 +416,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
         {
             const uint64_t mark = scratch->length;
             IrOptimizeWork work = { 0 };
-            check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+            check = ir_optimize_prepare(&work, function, output, scratch, false, true);
             const uint64_t bytes = scratch->length - mark;
             result->scratch_bytes = bytes > result->scratch_bytes ? bytes : result->scratch_bytes;
             arena_pop_to(scratch, mark);
@@ -840,28 +839,16 @@ static IrInlineCopies ir_inline_copies(const IrFunction* caller, uint32_t node, 
     return copies;
 }
 
-static void ir_inline_threshold(const uint32_t* costs, uint32_t count, uint32_t maximum, bool scalar, uint8_t* selected)
+static void ir_inline_threshold(const uint32_t* costs, uint32_t count, uint32_t maximum, uint8_t* selected)
 {
-    (void)scalar;
-
-    if (BUSTER_SCALAR_PATH(scalar))
+    for (uint32_t first = 0; first < count; first += 16)
     {
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            selected[i] = costs[i] <= maximum;
-        }
-    }
-    else
-    {
-        for (uint32_t first = 0; first < count; first += 16)
-        {
-            const uint32_t remaining = count - first;
-            const uint32_t n = remaining < 16 ? remaining : 16;
-            const __mmask16 mask = n == 16 ? UINT16_MAX : (uint16_t)((1u << n) - 1);
-            const __m512i values = _mm512_maskz_loadu_epi32(mask, costs + first);
-            const __mmask16 fits = mask & _mm512_cmple_epu32_mask(values, _mm512_set1_epi32((int32_t)maximum));
-            _mm_mask_storeu_epi8(selected + first, mask, _mm_maskz_set1_epi8(fits, 1));
-        }
+        const uint32_t remaining = count - first;
+        const uint32_t n = remaining < 16 ? remaining : 16;
+        const __mmask16 mask = n == 16 ? UINT16_MAX : (uint16_t)((1u << n) - 1);
+        const __m512i values = _mm512_maskz_loadu_epi32(mask, costs + first);
+        const __mmask16 fits = mask & _mm512_cmple_epu32_mask(values, _mm512_set1_epi32((int32_t)maximum));
+        _mm_mask_storeu_epi8(selected + first, mask, _mm_maskz_set1_epi8(fits, 1));
     }
 }
 
@@ -894,29 +881,18 @@ static IrInlineRows ir_inline_rows(const IrFunction* callee, const IrInlineBody*
 }
 
 // The cost sweep against a limit per call (IrInlineUnit.limits): the same masked 16-lane compare as ir_inline_threshold's,
-// of two columns, with its scalar twin.
-static void ir_inline_threshold_limits(const uint32_t* costs, const uint32_t* maxima, uint32_t count, bool scalar, uint8_t* selected)
+// of two columns.
+static void ir_inline_threshold_limits(const uint32_t* costs, const uint32_t* maxima, uint32_t count, uint8_t* selected)
 {
-    (void)scalar;
-    if (BUSTER_SCALAR_PATH(scalar))
+    for (uint32_t first = 0; first < count; first += 16)
     {
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            selected[i] = costs[i] <= maxima[i];
-        }
-    }
-    else
-    {
-        for (uint32_t first = 0; first < count; first += 16)
-        {
-            const uint32_t remaining = count - first;
-            const uint32_t n = remaining < 16 ? remaining : 16;
-            const __mmask16 mask = n == 16 ? UINT16_MAX : (uint16_t)((1u << n) - 1);
-            const __m512i values = _mm512_maskz_loadu_epi32(mask, costs + first);
-            const __m512i limits = _mm512_maskz_loadu_epi32(mask, maxima + first);
-            const __mmask16 fits = mask & _mm512_cmple_epu32_mask(values, limits);
-            _mm_mask_storeu_epi8(selected + first, mask, _mm_maskz_set1_epi8(fits, 1));
-        }
+        const uint32_t remaining = count - first;
+        const uint32_t n = remaining < 16 ? remaining : 16;
+        const __mmask16 mask = n == 16 ? UINT16_MAX : (uint16_t)((1u << n) - 1);
+        const __m512i values = _mm512_maskz_loadu_epi32(mask, costs + first);
+        const __m512i limits = _mm512_maskz_loadu_epi32(mask, maxima + first);
+        const __mmask16 fits = mask & _mm512_cmple_epu32_mask(values, limits);
+        _mm_mask_storeu_epi8(selected + first, mask, _mm_maskz_set1_epi8(fits, 1));
     }
 }
 
@@ -993,11 +969,11 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
             {
                 maxima[call - first] = result->callees[call] != BUSTER_IR_NONE ? unit->limits[result->callees[call]] : 0;
             }
-            ir_inline_threshold_limits(result->costs + first, maxima, end - first, BUSTER_SCALAR_PATH(options.scalar), fits);
+            ir_inline_threshold_limits(result->costs + first, maxima, end - first, fits);
         }
         else if (first != end)
         {
-            ir_inline_threshold(result->costs + first, end - first, options.maximum_cost, BUSTER_SCALAR_PATH(options.scalar), fits);
+            ir_inline_threshold(result->costs + first, end - first, options.maximum_cost, fits);
         }
         // Appended constant and address rows are bounded like instructions: a call that would carry the caller's
         // side tables past the representation limit stays a call, rather than failing the whole unit.
@@ -1330,8 +1306,8 @@ static IrInlineLayout ir_inline_layout(const IrFunction* caller, uint32_t node, 
 }
 
 // The splice's operand kinds (IrInlineKinds) from the IR's own operand tables, which ir_value_mask reads too: a value, or an
-// optional one, where the operation's operand is; and the rows and blocks that the scalar splice rebases by operation
-// (ir_inline_node, ir_inline_splice_scalar).
+// optional one, where the operation's operand is; and the rows and blocks that the node-at-a-time splice rebases by
+// operation (ir_inline_node, ir_inline_splice_scalar).
 static void ir_inline_kinds(IrInlineKinds* kinds)
 {
     memset(kinds, 0, sizeof(*kinds));
@@ -1419,9 +1395,10 @@ static void ir_inline_rebuild(const IrFunction* callee, uint32_t inner, uint32_t
     }
 }
 
-// The callee's blocks at the cursor (#2541), the scalar twin: a node at a time through ir_inline_node, which maps its
-// values through `inner_values` and rebases its rows by operation, then its blocks by `block_base`, then its rebuilt
-// operands (ir_inline_rebuild).
+// The callee's blocks at the cursor (#2541), a node at a time, for a callee the vector path doesn't take (its parameters
+// don't begin it, or there are more than 16; phase D of #2924): through ir_inline_node, which maps its values through
+// `inner_values` and rebases its rows by operation, then its blocks by `block_base`, then its rebuilt operands
+// (ir_inline_rebuild).
 static void ir_inline_splice_scalar(const IrFunction* callee, IrFunction* rewritten, const uint32_t* inner_values, IrInlineBases bases, uint32_t block_base, IrInlineCursor* cursor, IrInlineReturns* returns)
 {
     for (uint32_t block = 0; block < callee->block_count; block += 1)
@@ -1457,7 +1434,7 @@ static void ir_inline_splice_scalar(const IrFunction* callee, IrFunction* rewrit
 // each operand column's lanes get their kinds by one table lookup of their opcodes (IrInlineKinds): a value past the
 // parameters moves by the run's shift, a parameter becomes its argument by a permute of their row, and a block or a row
 // of a side table gets its kind's base by a permute of the bases' row. The nodes whose operands are rebuilt then go
-// through ir_inline_rebuild in node order, as the scalar twin's do.
+// through ir_inline_rebuild in node order.
 static void ir_inline_splice_vector(const IrFunction* callee, const IrInlineBody* shape, const IrInlineKinds* kinds, IrFunction* rewritten, const uint32_t* inner_values, IrInlineBases bases,
                                     uint32_t block_base, IrInlineCursor* cursor, IrInlineReturns* returns)
 {
@@ -1538,7 +1515,7 @@ static void ir_inline_splice_vector(const IrFunction* callee, const IrInlineBody
 // never returns; an aggregate's address, whose bytes are then copied into the call's destination) and ends the lifetimes
 // it started. The caller's block goes on in it.
 static void ir_inline_expand_general(const IrFunction* source, uint32_t node, const IrFunction* callee, const IrInlineBody* shape, const IrInlineKinds* kinds, const uint32_t* values,
-                                     uint32_t* inner_values, uint32_t* parameters, IrFunction* rewritten, IrInlineBases bases, uint8_t allowed, bool scalar, IrInlineCursor* cursor,
+                                     uint32_t* inner_values, uint32_t* parameters, IrFunction* rewritten, IrInlineBases bases, uint8_t allowed, IrInlineCursor* cursor,
                                      uint32_t* block)
 {
     const IrCall descriptor = source->calls[source->b[node]];
@@ -1596,7 +1573,7 @@ static void ir_inline_expand_general(const IrFunction* source, uint32_t node, co
         returns.slice = cursor->extra;
         cursor->extra += shape->returns * 2;
     }
-    if (!BUSTER_SCALAR_PATH(scalar) && shape->prefix == shape->parameters && shape->parameters <= 16)
+    if (shape->prefix == shape->parameters && shape->parameters <= 16)
     {
         ir_inline_splice_vector(callee, shape, kinds, rewritten, inner_values, bases, block_base, cursor, &returns);
     }
@@ -1784,86 +1761,63 @@ static void ir_inline_describe(const IrFunction* source, uint32_t node, const Ir
 // operand. The columns 16 nodes a vector, by a table lookup of the kinds and, where the caller has few expanded sites
 // (`sites`), a compare and masked add a site (a value after it moves by its growth, the site's own value is its result,
 // a block after its block moves by its blocks: the design's step function, #2541 step 3), or else two masked gathers
-// through the destination tables; or by the scalar twin, ir_inline_node's loop. The slices by both alike.
+// through the destination tables. Then the slices, a node at a time.
 static void ir_inline_copy_run(const IrFunction* source, uint32_t first, uint32_t end, const IrInlineKinds* kinds, const uint32_t* values, const uint32_t* block_first,
-                               const uint32_t* block_last, const IrInlineSites* sites, IrFunction* rewritten, bool scalar, IrInlineCursor* cursor)
+                               const uint32_t* block_last, const IrInlineSites* sites, IrFunction* rewritten, IrInlineCursor* cursor)
 {
-    (void)scalar;
-    (void)kinds;
     const uint32_t at = cursor->node;
-    if (!BUSTER_SCALAR_PATH(scalar))
+    const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_IR_NONE);
+    const uint32_t* inputs[3] = {
+        source->a,
+        source->b,
+        source->c,
+    };
+    uint32_t* outputs[3] = {
+        rewritten->a,
+        rewritten->b,
+        rewritten->c,
+    };
+    for (uint32_t i = first; i < end; i += 16)
     {
-        const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_IR_NONE);
-        const uint32_t* inputs[3] = {
-            source->a,
-            source->b,
-            source->c,
-        };
-        uint32_t* outputs[3] = {
-            rewritten->a,
-            rewritten->b,
-            rewritten->c,
-        };
-        for (uint32_t i = first; i < end; i += 16)
+        const uint32_t remaining = end - i;
+        const __mmask16 mask = remaining >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << remaining) - 1);
+        const uint32_t to = at + (i - first);
+        const __m128i op = _mm_maskz_loadu_epi8(mask, source->op + i);
+        _mm_mask_storeu_epi8(rewritten->op + to, mask, op);
+        _mm_mask_storeu_epi8(rewritten->type + to, mask, _mm_maskz_loadu_epi8(mask, source->type + i));
+        _mm_mask_storeu_epi8(rewritten->flags + to, mask, _mm_maskz_loadu_epi8(mask, source->flags + i));
+        _mm_mask_storeu_epi8(rewritten->alignment_log2 + to, mask, _mm_maskz_loadu_epi8(mask, source->alignment_log2 + i));
+        for (uint32_t column = 0; column < 3; column += 1)
         {
-            const uint32_t remaining = end - i;
-            const __mmask16 mask = remaining >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << remaining) - 1);
-            const uint32_t to = at + (i - first);
-            const __m128i op = _mm_maskz_loadu_epi8(mask, source->op + i);
-            _mm_mask_storeu_epi8(rewritten->op + to, mask, op);
-            _mm_mask_storeu_epi8(rewritten->type + to, mask, _mm_maskz_loadu_epi8(mask, source->type + i));
-            _mm_mask_storeu_epi8(rewritten->flags + to, mask, _mm_maskz_loadu_epi8(mask, source->flags + i));
-            _mm_mask_storeu_epi8(rewritten->alignment_log2 + to, mask, _mm_maskz_loadu_epi8(mask, source->alignment_log2 + i));
-            for (uint32_t column = 0; column < 3; column += 1)
+            const __m512i kind = ir_lookup_bytes(kinds->columns[column], op);
+            const __m512i operand = _mm512_maskz_loadu_epi32(mask, inputs[column] + i);
+            const __mmask16 optional = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_OPTIONAL)) & _mm512_cmpneq_epi32_mask(operand, none);
+            const __mmask16 value = mask & (_mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_VALUE)) | optional);
+            const __mmask16 target = mask & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_BLOCK));
+            __m512i rebased = operand;
+            if (sites != NULL)
             {
-                const __m512i kind = ir_lookup_bytes(kinds->columns[column], op);
-                const __m512i operand = _mm512_maskz_loadu_epi32(mask, inputs[column] + i);
-                const __mmask16 optional = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_OPTIONAL)) & _mm512_cmpneq_epi32_mask(operand, none);
-                const __mmask16 value = mask & (_mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_VALUE)) | optional);
-                const __mmask16 target = mask & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_BLOCK));
-                __m512i rebased = operand;
-                if (sites != NULL)
+                // Every site, not only those before the run: an operand may name a value laid out after its use.
+                for (uint32_t k = 0; value != 0 && k < sites->count; k += 1)
                 {
-                    // Every site, not only those before the run: an operand may name a value laid out after its use.
-                    for (uint32_t k = 0; value != 0 && k < sites->count; k += 1)
-                    {
-                        const __m512i site = _mm512_set1_epi32((int32_t)sites->node[k]);
-                        const __mmask16 after = value & _mm512_cmpgt_epu32_mask(operand, site);
-                        const __mmask16 at = value & _mm512_cmpeq_epi32_mask(operand, site);
-                        rebased = _mm512_mask_add_epi32(rebased, after, rebased, _mm512_set1_epi32((int32_t)sites->growth[k]));
-                        rebased = _mm512_mask_mov_epi32(rebased, at, _mm512_set1_epi32((int32_t)sites->result[k]));
-                    }
-                    for (uint32_t k = 0; target != 0 && k < sites->count; k += 1)
-                    {
-                        const __mmask16 later = target & _mm512_cmpgt_epu32_mask(operand, _mm512_set1_epi32((int32_t)sites->block[k]));
-                        rebased = _mm512_mask_add_epi32(rebased, later, rebased, _mm512_set1_epi32((int32_t)sites->blocks[k]));
-                    }
+                    const __m512i site = _mm512_set1_epi32((int32_t)sites->node[k]);
+                    const __mmask16 after = value & _mm512_cmpgt_epu32_mask(operand, site);
+                    const __mmask16 at = value & _mm512_cmpeq_epi32_mask(operand, site);
+                    rebased = _mm512_mask_add_epi32(rebased, after, rebased, _mm512_set1_epi32((int32_t)sites->growth[k]));
+                    rebased = _mm512_mask_mov_epi32(rebased, at, _mm512_set1_epi32((int32_t)sites->result[k]));
                 }
-                else
+                for (uint32_t k = 0; target != 0 && k < sites->count; k += 1)
                 {
-                    rebased = _mm512_mask_i32gather_epi32(operand, value, operand, values, 4);
-                    rebased = _mm512_mask_i32gather_epi32(rebased, target, operand, block_first, 4);
+                    const __mmask16 later = target & _mm512_cmpgt_epu32_mask(operand, _mm512_set1_epi32((int32_t)sites->block[k]));
+                    rebased = _mm512_mask_add_epi32(rebased, later, rebased, _mm512_set1_epi32((int32_t)sites->blocks[k]));
                 }
-                _mm512_mask_storeu_epi32(outputs[column] + to, mask, rebased);
             }
-        }
-    }
-    else
-    {
-        const IrInlineBases own = { 0 };
-        for (uint32_t i = first; i < end; i += 1)
-        {
-            const uint32_t to = at + (i - first);
-            ir_inline_node(source, i, rewritten, to, values, own);
-            if (source->op[i] == IR_BR)
+            else
             {
-                rewritten->a[to] = block_first[source->a[i]];
+                rebased = _mm512_mask_i32gather_epi32(operand, value, operand, values, 4);
+                rebased = _mm512_mask_i32gather_epi32(rebased, target, operand, block_first, 4);
             }
-            else if (source->op[i] == IR_CBR)
-            {
-                rewritten->b[to] = block_first[source->b[i]];
-                rewritten->c[to] = block_first[source->c[i]];
-            }
+            _mm512_mask_storeu_epi32(outputs[column] + to, mask, rebased);
         }
     }
     const IrInlineBases own = { 0 };
@@ -2234,7 +2188,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                             memcpy(rewritten.passed + bases.passed, callee->passed, (uint64_t)callee->passed_count * sizeof(IrPassed));
                         }
                         const uint32_t callee_blocks = new_block;
-                        ir_inline_expand_general(source, node, callee, shape, kinds, values, inner_values, parameters, &rewritten, bases, options.vector_copies, options.scalar, &cursor,
+                        ir_inline_expand_general(source, node, callee, shape, kinds, values, inner_values, parameters, &rewritten, bases, options.vector_copies, &cursor,
                                                  &new_block);
                         ir_inline_describe(source, node, callee, unit->symbols[result->callees[call]], inner_values, true, callee_blocks, binding_map, &rewritten);
                         bases.abi_calls += callee->abi_call_count;
@@ -2264,7 +2218,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                         last += 1;
                     }
                     ir_inline_copy_run(source, node, last, kinds, values, block_first, block_last, site_count <= options.add_sites && site_count <= 16 ? &expanded : NULL, &rewritten,
-                                       options.scalar, &cursor);
+                                       &cursor);
                     node = last - 1;
                     call += sites - site;
                 }
@@ -2338,7 +2292,7 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
             // The caller's CFG keeps its valid unreachable regions (a general expansion's continuation is one where its
             // callee never returns); check the same reachable SSA contract as the input, rather than deleting regions or
             // inventing dominance for dead blocks.
-            check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+            check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, false, true);
             const uint64_t bytes = scratch->length - scratch_mark;
             inlined.scratch_bytes = bytes > inlined.scratch_bytes ? bytes : inlined.scratch_bytes;
             arena_pop_to(scratch, verification_mark);

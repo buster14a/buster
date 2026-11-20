@@ -71,10 +71,10 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
     IrFunction function;
     const bool created = tier1_select_test_indirect_function(&test->input, &function);
     IrDominance dominance;
-    const bool dominated = created && tier1_terminal_dominance(test, &function, vector, &dominance);
+    const bool dominated = created && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the labels' fixture selects");
     const Tier1EmitOptions options = {
         .certify = true,
@@ -156,13 +156,13 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
         function.label_count = BUSTER_ARRAY_LENGTH(labels);
         function.symbol_count += 1;
     }
-    const bool verified = created && (fixture != 3 || (ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK));
+    const bool verified = created && (fixture != 3 || (ir_verify(&function, &test->scratch, 0).error == IR_OK));
     tier1_emit_test_expect(test, fixture != 3 || verified, "an absent label outside both indirect jumps' target lists is valid IR by both paths");
     IrDominance dominance;
-    const bool dominated = verified && tier1_terminal_dominance(test, &function, vector, &dominance);
+    const bool dominated = verified && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the review's indirect jumps' fixtures select");
     const Tier1EmitOptions options = {
         .certify = true,

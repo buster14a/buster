@@ -679,8 +679,67 @@ struct ProfileLoop
     uint64_t first;
     uint64_t last;
     uint64_t samples;
-    bool reported;
 };
+
+static bool profile_loop_before(const ProfileLoop* loops, uint64_t a, uint64_t b)
+{
+    const uint64_t a_samples = loops[a].samples;
+    const uint64_t b_samples = loops[b].samples;
+    bool before = a_samples > b_samples;
+    if (a_samples == b_samples)
+    {
+        const uint64_t a_span = loops[a].last - loops[a].first;
+        const uint64_t b_span = loops[b].last - loops[b].first;
+        before = a_span < b_span || (a_span == b_span && a < b);
+    }
+    return before;
+}
+
+// Place a loop in a heap whose root is the worst retained rank. Both child subtrees are already heaps.
+static void profile_loop_sift(const ProfileLoop* loops, uint64_t* order, uint64_t count, uint64_t root, uint64_t loop)
+{
+    while (root < count / 2)
+    {
+        uint64_t child = 2 * root + 1;
+        if (child + 1 < count && profile_loop_before(loops, order[child], order[child + 1]))
+        {
+            child += 1;
+        }
+        if (!profile_loop_before(loops, loop, order[child]))
+        {
+            break;
+        }
+        order[root] = order[child];
+        root = child;
+    }
+    order[root] = loop;
+}
+
+// Keep the best count discovery indices (0 < count <= total), then extract the worst to the end until sorted.
+static void profile_rank_loops(const ProfileLoop* loops, uint64_t total, uint64_t* order, uint64_t count)
+{
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        order[i] = i;
+    }
+    for (uint64_t i = count / 2; i != 0; i -= 1)
+    {
+        profile_loop_sift(loops, order, count, i - 1, order[i - 1]);
+    }
+    for (uint64_t i = count; i < total; i += 1)
+    {
+        if (profile_loop_before(loops, i, order[0]))
+        {
+            profile_loop_sift(loops, order, count, 0, i);
+        }
+    }
+    for (uint64_t end = count; end > 1; end -= 1)
+    {
+        const uint64_t last = order[end - 1];
+        order[end - 1] = order[0];
+        profile_loop_sift(loops, order, end - 1, 0, last);
+    }
+}
 
 static void profile_print_loop(ProfileReport* report, const ProfileDisassembly* disassembly, const ProfileLoop* loop, uint64_t total)
 {
@@ -837,18 +896,16 @@ static bool profile_hot_loops(Arena* arena, ProfileReport* report, String8 funct
                 profile_print(report, ", %llu samples named %.*s outside its copies", (unsigned long long)outside, (int)function.length, function.pointer);
             }
             profile_print(report, "\nloops by samples:\n");
-            // The top loop_count, by selection: each round takes the most sampled loop not reported yet.
-            for (uint64_t round = 0; round < loop_count && round < loop_total; round += 1)
+            // Every loop has consumed its prefix sums. Reuse that column for the requested discovery indices.
+            const uint64_t ranked = loop_count < loop_total ? loop_count : loop_total;
+            uint64_t* order = prefix;
+            if (ranked != 0)
             {
-                uint64_t best = loop_total;
-                for (uint64_t l = 0; l < loop_total; l += 1)
+                profile_rank_loops(loops, loop_total, order, ranked);
+                for (uint64_t i = 0; i < ranked; i += 1)
                 {
-                    const bool better = best == loop_total || loops[l].samples > loops[best].samples ||
-                                        (loops[l].samples == loops[best].samples && loops[l].last - loops[l].first < loops[best].last - loops[best].first);
-                    best = !loops[l].reported && better ? l : best;
+                    profile_print_loop(report, &disassembly, &loops[order[i]], total);
                 }
-                loops[best].reported = true;
-                profile_print_loop(report, &disassembly, &loops[best], total);
             }
 
             // Enclosing loops tie with the hot loop, so the one to read is the smallest with at least half the samples.

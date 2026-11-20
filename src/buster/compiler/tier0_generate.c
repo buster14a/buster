@@ -795,7 +795,6 @@ static void tier0_generate_expression(const Tier0Program* program, const Tier0Sc
                     tree->nodes[child].children[0] = grandchild;
                     work[work_count] = grandchild << 16 | slots << 8 | BUSTER_TYPED_CLASS_I16;
                     work_count += 1;
-                    children = 0;
                     node->kind = BUSTER_TIER0_EXPRESSION_CONVERT;
                     continue;
                 }

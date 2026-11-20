@@ -62,8 +62,7 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
     bool result = cbuiltin_rounds_test_expect(tally, program->mapping != MAP_FAILED, "native mapping", path);
     if (result)
     {
-        const int64_t encoded = path == 0 ? x86_encode_scalar(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL)
-                                          : x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
+        const int64_t encoded = x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
         result = cbuiltin_rounds_test_expect(tally, encoded > 0, "helper encoding", path);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
@@ -72,32 +71,27 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
             X86Instruction records[BUSTER_ARRAY_LENGTH(cbuiltin_rounds_helper_records)];
             uint32_t offsets[BUSTER_ARRAY_LENGTH(records)];
             memcpy(records, helper->code.records, sizeof(records));
-            const BranchSizing sized = path == 0 ? size_branches_scalar(records, helper->code.count, NULL, NULL, 0, offsets) :
-                                                  size_branches(records, helper->code.count, NULL, NULL, 0, offsets);
+            const BranchSizing sized = size_branches(records, helper->code.count, NULL, NULL, 0, offsets);
             Tier0Code sized_code = helper->code;
             sized_code.records = records;
             UnwindFunction published = { 0 };
-            UnwindFunction scalar_frame = { 0 };
-            UnwindFunction vector_frame = { 0 };
+            UnwindFunction proven_frame = { 0 };
             const UnwindError described = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &published);
-            const UnwindError scalar_proof = unwind_tier0_scalar(&sized_code, offsets, program->byte_count, &scalar_frame);
-            const UnwindError vector_proof = unwind_tier0(&sized_code, offsets, program->byte_count, &vector_frame);
-            result = cbuiltin_rounds_test_expect(tally, sized.error == BRANCH_SIZING_OK && described == UNWIND_OK &&
-                scalar_proof == UNWIND_OK && vector_proof == UNWIND_OK && memcmp(&published, &scalar_frame, sizeof(published)) == 0 &&
-                memcmp(&published, &vector_frame, sizeof(published)) == 0 && published.frame_size == 8 && published.event_count == 2 &&
+            const UnwindError proof = unwind_tier0(&sized_code, offsets, program->byte_count, &proven_frame);
+            result = cbuiltin_rounds_test_expect(tally, sized.error == BRANCH_SIZING_OK && described == UNWIND_OK && proof == UNWIND_OK &&
+                memcmp(&published, &proven_frame, sizeof(published)) == 0 && published.frame_size == 8 && published.event_count == 2 &&
                 published.saved == 0 && published.pointer == 0 && published.offsets[0] == 4 && published.offsets[1] == program->byte_count - 1,
-                "rounding-mode helper CFA matches both independent unwind proofs", path);
+                "rounding-mode helper CFA matches the records' unwind proof", path);
             sized_code.frame_size = 0;
             UnwindFunction wrong = { 0 };
             const UnwindError wrong_frame = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &wrong);
-            result = cbuiltin_rounds_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &scalar_frame, sizeof(wrong)) != 0,
+            result = cbuiltin_rounds_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &proven_frame, sizeof(wrong)) != 0,
                 "missing rounding-mode reservation disagrees with the record proof", path) && result;
         }
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
-            const int64_t caller_bytes = path == 0 ? x86_encode_scalar(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends)
-                                                  : x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
+            const int64_t caller_bytes = x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
             result = cbuiltin_rounds_test_expect(tally, caller_bytes > 0 && caller->reference_count == 1 && caller->references[0].target == 1 &&
                 caller->references[0].field == X86_FIXUP_DISPLACEMENT && caller->references[0].kind == BUSTER_LINK_FIXUP_CALL &&
                 caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "real Tier 0 helper CALL reference", path);

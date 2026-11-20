@@ -31,15 +31,16 @@ nothing, since the queue tested it before it landed.
 
 - **What a candidate runs.** The full hosted contract on its exact commit,
   documentation alone included:
-  - every `x86-64` row and sanitizer, and the `native` plain row (#2032);
+  - the `native` plain row (#2032; the `x86-64` rows are gone with the scalar
+    host, #2924);
   - the vector pool;
   - the three fuzz campaigns.
 
   It takes its own run-id concurrency group. Like a pull request's run, it
   stops at its first failure (the owner's choice on 2026-11-12):
   - its tests and fuzz campaigns wait for the policy job;
-  - its rows, shards, vector draws and fuzz campaigns fail fast, each within
-    its own matrix;
+  - its rows, shards, vector draws and the fuzz campaigns' draws fail fast,
+    each within its own matrix;
   - each shard stops at its first failing command (`parallel --fail-fast`,
     #2703), as a pull request's does;
   - once its test rows or fuzz campaigns have failed, `stop-tests` or
@@ -64,12 +65,13 @@ nothing, since the queue tested it before it landed.
 - **Aggregate.** The required aggregate passes a candidate only through its
   coverage step, `bash tools/ci/nightly.sh coverage DIR`. That step reads the
   run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
-  - every shard 1..N of every row of the contract (`x86-64`'s four, `native`'s
-    plain one);
+  - the native plain row's verdict (drawn since #2924);
   - the vector verdict;
-  - each fuzz campaign;
+  - the fuzz campaigns' verdict (they draw AVX-512 runners through
+    `drawn.yml`, #2924);
   - every job of each auxiliary workflow the selector named
-    (`--auxiliary "$AUXILIARY"`), and none of the others;
+    (`--auxiliary "$AUXILIARY"`), but its draws' skipped ones, and its drawn
+    job's one verdict; and none of the others;
 
   all completed and successful. `qualification.c` reads the step's outcome
   (`COVERAGE_RESULT`); no other event runs the step.
@@ -95,11 +97,28 @@ nothing, since the queue tested it before it landed.
 [The merge queue](../ci.md#the-merge-queue) has the details and the ruleset's
 settings.
 
+## Clang Static Analyzer
+
+Pull requests and merge-queue candidates each run a separate `Clang Static Analyzer`
+job on GitHub-hosted Ubuntu 26.04. It checks the triggering merge revision,
+including documentation-only changes. The job uses the pinned CI Clang and
+the ordinary vector Release build's translation units and flags from
+`build.sh print-sources` and `build.sh print-compile-flags`. It uses one
+analyzer process per available CPU. Static analysis does not execute the
+compiler or need an AVX-512 runner.
+
+Each analyzer finding is a Clang error. The job finishes the sweep, fails
+qualification and retains the diagnostic paths as an artifact. A candidate's
+analyzer failure also stops the rest of that candidate's run. An optional
+build configuration such as libFuzzer needs its own analysis invocation.
+[Hosted timing evidence](https://github.com/buster14a/buster-performance/tree/4087a9e563960f17e9e1fc2729f7904e12343270/docs/measurements/merge-queue-clang-analyzer-2026-11-18).
+
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
-Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
-builds on CPUs without the complete vector feature set use the scalar fallback.
+Clang/LLVM 23.1.4 release, in native host builds (the baseline `x86-64` rows
+are gone, #2924). Native builds on CPUs without the complete vector feature set
+use the scalar fallback.
 On a pull request the native row is the vector row instead (#2033): the
 explicit vector target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
 whose plain configuration's 4 shards are items that each draw's collector
@@ -124,27 +143,27 @@ Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as its own number of shards, a runner each:
 `parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by
 the row's hosted costs, the same deal on every shard's runner, so the shards run
-each command once ([Shard costs](#shard-costs)). A portable `x86-64` row
-builds its compiler once, and its shards verify and run that product
-(`tools/ci/hosted-product.sh`; [Shared row
-products](../ci.md#shared-row-products), #2032), and so does each vector
-configuration, on a qualifying CPU; the `native` plain row's shards each
-build their own (a native build must run on the CPU it was built for), which is
-why the `native` sanitizer rows went (#2032). Run
+each command once ([Shard costs](#shard-costs)). Each vector configuration
+builds its compiler once, on a qualifying CPU, and its items verify and run that
+product (`tools/ci/hosted-product.sh`; [Shared row
+products](../ci.md#shared-row-products), #2032); the `native` plain row's items,
+drawn on qualifying CPUs as the vector row's are (#2924), each build their own
+(a native build must run on the CPU it was built for), which is why the
+`native` sanitizer rows went (#2032). Run
 `bash tests/ci/hosted-product.sh` after changing the product's packing, identity
 or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
-4 shards take about 4 to 6. The steps a row needs once (the baseline fallback,
-QEMU and arena checks, the parser smoke test, the performance readers and the
-TSan/MSan `main.c` compiles) run in its shard 1.
+4 shards take about 4 to 6. The steps a row needs once (the native row's arena
+checks, the parser smoke test, the performance
+readers and the TSan/MSan `main.c` compiles) run in its shard 1.
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
 On merge-queue candidates and the daily and dispatched runs, the nightly
 snapshot's daily run among them (not on pull requests, which they would hold up
 for over an hour; before the queue, on pushes before the nightly mode), the
-`x86-64` row and the vector row's configurations also run the
-inventory under `BUSTER_SANITIZER=address|thread|memory` (the `native`
-sanitizer rows went in #2032; `native` keeps its plain row), but the
+vector row's configurations also run the inventory under
+`BUSTER_SANITIZER=address|thread|memory` (the `native` sanitizer rows went in
+#2032 and the `x86-64` rows in #2924; `native` keeps its plain row), but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
@@ -320,10 +339,11 @@ Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
   companion artifact `ARTIFACT-NAME-offline`. It holds:
   - the apt closure of `setup-hosted.sh`'s packages, resolved on the
     preparation's runner image, with a manifest of every package and version;
-  - the baseline runtime's 4 `.deb`s and the corpus (`downloads/DIGEST`);
+    it carries the image's packages that it pins exactly (#2974);
+  - the corpus and Lua's archive (`downloads/DIGEST`);
   - bare mirrors of c-testsuite and SQLite at `refs/pinned/COMMIT`.
 
-  The preparation keeps them in two caches. `hosted-apt-v1-…` is keyed by the
+  The preparation keeps them in two caches. `hosted-apt-v2-…` is keyed by the
   package list and the image (`ImageOS`, `ImageVersion`). `hosted-ci-v1-…` is
   keyed by the scripts that pin the rest. On a hit it contacts no external
   host. On a miss it fetches each input once, with retries, and checks it as
@@ -337,7 +357,10 @@ Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
 - **Summaries:** each job's step summary lists the installed package versions,
   and the preparation's lists every input's source.
 - **Image rollouts:** a shard on another image installs the same `.deb`s and
-  warns where the image's own packages differ.
+  warns where the image's own packages differ. A carried package moves to the
+  bundle's version, up or down. Before this, an exactly pinned image package
+  that had moved failed the job. In the merge queue, that dropped the
+  candidate (#2974).
 
 Run `bash tests/ci/hosted-offline.sh` after changing any of these scripts. It
 is network-free, and the preparation job runs it. `hosted-inputs-drill.yml`
@@ -347,8 +370,8 @@ failure handling and recovery: [Offline inputs](../hosted-toolchain.md#offline-i
 ## Shard costs
 
 Each hosted row deals its inventory to its shards by a table of its own,
-`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `x86-64`, `native` and
-`vector` rows (#2033), each sanitizer. Each table is
+`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `native` and `vector`
+rows (#2033), each sanitizer (the `x86-64` rows' tables went with them, #2924). Each table is
 `tools/ci/costs.c`'s output alone, never edited by hand. Its first line says
 so, and `costs --self-test --root .`, which the selector's job runs on every
 pull request, fails a table that differs in any byte from what `costs refresh`
@@ -464,8 +487,7 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 
 | Row | Shards | Why |
 | --- | ---: | --- |
-| plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
-| `x86-64` TSan, MSan | 7 | a portable row's extra shard costs a minute of setup; 7 reach the rows' longest commands (#2703: with #2712's finer parts, `costs plan` gives MSan 975 s as 6 and 841 s as 7, TSan 909 and 872 s, at the same runner-minutes) |
+| `native` plain | 4 | its items, drawn as the vector row's (#2924); more items each rebuild the compiler for under a minute less |
 | `vector`, each configuration | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the take gives the run step its configuration's count |
 | others | 4 | already shorter than the run's longest row |
 
@@ -533,8 +555,8 @@ never ones that failed, so green keeps meaning the tests passed.
   | `Check out triggering commit`, `Check out the triggering commit and its parents`, `Check out the run's commit and its first parent`, `Check out the exact caller revision`, `Check out the qualification policy`, `Check out reviewed first-party performance fixtures and acceptance harnesses`, `Fetch the vector draw's script from this commit` | the checkouts |
   | `Restore verified hosted release inputs` | `.github/actions/hosted-tools` |
   | `Acquire missing inputs once and verify the complete set`, `Acquire missing offline inputs once and check each as the jobs read it` | `prepare-hosted-tools.yml`'s acquisitions |
-  | `Install official Clang 23.1.4 and test tools`, `Install official Clang, sanitizer and libFuzzer runtimes` | `tools/ci/setup-hosted.sh` |
-  | `Fetch generic baseline startup objects and runtime for emulation` | `tools/ci/setup-baseline-runtime.sh` |
+  | `Install official Clang 23.1.4 and test tools`, `Install official Clang, sanitizer and libFuzzer runtimes` (the fuzz campaigns' before #2924) | `tools/ci/setup-hosted.sh` |
+  | `Fetch generic baseline startup objects and runtime for emulation` (historical: the scalar host's, gone with #2924) | `tools/ci/setup-baseline-runtime.sh`, removed |
   | `Fetch and verify frozen corpus inputs`, `Fetch c-testsuite at its pinned commit`, `Fetch SQLite's sources at their pinned commit` | the fetches |
 
 - **Notes.** The workflow's run summary lists every stopped job by the step

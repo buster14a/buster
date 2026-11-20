@@ -1528,6 +1528,10 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
    is one before its test and three more before the branch.
 5. **P4:** the depths, by in-register byte prefix sums.
 
+The passes' bitsets are one push and one clear. A function of a few entries pays for its entries, not for whole blocks:
+P0 stops at the last entry, and P4's scan takes as many log steps as its block has entries (#2972). The block's sum is
+read only for a block followed by another, which is full.
+
 The property tables are built from the template slots, so both paths follow one table; `tier0_initialize` refuses a
 table on which they could disagree.
 
@@ -1547,7 +1551,8 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    kind: the caller-saved registers in depth order, then the callee-saved ones to a local referenced twice or more
    (those come first in the order), or the XMM registers. So for up to 64 locals the vector path needs no order:
    each such local's rank among its kind's, counted by vector compares 16 locals at a time, picks its register from
-   the free registers' list (`vpermd`), and its home is a masked store. Past 64 locals, and for the scalar twin, only
+   the free registers' list (`vpermd`), and its home is a masked store. Where no local can take a register, the lists
+   and ranks are skipped. Past 64 locals, and for the scalar twin, only
    each kind's first 16 eligible locals can take a register. `tier0_register_locals_vector` filters 16 locals at a
    time by eligibility and the current smallest retained count, then inserts a candidate into 16 register lanes by
    comparisons and permutations. Equal counts keep the earlier local, as the old stable full sort did. Its scalar
@@ -2291,8 +2296,9 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   loads the deep slots of its operands in their own slots, which it doesn't read.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - bit-fields need no entry of their own: the checker's lowering reads and writes a field's access unit, clang's
-    (#1372), as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a
-    field whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
+    (#1372), as pieces of 8, 4, 2 and 1 bytes, with shifts and masks, and a packed field in 9 bytes as its first 8 and
+    its ninth (#2999; `docs/c-checker.md`, "Bit-fields"). It refuses a field wider than 64 bits, with
+    `CHECK_PROGRAM_UNSUPPORTED`;
   - complex values need no entry of their own: the checker's lowering takes them as aggregates of their two parts and
     computes each part, libgcc's functions their products and quotients (`docs/c-checker.md`, "Complex values");
   - inline assembly, `setjmp` and atomics;

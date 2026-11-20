@@ -18,8 +18,8 @@ Bitwise AND/OR/XOR/complement rows carry no element type in `Tier0Operation`:
 the producer uses identical records for i8/i16/i32/i64 elements at equal total
 byte widths. These representation-independent operations normalize to the i32
 bit container without inferring narrow/wide lane arithmetic or signedness.
-`ir_lower_typed_target` and its scalar twin compose this decoder with #131's
-whole-function adapter. Their explicit `target_features` argument must be the
+`ir_lower_typed_target` composes this decoder with #131's
+whole-function adapter. Its explicit `target_features` argument must be the
 producer's selected output target, including per-function target attributes.
 The old entry points grant no features and continue to refuse SIMD. Constants,
 128/256/512-bit vector loads/stores, object locals, DUP/DISCARD and values crossing
@@ -180,7 +180,7 @@ quality or throughput claim.
 
 ## Masks from the typed stream (#179)
 
-`ir_lower_typed_target` and its scalar twin take Tier 0's mask class (`MASK`, its
+`ir_lower_typed_target` takes Tier 0's mask class (`MASK`, its
 stack codes `BUSTER_TIER0_STACK_MASKS` to `+ 3`) as `m8` to `m64`: a mask's
 loads, stores, frame objects, `DUP`, `DISCARD`, `?:`'s joins and logic (`AND`,
 `OR`, `XOR`, `NOT`) are the IR's at its width, aligned to its bytes. A `CONVERT`
@@ -302,7 +302,7 @@ No expansion uses a temporary stack object or floating arithmetic.
 
 `tests/ir/splats.ir` round-trips all 18 scalar-type/vector-width combinations.
 `test-ir` checks type admission, one-operand use enumeration and malformed
-neighbors in both verifier paths. `test-ir-simd` checks actual producer rows,
+neighbors in the verifier. `test-ir-simd` checks actual producer rows,
 exact feature requirements and mutations of their roles and effects.
 `test-ir-lowering` and `test-ir-interpreter` check execution as described above.
 The existing `tier1-lanes` source fixture now requires zero machine rows where
@@ -349,7 +349,7 @@ every lane and NaN).
 The mask is the `vcmp`'s ANDed with the writemask, but where the typed stream
 gives the writemask as a constant of every lane converted to the mask just
 before the row (`ir_typed_unmasked`), as clang's intrinsics without a mask do;
-both lowering passes read that from the typed stream, so they decide alike. The
+the lowering reads that from the typed stream. The
 features are those of the forms Tier 1 selects: the comparison's own, AVX512F,
 VL below 64 bytes, DQ for a mask of 8 lanes or fewer (`kmovb`, `kandb`) and BW
 for 32 or 64. Any other immediate (vpcmp's false and true, a float's other 26),
@@ -386,7 +386,7 @@ The tests:
 - `test-tier1-masks` takes each of the 384 rows of the integer and packed float
   rules as a program's only row, 8 statements of two vectors under a writemask
   of every bit or of an input word, through both of Tier 0's paths natively
-  against a C model of the lanes, then both lowering paths, the IR's interpreter
+  against a C model of the lanes, then the lowering, the IR's interpreter
   at every stage (the 216 of an IR predicate; the others are machine rows) and
   Tier 1's native code against the model.
 - `test-checker-driver`'s machine rows' unit has eleven such comparisons, two
@@ -469,7 +469,7 @@ The tests:
     an immediate, a mask or vector of another width, a record too many).
 - `test-tier1-masks` takes each of the 27 rows as a program's only row, in
   four statements of vectors and masks from an input buffer. It runs them
-  through both lowering paths, the IR's interpreter at every stage, and Tier
+  through the lowering, the IR's interpreter at every stage, and Tier
   1's native code, against a C model. Tier 0 doesn't run them there: its
   register-direct moves have no Zen 5 row yet, which its builds require.
 - `test-checker-driver`'s machine rows' unit keeps its masked operations and
@@ -557,8 +557,8 @@ same sources (main's own improvements since change the records, 538,003 and
 
 The tests:
 
-- `test-ir`: both verifiers admit each kind at every pair of widths and part
-  below 5 exactly where the widths and part agree (19 forms), and refuse another
+- `test-ir`: the verifier admits each kind at every pair of widths and part
+  below 5 exactly where the widths and part agree (19 forms), and refuses another
   kind's flags. The model's values are checked against bytes written out.
 - `test-ir-parse`: round-trips the forms.
 - `test-ir-optimize`: SCCP folds, by both paths, an insert's part back, a
@@ -569,7 +569,7 @@ The tests:
 - `test-tier1-masks`: runs 81 programs, each rule's every part and the 6 casts,
   each its only row, and 3 round trips, a cast to a narrower width and back,
   whose widen writes the register that held the wide value. Every lane of an extract is merged under an input word or
-  an unmasked writemask. They go through both lowering paths, the interpreter
+  an unmasked writemask. They go through the lowering, the interpreter
   at every stage and Tier 1's native code, against a C model.
 - `test-checker-driver`'s machine-rows unit: its inserts, extracts and casts are
   now the IR's. It has 65 rows and 32 moves (main: 75 and 39), 51 and 26 with
@@ -646,8 +646,8 @@ use too) wait on the owner's decision on #1840.
 
 The tests:
 
-- `test-ir`: both verifiers take each kind at each width and every flags byte
-  exactly where the rule, written out again, admits it (317 forms). They refuse
+- `test-ir`: the verifier takes each kind at each width and every flags byte
+  exactly where the rule, written out again, admits it (317 forms). It refuses
   operands of another type and a missing b. The model's bytes are checked
   against a byte formula on random vectors.
 - `test-ir-parse`: round-trips the forms.
@@ -659,8 +659,8 @@ The tests:
   exactly its features. Each row stays a machine row without each feature it
   needs and under 8 changes.
 - `test-tier1-masks`: runs 89 programs, every row but vpermb's (the
-  pipeline's x86-64-v4 has no VBMI), each as a program's only row, through both
-  lowering paths, the interpreter at every stage and Tier 1's native code. They
+  pipeline's x86-64-v4 has no VBMI), each as a program's only row, through the
+  lowering, the interpreter at every stage and Tier 1's native code. They
   are checked against a C model written from Intel's manual.
 - `test-checker-driver`'s machine-rows unit: its `permutexvar` and
   `shuffle_epi8` are now the IR's, leaving 61 rows and 32 moves.
@@ -745,7 +745,7 @@ The tests:
     same indices;
   - random indices match exactly where some kind's at some immediate are theirs;
   - indices whose 16-byte lanes differ never match.
-- **`test-tier1-masks`:** the 120 run through both lowering paths, the
+- **`test-tier1-masks`:** the 120 run through the lowering, the
   interpreter at every stage and Tier 1 natively, against Intel's definitions
   of each instruction. Tier 1's code by both paths has the matched immediate
   form's 4 records and no `vpshufb`.
@@ -811,7 +811,7 @@ That is 52 and 104 rows fewer than with the permutes (990 and 1,510).
 
 The tests:
 
-- `test-ir`: both verifiers admit each kind between every pair of vector widths
+- `test-ir`: the verifier admits each kind between every pair of vector widths
   at every flags byte below 64 exactly where the lanes, mode and widths agree
   (156 forms). The model is checked against C's conversions of each lane on
   random vectors with saturating edges.
@@ -825,7 +825,7 @@ The tests:
   feature it needs and under changes.
 - `test-tier1-masks`: runs 74 programs, convertvector's and the masked
   truncations, the latter under an input word or unmasked. They go through
-  both lowering paths, the interpreter at every stage and Tier 1's native code,
+  the lowering, the interpreter at every stage and Tier 1's native code,
   against a lane-by-lane C model. Its runs caught the unsigned saturation's
   source, which an earlier version took as signed.
 - `test-checker-driver`'s machine-rows unit: 59 rows and 32 moves.
@@ -882,7 +882,7 @@ of its carrier into its role.
 The tests:
 
 - **`test-ir`:**
-  - both verifiers admit `extend` of an `f32` or `f64` into every width whose
+  - the verifier admits `extend` of an `f32` or `f64` into every width whose
     lanes it holds, at every flags byte (28 forms), and the model's lanes are
     C's;
   - `lane_extract` into an `f32` or `f64` is admitted for lane 0 of
@@ -892,7 +892,7 @@ The tests:
   - the 6 casts (4 and 8 bytes, from 16, 32 and 64) and the real producer's 18
     whole-lane extensions of a carrier decode at exactly their features;
   - each is refused without each feature and under changes.
-- **`test-tier1-masks`:** 48 programs through both lowering paths and Tier 1
+- **`test-tier1-masks`:** 48 programs through the lowering and Tier 1
   natively, against C:
   - the 18 extensions of a cast, and of a carrier loaded from memory, through
     the interpreter at every stage too;
@@ -960,7 +960,7 @@ unchanged (535 and 708). Spills are within 3 of before.
 
 The tests:
 
-- `test-ir`: both verifiers admit `shift` at each vector width, for every
+- `test-ir`: the verifier admits `shift` at each vector width, for every
   flags byte below 32 and a count of `i32`, `i64`, `i16` or the vector's type,
   exactly where the flags name a lane size and shift and the count is an `i32`
   (27 forms). The model is checked against C's shifts of each lane at counts
@@ -975,7 +975,7 @@ The tests:
 - `test-tier1-masks`: each of the 27 rules runs as a program's only row twice,
   once with counts loaded from memory (5, the lane's bits less 1, its bits, and
   65,537) and once with constant counts (1, bits less 1, bits plus 1, and 300).
-  They go through both lowering paths, the interpreter at every stage and Tier
+  They go through the lowering, the interpreter at every stage and Tier
   1's native code, by a register and by an immediate, against a lane-by-lane C
   model.
 
@@ -1030,7 +1030,7 @@ Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
 
 The tests:
 
-- `test-ir`: both verifiers admit `lane_op` at each vector width, for every
+- `test-ir`: the verifier admits `lane_op` at each vector width, for every
   flags byte below 64 and a second operand of the result's type or another
   width's, exactly where operation, lanes and operands agree (72 forms). The
   model is checked against C's minimum, maximum and clamped sum and difference
@@ -1042,7 +1042,7 @@ The tests:
   checked against flags and features written out. Each row is refused without
   each feature it needs and under 6 changes.
 - `test-tier1-masks`: each of the 72 rows runs as a program's only row, through
-  both lowering paths, the interpreter at every stage and Tier 1 natively,
+  the lowering, the interpreter at every stage and Tier 1 natively,
   against C's operations on inputs with lanes at the saturations' edges.
 
 ## Permutes of two tables (#1840)
@@ -1136,7 +1136,7 @@ The tests:
   narrower stay machine rows.
 - `test-tier1-masks`: the 30 rows the x86-64-v4 target allows (`vpermt2b` is
   VBMI's), of both orders at each width and of narrower tables at 32 and 64
-  bytes, run as a program's only row, through both lowering paths, the
+  bytes, run as a program's only row, through the lowering, the
   interpreter at every stage and Tier 1 natively, against a C model whose
   narrow tables are zero-extended.
 - `test-ir-source`: the vector and scalar use lists agree on C files of every
@@ -1189,16 +1189,16 @@ No `vpternlog` row is left in either unit.
 
 The tests:
 
-- `test-ir`: both verifiers admit ternlog with every 15th table at each width,
-  and refuse a third operand of another width. The model is checked against
+- `test-ir`: the verifier admits ternlog with every 15th table at each width,
+  and refuses a third operand of another width. The model is checked against
   each bit's table entry.
 - `test-ir-parse` and `test-ir-optimize`: `tests/ir/widths.ir` round-trips it,
   and SCCP folds it of three constants with 4 tables, on both paths.
 - `test-ir-simd`: the 18 rows decode at exactly their features: both lane
   sizes, 3 widths, and no writemask, merging or zeroing. Each is refused without
   a feature it needs and under 6 changes.
-- `test-tier1-masks`: 48 rows run as a program's only row, through both
-  lowering paths, the interpreter at every stage and Tier 1 natively, against a
+- `test-tier1-masks`: 48 rows run as a program's only row, through the
+  lowering, the interpreter at every stage and Tier 1 natively, against a
   C model. They cover 4 tables, both lane sizes and 3 widths, merging and
   zeroing, each under a mask from the input.
 
@@ -1253,14 +1253,14 @@ sources, against the bitwise functions (`3249be86`):
 
 The tests:
 
-- `test-ir`: both verifiers admit them exactly where the flags name b's mask
+- `test-ir`: the verifier admits them exactly where the flags name b's mask
   type. The model is checked against C's lanes on random vectors and masks.
 - `test-ir-parse` and `test-ir-optimize`: the text form round-trips, and SCCP
   folds them of constants under a constant mask, on both paths.
 - `test-ir-simd`: the 24 rows decode at exactly their features. Each is refused
   without a feature it needs and under 6 changes.
 - `test-tier1-masks`: the 12 rows the x86-64-v4 target allows (dwords and
-  quadwords) run under a mask from the input, through both lowering paths, the
+  quadwords) run under a mask from the input, through the lowering, the
   interpreter at every stage and Tier 1 natively, against C's lanes.
 
 ## AES rounds (#1840)
@@ -1308,7 +1308,7 @@ No AES row is left in either unit.
 
 The tests:
 
-- **`test-ir`:** both verifiers admit it with flags 0 and 1 alone. The model
+- **`test-ir`:** the verifier admits it with flags 0 and 1 alone. The model
   gives FIPS 197 Appendix B's round 1 in every lane of each width. For the last
   round, it gives the 9700X's `vaesenclast` of that appendix's round-10 key.
 - **`test-ir-parse` and `test-ir-optimize`:** the text form round-trips, and
@@ -1409,7 +1409,7 @@ compiling this change's sources, against main `e43dfc10`:
 
 The tests:
 
-- **`test-ir`:** both verifiers admit them exactly at integer lanes whose mask
+- **`test-ir`:** the verifier admits them exactly at integer lanes whose mask
   is their mask operand, a `ptr` address and an alignment's log2 up to 31; the
   float lanes, an invalid lane, another mask, a vector address and 2^32 are
   refused, at every width.
@@ -1421,7 +1421,7 @@ The tests:
   machine-row test's row of no result (a compress-store was, until compressing
   stores became the IR's own, and then a scatter, until scatters did, below).
 - **`test-tier1-masks`:** `vmovdqu8` to `vmovdqu64` at each width, load and
-  store (24 rows), under a mask from the input, through both lowering paths,
+  store (24 rows), under a mask from the input, through the lowering,
   the interpreter at every stage and Tier 1 natively, against C's lanes. Each
   program's fourth access starts half a vector before its buffer's end with
   its mask's upper half cleared, so the interpreter's binding checks prove a
@@ -1570,7 +1570,7 @@ The tests:
   `merge_partial`'s.
 - **`test-tier1-masks`:** 10 gathers (every integer shape, each at a scale of
   its own), 6 compressing stores and 24 truncating stores run under a mask from
-  the input, through both lowering paths, the interpreter at every stage and
+  the input, through the lowering, the interpreter at every stage and
   Tier 1 natively, against C's lanes. Each gather program's third statement
   has a constant mask of every lane, and its fourth statement's index points
   far past every buffer in each masked-off lane, so the interpreter's binding
@@ -1775,7 +1775,7 @@ compiling this change's sources, against the masked loads and stores
 
 The tests:
 
-- **`test-ir`:** both verifiers admit the three kinds exactly at a lane below
+- **`test-ir`:** the verifier admits the three kinds exactly at a lane below
   the vector's lanes, with the scalar of the lane's width, and a movemask's
   flags 0, 2 or 3 of a 16- or 32-byte vector, at every width and all 256 flags.
   The model gives C's lane, replaced lane and sign bits on random vectors.
@@ -1783,7 +1783,7 @@ The tests:
 - **`test-ir-simd`:** the 246 rows (210 extractions over every lane of every
   part and width, 30 insertions, 6 movemasks) decode at exactly their features.
   Each is refused without each feature it needs, and under 4 changes.
-- **`test-tier1-masks`:** 50 rows run through both lowering paths, the
+- **`test-tier1-masks`:** 50 rows run through the lowering, the
   interpreter at every stage and Tier 1 natively, against C's lanes: 36
   extractions, 8 insertions, 6 movemasks.
 - **Native check:** a C file of `_mm_extract_epi*`, `_mm_insert_epi*`,
@@ -1845,7 +1845,7 @@ floor drops from 10 to 5.
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `reduce` exactly at a `v4i32` result, of
+- **`test-ir`:** the verifier admits `reduce` exactly at a `v4i32` result, of
   a vector of each width, at every flags byte whose lanes are doublewords or
   quadwords and whose operation is one of the nine. The model gives C's
   reductions on random vectors with lanes at the signed and unsigned edges.
@@ -1854,7 +1854,7 @@ The tests:
   and the five others, of doublewords and quadwords at 3 widths) decode at
   exactly their features, the 9 split ones' second rows as `lane_extract`. Each
   is refused without each feature it needs and under 6 changes.
-- **`test-tier1-masks`:** the 54 run through both lowering paths, the
+- **`test-tier1-masks`:** the 54 run through the lowering, the
   interpreter at every stage and Tier 1 natively, against C's reductions.
 ## The lanes' unary operations (#1840)
 
@@ -1911,14 +1911,14 @@ compiling this change's sources, against main (`d96b2e73`, with the reductions):
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `lane_unary` exactly of its own type at
+- **`test-ir`:** the verifier admits `lane_unary` exactly of its own type at
   every flags byte and width. The model gives C's counts and conflicts on random
   vectors whose lanes repeat or are zero.
 - **`test-ir-parse`:** `tests/ir/lane-unary.ir` round-trips.
 - **`test-ir-simd`:** the 30 rows (popcounts of 4 lane sizes, both leading zero
   counts, the conflicts, at 3 widths) decode at exactly their features. Each is
   refused without each feature it needs and under 6 changes.
-- **`test-tier1-masks`:** the 30 run through both lowering paths, the
+- **`test-tier1-masks`:** the 30 run through the lowering, the
   interpreter at every stage and Tier 1 natively, against C. The population
   counts' target adds BITALG and VPOPCNTDQ to x86-64-v4's; a host that runs
   Tier 1's code natively without them leaves those 12 to `test-ir-simd`.
@@ -1972,7 +1972,7 @@ truncating conversions below:
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `fround` exactly of two 64-byte vectors
+- **`test-ir`:** the verifier admits `fround` exactly of two 64-byte vectors
   of its type at every flags byte below 32. The model is checked against C's
   operation in that rounding mode (`host_fesetround`, volatile operands) on
   random lanes, ties, overflow, underflow, zeros, infinities and NaNs, and
@@ -1980,7 +1980,7 @@ The tests:
 - **`test-ir-parse`:** `tests/ir/fround.ir` round-trips.
 - **`test-ir-simd`:** the 32 rows (4 operations, 2 lane sizes, 4 roundings)
   decode at exactly AVX512F, refused without it and under 6 changes.
-- **`test-tier1-masks`:** the 32 run through both lowering paths, the
+- **`test-tier1-masks`:** the 32 run through the lowering, the
   interpreter at every stage and Tier 1 natively, against C in each rounding
   mode, so that the processor checks the model.
 
@@ -2014,13 +2014,13 @@ are these conversions.
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `cvtt` exactly of a `v4i32` into its
+- **`test-ir`:** the verifier admits `cvtt` exactly of a `v4i32` into its
   flags' integer. The model gives x86's results at both ranges' edges, for
   infinities and for NaNs, against bounds written out in long double.
 - **`test-ir-parse`:** `tests/ir/fround.ir`'s second function.
 - **`test-ir-simd`:** the four rows decode at exactly their features, refused
   without AVX512F and under 5 changes.
-- **`test-tier1-masks`:** the four run through both lowering paths, the
+- **`test-tier1-masks`:** the four run through the lowering, the
   interpreter and Tier 1 natively on values of every magnitude around both
   ranges, infinities and NaNs.
 
@@ -2069,16 +2069,16 @@ byte shuffles and the carriers above: `main_unit_backend.c` 132 → 105. No
 The tests:
 
 - **`test-ir`:**
-  - both verifiers admit `bitshuffle` exactly of two vectors of one type into
+  - the verifier admits `bitshuffle` exactly of two vectors of one type into
     their bytes' mask, at flags 0;
-  - they refuse another width's b, another mask and a vector result;
+  - it refuses another width's b, another mask and a vector result;
   - the model is checked against the instruction's definition on random
     vectors.
 - **`test-ir-parse`:** `tests/ir/bitshuffle.ir` round-trips.
 - **`test-ir-simd`:** the 3 rules' rows decode at exactly their features, each
   refused without each and under 6 changes.
 - **`test-tier1-masks`:** the 3 run, under an input word's writemask and under
-  every lane, through both lowering paths, the interpreter at every stage and
+  every lane, through the lowering, the interpreter at every stage and
   Tier 1 natively. Both paths' code has the form's 8 records and no `kand`.
   With the fold left out, the 8 `kand`s fail it.
 
@@ -2119,14 +2119,14 @@ families above: `main_unit_backend.c` 105 → 96. No `vpmultishiftqb` or
 
 The tests:
 
-- **`test-ir`:** both verifiers admit `quadword_op` exactly of two vectors of
+- **`test-ir`:** the verifier admits `quadword_op` exactly of two vectors of
   the result's type at flags 0 and 1, at every width. The model is checked
   against both instructions' definitions, written out bit by bit, on random
   vectors.
 - **`test-ir-parse`:** `tests/ir/quadword-op.ir` round-trips.
 - **`test-ir-simd`:** the 6 rules' rows decode at exactly their features, each
   refused without each and under 6 changes.
-- **`test-tier1-masks`:** the 6 run through both lowering paths, the
+- **`test-tier1-masks`:** the 6 run through the lowering, the
   interpreter at every stage and Tier 1 natively, against the definitions. The
   multishifts' target adds VBMI to x86-64-v4's. A host that runs Tier 1's code
   natively without it leaves them to `test-ir-simd`.
@@ -2191,7 +2191,7 @@ families above: `main_unit_backend.c` 96 → 92. The 3 `vpshrdvd` rows and the
 The tests:
 
 - **`test-ir`:**
-  - both verifiers admit `funnel` exactly of three vectors of the result's
+  - the verifier admits `funnel` exactly of three vectors of the result's
     type, at flags 1 to 3 and 5 to 7;
   - the model is checked against C's `fshl` and `fshr`, written out a bit at a
     time, on random vectors whose counts are often zero or past the lanes'
@@ -2201,7 +2201,7 @@ The tests:
   and 4 immediates decode at exactly their features. Each is refused without
   each and under 6 changes.
 - **`test-tier1-masks`:** the 18 funnels and the 72 rotates (6 immediates each)
-  run through both lowering paths, the interpreter at every stage and Tier 1
+  run through the lowering, the interpreter at every stage and Tier 1
   natively, against C.
   - A rotate's code by both paths has its immediate form's 4 records.
   - The funnels' target adds VBMI2 to x86-64-v4's. A host without it, running
@@ -2313,7 +2313,7 @@ complete, and `measure-x86-zen5 --missing` finds none to measure.
 **Tests:**
 
 - **`test-ir`:**
-  - both verifiers admit `pairwise` at flags 0 to 5 and `dot` at 0 to 3, of
+  - the verifier admits `pairwise` at flags 0 to 5 and `dot` at 0 to 3, of
     their type, at every width;
   - the model is checked against the instructions' definitions written out
     (`ir_test_pairwise_oracle`) on extreme lanes that saturate, and against C's
@@ -2331,7 +2331,7 @@ complete, and `measure-x86-zen5 --missing` finds none to measure.
     stores of 8 lanes.
 
   Each is refused without each feature it needs and under changes.
-- **`test-tier1-masks`:** every one runs through both lowering paths, the
+- **`test-tier1-masks`:** every one runs through the lowering, the
   interpreter at every stage and Tier 1 natively:
   - **dot products:** a hand-written fixture whose accumulators live on takes
     every move path (the fixtures' `vnni` switch runs it where the host has
@@ -2405,7 +2405,7 @@ The tests:
   out. Each is refused without each feature it needs and under 6 changes.
 - `test-tier1-masks`: each of the 24 rules runs as a program's only row: a mask
   from an input word into a vector, or a vector into a mask stored zero-extended.
-  Each goes through both lowering paths, the interpreter at every stage and Tier
+  Each goes through the lowering, the interpreter at every stage and Tier
   1's native code, against a model from Intel's manual.
 
 ## Lanes: the vectors' element types (#141)
@@ -2438,7 +2438,7 @@ lane's instruction to the scalar oracle; `tests/ir/vector-lanes.ir` round-trips
 every form, and `test-ir` refuses its neighbours (an `fadd` of integer lanes, an
 integer `add` of floats, a bitwise operation's lanes, a mask of the wrong width,
 an unsigned floating comparison, a vector shifted by a scalar, a scalar's lanes)
-by both verifiers.
+by the verifier.
 
 The decoder (`ir_simd_typed_operation`) takes the operators' rows of every
 element type, EVEX's of AVX-512 and VEX's of AVX and AVX2, into these
@@ -2531,7 +2531,7 @@ The tests:
 - `test-ir` checks the bitcast rule's pairs both ways, accepted and refused, and
   `test-ir-interpreter` their values at each width.
 - `test-tier1-masks` takes Tier 0's random mask programs (`tier0_mask_test.c`'s
-  generator) through both lowering paths into the same IR, the IR's interpreter
+  generator) through the lowering, the IR's interpreter
   on the lowered, both promoted and the optimized functions against the
   generator's model, then both of Tier 1's paths natively; programs with rows the
   decoders refuse (an integer in a row, opmask registers by number) have them as

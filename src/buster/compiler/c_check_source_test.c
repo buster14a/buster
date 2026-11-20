@@ -10,6 +10,22 @@ static __attribute__((noinline)) bool check_test_source_region_transfer_call(con
     return check_input_region_transfer(reader, source, target);
 }
 
+// The definition the reader's bounded walk keeps: a jump from `source` to `target` enters a statement expression when a
+// region on the target's ancestor chain doesn't hold the source. Every ancestor up to the root is read; the reader
+// stops at the source and target's common ancestor, whose regions hold both (#2924: its scalar arm was this walk).
+static bool check_test_source_region_definition(const CheckInputReader* reader, uint32_t source, uint32_t target)
+{
+    const Parser* parser = reader->parser;
+    bool valid = true;
+    for (uint32_t ancestor = target; reader->output->region_count != 0 && ancestor < parser->tokens.count; ancestor = parser->tree.parents[ancestor])
+    {
+        const uint32_t selected = reader->output->expression_regions[ancestor];
+        const CheckInputRegion* region = selected != 0 ? &reader->output->regions[selected - 1] : NULL;
+        valid &= region == NULL || (source > region->opening && source < region->closing);
+    }
+    return valid;
+}
+
 static void check_test_source_region_transfers(CheckTest* test)
 {
     const Parser no_region_parser = { .tokens = { .count = 1 } };
@@ -59,19 +75,22 @@ static void check_test_source_region_transfers(CheckTest* test)
             }
             const CheckInputReader reader = { .parser = &parser, .output = &input, .postorder_positions = positions, .subtree_sizes = sizes };
             // Every token pair includes region boundaries, descendants, siblings, both jump directions and an absent token.
+            // A source just before a subtree in the postorder (its previous sibling's root) is outside it, where the
+            // bounded walk must not stop; `refused` counts the pairs the definition refuses.
+            uint32_t refused = 0;
             for (uint32_t from = 0; from <= parser.tokens.count; from += 1)
             {
                 for (uint32_t to = 0; to <= parser.tokens.count; to += 1)
                 {
                     const uint32_t source_token = from == parser.tokens.count ? BUSTER_CHECK_NONE : from;
                     const uint32_t target_token = to == parser.tokens.count ? BUSTER_CHECK_NONE : to;
-                    parser.options.scalar = true;
-                    const bool expected = check_input_region_transfer(&reader, source_token, target_token);
-                    parser.options.scalar = false;
+                    const bool expected = check_test_source_region_definition(&reader, source_token, target_token);
+                    refused += !expected;
                     check_test_expect(test, check_input_region_transfer(&reader, source_token, target_token) == expected,
                                       "bounded region transfer equals the full ancestor walk without parser-owned size metadata");
                 }
             }
+            check_test_expect(test, refused != 0, "region-transfer fixture has jumps its regions refuse");
         }
         parse_release(&parser);
         check_test_types_close(&types);

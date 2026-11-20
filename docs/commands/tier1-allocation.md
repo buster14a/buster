@@ -15,7 +15,8 @@ requirements. [Command index](README.md).
   `tier1_emit_cfg_recipes`). `test-tier1-allocation` includes native execution,
   guarded tails, and constrained hint traces for unused recipes, simultaneous
   register claims and stored-value continuations. `benchmark-tier1-allocation`
-  measures full preparation and allocation; `test-checker-driver`'s Tier 1
+  measures full preparation and allocation (`--after-scalar MS` runs scalar
+  integer work before each sample); `test-checker-driver`'s Tier 1
   fixture runs every recipe through `--tier1` against clang.
   [The allocation guide](../../docs/tier1-allocation.md)
   records producer constraints and the corpora's spills with and without

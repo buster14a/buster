@@ -409,28 +409,29 @@ static uint32_t ir_unroll_test_parameters(uint32_t bits, uint64_t* parameters, u
     return count;
 }
 
-// The fixture by both twins: the same function and counts; `expected`'s outcome counted once; an unrolled one verified,
+// The fixture: its function and counts into the digest; `expected`'s outcome counted once; an unrolled one verified,
 // optimized and executed against the original on every parameter.
 static void ir_unroll_test_run(IrOptimizeTest* test, const IrFunction* f, IrUnrollOptions options, IrUnrollRefusal expected, uint32_t bits, const char* label)
 {
     Arena vector = arena_reserve(UINT64_C(1) << 28);
-    Arena scalar = arena_reserve(UINT64_C(1) << 28);
     Arena scratch = arena_reserve(UINT64_C(1) << 30);
     Arena optimized = arena_reserve(UINT64_C(1) << 28);
     char message[256] = { 0 };
     IrUnrollResult a = { 0 };
-    IrUnrollResult b = { 0 };
-    options.scalar = false;
     const IrCheck ac = ir_optimize_unroll(f, &vector, &scratch, options, &a);
-    const uint64_t after_vector = scratch.length;
-    options.scalar = true;
-    const IrCheck bc = ir_optimize_unroll(f, &scalar, &scratch, options, &b);
-    snprintf(message, sizeof(message), "%s: both twins accept the fixture and return their scratch", label);
-    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && after_vector == 0 && scratch.length == 0, message);
-    bool same = memcmp(a.outcomes, b.outcomes, sizeof(a.outcomes)) == 0 && a.copies == b.copies && a.reductions == b.reductions && a.added == b.added;
-    same = same && ir_optimize_test_equal(&a.function, &b.function);
-    snprintf(message, sizeof(message), "%s: the twins give the same function and counts", label);
-    ir_optimize_test_expect(test, same, message);
+    snprintf(message, sizeof(message), "%s: the unroller accepts the fixture and returns its scratch", label);
+    ir_optimize_test_expect(test, ac.error == IR_OK && scratch.length == 0, message);
+    if (ac.error == IR_OK)
+    {
+        ir_optimize_test_fold_function(&test->unroll_digest, &a.function);
+        for (uint32_t k = 0; k < IR_UNROLL_OUTCOME_COUNT; k += 1)
+        {
+            ir_optimize_test_fold(&test->unroll_digest, a.outcomes[k]);
+        }
+        ir_optimize_test_fold(&test->unroll_digest, a.copies);
+        ir_optimize_test_fold(&test->unroll_digest, a.reductions);
+        ir_optimize_test_fold(&test->unroll_digest, a.added);
+    }
     snprintf(message, sizeof(message), "%s: the loop's outcome is %s (unrolled %u)", label, ir_unroll_outcome_names[expected], a.outcomes[IR_UNROLL_UNROLLED]);
     ir_optimize_test_expect(test, a.outcomes[expected] == 1, message);
     if (ac.error == IR_OK && a.outcomes[IR_UNROLL_UNROLLED] == 0)
@@ -440,7 +441,7 @@ static void ir_unroll_test_run(IrOptimizeTest* test, const IrFunction* f, IrUnro
     }
     if (ac.error == IR_OK && a.outcomes[IR_UNROLL_UNROLLED] != 0)
     {
-        const IrCheck verified = ir_optimize_verify_result(&a.function, &optimized, &scratch, false);
+        const IrCheck verified = ir_optimize_verify_result(&a.function, &optimized, &scratch);
         arena_pop_to(&optimized, 0);
         snprintf(message, sizeof(message), "%s: the unrolled function verifies with dominance (error %d at %u)", label, (int)verified.error, verified.instruction);
         ir_optimize_test_expect(test, verified.error == IR_OK, message);
@@ -475,7 +476,6 @@ static void ir_unroll_test_run(IrOptimizeTest* test, const IrFunction* f, IrUnro
         ir_optimize_test_expect(test, executed, message);
     }
     arena_release(&vector);
-    arena_release(&scalar);
     arena_release(&scratch);
     arena_release(&optimized);
 }
@@ -979,9 +979,124 @@ static void ir_unroll_test_limits(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// #2924: the opcode classes, a range's union of them and the operand remap against their definitions, on random
+// columns: every length to 200, every range of up to 130 rows at several places, and remaps of 1 to 40 rows.
+static void ir_unroll_test_scans(IrOptimizeTest* test)
+{
+    IrOptimizeTestScan scan;
+    uint8_t classes[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t op[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t type[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t flags[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t alignment[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t a[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t b[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t c[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t map[8];
+    bool classified = true;
+    bool unions = true;
+    bool remapped = true;
+    for (uint32_t round = 0; round < 32; round += 1)
+    {
+        ir_optimize_test_scan_fill(test, &scan);
+        IrFunction f = scan.function;
+        uint8_t alignments[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+        // A fixed operand is always a value; an optional one may be absent.
+        uint32_t* const columns[3] = { scan.a, scan.b, scan.c };
+        for (uint32_t i = 0; i < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; i += 1)
+        {
+            alignments[i] = (uint8_t)(scan.flags[i] % 7);
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                columns[k][i] = (ir_operand_table[scan.op[i]] >> k & 1) != 0 && columns[k][i] == BUSTER_IR_NONE ? k : columns[k][i];
+            }
+        }
+        f.alignment_log2 = alignments;
+        for (uint32_t length = round % 9; length <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; length += 13)
+        {
+            f.instruction_count = length;
+            memset(classes, 0xa5, sizeof(classes));
+            const bool phis = ir_unroll_classify(&f, classes);
+            bool expected_phis = false;
+            bool same = true;
+            for (uint32_t i = 0; i < length; i += 1)
+            {
+                same = same && classes[i] == ir_unroll_classes[f.op[i]];
+                expected_phis = expected_phis || (ir_unroll_classes[f.op[i]] & BUSTER_IR_UNROLL_PHI) != 0;
+            }
+            for (uint32_t i = length; i < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; i += 1)
+            {
+                same = same && classes[i] == 0xa5;
+            }
+            classified &= same && phis == expected_phis;
+        }
+        f.instruction_count = BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS;
+        for (uint32_t i = 0; i < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; i += 1)
+        {
+            classes[i] = ir_unroll_classes[f.op[i]];
+        }
+        for (uint32_t first = round % 5; first < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; first += 31)
+        {
+            for (uint32_t end = first; end <= BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS && end - first <= 130; end += 1)
+            {
+                uint32_t expected = 0;
+                for (uint32_t i = first; i < end; i += 1)
+                {
+                    expected |= classes[i];
+                }
+                unions &= ir_unroll_block_classes(classes, first, end) == expected;
+            }
+        }
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(map); k += 1)
+        {
+            map[k] = 1000 + k * 7 + round;
+        }
+        for (uint32_t count = 1; count <= 40; count += 1)
+        {
+            const uint32_t first = (round * 11 + count) % (BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS - 40);
+            const uint32_t out = (round + count) % 5;
+            memset(op, 0xa5, sizeof(op));
+            memset(type, 0xa5, sizeof(type));
+            memset(flags, 0xa5, sizeof(flags));
+            memset(alignment, 0xa5, sizeof(alignment));
+            memset(a, 0xa5, sizeof(a));
+            memset(b, 0xa5, sizeof(b));
+            memset(c, 0xa5, sizeof(c));
+            IrFunction view = {
+                .op = op,
+                .type = type,
+                .flags = flags,
+                .alignment_log2 = alignment,
+                .a = a,
+                .b = b,
+                .c = c,
+            };
+            ir_unroll_remap(&f, first, count, map, &view, out);
+            bool same = true;
+            for (uint32_t k = 0; k < count; k += 1)
+            {
+                const uint32_t i = first + k;
+                const uint32_t mask = ir_value_mask(&f, i);
+                same = same && op[out + k] == f.op[i] && type[out + k] == f.type[i] && flags[out + k] == f.flags[i] && alignment[out + k] == f.alignment_log2[i];
+                same = same && a[out + k] == ((mask & 1) != 0 ? map[f.a[i]] : f.a[i]);
+                same = same && b[out + k] == ((mask & 2) != 0 ? map[f.b[i]] : f.b[i]);
+                same = same && c[out + k] == ((mask & 4) != 0 ? map[f.c[i]] : f.c[i]);
+            }
+            same = same && (out == 0 || a[out - 1] == UINT32_C(0xa5a5a5a5)) && a[out + count] == UINT32_C(0xa5a5a5a5);
+            remapped &= same;
+        }
+    }
+    ir_optimize_test_expect(test, classified, "the unroller's opcode classes, against their definition");
+    ir_optimize_test_expect(test, unions, "the unroller's union of a range's classes, against its definition");
+    ir_optimize_test_expect(test, remapped, "the unroller's operand remap, against its definition");
+}
+
 static __attribute__((unused)) int run_ir_unroll_tests(int argc, char** argv)
 {
-    IrOptimizeTest test = { .random = 2755 };
+    IrOptimizeTest test = {
+        .random = 2755,
+        .unroll_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
+    };
     uint32_t shapes = 400;
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
@@ -1009,10 +1124,21 @@ static __attribute__((unused)) int run_ir_unroll_tests(int argc, char** argv)
     int result = 2;
     if (valid)
     {
+        const bool frozen = test.random == 2755 && shapes == 400;
+        ir_unroll_test_scans(&test);
         ir_unroll_test_shapes(&test, shapes);
         ir_unroll_test_refusals(&test);
         ir_unroll_test_limits(&test);
         ir_unroll_test_rollback(&test);
+        // The digest's random shapes are the default seed's 400.
+        if (frozen)
+        {
+            ir_optimize_test_expect(&test, test.unroll_digest == BUSTER_IR_OPTIMIZE_TEST_UNROLL_DIGEST, "every fixture's unrolled function and counts have their frozen digest");
+            if (test.unroll_digest != BUSTER_IR_OPTIMIZE_TEST_UNROLL_DIGEST)
+            {
+                fprintf(stderr, "ir-unroll: digest %#018" PRIx64 "\n", test.unroll_digest);
+            }
+        }
         printf("ir-unroll: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }
