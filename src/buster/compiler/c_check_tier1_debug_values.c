@@ -138,7 +138,7 @@ static void check_tier1_debug_value_change(const CheckTier1DebugValues* proof, C
 static void check_tier1_debug_value_follow(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, CheckTier1DebugValueTransfer transfer);
 static void check_tier1_debug_value_boundary(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t record);
 
-static void check_tier1_debug_value_start(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live)
+static void check_tier1_debug_value_start(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, bool publish)
 {
     *live = proof->live;
     live->known_count = 0;
@@ -147,7 +147,33 @@ static void check_tier1_debug_value_start(const CheckTier1DebugValues* proof, Ch
     memset(proof->state, 0xff, (uint64_t)proof->carrier_count * 4);
     memset(live->heads, 0xff, ((uint64_t)proof->value_count + 1) * 4);
     memset(live->known_at, 0xff, (uint64_t)proof->carrier_count * 4);
-    memset(live->value_queued, 0, (uint64_t)proof->value_count + 1);
+    // Only the range publisher consumes changed values. Mark them all present during the preceding
+    // CFG fixed point so that carrier changes update their reverse lists without appending to its queue.
+    memset(live->value_queued, publish ? 0 : 1, (uint64_t)proof->value_count + 1);
+}
+
+// Place the incoming carriers at the front of the known list. Each place occurs once in its
+// incoming row. Everything left past that prefix is absent and can be removed from the tail.
+static void check_tier1_debug_value_restore(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, const CheckTier1DebugValueFact* facts, uint32_t count)
+{
+    for (uint32_t f = 0; f < count; f += 1)
+    {
+        const uint32_t place = facts[f].place;
+        check_tier1_debug_value_change(proof, live, place, facts[f].value);
+        const uint32_t index = live->known_at[place];
+        if (index != f)
+        {
+            const uint32_t displaced = live->known[f];
+            live->known[index] = displaced;
+            live->known_at[displaced] = index;
+            live->known[f] = place;
+            live->known_at[place] = f;
+        }
+    }
+    while (live->known_count > count)
+    {
+        check_tier1_debug_value_change(proof, live, live->known[live->known_count - 1], BUSTER_IR_NONE);
+    }
 }
 
 static uint32_t check_tier1_debug_value_width(uint32_t type)
@@ -833,7 +859,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     if (valid && proof.machine)
     {
         CheckTier1DebugValueLive live;
-        check_tier1_debug_value_start(&proof, &live);
+        check_tier1_debug_value_start(&proof, &live, false);
         for (uint32_t reg = 0; reg < 32; reg += 1)
         {
             check_tier1_debug_value_change(&proof, &live, reg, seed[reg]);
@@ -852,15 +878,8 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
             head = head + 1 == proof.block_count ? 0 : head + 1;
             pending -= 1;
             queued[block] = 0;
-            while (live.known_count != 0)
-            {
-                check_tier1_debug_value_change(&proof, &live, live.known[live.known_count - 1], BUSTER_IR_NONE);
-            }
             const CheckTier1DebugValueBlock incoming = proof.blocks[block];
-            for (uint32_t f = 0; f < incoming.count; f += 1)
-            {
-                check_tier1_debug_value_change(&proof, &live, incoming.facts[f].place, incoming.facts[f].value);
-            }
+            check_tier1_debug_value_restore(&proof, &live, incoming.facts, incoming.count);
             for (uint32_t r = proof.first[block]; r < proof.first[block + 1]; r += 1)
             {
                 check_tier1_debug_value_boundary(&proof, &live, r);
@@ -885,11 +904,6 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
                     }
                 }
             }
-            for (uint32_t k = 0; k < live.value_count; k += 1)
-            {
-                live.value_queued[live.changed_values[k]] = 0;
-            }
-            live.value_count = 0;
         }
     }
     *result = valid ? proof : (CheckTier1DebugValues){ 0 };
@@ -1275,7 +1289,7 @@ static bool check_tier1_debug_value_ranges(const CheckTier1DebugValues* proof, c
     const uint32_t carriers = proof->carrier_count;
     const uint32_t values = proof->value_count;
     CheckTier1DebugValueLive live;
-    check_tier1_debug_value_start(proof, &live);
+    check_tier1_debug_value_start(proof, &live, true);
     bool valid = true;
     memset(proof->winner, 0xff, ((uint64_t)values + 1) * 4);
     memset(proof->active, 0xff, ((uint64_t)locals + 1) * 4);
@@ -1302,16 +1316,9 @@ static bool check_tier1_debug_value_ranges(const CheckTier1DebugValues* proof, c
     uint32_t instance_assigning = BUSTER_IR_NONE;
     for (uint32_t block = 0; valid && block < proof->block_count; block += 1)
     {
-        while (live.known_count != 0)
-        {
-            check_tier1_debug_value_change(proof, &live, live.known[live.known_count - 1], BUSTER_IR_NONE);
-        }
         const CheckTier1DebugValueBlock incoming = proof->blocks[block];
         const bool reached = proof->machine && incoming.reached;
-        for (uint32_t f = 0; reached && f < incoming.count; f += 1)
-        {
-            check_tier1_debug_value_change(proof, &live, incoming.facts[f].place, incoming.facts[f].value);
-        }
+        check_tier1_debug_value_restore(proof, &live, incoming.facts, reached ? incoming.count : 0);
         for (uint32_t r = proof->first[block]; valid && r < proof->first[block + 1]; r += 1)
         {
             if (reached)
