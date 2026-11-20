@@ -681,9 +681,11 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
         .flattened = false,
     },
     {
-        // A loop's header, whose counter is read in the body, which it alone reaches, and whose last sum is read on its
-        // exit, which it alone reaches: each successor would merge one, but threading it would rotate the loop. Left
-        // alone.
+        // A loop's header, whose counter is read in the body, which it alone reaches, and whose last sum is read past
+        // its exit, which it alone reaches: each successor would merge one, but threading it would rotate the loop.
+        // Left alone. The `?:` join past the exit, which tests the sum, is threaded: a candidate that isn't a loop's,
+        // so that the CFG and the dominators are built and the header's own test refuses it (the cheap scan would
+        // refuse a function whose only candidate is the header before either).
         .name = "loop-header",
         .text = "function (i64) -> i64 {\n"
                 "b0:\n"
@@ -692,23 +694,40 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
                 "  %2 = and.i64 %0, %1\n"
                 "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("00") "\n"
                 "  %4 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
-                "  %5 = br.void b1\n"
+                "  %5 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %6 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %7 = br.void b1\n"
                 "b1:\n"
-                "  %6 = phi.i64 [%3, b0], [%10, b2]\n"
-                "  %7 = phi.i64 [%3, b0], [%11, b2]\n"
-                "  %8 = icmp.i1 %6, %2 ult\n"
-                "  %9 = cbr.void %8, b2, b3\n"
+                "  %8 = phi.i64 [%3, b0], [%12, b2]\n"
+                "  %9 = phi.i64 [%3, b0], [%13, b2]\n"
+                "  %10 = icmp.i1 %8, %2 ult\n"
+                "  %11 = cbr.void %10, b2, b3\n"
                 "b2:\n"
-                "  %10 = add.i64 %6, %4\n"
-                "  %11 = add.i64 %6, %0\n"
-                "  %12 = br.void b1\n"
+                "  %12 = add.i64 %8, %4\n"
+                "  %13 = add.i64 %8, %0\n"
+                "  %14 = br.void b1\n"
                 "b3:\n"
-                "  %13 = ret.void %7\n"
+                "  %15 = icmp.i1 %9, %1 ugt\n"
+                "  %16 = cbr.void %15, b4, b5\n"
+                "b4:\n"
+                "  %17 = br.void b6\n"
+                "b5:\n"
+                "  %18 = icmp.i1 %9, %4 eq\n"
+                "  %19 = zext.i32 %18\n"
+                "  %20 = br.void b6\n"
+                "b6:\n"
+                "  %21 = phi.i32 [%6, b4], [%19, b5]\n"
+                "  %22 = icmp.i1 %21, %5 ne\n"
+                "  %23 = cbr.void %22, b7, b8\n"
+                "b7:\n"
+                "  %24 = ret.void %9\n"
+                "b8:\n"
+                "  %25 = ret.void %4\n"
                 "}\n",
-        .blocks = 0,
-        .copies = 0,
+        .blocks = 1,
+        .copies = 2,
         .redirects = 0,
-        .rounds = 0,
+        .rounds = 1,
         .merges = 0,
         .flattened = false,
     },
@@ -1250,6 +1269,90 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
         .flattened = false,
     },
     {
+        // As stranded-merge, where the true successor reads the masked parameter, not the number: it has no phi and
+        // merges nothing, so it may lose its only predecessor. Both conditional predecessors go to the false successor,
+        // and the block and the true successor are left unreachable.
+        .name = "stranded-plain",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %5 = const.i32 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %6 = icmp.i1 %2, %3 ult\n"
+                "  %7 = cbr.void %6, b1, b2\n"
+                "b1:\n"
+                "  %8 = icmp.i1 %2, %1 eq\n"
+                "  %9 = cbr.void %8, b3, b4\n"
+                "b2:\n"
+                "  %10 = add.i64 %2, %3\n"
+                "  %11 = icmp.i1 %10, %1 ugt\n"
+                "  %12 = cbr.void %11, b4, b3\n"
+                "b3:\n"
+                "  %13 = ret.void %1\n"
+                "b4:\n"
+                "  %14 = phi.i64 [%2, b1], [%10, b2]\n"
+                "  %15 = and.i32 %4, %5\n"
+                "  %16 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %17 = icmp.i1 %15, %16 ne\n"
+                "  %18 = cbr.void %17, b5, b6\n"
+                "b5:\n"
+                "  %19 = mul.i64 %2, %3\n"
+                "  %20 = ret.void %19\n"
+                "b6:\n"
+                "  %21 = ret.void %3\n"
+                "}\n",
+        .blocks = 1,
+        .copies = 0,
+        .redirects = 2,
+        .rounds = 1,
+        .merges = 0,
+        .flattened = true,
+    },
+    {
+        // As stranded-plain, the test true on every edge and the false successor the one left without a predecessor.
+        .name = "stranded-plain-false",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %5 = const.i32 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %6 = icmp.i1 %2, %3 ult\n"
+                "  %7 = cbr.void %6, b1, b2\n"
+                "b1:\n"
+                "  %8 = icmp.i1 %2, %1 eq\n"
+                "  %9 = cbr.void %8, b3, b4\n"
+                "b2:\n"
+                "  %10 = add.i64 %2, %3\n"
+                "  %11 = icmp.i1 %10, %1 ugt\n"
+                "  %12 = cbr.void %11, b4, b3\n"
+                "b3:\n"
+                "  %13 = ret.void %1\n"
+                "b4:\n"
+                "  %14 = phi.i64 [%2, b1], [%10, b2]\n"
+                "  %15 = or.i32 %4, %5\n"
+                "  %16 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %17 = icmp.i1 %15, %16 ne\n"
+                "  %18 = cbr.void %17, b5, b6\n"
+                "b5:\n"
+                "  %19 = ret.void %3\n"
+                "b6:\n"
+                "  %20 = mul.i64 %2, %3\n"
+                "  %21 = ret.void %20\n"
+                "}\n",
+        .blocks = 1,
+        .copies = 0,
+        .redirects = 2,
+        .rounds = 1,
+        .merges = 0,
+        .flattened = true,
+    },
+    {
         // Both predecessors redirected, one to each successor: the true one, which merges the number, keeps the one
         // that chose it.
         .name = "redirect-merge",
@@ -1497,6 +1600,95 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
                 "  %28 = phi.i64 [%21, b4], [%24, b5]\n"
                 "  %29 = add.i64 %28, %18\n"
                 "  %30 = ret.void %29\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // The entry as the block's false successor, whose only edge in the CFG is the block's: the function's start
+        // enters it too, and it dominates every block, the number's reader in the true successor among them. Only the
+        // true successor merges the number (the entry can have no phi, and its cover bit would have kept both). The
+        // truth value is 1 on every path, so the edge back to the entry never runs and the executor's trials end.
+        .name = "entry-successor",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %7 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %8 = icmp.i1 %2, %5 lt\n"
+                "  %9 = cbr.void %8, b1, b2\n"
+                "b1:\n"
+                "  %10 = add.i64 %2, %3\n"
+                "  %11 = br.void b3\n"
+                "b2:\n"
+                "  %12 = icmp.i1 %5, %1 ule\n"
+                "  %13 = zext.i32 %12\n"
+                "  %14 = br.void b3\n"
+                "b3:\n"
+                "  %15 = phi.i32 [%7, b1], [%13, b2]\n"
+                "  %16 = phi.i64 [%10, b1], [%5, b2]\n"
+                "  %17 = icmp.i1 %15, %6 ne\n"
+                "  %18 = cbr.void %17, b4, b0\n"
+                "b4:\n"
+                "  %19 = add.i64 %16, %1\n"
+                "  %20 = ret.void %19\n"
+                "}\n",
+        .blocks = 1,
+        .copies = 2,
+        .redirects = 0,
+        .rounds = 1,
+        .merges = 1,
+        .flattened = false,
+    },
+    {
+        // The entry as the block's true successor, the false one a loop's header, which its back edge also enters, and
+        // which reads the number: no successor that the block alone enters dominates the reader, so it is left alone
+        // (the entry's cover bit would have put the merge at the function's start). The truth value is 0 on every path.
+        .name = "entry-successor-true",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %7 = const.i64 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %8 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %9 = icmp.i1 %2, %5 lt\n"
+                "  %10 = cbr.void %9, b1, b2\n"
+                "b1:\n"
+                "  %11 = add.i64 %2, %3\n"
+                "  %12 = br.void b3\n"
+                "b2:\n"
+                "  %13 = icmp.i1 %5, %1 ugt\n"
+                "  %14 = zext.i32 %13\n"
+                "  %15 = br.void b3\n"
+                "b3:\n"
+                "  %16 = phi.i32 [%6, b1], [%14, b2]\n"
+                "  %17 = phi.i64 [%11, b1], [%5, b2]\n"
+                "  %18 = icmp.i1 %16, %6 ne\n"
+                "  %19 = cbr.void %18, b0, b4\n"
+                "b4:\n"
+                "  %20 = phi.i64 [%7, b3], [%24, b5]\n"
+                "  %21 = add.i64 %17, %20\n"
+                "  %22 = icmp.i1 %20, %2 ult\n"
+                "  %23 = cbr.void %22, b5, b6\n"
+                "b5:\n"
+                "  %24 = add.i64 %20, %8\n"
+                "  %25 = br.void b4\n"
+                "b6:\n"
+                "  %26 = ret.void %21\n"
                 "}\n",
         .blocks = 0,
         .copies = 0,

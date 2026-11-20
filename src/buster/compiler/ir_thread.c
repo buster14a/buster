@@ -20,30 +20,30 @@
 // extensions and comparisons nothing reads.
 //
 // One exception (#2608, Lua's `tonumberns`, a `?:` whose join's phis are the truth value and the number it set): a phi
-// of J may be read past J where a successor S has J as its only predecessor and S dominates every such reader (an
-// instruction's block, or a phi entry's predecessor). Threading gives S the predecessors that now reach it, so the
-// rewrite puts a phi at S's start that merges the phi again, each predecessor's input to it (and the phi itself from J
-// where J stays), and every reader outside J reads that merge: local SSA repair over S's dominance subtree, which a
-// new path still enters through S. J's chain values still may not be read past it, and a J that heads a loop (a
-// predecessor it dominates) isn't repaired: threading it would rotate the loop. The dominators are built only in a
-// round where some candidate needs the repair, after the escape scan, and a second pass of that scan over the
+// of J may be read past J where a successor S other than the entry has J as its only predecessor and S dominates every
+// such reader (an instruction's block, or a phi entry's predecessor). Threading gives S the predecessors that now reach
+// it, so the rewrite puts a phi at S's start that merges the phi again, each predecessor's input to it (and the phi
+// itself from J where J stays), and every reader outside J reads that merge: local SSA repair over S's dominance
+// subtree, which a new path still enters through S. J's chain values still may not be read past it, and a J that heads
+// a loop (a predecessor it dominates) isn't repaired: threading it would rotate the loop. The dominators are built only
+// in a round where some candidate needs the repair, after the escape scan, and a second pass of that scan over the
 // repairable candidates' values intersects the successors that dominate each reader.
 //
 // Bounds: J is not the entry or a label's block, has at least one phi, then at most BUSTER_IR_THREAD_BLOCK_LIMIT pure
 // operations (constants, copies, extensions, truncations, integer comparisons and bitwise operations of integers and
 // pointers, without flags), and branches on a value it defines, to two other blocks. A copy takes what the branch and
-// the successors' phis read of them (IrThreadWork.needed), at most BUSTER_IR_THREAD_CHAIN_LIMIT: the rest is dead,
-// the lowering's, which the optimizer removes. At most BUSTER_IR_THREAD_COPY_LIMIT predecessors take copies. A successor
-// that only J reaches and that has phis or merges one of J's keeps a predecessor: a J every predecessor of which would
-// be redirected to its other successor is left alone (its test is one constant on every edge). Within a round, no block is both threaded and another's
-// threaded predecessor or successor: a round's rewrite reads one CFG. BUSTER_IR_THREAD_ROUNDS rounds at most take the
-// chains `a && b && c` makes, a next one only where a candidate was left to it: by the roles, a repairable one whose
-// readers no successor dominated yet, or a block of phis that took a copy, which may have a candidate's shape with it
-// (the `?:` join that jumps to an `&&`'s, #2608). A function whose candidate blocks' phis
-// all take a value from a later instruction (loops' headers) builds no CFG. A 64-byte opcode scan finds the conditional branches;
-// the rest runs only for blocks that pass it. A successful result borrows the input's immutable tables, as
-// ir_if_convert's does: the input and output arenas stay alive until the optimizer copies the function. The input is
-// never mutated.
+// the successors' phis read of them (IrThreadWork.needed), at most BUSTER_IR_THREAD_CHAIN_LIMIT: the rest is dead, the
+// lowering's, which the optimizer removes. At most BUSTER_IR_THREAD_COPY_LIMIT predecessors take copies. A successor
+// that only J enters and that has phis or merges one of J's keeps a predecessor: a J every predecessor of which would
+// be redirected to its other successor is left alone (its test is one constant on every edge). Within a round, no block
+// is both threaded and another's threaded predecessor or successor: a round's rewrite reads one CFG.
+// BUSTER_IR_THREAD_ROUNDS rounds at most take the chains `a && b && c` makes, a next one only where a candidate was
+// left to it: by the roles, a repairable one whose readers no successor dominated yet, or a block of phis that took a
+// copy, which may have a candidate's shape with it (the `?:` join that jumps to an `&&`'s, #2608). A function whose
+// candidate blocks' phis all take a value from a later instruction (loops' headers) builds no CFG. A 64-byte opcode
+// scan finds the conditional branches; the rest runs only for blocks that pass it. A successful result borrows the
+// input's immutable tables, as ir_if_convert's does: the input and output arenas stay alive until the optimizer copies
+// the function. The input is never mutated.
 
 #ifndef BUSTER_IR_THREAD_C
 #define BUSTER_IR_THREAD_C
@@ -211,8 +211,15 @@ static bool ir_thread_shape(const IrThreadWork* work, uint32_t block)
     return safe;
 }
 
+// Whether `block` is entered only by the edge from its one predecessor: not the entry, which the function's start
+// enters too, dominating every block (J among them), and which has no phis to merge in (#2608).
+static bool ir_thread_alone(const IrCfg* cfg, uint32_t block)
+{
+    return block != 0 && cfg->predecessor_offsets[(uint64_t)block + 1] - cfg->predecessor_offsets[block] == 1;
+}
+
 // Which of the true and false successors of repairable block J dominate block `at`, as BUSTER_IR_THREAD_COVER_YES and
-// _NO. The escapes byte starts with the bits of those that have J as their only predecessor, whose subtrees are apart:
+// _NO. The escapes byte starts with the bits of those that J alone enters (ir_thread_alone), whose subtrees are apart:
 // one at most is left once a use narrowed it.
 static uint32_t ir_thread_cover(const IrThreadWork* work, uint32_t block, uint32_t at)
 {
@@ -354,7 +361,7 @@ static bool ir_thread_repairable(IrThreadWork* work)
             const uint32_t last = f->block_offsets[(uint64_t)block + 1] - 1;
             const uint32_t yes = f->b[last];
             const uint32_t no = f->c[last];
-            const bool alone = cfg->predecessor_offsets[(uint64_t)yes + 1] - cfg->predecessor_offsets[yes] == 1 || cfg->predecessor_offsets[(uint64_t)no + 1] - cfg->predecessor_offsets[no] == 1;
+            const bool alone = ir_thread_alone(cfg, yes) || ir_thread_alone(cfg, no);
             bool escapes = false;
             bool chain = false;
             for (uint32_t at = first; at < last; at += 64)
@@ -411,8 +418,8 @@ static IrError ir_thread_repairs(IrThreadWork* work, Arena* output, Arena* scrat
         const uint32_t last = f->block_offsets[(uint64_t)block + 1] - 1;
         const uint32_t yes = f->b[last];
         const uint32_t no = f->c[last];
-        const bool yes_alone = repairable && cfg->predecessor_offsets[(uint64_t)yes + 1] - cfg->predecessor_offsets[yes] == 1;
-        const bool no_alone = repairable && cfg->predecessor_offsets[(uint64_t)no + 1] - cfg->predecessor_offsets[no] == 1;
+        const bool yes_alone = repairable && ir_thread_alone(cfg, yes);
+        const bool no_alone = repairable && ir_thread_alone(cfg, no);
         const uint32_t covers = (yes_alone ? BUSTER_IR_THREAD_COVER_YES : 0) | (no_alone ? BUSTER_IR_THREAD_COVER_NO : 0);
         for (uint32_t at = first; repairable && !header && at < last; at += 64)
         {
@@ -801,11 +808,11 @@ static bool ir_thread_block(IrThreadWork* work, uint32_t block, uint64_t* values
             }
         }
     }
-    // A successor that only J reaches keeps a predecessor where it has phis or merges one of J's again: where every
+    // A successor that only J enters keeps a predecessor where it has phis or merges one of J's again: where every
     // predecessor is threaded, J is left an `unreachable`, and redirects that all chose its other successor would leave
     // it none, an empty phi. J's test is then the same constant on every edge, SCCP's to fold (Lua's checktab).
-    const bool yes_alone = cfg->predecessor_offsets[(uint64_t)yes + 1] - cfg->predecessor_offsets[yes] == 1;
-    const bool no_alone = cfg->predecessor_offsets[(uint64_t)no + 1] - cfg->predecessor_offsets[no] == 1;
+    const bool yes_alone = ir_thread_alone(cfg, yes);
+    const bool no_alone = ir_thread_alone(cfg, no);
     const uint32_t needing = merging | (yes_alone && f->op[f->block_offsets[yes]] == IR_PHI ? BUSTER_IR_THREAD_COVER_YES : 0) |
                              (no_alone && f->op[f->block_offsets[no]] == IR_PHI ? BUSTER_IR_THREAD_COVER_NO : 0);
     safe = safe && (threaded != predecessors || (needing & ~reaching) == 0);
@@ -888,9 +895,7 @@ static uint32_t ir_thread_merger(const IrThreadWork* work, uint32_t i)
 static uint32_t ir_thread_merged_from(const IrThreadWork* work, uint32_t block)
 {
     const IrCfg* cfg = &work->cfg;
-    const uint32_t start = cfg->predecessor_offsets[block];
-    const bool alone = cfg->predecessor_offsets[(uint64_t)block + 1] - start == 1;
-    const uint32_t from = alone ? cfg->predecessors[start] : BUSTER_IR_NONE;
+    const uint32_t from = ir_thread_alone(cfg, block) ? cfg->predecessors[cfg->predecessor_offsets[block]] : BUSTER_IR_NONE;
     return from != BUSTER_IR_NONE && (work->roles[from] & BUSTER_IR_THREAD_THREADED) != 0 ? from : BUSTER_IR_NONE;
 }
 
