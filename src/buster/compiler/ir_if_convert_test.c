@@ -138,6 +138,109 @@ static void ir_if_convert_test_compare(IrOptimizeTest* test, const IrFunction* f
     arena_pop_to(optimized, om);
 }
 
+// Rows 5 and 7 are the arms. Rows 1, 2, 3 hold the common parameter and the two distinct constants.
+// Vary which operand is common, and let a second phi also read either arm of the addition.
+static void ir_if_convert_test_pairs(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    const uint8_t ops[] = { IR_ADD, IR_SUB, IR_OR, IR_XOR };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ops); i += 1)
+    {
+        for (uint32_t variant = 0; variant < (i == 0 ? 6u : 4u); variant += 1)
+        {
+            const bool shared = variant >= 4;
+            const bool swap_yes = (variant & 1) != 0;
+            const bool swap_no = (variant & 2) != 0;
+            const bool sink = !shared && (ops[i] != IR_SUB || (!swap_yes && !swap_no));
+            IrFunction f = { 0 };
+            const bool created = ir_if_convert_test_fixture(input, &f, IR_I64, 0, 1 + shared, 1, 1);
+            ir_optimize_test_expect(test, created, "two-arm accumulation fixture allocation");
+            if (created)
+            {
+                ir_optimize_test_instruction(&f, 5, ops[i], IR_I64, swap_yes ? 2 : 1, swap_yes ? 1 : 2, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 7, ops[i], IR_I64, swap_no ? 3 : 1, swap_no ? 1 : 3, BUSTER_IR_NONE);
+                if (shared)
+                {
+                    f.extra[5] = variant == 4 ? 7 : 1;
+                    f.extra[7] = variant == 4 ? 1 : 5;
+                }
+                IrIfConvertResult result = { 0 };
+                const IrCheck check = ir_if_convert(&f, output, scratch, &result);
+                const IrFunction* g = &result.function;
+                const bool valid = check.error == IR_OK && ir_verify_complete(g, scratch).error == IR_OK;
+                ir_optimize_test_expect(test, valid, "two-arm accumulation verifies");
+                if (valid)
+                {
+                    const uint32_t join = g->block_offsets[3];
+                    const uint32_t select = g->b[join];
+                    const bool shape = sink ? g->op[join] == ops[i] && g->a[join] == 1 && g->op[select] == IR_SELECT &&
+                                              g->a[select] == 0 && g->b[select] == 2 && g->c[select] == 3 : g->op[join] == IR_SELECT;
+                    ir_optimize_test_expect(test, shape && result.sunk == (uint32_t)sink, "select polarity, subtraction order and shared arm values");
+                    for (uint32_t trial = 0; trial < 4; trial += 1)
+                    {
+                        const uint64_t parameter = trial < 2 ? trial : UINT64_MAX - trial;
+                        const IrOptimizeExecution before = ir_optimize_test_execute(&f, scratch, parameter, 0);
+                        const IrOptimizeExecution after = ir_optimize_test_execute(g, scratch, parameter, 0);
+                        ir_optimize_test_expect(test, before.status == 1 && after.status == 1 && before.value == after.value, "two-arm accumulation keeps both edge results");
+                    }
+                }
+            }
+            arena_pop_to(input, 0);
+            arena_pop_to(output, 0);
+        }
+    }
+}
+
+// The false arm's row becomes a select of the two increments. It can no longer describe that arm's sum.
+static void ir_if_convert_test_pair_debug(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    IrFunction f = { 0 };
+    uint8_t flags[] = { BUSTER_IR_DEBUG_BIND_REGIONS, BUSTER_IR_DEBUG_BIND_REGIONS, BUSTER_IR_DEBUG_BIND_REGIONS };
+    IrDebugBinding bindings[] = {
+        { .local = 0, .entry = 5, .value = 5, .anchor = 5, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        { .local = 1, .entry = 7, .value = 7, .anchor = 7, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        { .local = 2, .entry = 9, .value = 9, .anchor = 9, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+    };
+    IrDebugRegion region = { .local = 1, .block = 2, .begin = 7, .end = 8, .block_end = 9, .value = 7, .next = BUSTER_IR_NONE,
+                             .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 };
+    const IrDebugInfo source = {
+        .local_count = BUSTER_ARRAY_LENGTH(flags),
+        .binding_flags = flags,
+        .bindings = bindings,
+        .binding_count = BUSTER_ARRAY_LENGTH(bindings),
+        .regions = &region,
+        .region_count = 1,
+        .entry_count = 11,
+        .first_block_end = 5,
+    };
+    const bool created = ir_if_convert_test_fixture(input, &f, IR_I64, 0, 1, 1, 1) && ir_debug_create(input, &f, &source);
+    ir_optimize_test_expect(test, created, "debug two-arm fixture allocation");
+    if (created)
+    {
+        ir_optimize_test_instruction(&f, 7, IR_ADD, IR_I64, 1, 2, BUSTER_IR_NONE);
+        const bool verified = ir_verify_complete(&f, scratch).error == IR_OK;
+        IrIfConvertResult result = { 0 };
+        const bool folded = verified && ir_if_convert(&f, output, scratch, &result).error == IR_OK && result.sunk == 1 &&
+                            ir_verify_complete(&result.function, scratch).error == IR_OK;
+        const IrFunction* g = &result.function;
+        const IrDebugInfo* debug = g->debug;
+        const bool mapped = folded && debug != NULL && debug->binding_count == BUSTER_ARRAY_LENGTH(bindings) && debug->region_count == 1;
+        ir_optimize_test_expect(test, mapped, "two-arm fold retains a valid debug sidecar");
+        if (mapped)
+        {
+            const uint32_t kept = debug->bindings[0].value;
+            ir_optimize_test_expect(test, debug->bindings[0].kind == IR_DEBUG_BIND_VALUE && kept < g->instruction_count &&
+                                        g->op[kept] == IR_ADD && g->a[kept] == 1 && g->b[kept] == 3 &&
+                                        debug->bindings[2].kind == IR_DEBUG_BIND_VALUE && debug->bindings[2].value == g->block_offsets[3],
+                                    "surviving arm and join bindings still identify their sums");
+            ir_optimize_test_expect(test, debug->bindings[1].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->bindings[1].value == BUSTER_IR_NONE &&
+                                        debug->regions[0].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->regions[0].value == BUSTER_IR_NONE,
+                                    "repurposed arm invalidates its value binding and region");
+        }
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+}
+
 static bool ir_if_convert_test_clamp(Arena* arena, IrFunction* f)
 {
     const IrSizes sizes = {
@@ -948,6 +1051,8 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             }
         }
         arena_pop_to(&input, 0);
+        ir_if_convert_test_pairs(test, &input, &vector, &scratch);
+        ir_if_convert_test_pair_debug(test, &input, &vector, &scratch);
     }
     arena_release(&scratch);
     arena_release(&optimized);

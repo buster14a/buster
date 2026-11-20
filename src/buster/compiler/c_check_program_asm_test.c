@@ -41,7 +41,7 @@ static void check_test_program_asm_room(CheckTest* test)
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
@@ -133,7 +133,7 @@ static void check_test_program_asm_kinds(CheckTest* test)
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
@@ -237,7 +237,7 @@ static void check_test_program_asm_placement(CheckTest* test)
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };

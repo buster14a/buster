@@ -1554,7 +1554,8 @@ its store.
     (`check_graph_leaf`). That is 45% of the body nodes. The records go in
     node order, since a separate pass of leaves wrote each output line twice.
   - **Validation.** It checks 16 nodes a block with AVX-512
-    (`check_graph_validate_vector`), with the old loop's step as its exact twin.
+    (`check_graph_validate`, then named `check_graph_validate_vector`), with the
+    old loop's step as its exact twin until #2924 removed it.
   - **Scans.** The reports, warnings and resource scans read only the nodes
     that can act.
   - **Overloads.** Their checks are skipped in a graph without candidates.

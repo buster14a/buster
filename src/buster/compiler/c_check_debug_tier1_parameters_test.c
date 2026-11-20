@@ -6,6 +6,32 @@
 
 #include "c_check_debug_tier1_bindings_test.c"
 
+static void check_debug_tier1_inline_origins(CheckDebugTestTally* tally)
+{
+    const IrDebugInline table[] = {
+        { .first = 10, .count = 3, .parent = BUSTER_IR_NONE, .call = 2 },
+        { .first = 13, .count = 2, .parent = 0, .call = 12 },
+        { .first = 17, .count = 4, .parent = 1, .call = 13 },
+        { .first = 21, .count = 2, .parent = BUSTER_IR_NONE, .call = 5 },
+    };
+    const IrDebugInfo debug = { .entry_count = 8, .origin_count = 24, .inlines = table, .inline_count = BUSTER_ARRAY_LENGTH(table) };
+    const uint32_t inputs[] = { 7, 8, 10, 12, 13, 14, 15, 17, 20, 21, 22, 23, BUSTER_EMISSION_NO_ORIGIN, 18, 12, 19, 0 };
+    const uint32_t owners[] = { BUSTER_IR_NONE, BUSTER_IR_NONE, 0, 0, 1, 1, BUSTER_IR_NONE, 2, 2, 3, 3, BUSTER_IR_NONE, BUSTER_IR_NONE, 2, 0, 2, BUSTER_IR_NONE };
+    const uint32_t entries[] = { 7, BUSTER_EMISSION_NO_ORIGIN, 2, 2, 2, 2, BUSTER_EMISSION_NO_ORIGIN, 2, 2, 5, 5, BUSTER_EMISSION_NO_ORIGIN, BUSTER_EMISSION_NO_ORIGIN, 2, 2, 2, 0 };
+    CheckTier1DebugOrigin previous = { .instance = BUSTER_IR_NONE };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inputs); i += 1)
+    {
+        const CheckTier1DebugOrigin result = check_tier1_debug_origin(&debug, inputs[i], &previous);
+        check_debug_test_expect(tally, result.instance == owners[i] && result.entry == entries[i],
+                                "each machine origin names its own expansion and outer call", "nested, adjacent, gapped and revisited inline origins");
+    }
+    const IrDebugInfo empty = { .entry_count = 3 };
+    previous = (CheckTier1DebugOrigin){ .instance = BUSTER_IR_NONE };
+    const CheckTier1DebugOrigin gap = check_tier1_debug_origin(&empty, 3, &previous);
+    check_debug_test_expect(tally, gap.instance == BUSTER_IR_NONE && gap.entry == BUSTER_EMISSION_NO_ORIGIN,
+                            "an empty instance table leaves an expanded origin unknown", "no inline instances");
+}
+
 // A frame label cannot make an arbitrary base write harmless. Only a contiguous terminal teardown can change
 // the established base without invalidating later homes, and that property must hold in the final record order.
 static void check_debug_tier1_values_frames(CheckDebugTestTally* tally)
@@ -584,6 +610,7 @@ static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally)
     const uint8_t dead_values[] = { X86_REGISTER_RDI, UINT8_MAX, UINT8_MAX, X86_REGISTER_RDI, X86_REGISTER_RDI };
     code = (Tier1SelectCode){ .records = dead, .count = BUSTER_ARRAY_LENGTH(dead), .branches = dead_branches, .targets = dead_targets, .branch_count = 1 };
     check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, dead_values, "unreachable instructions never inherit the function entry's carrier seed");
+    check_debug_tier1_inline_origins(tally);
     check_debug_tier1_values_frames(tally);
     check_debug_tier1_values_objects(tally);
     check_debug_tier1_values_bindings(tally);

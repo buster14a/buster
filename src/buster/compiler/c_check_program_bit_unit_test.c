@@ -280,7 +280,7 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         // (Tier0Function.symbol_access) is the emission's, in what it left of `scratch` (check_program_access).
         Arena work = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
