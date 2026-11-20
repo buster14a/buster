@@ -718,10 +718,57 @@ static void check_test_declaration_starts(CheckTest* test)
     check_test_expect(test, differences == 0, "the declaration-start column gives the walk's start for every random role");
 }
 
+// check_sparse_next against its definition, the first token from `token` below `count` whose value isn't NONE, or
+// `count`, and check_sparse_wide_next against its, the first 16 from a multiple of 16 that has a block, or one at or past
+// the end: columns of 255 to 1,100 tokens, up to 69 directory entries, with one entry at every 7th token, from every
+// start. Past a 16 without a block each scans 16 directory entries at a time from the next, so the entry's block falls
+// at each lane of that scan; the column tests' 200 tokens reach none past their 13th entry.
+static __attribute__((noinline)) void check_test_sparse_next(CheckTest* test)
+{
+    Arena owned = arena_reserve(UINT64_C(1) << 22);
+    bool exact = owned.base != NULL && arena_commit(&owned, owned.capacity);
+    const uint32_t counts[] = { 255, 256, 257, 600, 1100 };
+    uint64_t cases = 0;
+    for (uint32_t c = 0; exact && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        const uint32_t count = counts[c];
+        for (uint32_t entry = 0; exact && entry < count; entry += 7)
+        {
+            owned.length = 0;
+            CheckSparsePool* pool = NULL;
+            CheckSparseColumn column = { 0 };
+            CheckSparseWide wide = { 0 };
+            exact = check_sparse_reserve_wide(&owned, &pool, &column, 1, &wide, 1, count, false, false);
+            if (exact)
+            {
+                check_sparse_set(pool, column, entry, entry + 1);
+                check_sparse_wide_set(pool, wide, entry, (uint64_t)entry + 1);
+            }
+            for (uint32_t start = 0; exact && start <= count; start += 1)
+            {
+                exact = check_sparse_next(column, start, count, true) == (start <= entry ? entry : count);
+                cases += 1;
+            }
+            const uint32_t group = entry & ~(BUSTER_CHECK_SPARSE_TOKENS - 1);
+            for (uint32_t first = 0; exact && first < count; first += BUSTER_CHECK_SPARSE_TOKENS)
+            {
+                const uint32_t next = check_sparse_wide_next(wide, first, count, true);
+                exact = first <= group ? next == group : next >= count;
+                cases += 1;
+            }
+        }
+    }
+    char description[160];
+    snprintf(description, sizeof(description), "the sparse columns' next entries are their definitions' in %llu cases", (unsigned long long)cases);
+    check_test_expect(test, exact && cases > 100000, description);
+    arena_release(&owned);
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
     check_test_sparse_columns(test);
+    check_test_sparse_next(test);
     check_test_sparse_wide(test);
     check_test_sparse_lanes(test);
     check_test_declaration_starts(test);
