@@ -480,6 +480,23 @@ static void check_test_program_helper_contracts(CheckTest* test)
         checked[CHECK_PROGRAM_HELPER_X86] += kept;
         snprintf(description, sizeof(description), "helper contracts: x86 leaf %s: %s", cbuiltin_x86_helper_infos[k].name, reason != NULL ? reason : "");
         check_test_expect(test, kept, description);
+        if (k == CBUILTIN_X86_HELPER_INIT_DWARF_REG_SIZE_TABLE)
+        {
+            static const uint8_t expected[] = {
+                0xb8, 0x08, 0x08, 0x08, 0x08,  // mov eax, 0x08080808
+                0x66, 0x0f, 0x6e, 0xc0,        // movd xmm0, eax
+                0x0f, 0xc6, 0xc0, 0x00,        // shufps xmm0, xmm0, 0
+                0x0f, 0x11, 0x07,              // movups [rdi], xmm0
+                0x88, 0x47, 0x10,              // mov [rdi + 16], al
+                0xc3,                          // ret
+            };
+            uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(6)];
+            const int64_t count = x86_encode(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0);
+            check_test_expect(test, native.parameter_count == 1 && native.result_class == BUSTER_TYPED_CLASS_VOID &&
+                                    native.code.frame_size == 0 && native.code.frame_saved == 0 && !native.code.frame_pointer &&
+                                    count == sizeof(expected) && memcmp(bytes, expected, sizeof(expected)) == 0,
+                              "DWARF register sizes: frameless void leaf writes sixteen unaligned bytes and one tail byte");
+        }
         arena_pop_to(&output, mark);
     }
     // A helper no family names keeps UNMODELED's bounds whatever its code does, which needn't back any of them: a trap's
