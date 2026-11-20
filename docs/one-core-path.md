@@ -2139,6 +2139,96 @@ executable that reads the columns either way, each reading's own difference:
 - **The sweep's one gather left** is of bytes at entries' numbers, which no
   permute replaces.
 
+## X's rows on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x-rows-on-the-window-2850-2026-11-19).
+`measure-node-machine --shadow --window-rows`
+([the guide](commands/lowering.md#xs-rows-on-the-window-2850)).
+
+C's answers on the window had no reader there: X, which writes each
+evaluated record's entries, ran on T's columns still. This piece makes the
+first of X on the window: the kinds and the classes of a record's own
+entries and of its conversion's, for the expressions with no update and no
+operator evaluated as branches, 64 records a step. An entry's value, an
+update's rows and the branches' are next. No compile takes any of it. [The
+node machine's page](node-machine.md#xs-rows-on-the-window-first-their-shapes)
+has it whole: the shapes, the three sweeps, the builds, the probes and the
+faults. [Its
+specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7023470094)
+had five gates.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release, TSC ticks, seven readings; one
+executable with the rows on and off, on, off, off, on in each reading:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions C takes on the window | 49,155 | 9,909 | 39,712 |
+| their tapes made here | 43,719 (88.94%) | 8,961 (90.43%) | 35,194 (88.62%) |
+| tapes that differ from X's on T's columns | 0 | 0 | 0 |
+| **the three sweeps and the part, a record swept** | **4.11 (4.02 to 4.23)** | **5.17 (5.09 to 5.33)** | **10.54 (9.22 to 13.20)** |
+| a second run over the same chunk | 3.29 | 3.14 | 4.04 |
+| a record of the taken expressions | 5.84 | 8.66 | 24.68 |
+| X on T's columns, a record of theirs, with its values | 24.34 | 22.99 | 27.54 |
+
+### Against its gates
+
+- **R1, exact: met.** No tape made differs from X's on T's columns in its
+  number of entries, a kind or a class, on the three corpora and the
+  compiler's own source.
+- **R2, how much: met on `sqlite3.c` and Lua, not on musl.** 88.66% and
+  88.91% of the expressions C decides have their tape made here (85% asked),
+  and 84.28% on musl, where C refuses 2,047 of the 41,759 it decides.
+- **R3, cost: met on `sqlite3.c`, not on Lua.** 4.11 and 5.17 ticks a record
+  swept (5.0 asked, refuted over 8.0).
+- **R4, nothing else moves: met, but for the records' bytes on Lua.** The
+  kernel, the tests' other parts and C's sweeps read within 0.12 with the
+  rows on; the records' bytes' sweep, which makes the types' column for
+  them, +0.15 and +0.35 (0.3 asked).
+- **R5, faults: met.** Four rounds' survivors (22) each took a term out or
+  put a line in the fixture; the fifth round's 167 faults, on the code as it
+  is, are all caught.
+
+### What stays a record at a time, and why
+
+The reads' two loops, for 24.6% of `sqlite3.c`'s records swept, 20.3% of
+Lua's and 14.2% of musl's. An iteration is a load
+by a type's or an object's number, or of a record's line, and a store of
+bytes, with no branch but the loop's. A gather of sixteen such loads is 64
+uops on Zen 5, what sixteen loads are, and its results would be stored to the
+same bytes. What the vector does there is the lists: the masks that say which
+records to read for, compressed, 64 records a step.
+
+### What it means
+
+- **X's first two parts are shapes.** A record's own entries and its
+  conversion's are each a byte, from masks over C's answers; four lookups a
+  part give 64 records' kinds and classes, and one compress joins the parts
+  and the rows. No walk up a tree, no dispatch a record, no entry written a
+  record at a time.
+- **Bytes stored one at a time are not read back as a register at once.**
+  The first build's loops stored a block's bytes and its vector part read
+  them: 4.35 ticks a record, and 0.80 with the reads a sweep before. A loop a
+  block mispredicted its end; a loop a chunk over a compressed list does not.
+- **A rule's term that no record separates is no mask.** The fault rounds
+  and 241 one-statement programs took the shapes' sweep from the rule's
+  terms one by one to those a C program reaches on the window: the shapes'
+  sweep read 0.88 ticks a record on `sqlite3.c` before the rounds and reads
+  0.62. And the corpora decide what a program reaches: one term went out on a reading
+  of the code and thirty-one probes, five of musl's tapes differed, and it
+  went back with its line (`a = b = 0`).
+- **A chunk's first run reads more than its second.** Run again right after,
+  the same chunk reads 3.29 ticks a record on `sqlite3.c` and 3.14 on Lua,
+  for 4.11 and 5.17 the first time. What the first run reads more is not
+  taken apart yet; Lua's chunks are 379 records for `sqlite3.c`'s 526.
+- **Until the values and the two listed kinds are made, the sum of step 2
+  does not move.** What X on T's columns spends on the taken expressions is
+  24.34 ticks a record of theirs on `sqlite3.c`, 22.99 on Lua and 27.54 on
+  musl, with its values; the rows here are 5.84, 8.66 and 24.68.
+  Next: an update's rows, the branches', then the entries' values.
+
+
 ## Step 4's first piece: a census of Tier 0's row
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-census-2874-2026-11-16)
