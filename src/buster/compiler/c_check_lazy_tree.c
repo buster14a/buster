@@ -50,7 +50,6 @@ static uint64_t check_lazy_tree_mask_scalar(const Parser* parser, const uint32_t
 static __attribute__((noinline)) uint64_t check_lazy_tree_mask(const Parser* parser, const uint32_t* targets, uint32_t names, uint32_t first, uint32_t count, bool scalar)
 {
     uint64_t mask = 0;
-#if BUSTER_HOST_VECTOR
     if (!scalar && names <= INT32_MAX)
     {
         const uint64_t live = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
@@ -73,9 +72,6 @@ static __attribute__((noinline)) uint64_t check_lazy_tree_mask(const Parser* par
         }
     }
     else
-#else
-    (void)scalar;
-#endif
     {
         mask = check_lazy_tree_mask_scalar(parser, targets, names, first, count);
     }

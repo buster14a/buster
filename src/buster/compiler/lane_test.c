@@ -595,10 +595,239 @@ static void lane_test_stack_base_pages(LaneTestTally* tally)
     arena_stack_base_pages = was_stack;
 }
 
+// Whether [mapping, mapping + bytes) is in the stretch that reservations are taken from together (arena_regions), in
+// its lower half (`down` 1) or its upper one (0). A mapping of a reservation's own can be there too, in the hole a
+// released arena left: lane_test_carved says which.
+static bool lane_test_in_region(uint32_t down, uintptr_t mapping, uint64_t bytes)
+{
+    const uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
+    const bool mapped = middle > BUSTER_ARENA_REGION_REFUSED;
+    return mapped && (down != 0 ? mapping >= middle - BUSTER_ARENA_REGION_BYTES && mapping + bytes <= middle : mapping >= middle && mapping + bytes <= middle + BUSTER_ARENA_REGION_BYTES);
+}
+
+// The bytes carved so far from the stretch's lower half (`down` 1) or upper half (0).
+static uint64_t lane_test_carved(uint32_t down)
+{
+    return __atomic_load_n(&arena_regions.carved[down], __ATOMIC_RELAXED);
+}
+
+// Reservations taken together (#2873: arena_reservation_map). With the limits fixed and the address space unlimited,
+// as a compile's command has them: two arenas reserved one after the other are next to each other in the stretch's
+// upper half, each zero-filled and writable where it pushed, as an arena of its own mapping is, and advised huge pages
+// past its base pages from its reservation; a release without a pool leaves a small arena mapped and unmaps a large
+// one, and unmaps small ones too once BUSTER_ARENA_KEPT_COUNT have been kept, or where commit is charged
+// (arena_release_keeps); an arena
+// of base pages and an arena of tables come from the lower half, each right below the one before, with their
+// mappings' flags; a pool takes a released arena and gives the same one back; commits take an arena's base pages at
+// once and then four times what is committed where the kernel charges none, 64 KB and then twice where it does
+// (arena_commit); and a region with no room left, a thread
+// switched to compact reservations and limits that aren't fixed each leave a reservation a mapping of its own, in no
+// region. Where the build has no regions (a sanitizer's) or the kernel refused one, every reservation has its own. In
+// a process of its own (lane_test_arena_regions), since a region's bytes count against the address-space limit that
+// the checks after this one lower.
+static void lane_test_arena_regions_child(LaneTestTally* tally)
+{
+    static ArenaPool pool;
+    const ArenaLimits was_limits = arena_limits;
+    const bool was_compact = arena_compact;
+    ArenaPool* was_pool = arena_pool;
+    arena_pool = 0;
+    arena_compact = false;
+    arena_limits = (ArenaLimits){
+        .fixed = true,
+        .address_share = BUSTER_ARENA_MAX_CAPACITY,
+        .commit_unbounded = true,
+    };
+    Arena first = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    Arena second = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uintptr_t first_mapping = (uintptr_t)first.base - first.mapping_offset;
+    const uintptr_t second_mapping = (uintptr_t)second.base - second.mapping_offset;
+    const bool regions = BUSTER_ARENA_REGIONS && lane_test_in_region(0, first_mapping, first.mapping_bytes);
+    const bool together = lane_test_in_region(0, second_mapping, second.mapping_bytes) && second_mapping == first_mapping + first.mapping_bytes;
+    lane_test_expect(tally, first.base != 0 && second.base != 0 && (!regions || together), "two reservations weren't next to each other in a region");
+    lane_test_expect(tally, BUSTER_ARENA_REGIONS || !lane_test_in_region(0, first_mapping, first.mapping_bytes), "a build without regions took a reservation from one");
+    uint8_t* first_bytes = first.base != 0 ? arena_push(&first, 3 * BUSTER_ARENA_PAGE_BYTES, 1) : 0;
+    uint8_t* second_bytes = second.base != 0 ? arena_push(&second, BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES, 1) : 0;
+    bool zero = first_bytes != 0 && second_bytes != 0;
+    for (uint64_t i = 0; zero && i < 3 * BUSTER_ARENA_PAGE_BYTES; i += 1)
+    {
+        zero = first_bytes[i] == 0 && second_bytes[i] == 0;
+    }
+    if (first_bytes != 0 && second_bytes != 0)
+    {
+        memset(first_bytes, 0x5a, 3 * BUSTER_ARENA_PAGE_BYTES);
+        memset(second_bytes, 0xa5, BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES);
+    }
+    lane_test_expect(tally, zero, "a reservation from a region wasn't zero-filled where it pushed");
+    // The region of mappings without flags is advised huge pages whole, so its arena needs no advice of its own: its
+    // pages past its base pages are advised, and those could be mapped by a huge page.
+    bool flagged = false;
+    const bool advised = second_bytes != 0 && second.huge && lane_test_vm_flag((uintptr_t)second.base + BUSTER_ARENA_SMALL_BYTES, "hg", &flagged) && flagged &&
+                         lane_test_huge_capable((uintptr_t)second.base + BUSTER_ARENA_SMALL_BYTES, &flagged) && flagged;
+    const bool base_pages = second_bytes != 0 && !(lane_test_huge_capable((uintptr_t)second.base, &flagged) || !flagged);
+    lane_test_expect(tally, !regions || (advised && base_pages), "a region's arena wasn't advised huge pages past its base pages, or its base pages could be huge");
+    // Releases without a pool (arena_release_keeps). The first, which pushed three pages, stays mapped; the second,
+    // which pushed more than BUSTER_ARENA_KEPT_BYTES, is unmapped: the kernel has no page there. Then small arenas
+    // until BUSTER_ARENA_KEPT_COUNT have been kept: the next one's release unmaps it, small as it is.
+    const uint8_t* first_page = (const uint8_t*)((uintptr_t)first.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
+    const uint8_t* second_page = (const uint8_t*)((uintptr_t)second.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
+    const bool neighbour = second_bytes != 0 && second_bytes[0] == 0xa5 && second_bytes[BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == 0xa5;
+    arena_release(&first);
+    arena_release(&second);
+    unsigned char vector = 0;
+    const bool first_mapped = first_page != 0 && mincore((void*)first_page, BUSTER_ARENA_PAGE_BYTES, &vector) == 0;
+    const bool second_unmapped = second_page != 0 && mincore((void*)second_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
+    lane_test_expect(tally, neighbour && first.base == 0 && second_unmapped && (!regions || first_mapped), "a small arena's release unmapped it, or a large one's didn't");
+    bool every_kept = true;
+    uint32_t releases = 1;
+    for (; regions && releases < BUSTER_ARENA_KEPT_COUNT; releases += 1)
+    {
+        Arena small = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+        const uint8_t* page = small.base != 0 && arena_push(&small, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)small.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
+        arena_release(&small);
+        every_kept = every_kept && page != 0 && mincore((void*)page, BUSTER_ARENA_PAGE_BYTES, &vector) == 0;
+    }
+    Arena past = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uint8_t* past_page = past.base != 0 && arena_push(&past, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)past.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
+    arena_release(&past);
+    const bool past_unmapped = past_page != 0 && mincore((void*)past_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
+    lane_test_expect(tally, every_kept && past_unmapped, "a process's releases kept more small arenas mapped than they may, or fewer");
+    // Where commit is charged, a small arena's release unmaps it, whatever has been kept: with the count as it was
+    // before any release.
+    const uint32_t kept_count = __atomic_exchange_n(&arena_regions.kept, 0, __ATOMIC_RELAXED);
+    arena_limits.commit_unbounded = false;
+    Arena charged_small = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uint8_t* charged_page = charged_small.base != 0 && arena_push(&charged_small, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)charged_small.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
+    arena_release(&charged_small);
+    const bool charged_unmapped = charged_page != 0 && mincore((void*)charged_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
+    lane_test_expect(tally, charged_unmapped && __atomic_load_n(&arena_regions.kept, __ATOMIC_RELAXED) == 0, "a small arena's release stayed mapped where commit is charged");
+    arena_limits.commit_unbounded = true;
+    __atomic_store_n(&arena_regions.kept, kept_count, __ATOMIC_RELAXED);
+    // The other flags' regions: base pages of 2 MB or more (MAP_STACK where the kernel maps them so), and tables.
+    Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 4 * BUSTER_ARENA_HUGE_PAGE_BYTES);
+    ArenaTable tables[] = {
+        { .bytes = 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_HUGE_PAGE_BYTES },
+        { .bytes = BUSTER_ARENA_SMALL_BYTES, .small = BUSTER_ARENA_SMALL_BYTES },
+    };
+    Arena held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
+    const uint32_t wide_down = arena_stack_base_pages ? 1 : 0;
+    const uintptr_t wide_mapping = (uintptr_t)wide.base - wide.mapping_offset;
+    const uintptr_t held_mapping = (uintptr_t)held.base - held.mapping_offset;
+    const bool wide_placed = wide.base != 0 && (!regions || lane_test_in_region(wide_down, wide_mapping, wide.mapping_bytes));
+    const bool held_placed = held.base != 0 && (!regions || (lane_test_in_region(1, held_mapping, held.mapping_bytes) && (wide_down == 0 || held_mapping + held.mapping_bytes == wide_mapping)));
+    bool found = false;
+    const bool uncharged = held.base != 0 && lane_test_vm_flag((uintptr_t)tables[0].base, "nr", &found) && found;
+    const bool tabled = held.base != 0 && ((uint8_t*)tables[0].base)[0] == 0 && ((uint8_t*)tables[1].base)[BUSTER_ARENA_SMALL_BYTES - 1] == 0;
+    lane_test_expect(tally, wide_placed && held_placed && uncharged && tabled, "an arena of base pages or of tables wasn't in the half of its mapping's flags");
+    arena_release(&wide);
+    arena_release(&held);
+    // A pool takes a released arena of a region and gives the same one back.
+    arena_pool = &pool;
+    Arena pooled = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uint8_t* pooled_base = pooled.base;
+    uint8_t* pooled_bytes = pooled.base != 0 ? arena_push(&pooled, BUSTER_ARENA_SMALL_BYTES, 1) : 0;
+    const bool pooled_pushed = pooled_bytes != 0;
+    if (pooled_pushed)
+    {
+        memset(pooled_bytes, 0x77, BUSTER_ARENA_SMALL_BYTES);
+    }
+    arena_release(&pooled);
+    Arena again = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uint8_t* again_bytes = again.base != 0 ? arena_push(&again, BUSTER_ARENA_PAGE_BYTES, 1) : 0;
+    lane_test_expect(tally, pooled_pushed && again.base == pooled_base && again_bytes != 0 && again_bytes[0] == 0, "a pool didn't give a region's arena back, emptied");
+    arena_release(&again);
+    arena_pool_release(&pool);
+    arena_pool = 0;
+    // Commits where the kernel charges none (arena_commit): an arena's base pages at once, up to
+    // BUSTER_ARENA_COMMIT_BYTES of them, then BUSTER_ARENA_COMMIT_GROWTH times what is committed; and where it charges,
+    // 64 KB first, whatever the arena's base pages.
+    for (uint32_t charged = 0; charged < 2; charged += 1)
+    {
+        arena_limits.commit_unbounded = charged == 0;
+        Arena based = arena_reserve_small(8 * BUSTER_ARENA_HUGE_PAGE_BYTES, BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_SMALL_BYTES);
+        Arena widest = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 2 * BUSTER_ARENA_COMMIT_BYTES);
+        Arena plain = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+        const bool pushed = based.base != 0 && widest.base != 0 && plain.base != 0 && arena_push(&based, 1, 1) != 0 && arena_push(&widest, 1, 1) != 0 && arena_push(&plain, 1, 1) != 0;
+        const uint64_t based_first = pushed ? based.committed - based.mapping_offset : 0;
+        const uint64_t widest_first = pushed ? widest.committed - widest.mapping_offset : 0;
+        const uint64_t plain_first = pushed ? plain.committed - plain.mapping_offset : 0;
+        const bool first_commits = charged == 0 ? based_first == BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_SMALL_BYTES && widest_first == BUSTER_ARENA_COMMIT_BYTES && plain_first == BUSTER_ARENA_SMALL_BYTES :
+                                                  based_first == BUSTER_ARENA_SMALL_BYTES && widest_first == BUSTER_ARENA_SMALL_BYTES && plain_first == BUSTER_ARENA_SMALL_BYTES;
+        // Past what is committed: four times it where nothing is charged, twice where it is (the plain arena's to its
+        // next huge page boundary, at least).
+        const bool more = pushed && arena_push(&widest, widest_first, 1) != 0 && arena_push(&plain, plain_first, 1) != 0;
+        const uint64_t widest_second = more ? widest.committed - widest.mapping_offset : 0;
+        const uint64_t plain_second = more ? plain.committed - plain.mapping_offset : 0;
+        // Where commit is charged, a commit past the first 64 KB takes what its push needs, within twice what was
+        // committed.
+        const bool widest_grew = charged == 0 ? widest_second == BUSTER_ARENA_COMMIT_GROWTH * widest_first : widest_second > widest_first && widest_second <= 2 * widest_first + BUSTER_ARENA_PAGE_BYTES;
+        const uint64_t factor = charged == 0 ? BUSTER_ARENA_COMMIT_GROWTH : 2;
+        const bool second_commits = widest_grew && plain_second >= factor * plain_first && plain_second < factor * plain_first + BUSTER_ARENA_HUGE_PAGE_BYTES;
+        if (!pushed || !first_commits || !more || !second_commits)
+        {
+            printf("  arenas: with commit %s, first commits of %llu, %llu and %llu bytes, then %llu and %llu\n", charged == 0 ? "uncharged" : "charged", (unsigned long long)based_first,
+                   (unsigned long long)widest_first, (unsigned long long)plain_first, (unsigned long long)widest_second, (unsigned long long)plain_second);
+        }
+        lane_test_expect(tally, pushed && first_commits && more && second_commits, "an arena's commits weren't its base pages and then a multiple of what it had committed");
+        arena_release(&based);
+        arena_release(&widest);
+        arena_release(&plain);
+    }
+    // No room left in the region, compact reservations, and limits that aren't fixed: a mapping of the reservation's own,
+    // which carves nothing.
+    arena_limits.commit_unbounded = true;
+    const uint64_t carved = lane_test_carved(0);
+    __atomic_store_n(&arena_regions.carved[0], BUSTER_ARENA_REGION_BYTES - BUSTER_ARENA_PAGE_BYTES, __ATOMIC_RELAXED);
+    Arena full = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const bool full_own = lane_test_carved(0) == BUSTER_ARENA_REGION_BYTES - BUSTER_ARENA_PAGE_BYTES;
+    __atomic_store_n(&arena_regions.carved[0], carved, __ATOMIC_RELAXED);
+    arena_compact = true;
+    Arena compact = arena_reserve(BUSTER_ARENA_SMALL_BYTES);
+    arena_compact = false;
+    arena_limits = (ArenaLimits){ 0 };
+    Arena unfixed = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const bool own = full.base != 0 && compact.base != 0 && unfixed.base != 0 && arena_push(&full, 1, 1) != 0 && arena_push(&compact, 1, 1) != 0 && arena_push(&unfixed, 1, 1) != 0 &&
+                     full_own && lane_test_carved(0) == carved;
+    lane_test_expect(tally, own, "a reservation that a region can't take didn't map its own");
+    // With the limits fixed again, the next one is carved where the last one ended.
+    arena_limits = (ArenaLimits){
+        .fixed = true,
+        .address_share = BUSTER_ARENA_MAX_CAPACITY,
+        .commit_unbounded = true,
+    };
+    Arena next = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    lane_test_expect(tally, next.base != 0 && (!regions || lane_test_carved(0) == carved + next.mapping_bytes), "a reservation after those wasn't carved from the region");
+    arena_release(&next);
+    arena_release(&full);
+    arena_release(&compact);
+    arena_release(&unfixed);
+    arena_limits = was_limits;
+    arena_compact = was_compact;
+    arena_pool = was_pool;
+}
+
+// lane_test_arena_regions_child in a process of its own: one check here, that every check of its passed.
+static void lane_test_arena_regions(LaneTestTally* tally)
+{
+    fflush(stdout);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        LaneTestTally own = { 0 };
+        lane_test_arena_regions_child(&own);
+        fflush(stdout);
+        _exit(own.failures == 0 && own.checks != 0 ? 0 : 1);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of reservations taken together failed in their process");
+}
+
 static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
     lane_test_stack_base_pages(&tally);
+    lane_test_arena_regions(&tally);
 
     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
     static const struct

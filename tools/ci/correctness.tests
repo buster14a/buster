@@ -747,12 +747,9 @@ if "$BUSTER_COMPILER" test-preprocessor --compare-clang tests/preprocessor-oracl
 # libc_nonshared.a's members, with readelf's.
 "$BUSTER_COMPILER" test-import --cross-check
 == Test Make dependency-rule serialization
-# #805's serializer, standalone until the driver calls it: the x86-64 build's scalar classifier and the
-# native build's AVX-512BW path where the host supplies it, each over generated names against an
-# independent quoting implementation, guarded tails, malformed records and capacities, and --oracle's
-# -MT/-MQ target rules against the installed gcc and clang's -MM output.
-clang -std=c17 -O2 -march=x86-64 -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-scalar
-./build/test-dependency-rule-scalar --oracle
+# #805's serializer, standalone until the driver calls it: the native build's AVX-512BW path (the host's alone since
+# #2924) over generated names against an independent quoting implementation, guarded tails, malformed records and
+# capacities, and --oracle's -MT/-MQ target rules against the installed gcc and clang's -MM output.
 clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-native
 ./build/test-dependency-rule-native --oracle
 == Test selective lowering against its independent oracle and Clang symbols

@@ -211,22 +211,13 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
             fclose(input);
         }
         size = capacity;
-        const X86DecodeResult reference = x86_disassemble_scalar(bytes, size, expected, count);
-        valid = valid && reference.status == X86_DECODE_OK;
-        X86Decoded* actual = malloc((uint64_t)count * sizeof(*actual));
-        valid = valid && actual != 0;
-        if (valid)
-        {
-            const X86DecodeResult vectorized = x86_disassemble_impl(bytes, size, actual, count, true, true);
-            valid = vectorized.status == X86_DECODE_OK && vectorized.count == reference.count && memcmp(actual, expected, reference.count * sizeof(*actual)) == 0;
-            const X86DecodeResult batched = x86_disassemble(bytes, size, actual, count);
-            valid = valid && batched.status == X86_DECODE_OK && batched.count == reference.count && memcmp(actual, expected, reference.count * sizeof(*actual)) == 0;
-        }
-        free(actual);
-        count = (uint32_t)reference.count;
+        // The whole file decodes; objdump then checks every record's boundary and mnemonic.
+        const X86DecodeResult decoded = x86_disassemble(bytes, size, expected, count);
+        valid = valid && decoded.status == X86_DECODE_OK && decoded.consumed == size;
+        count = (uint32_t)decoded.count;
         if (!valid)
         {
-            fprintf(stderr, "raw oracle coverage/equivalence failed at %llu/%u bytes, status=%u\n", (unsigned long long)reference.consumed, size, reference.status);
+            fprintf(stderr, "raw oracle coverage failed at %llu/%u bytes, status=%u\n", (unsigned long long)decoded.consumed, size, decoded.status);
         }
     }
     uint32_t catalogue_cursor = 2;
@@ -415,50 +406,224 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
     return valid;
 }
 
-static bool x86_decode_test_equal(const uint8_t* bytes, uint32_t size, bool verbose)
+// The VEX and EVEX buckets' index against its definition, a scan of the bucket's signatures: for a key, the one
+// form whose signature matches, 0 when none does, UINT16_MAX when several do (or the bucket has no index). Keys are
+// each signature with random bits where its mask doesn't look, and random keys.
+static uint64_t x86_decode_test_index(uint64_t* state)
 {
-    X86Decoded vectorized[128];
-    X86Decoded scalar[128];
-    X86Decoded batched[128];
-    memset(vectorized, 0xa5, sizeof(vectorized));
-    memset(scalar, 0xa5, sizeof(scalar));
-    memset(batched, 0xa5, sizeof(batched));
-    const X86DecodeResult a = x86_disassemble_impl(bytes, size, vectorized, BUSTER_ARRAY_LENGTH(vectorized), true, true);
-    const X86DecodeResult b = x86_disassemble_scalar(bytes, size, scalar, BUSTER_ARRAY_LENGTH(scalar));
-    const X86DecodeResult c = x86_disassemble(bytes, size, batched, BUSTER_ARRAY_LENGTH(batched));
-    bool result = a.count == b.count && a.consumed == b.consumed && a.status == b.status && memcmp(vectorized, scalar, sizeof(scalar)) == 0;
-    result = result && a.count == c.count && a.consumed == c.consumed && a.status == c.status && memcmp(vectorized, batched, sizeof(batched)) == 0;
-    for (uint64_t i = 0; i < a.count && result; i += 1)
+    uint64_t failures = 0;
+    uint64_t checked = 0;
+    uint64_t indexed = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_decode_indices); i += 1)
     {
-        const X86Decoded* decoded = &vectorized[i];
-        char text[512] = {0};
-        char reference[512] = {0};
-        const int64_t text_length = x86_disassembly_format(decoded, text, sizeof(text));
-        const int64_t reference_length = x86_disassembly_format_scalar(decoded, reference, sizeof(reference));
-        result = text_length == reference_length && text_length >= 0 && memcmp(text, reference, (uint64_t)text_length + 1) == 0;
-        if (!result && verbose)
+        const uint32_t bucket_index = i + BUSTER_X86_DECODE_MAPS * 256;
+        const X86DecodeBucket bucket = x86_decode_buckets[bucket_index];
+        indexed += bucket.count != 0 && x86_decode_indices[i].first != UINT32_MAX;
+        for (uint32_t sample = 0; sample < bucket.count * 4 + (bucket.count != 0 ? 16 : 0); sample += 1)
         {
-            fprintf(stderr, "formatter twins disagree: row=%u fast=%s scalar=%s\n", decoded->instruction.form, text, reference);
+            const uint32_t entry = bucket.first + sample / 4;
+            const uint64_t noise = x86_test_random(state) ^ (x86_test_random(state) << 32);
+            const uint64_t key = sample < bucket.count * 4 ? x86_decode_keys[entry] | (noise & ~x86_decode_masks[entry]) : noise;
+            uint16_t expected = 0;
+            for (uint32_t j = 0; j < bucket.count; j += 1)
+            {
+                const uint32_t candidate = bucket.first + j;
+                if ((key & x86_decode_masks[candidate]) == x86_decode_keys[candidate])
+                {
+                    expected = expected == 0 ? x86_decode_forms[candidate] : UINT16_MAX;
+                }
+            }
+            expected = x86_decode_indices[i].first == UINT32_MAX ? UINT16_MAX : expected;
+            const uint16_t actual = x86_decode_index_row(bucket_index, key);
+            if (actual != expected && failures < 8)
+            {
+                fprintf(stderr, "disassembler index: bucket %u key %016llx names %u, its signatures %u\n", bucket_index, (unsigned long long)key, actual, expected);
+            }
+            failures += actual != expected;
+            checked += 1;
         }
-        if (result)
+    }
+    printf("disassembler index: %llu keys in %llu indexed buckets against their signatures, failures=%llu\n", (unsigned long long)checked, (unsigned long long)indexed, (unsigned long long)failures);
+    return failures;
+}
+
+// The prefix classifier's answer, from the prefix groups as the SDM lists them rather than from the decoder's
+// tables: REX (40-4F), the segment overrides (26 2E 36 3E 64 65), operand and address size (66 67), LOCK and the
+// REP forms (F0 F2 F3), and FWAIT (9B), which the decoder reads as the prefix of a waiting x87 form.
+static uint64_t x86_decode_test_prefix_mask(const uint8_t* bytes, uint32_t length)
+{
+    static const uint8_t prefixes[] = {0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65, 0x66, 0x67, 0x9b, 0xf0, 0xf2, 0xf3};
+    uint64_t mask = 0;
+    for (uint32_t i = 0; i < length; i += 1)
+    {
+        bool prefix = (bytes[i] & 0xf0) == 0x40;
+        for (uint32_t j = 0; j < sizeof(prefixes); j += 1)
         {
-            const int64_t listing_length = x86_disassembly_listing(decoded, bytes, 0xfedcba98u, text, sizeof(text), false);
-            const int64_t scalar_length = x86_disassembly_listing(decoded, bytes, 0xfedcba98u, reference, sizeof(reference), true);
-            result = listing_length == scalar_length && listing_length >= 0 && memcmp(text, reference, (uint64_t)listing_length + 1) == 0;
+            prefix = prefix || bytes[i] == prefixes[j];
+        }
+        mask |= (uint64_t)prefix << i;
+    }
+    return mask;
+}
+
+// The decoder's own contract, checked without a second decoder (#2924). Records tile the consumed bytes from the
+// start, and the stop is explained. Each record decodes alone to itself: a one-instruction slice takes
+// x86_decode_one, never the lanes of a batch. Its text is the same at every capacity that holds it (the planned
+// writer at a full buffer, the bounded writer at its exact length). The listing's address and byte columns are
+// the ones written here, and the record re-encodes to an instruction that decodes back to it. Bytes that stop the
+// decode decode alone to nothing, with the same status.
+static bool x86_decode_test_check(const uint8_t* bytes, uint32_t size, bool verbose)
+{
+    X86Decoded records[128];
+    memset(records, 0xa5, sizeof(records));
+    const X86DecodeResult result = x86_disassemble(bytes, size, records, BUSTER_ARRAY_LENGTH(records));
+    bool valid = result.count <= BUSTER_ARRAY_LENGTH(records);
+    valid = valid && (result.status == X86_DECODE_OK || result.status == X86_DECODE_UNSUPPORTED || result.status == X86_DECODE_TRUNCATED || result.status == X86_DECODE_OUTPUT_FULL);
+    uint64_t end = 0;
+    for (uint64_t i = 0; valid && i < result.count; i += 1)
+    {
+        valid = records[i].offset == end && records[i].length != 0 && records[i].length <= 15 && records[i].reserved == 0 && end + records[i].length <= size;
+        end += records[i].length;
+    }
+    valid = valid && end == result.consumed && (result.status != X86_DECODE_OK || result.consumed == size);
+    valid = valid && (result.status != X86_DECODE_OUTPUT_FULL || (result.count == BUSTER_ARRAY_LENGTH(records) && result.consumed < size));
+    // Nothing is written past the published records: the poisoned tail still equals its own first byte, 0xa5.
+    const uint8_t* tail = valid ? (const uint8_t*)&records[result.count] : 0;
+    const uint64_t tail_size = valid ? (BUSTER_ARRAY_LENGTH(records) - result.count) * sizeof(*records) : 0;
+    valid = valid && (tail_size == 0 || (tail[0] == 0xa5 && memcmp(tail, tail + 1, tail_size - 1) == 0));
+    const char* failure = valid ? 0 : "records don't tile the consumed bytes";
+    for (uint64_t i = 0; valid && i < result.count; i += 1)
+    {
+        const X86Decoded* decoded = &records[i];
+        X86Decoded alone[2];
+        memset(alone, 0x5a, sizeof(alone));
+        const X86DecodeResult single = x86_disassemble(bytes + decoded->offset, decoded->length, alone, BUSTER_ARRAY_LENGTH(alone));
+        valid = single.status == X86_DECODE_OK && single.count == 1 && single.consumed == decoded->length && alone[0].offset == 0 && alone[0].length == decoded->length &&
+                alone[0].address32 == decoded->address32 && memcmp(&alone[0].instruction, &decoded->instruction, sizeof(X86Instruction)) == 0;
+        failure = valid ? 0 : "a record decodes alone to another";
+        char text[512];
+        char exact[512];
+        const int64_t text_length = valid ? x86_disassembly_format(decoded, text, sizeof(text)) : -1;
+        valid = valid && text_length >= 0 && (uint64_t)text_length == strlen(text);
+        const int64_t exact_length = valid ? x86_disassembly_format(decoded, exact, (uint64_t)text_length + 1) : -1;
+        valid = valid && exact_length == text_length && memcmp(exact, text, (uint64_t)text_length + 1) == 0;
+        failure = valid || failure != 0 ? failure : "the text depends on the capacity";
+        if (valid)
+        {
+            // Eight address digits, two spaces, fifteen three-byte slots (two hex digits and a space, or three
+            // spaces past the instruction) and one more space.
+            static const char digits[] = "0123456789abcdef";
+            const uint32_t base = 0xfedcba98u;
+            const uint32_t address = base + decoded->offset;
+            char columns[56];
+            memset(columns, ' ', sizeof(columns));
+            for (uint32_t j = 0; j < 8; j += 1)
+            {
+                columns[j] = digits[(address >> (28 - 4 * j)) & 15];
+            }
+            for (uint32_t j = 0; j < decoded->length; j += 1)
+            {
+                columns[10 + 3 * j] = digits[bytes[decoded->offset + j] >> 4];
+                columns[11 + 3 * j] = digits[bytes[decoded->offset + j] & 15];
+            }
+            char listing[600];
+            const int64_t listing_length = x86_disassembly_listing(decoded, bytes, base, listing, sizeof(listing));
+            valid = listing_length == 56 + text_length && memcmp(listing, columns, 56) == 0 && memcmp(listing + 56, text, (uint64_t)text_length + 1) == 0;
+            failure = valid ? 0 : "the listing's columns or text differ";
         }
         uint8_t encoded[32];
         const X86EncoderMode mode = decoded->address32 ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64;
-        result = result && instruction_is_valid(&decoded->instruction, mode);
-        const uint32_t length = result ? encode_one(&decoded->instruction, encoded, mode) : 0;
+        valid = valid && instruction_is_valid(&decoded->instruction, mode);
+        const uint32_t length = valid ? encode_one(&decoded->instruction, encoded, mode) : 0;
         X86Decoded roundtrip[16];
         const X86DecodeResult again = x86_disassemble(encoded, length, roundtrip, BUSTER_ARRAY_LENGTH(roundtrip));
-        result = result && again.status == X86_DECODE_OK && again.count == 1 && memcmp(&decoded->instruction, &roundtrip[0].instruction, sizeof(X86Instruction)) == 0;
+        valid = valid && again.status == X86_DECODE_OK && again.count == 1 && memcmp(&decoded->instruction, &roundtrip[0].instruction, sizeof(X86Instruction)) == 0;
+        failure = valid || failure != 0 ? failure : "the record doesn't round-trip through the encoder";
     }
-    if (!result && verbose)
+    if (valid && (result.status == X86_DECODE_UNSUPPORTED || result.status == X86_DECODE_TRUNCATED))
     {
-        fprintf(stderr, "disassembler twins disagree: length=%u statuses=%u/%u/%u counts=%llu/%llu/%llu\n", size, a.status, b.status, c.status, (unsigned long long)a.count, (unsigned long long)b.count, (unsigned long long)c.count);
+        X86Decoded rest[4];
+        const X86DecodeResult stop = x86_disassemble(bytes + result.consumed, size - result.consumed, rest, BUSTER_ARRAY_LENGTH(rest));
+        valid = stop.status == result.status && stop.count == 0 && stop.consumed == 0;
+        failure = valid ? 0 : "the stopping bytes decode alone to another answer";
     }
-    return result;
+    if (!valid && verbose)
+    {
+        fprintf(stderr, "disassembler check failed (%s): length=%u status=%u count=%llu consumed=%llu bytes=", failure, size, result.status, (unsigned long long)result.count, (unsigned long long)result.consumed);
+        for (uint32_t i = 0; i < size && i < 64; i += 1)
+        {
+            fprintf(stderr, "%02x", bytes[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+    return valid;
+}
+
+// Every slice of a stream keeps the stream's records that end inside it, and a slice that ends on a record
+// boundary decodes to exactly those records: no record's decode depends on the bytes after it.
+static uint64_t x86_decode_test_prefixes(const uint8_t* bytes, uint32_t size, bool verbose)
+{
+    X86Decoded whole[128];
+    X86Decoded part[128];
+    const X86DecodeResult full = x86_disassemble(bytes, size, whole, BUSTER_ARRAY_LENGTH(whole));
+    uint64_t failures = 0;
+    uint64_t complete = 0;
+    for (uint32_t length = 0; length <= size; length += 1)
+    {
+        while (complete < full.count && whole[complete].offset + whole[complete].length <= length)
+        {
+            complete += 1;
+        }
+        const X86DecodeResult result = x86_disassemble(bytes, length, part, BUSTER_ARRAY_LENGTH(part));
+        const bool boundary = complete == 0 ? length == 0 : whole[complete - 1].offset + whole[complete - 1].length == length;
+        bool same = result.count >= complete && memcmp(part, whole, complete * sizeof(*part)) == 0;
+        same = same && (!boundary || (result.status == X86_DECODE_OK && result.count == complete && result.consumed == length));
+        if (!same && verbose)
+        {
+            fprintf(stderr, "disassembler slice %u of %u bytes lost the stream's records: %llu kept of %llu, status=%u\n", length, size, (unsigned long long)result.count, (unsigned long long)complete, result.status);
+        }
+        failures += !same;
+        failures += !x86_decode_test_check(bytes, length, verbose);
+    }
+    return failures;
+}
+
+// A supported encoding cut short is TRUNCATED, never UNSUPPORTED: the matcher leaves the missing bytes out of the
+// signatures it compares. A cut can first complete shorter instructions (9B DB E3's FWAIT).
+static uint64_t x86_decode_test_truncations(const uint8_t* bytes, uint32_t length, bool verbose)
+{
+    uint64_t failures = 0;
+    for (uint32_t cut = 0; cut < length; cut += 1)
+    {
+        X86Decoded records[16];
+        const X86DecodeResult result = x86_disassemble(bytes, cut, records, BUSTER_ARRAY_LENGTH(records));
+        const bool valid = result.status == X86_DECODE_TRUNCATED || (result.status == X86_DECODE_OK && result.consumed == cut);
+        if (!valid && verbose && failures == 0)
+        {
+            fprintf(stderr, "disassembler: %u of a %u-byte instruction's bytes decode with status %u, not truncated\n", cut, length, result.status);
+        }
+        failures += !valid;
+    }
+    return failures;
+}
+
+// Bytes the encoder produced decode to the instructions that produced them: the same boundaries, each record
+// re-encoding to its own bytes (alias-proof), and, where the record is the generated instruction itself, counted.
+static bool x86_decode_test_generated(const uint8_t* bytes, uint32_t size, const X86Instruction* instructions, const uint8_t* lengths, uint32_t count, X86EncoderMode mode, uint64_t* identical)
+{
+    X86Decoded records[64];
+    const X86DecodeResult result = count <= BUSTER_ARRAY_LENGTH(records) ? x86_disassemble(bytes, size, records, BUSTER_ARRAY_LENGTH(records)) : (X86DecodeResult){.status = X86_DECODE_BAD_ARGUMENT};
+    bool valid = result.status == X86_DECODE_OK && result.count == count && result.consumed == size;
+    uint32_t offset = 0;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        uint8_t encoded[32];
+        const uint32_t length = records[i].offset == offset && records[i].length == lengths[i] ? encode_one(&records[i].instruction, encoded, mode) : 0;
+        valid = length == lengths[i] && memcmp(encoded, bytes + offset, length) == 0;
+        *identical += valid && memcmp(&records[i].instruction, &instructions[i], sizeof(X86Instruction)) == 0;
+        offset += lengths[i];
+    }
+    return valid;
 }
 
 static uint64_t x86_decode_test_simple(uint64_t seed)
@@ -481,37 +646,39 @@ static uint64_t x86_decode_test_simple(uint64_t seed)
     const X86EncoderMode saved = x86_test_mode;
     x86_test_mode = X86_ENCODER_MODE_64;
     uint32_t streams = 0;
+    uint64_t identical = 0;
     for (uint32_t batch = 0; batch < 4096 && failures == 0; batch += 1)
     {
         uint8_t storage[32 * 15 + 64];
         uint8_t* bytes = storage + (batch & 63);
         uint32_t size = 0;
+        X86Instruction instructions[32];
+        uint8_t lengths[32];
         for (uint32_t i = 0; i < 32; i += 1)
         {
             const uint16_t row = forms[x86_random_below(&state, form_count)];
-            const X86Instruction instruction = x86_random_instruction(&state, row, false);
-            size += encode_one(&instruction, bytes + size, X86_ENCODER_MODE_64);
+            instructions[i] = x86_random_instruction(&state, row, false);
+            lengths[i] = (uint8_t)encode_one(&instructions[i], bytes + size, X86_ENCODER_MODE_64);
+            size += lengths[i];
         }
-        failures += !x86_decode_test_equal(bytes, size, true);
+        failures += !x86_decode_test_generated(bytes, size, instructions, lengths, 32, X86_ENCODER_MODE_64, &identical);
+        failures += !x86_decode_test_check(bytes, size, true);
         // The first 64 streams exercise every byte tail at every alignment. The rest vary one tail and four
         // mutations per stream, keeping dense eligible runs around varied bases, indices, high bytes and immediates.
         if (batch < 64)
         {
-            for (uint32_t length = 0; length < size; length += 1)
-            {
-                failures += !x86_decode_test_equal(bytes, length, true);
-            }
+            failures += x86_decode_test_prefixes(bytes, size, true);
         }
         else
         {
-            failures += !x86_decode_test_equal(bytes, x86_random_below(&state, size), true);
+            failures += !x86_decode_test_check(bytes, x86_random_below(&state, size), true);
         }
         for (uint32_t mutation = 0; mutation < 4; mutation += 1)
         {
             const uint32_t at = x86_random_below(&state, size);
             const uint8_t original = bytes[at];
             bytes[at] ^= (uint8_t)(1u << x86_random_below(&state, 8));
-            failures += !x86_decode_test_equal(bytes, size, true);
+            failures += !x86_decode_test_check(bytes, size, true);
             bytes[at] = original;
         }
         if (failures != 0)
@@ -521,7 +688,7 @@ static uint64_t x86_decode_test_simple(uint64_t seed)
         streams += 1;
     }
     x86_test_mode = saved;
-    printf("disassembler lane streams: %u streams of 32 instructions, %u forms, failures=%llu\n", streams, form_count, (unsigned long long)failures);
+    printf("disassembler lane streams: %u streams of 32 instructions, %u forms, %llu records the generated instruction itself, failures=%llu\n", streams, form_count, (unsigned long long)identical, (unsigned long long)failures);
     return failures;
 }
 
@@ -545,9 +712,11 @@ static uint64_t x86_decode_test_format_bounds(uint64_t* state)
                     uint8_t bytes[32];
                     const uint32_t size = encode_one(&instruction, bytes, x86_test_mode);
                     X86Decoded decoded[16] = {0};
-                    const X86DecodeResult result = x86_disassemble_scalar(bytes, size, decoded, BUSTER_ARRAY_LENGTH(decoded));
+                    const X86DecodeResult result = x86_disassemble(bytes, size, decoded, BUSTER_ARRAY_LENGTH(decoded));
+                    // The reference is the planned writer's text at a full buffer; smaller capacities that still hold it
+                    // take the bounded writer, which must write the same.
                     char reference[512];
-                    const int64_t length = result.status == X86_DECODE_OK && result.count == 1 ? x86_disassembly_format_scalar(decoded, reference, sizeof(reference)) : -1;
+                    const int64_t length = result.status == X86_DECODE_OK && result.count == 1 ? x86_disassembly_format(decoded, reference, sizeof(reference)) : -1;
                     const X86DisassemblyPlan* plan = &x86_disassembly_plans[x86_form_description(decoded[0].instruction.form) - x86_form_descriptions];
                     const uint32_t bound = plan->bound;
                     failures += length < 0 || bound == 0 || bound > sizeof(reference) || (uint64_t)length + 8 > bound;
@@ -555,13 +724,13 @@ static uint64_t x86_decode_test_format_bounds(uint64_t* state)
                     {
                         for (uint32_t style = 0; style < 2; style += 1)
                         {
-                            const int64_t expected_length = style == 0 ? length : x86_disassembly_listing(decoded, bytes, 0xfedcba98u, reference, sizeof(reference), true);
+                            const int64_t expected_length = style == 0 ? length : x86_disassembly_listing(decoded, bytes, 0xfedcba98u, reference, sizeof(reference));
                             failures += expected_length < 0;
                             for (uint32_t capacity = 0; capacity <= bound + 8 + style * 56; capacity += 1)
                             {
                                 char* output = (char*)mapping + 2 * page - capacity;
                                 output[-1] = (char)0xa5;
-                                const int64_t actual = style == 0 ? x86_disassembly_format(decoded, output, capacity) : x86_disassembly_listing(decoded, bytes, 0xfedcba98u, output, capacity, false);
+                                const int64_t actual = style == 0 ? x86_disassembly_format(decoded, output, capacity) : x86_disassembly_listing(decoded, bytes, 0xfedcba98u, output, capacity);
                                 const bool same = capacity <= (uint64_t)expected_length ? actual == -1 : actual == expected_length && memcmp(output, reference, (uint64_t)expected_length + 1) == 0;
                                 failures += !same || (uint8_t)output[-1] != 0xa5;
                                 checked += 1;
@@ -642,7 +811,7 @@ static uint64_t x86_decode_test_cli(void)
         {
             valid = fclose(input) == 0 && valid;
         }
-        const X86DecodeResult result = x86_disassemble_scalar(bytes, size, decoded, sizeof(bytes));
+        const X86DecodeResult result = x86_disassemble(bytes, size, decoded, sizeof(bytes));
         valid = valid && result.status == X86_DECODE_OK && result.consumed == size;
         for (uint32_t assembly = 0; valid && assembly < 2; assembly += 1)
         {
@@ -654,7 +823,7 @@ static uint64_t x86_decode_test_cli(void)
             }
             for (uint32_t i = 0; valid && i < result.count; i += 1)
             {
-                // Retain the original scalar command's formatting as an independent whole-file reference.
+                // The listing's address and byte columns are written here, independently of the command's.
                 if (!assembly)
                 {
                     valid = fprintf(reference, "%08x  ", decoded[i].offset) >= 0;
@@ -665,7 +834,7 @@ static uint64_t x86_decode_test_cli(void)
                     valid = fprintf(reference, " ") >= 0 && valid;
                 }
                 char text[512];
-                valid = x86_disassembly_format_scalar(decoded + i, text, sizeof(text)) >= 0 && valid;
+                valid = x86_disassembly_format(decoded + i, text, sizeof(text)) >= 0 && valid;
                 if (valid)
                 {
                     valid = fprintf(reference, "%s\n", text) >= 0;
@@ -675,17 +844,13 @@ static uint64_t x86_decode_test_cli(void)
             {
                 valid = fclose(reference) == 0 && valid;
             }
-            for (uint32_t scalar = 0; valid && scalar < 2; scalar += 1)
+            if (valid)
             {
-                char* arguments[6] = {"/proc/self/exe", "disassemble"};
+                char* arguments[5] = {"/proc/self/exe", "disassemble"};
                 uint32_t count = 2;
                 if (assembly)
                 {
                     arguments[count++] = "--assembly";
-                }
-                if (scalar)
-                {
-                    arguments[count++] = "--scalar";
                 }
                 arguments[count] = binary;
                 const bool same = x86_decode_test_process(arguments, actual) && x86_decode_test_same_file(expected, actual);
@@ -782,7 +947,7 @@ static uint64_t x86_decode_test_fixtures(void)
             {
                 fprintf(stderr, "independent fixture %u failed, status=%u count=%llu\n", i, result.status, (unsigned long long)result.count);
             }
-            failures += !x86_decode_test_equal(storage + alignment, fixtures[i].length, true);
+            failures += !x86_decode_test_check(storage + alignment, fixtures[i].length, true);
             if (valid)
             {
                 char formatted[512];
@@ -855,7 +1020,7 @@ static uint64_t x86_decode_test_fixtures(void)
     const X86DecodeResult wait_result = x86_disassemble(waits, sizeof(waits), waiting, BUSTER_ARRAY_LENGTH(waiting));
     failures += wait_result.status != X86_DECODE_OK || wait_result.count != 2 || wait_result.consumed != sizeof(waits) ||
                 waiting[0].length != 1 || waiting[0].instruction.form != X86_FORM_FWAIT || waiting[1].length != 3 || waiting[1].instruction.form != X86_FORM_FINIT;
-    failures += !x86_decode_test_equal(waits, sizeof(waits), true);
+    failures += !x86_decode_test_check(waits, sizeof(waits), true);
     memset(nops, 0x90, sizeof(nops));
     const long page = sysconf(_SC_PAGESIZE);
     uint8_t* mapping = mmap(0, (uint64_t)page * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -868,8 +1033,6 @@ static uint64_t x86_decode_test_fixtures(void)
             X86Decoded* output = (X86Decoded*)(mapping + 2 * page - capacity * sizeof(X86Decoded));
             const X86DecodeResult result = x86_disassemble(nops, sizeof(nops), output, capacity);
             failures += result.count != capacity || result.consumed != capacity || result.status != (capacity == 128 ? X86_DECODE_OK : X86_DECODE_OUTPUT_FULL);
-            const X86DecodeResult batched = x86_disassemble_batched(nops, sizeof(nops), output, capacity);
-            failures += batched.count != result.count || batched.consumed != result.consumed || batched.status != result.status;
         }
         static const uint8_t pattern[] = {0x48, 0x8b, 0x44, 0x24, 8, 0x48, 0x83, 0xe8, 3, 0x75, 0xf5, 0x41, 0x54};
         uint8_t stream[sizeof(pattern) * 8];
@@ -877,19 +1040,22 @@ static uint64_t x86_decode_test_fixtures(void)
         {
             stream[i] = pattern[i % sizeof(pattern)];
         }
+        X86Decoded whole[64];
+        const X86DecodeResult full = x86_disassemble(stream, sizeof(stream), whole, BUSTER_ARRAY_LENGTH(whole));
+        failures += full.status != X86_DECODE_OK || full.count != 32 || full.consumed != sizeof(stream);
         for (uint32_t capacity = 0; capacity <= 32; capacity += 1)
         {
-            X86Decoded reference[32];
             X86Decoded* output = (X86Decoded*)(mapping + 2 * page - capacity * sizeof(X86Decoded));
-            const X86DecodeResult expected = x86_disassemble_scalar(stream, sizeof(stream), reference, capacity);
-            const X86DecodeResult actual = x86_disassemble_batched(stream, sizeof(stream), output, capacity);
-            failures += actual.status != expected.status || actual.count != expected.count || actual.consumed != expected.consumed ||
-                        memcmp(reference, output, expected.count * sizeof(*output)) != 0;
+            const X86DecodeResult actual = x86_disassemble(stream, sizeof(stream), output, capacity);
+            // A smaller capacity keeps the first records of the whole stream's decode and stops where they end.
+            const uint64_t kept = capacity < full.count ? capacity : full.count;
+            failures += actual.count != kept || actual.status != (kept < full.count ? X86_DECODE_OUTPUT_FULL : X86_DECODE_OK) ||
+                        actual.consumed != (kept == 0 ? 0 : whole[kept - 1].offset + whole[kept - 1].length) || memcmp(whole, output, kept * sizeof(*output)) != 0;
         }
         for (uint32_t length = 0; length <= sizeof(stream); length += 1)
         {
             memcpy(mapping + 2 * page - length, stream, length);
-            failures += !x86_decode_test_equal(mapping + 2 * page - length, length, true);
+            failures += !x86_decode_test_check(mapping + 2 * page - length, length, true);
         }
         munmap(mapping, (uint64_t)page * 3);
     }
@@ -993,17 +1159,32 @@ static int run_x86_disassembler_tests(int argc, char** argv)
         failures += x86_decode_test_fixtures();
         failures += x86_decode_test_simple(seed);
         failures += x86_decode_test_format_bounds(&state);
+        failures += x86_decode_test_index(&state);
         failures += x86_decode_test_cli();
         uint8_t bytes[128];
+        uint64_t classified = 0;
         for (uint32_t byte = 0; byte < 256; byte += 1)
         {
             memset(bytes, byte, sizeof(bytes));
             for (uint32_t length = 0; length <= 64; length += 1)
             {
-                failures += x86_decode_classify(bytes, length) != x86_decode_classify_scalar(bytes, length);
+                failures += x86_decode_classify(bytes, length) != x86_decode_test_prefix_mask(bytes, length);
+                classified += 1;
             }
         }
+        for (uint32_t sample = 0; sample < 4096; sample += 1)
+        {
+            for (uint32_t i = 0; i < 64; i += 1)
+            {
+                bytes[i] = (uint8_t)x86_test_random(&state);
+            }
+            const uint32_t length = x86_random_below(&state, 65);
+            failures += x86_decode_classify(bytes, length) != x86_decode_test_prefix_mask(bytes, length);
+            classified += 1;
+        }
+        printf("disassembler prefix classifier: %llu windows against the prefix table, failures=%llu\n", (unsigned long long)classified, (unsigned long long)failures);
         uint64_t forms = 0;
+        uint64_t identical = 0;
         uint8_t stream[128];
         uint32_t stream_length = 0;
         for (uint32_t address32 = 0; address32 < 2; address32 += 1)
@@ -1017,7 +1198,10 @@ static int run_x86_disassembler_tests(int argc, char** argv)
                     const uint32_t length = encode_one(&instruction, bytes, x86_test_mode);
                     X86Decoded decoded[16];
                     const X86DecodeResult result = x86_disassemble(bytes, length, decoded, BUSTER_ARRAY_LENGTH(decoded));
-                    const bool valid = result.status == X86_DECODE_OK && result.count == 1 && result.consumed == length && x86_decode_test_equal(bytes, length, true);
+                    const uint8_t encoded_length = (uint8_t)length;
+                    bool valid = result.status == X86_DECODE_OK && result.count == 1 && result.consumed == length && x86_decode_test_check(bytes, length, true);
+                    valid = x86_decode_test_generated(bytes, length, &instruction, &encoded_length, 1, x86_test_mode, &identical) && valid;
+                    valid = x86_decode_test_truncations(bytes, length, failures < 30) == 0 && valid;
                     if (!valid && failures < 30)
                     {
                         fprintf(stderr, "form=%u %s address32=%u length=%u status=%u count=%llu bytes=", row, x86_form_descriptions[row].mnemonic, address32, length, result.status, (unsigned long long)result.count);
@@ -1033,7 +1217,8 @@ static int run_x86_disassembler_tests(int argc, char** argv)
                 }
             }
         }
-        printf("disassembler catalogue: %llu instances, failures=%llu\n", (unsigned long long)forms, (unsigned long long)failures);
+        printf("disassembler catalogue: %llu instances, %llu records the generated instruction itself, failures=%llu\n", (unsigned long long)forms, (unsigned long long)identical, (unsigned long long)failures);
+        identical = 0;
         for (uint64_t n = 0; n < count; n += 1)
         {
             x86_test_mode = (n & 1) ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64;
@@ -1046,7 +1231,10 @@ static int run_x86_disassembler_tests(int argc, char** argv)
             const uint32_t length = encode_one(&instruction, bytes, x86_test_mode);
             X86Decoded decoded[16];
             const X86DecodeResult result = x86_disassemble(bytes, length, decoded, BUSTER_ARRAY_LENGTH(decoded));
-            const bool valid = result.status == X86_DECODE_OK && result.count == 1 && result.consumed == length && x86_decode_test_equal(bytes, length, true);
+            const uint8_t encoded_length = (uint8_t)length;
+            bool valid = result.status == X86_DECODE_OK && result.count == 1 && result.consumed == length;
+            valid = x86_decode_test_generated(bytes, length, &instruction, &encoded_length, 1, x86_test_mode, &identical) && valid;
+            valid = x86_decode_test_truncations(bytes, length, failures < 30) == 0 && valid;
             if (!valid && failures < 30)
             {
                 fprintf(stderr, "random form=%u %s mode=%u length=%u status=%u count=%llu bytes=", form, x86_form_descriptions[form].mnemonic, x86_test_mode, length, result.status, (unsigned long long)result.count);
@@ -1060,19 +1248,20 @@ static int run_x86_disassembler_tests(int argc, char** argv)
             checked += 1;
             if (stream_length + length > sizeof(stream))
             {
-                failures += !x86_decode_test_equal(stream, stream_length, true);
+                failures += !x86_decode_test_check(stream, stream_length, true);
                 stream_length = 0;
             }
             memcpy(stream + stream_length, bytes, length);
             stream_length += length;
+            // Every slice of the instruction, the instruction itself included, keeps the decoder's contract.
+            failures += x86_decode_test_prefixes(bytes, length, failures < 30);
             for (uint32_t i = 0; i < length; i += 1)
             {
-                failures += !x86_decode_test_equal(bytes, i, false);
                 // Mutate each existing byte so prefix, opcode, ModRM/SIB and immediate fields reach meaningful
                 // candidate validation, unlike random streams which often stop at their first unsupported opcode.
                 const uint8_t original = bytes[i];
                 bytes[i] ^= (uint8_t)(1u << (n & 7));
-                failures += !x86_decode_test_equal(bytes, length, false);
+                failures += !x86_decode_test_check(bytes, length, false);
                 bytes[i] = original;
             }
             const uint32_t random_size = x86_random_below(&state, 128);
@@ -1080,7 +1269,7 @@ static int run_x86_disassembler_tests(int argc, char** argv)
             {
                 bytes[i] = (uint8_t)x86_test_random(&state);
             }
-            failures += !x86_decode_test_equal(bytes, random_size, true);
+            failures += !x86_decode_test_check(bytes, random_size, true);
         }
         const long page = sysconf(_SC_PAGESIZE);
         uint8_t* mapping = mmap(0, (uint64_t)page * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1097,9 +1286,9 @@ static int run_x86_disassembler_tests(int argc, char** argv)
                     {
                         source[i] = (uint8_t)x86_test_random(&state);
                     }
-                    failures += !x86_decode_test_equal(source, length, true);
+                    failures += !x86_decode_test_check(source, length, true);
                     memset(source, 0x90, length);
-                    failures += !x86_decode_test_equal(source, length, true);
+                    failures += !x86_decode_test_check(source, length, true);
                 }
             }
             munmap(mapping, (uint64_t)page * 3);
@@ -1114,7 +1303,7 @@ static int run_x86_disassembler_tests(int argc, char** argv)
         {
             failures += !x86_decode_test_objdump(&state, 0, raw, false);
         }
-        printf("disassembler: checked=%llu random-bytes=%llu guarded=516 failures=%llu\n", (unsigned long long)checked, (unsigned long long)count, (unsigned long long)failures);
+        printf("disassembler: checked=%llu random-bytes=%llu generated records the instruction itself=%llu guarded=516 failures=%llu\n", (unsigned long long)checked, (unsigned long long)count, (unsigned long long)identical, (unsigned long long)failures);
     }
     else
     {

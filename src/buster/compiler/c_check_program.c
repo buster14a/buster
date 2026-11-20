@@ -4486,9 +4486,9 @@ __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram*
     {
         late = pragmas->records[i].after_use;
     }
-    if (valid && (events->count != 0 || late))
     // A late weak declaration's emission walk reads the callee keys too (#1849).
     late |= events->callee_count != 0 && program->weak_late_count != 0;
+    if (valid && (events->count != 0 || late))
     {
         uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, total);
         uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, total);

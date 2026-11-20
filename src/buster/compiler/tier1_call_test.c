@@ -833,12 +833,10 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     uint32_t* offsets = calloc((uint64_t)code->count + 1, sizeof(uint32_t));
     uint32_t* ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint32_t* twin_ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint8_t* twin = malloc(capacity);
     // Narrow fixtures put helper TEXT before the caller; wide fixtures put it after. Both rel32 signs execute.
     const uint32_t entry_offset = fixture->width == 4 ? 16u << 10 : 64;
     uint8_t* entry = mapping + entry_offset;
-    bool ready = offsets && ends && twin_ends && twin && capacity + entry_offset <= BUSTER_TIER1_CALL_CODE_BYTES;
+    bool ready = offsets && ends && capacity + entry_offset <= BUSTER_TIER1_CALL_CODE_BYTES;
     tier1_emit_test_expect(test, ready, "direct-call loader storage");
     int64_t length = -1;
     if (ready)
@@ -850,10 +848,9 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
     }
     if (ready)
     {
-        length = x86_encode(code->records, code->count, entry, capacity, 0, ends);
-        const int64_t twin_length = x86_encode_scalar(code->records, code->count, twin, capacity, offsets, twin_ends);
-        ready = length > 0 && length == twin_length && memcmp(entry, twin, (size_t)length) == 0 && memcmp(ends, twin_ends, emitted->reference_count * sizeof(uint32_t)) == 0;
-        tier1_emit_test_expect(test, ready, "call encoders agree on bytes and symbolic instruction ends");
+        length = x86_encode(code->records, code->count, entry, capacity, offsets, ends);
+        ready = length > 0;
+        tier1_emit_test_expect(test, ready, "the direct-call code encodes");
     }
     uint32_t targets[BUSTER_TIER1_CALL_HELPERS] = {0};
     uint32_t used = fixture->width == 4 ? 64 : ready ? (entry_offset + (uint32_t)length + 15) & ~15u : 0;
@@ -923,8 +920,6 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
         ready = mprotect(mapping, BUSTER_TIER1_CALL_CODE_BYTES, PROT_READ | PROT_EXEC) == 0;
         tier1_emit_test_expect(test, ready, "patched direct-call image is executable");
     }
-    free(twin);
-    free(twin_ends);
     free(ends);
     free(offsets);
     return ready && native ? entry : 0;
@@ -1221,7 +1216,7 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
         .leave = fixture->dominance_leave,
         .block_count = fixture->function.block_count,
     };
-    const Tier1SelectError selected = tier1_select_plan(&fixture->function, fixture->dominated ? &dominance : 0, &test->output, &test->scratch, vector, &plan, &node);
+    const Tier1SelectError selected = tier1_select_plan(&fixture->function, fixture->dominated ? &dominance : 0, &test->output, &test->scratch, &plan, &node);
     tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "original direct-call IR selects");
     if (selected != TIER1_SELECT_OK && test->failures < 20)
     {
@@ -1415,7 +1410,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
     };
     Tier1SelectPlan plan;
     uint32_t node;
-    bool ready = tier1_call_fixture(test, &fixture) && tier1_select_plan(&fixture.function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+    bool ready = tier1_call_fixture(test, &fixture) && tier1_select_plan(&fixture.function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, ready, "transactional direct-call fixture selects");
     if (ready)
     {
@@ -1496,7 +1491,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
             function.calls[0].variadic = failure == 1;
             tier1_emit_test_node(&function, 1, failure == 2 ? IR_CALL_INDIRECT : IR_CALL, result, failure == 2 ? 0 : 1, 0);
             tier1_emit_test_node(&function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE);
-            ready = ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+            ready = ir_verify(&function, &test->scratch, 0).error == IR_OK;
             tier1_emit_test_expect(test, ready, "unsupported-call fixture is valid semantic IR");
         }
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
@@ -1507,7 +1502,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
             memcpy(&before, &rejected, sizeof(rejected));
             const uint64_t mark = test->output.length;
             const uint64_t scratch_mark = test->scratch.length;
-            const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &rejected, &node);
+            const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, &rejected, &node);
             tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "too many arguments and wide or floating results explicitly refuse");
             tier1_emit_test_expect(test, test->output.length == mark && test->scratch.length == scratch_mark && memcmp(&before, &rejected, sizeof(rejected)) == 0, "unsupported-call selection is transactional");
         }

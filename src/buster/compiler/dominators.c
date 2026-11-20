@@ -3,7 +3,9 @@
 //
 // Entry-rooted dominators, frontiers and natural loops for a borrowed CSR CFG. Include after lane.c.
 // dominators_analyze validates both CSR views, computes reachable reverse postorder and DFS preorder, solves by
-// AVX-512 set intersection or scalar SEMI-NCA, then builds the tree and the requested frontier/loop sets.
+// SEMI-NCA, then builds the tree and the requested frontier/loop sets. SEMI-NCA and the loop-body walk are scalar:
+// on the 9700X they beat the AVX-512 bit-matrix solver and loop-body sweep they replaced at every measured size
+// (#1352, #2924; docs/dominators.md, "Why it is scalar").
 // All input-dependent walks use explicit stacks. No source or implementation from another compiler is copied.
 //
 // The caller owns the input arrays throughout the call; each offsets array has block_count + 1 u32 elements,
@@ -14,13 +16,12 @@
 // Matrices have 64-byte-aligned rows of row_words u64s, padded to 512 bits, with zero inactive bits. Every load
 // stays inside its allocated row. Recompute after any CFG mutation. See docs/dominators.md for the stage contract.
 //
-// Layout: dominators_validate; dominators_order; dominators_scalar/vector; dominators_tree/frontiers;
-// dominators_components; dominators_loops; dominators_analyze; the consumer query helpers.
+// Layout: dominators_validate; dominators_order; dominators_semi_nca; dominators_tree/frontiers;
+// dominators_components; dominators_loop_body/loops; dominators_analyze; the consumer query helpers.
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include "host_isa.h"
 
 #define BUSTER_DOMINATOR_NONE UINT32_MAX
 #define BUSTER_DOMINATOR_VECTOR_WORDS 8
@@ -38,13 +39,6 @@ typedef enum DominatorStatus
     DOMINATOR_MATRIX_LIMIT,
 } DominatorStatus;
 
-typedef enum DominatorPath
-{
-    DOMINATOR_AUTO,
-    DOMINATOR_VECTOR,
-    DOMINATOR_SCALAR,
-} DominatorPath;
-
 typedef struct DominatorCfg DominatorCfg;
 struct DominatorCfg
 {
@@ -60,9 +54,8 @@ struct DominatorCfg
 typedef struct DominatorOptions DominatorOptions;
 struct DominatorOptions
 {
-    DominatorPath path;
     uint32_t outputs;
-    // Peak bytes of simultaneously live bitset matrices, including temporary predecessor rows. Zero permits none.
+    // Peak bytes of simultaneously live bitset matrices: the frontiers and the loop bodies. Zero permits none.
     uint64_t max_matrix_bytes;
 };
 
@@ -75,12 +68,9 @@ struct Dominators
     uint32_t loop_count;
     uint32_t outputs;
     uint64_t row_words;
-    uint64_t iterations;
     uint64_t matrix_peak_bytes;
     uint64_t output_bytes;
     uint64_t scratch_peak_bytes;
-    DominatorPath path;
-    DominatorPath loop_path;
     uint32_t* idom;
     uint32_t* rpo;
     uint32_t* rpo_index;
@@ -126,7 +116,6 @@ static __attribute__((unused)) bool dominators_loop_contains(const Dominators* d
 static DominatorOptions dominators_options(void)
 {
     const DominatorOptions result = {
-        .path = DOMINATOR_AUTO,
         .outputs = BUSTER_DOMINATOR_FRONTIERS | BUSTER_DOMINATOR_LOOPS,
         .max_matrix_bytes = BUSTER_DOMINATOR_DEFAULT_MATRIX_BYTES,
     };
@@ -335,7 +324,7 @@ static uint32_t dominators_evaluate(DominatorLink* links, uint32_t* stack, uint3
 // vertices, then each idom is the nearest common dominator-tree ancestor of its DFS parent and semidominator, by a
 // walk up the finished tree that is short unless a deep block has many DFS children dominated from far above it.
 // One pass; parents is overwritten by the idom numbers.
-static void dominators_scalar(const DominatorCfg* cfg, Dominators* result, const uint32_t* dfs_begin, const uint32_t* vertices, uint32_t* parents, uint32_t* semi, DominatorLink* links, uint32_t* stack)
+static void dominators_semi_nca(const DominatorCfg* cfg, Dominators* result, const uint32_t* dfs_begin, const uint32_t* vertices, uint32_t* parents, uint32_t* semi, DominatorLink* links, uint32_t* stack)
 {
     const uint32_t reachable = result->reachable_count;
     for (uint32_t number = 0; number < reachable; number += 1)
@@ -373,7 +362,6 @@ static void dominators_scalar(const DominatorCfg* cfg, Dominators* result, const
         parents[number] = candidate;
         result->idom[vertices[number]] = vertices[candidate];
     }
-    result->iterations += 1;
 }
 
 static bool dominators_bit(const uint64_t* row, uint32_t bit)
@@ -384,86 +372,6 @@ static bool dominators_bit(const uint64_t* row, uint32_t bit)
 static void dominators_set(uint64_t* row, uint32_t bit)
 {
     row[bit / 64] |= UINT64_C(1) << (bit % 64);
-}
-
-static void dominators_vector(const DominatorCfg* cfg, Dominators* result, uint64_t* sets, uint64_t* reachable, uint32_t* sizes)
-{
-    const uint64_t words = result->row_words;
-    const uint64_t bytes = words * sizeof(uint64_t);
-    memset(sets, 0, (uint64_t)cfg->block_count * bytes);
-    memset(reachable, 0, bytes);
-    for (uint32_t order = 0; order < result->reachable_count; order += 1)
-    {
-        dominators_set(reachable, result->rpo[order]);
-    }
-    for (uint32_t order = 1; order < result->reachable_count; order += 1)
-    {
-        memcpy(sets + (uint64_t)result->rpo[order] * words, reachable, bytes);
-    }
-    dominators_set(sets + (uint64_t)cfg->entry * words, cfg->entry);
-    bool changed;
-    do
-    {
-        changed = false;
-        result->iterations += 1;
-        for (uint32_t order = 1; order < result->reachable_count; order += 1)
-        {
-            const uint32_t block = result->rpo[order];
-            uint64_t* row = sets + (uint64_t)block * words;
-            for (uint64_t word = 0; word < words; word += BUSTER_DOMINATOR_VECTOR_WORDS)
-            {
-                __m512i value = _mm512_load_si512(reachable + word);
-                for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
-                {
-                    const uint32_t source = cfg->predecessors[edge];
-                    if (result->rpo_index[source] != BUSTER_DOMINATOR_NONE)
-                    {
-                        value = _mm512_and_si512(value, _mm512_load_si512(sets + (uint64_t)source * words + word));
-                    }
-                }
-                const __m512i lane = _mm512_setr_epi64(word, word + 1, word + 2, word + 3, word + 4, word + 5, word + 6, word + 7);
-                const __mmask8 own_word = _mm512_cmpeq_epi64_mask(lane, _mm512_set1_epi64(block / 64));
-                const __m512i own_bit = _mm512_maskz_set1_epi64(own_word, UINT64_C(1) << (block % 64));
-                value = _mm512_or_si512(value, own_bit);
-                const __m512i difference = _mm512_xor_si512(value, _mm512_load_si512(row + word));
-                changed = (_mm512_test_epi64_mask(difference, difference) != 0) || changed;
-                _mm512_store_si512(row + word, value);
-            }
-        }
-    } while (changed);
-    memset(result->idom, 0xff, (uint64_t)cfg->block_count * sizeof(uint32_t));
-    memset(sizes, 0, (uint64_t)cfg->block_count * sizeof(uint32_t));
-    for (uint32_t order = 0; order < result->reachable_count; order += 1)
-    {
-        const uint32_t block = result->rpo[order];
-        __m512i sums = _mm512_setzero_si512();
-        for (uint64_t word = 0; word < words; word += BUSTER_DOMINATOR_VECTOR_WORDS)
-        {
-            sums = _mm512_add_epi64(sums, _mm512_popcnt_epi64(_mm512_load_si512(sets + (uint64_t)block * words + word)));
-        }
-        sizes[block] = (uint32_t)_mm512_reduce_add_epi64(sums);
-    }
-    result->idom[cfg->entry] = cfg->entry;
-    for (uint32_t order = 1; order < result->reachable_count; order += 1)
-    {
-        const uint32_t block = result->rpo[order];
-        const uint64_t* row = sets + (uint64_t)block * words;
-        uint32_t largest = 0;
-        for (uint64_t word = 0; word < words; word += 1)
-        {
-            uint64_t bits = row[word];
-            while (bits != 0)
-            {
-                const uint32_t candidate = (uint32_t)(word * 64 + __builtin_ctzll(bits));
-                bits &= bits - 1;
-                if (candidate != block && sizes[candidate] > largest)
-                {
-                    largest = sizes[candidate];
-                    result->idom[block] = candidate;
-                }
-            }
-        }
-    }
 }
 
 static void dominators_tree(Dominators* result, DominatorFrame* stack, uint32_t* cursors)
@@ -610,7 +518,8 @@ static void dominators_components(const DominatorCfg* cfg, Dominators* result, u
     }
 }
 
-static void dominators_loop_scalar(const DominatorCfg* cfg, const Dominators* result, uint32_t header, uint64_t* body, uint32_t* stack)
+// The natural loop of header: header, and every reachable block that reaches one of its latches without passing it.
+static void dominators_loop_body(const DominatorCfg* cfg, const Dominators* result, uint32_t header, uint64_t* body, uint32_t* stack)
 {
     dominators_set(body, header);
     uint64_t depth = 0;
@@ -639,51 +548,6 @@ static void dominators_loop_scalar(const DominatorCfg* cfg, const Dominators* re
             }
         }
     }
-}
-
-static void dominators_loop_vector(const DominatorCfg* cfg, const Dominators* result, uint32_t header, uint64_t* body, const uint64_t* predecessors, uint64_t* frontier, uint64_t* next)
-{
-    const uint64_t words = result->row_words;
-    const uint64_t bytes = words * sizeof(uint64_t);
-    memset(frontier, 0, bytes);
-    dominators_set(body, header);
-    for (uint32_t edge = cfg->predecessor_offsets[header]; edge < cfg->predecessor_offsets[(uint64_t)header + 1]; edge += 1)
-    {
-        const uint32_t latch = cfg->predecessors[edge];
-        if (latch != header && dominators_dominates(result, header, latch))
-        {
-            dominators_set(body, latch);
-            dominators_set(frontier, latch);
-        }
-    }
-    bool changed;
-    do
-    {
-        memset(next, 0, bytes);
-        for (uint64_t word = 0; word < words; word += 1)
-        {
-            uint64_t bits = frontier[word];
-            while (bits != 0)
-            {
-                const uint32_t block = (uint32_t)(word * 64 + __builtin_ctzll(bits));
-                bits &= bits - 1;
-                const uint64_t* row = predecessors + (uint64_t)block * words;
-                for (uint64_t w = 0; w < words; w += BUSTER_DOMINATOR_VECTOR_WORDS)
-                {
-                    _mm512_store_si512(next + w, _mm512_or_si512(_mm512_load_si512(next + w), _mm512_load_si512(row + w)));
-                }
-            }
-        }
-        changed = false;
-        for (uint64_t word = 0; word < words; word += BUSTER_DOMINATOR_VECTOR_WORDS)
-        {
-            const __m512i old = _mm512_load_si512(body + word);
-            const __m512i added = _mm512_andnot_si512(old, _mm512_load_si512(next + word));
-            changed = (_mm512_test_epi64_mask(added, added) != 0) || changed;
-            _mm512_store_si512(frontier + word, added);
-            _mm512_store_si512(body + word, _mm512_or_si512(old, added));
-        }
-    } while (changed);
 }
 
 static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const DominatorCfg* cfg, DominatorOptions options, Dominators* result, uint32_t* workspace, const uint32_t* dfs_begin, const uint32_t* dfs_end, uint64_t scratch_start)
@@ -729,59 +593,16 @@ static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const Domi
     {
         result->matrix_peak_bytes = kept_bytes;
     }
-    uint64_t* predecessor_rows = 0;
-    uint64_t* frontier = 0;
-    uint64_t* next = 0;
     if (status == DOMINATOR_OK && result->loop_count != 0)
     {
-        const uint64_t vector_bytes = kept_bytes + matrix_bytes + 2 * row_bytes;
-        result->loop_path = options.path == DOMINATOR_SCALAR || vector_bytes > options.max_matrix_bytes ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-        if (options.path == DOMINATOR_VECTOR && result->loop_path != DOMINATOR_VECTOR)
+        result->loop_header = arena_push_array(arena, result->loop_count, sizeof(uint32_t), _Alignof(uint32_t));
+        result->loop_parent = arena_push_array(arena, result->loop_count, sizeof(uint32_t), _Alignof(uint32_t));
+        result->loop_size = arena_push_array(arena, result->loop_count, sizeof(uint32_t), _Alignof(uint32_t));
+        result->loop_irreducible = arena_push_array(arena, result->loop_count, sizeof(uint8_t), _Alignof(uint8_t));
+        result->loop_bodies = arena_push(arena, body_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);
+        if (result->loop_header == 0 || result->loop_parent == 0 || result->loop_size == 0 || result->loop_irreducible == 0 || result->loop_bodies == 0)
         {
-            status = DOMINATOR_MATRIX_LIMIT;
-        }
-        if (status == DOMINATOR_OK)
-        {
-            result->loop_header = arena_push_array(arena, result->loop_count, sizeof(uint32_t), _Alignof(uint32_t));
-            result->loop_parent = arena_push_array(arena, result->loop_count, sizeof(uint32_t), _Alignof(uint32_t));
-            result->loop_size = arena_push_array(arena, result->loop_count, sizeof(uint32_t), _Alignof(uint32_t));
-            result->loop_irreducible = arena_push_array(arena, result->loop_count, sizeof(uint8_t), _Alignof(uint8_t));
-            result->loop_bodies = arena_push(arena, body_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);
-            if (result->loop_header == 0 || result->loop_parent == 0 || result->loop_size == 0 || result->loop_irreducible == 0 || result->loop_bodies == 0)
-            {
-                status = DOMINATOR_NO_MEMORY;
-            }
-        }
-        if (status == DOMINATOR_OK && result->loop_path == DOMINATOR_VECTOR)
-        {
-            predecessor_rows = arena_push(scratch, matrix_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);
-            frontier = arena_push(scratch, row_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);
-            next = arena_push(scratch, row_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);
-            if (predecessor_rows == 0 || frontier == 0 || next == 0)
-            {
-                status = DOMINATOR_NO_MEMORY;
-            }
-            else
-            {
-                if (vector_bytes > result->matrix_peak_bytes)
-                {
-                    result->matrix_peak_bytes = vector_bytes;
-                }
-                memset(predecessor_rows, 0, matrix_bytes);
-                for (uint32_t order = 0; order < result->reachable_count; order += 1)
-                {
-                    const uint32_t block = result->rpo[order];
-                    uint64_t* row = predecessor_rows + (uint64_t)block * result->row_words;
-                    for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
-                    {
-                        const uint32_t source = cfg->predecessors[edge];
-                        if (result->rpo_index[source] != BUSTER_DOMINATOR_NONE)
-                        {
-                            dominators_set(row, source);
-                        }
-                    }
-                }
-            }
+            status = DOMINATOR_NO_MEMORY;
         }
         if (status == DOMINATOR_OK)
         {
@@ -793,14 +614,7 @@ static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const Domi
                 {
                     result->loop_header[loop] = header;
                     uint64_t* body = result->loop_bodies + (uint64_t)loop * result->row_words;
-                    if (result->loop_path == DOMINATOR_VECTOR)
-                    {
-                        dominators_loop_vector(cfg, result, header, body, predecessor_rows, frontier, next);
-                    }
-                    else
-                    {
-                        dominators_loop_scalar(cfg, result, header, body, stack);
-                    }
+                    dominators_loop_body(cfg, result, header, body, stack);
                     uint32_t size = 0;
                     uint8_t irreducible = 0;
                     for (uint64_t word = 0; word < result->row_words; word += 1)
@@ -870,13 +684,11 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             .entry = cfg->entry,
             .outputs = options.outputs,
             .row_words = ((uint64_t)cfg->block_count + BUSTER_DOMINATOR_VECTOR_BITS - 1) / BUSTER_DOMINATOR_VECTOR_BITS * BUSTER_DOMINATOR_VECTOR_WORDS,
-            .path = DOMINATOR_SCALAR,
-            .loop_path = DOMINATOR_SCALAR,
         };
         const uint32_t count = cfg->block_count;
         const uint64_t row_bytes = candidate.row_words * sizeof(uint64_t);
         const uint64_t matrix_bytes = (uint64_t)count * row_bytes;
-        const bool option_valid = options.path >= DOMINATOR_AUTO && options.path <= DOMINATOR_SCALAR && (options.outputs & ~(BUSTER_DOMINATOR_FRONTIERS | BUSTER_DOMINATOR_LOOPS)) == 0;
+        const bool option_valid = (options.outputs & ~(BUSTER_DOMINATOR_FRONTIERS | BUSTER_DOMINATOR_LOOPS)) == 0;
         if (option_valid)
         {
             status = dominators_validate(cfg, scratch, &candidate);
@@ -914,47 +726,19 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
         if (status == DOMINATOR_OK && count != 0)
         {
             dominators_order(cfg, &candidate, frames, dfs_begin, dfs_end, dfs_vertex, dfs_parent);
-            // AUTO solves by SEMI-NCA: on the 9700X it beats the bit matrix at every measured size, real and synthetic
-            // (#1352, docs/dominators.md). The matrix solver stays the explicit VECTOR path and SEMI-NCA's test twin.
-            const uint64_t vector_bytes = matrix_bytes + row_bytes;
-            candidate.path = options.path == DOMINATOR_VECTOR ? DOMINATOR_VECTOR : DOMINATOR_SCALAR;
-            if (candidate.path == DOMINATOR_VECTOR && vector_bytes > options.max_matrix_bytes)
+            const uint64_t phase_start = scratch->length;
+            DominatorLink* links = arena_push_array(scratch, candidate.reachable_count, sizeof(DominatorLink), _Alignof(DominatorLink));
+            uint32_t* stack = arena_push_array(scratch, candidate.reachable_count, sizeof(uint32_t), _Alignof(uint32_t));
+            if (links == 0 || stack == 0)
             {
-                status = DOMINATOR_MATRIX_LIMIT;
+                status = DOMINATOR_NO_MEMORY;
             }
-            if (status == DOMINATOR_OK && candidate.path == DOMINATOR_VECTOR)
+            else
             {
-                const uint64_t phase_start = scratch->length;
-                uint64_t* sets = arena_push(scratch, matrix_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);
-                uint64_t* reachable = arena_push(scratch, row_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);
-                if (sets == 0 || reachable == 0)
-                {
-                    status = DOMINATOR_NO_MEMORY;
-                }
-                else
-                {
-                    candidate.matrix_peak_bytes = vector_bytes;
-                    dominators_vector(cfg, &candidate, sets, reachable, workspace);
-                }
-                dominators_record_scratch(&candidate, scratch, scratch_start);
-                arena_pop_to(scratch, phase_start);
+                dominators_semi_nca(cfg, &candidate, dfs_begin, dfs_vertex, dfs_parent, workspace, links, stack);
             }
-            else if (status == DOMINATOR_OK)
-            {
-                const uint64_t phase_start = scratch->length;
-                DominatorLink* links = arena_push_array(scratch, candidate.reachable_count, sizeof(DominatorLink), _Alignof(DominatorLink));
-                uint32_t* stack = arena_push_array(scratch, candidate.reachable_count, sizeof(uint32_t), _Alignof(uint32_t));
-                if (links == 0 || stack == 0)
-                {
-                    status = DOMINATOR_NO_MEMORY;
-                }
-                else
-                {
-                    dominators_scalar(cfg, &candidate, dfs_begin, dfs_vertex, dfs_parent, workspace, links, stack);
-                }
-                dominators_record_scratch(&candidate, scratch, scratch_start);
-                arena_pop_to(scratch, phase_start);
-            }
+            dominators_record_scratch(&candidate, scratch, scratch_start);
+            arena_pop_to(scratch, phase_start);
         }
         if (status == DOMINATOR_OK && count != 0)
         {

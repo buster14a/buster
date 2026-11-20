@@ -272,9 +272,10 @@ struct ForeignArchive
 // A shared library: its exports, versions and references (import_library), indexed by hash; whether it came under
 // --as-needed, and whether it is needed (from the start without --as-needed; foreign_needed_library has when an
 // as-needed one is); and once it is needed, if it refers to any name, the object, plus 1, that holds its references: a
-// library's undefined symbols join the resolution as an object's, at the library's position, and so load the archive
-// members that define them, as GNU ld and lld load them. A library that refers to nothing (the loader) takes no object,
-// and so no round of its own.
+// library's undefined symbols join the resolution as an object's, at the library's position. Only its unversioned
+// references load archive members by their bare names, as GNU ld and lld load them. All references keep their bare
+// names for executable exports. A library that refers to nothing (the loader) takes no object, and so no round of its
+// own.
 typedef struct ForeignLibrary ForeignLibrary;
 struct ForeignLibrary
 {
@@ -390,9 +391,10 @@ _Static_assert(sizeof(ForeignRecord) == 32, "a record is half a cache line");
 
 // A name in a partition's table, 64 bytes: its hash and bytes (the first record's); what the rounds need to decide what
 // to load: its flags (BUSTER_FOREIGN_ENTRY_*), the most constraining visibility of every record of it (a rank: default,
-// protected, hidden, internal), the last round that touched it, and the positions of its earliest strong reference,
-// definition (strong, common or weak) and common symbol; the archive member that defines it first (its archive plus 1,
-// and the member), and the shared library that exports it first (its library plus 1, and the export).
+// protected, hidden, internal), the last round that touched it, and the positions of its earliest strong reference
+// that may load a member (excluding a library's versioned reference), definition (strong, common or weak) and common
+// symbol; the archive member that defines it first (its archive plus 1, and the member), and the shared library that
+// exports it first (its library plus 1, and the export).
 typedef struct ForeignEntry ForeignEntry;
 struct ForeignEntry
 {
@@ -1315,8 +1317,8 @@ static bool foreign_list_inputs(Foreign* foreign, ForeignLane* lane)
             foreign->as_needed_waiting += as_needed ? 1 : 0;
         }
     }
-    foreign->archives_begin = foreign->archive_count != 0 ? foreign_position(foreign->archives[0].input, 1) : BUSTER_FOREIGN_NO_POSITION;
-    foreign->libraries_begin = foreign->library_count != 0 ? foreign_position(foreign->libraries[0].input, 0) : BUSTER_FOREIGN_NO_POSITION;
+    foreign->archives_begin = result && foreign->archive_count != 0 ? foreign_position(foreign->archives[0].input, 1) : BUSTER_FOREIGN_NO_POSITION;
+    foreign->libraries_begin = result && foreign->library_count != 0 ? foreign_position(foreign->libraries[0].input, 0) : BUSTER_FOREIGN_NO_POSITION;
     if (!result)
     {
         foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
@@ -2920,14 +2922,25 @@ static bool foreign_touched_room(ForeignTable* table, uint64_t records, Arena* a
 // A record folded into its entry, whose index then takes the record's length's place.
 static void foreign_fold(Foreign* foreign, ForeignRound* round, ForeignTable* table, uint32_t e, ForeignRecord* record, uint32_t index)
 {
-    const uint64_t position = foreign->positions[record->tag >> BUSTER_FOREIGN_TAG_OBJECT_SHIFT];
-    if ((record->tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP)
+    const uint32_t tag = record->tag;
+    const uint32_t object = tag >> BUSTER_FOREIGN_TAG_OBJECT_SHIFT;
+    uint64_t position = foreign->positions[object];
+    if ((tag & BUSTER_FOREIGN_TAG_CLASS) == FOREIGN_CLASS_GROUP)
     {
         foreign_touch_group(table, e, round->first_group + record->item, position);
     }
     else
     {
-        foreign_touch(table, e, record->tag, position, index);
+        if ((tag & (BUSTER_FOREIGN_TAG_LIBRARY | BUSTER_FOREIGN_TAG_CLASS)) == (BUSTER_FOREIGN_TAG_LIBRARY | FOREIGN_CLASS_REFERENCE))
+        {
+            const ForeignObject* holder = &foreign->objects[object];
+            const ImportReferences* references = &foreign->libraries[holder->library - 1].library.references;
+            const uint32_t reference = round->first_symbol + record->item - holder->global_begin;
+            // A library's foo@VERSION must not extract an archive's unversioned foo. Keep the record's bare name and
+            // class for the winners and executable exports, but give this reference no archive-loading position.
+            position = references->version[reference] > VER_NDX_GLOBAL ? BUSTER_FOREIGN_NO_POSITION : position;
+        }
+        foreign_touch(table, e, tag, position, index);
     }
     record->entry = e;
 }

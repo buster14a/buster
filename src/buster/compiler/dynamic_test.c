@@ -4734,6 +4734,7 @@ static void dynamic_test_report_import(RuntimeError error, const Runtime* runtim
 
 #include "buster/compiler/dynamic_libraries_test.c"
 #include "buster/compiler/dynamic_bounds_test.c"
+#include "buster/compiler/dynamic_no_pie_test.c"
 
 static int run_dynamic_tests(int argc, char** argv)
 {
@@ -4812,6 +4813,7 @@ static int run_dynamic_tests(int argc, char** argv)
         passed = dynamic_test_imports(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_libraries(&directory, &runtime) && passed;
         passed = dynamic_test_smalls(&directory, &runtime) && passed;
+        passed = dynamic_test_no_pie(&directory) && passed;
         passed = dynamic_test_libgcc_s(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_section_bounds(&directory, &runtime, cross_check) && passed;
         passed = dynamic_test_image_bounds(&directory, &runtime, cross_check) && passed;

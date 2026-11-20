@@ -92,11 +92,19 @@ static bool dependency_prepare(DependencyOutput* output, const DependencyOptions
         };
         uint64_t length = 0;
         result = path != NULL && target != NULL && dependency_rule(&rule, NULL, 0, &length) == DEPENDENCY_OK;
-        char* bytes = result ? arena_push(arena, length, 1) : NULL;
-        result = result && bytes != NULL && dependency_rule(&rule, bytes, length, &length) == DEPENDENCY_OK;
+        DependencySink writing = {
+            .pointer = result ? arena_push(arena, length, 1) : NULL,
+            .status = DEPENDENCY_OK,
+        };
+        if (writing.pointer != NULL)
+        {
+            // The query validated this immutable rule. The private buffer has exactly the space it measured.
+            dependency_emit(&writing, &rule);
+        }
+        result = writing.pointer != NULL && writing.status == DEPENDENCY_OK && writing.count == length;
         if (result)
         {
-            *output = (DependencyOutput){ .path = path, .bytes = { .pointer = bytes, .length = length } };
+            *output = (DependencyOutput){ .path = path, .bytes = { .pointer = writing.pointer, .length = length } };
         }
         else
         {

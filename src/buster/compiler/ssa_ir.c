@@ -688,9 +688,8 @@ static void ssa_ir_fill(const SsaIrWork* work, IrFunction* f)
     f->block_offsets[f->block_count] = instruction;
 }
 
-// The promoted function's full verification, with promotion's dominance, on the path the promotion took (#1379): the
-// two verifiers are twins, which the IR tests compare, so a compile checks its output once, not by both.
-static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f, bool vector)
+// The promoted function's full verification, with promotion's dominance (#1379).
+static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
 {
     uint32_t* enter = ssa_allocate(work->scratch, f->block_count, 4);
     uint32_t* leave = ssa_allocate(work->scratch, f->block_count, 4);
@@ -710,7 +709,7 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f, 
             .leave = leave,
             .block_count = f->block_count,
         };
-        check = BUSTER_VECTOR_PATH(vector) ? ir_verify(f, work->scratch, &dominance) : ir_verify_scalar(f, work->scratch, &dominance);
+        check = ir_verify(f, work->scratch, &dominance);
     }
     return check;
 }
@@ -844,7 +843,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     IrFunction candidate = { 0 };
     if (check.error == IR_OK && !input_verified)
     {
-        check = ir_verify_path(input, scratch, 0, BUSTER_VECTOR_PATH(vector));
+        check = ir_verify(input, scratch, 0);
     }
     // A function with SIMD values promotes as any other: its masks' slots (#179) and its vectors' (#141) as any scalar's,
     // each read and written whole at its own type (ssa_ir_classify).
@@ -955,7 +954,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         check.error = ssa_ir_debug_regions(&work, &candidate);
         if (check.error == IR_OK)
         {
-            check = ssa_ir_verify_output(&work, &candidate, vector);
+            check = ssa_ir_verify_output(&work, &candidate);
         }
     }
     if (check.error == IR_OK)
@@ -1005,11 +1004,7 @@ static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Are
 
 static IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ssa_ir_promote_scalar(input, output, scratch, result);
-#else
     return ssa_ir_promote_path(input, output, scratch, result, true, 0, false);
-#endif
 }
 
 static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)

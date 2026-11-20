@@ -228,7 +228,7 @@ static void tier1_emit_test_pressure(Tier1EmitTest* test)
                     {
                         Tier1SelectPlan plan;
                         uint32_t node;
-                        const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node);
+                        const Tier1SelectError selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node);
                         tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real pressure IR");
                         if (selected == TIER1_SELECT_OK)
                         {
@@ -293,7 +293,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
     bool ready = tier1_emit_test_fixture(test, &function);
     Tier1SelectPlan plan;
     uint32_t node;
-    ready = ready && tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+    ready = ready && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, ready, "failure fixture selected");
     if (ready)
     {
@@ -345,7 +345,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
         function.block_offsets[1] = 2;
         tier1_emit_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
         tier1_emit_test_node(&function, 1, IR_BR, IR_VOID, 0, BUSTER_IR_NONE);
-        ready = tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+        ready = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         tier1_emit_test_expect(test, ready, "loop fixture selected independently");
         if (ready)
         {
@@ -365,7 +365,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
     arena_pop_to(&test->output, 0);
     arena_pop_to(&test->input, 0);
     const IrSizes empty_sizes = {0};
-    ready = ir_create(&test->input, &empty_sizes, &function) == IR_OK && tier1_select_plan(&function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+    ready = ir_create(&test->input, &empty_sizes, &function) == IR_OK && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     if (ready)
     {
         const Tier1EmitOptions options = { .vector = true, .certify = true };
@@ -493,44 +493,54 @@ static bool tier1_emit_test_saves_loaded(const Tier1EmitResult* emitted)
     return loaded && pending == 0;
 }
 
-// The call-save rows' helpers (Tier1EmitSaves) by both paths, on random rows, owners and masks: the vector path's
-// compares and blends must give the scalar twin's masks and rows. A third of the rows hold their owners, so `kept` sees
-// both answers, and some owners are none.
-static void tier1_emit_test_saves_twins(Tier1EmitTest* test)
+// The call-save rows' helpers (Tier1EmitSaves) on random rows, owners and masks against their definitions: a reset leaves
+// every row none and nothing owed; `kept` is the saved registers whose rows hold their owners; after a call the saved
+// rows hold their owners and those registers are owed; after a fixed registers' sequence their rows are none. A third
+// of the rows hold their owners, so `kept` sees both answers, and some owners are none.
+static void tier1_emit_test_saves_rows(Tier1EmitTest* test)
 {
     uint64_t random = UINT64_C(0x5be2b9d0c41f7a63);
     bool same = true;
     for (uint32_t round = 0; round < 4096; round += 1)
     {
-        Tier1EmitSaves saves[2];
+        Tier1EmitSaves saves;
         Tier1EmitTransitions transitions = { 0 };
-        tier1_emit_saves_reset(&saves[0], false);
-        tier1_emit_saves_reset(&saves[1], true);
-        same &= memcmp(saves[0].rows, saves[1].rows, sizeof(saves[0].rows)) == 0;
+        memset(&saves, 0xa5, sizeof(saves));
+        tier1_emit_saves_reset(&saves);
+        uint32_t rows[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
         for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
         {
+            same &= saves.rows[reg] == BUSTER_IR_NONE;
             const uint64_t bits = tier1_emit_test_random(&random);
             transitions.owners[reg] = (bits & 7) == 7 ? BUSTER_IR_NONE : (uint32_t)(bits >> 8) & 63;
-            const uint32_t row = (bits >> 16) % 3 == 0 ? transitions.owners[reg] : (uint32_t)(bits >> 24) & 63;
-            saves[0].rows[reg] = row;
-            saves[1].rows[reg] = row;
+            rows[reg] = (bits >> 16) % 3 == 0 ? transitions.owners[reg] : (uint32_t)(bits >> 24) & 63;
+            saves.rows[reg] = rows[reg];
         }
+        same &= saves.owed == 0;
         const uint64_t masks = tier1_emit_test_random(&random);
         const uint32_t saved = (uint32_t)masks & 0xffff;
         const uint32_t fixed = (uint32_t)(masks >> 16) & 0xffff;
-        same &= tier1_emit_kept(&saves[0], &transitions, saved) == tier1_emit_kept(&saves[1], &transitions, saved);
-        tier1_emit_saved(&saves[0], &transitions, saved);
-        tier1_emit_saved(&saves[1], &transitions, saved);
-        tier1_emit_fixed_rows(&saves[0], fixed);
-        tier1_emit_fixed_rows(&saves[1], fixed);
-        same &= saves[0].owed == saves[1].owed && memcmp(saves[0].rows, saves[1].rows, sizeof(saves[0].rows)) == 0;
+        uint32_t kept = 0;
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            kept |= ((saved >> reg) & 1) != 0 && rows[reg] == transitions.owners[reg] ? 1u << reg : 0;
+        }
+        same &= tier1_emit_kept(&saves, &transitions, saved) == kept;
+        tier1_emit_saved(&saves, &transitions, saved);
+        tier1_emit_fixed_rows(&saves, fixed);
+        same &= saves.owed == saved;
+        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            const uint32_t after_call = ((saved >> reg) & 1) != 0 ? transitions.owners[reg] : rows[reg];
+            same &= saves.rows[reg] == (((fixed >> reg) & 1) != 0 ? BUSTER_IR_NONE : after_call);
+        }
     }
-    tier1_emit_test_expect(test, same, "the call-save rows' vector helpers give their scalar twins' masks and rows");
+    tier1_emit_test_expect(test, same, "the call-save rows' helpers give their definitions' masks and rows");
 }
 
-// #2538: the calls before each position by both paths, on random sorted call positions over random lengths (a call at the
-// last position, and none at all, among them): the vector prefix sum must give the scalar running count's column.
-static void tier1_emit_test_calls_before_twins(Tier1EmitTest* test)
+// #2538: the calls before each position, on random sorted call positions over random lengths (a call at the last
+// position, and none at all, among them): the vector prefix sum must give, at each position, the calls before it.
+static void tier1_emit_test_calls_before(Tier1EmitTest* test)
 {
     uint64_t random = UINT64_C(0x2538a1b2c3d4e5f6);
     uint32_t calls[256];
@@ -547,13 +557,23 @@ static void tier1_emit_test_calls_before_twins(Tier1EmitTest* test)
             calls[count] = q;
             count += call;
         }
-        memset(before, 0xa5, sizeof(before));
+        // The definition: the calls at positions before q, a prefix sum over a bitmap of the call positions.
+        uint8_t called[1024] = { 0 };
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            called[calls[k]] = 1;
+        }
+        before[1][0] = 0;
+        for (uint32_t q = 0; q < positions; q += 1)
+        {
+            before[1][q + 1] = before[1][q] + called[q];
+        }
+        memset(before[0], 0xa5, sizeof(before[0]));
         tier1_emit_cfg_calls_before_vector(calls, count, positions, before[0]);
-        tier1_emit_cfg_calls_before_scalar(calls, count, positions, before[1]);
         same &= memcmp(before[0], before[1], ((uint64_t)positions + 1) * sizeof(uint32_t)) == 0 && before[1][positions] == count;
         same &= before[0][positions + 1] == 0xa5a5a5a5u;
     }
-    tier1_emit_test_expect(test, same, "the calls before each position: the vector prefix sum gives its scalar twin's column");
+    tier1_emit_test_expect(test, same, "the calls before each position: the vector prefix sum gives the count of calls before it");
 }
 
 #include "tier1_call_test.c"
@@ -936,7 +956,7 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
                 uint32_t dominance_enter[3] = { 0, 1, 2 };
                 uint32_t dominance_leave[3] = { function.block_count, 2, 3 };
                 const IrDominance dominance = { .enter = dominance_enter, .leave = dominance_leave, .block_count = function.block_count };
-                const Tier1SelectError selected = created ? tier1_select_plan(&function, function.block_count > 1 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+                const Tier1SelectError selected = created ? tier1_select_plan(&function, function.block_count > 1 ? &dominance : 0, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real object IR");
                 if (selected == TIER1_SELECT_OK)
                 {
@@ -1181,14 +1201,14 @@ static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
         {
             IrFunction function;
             const bool created = tier1_emit_test_lifetime_fixture(test, shape, &function);
-            tier1_emit_test_expect(test, created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK, "construct lifetime IR");
+            tier1_emit_test_expect(test, created && ir_verify(&function, &test->scratch, 0).error == IR_OK, "construct lifetime IR");
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
             // Shape 2's dominator tree: the entry block over both of the others, whose values they read.
             uint32_t dominance_enter[3] = { 0, 1, 2 };
             uint32_t dominance_leave[3] = { 3, 2, 3 };
             const IrDominance tree = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 3 };
-            const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 2 ? &tree : 0, &test->output, &test->scratch, vector != 0, &plan, &node) :
+            const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 2 ? &tree : 0, &test->output, &test->scratch, &plan, &node) :
                                                         TIER1_SELECT_ERROR_INVALID;
             tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select lifetime IR");
             if (selected == TIER1_SELECT_OK)
@@ -1284,7 +1304,7 @@ static void tier1_emit_test_object_overflow(Tier1EmitTest* test)
         }
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError selected = created ? tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+        const Tier1SelectError selected = created ? tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
         tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select overflowing displacement IR");
         if (created && selected == TIER1_SELECT_OK)
         {
@@ -1403,17 +1423,17 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
                 tier1_emit_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE);
                 tier1_emit_test_node(&function, 7, IR_SUB, IR_I64, 2, 1);
                 tier1_emit_test_node(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE);
-                ready = ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+                ready = ir_verify(&function, &test->scratch, 0).error == IR_OK;
             }
         }
         tier1_emit_test_expect(test, ready, "overlong fixture is valid IR");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             IrDominance dominance;
-            const bool dominated = branching == 0 || tier1_terminal_dominance(test, &function, vector != 0, &dominance);
+            const bool dominated = branching == 0 || tier1_terminal_dominance(test, &function, &dominance);
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const bool planned = dominated && tier1_select_plan(&function, branching != 0 ? &dominance : 0, &test->output, &test->scratch, vector != 0, &plan, &node) == TIER1_SELECT_OK;
+            const bool planned = dominated && tier1_select_plan(&function, branching != 0 ? &dominance : 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
             tier1_emit_test_expect(test, planned, "overlong fixture selects");
             const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector != 0, .certify = true };
             Tier1EmitResult base;
@@ -1474,8 +1494,8 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_emit_test_objects(&test);
             tier1_emit_test_lifetimes(&test);
             tier1_emit_test_object_overflow(&test);
-            tier1_emit_test_saves_twins(&test);
-            tier1_emit_test_calls_before_twins(&test);
+            tier1_emit_test_saves_rows(&test);
+            tier1_emit_test_calls_before(&test);
             tier1_call_tests(&test);
             tier1_narrow_tests(&test);
             tier1_terminal_tests(&test);

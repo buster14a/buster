@@ -134,9 +134,8 @@ Layout validation has a contiguous 16-record AVX-512 path and an exact scalar
 path. Masked loads cover only the valid tail; a shifted end vector checks each
 record against its predecessor, including across batch boundaries. The module is
 included by `emission_metadata_test.c`, and by `main.c` (before `emitted_code.c`,
-`c_check_program.c` and `c_check_debug.c`), after the host ISA is selected. The standalone wrapper's
-vector command enables `BUSTER_HOST_VECTOR` through
-`BUSTER_EMISSION_METADATA_TEST_VECTOR`.
+`c_check_program.c` and `c_check_debug.c`), after the host ISA is selected. The standalone wrapper
+builds the module alone for any AVX-512F target, without `host_isa.h`.
 
 Sparse event resolution and frame-state protocol checking currently use scalar
 code, and this prerequisite makes no speedup claim. The integrated path's total
@@ -363,28 +362,17 @@ commands below compile the protocol's tests without the compiler, which is
 useful for bisecting a protocol change; the vector ones require an
 AVX-512F-capable host. These are correctness tests, not performance measurements.
 
-Baseline:
+Vector and scalar-twin comparisons (the baseline `-march=x86-64` build went with
+the scalar host, #2924):
 
 ```sh
-clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-scalar && /tmp/buster-emission-scalar
+clang -std=c17 -O2 -g -mavx512f -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-vector && /tmp/buster-emission-vector
 ```
 
-Vector and scalar-twin comparisons:
+Address and undefined-behavior sanitizers:
 
 ```sh
-clang -std=c17 -O2 -g -mavx512f -DBUSTER_EMISSION_METADATA_TEST_VECTOR -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-vector && /tmp/buster-emission-vector
-```
-
-Address and undefined-behavior sanitizers, baseline:
-
-```sh
-clang -std=c17 -O1 -g -march=x86-64 -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-scalar-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-scalar-sanitize
-```
-
-The same sanitizers with the vector checker enabled:
-
-```sh
-clang -std=c17 -O1 -g -mavx512f -DBUSTER_EMISSION_METADATA_TEST_VECTOR -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-vector-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-vector-sanitize
+clang -std=c17 -O1 -g -mavx512f -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-vector-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-vector-sanitize
 ```
 
 Each run prints its check and failure counts; the correctness inventory records

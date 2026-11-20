@@ -123,7 +123,7 @@ static bool tier1_terminal_fixture(Tier1EmitTest* test, Tier1TerminalShape shape
     return ready;
 }
 
-static bool tier1_terminal_dominance(Tier1EmitTest* test, const IrFunction* function, bool vector, IrDominance* dominance)
+static bool tier1_terminal_dominance(Tier1EmitTest* test, const IrFunction* function, IrDominance* dominance)
 {
     IrCfg cfg;
     bool ready = ir_build_cfg(function, &test->output, &test->scratch, &cfg) == IR_OK;
@@ -139,7 +139,6 @@ static bool tier1_terminal_dominance(Tier1EmitTest* test, const IrFunction* func
             .predecessors = cfg.predecessors,
         };
         DominatorOptions options = dominators_options();
-        options.path = vector ? DOMINATOR_VECTOR : DOMINATOR_SCALAR;
         options.outputs = 0;
         Dominators result;
         ready = dominators_analyze(&test->output, &test->scratch, &graph, options, &result) == DOMINATOR_OK;
@@ -165,9 +164,7 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     uint32_t* offsets = calloc((uint64_t)code->count + 1, sizeof(uint32_t));
     uint32_t* ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint32_t* scalar_ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint8_t* scalar = malloc(BUSTER_TIER1_TERMINAL_CODE_BYTES);
-    bool ready = offsets && ends && scalar_ends && scalar && code->count != 0 && capacity <= BUSTER_TIER1_TERMINAL_HELPER_OFFSET;
+    bool ready = offsets && ends && code->count != 0 && capacity <= BUSTER_TIER1_TERMINAL_HELPER_OFFSET;
     tier1_emit_test_expect(test, ready, "terminal encoder storage is bounded");
     if (ready)
     {
@@ -217,10 +214,9 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
     int64_t length = -1;
     if (ready)
     {
-        length = x86_encode(code->records, code->count, mapping, capacity, 0, ends);
-        const int64_t scalar_length = x86_encode_scalar(code->records, code->count, scalar, capacity, offsets, scalar_ends);
-        ready = length > 0 && (uint64_t)length <= capacity && length == scalar_length && memcmp(mapping, scalar, (size_t)length) == 0 && memcmp(ends, scalar_ends, emitted->reference_count * sizeof(uint32_t)) == 0;
-        tier1_emit_test_expect(test, ready, "terminal scalar/vector encoders agree on all bytes and symbolic field ends");
+        length = x86_encode(code->records, code->count, mapping, capacity, offsets, ends);
+        ready = length > 0 && (uint64_t)length <= capacity;
+        tier1_emit_test_expect(test, ready, "terminal code encodes within its capacity");
     }
     if (ready)
     {
@@ -260,9 +256,8 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
         const uint64_t helper_capacity = BUSTER_X86_ENCODER_CAPACITY(count);
         ready = helper_capacity <= BUSTER_TIER1_TERMINAL_CODE_BYTES - BUSTER_TIER1_TERMINAL_HELPER_OFFSET && x86_target_validate(test->allowed, helper, count) == count;
         const int64_t helper_length = ready ? x86_encode(helper, count, mapping + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, helper_capacity, 0, 0) : -1;
-        const int64_t scalar_length = ready ? x86_encode_scalar(helper, count, scalar + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, helper_capacity, 0, 0) : -1;
-        ready = helper_length > 0 && (uint64_t)helper_length <= helper_capacity && helper_length == scalar_length && memcmp(mapping + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, scalar + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, (size_t)helper_length) == 0;
-        tier1_emit_test_expect(test, ready, "independent returning/trapping helper encodes identically within baseline local TEXT");
+        ready = helper_length > 0 && (uint64_t)helper_length <= helper_capacity;
+        tier1_emit_test_expect(test, ready, "independent returning/trapping helper encodes within baseline local TEXT");
         if (ready)
         {
             const LinkReference* reference = &emitted->references[0];
@@ -281,10 +276,9 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
                     {
                         const int32_t relative = (int32_t)displacement;
                         memcpy(mapping + end - 4, &relative, sizeof(relative));
-                        memcpy(scalar + end - 4, &relative, sizeof(relative));
                         int32_t decoded;
                         memcpy(&decoded, mapping + end - 4, sizeof(decoded));
-                        ready = (int64_t)end + decoded == BUSTER_TIER1_TERMINAL_HELPER_OFFSET && memcmp(mapping, scalar, (size_t)length) == 0;
+                        ready = (int64_t)end + decoded == BUSTER_TIER1_TERMINAL_HELPER_OFFSET;
                     }
                 }
             }
@@ -296,8 +290,6 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
         ready = mprotect(mapping, BUSTER_TIER1_TERMINAL_CODE_BYTES, PROT_READ | PROT_EXEC) == 0;
         tier1_emit_test_expect(test, ready, "terminal local TEXT becomes executable only after checks and relocation");
     }
-    free(scalar);
-    free(scalar_ends);
     free(ends);
     free(offsets);
     return ready && native ? mapping : 0;
@@ -440,17 +432,17 @@ static void tier1_terminal_supported(Tier1EmitTest* test)
     {
         IrFunction function;
         const bool ready = tier1_terminal_fixture(test, (Tier1TerminalShape)shape, &function);
-        tier1_emit_test_expect(test, ready && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK, "original terminal fixture is valid semantic IR on both paths");
+        tier1_emit_test_expect(test, ready && ir_verify(&function, &test->scratch, 0).error == IR_OK, "original terminal fixture is valid semantic IR on both paths");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             for (uint32_t frame = 0; frame < 2; frame += 1)
             {
                 IrDominance dominance;
-                const bool derived = tier1_terminal_dominance(test, &function, vector != 0, &dominance);
+                const bool derived = tier1_terminal_dominance(test, &function, &dominance);
                 tier1_emit_test_expect(test, derived, "terminal fixture derives its real CFG and dominance before cross-block selection");
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
+                const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
                 tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "terminal fixture selects on the scalar/vector path");
                 if (selected != TIER1_SELECT_OK)
                 {
@@ -553,16 +545,16 @@ static void tier1_terminal_general(Tier1EmitTest* test)
     {
         IrFunction function;
         const bool ready = tier1_terminal_refusal_fixture(test, shape, &function);
-        tier1_emit_test_expect(test, ready && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK, "nonempty loop, conditional or phi fixture is valid semantic IR");
+        tier1_emit_test_expect(test, ready && ir_verify(&function, &test->scratch, 0).error == IR_OK, "nonempty loop, conditional or phi fixture is valid semantic IR");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {
             IrDominance dominance;
-            const bool derived = tier1_terminal_dominance(test, &function, vector != 0, &dominance);
+            const bool derived = tier1_terminal_dominance(test, &function, &dominance);
             tier1_emit_test_expect(test, derived, "a general terminal shape derives real dominance before selection");
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
             const uint64_t scratch_mark = test->scratch.length;
-            const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector != 0, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
+            const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
             tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "valid nonempty loops, conditionals and phis select");
             if (selected != TIER1_SELECT_OK)
             {

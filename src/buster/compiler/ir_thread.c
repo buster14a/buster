@@ -26,7 +26,7 @@
 // the lowering's, which the optimizer removes. At most BUSTER_IR_THREAD_COPY_LIMIT predecessors take copies. Within a round, no block is both threaded and another's
 // threaded predecessor or successor: a round's rewrite reads one CFG. BUSTER_IR_THREAD_ROUNDS rounds at most take the
 // chains `a && b && c` makes, a next one only where a candidate was left to it. A function whose candidate blocks' phis
-// all take a value from a later instruction (loops' headers) builds no CFG. A 64-byte opcode scan finds the conditional branches (its scalar loop is the exact twin);
+// all take a value from a later instruction (loops' headers) builds no CFG. A 64-byte opcode scan finds the conditional branches;
 // the rest runs only for blocks that pass it. A successful result borrows the input's immutable tables, as
 // ir_if_convert's does: the input and output arenas stay alive until the optimizer copies the function. The input is
 // never mutated.
@@ -95,28 +95,15 @@ struct IrThreadWork
 };
 
 // The conditional branches among `count` (at most 64) operations, a bit each.
-static uint64_t ir_thread_candidates(const uint8_t* operations, uint32_t count, bool scalar)
+static uint64_t ir_thread_candidates(const uint8_t* operations, uint32_t count)
 {
     uint64_t candidates = 0;
     if (count != 0 && count <= BUSTER_IR_THREAD_BATCH)
     {
-#if BUSTER_HOST_VECTOR
-        if (!scalar)
-        {
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_THREAD_BATCH - count);
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
-            candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
-        }
-        else
-#endif
-        {
-            for (uint32_t lane = 0; lane < count; lane += 1)
-            {
-                candidates |= (uint64_t)(operations[lane] == IR_CBR) << lane;
-            }
-        }
+        const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_THREAD_BATCH - count);
+        const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
+        candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
     }
-    (void)scalar;
     return candidates;
 }
 
@@ -221,38 +208,12 @@ static void ir_thread_escapes_extra(IrThreadWork* work, uint32_t i)
     }
 }
 
-// The scalar twin of ir_thread_escapes_vector, exactly: every instruction's a, b and c operands by its value mask, and
-// its others.
-static void ir_thread_escapes_scalar(IrThreadWork* work)
-{
-    const IrFunction* f = work->function;
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
-    {
-        const uint32_t block = work->cfg.instruction_blocks[i];
-        const uint32_t mask = ir_value_mask(f, i);
-        if ((mask & 1) != 0)
-        {
-            ir_thread_escape(work, f->a[i], block);
-        }
-        if ((mask & 2) != 0)
-        {
-            ir_thread_escape(work, f->b[i], block);
-        }
-        if ((mask & 4) != 0)
-        {
-            ir_thread_escape(work, f->c[i], block);
-        }
-        ir_thread_escapes_extra(work, i);
-    }
-}
-
-#if BUSTER_HOST_VECTOR
 // The escapes of 16 instructions at a time (#2554's measured cost: this scan was a third of the pass on speedtest1):
 // each one's value mask is its opcode's operand bits, the optional ones where present (ir_value_mask's), by two 128-byte
 // tables' lookups; each used operand's block is gathered, then whether that block is a candidate's, and a candidate's
-// value used in another block is an escape. Phis, calls and ternary intrinsics, whose other operands are in the extra
-// array, take ir_thread_escapes_extra.
-static void ir_thread_escapes_vector(IrThreadWork* work)
+// value used in another block is an escape. Phis, calls, ternary intrinsics and scatters, whose other operands are in the
+// extra array, take ir_thread_escapes_extra.
+static void ir_thread_escapes(IrThreadWork* work)
 {
     const IrFunction* f = work->function;
     const uint32_t count = f->instruction_count;
@@ -291,30 +252,14 @@ static void ir_thread_escapes_vector(IrThreadWork* work)
             }
         }
         uint32_t extra = _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_CALL)) |
-                         _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_CALL_INDIRECT)) | _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_INTRINSIC));
+                         _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_CALL_INDIRECT)) | _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_INTRINSIC)) |
+                         _mm_mask_cmpeq_epi8_mask(valid, op, _mm_set1_epi8(IR_SCATTER));
         while (extra != 0)
         {
             ir_thread_escapes_extra(work, (uint32_t)first + (uint32_t)__builtin_ctz(extra));
             extra &= extra - 1;
         }
     }
-}
-#endif
-
-// Each candidate block's values that are used where threading couldn't follow them, by the vector scan or its twin.
-static void ir_thread_escapes(IrThreadWork* work, bool scalar)
-{
-#if BUSTER_HOST_VECTOR
-    if (!scalar)
-    {
-        ir_thread_escapes_vector(work);
-    }
-    else
-#endif
-    {
-        ir_thread_escapes_scalar(work);
-    }
-    (void)scalar;
 }
 
 // The phi's input from `predecessor`, or BUSTER_IR_NONE: its last entry for it, found from the end. The search stops
@@ -933,7 +878,7 @@ static IrError ir_thread_rewrite(const IrThreadWork* work, Arena* output, Arena*
 
 // One round over `function`: its candidates threaded where their predecessors allow it. `changed` says whether anything
 // was; `result` is the rewritten function then, else `function` itself.
-static IrCheck ir_thread_round(const IrFunction* function, Arena* output, Arena* scratch, bool scalar, IrThreadResult* totals, IrFunction* result, bool* changed, uint32_t* deferred)
+static IrCheck ir_thread_round(const IrFunction* function, Arena* output, Arena* scratch, IrThreadResult* totals, IrFunction* result, bool* changed, uint32_t* deferred)
 {
     const uint64_t sm = scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
@@ -948,7 +893,7 @@ static IrCheck ir_thread_round(const IrFunction* function, Arena* output, Arena*
     for (uint64_t first = 0; first < count && !candidate; first += BUSTER_IR_THREAD_BATCH)
     {
         const uint32_t lanes = count - first < BUSTER_IR_THREAD_BATCH ? (uint32_t)(count - first) : BUSTER_IR_THREAD_BATCH;
-        uint64_t branches = ir_thread_candidates(function->op + first, lanes, scalar);
+        uint64_t branches = ir_thread_candidates(function->op + first, lanes);
         while (branches != 0 && !candidate)
         {
             const uint32_t branch = (uint32_t)first + (uint32_t)__builtin_ctzll(branches);
@@ -1024,7 +969,7 @@ static IrCheck ir_thread_round(const IrFunction* function, Arena* output, Arena*
             }
             if (any)
             {
-                ir_thread_escapes(&work, BUSTER_SCALAR_PATH(scalar));
+                ir_thread_escapes(&work);
                 // The chain's evaluation slots: a known flag and a value per instruction of the largest candidate.
                 uint32_t largest = 0;
                 for (uint32_t block = 1; block < blocks; block += 1)
@@ -1064,7 +1009,7 @@ static IrCheck ir_thread_round(const IrFunction* function, Arena* output, Arena*
 // The function's truth values' blocks threaded (#2554), in up to BUSTER_IR_THREAD_ROUNDS rounds. The caller supplies
 // verified SSA before use lists or a verified-analysis revision exist, and runs the optimizer afterwards, which verifies
 // the result. `result->function` borrows the input's tables where nothing was threaded.
-static IrCheck ir_thread(const IrFunction* function, Arena* output, Arena* scratch, bool scalar, IrThreadResult* result)
+static IrCheck ir_thread(const IrFunction* function, Arena* output, Arena* scratch, IrThreadResult* result)
 {
     const uint64_t om = output->length;
     IrCheck check = ir_check(output != scratch ? IR_OK : IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0);
@@ -1075,7 +1020,7 @@ static IrCheck ir_thread(const IrFunction* function, Arena* output, Arena* scrat
     for (uint32_t round = 0; check.error == IR_OK && changed && deferred != 0 && round < BUSTER_IR_THREAD_ROUNDS; round += 1)
     {
         IrFunction next = { 0 };
-        check = ir_thread_round(&totals.function, output, scratch, scalar, &totals, &next, &changed, &deferred);
+        check = ir_thread_round(&totals.function, output, scratch, &totals, &next, &changed, &deferred);
         if (check.error == IR_OK && changed)
         {
             totals.function = next;

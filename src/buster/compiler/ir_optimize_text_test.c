@@ -155,7 +155,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     else if (fixture->pass == IR_OPTIMIZE_TEXT_UNROLL)
     {
         IrUnrollOptions options = ir_unroll_options();
-        options.scalar = scalar;
         IrUnrollResult pass = { 0 };
         check = ir_optimize_unroll(input, output, scratch, options, &pass);
         result = pass.function;

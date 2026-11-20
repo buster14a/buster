@@ -36,7 +36,7 @@
 //    A general range live across a fixed register's sequence (sequences, #2767: a division's rax and rdx, a shift's rcx)
 //    avoids the registers it writes (tier1_cfg_crossed): it takes one only where no other register is free, so that the
 //    sequence's consumer saves no value around it.
-// 3. tier1_allocate, or its scalar twin, assigns the intervals.
+// 3. tier1_allocate assigns the intervals.
 // 4. Each edge moves its successor's live-in values and phis from their locations at the predecessor's last position
 //    to their entry locations (tier1_cfg_entry_location). A store of the same value to its own slot is omitted where
 //    the predecessor block already establishes that slot (tier1_cfg_slot_current, #1216). A changed phi operand still
@@ -1932,12 +1932,11 @@ struct Tier1CfgPrepared
     uint32_t splits;
     uint64_t output_saved;
     uint64_t scratch_saved;
-    bool vector;
 };
 
 // Validation, homes and dense values, hints, liveness, block lists and the intervals (1. and 2. above), for `input`'s
 // problem. Failure restores both arenas.
-static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgPrepared* prepared)
+static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgPrepared* prepared)
 {
     Tier1CfgError error = TIER1_CFG_INVALID;
     const uint64_t output_saved = output != 0 ? output->length : 0;
@@ -2125,7 +2124,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         }
         if (ready)
         {
-            candidate.liveness_iterations = BUSTER_VECTOR_PATH(vector) ? dataflow_liveness_vector(&liveness) : dataflow_liveness_scalar(&liveness);
+            candidate.liveness_iterations = dataflow_liveness(&liveness);
             // The same edge uses contribute to OUT even when their defining block kills propagation to IN.
             // Local operands have no dense id; their flag supplies the home tail during interval construction.
             for (uint32_t b = 0; b < blocks; b += 1)
@@ -2589,7 +2588,6 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 .splits = (uint32_t)pieces.splits,
                 .output_saved = output_saved,
                 .scratch_saved = scratch_saved,
-                .vector = vector,
             };
             error = TIER1_CFG_OK;
         }
@@ -2629,7 +2627,7 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
     Tier1CfgAllocation candidate = prepared->candidate;
     candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
     tier1_cfg_problem_registers(input, &candidate.intervals);
-    const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(prepared->vector) ? tier1_allocate(&candidate.intervals, output, &candidate.allocation) : tier1_allocate_scalar(&candidate.intervals, output, &candidate.allocation);
+    const Tier1AllocationError allocated = tier1_allocate(&candidate.intervals, output, &candidate.allocation);
     const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
     if (error == TIER1_CFG_OK)
     {
@@ -2903,11 +2901,11 @@ static void tier1_cfg_release(const Tier1CfgPrepared* prepared, Arena* scratch)
 }
 
 // The three in a row, for the input's own problem.
-static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgAllocation* result)
+static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
 {
     Tier1CfgPrepared prepared = { 0 };
     Tier1CfgAllocation candidate = { 0 };
-    Tier1CfgError error = result != 0 ? tier1_cfg_prepare(input, output, scratch, vector, &prepared) : TIER1_CFG_INVALID;
+    Tier1CfgError error = result != 0 ? tier1_cfg_prepare(input, output, scratch, &prepared) : TIER1_CFG_INVALID;
     const bool held = error == TIER1_CFG_OK;
     error = held ? tier1_cfg_assign(input, &prepared, 0, output, &candidate) : error;
     error = error == TIER1_CFG_OK ? tier1_cfg_finish(input, &prepared, output, scratch, &candidate) : error;
@@ -2926,12 +2924,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
 
 static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
 {
-    return tier1_cfg_allocate_impl(input, output, scratch, BUSTER_HOST_VECTOR, result);
-}
-
-static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate_scalar(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
-{
-    return tier1_cfg_allocate_impl(input, output, scratch, false, result);
+    return tier1_cfg_allocate_impl(input, output, scratch, result);
 }
 
 // Whether each value's registers lie in its class's, and its definition's in its allowed ones: tier1_cfg_input_valid's
@@ -2956,17 +2949,6 @@ static bool tier1_cfg_sets_valid_vector(const Tier1CfgInput* input)
     return bad == 0;
 }
 
-// The scalar twin of tier1_cfg_sets_valid_vector: tier1_cfg_input_valid's two compares per value.
-static bool tier1_cfg_sets_valid_scalar(const Tier1CfgInput* input)
-{
-    bool valid = true;
-    for (uint32_t v = 0; valid && v < input->value_count; v += 1)
-    {
-        valid = (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0);
-    }
-    return valid;
-}
-
 // The registers each prepared interval may take in another problem over the same values (#2538): `input` is the
 // prepared one but for its registers, allowed_registers and definition_registers. Each value's run of intervals takes its
 // allowed set, and the interval that holds its definition its definition's registers where some are bound, as
@@ -2983,7 +2965,7 @@ static __attribute__((unused)) Tier1CfgError tier1_cfg_column(const Tier1CfgInpu
     }
     valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_GPR] & 0xffff0000u) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_GPR] < 16;
     valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_MASK] & ~BUSTER_TIER1_ALLOCATE_MASK_REGISTERS) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_MASK] < 8;
-    valid = valid && (BUSTER_VECTOR_PATH(prepared->vector) ? tier1_cfg_sets_valid_vector(input) : tier1_cfg_sets_valid_scalar(input));
+    valid = valid && tier1_cfg_sets_valid_vector(input);
     uint32_t* written = valid ? arena_push_array(output, (uint64_t)intervals->intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     for (uint32_t v = 0; written != 0 && v < input->value_count; v += 1)
     {
@@ -3021,7 +3003,7 @@ static Tier1CfgError tier1_cfg_assign_verdict(const Tier1CfgInput* input, const 
     {
         verdict.registers[c] = other->registers[c];
     }
-    const Tier1AllocationError allocated = tier1_allocate_verdict(&candidate.intervals, output, prepared->vector, &verdict, &candidate.allocation);
+    const Tier1AllocationError allocated = tier1_allocate_verdict(&candidate.intervals, output, &verdict, &candidate.allocation);
     const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
     if (error == TIER1_CFG_OK)
     {
@@ -3080,10 +3062,10 @@ struct Tier1CfgOrder
 
 // The one-call order's first half: the intervals (tier1_cfg_prepare), whose columns the preference reads in
 // `order->prepared.candidate`. tier1_cfg_order_run or tier1_cfg_release ends what this holds.
-static __attribute__((unused)) Tier1CfgError tier1_cfg_order_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgOrder* order)
+static __attribute__((unused)) Tier1CfgError tier1_cfg_order_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgOrder* order)
 {
     *order = (Tier1CfgOrder){ 0 };
-    return tier1_cfg_prepare(input, output, scratch, vector, &order->prepared);
+    return tier1_cfg_prepare(input, output, scratch, &order->prepared);
 }
 
 // The plain problem assigned whole over the prepared intervals: with `freed`, its definitions already free, over the free
