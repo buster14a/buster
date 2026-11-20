@@ -1300,7 +1300,7 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
     uint8_t* labeled = targets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint8_t* encoded = labeled != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, BUSTER_X86_ENCODER_CAPACITY(count)) : 0;
     AssemblyError error = encoded != 0 ? ASSEMBLY_OK : ASSEMBLY_FULL;
-    const int64_t length = encoded != 0 ? x86_encode_scalar(code->records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0) : -1;
+    const int64_t length = encoded != 0 ? x86_encode(code->records, count, encoded, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0) : -1;
     if (error == ASSEMBLY_OK && ((uint64_t)length != size || atom_bytes == 0))
     {
         error = ASSEMBLY_INVALID;
