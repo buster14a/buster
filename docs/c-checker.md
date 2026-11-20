@@ -7222,8 +7222,7 @@ scalar path, the twin, tests every comparison; #2451), a plain `x = y` for `-Wse
 an analysis whose diagnostics are ignored. The token passes find their roles
 and kinds 64 tokens at a time, the node passes their operators 16 nodes at a
 time through an operator bitset, and `-Wuninitialized`'s declaration loops a
-sparse column's next entry by its directory (`check_sparse_next`). Each scalar
-path, the twin, visits every item and runs the same tests.
+sparse column's next entry by its directory (`check_sparse_next`).
 A static selection's unselected arms and controlling expression
 (`check_common_unselected_roots`, which `check_common_evaluated` and the
 returned-address check use) are the roots inside its range, from past its

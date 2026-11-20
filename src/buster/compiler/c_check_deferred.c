@@ -1840,7 +1840,7 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
     {
         const CheckDeferredIds* ids = pass->ids + c;
         const bool sparse = ids->column == NULL;
-        const uint32_t entries = sparse ? check_sparse_entries(ids->sparse, begin, finish, pass->vector, positions) :
+        const uint32_t entries = sparse ? check_sparse_entries(ids->sparse, begin, finish, positions) :
                                           check_deferred_entries(ids->column, begin, finish, ids->none, pass->vector, positions);
         uint32_t body = first;
         for (uint32_t e = 0; e < entries; e += 1)

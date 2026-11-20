@@ -26,7 +26,7 @@ static void check_test_generic_masks(CheckTest* test)
                 {
                     expected |= (uint32_t)(keys[lane] == key) << lane | (uint32_t)(keys[lane] == 0) << (BUSTER_CHECK_GENERIC_GROUP + lane);
                 }
-                const uint32_t masks = check_generic_masks(keys, key, false);
+                const uint32_t masks = check_generic_masks(keys, key);
                 check_test_expect(test, masks == expected && (masks >> BUSTER_CHECK_GENERIC_GROUP) == (UINT16_MAX & (UINT32_C(0xffff) << length)),
                                   "generic masks are each lane's match and emptiness through the last owned group");
             }
