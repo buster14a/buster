@@ -901,6 +901,71 @@ static void tier1_float_fma_addend_addresses(Tier1EmitTest* test)
     }
 }
 
+// A load in the first factor can use the existing 132/231 memory forms only when the
+// register factor cannot supply a competing NaN. The addend remains the original addend.
+static void tier1_float_first_fma_load(Tier1EmitTest* test)
+{
+    const IrSizes sizes = { .instruction_count = 8, .block_count = 1, .parameter_count = 3, .constant_count = 1 };
+    for (uint32_t type = IR_F32; type <= IR_F64; type += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create a scalar FMA with a loaded first factor");
+        for (uint32_t shape = 0; created && shape < 10; shape += 1)
+        {
+            const uint64_t bits32[] = { 0x3fa00000, 0xff800000, 0x7fc11234, 0xff800001 };
+            const uint64_t bits64[] = { UINT64_C(0x3ff4000000000000), UINT64_C(0xfff0000000000000),
+                                        UINT64_C(0x7ff8000000001234), UINT64_C(0xfff0000000000001) };
+            function.result_type = (uint8_t)type;
+            function.block_offsets[1] = 8;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[2] = (uint8_t)type;
+            tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+            function.parameter_types[1] = shape == 6 ? (uint8_t)type : IR_I32;
+            tier1_emit_test_node(&function, 1, IR_PARAM, function.parameter_types[1], 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 2, IR_PARAM, type, 2, BUSTER_IR_NONE);
+            if (shape < 4 || shape >= 7)
+            {
+                const uint32_t literal = shape < 4 ? shape : 0;
+                function.constants[0].low = type == IR_F32 ? bits32[literal] : bits64[literal];
+                tier1_emit_test_node(&function, 3, IR_CONST, type, 0, BUSTER_IR_NONE);
+            }
+            else
+            {
+                const uint32_t operation = shape == 4 ? IR_SITOFP : shape == 5 ? IR_UITOFP : IR_COPY;
+                tier1_emit_test_node(&function, 3, operation, type, 1, BUSTER_IR_NONE);
+            }
+            tier1_emit_test_node(&function, 4, IR_LOAD, type, 0, BUSTER_IR_NONE);
+            function.flags[4] = shape == 7 ? BUSTER_IR_VOLATILE : 0;
+            if (shape == 9)
+            {
+                tier1_emit_test_node(&function, 5, IR_STORE, IR_VOID, 0, 2);
+            }
+            else
+            {
+                tier1_emit_test_node(&function, 5, IR_COPY, type, shape == 8 ? 4 : 2, BUSTER_IR_NONE);
+            }
+            tier1_emit_test_node(&function, 6, IR_FMA, type, 4, 3);
+            function.c[6] = 2;
+            tier1_emit_test_node(&function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE);
+            Tier1SelectPlan plan;
+            uint32_t failed = BUSTER_IR_NONE;
+            const bool selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+            tier1_emit_test_expect(test, selected, "select the scalar FMA first-factor alternatives");
+            if (selected)
+            {
+                const bool fold = shape < 2 || shape == 4 || shape == 5;
+                const Tier1SelectPattern pattern = plan.patterns[6];
+                tier1_emit_test_expect(test, (pattern.rule == TIER1_RULE_FLOAT_FMA_LOAD) == fold && (plan.covered[4] != 0) == fold &&
+                                       (!fold || (pattern.values[0] == 3 && pattern.values[1] == 2 && pattern.condition == 0)),
+                                       "only a non-NaN register factor allows the first load to occupy r/m");
+            }
+            arena_pop_to(&test->output, 0);
+        }
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static void tier1_float_fma_loads(Tier1EmitTest* test)
 {
     const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .parameter_count = 3, .constant_count = 1 };
@@ -988,6 +1053,7 @@ static void tier1_float_cases(Tier1EmitTest* test)
     test->width = 8;
     test->selects = false;
     tier1_float_conversion_loads(test);
+    tier1_float_first_fma_load(test);
     tier1_float_fma_loads(test);
     tier1_float_fma_addend_addresses(test);
     for (uint32_t fixture = 0; fixture < BUSTER_TIER1_FLOAT_FIXTURES; fixture += 1)
