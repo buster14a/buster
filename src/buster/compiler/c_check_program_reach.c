@@ -8,12 +8,10 @@
 // __builtin_unreachable() has no insertion point. An if whose taken arms both end that way, and a while or for whose
 // condition is constantly true and that no break leaves, end the same way. __builtin_trap() does not, and a do's
 // following statement stays: clang -O0 still names a function only that statement calls. The walk is ordered because
-// each statement's insertion point is the one before it. Nesting past BUSTER_CHECK_REACH_DEPTH keeps the following
-// statements.
+// each statement's insertion point is the one before it. The statement tree is an explicit stack
+// (BUSTER_CHECK_REACH_DEPTH frames): past that, the following statements stay, which keeps a reachable call.
 
-#define BUSTER_CHECK_REACH_DEPTH 64u
-
-static bool check_control_completes(CheckControlWriter* writer, uint32_t token, bool entered);
+#define BUSTER_CHECK_REACH_DEPTH 128u
 
 static bool check_control_sequence_child(const CheckControlWriter* writer, uint32_t child)
 {
@@ -179,63 +177,17 @@ static void check_control_reach_condition_children(const CheckControlWriter* wri
     }
 }
 
-static bool check_control_completes_sequence(CheckControlWriter* writer, uint32_t token, bool entered, uint32_t after, bool skip_final)
-{
-    bool ip = entered;
-    for (uint32_t child = writer->first[token]; child != BUSTER_CHECK_NONE; child = writer->next[child])
-    {
-        const bool kept = check_control_sequence_child(writer, child) && child > after && !(skip_final && child == writer->region_final);
-        if (kept && (ip || check_control_enterable(writer, child)))
-        {
-            ip = check_control_completes(writer, child, ip);
-        }
-    }
-    return ip;
-}
-
-static bool check_control_completes_if(CheckControlWriter* writer, uint32_t token, uint32_t keyword, uint32_t body, uint32_t alternate)
-{
-    const CheckInput* input = writer->program->input;
-    const CheckGraph* graph = &input->graph;
-    const uint32_t condition = input->token_nodes[token];
-    const uint32_t expression = condition < graph->count && graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
-    bool truth = false;
-    const bool folded = keyword != BUSTER_CHECK_NONE && body != BUSTER_CHECK_NONE && check_control_fold_truth(writer, expression, &truth) &&
-                        !check_control_labeled(writer, keyword + 1, token) && !check_control_enterable(writer, truth ? alternate : body);
-    bool result = true;
-    if (folded)
-    {
-        const uint32_t executed = truth ? body : alternate;
-        // No taken arm (`if (0)` without an else) falls through. A taken return does not.
-        result = executed == BUSTER_CHECK_NONE || check_control_completes(writer, executed, true);
-    }
-    else if (alternate == BUSTER_CHECK_NONE)
-    {
-        result = true;
-    }
-    else
-    {
-        const bool then_ip = body != BUSTER_CHECK_NONE && check_control_completes(writer, body, true);
-        const bool else_ip = check_control_completes(writer, alternate, true);
-        result = then_ip || else_ip;
-    }
-    return result;
-}
-
-static bool check_control_completes_body(CheckControlWriter* writer, uint32_t token, bool entered)
+// A statement whose completion does not depend on another statement. Sequences and ifs are not leaves.
+static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t token, bool* completes)
 {
     const Parser* parser = writer->parser;
     const uint8_t role = parser->tree.roles[token];
+    bool leaf = true;
     bool result = true;
-    if (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
+    if (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO ||
+        role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE)
     {
-        result = check_control_completes_sequence(writer, token, entered, writer->opening, false);
-    }
-    else if (role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE)
-    {
-        // The label or case creates the insertion point. Statements after it are its children, and a return among
-        // them leaves out the rest, the same way a block does. The region's value is not one of those statements.
-        result = check_control_completes_sequence(writer, token, true, token, true);
+        leaf = false;
     }
     else if (role == PARSE_ROLE_TERMINATOR)
     {
@@ -278,7 +230,7 @@ static bool check_control_completes_body(CheckControlWriter* writer, uint32_t to
         const uint8_t kind = keyword != BUSTER_CHECK_NONE ? parser->tokens.kinds[keyword] : 0;
         if (kind == PARSE_KIND_IF)
         {
-            result = check_control_completes_if(writer, token, keyword, body, alternate);
+            leaf = false;
         }
         else if (kind == PARSE_KIND_WHILE)
         {
@@ -313,17 +265,198 @@ static bool check_control_completes_body(CheckControlWriter* writer, uint32_t to
         const bool breaks = check_control_reach_breaks(writer, token, body);
         result = !always || breaks;
     }
-    return result;
+    *completes = result;
+    return leaf;
 }
 
+// Whether an if folds, and which arm it keeps. A missing arm falls through (`if (0)` with no else).
+static bool check_control_reach_if(const CheckControlWriter* writer, uint32_t token, bool* folded, uint32_t* first, uint32_t* second)
+{
+    const Parser* parser = writer->parser;
+    const CheckInput* input = writer->program->input;
+    const CheckGraph* graph = &input->graph;
+    uint32_t keyword = BUSTER_CHECK_NONE;
+    uint32_t body = BUSTER_CHECK_NONE;
+    uint32_t alternate = BUSTER_CHECK_NONE;
+    check_control_reach_condition_children(writer, token, &keyword, &body, &alternate);
+    const uint32_t condition = token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const uint32_t expression = condition < graph->count && graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
+    bool truth = false;
+    const bool folds = keyword != BUSTER_CHECK_NONE && parser->tokens.kinds[keyword] == PARSE_KIND_IF && body != BUSTER_CHECK_NONE &&
+                       check_control_fold_truth(writer, expression, &truth) && !check_control_labeled(writer, keyword + 1, token) &&
+                       !check_control_enterable(writer, truth ? alternate : body);
+    *folded = folds;
+    *first = folds ? (truth ? body : alternate) : body;
+    *second = folds || alternate == BUSTER_CHECK_NONE ? BUSTER_CHECK_NONE : alternate;
+    return alternate == BUSTER_CHECK_NONE && !folds;
+}
+
+typedef enum CheckReachStep
+{
+    CHECK_REACH_STATEMENT,
+    CHECK_REACH_SEQUENCE,
+    CHECK_REACH_IF_THEN,
+    CHECK_REACH_IF_ELSE,
+} CheckReachStep;
+
+typedef struct CheckReachFrame CheckReachFrame;
+struct CheckReachFrame
+{
+    uint32_t token;
+    uint32_t child;
+    uint32_t after;
+    uint32_t alternate;
+    CheckReachStep step;
+    bool entered;
+    bool ip;
+    bool skip_final;
+    bool then_ip;
+};
+
+// Whether control leaves `token` for the next statement. `entered` is false when the statement was reached only
+// through a label inside it. An explicit stack: the call graph has no cycle here.
 static bool check_control_completes(CheckControlWriter* writer, uint32_t token, bool entered)
 {
+    CheckReachFrame stack[BUSTER_CHECK_REACH_DEPTH];
+    uint32_t depth = 0;
     bool result = true;
-    if (writer->reach_depth < BUSTER_CHECK_REACH_DEPTH && token != BUSTER_CHECK_NONE)
+    bool have = false;
+    bool overflow = token == BUSTER_CHECK_NONE;
+    if (!overflow)
     {
-        writer->reach_depth += 1;
-        result = check_control_completes_body(writer, token, entered);
-        writer->reach_depth -= 1;
+        stack[0] = (CheckReachFrame){ .token = token, .step = CHECK_REACH_STATEMENT, .entered = entered };
+        depth = 1;
+    }
+    while (depth != 0 && !overflow)
+    {
+        CheckReachFrame* frame = stack + depth - 1;
+        if (have && frame->step == CHECK_REACH_SEQUENCE)
+        {
+            frame->ip = result;
+            frame->child = writer->next[frame->child];
+            have = false;
+        }
+        else if (have && frame->step == CHECK_REACH_IF_THEN)
+        {
+            frame->then_ip = result;
+            frame->step = CHECK_REACH_IF_ELSE;
+            have = false;
+            if (depth >= BUSTER_CHECK_REACH_DEPTH)
+            {
+                overflow = true;
+            }
+            else
+            {
+                stack[depth++] = (CheckReachFrame){ .token = frame->alternate, .step = CHECK_REACH_STATEMENT, .entered = true };
+            }
+        }
+        else if (have && frame->step == CHECK_REACH_IF_ELSE)
+        {
+            result = frame->then_ip || result;
+            depth -= 1;
+        }
+        else if (frame->step == CHECK_REACH_STATEMENT)
+        {
+            const uint8_t role = writer->parser->tree.roles[frame->token];
+            bool leaf_result = true;
+            if (check_control_reach_leaf(writer, frame->token, &leaf_result))
+            {
+                result = leaf_result;
+                have = true;
+                depth -= 1;
+            }
+            else if (role == PARSE_ROLE_CLOSE_CONDITION)
+            {
+                bool folded = false;
+                uint32_t first = BUSTER_CHECK_NONE;
+                uint32_t second = BUSTER_CHECK_NONE;
+                const bool falls = check_control_reach_if(writer, frame->token, &folded, &first, &second);
+                if (falls || (folded && first == BUSTER_CHECK_NONE))
+                {
+                    // No else, or `if (0)` with no else: control continues after the if.
+                    result = true;
+                    have = true;
+                    depth -= 1;
+                }
+                else if (folded)
+                {
+                    frame->token = first;
+                    frame->entered = true;
+                }
+                else if (first == BUSTER_CHECK_NONE)
+                {
+                    frame->then_ip = false;
+                    frame->alternate = second;
+                    frame->step = CHECK_REACH_IF_ELSE;
+                    if (depth >= BUSTER_CHECK_REACH_DEPTH)
+                    {
+                        overflow = true;
+                    }
+                    else
+                    {
+                        stack[depth++] = (CheckReachFrame){ .token = second, .step = CHECK_REACH_STATEMENT, .entered = true };
+                    }
+                }
+                else
+                {
+                    frame->alternate = second;
+                    frame->step = CHECK_REACH_IF_THEN;
+                    if (depth >= BUSTER_CHECK_REACH_DEPTH)
+                    {
+                        overflow = true;
+                    }
+                    else
+                    {
+                        stack[depth++] = (CheckReachFrame){ .token = first, .step = CHECK_REACH_STATEMENT, .entered = true };
+                    }
+                }
+            }
+            else
+            {
+                const bool label = role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE;
+                frame->step = CHECK_REACH_SEQUENCE;
+                frame->ip = label || frame->entered;
+                frame->after = label ? frame->token : writer->opening;
+                frame->skip_final = label;
+                frame->child = writer->first[frame->token];
+            }
+        }
+        else
+        {
+            bool pushed = false;
+            while (frame->child != BUSTER_CHECK_NONE && !pushed && !overflow)
+            {
+                const uint32_t child = frame->child;
+                const bool kept = check_control_sequence_child(writer, child) && child > frame->after &&
+                                  !(frame->skip_final && child == writer->region_final);
+                if (kept && (frame->ip || check_control_enterable(writer, child)))
+                {
+                    if (depth >= BUSTER_CHECK_REACH_DEPTH)
+                    {
+                        overflow = true;
+                    }
+                    else
+                    {
+                        stack[depth++] = (CheckReachFrame){ .token = child, .step = CHECK_REACH_STATEMENT, .entered = frame->ip };
+                        pushed = true;
+                    }
+                }
+                else
+                {
+                    frame->child = writer->next[child];
+                }
+            }
+            if (!pushed && !overflow)
+            {
+                result = frame->ip;
+                have = true;
+                depth -= 1;
+            }
+        }
+    }
+    if (overflow)
+    {
+        result = true;
     }
     return result;
 }

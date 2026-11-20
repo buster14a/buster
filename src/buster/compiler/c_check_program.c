@@ -860,9 +860,6 @@ struct CheckControlWriter
     Arena* switch_scratch;
     uint32_t* fold_stack;
     uint32_t fold_capacity;
-    // Nesting of check_control_completes (#2987). Past BUSTER_CHECK_REACH_DEPTH the following statements stay, which
-    // keeps a reachable call rather than dropping one.
-    uint32_t reach_depth;
     uint32_t count;
     uint32_t depth;
     uint32_t label_count;
