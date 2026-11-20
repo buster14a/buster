@@ -111,9 +111,11 @@ struct IrVectorizeTarget
     uint8_t reduce[4][BUSTER_IR_REDUCE_OPERATIONS];
     // A population count of lanes of 1 << size bytes.
     uint8_t popcount[4];
-    // A masked load and a masked store of lanes of 1 << size bytes at the width, and the mask of its lanes from a general
-    // register: the masked tail's (#2807), EVEX's alone.
+    // A masked load and a masked store of lanes of 1 << size bytes at the width: the masked tail's (#2807), EVEX's alone.
     uint8_t masked[4];
+    // The masked tail's mask of 1 << k lanes from a general register, a bit k for 2 to 64 lanes (#2807): a kmov of the mask
+    // type's bytes, which a loop with no vector load or store needs too (kmovb, of 8 lanes or fewer, is AVX512DQ's).
+    uint8_t mask;
 };
 
 // test-ir-vectorize's mutants (IrVectorizeOptions.mutation): each breaks one rule of the rewrite, and the tests' oracle
@@ -1354,15 +1356,15 @@ static uint32_t ir_vectorize_width(const IrVectorizeWork* work, const IrVectoriz
     return lanes;
 }
 
-// Whether the loop's tail can be one masked vector iteration at `lanes` (#2807): the vector rows' integer arithmetic
-// alone (a floating row would compute the inactive lanes too, raising flags the scalar loop never raises), each vector
-// load and store with its lanes' masked move at its width and the mask from a general register
-// (IrVectorizeTarget.masked), and each reduction's accumulator kept in the inactive lanes by a select.
+// Whether the loop's tail can be one masked vector iteration at `lanes` (#2807): the mask of the lanes from a general
+// register (IrVectorizeTarget.mask), the vector rows' integer arithmetic alone (a floating row would compute the inactive
+// lanes too, raising flags the scalar loop never raises), each vector load and store with its lanes' masked move at its
+// width (IrVectorizeTarget.masked), and each reduction's accumulator kept in the inactive lanes by a select.
 static bool ir_vectorize_masked_legal(const IrVectorizeWork* work, const IrVectorizeLoop* plan, uint32_t lanes)
 {
     const IrFunction* f = work->function;
     const IrVectorizeTarget* t = work->target;
-    bool legal = true;
+    bool legal = ((t->mask >> __builtin_ctz(lanes)) & 1) != 0;
     for (uint32_t k = 0; legal && k < plan->row_count; k += 1)
     {
         const uint32_t i = work->rows[k];
@@ -2233,6 +2235,8 @@ static __attribute__((unused)) void ir_vectorize_target_ir(IrVectorizeTarget* ta
         target->popcount[from] = 7;
         target->masked[from] = 7;
     }
+    // A mask of 2 to 64 lanes.
+    target->mask = 0x7e;
     for (uint32_t operation = BUSTER_IR_REDUCE_ADD; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
     {
         target->reduce[2][operation] = 7;

@@ -2,9 +2,11 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-ir-vectorize [--seed N] [--print NAME] (#2743): the loop vectorizer's fixtures, tests/ir/vectorize/*.ir, one
-// function each. Each is parsed by both parser paths and vectorized at three targets of the IR's every operation, 64, 32
-// and 16 bytes wide (IrVectorizeTarget.moves), each result and its counts folded into a frozen digest (#2924); a
-// fixture expects how many loops each width vectorizes, or the refusal it gives. Then the oracle, on every
+// function each. Each is parsed by both parser paths and vectorized at six targets: three of the IR's every operation,
+// 64, 32 and 16 bytes wide (IrVectorizeTarget.moves), then three at 64 bytes without masked moves, without selects of
+// 32- and 64-bit lanes, and without masks of 8 lanes or fewer (#2807); each result and its counts folded into a frozen
+// digest (#2924). A fixture expects how many loops each width vectorizes, or the refusal it gives, and how many of them
+// have a masked tail. Then the oracle, on every
 // fixture a target changed: the input, the result and the result after the ordinary optimizer (whose final
 // verification checks dominance, past if-conversion's stubs) run in the shared interpreter on one buffer, its pointer
 // parameters placed apart, at one address, a byte, an element and a vector apart either way, at lengths around zero,
@@ -19,8 +21,9 @@
 #define BUSTER_IR_VECTORIZE_TEST_SYMBOL 1u
 #define BUSTER_IR_VECTORIZE_TEST_ENTRY 7u
 // At most 64, 32 and 16 bytes wide with masked moves, then 64 bytes without them, whose tails are the scalar loop's,
-// and 64 bytes with them but no select of 32- or 64-bit lanes, which a masked tail's accumulators need (#2807).
-#define BUSTER_IR_VECTORIZE_TEST_TARGETS 5u
+// 64 bytes with them but no select of 32- or 64-bit lanes, which a masked tail's accumulators need, and 64 bytes with
+// them but no mask of 8 lanes or fewer from a general register (an AVX512F target without DQ's kmovb) (#2807).
+#define BUSTER_IR_VECTORIZE_TEST_TARGETS 6u
 
 typedef struct IrVectorizeTest IrVectorizeTest;
 struct IrVectorizeTest
@@ -36,7 +39,7 @@ struct IrVectorizeTest
     uint64_t digest;
 };
 
-#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0xefe73177faebaa65)
+#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0x34033ad4f0b6e03a)
 
 typedef struct IrVectorizeTestFixture IrVectorizeTestFixture;
 struct IrVectorizeTestFixture
@@ -52,32 +55,36 @@ struct IrVectorizeTestFixture
     // Whether its loop computes floating values, whose tail stays the scalar loop's (#2807): a masked one's inactive
     // lanes would raise flags.
     bool floating;
+    // Its integer loops of 8 lanes or fewer at 64 bytes (a lane of 8 bytes), whose mask is a byte's (#2807).
+    uint32_t byte_masks;
 };
 
 static const IrVectorizeTestFixture ir_vectorize_test_fixtures[] = {
     { .name = "add-i32", .roles = "pppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "add-u8", .roles = "pppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "sub-i16", .roles = "pppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
-    { .name = "mul-i64", .roles = "pppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
+    { .name = "mul-i64", .roles = "pppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 1 },
     { .name = "xor-i32", .roles = "pppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "fadd-f64", .roles = "pppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
     { .name = "fmul-f32", .roles = "pppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
     { .name = "fill-u32", .roles = "pkn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "copy-u8", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
+    // A reduction of a uniform: no vector load or store, the masked tail's mask from a general register alone (#2807).
+    { .name = "sum-uniform-i64", .roles = "kn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 1 },
     // 4- and 8-byte lanes: 8 lanes at 64 bytes, 4 at 32; at 16 bytes the doublewords would be 8 bytes.
-    { .name = "sum-i32", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS },
+    { .name = "sum-i32", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 1 },
     { .name = "sum-u8", .roles = "pnk", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "dot-i16", .roles = "ppn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "reductions-i32", .roles = "pn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
-    { .name = "cond-sum-i32", .roles = "pnk", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS },
+    { .name = "cond-sum-i32", .roles = "pnk", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 1 },
     { .name = "clamp-i32", .roles = "ppkkm", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "scale-u8", .roles = "ppkn", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS },
-    { .name = "popcount-u64", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS },
+    { .name = "popcount-u64", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 1 },
     { .name = "stencil-u8", .roles = "ppn", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "axpy-f32", .roles = "ppkn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
     { .name = "start-offset", .roles = "ppsno", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
-    { .name = "uniform-load", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
-    { .name = "two-loops", .roles = "ppm", .vectorized = { 2, 2, 2 }, .refusal = IR_VECTORIZE_REFUSALS },
+    { .name = "uniform-load", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 1 },
+    { .name = "two-loops", .roles = "ppm", .vectorized = { 2, 2, 2 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 2 },
     { .name = "nested", .roles = "pprn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "refuse-prefix-sum", .roles = "pn", .refusal = IR_VECTORIZE_REFUSE_DEPENDENCE },
     { .name = "refuse-histogram", .roles = "ppn", .refusal = IR_VECTORIZE_REFUSE_ADDRESS },
@@ -115,9 +122,10 @@ static uint64_t ir_vectorize_test_next(IrVectorizeTest* test)
     return x;
 }
 
-// The five targets: every operation of the IR, its moves at most 64, 32 or 16 bytes wide; then at most 64 bytes without
-// masked moves (an AVX2 or SSE2 target's tail at AVX-512's widths); then at most 64 bytes with no select of 32- or
-// 64-bit lanes.
+// The six targets: every operation of the IR, its moves at most 64, 32 or 16 bytes wide; then at most 64 bytes without
+// masked moves or masks from a general register (an AVX2 or SSE2 target's tail at AVX-512's widths); then at most 64
+// bytes with no select of 32- or 64-bit lanes; then at most 64 bytes with no mask of 8 lanes or fewer from a general
+// register.
 static void ir_vectorize_test_target(uint32_t index, IrVectorizeTarget* target)
 {
     ir_vectorize_target_ir(target);
@@ -126,6 +134,7 @@ static void ir_vectorize_test_target(uint32_t index, IrVectorizeTarget* target)
     {
         target->masked[size] = 0;
     }
+    target->mask = (uint8_t)(index == 3 ? 0 : index == 5 ? 0x70 : target->mask);
     if (index == 4)
     {
         target->select[IR_SIMD_LANE_I32] = 0;
@@ -133,7 +142,7 @@ static void ir_vectorize_test_target(uint32_t index, IrVectorizeTarget* target)
     }
 }
 
-// A target's bytes at most: 64, 32, 16, then 64 twice.
+// A target's bytes at most: 64, 32, 16, then 64 three times.
 static uint32_t ir_vectorize_test_bytes(uint32_t index)
 {
     return index >= 3 ? 64u : 64u >> index;
@@ -261,7 +270,7 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
         const IrCheck ac = ir_vectorize_loops(&function, &options, vector, scratch, &a);
         char what[256];
         const uint32_t bytes = ir_vectorize_test_bytes(t);
-        snprintf(what, sizeof(what), "the pass accepts it and restores scratch at %u bytes%s", bytes, t == 3 ? " without masked moves" : "");
+        snprintf(what, sizeof(what), "the pass accepts it and restores scratch at %u bytes%s", bytes, t == 3 ? " without masked moves" : t == 4 ? " without 32- and 64-bit selects" : t == 5 ? " without byte masks" : "");
         ir_vectorize_test_expect(test, ac.error == IR_OK && scratch->length == tm, fixture->name, what);
         if (ac.error == IR_OK)
         {
@@ -293,9 +302,10 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
         ir_vectorize_test_expect(test, ac.error == IR_OK && (t == 4 ? a.vectorized <= expected : a.vectorized == expected && a.changed == (expected != 0)), fixture->name, what);
         // #2807: every integer loop's tail is masked where the target has masked moves, and none otherwise; without
         // selects of 32- and 64-bit lanes, a loop's with no reduction alone, whose accumulators need one (no fixture
-        // has two loops with reductions: each reduction is then one loop's).
+        // has two loops with reductions: each reduction is then one loop's); without masks of 8 lanes or fewer from a
+        // general register, a loop's of more lanes alone.
         const uint32_t reducing = a.reductions < a.vectorized ? a.reductions : a.vectorized;
-        const uint32_t masked = t == 3 || fixture->floating ? 0 : t == 4 ? a.vectorized - reducing : expected;
+        const uint32_t masked = t == 3 || fixture->floating ? 0 : t == 4 ? a.vectorized - reducing : t == 5 ? expected - fixture->byte_masks : expected;
         snprintf(what, sizeof(what), "%u masked tails at %u bytes, %u expected", a.masked, bytes, masked);
         ir_vectorize_test_expect(test, ac.error == IR_OK && a.masked == masked, fixture->name, what);
         if (fixture->refusal != IR_VECTORIZE_REFUSALS && t == 0)

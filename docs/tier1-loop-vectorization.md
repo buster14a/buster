@@ -101,12 +101,14 @@ loop is the remainder and the fallback. The vector loop's induction is lane
 0's, the original's type, stepping by the lanes to `start + vector_n` by the
 original's predicate.
 
-**The masked remainder (#2807).** Where the target has masked moves
-(`IrVectorizeTarget.masked`: a masked load and store of each lane size at the
-width and the mask from a general register, Tier 1's `vmovdqu8` to
-`vmovdqu64` and `kmov`, EVEX's alone) and the loop's vector rows compute no
-floating value, the remainder is one masked vector iteration instead
-(`ir_vectorize_masked_legal`). A floating loop keeps the scalar remainder: its
+**The masked remainder (#2807).** Where the target makes the lanes' mask from
+a general register (`IrVectorizeTarget.mask`: Tier 1's `kmov` of the mask's
+bytes, `kmovb`, AVX512DQ's, for 8 lanes or fewer), has masked moves of each
+vector load's and store's lanes (`IrVectorizeTarget.masked`: `vmovdqu8` to
+`vmovdqu64`, EVEX's alone) and the loop's vector rows compute no floating
+value, the remainder is one masked vector iteration instead
+(`ir_vectorize_masked_legal`). A loop with no vector load or store, a
+reduction of a uniform, needs the mask too. A floating loop keeps the scalar remainder: its
 inactive lanes would raise flags the scalar loop never raises. The rewrite then
 appends G, P, VB, T, TM and TX:
 
