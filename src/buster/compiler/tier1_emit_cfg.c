@@ -3261,6 +3261,9 @@ static Tier1SelectHoles tier1_emit_cfg_holes(const Tier1SelectPlan* plan, const 
     holes.unsigned_i64_float_forms = emitted->prepared.unsigned_i64_float_forms;
     holes.avx2 = emitted->prepared.avx2;
     holes.sse = emitted->prepared.sse;
+    // A floating select's blend (#2842) takes k1 at a target with AVX512VL in a function with no mask values, where no
+    // opmask register holds a value between its nodes.
+    holes.opmask = !emitted->prepared.vex && emitted->prepared.mask_columns == 0 ? 1 : 0;
     return holes;
 }
 

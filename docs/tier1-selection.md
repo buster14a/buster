@@ -407,6 +407,61 @@ patterns are:
   fewer instructions, and Lua's five scripts the same within their runs'
 
   variation (callgrind).
+- Selects of floating values (#2842, `TIER1_RULE_FLOAT_BLEND` and
+  `TIER1_RULE_FLOAT_BLEND_COMPARE`): an `F32` or `F64` select, which
+  if-conversion makes since #2842 ([ir-optimization.md](ir-optimization.md)),
+  is a blend without a branch, every record of a form whose Zen 5 row is
+  measured. Its condition's `i1` (0 or 1) under an opmask register where the
+  CFG consumer gives it one (`Tier1SelectHoles.opmask`: k1, at a target with
+  AVX512VL, in a function with no mask values, so that no opmask register holds
+  a value between nodes): `kmovw` of the condition, then `vpblendmq` (an
+  `F32`'s `vpblendmd`) of the false value and the true one under k1, three
+  registers, so the destination takes no copy. Anywhere else, at x86-64,
+  x86-64-v2, x86-64-v3 and in a function with masks, its lane mask in xmm15:
+  `-c` through the scratch general register and `movq` (`movd`), then
+  `f ^ ((t ^ f) & mask)`, the true value copied into the destination, `pxor`
+  of the false one, `pand` of the mask and `pxor` again. Bitwise operations
+  raise no floating exception and keep a NaN's bits. Where the destination
+  holds the false value, the mask is the condition's negation, `c - 1`, and the
+  two values change places, so that neither value's register takes a copy (the
+  select ties both, `tier1_select_ties`). A floating comparison of the values'
+  width that only the select reads, directly, through its `i1` copy or through
+  C's truth values' links, is folded: `movaps` of its left operand into xmm15
+  and `cmpss` or `cmpsd` by the predicate whose lanes are C's truth, `EQ_OQ`
+  for `==`, `LT_OS` for `<` and `>` (swapped), `LE_OS` for `<=` and `>=`,
+  `NEQ_UQ` for `!=`, and the other one of each pair (four apart: `NEQ_UQ`,
+  `NLT_US`, `NLE_US`, `EQ_OQ`) for a negation, which is true for unordered
+  operands as `!(a < b)` is. The relational predicates are IEC 60559's
+  signaling ones, as C's `<` is (C23 F.3), and the equalities quiet ones; the
+  comparison ran in the head anyway, so nothing is speculated. clang -O2's
+  select of an `fcmp` without AVX-512 is the same `cmpltsd` and mask. A
+  comparison of the other width, or one another node reads, computes its truth
+  value (`ucomis`, `setcc`) and the select blends by it. #2842's `k_ssel`,
+  `float f(float a, float b, int c) { return c ? a : b; }`, is `xor; test;
+  setne; kmovw %eax,%k1; vpblendmd %xmm0,%xmm1,%xmm0{%k1}` at znver5 (clang
+  -O2's `sete; kmovd; vmovss {%k1}`), and `mov %eax,%r11d; neg %r11d; movd
+  %r11d,%xmm15; pxor %xmm1,%xmm0; pand %xmm15,%xmm0; pxor %xmm1,%xmm0` at
+  x86-64-v3, where clang -O2 branches; `a < b ? x : y` of doubles is `movaps
+  %xmm0,%xmm15; cmpltsd %xmm1,%xmm15; pxor %xmm3,%xmm2; pand %xmm15,%xmm2;
+  pxor %xmm3,%xmm2` at every target. Two constants (`k_fsel`'s 3.0 and 1.0) are
+  each their own `FLOAT_CONSTANT` and blended: their bits selected in general
+  registers by a `cmov` and one `movq` would need a second general register,
+  which no rule has but the scratch one. Grammar-wise the select is the REG
+  leaf's (`tier1_burs_classify` takes integer selects alone), so both paths
+  take munch's candidate, the folded one first by its fold. `test-tier1-select`
+  runs both rules' records natively (`tier1_float_blend_test.c`): the blend at
+  both widths and both conditions, the values in two registers or one and the
+  destination its own, either value's or both's, past xmm7 too, by the lane
+  mask valid at x86-64's baseline and under k1 at x86-64-v4, on NaN payloads;
+  the comparisons' at each of the six immediates against C's comparisons, NaNs,
+  signed zeros, infinities and a subnormal among the operands, the operands in
+  two registers, one, or the destination's; and the plans of each predicate's
+  select directly, through its copy, past a copy that isn't its own, through
+  one or two links, of either width and the other, and by an integer condition,
+  each in the selection's frozen digest. `test-checker-driver` compiles #2842's
+  kernels and selects of every comparison at x86-64, x86-64-v3 and x86-64-v4
+  against clang -O0 and decodes each function's blends and branches
+  (`c_check_tier1_if_convert_test.c`).
 - Labels and indirect jumps (#789): GNU C's labels as values and computed gotos,
   and the jump tables C's switches lower to. A label's address is its symbol's
   (`TIER1_RULE_SYMBOL_ADDRESS`). A `br_indirect` is a `jmp` through its target's
