@@ -797,6 +797,7 @@ static void tier1_float_unsigned_i64_forms(Tier1EmitTest* test)
             const uint32_t count = tier1_select_fixed(&holes, rows);
             const bool hardware = (mask & (width == 4 ? 1u : 2u)) != 0;
             const uint16_t form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM64 : X86_FORM_VCVTUSI2SD_X_X_RM64;
+            tier1_emit_test_expect(test, !hardware || x86_zen5_missing(rows, count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "the emitted unsigned conversion has measured Zen 5 costs");
             tier1_emit_test_expect(test, hardware ? count == 2 && rows[0].form == X86_FORM_XORPS_X_XM128 &&
                                    rows[0].reg == 7 && rows[0].rm == 7 && rows[1].form == form &&
                                    rows[1].reg == 7 && rows[1].vvvv == 7 && rows[1].rm == X86_REGISTER_R9 :
