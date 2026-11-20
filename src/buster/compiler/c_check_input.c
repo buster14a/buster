@@ -13008,7 +13008,8 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     if (kind == C_BINDING_FUNCTION && !overload && !versions && reader->parser->language.standard < 2023 && reader->pp != NULL)
     {
         const uint32_t previous = linked_visible ? old_declaration : linked_library != 0 ? linked_library - 1 : BUSTER_CHECK_NONE;
-        if (previous < reader->parser->tokens.count && reader->declaration_kinds[previous] == C_BINDING_FUNCTION)
+        if (previous < reader->parser->tokens.count && reader->declaration_kinds[previous] == C_BINDING_FUNCTION &&
+            check_input_linkage(reader->declaration_bits, token) == check_input_linkage(reader->declaration_bits, previous))
         {
             prototype_warning = check_input_non_prototype_merge(reader, token, previous, point);
         }
