@@ -17,7 +17,10 @@ the planner the checked program's definitions, roots and evaluated references,
 and `-c` and the direct path lower what it selects. A constant `if`'s dead arm
 is never written, as clang -O0 doesn't emit it (#1108, the lowering guide's
 "Constant `if`s"): what only it reaches, a block-scope static it declares
-among them, is neither selected nor checked for target features, so
+among them, is neither selected nor checked for target features. A statement
+after a `return`, `break`, `continue`, `goto` or `__builtin_unreachable()` is
+left out the same way (#2987, "Statements no control reaches"), so
+`return 0; missing();` does not select `missing`. That is why
 `main.c`'s units emit no other unit's commands and a baseline build no
 `BUSTER_VECTOR_PATH` kernel. `c_lowering_symbols.c`
 compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
