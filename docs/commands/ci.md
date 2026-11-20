@@ -367,6 +367,57 @@ is network-free, and the preparation job runs it. `hosted-inputs-drill.yml`
 runs a shard's setup, and a warm preparation, with those hosts down. Details,
 failure handling and recovery: [Offline inputs](../hosted-toolchain.md#offline-inputs-2275).
 
+## Deterministic work and growth contracts
+
+The correctness inventory's `Test deterministic work and growth contracts`
+heading (#2041) runs `bash tests/work-contracts/run.sh` on one CPU. Its small
+declared set runs in every applicable PR row and every merge candidate's full
+hosted coverage, with the row's host and sanitizer flags. Native correctness
+retains the same inventory.
+
+`work_contract.h` uses the existing tagged key/value report style:
+
+```text
+work-contract fixture=NAME size=N metric=NAME actual=COUNT bound=LIMIT semantic=pass|fail result=pass|fail
+```
+
+A record passes only when its semantic check passes and `actual <= bound`.
+Report write/flush failures fail the command too. The runner requires the
+complete declared record inventory and identical records on a second run;
+missing sizes, duplicate records or a crashed negative control cannot pass.
+Inputs are 256, 512 and 1024 (N, 2N and 4N). No elapsed-time or RSS value
+enters a verdict.
+
+| Fixture and counted operation | Bound and reason | Required useful result |
+| --- | --- | --- |
+| Dependency admission: actual filesystem probes (#1314) | At most 9N: up to three probes for each source, object and destination. Doubling N permits at most twice the probes. | Distinct destinations admitted; final source/object hard-link aliases, absent parent-directory aliases and dangling links refused with diagnostics; protected bytes unchanged; stdout requires no probes or storage. |
+| Dependency admission: identity comparisons | N × (32 + 20 × ceil(log2(2N))), including index construction; doubling N permits at most three times the work. This retains the existing driver's bounded sorting/search allowance. | The same admission controls, including conflicts at the end of the protected set. |
+| Dependency admission: retained arena bytes | N × (80 + 2 × sizeof(DependencyIdentity) + 6 × sizeof(identity pointer)) + three alignment boundaries: bounded names, two protected identities and their three index columns. Doubling permits twice the storage plus alignment. | The same admission controls; this metric describes retained arena demand, not RSS. |
+| SSA scoped loops: total requested construction bytes (#1353) | 4096N + 65536: 4 KiB per loop and 64 KiB fixed slack for topology, accesses, reusable local workspace and actual phis. The fixture has 3N+2 blocks, 8N instructions and 4N+1 edges; no blocks-times-locals table is needed. | Every local promoted with one two-input phi and independently known reaching values; all blocks reachable, input unchanged and scratch restored. Phi numbering may differ. |
+| SSA scoped loops: total requested verification bytes | The same linear allowance, charged separately from construction. | The independent SSA verifier accepts the complete result and restores scratch. |
+
+The dependency fixture reuses the driver's existing comparison API and
+independently counts actual `stat`/`lstat` calls. SSA wraps the real arena
+request functions only in its standalone translation unit: failed requests
+and requests later released by restoring scratch are still charged. Fixture
+generation and the fixture's own oracle buffers are outside those counters.
+
+The runner deliberately restores excessive work in temporary copies of the
+real implementations: linear dependency-index searches and dense SSA
+selection must fail the work bounds while every semantic check still passes.
+A third mutation skips overlap checks and must fail semantic verification
+despite doing less work. A source fragment that no longer matches fails the
+mutation setup rather than silently testing an unmodified implementation.
+
+The new instrumentation belongs only to standalone test builds, with no
+production-source edits. The runner checks the actual znver5 Release flags
+and production source inventory, then requires every test wrapper to refuse
+the production-unit flags. Existing optional dependency counters are unchanged;
+this guarantees no new counter code in benchmark builds. These contracts do not replace
+native performance measurements, existing timing guardrails or the focused
+SQLite object-change policy. Their counts constrain the stated operations,
+not CPU, cache or layout performance.
+
 ## Shard costs
 
 Each hosted row deals its inventory to its shards by a table of its own,
