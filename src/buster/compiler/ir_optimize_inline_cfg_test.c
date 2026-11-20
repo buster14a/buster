@@ -704,6 +704,64 @@ static void ir_inline_test_general_limits(IrInlineTest* test, Arena* input, Aren
             ir_inline_test_expect(test, result.functions[3].op == functions[3].op && result.functions[1].op == functions[1].op && result.decisions[result.call_offsets[3]] == IR_INLINE_DISABLED &&
                                       kept == 2,
                                   "the callees are taken as they are, their calls kept");
+            // A saved diamond and the unit's other, uncached callees can feed more than one caller. The
+            // builder's immutable shape stays live through both expansions.
+            const uint64_t shape_mark = input->length;
+            IrInlineBody saved = { 0 };
+            const bool shaped = ir_inline_shape(&functions[1], true, input, &saved);
+            ir_inline_test_expect(test, shaped && saved.general && saved.supported, "the saved general callee has an admitted shape");
+            if (shaped && saved.supported)
+            {
+                const IrInlineBody* const shapes[5] = { NULL, &saved, NULL, NULL, NULL };
+                for (uint32_t caller = 0; caller < 2; caller += 1)
+                {
+                    const uint64_t other_mark = twin->length;
+                    const uint64_t temporary = scratch->length;
+                    uint32_t failed = 0;
+                    IrInlineResult reused = { 0 };
+                    const IrCheck check = ir_inline_with_shapes(&unit, twin, scratch, options, shapes, &reused, &failed);
+                    ir_inline_test_expect(test, check.error == IR_OK && failed == BUSTER_IR_NONE && scratch->length == temporary,
+                                          "each caller reuses the same immutable callee shape and returns its scratch");
+                    if (check.error == IR_OK)
+                    {
+                        ir_inline_test_same_result(test, &unit, &result, &reused);
+                    }
+                    arena_pop_to(twin, other_mark);
+                }
+            }
+            // The slot fixture has two slots. Its own marker belongs to slot one and the caller must
+            // introduce one around slot zero. Store the marks with the immutable summary.
+            ir_inline_cfg_callee(&text, 5, 7);
+            IrFunction slotted = { 0 };
+            IrInlineBody slots = { 0 };
+            const bool parsed_slots = ir_inline_cfg_parse(test, &text, input, scratch, &slotted);
+            const bool saved_slots = parsed_slots && ir_inline_shape(&slotted, true, input, &slots);
+            ir_inline_test_expect(test, saved_slots && slots.general && slots.supported && slots.unmarked == 1 && slots.marked != NULL &&
+                                  slots.marked[0] == 0 && slots.marked[1] == 1, "a summary retains the originating callee's slot lifetime markers");
+            if (saved_slots && slots.supported)
+            {
+                IrFunction members[5];
+                memcpy(members, functions, sizeof(members));
+                members[1] = slotted;
+                IrInlineUnit with_slots = unit;
+                with_slots.functions = members;
+                const IrInlineBody* const shapes[5] = { NULL, &slots, NULL, NULL, NULL };
+                const uint64_t out_mark = output->length;
+                const uint64_t other_mark = twin->length;
+                IrInlineResult reference = { 0 };
+                IrInlineResult cached = { 0 };
+                const IrCheck original = ir_optimize_inline(&with_slots, output, scratch, options, &reference, NULL);
+                const IrCheck repeated = ir_inline_with_shapes(&with_slots, twin, scratch, options, shapes, &cached, NULL);
+                ir_inline_test_expect(test, original.error == IR_OK && repeated.error == IR_OK && cached.inlined_calls != 0,
+                                      "a caller expands a slotted body using its saved lifetime markers");
+                if (original.error == IR_OK && repeated.error == IR_OK)
+                {
+                    ir_inline_test_same_result(test, &with_slots, &reference, &cached);
+                }
+                arena_pop_to(output, out_mark);
+                arena_pop_to(twin, other_mark);
+            }
+            arena_pop_to(input, shape_mark);
             IrInlineCfgRun runs[2];
             for (uint32_t trial = 0; trial < 16; trial += 1)
             {

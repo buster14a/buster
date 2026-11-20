@@ -2258,7 +2258,8 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     return error;
 }
 
-static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* unit, Arena* output, Arena* scratch, IrInlineOptions options, IrInlineResult* result, uint32_t* error_function)
+static IrCheck ir_inline_with_shapes(const IrInlineUnit* unit, Arena* output, Arena* scratch, IrInlineOptions options,
+                                     const IrInlineBody* const* known, IrInlineResult* result, uint32_t* error_function)
 {
     const bool arenas = output && scratch && output->base && scratch->base && output->length <= output->capacity && scratch->length <= scratch->capacity;
     const bool error_storage = error_function == 0 || (arenas && !ir_inline_tail_conflict(error_function, sizeof(*error_function), output, scratch) && !ir_inline_overlap(error_function, sizeof(*error_function), result, sizeof(*result)));
@@ -2328,10 +2329,18 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
         arena_pop_to(scratch, function_mark);
         // A shape is read only when choosing what to inline into a later caller. In single-caller mode the
         // rewritten body is that caller, and its expanded rows and slot lifetimes need no callee summary.
-        if (check.error == IR_OK && (unit->only == 0 || !rewritten) &&
-            !ir_inline_shape(&inlined.functions[failed_function], options.control_flow, scratch, &shapes[failed_function]))
+        if (check.error == IR_OK && (unit->only == 0 || !rewritten))
         {
-            check.error = IR_ERROR_MEMORY;
+            // The emission's single-caller unit borrows finished callee bodies from immutable summaries. Its
+            // saved shapes describe those very bodies, including any slot lifetime marks, for every caller.
+            if (!rewritten && known != NULL && known[failed_function] != NULL)
+            {
+                shapes[failed_function] = *known[failed_function];
+            }
+            else if (!ir_inline_shape(&inlined.functions[failed_function], options.control_flow, scratch, &shapes[failed_function]))
+            {
+                check.error = IR_ERROR_MEMORY;
+            }
         }
     }
     if (arguments)
@@ -2353,4 +2362,9 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
         *error_function = failed_function;
     }
     return check;
+}
+
+static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* unit, Arena* output, Arena* scratch, IrInlineOptions options, IrInlineResult* result, uint32_t* error_function)
+{
+    return ir_inline_with_shapes(unit, output, scratch, options, NULL, result, error_function);
 }
