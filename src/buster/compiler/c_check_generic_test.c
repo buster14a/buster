@@ -95,7 +95,7 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
                 const uint32_t selected = count / 2;
                 const uint64_t mark = scratch.length;
                 CheckGenericSet set;
-                bool valid = check_generic_initialize(&reader, &set, count * 4, types[selected], 1);
+                bool valid = check_generic_initialize(&reader, &set, count, types[selected], 1);
                 uint32_t matched = 0;
                 for (uint32_t i = 0; valid && i < count; i += 1)
                 {
@@ -118,7 +118,7 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
         // Twenty incompatible pointer depths share a key. They fill the last group and wrap to the first group;
         // the repeated last depth must still visit all nineteen earlier candidates before its equal type.
         CheckGenericSet collided;
-        bool valid = check_generic_initialize(&reader, &collided, 80, BUSTER_TYPE_INT, 1);
+        bool valid = check_generic_initialize(&reader, &collided, 20, BUSTER_TYPE_INT, 1);
         TypeId nested = 0;
         for (uint32_t i = 0; nested == 0 && i < BUSTER_ARRAY_LENGTH(records); i += 1)
         {
@@ -213,7 +213,7 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
                         const TypeAnswer expected = type_compatible_at(&storage.table, a, b, activations, storage.table.tags.count, position);
                         CheckGenericSet set;
                         bool matches = false;
-                        bool valid = a != 0 && b != 0 && expected != TYPE_ANSWER_FULL && check_generic_initialize(&reader, &set, 8, b, position);
+                        bool valid = a != 0 && b != 0 && expected != TYPE_ANSWER_FULL && check_generic_initialize(&reader, &set, 2, b, position);
                         valid = valid && check_generic_association(&reader, &set, a, &matches);
                         check_test_expect(test, valid && matches == (expected == TYPE_ANSWER_YES), "generic control filtering agrees with independent exact compatibility");
                         check_test_expect(test, valid && check_generic_association(&reader, &set, b, &matches) == (expected == TYPE_ANSWER_NO),

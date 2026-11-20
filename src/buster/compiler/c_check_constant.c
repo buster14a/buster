@@ -2024,6 +2024,9 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
     {
         check_constant_mark_type(input, input->first, input->end);
     }
+    // The last type query's type name that this walk marked, [specifier_first, specifier_end), or none.
+    uint32_t specifier_first = 0;
+    uint32_t specifier_end = 0;
     for (uint32_t token = input->bind_cursor; valid && token < input->end; token += 1)
     {
         const uint32_t index = token - input->first;
@@ -2134,7 +2137,17 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                 if (check_constant_type_start(parser, next))
                 {
                     input->type_begin[close - input->first] = next;
-                    check_constant_mark_type(input, next, close);
+                    // A query at the start of the one around it (`typeof(typeof(...))`, `typeof(typeof(...) *)`) has its
+                    // tokens marked by that one's mark, which reached its `(` a token at a time and marked them as its own
+                    // mark would, and the `typeof` between the two writes none: marking them again made a chain of n
+                    // queries mark n^2/2 tokens (#2995).
+                    const bool marked = token == specifier_first + 1 && close < specifier_end && parser->tokens.kinds[token - 1] == PARSE_KIND_TYPEOF;
+                    if (!marked)
+                    {
+                        check_constant_mark_type(input, next, close);
+                    }
+                    specifier_first = next;
+                    specifier_end = close;
                 }
                 else
                 {
@@ -2339,7 +2352,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         const uint64_t mark = reader->scratch->length;
         const TypeId control_type = check_constant_control_type(reader, &control);
         CheckGenericSet seen;
-        valid = control_type != 0 && check_generic_initialize(reader, &seen, token - separator, control_type, token + 1);
+        valid = control_type != 0 && check_generic_initialize(reader, &seen, check_generic_associations(parser, separator + 1, token), control_type, token + 1);
         uint32_t chosen_first = BUSTER_CHECK_NONE;
         uint32_t chosen_end = 0;
         uint32_t default_first = BUSTER_CHECK_NONE;
