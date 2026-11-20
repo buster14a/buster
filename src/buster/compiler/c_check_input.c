@@ -12789,11 +12789,12 @@ static bool check_input_builtin_function(CheckInputReader* reader, uint32_t name
 // its "cannot redeclare builtin function", with the same note; and a definition is clang's error
 // (ActOnStartOfFunctionDef's err_builtin_definition), but of a library builtin. A compatible declaration leaves the name
 // the builtin's: its calls are the builtin's (check_input_resolve_name, check_input_intrinsic_prepare). Rare: scalar.
-static __attribute__((noinline)) void check_input_builtin_declaration(CheckInputReader* reader, uint32_t token)
+static __attribute__((noinline)) bool check_input_builtin_declaration(CheckInputReader* reader, uint32_t token)
 {
     TypeId builtin = 0;
     bool custom = false;
-    if (check_input_builtin_function(reader, reader->parser->tokens.names[token], &builtin, &custom))
+    const bool builtin_function = check_input_builtin_function(reader, reader->parser->tokens.names[token], &builtin, &custom);
+    if (builtin_function)
     {
         const TypeAnswer compatible = builtin != 0 && !custom ? type_compatible(reader->types, builtin, reader->declared_types[token]) : TYPE_ANSWER_YES;
         reader->output->resource |= compatible == TYPE_ANSWER_FULL;
@@ -12811,6 +12812,7 @@ static __attribute__((noinline)) void check_input_builtin_declaration(CheckInput
             check_input_report(reader, token, CHECK_INPUT_BUILTIN_DEFINITION);
         }
     }
+    return builtin_function;
 }
 
 // Whether `token` declares an object's redefinition kept after its error (CheckInputReader.invalid_redefinitions).
@@ -12921,8 +12923,8 @@ static bool check_input_non_prototype_merge(CheckInputReader* reader, uint32_t t
             const IdentId name = reader->parser->tokens.names[plain];
             const InternSpan span = reader->pp->table->spans[name];
             const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)reader->pp->table->records + span.offset, span.length);
-            const bool builtin = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL &&
-                                 check_input_library_enabled(info, &reader->pp->options);
+            const bool builtin = check_input_linkage(reader->declaration_bits, plain) == 2 && info != NULL &&
+                                 memchr(info->attributes, 'f', info->attributes_length) != NULL && check_input_library_enabled(info, &reader->pp->options);
             if (!builtin)
             {
                 uint32_t inherited_count = 0;
@@ -12959,10 +12961,11 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
     const bool linked_visible = old != 0 && check_input_linkage(reader->declaration_bits, old_declaration) != 0 && check_input_linkage(reader->declaration_bits, token) != 0;
     const bool overload = check_input_overload_active(reader, token);
+    bool builtin_function = false;
     if (__builtin_expect(kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && !overload &&
                          check_input_builtin_named(reader, name), 0))
     {
-        check_input_builtin_declaration(reader, token);
+        builtin_function = check_input_builtin_declaration(reader, token);
     }
     const uint32_t linked_library = kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && reader->linked_declarations != NULL ? reader->linked_declarations[name] : 0;
     const bool library_redeclaration = kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && linked_library != 0 && reader->output->function_flags != NULL &&
@@ -13005,7 +13008,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
         version = check_input_target_versions_match(reader, token, &versions);
     }
     bool prototype_warning = false;
-    if (kind == C_BINDING_FUNCTION && !overload && !versions && reader->parser->language.standard < 2023 && reader->pp != NULL)
+    if (kind == C_BINDING_FUNCTION && !builtin_function && !overload && !versions && reader->parser->language.standard < 2023 && reader->pp != NULL)
     {
         const uint32_t previous = linked_visible ? old_declaration : linked_library != 0 ? linked_library - 1 : BUSTER_CHECK_NONE;
         if (previous < reader->parser->tokens.count && reader->declaration_kinds[previous] == C_BINDING_FUNCTION &&
