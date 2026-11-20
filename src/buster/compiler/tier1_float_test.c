@@ -654,6 +654,54 @@ static void tier1_float_unsigned_run(Tier1EmitTest* test, const void* code, uint
     }
 }
 
+// A loaded I32 has zero upper bits. A parameter can arrive with arbitrary upper bits.
+static void tier1_float_unsigned_i32_storage(Tier1EmitTest* test)
+{
+    const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .parameter_count = 2 };
+    const uint8_t registers[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RAX, 16, 0 };
+    for (uint32_t target = IR_F32; target <= IR_F64; target += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create the unsigned dword conversion");
+        if (!created)
+        {
+            return;
+        }
+        function.result_type = (uint8_t)target;
+        function.block_offsets[1] = 5;
+        function.parameter_types[0] = IR_PTR;
+        function.parameter_types[1] = IR_I32;
+        tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 1, IR_PARAM, IR_I32, 1, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 2, IR_LOAD, IR_I32, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 3, IR_UITOFP, target, 1, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE);
+        for (uint32_t source = 1; source <= 2; source += 1)
+        {
+            function.a[3] = source;
+            Tier1SelectPlan plan;
+            uint32_t failed = BUSTER_IR_NONE;
+            const bool selected = tier1_select_plan(&function, NULL, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+            tier1_emit_test_expect(test, selected, "select the unsigned dword conversion");
+            if (selected)
+            {
+                const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 3);
+                const Tier1SelectRecords result = tier1_select_expand(&holes);
+                const bool clear = source == 1;
+                const uint16_t form = tier1_select_float_forms(target == IR_F32 ? 4 : 8)->from_integer[1];
+                tier1_emit_test_expect(test, result.count == 2u + clear &&
+                                      (!clear || (result.records[0].form == X86_FORM_MOV_R32_RM32 && result.records[0].rm == X86_REGISTER_RSI)) &&
+                                      result.records[clear].form == X86_FORM_XORPS_X_XM128 && result.records[1 + clear].form == form &&
+                                      result.records[1 + clear].rm == (clear ? BUSTER_TIER1_SELECT_SCRATCH : X86_REGISTER_RAX),
+                                      "only an uncertified I32 needs a zero-extending move before signed qword conversion");
+            }
+            arena_pop_to(&test->output, 0);
+        }
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 // One compile of a fixture (0 mixed, 1 the loop, 2 undefined operands, then the unsigned conversions), by one path and
 // one set of options, run on the samples, or for an unsigned conversion on Tier 0's named values.
 static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vector, bool rematerialize, uint32_t vector_mask, bool keep_pointer)
@@ -944,15 +992,138 @@ static void tier1_float_conversion_loads(Tier1EmitTest* test)
     }
 }
 
+static void tier1_float_fma_addend_addresses(Tier1EmitTest* test)
+{
+    const IrSizes sizes = { .instruction_count = 8, .block_count = 1, .parameter_count = 4, .address_count = 1 };
+    for (uint32_t type = IR_F32; type <= IR_F64; type += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create a scalar FMA with an addressed addend");
+        if (created)
+        {
+            function.result_type = (uint8_t)type;
+            function.block_offsets[1] = 8;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[1] = IR_I64;
+            function.parameter_types[2] = (uint8_t)type;
+            function.parameter_types[3] = (uint8_t)type;
+            tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 2, IR_PARAM, type, 2, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 3, IR_PARAM, type, 3, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 4, IR_ADDRESS, IR_PTR, 0, 1);
+            function.c[4] = 0;
+            tier1_emit_test_node(&function, 5, IR_LOAD, type, 4, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 6, IR_FMA, type, 2, 3);
+            function.c[6] = 5;
+            tier1_emit_test_node(&function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE);
+            for (uint32_t address = 0; address <= 4; address += 1)
+            {
+                const uint8_t shift = address == 0 ? 0 : (uint8_t)(address - 1);
+                function.b[4] = address == 0 ? BUSTER_IR_NONE : 1;
+                function.addresses[0] = (IrAddress){ .offset = -7, .scale = (uint8_t)(1u << shift) };
+                Tier1SelectPlan plan;
+                uint32_t failed = BUSTER_IR_NONE;
+                const bool selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+                tier1_emit_test_expect(test, selected, "select a folded FMA addend address");
+                for (uint8_t x = 1; selected && x <= 3; x += 1)
+                {
+                    const uint8_t registers[8] = { X86_REGISTER_RDI, X86_REGISTER_RSI, 17, 18, X86_REGISTER_RDX, 19, (uint8_t)(16 + x), 0 };
+                    const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 6);
+                    const Tier1SelectRecords records = tier1_select_expand(&holes);
+                    const bool separate = x == 1;
+                    const uint32_t at = x == 3 ? 1u : 0u;
+                    const X86Instruction memory = records.records[at];
+                    const uint16_t form = separate ? tier1_select_class_forms(type == IR_F32 ? 4 : 8, tier1_select_holes_encoding(&holes))->load :
+                                                     (type == IR_F32 ? X86_FORM_VFMADD213SS_X_X_XM32 : X86_FORM_VFMADD213SD_X_X_XM64);
+                    const uint8_t mode = address == 0 ? BUSTER_X86_MEMORY_BASE : BUSTER_X86_MEMORY_BASE_INDEX(shift);
+                    tier1_emit_test_expect(test, plan.covered[4] && plan.covered[5] && records.count == (x == 2 ? 1u : 2u) &&
+                                          memory.form == form && memory.rm == X86_REGISTER_RDI && memory.mode == mode &&
+                                          (address == 0 || memory.index == X86_REGISTER_RSI) && memory.displacement == -7,
+                                          "the actual addend load keeps its base, index, scale and displacement");
+                }
+                arena_pop_to(&test->output, 0);
+            }
+        }
+        arena_pop_to(&test->input, 0);
+    }
+}
+
+// A load in the first factor can use the existing 132/231 memory forms only when the
+// register factor cannot supply a competing NaN. The addend remains the original addend.
+static void tier1_float_first_fma_load(Tier1EmitTest* test)
+{
+    const IrSizes sizes = { .instruction_count = 8, .block_count = 1, .parameter_count = 3, .constant_count = 1 };
+    for (uint32_t type = IR_F32; type <= IR_F64; type += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create a scalar FMA with a loaded first factor");
+        for (uint32_t shape = 0; created && shape < 10; shape += 1)
+        {
+            const uint64_t bits32[] = { 0x3fa00000, 0xff800000, 0x7fc11234, 0xff800001 };
+            const uint64_t bits64[] = { UINT64_C(0x3ff4000000000000), UINT64_C(0xfff0000000000000),
+                                        UINT64_C(0x7ff8000000001234), UINT64_C(0xfff0000000000001) };
+            function.result_type = (uint8_t)type;
+            function.block_offsets[1] = 8;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[2] = (uint8_t)type;
+            tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+            function.parameter_types[1] = shape == 6 ? (uint8_t)type : IR_I32;
+            tier1_emit_test_node(&function, 1, IR_PARAM, function.parameter_types[1], 1, BUSTER_IR_NONE);
+            tier1_emit_test_node(&function, 2, IR_PARAM, type, 2, BUSTER_IR_NONE);
+            if (shape < 4 || shape >= 7)
+            {
+                const uint32_t literal = shape < 4 ? shape : 0;
+                function.constants[0].low = type == IR_F32 ? bits32[literal] : bits64[literal];
+                tier1_emit_test_node(&function, 3, IR_CONST, type, 0, BUSTER_IR_NONE);
+            }
+            else
+            {
+                const uint32_t operation = shape == 4 ? IR_SITOFP : shape == 5 ? IR_UITOFP : IR_COPY;
+                tier1_emit_test_node(&function, 3, operation, type, 1, BUSTER_IR_NONE);
+            }
+            tier1_emit_test_node(&function, 4, IR_LOAD, type, 0, BUSTER_IR_NONE);
+            function.flags[4] = shape == 7 ? BUSTER_IR_VOLATILE : 0;
+            if (shape == 9)
+            {
+                tier1_emit_test_node(&function, 5, IR_STORE, IR_VOID, 0, 2);
+            }
+            else
+            {
+                tier1_emit_test_node(&function, 5, IR_COPY, type, shape == 8 ? 4 : 2, BUSTER_IR_NONE);
+            }
+            tier1_emit_test_node(&function, 6, IR_FMA, type, 4, 3);
+            function.c[6] = 2;
+            tier1_emit_test_node(&function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE);
+            Tier1SelectPlan plan;
+            uint32_t failed = BUSTER_IR_NONE;
+            const bool selected = tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+            tier1_emit_test_expect(test, selected, "select the scalar FMA first-factor alternatives");
+            if (selected)
+            {
+                const bool fold = shape < 2 || shape == 4 || shape == 5;
+                const Tier1SelectPattern pattern = plan.patterns[6];
+                tier1_emit_test_expect(test, (pattern.rule == TIER1_RULE_FLOAT_FMA_LOAD) == fold && (plan.covered[4] != 0) == fold &&
+                                       (!fold || (pattern.values[0] == 3 && pattern.values[1] == 2 && pattern.condition == 0)),
+                                       "only a non-NaN register factor allows the first load to occupy r/m");
+            }
+            arena_pop_to(&test->output, 0);
+        }
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 static void tier1_float_fma_loads(Tier1EmitTest* test)
 {
-    const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .parameter_count = 3 };
+    const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .parameter_count = 3, .constant_count = 1 };
     for (uint32_t type = IR_F32; type <= IR_F64; type += 1)
     {
         IrFunction function;
         const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
         tier1_emit_test_expect(test, created, "create a scalar FMA with a loaded operand");
-        for (uint32_t shape = 0; created && shape < 6; shape += 1)
+        for (uint32_t shape = 0; created && shape < 8; shape += 1)
         {
             function.result_type = (uint8_t)type;
             function.block_offsets[1] = 7;
@@ -961,6 +1132,12 @@ static void tier1_float_fma_loads(Tier1EmitTest* test)
             function.parameter_types[2] = (uint8_t)type;
             tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
             tier1_emit_test_node(&function, 1, IR_PARAM, type, 1, BUSTER_IR_NONE);
+            if (shape >= 6)
+            {
+                function.constants[0].low = type == IR_F32 ? (shape == 6 ? UINT32_C(0x3fc00000) : UINT32_C(0x7fc12345)) :
+                                                            (shape == 6 ? UINT64_C(0x3ff8000000000000) : UINT64_C(0x7ff8123456789abc));
+                tier1_emit_test_node(&function, 1, IR_CONST, type, 0, BUSTER_IR_NONE);
+            }
             tier1_emit_test_node(&function, 2, IR_PARAM, type, 2, BUSTER_IR_NONE);
             tier1_emit_test_node(&function, 3, IR_LOAD, type, 0, BUSTER_IR_NONE);
             function.flags[3] = shape == 1 ? BUSTER_IR_VOLATILE : 0;
@@ -972,8 +1149,8 @@ static void tier1_float_fma_loads(Tier1EmitTest* test)
             {
                 tier1_emit_test_node(&function, 4, IR_COPY, type, shape == 5 ? 3 : 1, BUSTER_IR_NONE);
             }
-            tier1_emit_test_node(&function, 5, IR_FMA, type, shape == 2 ? 3 : 1, shape == 2 ? 1 : shape == 3 ? 2 : 3);
-            function.c[5] = shape == 3 ? 3 : 2;
+            tier1_emit_test_node(&function, 5, IR_FMA, type, shape == 2 ? 3 : 1, shape == 2 ? 1 : (shape == 3 || shape >= 6) ? 2 : 3);
+            function.c[5] = shape == 3 || shape >= 6 ? 3 : 2;
             tier1_emit_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE);
             Tier1SelectPlan plan;
             uint32_t failed = BUSTER_IR_NONE;
@@ -982,8 +1159,24 @@ static void tier1_float_fma_loads(Tier1EmitTest* test)
             if (selected)
             {
                 const bool folded = plan.patterns[5].rule == TIER1_RULE_FLOAT_FMA_LOAD;
-                tier1_emit_test_expect(test, folded == (shape == 0) && (plan.covered[3] != 0) == folded, "only the eligible second multiplicand becomes a memory operand");
-                for (uint8_t x = 1; folded && x <= 3; x += 1)
+                const bool addend = shape == 3 || shape >= 6;
+                tier1_emit_test_expect(test, folded == (shape == 0 || addend) && (plan.covered[3] != 0) == folded,
+                                      "only an eligible second multiplicand or addend becomes a memory operand");
+                for (uint8_t x = 1; folded && addend && x <= 3; x += 1)
+                {
+                    const uint8_t registers[7] = { X86_REGISTER_RDI, 17, 18, 19, 20, (uint8_t)(16 + x), 0 };
+                    const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 5);
+                    const Tier1SelectRecords records = tier1_select_expand(&holes);
+                    const bool keep_a = x == 1 && shape != 6;
+                    const X86Instruction fma = records.records[records.count - 1];
+                    const uint16_t form = type == IR_F32 ? (keep_a ? X86_FORM_VFMADD132SS_X_X_XM32 : X86_FORM_VFMADD213SS_X_X_XM32) :
+                                                           (keep_a ? X86_FORM_VFMADD132SD_X_X_XM64 : X86_FORM_VFMADD213SD_X_X_XM64);
+                    tier1_emit_test_expect(test, records.count == (x == 2 || (x == 1 && !keep_a) ? 1u : 2u) && fma.form == form && fma.reg == x &&
+                                          fma.vvvv == (keep_a ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : x == 1 ? 2 : 1) &&
+                                          fma.mode == (keep_a ? BUSTER_X86_REGISTER_DIRECT : BUSTER_X86_MEMORY_BASE) &&
+                                          fma.rm == (keep_a ? 2 : X86_REGISTER_RDI), "the loaded addend keeps its mathematical operand position");
+                }
+                for (uint8_t x = 1; folded && !addend && x <= 3; x += 1)
                 {
                     const uint8_t registers[7] = { X86_REGISTER_RDI, 17, 18, 19, 20, (uint8_t)(16 + x), 0 };
                     const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 5);
@@ -1068,7 +1261,9 @@ static void tier1_float_cases(Tier1EmitTest* test)
     test->selects = false;
     tier1_float_conversion_loads(test);
     tier1_float_unsigned_dword_memory(test);
+    tier1_float_first_fma_load(test);
     tier1_float_fma_loads(test);
+    tier1_float_fma_addend_addresses(test);
     tier1_float_fma_factor_addresses(test);
     for (uint32_t fixture = 0; fixture < BUSTER_TIER1_FLOAT_FIXTURES; fixture += 1)
     {
@@ -1082,6 +1277,7 @@ static void tier1_float_cases(Tier1EmitTest* test)
             tier1_float_compile(test, fixture, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : 0, (variant & 8) != 0);
         }
     }
+    tier1_float_unsigned_i32_storage(test);
     tier1_float_negation_operands(test);
     // Some compile saves an xmm register around a call, so the rows' check reads such stores, not none (#1116).
     tier1_emit_test_expect(test, test->vector_saves != 0, "a floating value lives past a call in an xmm register, whose row its call stores and loads");

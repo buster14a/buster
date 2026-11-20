@@ -255,7 +255,7 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ASM,
     // A signed i32 or i64 in memory converted directly into an xmm register (#2829). Its scale belongs to the address.
     TIER1_RULE_FLOAT_CONVERT_LOAD,
-    // a * [base + index * scale + displacement] + c. The register operands a and c precede the address's two values.
+    // The second multiplicand or the addend is in memory. The two register operands precede the base and index.
     TIER1_RULE_FLOAT_FMA_LOAD,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
@@ -455,6 +455,8 @@ typedef enum Tier1SelectRule
 // The vector class's scratch register, which holds no value: a non-commutative operation's right operand where the
 // allocation gave it the destination.
 #define BUSTER_TIER1_SELECT_FLOAT_SCRATCH 15
+#define BUSTER_TIER1_FMA_MEMORY_ADDEND 1
+#define BUSTER_TIER1_FMA_COMMUTATIVE_ADDEND 2
 
 // Whether a rule is a mask's (#179), which the uniform-register consumer and the straight-line one don't take.
 static bool tier1_select_mask_rule(uint32_t rule)
@@ -2970,6 +2972,34 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const uint8_t b = memory ? BUSTER_TIER1_SELECT_NO_REGISTER : holes->right & 15;
         const uint8_t c = (memory ? holes->right : holes->third) & 15;
         const uint32_t d = width == 8 ? 1 : 0;
+        if (memory && holes->condition != 0)
+        {
+            // 213 takes its addend in r/m. When x holds a, exchanging the multiplicands would select
+            // a different NaN if both carry one. Load the addend separately in that case.
+            const uint8_t multiplier = holes->right & 15;
+            const bool keep_a = x == a && a != multiplier && holes->condition == BUSTER_TIER1_FMA_MEMORY_ADDEND;
+            X86Instruction record = holes->memory;
+            if (keep_a)
+            {
+                record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load;
+                record.reg = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+                tier1_select_append(&result, record);
+                record = tier1_select_register_record(forms[d][2], x, multiplier);
+                record.vvvv = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+            }
+            else
+            {
+                if (x != a && x != multiplier)
+                {
+                    tier1_select_append(&result, tier1_select_float_move(x, multiplier));
+                }
+                record.form = forms[d][0];
+                record.reg = x;
+                record.vvvv = x == a ? multiplier : a;
+            }
+            tier1_select_append(&result, record);
+            break;
+        }
         // With b in memory, use a's register for 132 or c's for 231. In a fresh register copy c and keep a in vvvv.
         const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : memory ? 1 : 0;
         if (x != b && x != c && x != a)
@@ -3622,9 +3652,10 @@ struct Tier1SelectForest
     const uint8_t* symbol_access;
     uint32_t symbol_count;
     // By node, for a leaf the lowering repeats (a symbol's address, or an extension, tier1_select_leaves_mask) that
-    // another of the same operation, type and operand precedes in its block, that first one's node plus one; 0 for any
-    // other node. Null where no block repeats one (#2601, tier1_select_symbol_firsts): every pattern reads the first
-    // instead (tier1_select_add_candidate).
+    // another of the same operation, type and operand precedes in its block, that first one's node plus one; for an
+    // extension to I64 whose operand's register already holds its value, that operand's node plus one (#2843,
+    // tier1_select_extension_forwards), and so for its block's repeats of it; 0 for any other node. Null where no node
+    // has one (#2601, tier1_select_symbol_firsts): every pattern reads that node instead (tier1_select_add_candidate).
     const uint32_t* symbol_first;
     // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
     // one pays no node's vector checks (tier1_select_candidates).
@@ -5026,7 +5057,8 @@ static inline __attribute__((always_inline)) void tier1_select_add_candidate(con
     pattern.intrinsic_cost += pattern.sign_result;
     // A symbol's address or an extension the pattern reads is its block's first of the same (#2601): the lowering makes
     // one for every access, and an indexed access, which needs its base and index in registers, would make each one's
-    // lea and move.
+    // lea and move. An extension whose operand's register holds its value is that operand (#2843), whose register the
+    // pattern reads rather than its copy's.
     for (uint32_t k = 0; forest->symbol_first != 0 && k < BUSTER_TIER1_SELECT_VALUES; k += 1)
     {
         const uint32_t value = pattern.values[k];
@@ -5045,6 +5077,20 @@ static bool tier1_select_constant(const IrFunction* function, uint32_t value, ui
         *bits = function->constants[function->a[value]].low;
     }
     return result;
+}
+
+// The multiplicands of a fused multiply-add can trade places if only one can carry a NaN payload.
+static bool tier1_select_fma_non_nan(const IrFunction* function, uint32_t value)
+{
+    const uint32_t op = value < function->instruction_count ? function->op[value] : IR_UNDEF;
+    bool known = op == IR_SITOFP || op == IR_UITOFP;
+    if (op == IR_CONST)
+    {
+        const uint64_t bits = function->constants[function->a[value]].low;
+        known = function->type[value] == IR_F32 ? (bits & UINT32_C(0x7fffffff)) <= UINT32_C(0x7f800000) :
+                                                 (bits & UINT64_C(0x7fffffffffffffff)) <= UINT64_C(0x7ff0000000000000);
+    }
+    return known;
 }
 
 // C's truth values reach the IR as integers: `a < b` is `zext (icmp lt a, b)`, which `if`, `!` and `&&` test against
@@ -5312,13 +5358,52 @@ static bool tier1_select_first_insert(const IrFunction* function, const uint32_t
     return firsts[node] != 0;
 }
 
+// Whether extension `node` is its operand's register (#2843): an extension to I64 that tier1_select_candidates selects as
+// a copy of its operand (TIER1_RULE_COPY), whose register holds its 64-bit value at every point of its life by its
+// storage (tier1_select_canonical), which spills, reloads and edge moves keep: an I32 that holds its signed value
+// (STORAGE_SIGN's eight bytes) extended by sign, or a narrow value or an I32 whose bits past its width are zero
+// (STORAGE_ZERO, 32-bit writes) extended by zero, or by sign where it is nonnegative there. A pattern that reads the
+// extension's register reads the operand's then, so that the operand and its extension are one value, in one register.
+// Only an operand with other uses: its extension's copy would move it into a register of its own while it stays live
+// (`movslq (%rdi,%rcx,4),%rdx; mov %rdx,%r8`, then `test %edx,%edx` reading the load), and no pattern folds it, a tree
+// child's single use alone folding, so it is computed in its own register for the pattern to read. A single-use operand
+// dies at its extension, whose copy takes its register (Tier1CfgInput.ties), or whose pattern folds it (a load's movsx).
+static bool tier1_select_extension_forwards(const IrFunction* function, const uint32_t* uses, const uint16_t* known, const uint8_t* canonical, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    bool forwards = false;
+    if ((op == IR_SEXT || op == IR_ZEXT) && function->type[node] == IR_I64)
+    {
+        const uint32_t operand = function->a[node];
+        const uint32_t source = function->type[operand];
+        const bool zero_source = op == IR_ZEXT && (source == IR_I1 || source == IR_I8 || source == IR_I16 || source == IR_I32);
+        const bool sign_source = op == IR_SEXT && (source == IR_I8 || source == IR_I16 || source == IR_I32);
+        const bool zero = (canonical[operand] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+        const bool sign = source == IR_I32 && (canonical[operand] & BUSTER_TIER1_STORAGE_SIGN) != 0;
+        const bool nonnegative = (known[operand] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < ir_type_bits[source] || (canonical[node] & BUSTER_TIER1_RANGE_NONNEGATIVE_USE) != 0;
+        forwards = uses[operand] >= 2 && ((zero_source && zero) || (sign_source && (sign || (zero && nonnegative))));
+    }
+    return forwards;
+}
+
+// Leaf `node`'s entry in the column of firsts: its block's first of the same (tier1_select_first_insert), or for a
+// forwarded extension its operand (tier1_select_extension_forwards). A block's repeats of an extension are forwarded
+// alike: the decision reads their one operand's facts and the block's nonnegative guard. Returns whether it has one.
+static bool tier1_select_first_leaf(const IrFunction* function, const uint32_t* blocks, const uint32_t* uses, const uint16_t* known, const uint8_t* canonical, uint32_t* slots, uint32_t capacity, uint32_t* firsts, uint32_t node)
+{
+    tier1_select_first_insert(function, blocks, slots, capacity, firsts, node);
+    firsts[node] = tier1_select_extension_forwards(function, uses, known, canonical, node) ? function->a[node] + 1 : firsts[node];
+    return firsts[node] != 0;
+}
+
 // Each repeated leaf's first in its block (#2601, Tier1SelectForest.symbol_first): the first node of the same operation,
 // type and operand (a symbol's address's symbol), by an open-addressed table of them, a power of two at least twice the
-// function's leaves, in `scratch`, which the plan keeps until it is made. Null where no block repeats one. The first
-// precedes the others in their block, so it dominates their users, and a leaf is pure, so it is their value. The vector
-// path finds the leaves 64 nodes at a time (tier1_select_leaves_mask); the table's inserts, a function's few leaves',
-// are scalar on either path, in the nodes' order, so both make the same column.
-static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, Arena* scratch, bool* ok)
+// function's leaves, in `scratch`, which the plan keeps until it is made; and each forwarded extension's operand (#2843),
+// which precedes it, so dominates its users, and holds its value. Null where no leaf has either. The first precedes the
+// others in their block, so it dominates their users, and a leaf is pure, so it is their value. The vector path finds
+// the leaves 64 nodes at a time (tier1_select_leaves_mask); the table's inserts, a function's few leaves', are scalar on
+// either path, in the nodes' order, so both make the same column.
+static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, const uint32_t* uses, const uint16_t* known, const uint8_t* canonical, Arena* scratch, bool* ok)
 {
     const uint32_t count = function->instruction_count;
     uint32_t leaves = 0;
@@ -5331,7 +5416,8 @@ static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, co
     {
         capacity *= 2;
     }
-    const bool candidates = leaves >= 2;
+    // One leaf may be a forwarded extension.
+    const bool candidates = leaves != 0;
     uint32_t* firsts = candidates ? ir_allocate(scratch, count, 4, ok) : 0;
     uint32_t* slots = candidates ? ir_allocate(scratch, capacity, 4, ok) : 0;
     bool repeated = false;
@@ -5341,7 +5427,7 @@ static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, co
         {
             for (uint64_t mask = tier1_select_leaves_mask(function, first, count); mask != 0; mask &= mask - 1)
             {
-                repeated |= tier1_select_first_insert(function, blocks, slots, capacity, firsts, first + (uint32_t)__builtin_ctzll(mask));
+                repeated |= tier1_select_first_leaf(function, blocks, uses, known, canonical, slots, capacity, firsts, first + (uint32_t)__builtin_ctzll(mask));
             }
         }
     }
@@ -6273,14 +6359,34 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[2] = c;
         base.intrinsic_cost = 4;
         tier1_select_add_candidate(forest, node, &candidates, base);
-        // The r/m multiplicand of both 132 and 231 is b. Swapping a and b would change which NaN payload wins.
+        // Prefer the existing second multiplicand and addend folds. A first multiplicand can
+        // occupy r/m too when exchanging the two factors cannot change which NaN is propagated.
+        uint32_t load = BUSTER_IR_NONE;
         if (tier1_select_load_folds(forest, node, b))
+        {
+            load = b;
+        }
+        else if (tier1_select_load_folds(forest, node, c))
+        {
+            load = c;
+        }
+        else if (tier1_select_load_folds(forest, node, a) && tier1_select_fma_non_nan(function, b))
+        {
+            load = a;
+        }
+        if (load != BUSTER_IR_NONE)
         {
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_FLOAT_FMA_LOAD;
-            folded.values[1] = c;
-            tier1_select_fold(forest, node, b, &folded);
-            tier1_select_memory(forest, node, function->a[b], &folded, 2);
+            if (load == c)
+            {
+                const bool commute = a == b || tier1_select_fma_non_nan(function, a) || tier1_select_fma_non_nan(function, b);
+                folded.condition = commute ? BUSTER_TIER1_FMA_COMMUTATIVE_ADDEND : BUSTER_TIER1_FMA_MEMORY_ADDEND;
+            }
+            folded.values[0] = load == a ? b : a;
+            folded.values[1] = load == c ? b : c;
+            tier1_select_fold(forest, node, load, &folded);
+            tier1_select_memory(forest, node, function->a[load], &folded, 2);
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
@@ -6445,6 +6551,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.source_width = (uint8_t)(operand_float != 0 ? operand_float : source == IR_I1 ? 1 : tier1_select_memory_width(source));
         base.scale = (uint8_t)(op == IR_SITOFP ? BUSTER_TIER1_FLOAT_FROM_SIGNED : op == IR_UITOFP ? BUSTER_TIER1_FLOAT_FROM_UNSIGNED : op == IR_FPTOSI ? BUSTER_TIER1_FLOAT_TO_SIGNED :
                                op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
+        // A zero-extended I32 already holds its unsigned value as a nonnegative signed qword.
+        if (op == IR_UITOFP && source == IR_I32 && forest->canonical != NULL && (forest->canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0)
+        {
+            base.source_width = 8;
+        }
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
         const bool from_integer = (op == IR_SITOFP && (source == IR_I32 || source == IR_I64)) || (op == IR_UITOFP && source == IR_I32);
@@ -7851,12 +7962,13 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             level_nodes[positions[depths[node]]++] = node;
         }
     }
-    // A symbol's address or an extension read in place of another of its block's (#2601).
+    // A symbol's address or an extension read in place of another of its block's (#2601), and an extension in place of
+    // its operand, whose register holds its value (#2843).
     const uint32_t* symbol_first = 0;
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
-        symbol_first = tier1_select_symbol_firsts(function, blocks, scratch, &ok);
+        symbol_first = tier1_select_symbol_firsts(function, blocks, uses, known_bits, canonical, scratch, &ok);
         error = ok ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     const Tier1SelectForest forest =
