@@ -932,7 +932,8 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
     },
     {
         // `if (a < b && (b < c ? c < d : 0))`, nothing read past a test: the `&&` join's copy gives the `?:` join, a
-        // block of phis that jumped to it, a candidate's shape, which a second round threads.
+        // block of phis that jumped to it, a candidate's shape, which asks for no second round of its own (only the
+        // roles and a repair left to the next round do). The `?:` join's phi stays.
         .name = "copied-shape",
         .text = "function (i64) -> i64 {\n"
                 "b0:\n"
@@ -972,12 +973,12 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
                 "b6:\n"
                 "  %28 = ret.void %9\n"
                 "}\n",
-        .blocks = 2,
-        .copies = 2,
-        .redirects = 2,
-        .rounds = 2,
+        .blocks = 1,
+        .copies = 1,
+        .redirects = 1,
+        .rounds = 1,
         .merges = 0,
-        .flattened = true,
+        .flattened = false,
     },
     {
         // Two repairs in one round, one inside the other's subtree: the inner block's phi takes the outer number on an
@@ -2019,6 +2020,87 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
                 "  %20 = ret.void %19\n"
                 "b5:\n"
                 "  %21 = ret.void %3\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // `n = c ? 0 : b; if (p < q) r = n + 1;`: the number's join, read past its test, and a test that reads none of
+        // its phis (it compares values from outside the block). No truth value is joined there: left alone.
+        .name = "test-outside",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i64 " BUSTER_IR_THREAD_TEST_C("04") "\n"
+                "  %7 = lshr.i64 %0, %6\n"
+                "  %8 = and.i64 %7, %1\n"
+                "  %9 = const.i64 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %10 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %11 = icmp.i1 %2, %10 ult\n"
+                "  %12 = cbr.void %11, b1, b2\n"
+                "b1:\n"
+                "  %13 = br.void b3\n"
+                "b2:\n"
+                "  %14 = br.void b3\n"
+                "b3:\n"
+                "  %15 = phi.i64 [%9, b1], [%8, b2]\n"
+                "  %16 = icmp.i1 %5, %8 lt\n"
+                "  %17 = cbr.void %16, b4, b5\n"
+                "b4:\n"
+                "  %18 = add.i64 %15, %10\n"
+                "  %19 = ret.void %18\n"
+                "b5:\n"
+                "  %20 = ret.void %3\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // `n = c ? a * 3 : a + 1; if ((3 & 1) == 1) r = n + a;`: a test of constants alone, which every edge decides
+        // (SCCP folds it, after threading), reads none of the join's phis: no truth value is joined there, and the
+        // number read past it leaves it alone. Read as a phi, the test's first operation (`and %1, %2`) has entries
+        // from the extra array's second word, which name the constant %2: a rule that took an operation for the tested
+        // phi would find a deciding edge there and repair the join.
+        .name = "constant-test",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %3 = and.i64 %0, %1\n"
+                "  %4 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %5 = lshr.i64 %0, %4\n"
+                "  %6 = icmp.i1 %3, %2 eq\n"
+                "  %7 = cbr.void %6, b1, b2\n"
+                "b1:\n"
+                "  %8 = mul.i64 %5, %1\n"
+                "  %9 = br.void b3\n"
+                "b2:\n"
+                "  %10 = add.i64 %5, %2\n"
+                "  %11 = br.void b3\n"
+                "b3:\n"
+                "  %12 = phi.i64 [%8, b1], [%10, b2]\n"
+                "  %13 = and.i64 %1, %2\n"
+                "  %14 = icmp.i1 %13, %2 eq\n"
+                "  %15 = cbr.void %14, b4, b5\n"
+                "b4:\n"
+                "  %16 = add.i64 %12, %5\n"
+                "  %17 = ret.void %16\n"
+                "b5:\n"
+                "  %18 = ret.void %1\n"
                 "}\n",
         .blocks = 0,
         .copies = 0,

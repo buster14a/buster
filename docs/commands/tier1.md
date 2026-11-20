@@ -348,22 +348,26 @@ each removed where it is made:
   entry or a label's block, and its chain has at most four operations, at most
   sixteen predecessors take copies, and the rewrite runs up to four rounds
   (`a && b && c`). A next round runs where this one changed something and left a
-  block to it: by the roles that keep a round's blocks apart, a block to repair
-  whose readers no successor dominated yet, or a block of phis that took a copy
-  and whose other operations are chain operations, which then has a candidate's
-  shape (`tonumberns(a, n) && tonumberns(b, m)`: the `&&` join first, then both
-  `?:` joins). A block no reachable predecessor reaches any more is left an
-  `unreachable` alone. `test-ir-optimize` runs fifty-three IR text fixtures
-  (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's found flag, a truth value
-  read past its test (left alone: the test reads it), a switch's kept edge with
-  mapped successor phis, a collapse, `a && b && c`, a label's block and a
-  self-loop; and #2608's `tonumberns`, `tonumberns && tonumberns` and
-  `tonumberns && x < y` (two rounds each), readers through the successor's
+  block to it: by the roles that keep a round's blocks apart, or a block to
+  repair whose readers no successor dominated yet
+  (`tonumberns(a, n) && tonumberns(b, m)`: the `&&` join first, then both `?:`
+  joins, the second of which took the `&&` join's test). A block that a copy
+  alone gives a candidate's shape asks for no round of its own, as before #2608:
+  in #2608's first form such rounds were 82 of the 92 it added on sqlite3.c,
+  each a CFG and an escape scan of the whole function, and Lua's 33 repairs are
+  the same without them. A block no reachable predecessor reaches any more is
+  left an `unreachable` alone. `test-ir-optimize` runs fifty-five IR text
+  fixtures (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's found flag, a
+  truth value read past its test (left alone: the test reads it), a switch's
+  kept edge with mapped successor phis, a collapse, `a && b && c`, a label's
+  block and a self-loop; and #2608's `tonumberns`, `tonumberns && tonumberns`
+  and `tonumberns && x < y` (two rounds each), readers through the successor's
   subtree and on an edge out of it, a chain value read past the test, readers
   where both successors' paths meet, a successor with a second predecessor, a
   loop's header (beside a `?:` join that is threaded), a kept edge, a merge in
   each successor, a reader on a loop's back edge in the subtree, an `&&` whose
-  right side is a `?:` (two rounds), two repairs, one inside the other's
+  right side is a `?:` (one round: the copy that gives the `?:` join a
+  candidate's shape asks for no other), two repairs, one inside the other's
   subtree, whose reads are copied, merged and passed to a call, a vector a
   ternary intrinsic reads (verified, not executed), a repair the roles left to a
   second round, three blocks whose redirects would strand a successor's merge or
@@ -377,21 +381,23 @@ each removed where it is made:
   the other successor merges the number, or the block is left alone), a block of
   70 phis, past a 64-byte mask, the driver's `if_clamp`, a clamp to constants, a
   truth value that no edge decides and one compared with a value from outside
-  the block, a number read where both successors meet (each left alone), one
-  read two blocks into the false successor's subtree, two repairs in one round
-  whose second block's number is its first phi, a loop's header refused for its
-  later back edge alone, another whose back edge is its 18th predecessor, a `?:`
-  join refused for a phi input from a later block (the cheap test's false
-  refusal), a header laid out after its body (threaded: the loop rotated), and a
-  number read 63 and 64 blocks of jumps past the successor, the second also on
-  an edge from it (the walk's bound: merged, then left alone twice). #2608's
-  fixtures draw their random trials from a stream of their own, so that the
-  programs generated after them stay the ones value numbering with memory's
-  digest was frozen on. Each is verified as complete SSA, folded with the pass's
-  work (the rounds run and the blocks the walks visited) into a frozen digest
-  (#2924), and executed against its input after threading and after the truth
-  rewrite and the optimizer. The candidate scan and both passes of the escape
-  scan are checked against their definitions.
+  the block, a number's join whose test reads none of its phis (a comparison of
+  values from outside it, and one of constants alone, which every edge decides),
+  a number read where both successors meet (each left alone), one read two
+  blocks into the false successor's subtree, two repairs in one round whose
+  second block's number is its first phi, a loop's header refused for its later
+  back edge alone, another whose back edge is its 18th predecessor, a `?:` join
+  refused for a phi input from a later block (the cheap test's false refusal), a
+  header laid out after its body (threaded: the loop rotated), and a number read
+  63 and 64 blocks of jumps past the successor, the second also on an edge from
+  it (the walk's bound: merged, then left alone twice). #2608's fixtures draw
+  their random trials from a stream of their own, so that the programs generated
+  after them stay the ones value numbering with memory's digest was frozen on.
+  Each is verified as complete SSA, folded with the pass's work (the rounds run
+  and the blocks the walks visited) into a frozen digest (#2924), and executed
+  against its input after threading and after the truth rewrite and the
+  optimizer. The candidate scan and both passes of the escape scan are checked
+  against their definitions.
 - **Stored constants** (`tier1_select.c`, `tier1_select_burs.c`). A store of a
   constant is `mov $imm, mem` at its width, an 8-byte store's where the constant
   fits a sign-extended imm32, rather than the constant's register. The candidates

@@ -41,12 +41,15 @@
 // be redirected to its other successor is left alone (its test is one constant on every edge). Within a round, no block
 // is both threaded and another's threaded predecessor or successor: a round's rewrite reads one CFG.
 // BUSTER_IR_THREAD_ROUNDS rounds at most take the chains `a && b && c` makes, a next one only where a candidate was
-// left to it: by the roles, a repairable one whose readers no successor dominated yet, or a block of phis that took a
-// copy and has a candidate's shape with it (the `?:` join that jumps to an `&&`'s, #2608; ir_thread_shaped). A
-// function whose candidate blocks' phis all take a value from a later instruction (loops' headers) builds no CFG. A
-// 64-byte opcode scan finds the conditional branches; the rest runs only for blocks that pass it. A successful result
-// borrows the input's immutable tables, as ir_if_convert's does: the input and output arenas stay alive until the
-// optimizer copies the function. The input is never mutated.
+// left to it: by the roles, or a repairable one whose readers no successor dominated yet (#2608: the first `?:` join of
+// `tonumberns(a, n) && tonumberns(b, m)`, whose number is read past the `&&` join that the first round threads; the
+// second round also threads the second `?:` join, which took that join's test). A block that a copy alone gives a
+// candidate's shape asks for no round of its own: in #2608's first form such rounds were 82 of the 92 it added on
+// sqlite3.c (each a CFG and an escape scan of the whole function, and its rewrite where it changed it), and Lua's 33
+// repairs are the same without them. A function whose candidate blocks' phis all take a value from a later instruction
+// (loops' headers) builds no CFG. A 64-byte opcode scan finds the conditional branches; the rest runs only for blocks
+// that pass it. A successful result borrows the input's immutable tables, as ir_if_convert's does: the input and output
+// arenas stay alive until the optimizer copies the function. The input is never mutated.
 
 #ifndef BUSTER_IR_THREAD_C
 #define BUSTER_IR_THREAD_C
@@ -138,9 +141,8 @@ struct IrThreadWork
     uint32_t merged;
     // The blocks the repairs' walks visited (ir_thread_cover).
     uint32_t walked;
-    // Candidates or their predecessors left for another round by the roles, repairable candidates whose readers no
-    // successor dominated, and copying predecessors that have a candidate's shape with the copy: what a next round may
-    // still thread.
+    // Candidates or their predecessors left for another round by the roles, and repairable candidates whose readers no
+    // successor dominated: what a next round may still thread.
     uint32_t deferred;
 };
 
@@ -782,27 +784,6 @@ static void ir_thread_repairs(IrThreadWork* work)
     ir_thread_escapes(work, BUSTER_IR_THREAD_REPAIRABLE);
 }
 
-// Whether `predecessor`, which takes a copy of a threaded block's chain, will have a candidate's shape (#2608): a block
-// of phis whose other operations are chain operations. Only then may a next round thread it; a copy into any other
-// block leaves the next round nothing to do there.
-static bool ir_thread_shaped(const IrThreadWork* work, uint32_t predecessor)
-{
-    const IrFunction* f = work->function;
-    const uint32_t first = f->block_offsets[predecessor];
-    const uint32_t last = f->block_offsets[(uint64_t)predecessor + 1] - 1;
-    uint32_t i = first;
-    while (i < last && f->op[i] == IR_PHI)
-    {
-        i += 1;
-    }
-    bool shaped = i != first;
-    for (; shaped && i < last; i += 1)
-    {
-        shaped = ir_thread_chain_operation(f, i);
-    }
-    return shaped;
-}
-
 // Thread block J where its predecessors allow it: their actions, and the roles that keep a round's blocks apart.
 static bool ir_thread_block(IrThreadWork* work, uint32_t block, uint64_t* values, uint8_t* known, Arena* scratch)
 {
@@ -938,9 +919,6 @@ static bool ir_thread_block(IrThreadWork* work, uint32_t block, uint64_t* values
             if (work->actions[predecessor] != BUSTER_IR_THREAD_KEEP && work->threaded[predecessor] == block)
             {
                 work->roles[predecessor] |= BUSTER_IR_THREAD_PREDECESSOR;
-                // A copy into a block of phis may give it a candidate's shape, which a next round may thread in its turn
-                // (#2608: Lua's `tonumberns` `?:` join, which jumps to its `&&`'s join, takes that join's test).
-                work->deferred += work->actions[predecessor] == BUSTER_IR_THREAD_COPY && ir_thread_shaped(work, predecessor);
                 work->copy_count += work->actions[predecessor] == BUSTER_IR_THREAD_COPY;
                 work->redirect_count += work->actions[predecessor] != BUSTER_IR_THREAD_COPY;
                 work->cloned += work->actions[predecessor] == BUSTER_IR_THREAD_COPY ? chain : 0;
