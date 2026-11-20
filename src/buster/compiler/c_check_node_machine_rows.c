@@ -2,9 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #2850's step 2, X's rows on the window, first their shapes (measure-node-machine --shadow --window-rows;
-// docs/one-core-path.md, "X's rows on the window"): the kinds and the classes of the entries X writes for a chunk's
-// records, made from C's answers on the window (c_check_node_machine_window.c) with no walk up a tree and no dispatch
-// a record. X (c_check_node_machine_expand.c's node_machine_expand) goes up an expression's postorder and writes each
+// docs/one-core-path.md, "X's rows on the window"): the kinds, the classes and the values of the entries X writes for
+// a chunk's records, made from C's answers on the window (c_check_node_machine_window.c) with no walk up a tree and
+// no dispatch a record. X (c_check_node_machine_expand.c's node_machine_expand) goes up an expression's postorder and writes each
 // evaluated record's row to the tape: its own entries by its template, then its conversion's to its target. A census
 // of its rows (the measurement record's x-rows-census-2850) found each part of a row a table's row by a key of the
 // record's own bytes and its target's.
@@ -51,10 +51,11 @@
 // value's templates list their expression too: C on the window makes them of no record.) Listing is always safe.
 //
 // The entries' values are a third stream, a quadword an entry, made after the rows are placed
-// (node_rows_window_values): zeros, then a list a source of the records whose row has a value that is no zero (its
-// line's object, its destination's, a constant's bits, a member's offset, a stride, the control's label), each
-// written by a loop of its own; and the numbers of the few expressions with two calls, two labels or two postfix
-// updates through an address (node_rows_window_number).
+// (node_rows_window_values): zeros and each PTR_ADD's 1, then a list a source of the records whose row has another
+// value (its record's value, which is its object's number, its payload or its member's offset; its destination's; a
+// constant's bits by its class; a stride; the control's label), each written by a loop of its own from two columns;
+// and the numbers of the few expressions with two calls, two labels or two postfix updates through an address
+// (node_rows_window_number).
 //
 // The reference is X on T's columns at reader time, whose tape the shadow keeps (NodeFrontTypes.tape_kinds,
 // tape_classes and tape_values): every expression decided on the window and taken here is compared with it, entry by

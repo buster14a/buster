@@ -108,12 +108,14 @@
 #define BUSTER_NODE_READER_ONE_SLOT 256u
 // X's rows on that window too, first their shapes (measure-node-machine --shadow --window-rows, with
 // BUSTER_NODE_READER_WINDOW_CONTEXTS, whose answers they are made from; c_check_node_machine_rows.c's
-// node_rows_window_chunk; "X's rows on the window"): the kinds and the classes of the entries X writes for the
-// expressions C takes there, compared with X's tape on T's columns at reader time.
+// node_rows_window_chunk; "X's rows on the window"): the kinds, the classes and the values of the entries X writes
+// for the expressions C takes there, compared with X's tape on T's columns at reader time.
 #define BUSTER_NODE_READER_WINDOW_ROWS 512u
 // test-checker's control of that comparison (with BUSTER_NODE_READER_WINDOW_ROWS): the reference's tape is read with
-// one of its answers changed for each expression the rows take (its first entry's kind, its last's class or its
-// length, in turn), so that the comparison is seen to count every one of them (node_rows_window_compare).
+// one of its answers changed for each expression the rows take (its first entry's kind, its last's class, its length
+// or an entry's value, in turn), so that the comparison is seen to count every one of them
+// (node_rows_window_compare); and one of a chunk's first run's answers is changed, so that its second run's
+// comparison is seen to count every chunk (node_rows_window_chunk).
 #define BUSTER_NODE_READER_WINDOW_ROWS_FAULT 1024u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u

@@ -6322,8 +6322,8 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
                 // Its root's sense, at its operand's record of the window: a statement's condition evaluated as
                 // branches is over an `&&` or an `||`, whose turn reads it there (node_rows_window_branch), and no
                 // one reads another expression's. With it, that the record is its expression's operand's last, which
-                // the values' sweep reads (BUSTER_NODE_ROWS_SENSE_TOP); the rows clear a chunk's bytes once they
-                // are done with it (node_rows_window_chunk).
+                // the values' sweep reads (BUSTER_NODE_ROWS_SENSE_TOP); a batch's bytes are cleared at its end
+                // (node_facts_reader_flush).
                 if (placed)
                 {
                     state->window_x_senses[operand] = (uint8_t)(state->c_sense_now | BUSTER_NODE_ROWS_SENSE_TOP);
