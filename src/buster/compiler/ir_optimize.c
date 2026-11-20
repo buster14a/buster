@@ -873,9 +873,10 @@ static bool ir_optimize_float_conversion(uint32_t op, uint32_t from, uint32_t to
     const uint32_t width = floating_source ? from : to;
     const uint32_t precision = width == 32 ? 24 : 53;
     const int32_t bias = width == 32 ? 127 : 1023;
+    // The floating format's fields: the source's for a floating source, the target's (unread here) for an integer one.
     const uint64_t sign = floating_source ? UINT64_C(1) << (from - 1) : 0;
     const uint64_t fraction = (UINT64_C(1) << (precision - 1)) - 1;
-    const uint64_t exponent = (UINT64_C(1) << (from - 1)) - 1 - fraction;
+    const uint64_t exponent = (UINT64_C(1) << (width - 1)) - 1 - fraction;
     const bool zero = floating_source && (bits & ~sign) == 0;
     const bool infinite = floating_source && (bits & ~sign) == exponent;
     const bool special = floating_source && ((bits & exponent) == exponent || (bits & exponent) == 0);
