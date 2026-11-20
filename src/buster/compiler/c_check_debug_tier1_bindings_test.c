@@ -137,6 +137,91 @@ static void check_debug_tier1_region_changes(CheckDebugTestTally* tally)
                             "a preceding boundary outside this interval still queues its local", "unaligned start and one trailing event");
 }
 
+// Compare sparse restoration with a dense row, including the reverse links used by the publisher.
+static void check_debug_tier1_restore_rows(CheckDebugTestTally* tally)
+{
+    enum { places = 7, values = 4 };
+    uint32_t state[places], known[places], at[places], next[places], previous[places];
+    uint32_t heads[values + 1], changed[values + 1];
+    uint8_t queued[values + 1];
+    const CheckTier1DebugValues proof = { .carrier_count = places, .value_count = values, .state = state,
+        .live = { .heads = heads, .next = next, .previous = previous, .known = known, .known_at = at,
+                  .changed_values = changed, .value_queued = queued } };
+    CheckTier1DebugValueLive live;
+    check_tier1_debug_value_start(&proof, &live, true);
+    bool valid = true;
+    for (uint32_t row = 0; valid && row < 512; row += 1)
+    {
+        CheckTier1DebugValueFact facts[places];
+        uint32_t expected[places];
+        memset(expected, 0xff, sizeof(expected));
+        uint32_t count = 0;
+        const uint32_t mask = row < 128 ? row : (row * 43 + row / 7) & 127;
+        for (uint32_t i = 0; i < places; i += 1)
+        {
+            const uint32_t place = (3 * i + row) % places;
+            if (((mask >> place) & 1u) != 0)
+            {
+                expected[place] = (place + row / 3) % values;
+                facts[count++] = (CheckTier1DebugValueFact){ place, expected[place] };
+            }
+        }
+        uint32_t expected_changes = 0;
+        for (uint32_t place = 0; place < places; place += 1)
+        {
+            if (state[place] != expected[place])
+            {
+                if (state[place] != BUSTER_IR_NONE)
+                {
+                    expected_changes |= 1u << state[place];
+                }
+                if (expected[place] != BUSTER_IR_NONE)
+                {
+                    expected_changes |= 1u << expected[place];
+                }
+            }
+        }
+        check_tier1_debug_value_restore(&proof, &live, facts, count);
+        check_tier1_debug_value_restore(&proof, &live, facts, count);
+        valid = live.known_count == count && memcmp(expected, state, sizeof(expected)) == 0;
+        uint32_t seen = 0, changes = 0;
+        for (uint32_t value = 0; valid && value < values; value += 1)
+        {
+            uint32_t prior = BUSTER_IR_NONE;
+            for (uint32_t p = heads[value]; valid && p != BUSTER_IR_NONE; p = next[p])
+            {
+                if (p >= places || (seen & (1u << p)) != 0)
+                {
+                    valid = false;
+                    break;
+                }
+                valid = state[p] == value && previous[p] == prior && at[p] < count && known[at[p]] == p;
+                prior = p;
+                seen |= 1u << p;
+            }
+        }
+        for (uint32_t p = 0; valid && p < places; p += 1)
+        {
+            valid = expected[p] != BUSTER_IR_NONE || at[p] == BUSTER_IR_NONE;
+        }
+        for (uint32_t i = 0; valid && i < live.value_count; i += 1)
+        {
+            const uint32_t v = changed[i];
+            valid = v < values && queued[v] != 0 && (changes & (1u << v)) == 0;
+            if (valid)
+            {
+                changes |= 1u << v;
+                queued[v] = 0;
+            }
+        }
+        live.value_count = 0;
+        valid = valid && seen == mask && changes == expected_changes;
+    }
+    check_debug_test_expect(tally, valid, "incoming carrier rows and their reverse lists match the dense state",
+                            "512 permuted subsets, replacement, empty rows and identical repeated restores");
+}
+
+
 // The static CFG meet alone can hide a stale-iteration bug by discarding a first-trip-absent row. Walk the concrete
 // backedge twice too: the same static phi/definition IDs have new dynamic values, while their old private spills
 // still contain the preceding iteration's bytes. All observed source PCs stay inside the same witnessed region.
@@ -225,7 +310,11 @@ static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
                                 check_tier1_debug_value_region(&proof, 1, 1, 19) == BUSTER_IR_NONE,
                                 "a local is visible only inside its half-open source and machine regions", "empty list, source endpoints, maximum entry and other block");
         CheckTier1DebugValueLive live = { 0 };
-        check_tier1_debug_value_start(&proof, &live);
+        check_tier1_debug_value_start(&proof, &live, false);
+        check_tier1_debug_value_change(&proof, &live, X86_REGISTER_RDI, 0);
+        check_debug_test_expect(tally, live.value_count == 0 && proof.state[X86_REGISTER_RDI] == 0 && live.heads[0] == X86_REGISTER_RDI,
+                                "fixed-point changes still update the carrier state without a publication event", "incoming register");
+        check_tier1_debug_value_start(&proof, &live, true);
         memset(proof.winner, 0xff, ((uint64_t)proof.value_count + 1) * 4);
         memset(live.users, 0xff, ((uint64_t)proof.value_count + 1) * 4);
         check_tier1_debug_value_change(&proof, &live, X86_REGISTER_RDI, 0);
@@ -440,6 +529,7 @@ static void check_debug_tier1_values_bindings(CheckDebugTestTally* tally)
     check_debug_tier1_values_binding_case(tally, &function, &ir, &emitted, NULL, sequence_entries, sequence_safe, 8, absent,
                                          "without a checked later RHS, old source origins cannot justify stale assignment ranges");
     check_debug_tier1_region_changes(tally);
+    check_debug_tier1_restore_rows(tally);
     check_debug_tier1_values_fresh(tally);
     check_debug_tier1_values_float_call(tally);
 }
