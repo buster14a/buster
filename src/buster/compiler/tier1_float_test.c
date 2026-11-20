@@ -631,6 +631,54 @@ static void tier1_float_unsigned_run(Tier1EmitTest* test, const void* code, uint
     }
 }
 
+// A loaded I32 has zero upper bits. A parameter can arrive with arbitrary upper bits.
+static void tier1_float_unsigned_i32_storage(Tier1EmitTest* test)
+{
+    const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .parameter_count = 2 };
+    const uint8_t registers[] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RAX, 16, 0 };
+    for (uint32_t target = IR_F32; target <= IR_F64; target += 1)
+    {
+        IrFunction function;
+        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+        tier1_emit_test_expect(test, created, "create the unsigned dword conversion");
+        if (!created)
+        {
+            return;
+        }
+        function.result_type = (uint8_t)target;
+        function.block_offsets[1] = 5;
+        function.parameter_types[0] = IR_PTR;
+        function.parameter_types[1] = IR_I32;
+        tier1_emit_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 1, IR_PARAM, IR_I32, 1, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 2, IR_LOAD, IR_I32, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 3, IR_UITOFP, target, 1, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE);
+        for (uint32_t source = 1; source <= 2; source += 1)
+        {
+            function.a[3] = source;
+            Tier1SelectPlan plan;
+            uint32_t failed = BUSTER_IR_NONE;
+            const bool selected = tier1_select_plan(&function, NULL, &test->output, &test->scratch, &plan, &failed) == TIER1_SELECT_OK;
+            tier1_emit_test_expect(test, selected, "select the unsigned dword conversion");
+            if (selected)
+            {
+                const Tier1SelectHoles holes = tier1_select_holes(&plan, registers, 3);
+                const Tier1SelectRecords result = tier1_select_expand(&holes);
+                const bool clear = source == 1;
+                const uint16_t form = tier1_select_float_forms(target == IR_F32 ? 4 : 8)->from_integer[1];
+                tier1_emit_test_expect(test, result.count == 2u + clear &&
+                                      (!clear || (result.records[0].form == X86_FORM_MOV_R32_RM32 && result.records[0].rm == X86_REGISTER_RSI)) &&
+                                      result.records[clear].form == X86_FORM_XORPS_X_XM128 && result.records[1 + clear].form == form &&
+                                      result.records[1 + clear].rm == (clear ? BUSTER_TIER1_SELECT_SCRATCH : X86_REGISTER_RAX),
+                                      "only an uncertified I32 needs a zero-extending move before signed qword conversion");
+            }
+            arena_pop_to(&test->output, 0);
+        }
+        arena_pop_to(&test->input, 0);
+    }
+}
+
 // One compile of a fixture (0 mixed, 1 the loop, 2 undefined operands, then the unsigned conversions), by one path and
 // one set of options, run on the samples, or for an unsigned conversion on Tier 0's named values.
 static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vector, bool rematerialize, uint32_t vector_mask, bool keep_pointer)
@@ -799,6 +847,7 @@ static void tier1_float_cases(Tier1EmitTest* test)
             tier1_float_compile(test, fixture, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : 0, (variant & 8) != 0);
         }
     }
+    tier1_float_unsigned_i32_storage(test);
     // Some compile saves an xmm register around a call, so the rows' check reads such stores, not none (#1116).
     tier1_emit_test_expect(test, test->vector_saves != 0, "a floating value lives past a call in an xmm register, whose row its call stores and loads");
 }
