@@ -15,7 +15,10 @@ no unit left to take (#777: the lanes are a board, `CheckEmitBoard`, on which a
 unit's emission that starts while a lane takes no units shares its parts, cut as
 function lanes cut them, with the lanes that take none,
 `check_program_emit_help`; its outputs one lane's). Each lane keeps an
-intern table and a file cache that its units share; no lane shares anything a
+intern table and a file cache that its units share. The command resolves the
+include search order once before its lanes start. Each unit keeps its own
+file-cache entries for those directories. The source stream preflight also
+supplies the sizes used to schedule units. No lane shares anything a
 unit writes (#776 measured one cache and table for all the lanes, filled by
 #150's walk before the units and copied by each lane, and found it slower:
 the guide's "One cache for all the lanes, measured"). Each unit's diagnostics

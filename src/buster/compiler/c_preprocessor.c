@@ -281,6 +281,26 @@ struct PPDriverInput
     bool explicit_language;
 };
 
+// Immutable for the duration of a multi-unit command. Each unit owns its directory entries in its file cache.
+typedef struct PPSearchDirectories PPSearchDirectories;
+struct PPSearchDirectories
+{
+    // The search directories: quoted ones first, then -I, then the system ones.
+    char** directories;
+    uint32_t* directory_lengths;
+    uint8_t* directory_system;
+    uint32_t directory_count;
+    uint32_t angled_first; // The first directory <...> searches.
+    // With --buster-headers: clang's resource directory, right after buster's (`buster_directory`, its path, as
+    // pp_add_directory copied it), which supplies only the names buster's doesn't have (pp_find_include); otherwise
+    // BUSTER_PP_NONE.
+    uint32_t fallback_directory;
+    const char* buster_directory;
+    uint32_t buster_directory_length;
+    uint32_t requested; // Before deduplication, for a unit whose compact capacity might be smaller.
+    bool missing_headers;
+};
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -291,6 +311,7 @@ struct PPOptions
     // Named non-regular inputs, read once the same way. A replay and a second pass see these bytes, not the stream.
     PPStreamInput* streams;
     uint32_t stream_count;
+    const char* probed_input; // The primary path already classified by driver_cache_streams for this unit.
     bool explicit_language;
     // A .i input is already preprocessed. Tokens copied to the output are not expanded again; directives still run.
     bool preprocessed;
@@ -305,6 +326,7 @@ struct PPOptions
     // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
     // table; or null, for a cache of the translation unit's own.
     FileCache* files;
+    const PPSearchDirectories* search;
     CLanguage language;
     // The generated code's instruction set (x86_target.c), from -march and the -m flags (predefines_target): for the
     // assembler's forms and __has_builtin's target builtins.
@@ -485,6 +507,7 @@ struct PPTokens
 
 typedef struct Preprocessor Preprocessor;
 
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_prepare_search(PPSearchDirectories* search, Arena* arena, const PPOptions* options);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_run(Preprocessor* pp, const char* main_path);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length);
@@ -1528,20 +1551,9 @@ struct Preprocessor
     uint32_t file_slot_mask;
     // The system calls this unit's path lookups made (none for a path the cache had looked up already).
     FileCacheCounts probes;
-    // The search directories: quoted ones first, then -I, then the system ones.
-    char** directories;
-    uint32_t* directory_lengths;
-    uint8_t* directory_system;
+    PPSearchDirectories search;
     // Each one's directory in the file cache (FileCacheDirectory), once a lookup has needed it.
     FileCacheDirectory** directory_entries;
-    uint32_t directory_count;
-    uint32_t angled_first; // The first directory <...> searches.
-    // With --buster-headers: clang's resource directory, right after buster's (`buster_directory`, its path, as
-    // pp_add_directory copied it), which supplies only the names buster's doesn't have (pp_find_include); otherwise
-    // BUSTER_PP_NONE.
-    uint32_t fallback_directory;
-    const char* buster_directory;
-    uint32_t buster_directory_length;
     // The location space.
     PPRange* ranges;
     uint32_t range_count;
@@ -4709,7 +4721,7 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
     {
         const bool resumes = next && includer->present && includer_search != BUSTER_PP_NONE;
         const bool local = !resumes && !angled && includer->present;
-        const uint32_t start = resumes ? includer_search + 1 : angled ? pp->angled_first : 0;
+        const uint32_t start = resumes ? includer_search + 1 : angled ? pp->search.angled_first : 0;
         if (local && index == 0)
         {
             // The includer's directory: the directory part of its path as it was found, or "." for a path without one.
@@ -4729,18 +4741,18 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
         else
         {
             const uint64_t i = (uint64_t)start + index - (local ? 1 : 0);
-            if (i < pp->directory_count)
+            if (i < pp->search.directory_count)
             {
-                const uint32_t directory_length = pp->directory_lengths[i];
+                const uint32_t directory_length = pp->search.directory_lengths[i];
                 *directory = (uint32_t)i;
                 result = PP_CANDIDATE_SKIP;
                 if ((uint64_t)directory_length + 1 + length < PATH_MAX)
                 {
-                    memcpy(path, pp->directories[i], directory_length);
+                    memcpy(path, pp->search.directories[i], directory_length);
                     path[directory_length] = '/';
                     memcpy(path + directory_length + 1, name, length);
                     *path_length = directory_length + 1 + length;
-                    *system = pp->directory_system[i];
+                    *system = pp->search.directory_system[i];
                     result = PP_CANDIDATE_PATH;
                 }
             }
@@ -6113,27 +6125,37 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_run_input(Preprocessor* pp, const char* path);
 
 // Reads each non-regular input once into `arena` and records it on `options`. `-` is stdin and is left to
 // driver_read_stdin. A regular file, a directory, and a missing path are left for the file cache. A failed stream
-// read fails the command; driver_read_nonregular has already said why.
-static bool driver_cache_streams(Arena* arena, char** inputs, uint32_t count, PPOptions* options)
+// read fails the command; driver_read_nonregular has already said why. With the checker's positional kinds, only C
+// and preprocessed assembly are candidates, and the stat used to classify one also gives its unit scheduling size.
+static bool driver_cache_streams(Arena* arena, char** inputs, CheckDriverInput* kinds, uint32_t count, PPOptions* options)
 {
     bool result = true;
     options->streams = NULL;
     options->stream_count = 0;
-    if (count != 0)
-    {
-        options->streams = BUSTER_ARENA_PUSH_ARRAY(arena, PPStreamInput, count);
-        result = options->streams != NULL;
-    }
     for (uint32_t i = 0; result && i < count; i += 1)
     {
+        if (kinds != NULL && kinds[i].kind != CHECK_DRIVER_INPUT_C && kinds[i].kind != CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
+        {
+            continue;
+        }
         bool seen = strcmp(inputs[i], "-") == 0;
         for (uint32_t earlier = 0; !seen && earlier < options->stream_count; earlier += 1)
         {
             seen = strcmp(options->streams[earlier].path, inputs[i]) == 0;
         }
         String8 bytes = { 0 };
-        const int kind = seen ? 0 : driver_read_nonregular(arena, inputs[i], &bytes);
-        result = kind >= 0;
+        uint64_t size = 0;
+        const int kind = seen ? 0 : driver_read_nonregular(arena, inputs[i], &bytes, &size);
+        if (kinds != NULL)
+        {
+            kinds[i].probed = !seen;
+            kinds[i].size = size;
+        }
+        if (kind > 0 && options->streams == NULL)
+        {
+            options->streams = BUSTER_ARENA_PUSH_ARRAY(arena, PPStreamInput, count);
+        }
+        result = kind >= 0 && (kind == 0 || options->streams != NULL);
         if (result && kind > 0)
         {
             options->streams[options->stream_count] = (PPStreamInput){
@@ -7447,7 +7469,7 @@ static __attribute__((unused)) int run_preprocessor_command_mode(int count, char
         parsed = driver_read_stdin(&arena, &options.stdin_source);
         options.stdin_ready = parsed;
     }
-    parsed = parsed && driver_cache_streams(&arena, paths, input_count, &options);
+    parsed = parsed && driver_cache_streams(&arena, paths, NULL, input_count, &options);
     if (arena.base == NULL || (!parsed && arena_failure.bytes != 0))
     {
         arena_report_failure(stderr, "preprocessing", BUSTER_PP_ARENA_BYTES);
