@@ -484,7 +484,59 @@ static __attribute__((unused)) ForeignLinkResult foreign_unwind_dedup_link(Forei
         {
             current[atom] = frames.frames[atom] != 0 ? &frames.frames[atom]->current : 0;
         }
+        const char* fault = getenv("CIE3155_FAULT");
+        ForeignUnwind fixture = { 0 };
+        uint8_t* private_bytes = 0;
+        __typeof__(input->link.atoms.bytes[0]) original_bytes = 0;
+        AtomId changed = 0;
+        if (fault != 0)
+        {
+            for (AtomId atom = 1; changed == 0 && atom < input->link.atoms.count; atom += 1)
+            {
+                const ForeignUnwind* f = current[atom];
+                if (f == 0 || f->record_count < 4 || f->records[0].kind != FOREIGN_UNWIND_CIE ||
+                    f->records[1].kind != FOREIGN_UNWIND_FDE || f->records[2].kind != FOREIGN_UNWIND_FDE ||
+                    f->records[3].kind != FOREIGN_UNWIND_FDE) { continue; }
+                changed = atom;
+                fixture = *f;
+                fixture.records = malloc(sizeof(*f->records) * f->record_count);
+                private_bytes = malloc(f->bytes.length);
+                if (fixture.records == 0 || private_bytes == 0) { abort(); }
+                memcpy(fixture.records, f->records, sizeof(*f->records) * f->record_count);
+                memcpy(private_bytes, f->bytes.pointer, f->bytes.length);
+                fixture.bytes.pointer = (char*)private_bytes;
+                original_bytes = input->link.atoms.bytes[atom];
+                input->link.atoms.bytes[atom] = private_bytes;
+                current[atom] = &fixture;
+                const uint32_t n = strcmp(fault, "late") == 0 ? 3 : 2;
+                ForeignUnwindRecord* rec = &fixture.records[n];
+                const uint64_t at = rec->old_offset;
+                uint32_t id = executable_load32(private_bytes + at + 4);
+                uint32_t length = executable_load32(private_bytes + at);
+                if (strcmp(fault, "underflow") == 0) { id = (uint32_t)at + 5; }
+                else if (strcmp(fault, "interior") == 0) { rec->cie_offset = 1; id = (uint32_t)(at + 3); }
+                else if (strcmp(fault, "fde") == 0) { rec->cie_offset = fixture.records[1].old_offset; id = (uint32_t)(at + 4 - rec->cie_offset); }
+                else if (strcmp(fault, "self") == 0) { rec->cie_offset = at; id = 4; }
+                else if (strcmp(fault, "sentinel") == 0) { rec->cie_offset = UINT64_MAX; }
+                else if (strcmp(fault, "short") == 0) { rec->length = 16; length = 12; }
+                else if (strcmp(fault, "truncated") == 0) { rec->length = f->bytes.length - at + 1; length = (uint32_t)rec->length - 4; }
+                else { id -= 1; }
+                if (strcmp(fault, "double") == 0) { fixture.records[3].length = f->bytes.length; }
+                memcpy(private_bytes + at + 4, &id, 4);
+                memcpy(private_bytes + at, &length, 4);
+                fprintf(stderr, "CIE3155 SITE %llu\n", (unsigned long long)at);
+            }
+            if (changed == 0) { abort(); }
+        }
         const ForeignUnwindResult planned = foreign_unwind_dedup_plan(&input->link, current, pins, section_symbols, path, arena, &built.plan);
+        if (changed != 0)
+        {
+            input->link.atoms.bytes[changed] = original_bytes;
+            free(private_bytes);
+            free(fixture.records);
+            fprintf(stderr, "CIE3155 ERR %u %llu %u\n", (unsigned)planned.error,
+                    (unsigned long long)planned.offset, planned.relocation);
+        }
         result.error = planned.error == FOREIGN_UNWIND_ERROR_NONE ? FOREIGN_LINK_ERROR_NONE : planned.error == FOREIGN_UNWIND_ERROR_MEMORY ?
                        FOREIGN_LINK_ERROR_MEMORY : planned.error == FOREIGN_UNWIND_ERROR_UNSUPPORTED ? FOREIGN_LINK_ERROR_UNSUPPORTED : FOREIGN_LINK_ERROR_INPUT;
         result.import.offset = planned.offset;
@@ -503,6 +555,40 @@ static __attribute__((unused)) ForeignLinkResult foreign_unwind_dedup_link(Forei
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
+        if (getenv("CIE3155_MODE") != 0)
+        {
+            const ForeignUnwindDedup* p = &built.plan;
+            fprintf(stderr, "CIE3155 M P %u %u %u %u %llu %u\n", p->atom_count, p->fixup_count,
+                    p->removed_cies, p->removed_atoms, (unsigned long long)p->removed_bytes, built.section_count);
+            for (AtomId a = 0; a < p->atom_count; a += 1)
+            {
+                const ForeignUnwindDedupAtom* m = &p->maps[a];
+                fprintf(stderr, "CIE3155 M A %u %u %u %u %llu %llu %u %u %u %u\n", a, p->atoms[a], m->owner,
+                        m->next, (unsigned long long)m->length, (unsigned long long)m->endpoint,
+                        (unsigned)m->alignment_log2, (unsigned)m->eligible, (unsigned)m->pooled, m->record_count);
+                for (uint32_t n = 0; n < m->record_count; n += 1)
+                {
+                    const ForeignUnwindRecord* r = &m->records[n];
+                    fprintf(stderr, "CIE3155 M R %u %u %u %llu %llu %llu %llu %u %u %u\n", a, n, (unsigned)m->kept[n],
+                            (unsigned long long)r->old_offset, (unsigned long long)r->new_offset, (unsigned long long)r->length,
+                            (unsigned long long)r->cie_offset, r->kind, r->section, r->atom);
+                }
+            }
+            for (FixupId f = 0; f < p->fixup_count; f += 1) { fprintf(stderr, "CIE3155 M F %u %u\n", f, p->fixups[f]); }
+            for (uint32_t s = 0; s < built.section_count; s += 1)
+            {
+                const ForeignUnwindDedupSection* m = &built.sections[s];
+                fprintf(stderr, "CIE3155 M S %u %u %u %u %llu %llu %u\n", s, m->object, m->section, m->atom,
+                        (unsigned long long)m->old_length, (unsigned long long)m->endpoint, m->record_count);
+                for (uint32_t n = 0; n < m->record_count; n += 1)
+                {
+                    const ForeignUnwindRecord* r = &m->records[n];
+                    fprintf(stderr, "CIE3155 M E %u %u %llu %llu %llu %llu %u %u %u\n", s, n,
+                            (unsigned long long)r->old_offset, (unsigned long long)r->new_offset, (unsigned long long)r->length,
+                            (unsigned long long)r->cie_offset, r->kind, r->section, r->atom);
+                }
+            }
+        }
         *output = built;
     }
     else

@@ -343,6 +343,17 @@ static __attribute__((unused)) bool foreign_unwind_dedup_test(void)
         foreign_unwind_dedup_test_failures(&tally, &arena);
         foreign_unwind_dedup_test_guards(&tally);
     }
+    // Temporary hosted evidence entry. Child processes exercise only link-foreign.
+    char cie3155_program[4096];
+    const ssize_t length = readlink("/proc/self/exe", cie3155_program, sizeof(cie3155_program) - 1);
+    bool measured = length > 0 && (size_t)length < sizeof(cie3155_program) - 1;
+    if (measured)
+    {
+        cie3155_program[length] = 0;
+        measured = setenv("CIE3155_BINARY", cie3155_program, 1) == 0 &&
+                   system("python3 tests/foreign-cie-3155/probe.py") == 0;
+    }
+    foreign_test_expect(&tally, measured, "paired compiler-produced CIE maps and midpoint counts", 0);
     arena_release(&arena);
     return foreign_test_report(&tally);
 }

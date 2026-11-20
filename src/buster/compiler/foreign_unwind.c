@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
@@ -206,6 +208,8 @@ static ForeignUnwindError foreign_unwind_cie(const uint8_t* bytes, ForeignUnwind
 }
 
 // First record whose end is after offset; records cover the original section without gaps.
+// Temporary evidence hook. Set only at the FDE validation lookup.
+static _Thread_local unsigned int* cie3155_active_probe;
 static uint32_t foreign_unwind_record_at(const ForeignUnwind* output, uint64_t offset)
 {
     uint32_t low = 0;
@@ -213,6 +217,7 @@ static uint32_t foreign_unwind_record_at(const ForeignUnwind* output, uint64_t o
     while (low < high)
     {
         const uint32_t middle = low + (high - low) / 2;
+        if (cie3155_active_probe != 0) { *cie3155_active_probe += 1; }
         const ForeignUnwindRecord* record = &output->records[middle];
         if (record->old_offset + record->length <= offset)
         {

@@ -164,7 +164,7 @@ static bool foreign_unwind_dedup_offset(const ForeignUnwindDedupAtom* map, uint6
     return valid;
 }
 
-static ForeignUnwindResult foreign_unwind_dedup_records(ForeignUnwindDedupAtom* map, const Link* link, AtomId atom,
+static ForeignUnwindResult foreign_unwind_dedup_records_base(ForeignUnwindDedupAtom* map, const Link* link, AtomId atom,
                                                        const ForeignUnwind* frame, ForeignPath path, Arena* arena)
 {
     ForeignUnwindResult result = { 0 };
@@ -183,7 +183,6 @@ static ForeignUnwindResult foreign_unwind_dedup_records(ForeignUnwindDedupAtom* 
     }
     uint64_t cursor = 0;
     uint32_t fdes = 0;
-    uint32_t cie = UINT32_MAX;
     map->eligible = length != 0 && length <= BUSTER_EXECUTABLE_MAX_ATOM_BYTES;
     for (uint32_t r = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && r < map->record_count; r += 1)
     {
@@ -200,10 +199,17 @@ static ForeignUnwindResult foreign_unwind_dedup_records(ForeignUnwindDedupAtom* 
         }
         else if (record.kind == FOREIGN_UNWIND_FDE)
         {
-            // The frame is immutable, and only a validated index survives to the next FDE.
-            if (cie == UINT32_MAX || frame->records[cie].old_offset != record.cie_offset)
+            unsigned int examined = 0;
+            unsigned int searched = 0;
+            const bool trace = getenv("CIE3155_MODE") != 0;
+            cie3155_active_probe = trace ? &examined : 0;
+            const uint32_t cie = foreign_unwind_record_at(frame, record.cie_offset);
+            cie3155_active_probe = 0;
+            searched = 1;
+            if (trace)
             {
-                cie = foreign_unwind_record_at(frame, record.cie_offset);
+                fprintf(stderr, "CIE3155 F %u %u %llu %llu %u %u\n", atom, r,
+                        (unsigned long long)cursor, (unsigned long long)record.cie_offset, searched, examined);
             }
             if (record.length < 17 || id > cursor + 4 || cursor + 4 - id != record.cie_offset || cie >= r ||
                 frame->records[cie].kind != FOREIGN_UNWIND_CIE || frame->records[cie].old_offset != record.cie_offset)
@@ -267,6 +273,133 @@ static ForeignUnwindResult foreign_unwind_dedup_records(ForeignUnwindDedupAtom* 
         }
     }
     return result;
+}
+
+static ForeignUnwindResult foreign_unwind_dedup_records_head(ForeignUnwindDedupAtom* map, const Link* link, AtomId atom,
+                                                       const ForeignUnwind* frame, ForeignPath path, Arena* arena)
+{
+    ForeignUnwindResult result = { 0 };
+    const uint64_t length = link->atoms.size[atom];
+    if (frame == 0 || frame->old_length != length || frame->bytes.length != length ||
+        (length != 0 && frame->bytes.pointer != (char*)link->atoms.bytes[atom]) || (frame->record_count != 0 && frame->records == 0))
+    {
+        result.error = FOREIGN_UNWIND_ERROR_INPUT;
+    }
+    if (result.error == FOREIGN_UNWIND_ERROR_NONE)
+    {
+        map->records = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignUnwindRecord, frame->record_count);
+        map->kept = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, frame->record_count);
+        map->record_count = frame->record_count;
+        result.error = map->records != 0 && map->kept != 0 ? FOREIGN_UNWIND_ERROR_NONE : FOREIGN_UNWIND_ERROR_MEMORY;
+    }
+    uint64_t cursor = 0;
+    uint32_t fdes = 0;
+    uint32_t cie = UINT32_MAX;
+    map->eligible = length != 0 && length <= BUSTER_EXECUTABLE_MAX_ATOM_BYTES;
+    for (uint32_t r = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && r < map->record_count; r += 1)
+    {
+        ForeignUnwindRecord record = frame->records[r];
+        const uint64_t left = length - cursor;
+        const bool fits = record.old_offset == cursor && record.length >= 4 && record.length <= left;
+        const uint32_t stored = fits ? executable_load32(link->atoms.bytes[atom] + cursor) : 0;
+        const uint32_t id = fits && record.length >= 8 ? executable_load32(link->atoms.bytes[atom] + cursor + 4) : 0;
+        const bool terminator = record.kind == FOREIGN_UNWIND_TERMINATOR;
+        if (!fits || record.kind > FOREIGN_UNWIND_TERMINATOR || (terminator ? stored != 0 || record.length != left :
+            stored < 4 || stored == UINT32_MAX || (uint64_t)stored + 4 != record.length || (record.kind == FOREIGN_UNWIND_CIE) != (id == 0)))
+        {
+            result = foreign_unwind_fail(FOREIGN_UNWIND_ERROR_MALFORMED, cursor, 0);
+        }
+        else if (record.kind == FOREIGN_UNWIND_FDE)
+        {
+            unsigned int examined = 0;
+            unsigned int searched = 0;
+            const bool trace = getenv("CIE3155_MODE") != 0;
+            // The frame is immutable, and only a validated index survives to the next FDE.
+            if (cie == UINT32_MAX || frame->records[cie].old_offset != record.cie_offset)
+            {
+                cie3155_active_probe = trace ? &examined : 0;
+                cie = foreign_unwind_record_at(frame, record.cie_offset);
+                cie3155_active_probe = 0;
+                searched = 1;
+            }
+            if (trace)
+            {
+                fprintf(stderr, "CIE3155 F %u %u %llu %llu %u %u\n", atom, r,
+                        (unsigned long long)cursor, (unsigned long long)record.cie_offset, searched, examined);
+            }
+            if (record.length < 17 || id > cursor + 4 || cursor + 4 - id != record.cie_offset || cie >= r ||
+                frame->records[cie].kind != FOREIGN_UNWIND_CIE || frame->records[cie].old_offset != record.cie_offset)
+            {
+                result = foreign_unwind_fail(FOREIGN_UNWIND_ERROR_MALFORMED, cursor, 0);
+            }
+            fdes += 1;
+        }
+        else if (record.kind == FOREIGN_UNWIND_CIE)
+        {
+            ForeignUnwindState state = {
+                .auxiliary = UINT64_MAX,
+            };
+            const ForeignUnwindError parsed = foreign_unwind_cie(link->atoms.bytes[atom], &record, &state);
+            if (parsed == FOREIGN_UNWIND_ERROR_MALFORMED)
+            {
+                result = foreign_unwind_fail(parsed, cursor, 0);
+            }
+            map->eligible = map->eligible && parsed == FOREIGN_UNWIND_ERROR_NONE;
+            if (r != 0)
+            {
+                map->eligible = map->eligible && frame->records[0].kind == FOREIGN_UNWIND_CIE &&
+                                foreign_unwind_dedup_identity(link, atom, &frame->records[0], atom, &record, path);
+            }
+        }
+        else
+        {
+            map->eligible = false;
+            for (uint64_t i = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && i < record.length; i += 1)
+            {
+                if (link->atoms.bytes[atom][cursor + i] != 0)
+                {
+                    result = foreign_unwind_fail(FOREIGN_UNWIND_ERROR_MALFORMED, cursor + i, 0);
+                }
+            }
+        }
+        map->eligible = map->eligible && record.length % 4 == 0;
+        record.new_offset = record.old_offset;
+        map->records[r] = record;
+        map->kept[r] = 1;
+        cursor += fits ? record.length : 0;
+    }
+    if (result.error == FOREIGN_UNWIND_ERROR_NONE && cursor != length)
+    {
+        result = foreign_unwind_fail(FOREIGN_UNWIND_ERROR_MALFORMED, cursor, 0);
+    }
+    map->eligible = map->eligible && fdes != 0 && map->record_count != 0 && map->records[0].kind == FOREIGN_UNWIND_CIE;
+    // Every fixup must remain inside one record; producer validation supplies pointer encodings and ownership.
+    const FixupId begin = link->atoms.fixup_begin[atom];
+    for (uint32_t i = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && i < link->atoms.fixup_count[atom]; i += 1)
+    {
+        const FixupId fixup = begin + i;
+        const uint64_t offset = link->fixups.offset[fixup];
+        const uint32_t r = foreign_unwind_record_at(frame, offset);
+        const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+        const uint64_t width = link_fixup_kinds[kind].width;
+        if (r >= map->record_count || offset < map->records[r].old_offset + 8 || map->records[r].kind == FOREIGN_UNWIND_TERMINATOR ||
+            width > map->records[r].length || offset - map->records[r].old_offset > map->records[r].length - width)
+        {
+            result = foreign_unwind_fail(FOREIGN_UNWIND_ERROR_MALFORMED, offset, i + 1);
+        }
+    }
+    return result;
+}
+
+static ForeignUnwindResult foreign_unwind_dedup_records(ForeignUnwindDedupAtom* map, const Link* link, AtomId atom,
+                                                       const ForeignUnwind* frame, ForeignPath path, Arena* arena)
+{
+    const char* mode = getenv("CIE3155_MODE");
+    if (mode != 0 && strcmp(mode, "base") == 0)
+    {
+        return foreign_unwind_dedup_records_base(map, link, atom, frame, path, arena);
+    }
+    return foreign_unwind_dedup_records_head(map, link, atom, frame, path, arena);
 }
 
 static __attribute__((unused)) ForeignUnwindResult foreign_unwind_dedup_plan(const Link* link, const ForeignUnwind* const* frames,
