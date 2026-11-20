@@ -69,7 +69,12 @@ refs3166:
     .reloc ., R_X86_64_NONE, middle3166+7
     .quad 0
     .quad kept3166+1
-#if MODE == 1 || MODE == 4
+#if MODE == 5 || MODE == 6
+    /* COPY is a dynamic relocation, unsupported as an input object fixup. */
+    .reloc ., R_X86_64_COPY, kept3166
+    .quad 0
+#endif
+#if MODE == 1 || MODE == 4 || MODE == 6
     .quad middle3166+4
     .long other3166-.-4
 #elif MODE == 2
