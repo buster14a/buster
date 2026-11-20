@@ -323,6 +323,8 @@ struct CheckTier1PassesInput
     // unroller skips it, so that an expanded loop is unrolled once, in its caller, and the summary's size (which the
     // callers' expansion decisions read) is the loop's own.
     bool summary;
+    // An original or inlined C body with a potentially volatile indirect access (#2805).
+    bool vectorize_volatile;
 };
 
 // What Tier 1's passes made of a function (check_tier1_passes): the optimized function and its verified analysis,
@@ -553,7 +555,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     // --tier1-passes=+vectorize (#2743's measurement): the loop vectorizer, in steps[10], after LICM and before the
     // optimizer, whose SCCP, dead-code removal, CFG cleanup and final verification take its result (its scalar loops
     // and its vector ones alike). A function without a loop it takes goes on as it was, borrowed.
-    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0)
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 && !input->vectorize_volatile)
     {
         IrVectorizeResult vectorized = { 0 };
         const IrVectorizeOptions options = { .target = lane->vectorize };
@@ -713,7 +715,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     bool lowered_verified = true;
     const IrFunction original = lowered;
     bool expanded_verified = true;
-    if (stage == CHECK_TIER1_COMPILED && !own && member && check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified))
+    bool vectorize_volatile = lane->vectorize_volatile != NULL && lane->vectorize_volatile[lane->emitting_body] != 0;
+    if (stage == CHECK_TIER1_COMPILED && !own && member && check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified, &vectorize_volatile))
     {
         lowered = expanded;
         lowered_verified = expanded_verified;
@@ -771,6 +774,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .verified = gvn_applied || lowered_verified,
             .unexpanded = !gvn_applied && inlined_calls != 0 ? &original : NULL,
             .numbered = gvn_applied,
+            .vectorize_volatile = vectorize_volatile,
         };
         outcome = check_tier1_passes(lane, &input, target, scalar, certify, fault, &lane->steps[1], &lane->steps[2], &lane->steps[3], &revision, &passes);
         stage = outcome.stage;
