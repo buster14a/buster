@@ -255,7 +255,7 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ASM,
     // A signed i32 or i64 in memory converted directly into an xmm register (#2829). Its scale belongs to the address.
     TIER1_RULE_FLOAT_CONVERT_LOAD,
-    // a * [base + index * scale + displacement] + c. The register operands a and c precede the address's two values.
+    // The second multiplicand or the addend is in memory. The two register operands precede the base and index.
     TIER1_RULE_FLOAT_FMA_LOAD,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
@@ -455,6 +455,8 @@ typedef enum Tier1SelectRule
 // The vector class's scratch register, which holds no value: a non-commutative operation's right operand where the
 // allocation gave it the destination.
 #define BUSTER_TIER1_SELECT_FLOAT_SCRATCH 15
+#define BUSTER_TIER1_FMA_MEMORY_ADDEND 1
+#define BUSTER_TIER1_FMA_COMMUTATIVE_ADDEND 2
 
 // Whether a rule is a mask's (#179), which the uniform-register consumer and the straight-line one don't take.
 static bool tier1_select_mask_rule(uint32_t rule)
@@ -2968,6 +2970,34 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const uint8_t b = memory ? BUSTER_TIER1_SELECT_NO_REGISTER : holes->right & 15;
         const uint8_t c = (memory ? holes->right : holes->third) & 15;
         const uint32_t d = width == 8 ? 1 : 0;
+        if (memory && holes->condition != 0)
+        {
+            // 213 takes its addend in r/m. When x holds a, exchanging the multiplicands would select
+            // a different NaN if both carry one. Load the addend separately in that case.
+            const uint8_t multiplier = holes->right & 15;
+            const bool keep_a = x == a && a != multiplier && holes->condition == BUSTER_TIER1_FMA_MEMORY_ADDEND;
+            X86Instruction record = holes->memory;
+            if (keep_a)
+            {
+                record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load;
+                record.reg = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+                tier1_select_append(&result, record);
+                record = tier1_select_register_record(forms[d][2], x, multiplier);
+                record.vvvv = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+            }
+            else
+            {
+                if (x != a && x != multiplier)
+                {
+                    tier1_select_append(&result, tier1_select_float_move(x, multiplier));
+                }
+                record.form = forms[d][0];
+                record.reg = x;
+                record.vvvv = x == a ? multiplier : a;
+            }
+            tier1_select_append(&result, record);
+            break;
+        }
         // With b in memory, use a's register for 132 or c's for 231. In a fresh register copy c and keep a in vvvv.
         const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : memory ? 1 : 0;
         if (x != b && x != c && x != a)
@@ -5027,6 +5057,20 @@ static bool tier1_select_constant(const IrFunction* function, uint32_t value, ui
     return result;
 }
 
+// The multiplicands of a fused multiply-add can trade places if only one can carry a NaN payload.
+static bool tier1_select_fma_non_nan(const IrFunction* function, uint32_t value)
+{
+    const uint32_t op = value < function->instruction_count ? function->op[value] : IR_UNDEF;
+    bool known = op == IR_SITOFP || op == IR_UITOFP;
+    if (op == IR_CONST)
+    {
+        const uint64_t bits = function->constants[function->a[value]].low;
+        known = function->type[value] == IR_F32 ? (bits & UINT32_C(0x7fffffff)) <= UINT32_C(0x7f800000) :
+                                                 (bits & UINT64_C(0x7fffffffffffffff)) <= UINT64_C(0x7ff0000000000000);
+    }
+    return known;
+}
+
 // C's truth values reach the IR as integers: `a < b` is `zext (icmp lt a, b)`, which `if`, `!` and `&&` test against
 // zero again, `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source nests. The walk follows such a
 // chain back from `value`, an I1, to the value it tests, through links that only `root`'s pattern uses, at most
@@ -6294,13 +6338,20 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 4;
         tier1_select_add_candidate(forest, node, &candidates, base);
         // The r/m multiplicand of both 132 and 231 is b. Swapping a and b would change which NaN payload wins.
-        if (tier1_select_load_folds(forest, node, b))
+        const bool multiplicand = tier1_select_load_folds(forest, node, b);
+        if (multiplicand || tier1_select_load_folds(forest, node, c))
         {
+            const uint32_t load = multiplicand ? b : c;
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_FLOAT_FMA_LOAD;
-            folded.values[1] = c;
-            tier1_select_fold(forest, node, b, &folded);
-            tier1_select_memory(forest, node, function->a[b], &folded, 2);
+            if (!multiplicand)
+            {
+                const bool commute = a == b || tier1_select_fma_non_nan(function, a) || tier1_select_fma_non_nan(function, b);
+                folded.condition = commute ? BUSTER_TIER1_FMA_COMMUTATIVE_ADDEND : BUSTER_TIER1_FMA_MEMORY_ADDEND;
+            }
+            folded.values[1] = multiplicand ? c : b;
+            tier1_select_fold(forest, node, load, &folded);
+            tier1_select_memory(forest, node, function->a[load], &folded, 2);
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }

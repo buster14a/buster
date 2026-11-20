@@ -385,7 +385,12 @@ patterns are:
   `movq`), and an integer constant's conversion is the floating constant it
   converts to. A copy is a `movaps`. Addition, subtraction, multiplication and
   division are the two-operand `ss` or `sd` forms, the right operand from memory
-  where it folds a load, as an integer's. A negation `xorps` the sign bit, which
+  where it folds a load, as an integer's. A scalar FMA3 can fold its single-use
+  second multiplicand into 132 or 231, or its addend into 213. The latter keeps
+  the multiplicands' NaN payload priority. A destination holding the first
+  multiplicand can exchange them when one is an integer conversion or a
+  non-NaN constant. Otherwise it takes the register form with a separate load.
+  A negation `xorps` the sign bit, which
   the scratch register moves into xmm15. Loads and stores are one `movss` or
   `movsd`, folded through their addresses as an integer's. A comparison's truth
   value is `ucomis`, `setcc` and `movzx`, where `<` and `<=` swap their operands
