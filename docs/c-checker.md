@@ -5069,8 +5069,7 @@ It also checks that `-c` of each fixture is refused with no object written. The
 deferred readings are `-c`'s, on one, two and three lanes: `-fsyntax-only`
 starts no lanes, so a deferred `-fsyntax-only` reading is source order's. The
 driver reads `--scalar`'s in source order; `test-checker-deferred` compares the
-deferred reader with both paths, and its merge with its scalar twins, on its
-recovered fixtures too.
+deferred reader with both paths on its recovered fixtures too.
 The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.

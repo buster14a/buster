@@ -361,8 +361,6 @@ struct CheckDeferred
     bool fail_after_expressions;
     bool hold_lanes;
     bool late_first;
-    // For the tests: the merge finds the token columns' entries by its scalar twin (check_deferred_entries).
-    bool scalar_merge;
     // The first lane's word that it has taken every part, which hold_lanes' other lanes wait for; and the other lanes
     // that have taken from the counter, which late_first's first lane waits for.
     uint32_t held;
@@ -1586,99 +1584,66 @@ static uint32_t check_deferred_id1(const uint32_t* top, uint32_t top_count, uint
 // those that have one lane by lane; the scalar path, its twin, tests each token. Every load is masked to the range.
 // The merge writes a column back at its entries alone: the reader keeps these columns in pages of their own, which
 // take memory only where the walk wrote them (#572), and writing their zeros back would make every page of zeros real.
-static uint32_t check_deferred_entries(const uint32_t* column, uint32_t begin, uint32_t end, uint32_t none, bool vector, uint32_t* positions)
+static uint32_t check_deferred_entries(const uint32_t* column, uint32_t begin, uint32_t end, uint32_t none, uint32_t* positions)
 {
     uint32_t total = 0;
-    if (vector)
+    const __m512i empty = _mm512_set1_epi32((int)none);
+    for (uint32_t first = begin; first < end; first += 64)
     {
-        const __m512i empty = _mm512_set1_epi32((int)none);
-        for (uint32_t first = begin; first < end; first += 64)
+        uint64_t set = 0;
+        for (uint32_t part = 0; part < 4; part += 1)
         {
-            uint64_t set = 0;
-            for (uint32_t part = 0; part < 4; part += 1)
-            {
-                const uint32_t at = first + part * 16;
-                const uint32_t length = at < end ? (end - at < 16 ? end - at : 16) : 0;
-                const __mmask16 active = (__mmask16)(((uint32_t)1 << length) - 1);
-                const __m512i values = length != 0 ? _mm512_maskz_loadu_epi32(active, column + at) : empty;
-                set |= (uint64_t)_mm512_mask_cmpneq_epu32_mask(active, values, empty) << (part * 16);
-            }
-            while (set != 0)
-            {
-                positions[total] = first + (uint32_t)__builtin_ctzll(set);
-                total += 1;
-                set &= set - 1;
-            }
+            const uint32_t at = first + part * 16;
+            const uint32_t length = at < end ? (end - at < 16 ? end - at : 16) : 0;
+            const __mmask16 active = (__mmask16)(((uint32_t)1 << length) - 1);
+            const __m512i values = length != 0 ? _mm512_maskz_loadu_epi32(active, column + at) : empty;
+            set |= (uint64_t)_mm512_mask_cmpneq_epu32_mask(active, values, empty) << (part * 16);
         }
-    }
-    else
-    {
-        for (uint32_t token = begin; token < end; token += 1)
+        while (set != 0)
         {
-            positions[total] = token;
-            total += column[token] != none;
+            positions[total] = first + (uint32_t)__builtin_ctzll(set);
+            total += 1;
+            set &= set - 1;
         }
     }
     return total;
 }
 
 // check_deferred_entries of a column of 64-bit values, whose entries are those other than 0.
-static uint32_t check_deferred_entries64(const uint64_t* column, uint32_t begin, uint32_t end, bool vector, uint32_t* positions)
+static uint32_t check_deferred_entries64(const uint64_t* column, uint32_t begin, uint32_t end, uint32_t* positions)
 {
     uint32_t total = 0;
-    if (vector)
+    for (uint32_t first = begin; first < end; first += 64)
     {
-        for (uint32_t first = begin; first < end; first += 64)
+        uint64_t set = 0;
+        for (uint32_t part = 0; part < 8; part += 1)
         {
-            uint64_t set = 0;
-            for (uint32_t part = 0; part < 8; part += 1)
-            {
-                const uint32_t at = first + part * 8;
-                const uint32_t length = at < end ? (end - at < 8 ? end - at : 8) : 0;
-                const __mmask8 active = (__mmask8)(((uint32_t)1 << length) - 1);
-                const __m512i values = length != 0 ? _mm512_maskz_loadu_epi64(active, column + at) : _mm512_setzero_si512();
-                set |= (uint64_t)_mm512_mask_test_epi64_mask(active, values, values) << (part * 8);
-            }
-            while (set != 0)
-            {
-                positions[total] = first + (uint32_t)__builtin_ctzll(set);
-                total += 1;
-                set &= set - 1;
-            }
+            const uint32_t at = first + part * 8;
+            const uint32_t length = at < end ? (end - at < 8 ? end - at : 8) : 0;
+            const __mmask8 active = (__mmask8)(((uint32_t)1 << length) - 1);
+            const __m512i values = length != 0 ? _mm512_maskz_loadu_epi64(active, column + at) : _mm512_setzero_si512();
+            set |= (uint64_t)_mm512_mask_test_epi64_mask(active, values, values) << (part * 8);
         }
-    }
-    else
-    {
-        for (uint32_t token = begin; token < end; token += 1)
+        while (set != 0)
         {
-            positions[total] = token;
-            total += column[token] != 0;
+            positions[total] = first + (uint32_t)__builtin_ctzll(set);
+            total += 1;
+            set &= set - 1;
         }
     }
     return total;
 }
 
-// How many of a byte column's tokens from `begin` to `end` are other than 0: 64 at a time, or with the scalar twin one
-// by one.
-static uint32_t check_deferred_count_bytes(const uint8_t* column, uint32_t begin, uint32_t end, bool vector)
+// How many of a byte column's tokens from `begin` to `end` are other than 0, 64 at a time.
+static uint32_t check_deferred_count_bytes(const uint8_t* column, uint32_t begin, uint32_t end)
 {
     uint32_t total = 0;
-    if (vector)
+    for (uint32_t first = begin; first < end; first += 64)
     {
-        for (uint32_t first = begin; first < end; first += 64)
-        {
-            const uint32_t length = end - first < 64 ? end - first : 64;
-            const __mmask64 active = length == 64 ? ~(__mmask64)0 : (((__mmask64)1 << length) - 1);
-            const __m512i bytes = _mm512_maskz_loadu_epi8(active, column + first);
-            total += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(active, bytes, bytes));
-        }
-    }
-    else
-    {
-        for (uint32_t token = begin; token < end; token += 1)
-        {
-            total += column[token] != 0;
-        }
+        const uint32_t length = end - first < 64 ? end - first : 64;
+        const __mmask64 active = length == 64 ? ~(__mmask64)0 : (((__mmask64)1 << length) - 1);
+        const __m512i bytes = _mm512_maskz_loadu_epi8(active, column + first);
+        total += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(active, bytes, bytes));
     }
     return total;
 }
@@ -1736,7 +1701,6 @@ struct CheckDeferredPass
     const uint64_t* costs;
     // Room for every token's position, an item's tokens' at their own.
     uint32_t* positions;
-    bool vector;
     // The top level's stream (the reader's), its layout, and the merged stream's columns.
     const uint32_t* event_map;
     const uint32_t* event_bases;
@@ -1828,7 +1792,7 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pass->types); c += 1)
     {
         TypeId* column = pass->types[c];
-        const uint32_t entries = check_deferred_entries(column, begin, finish, 0, pass->vector, positions);
+        const uint32_t entries = check_deferred_entries(column, begin, finish, 0, positions);
         uint32_t body = first;
         for (uint32_t e = 0; e < entries; e += 1)
         {
@@ -1841,7 +1805,7 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
         const CheckDeferredIds* ids = pass->ids + c;
         const bool sparse = ids->column == NULL;
         const uint32_t entries = sparse ? check_sparse_entries(ids->sparse, begin, finish, positions) :
-                                          check_deferred_entries(ids->column, begin, finish, ids->none, pass->vector, positions);
+                                          check_deferred_entries(ids->column, begin, finish, ids->none, positions);
         uint32_t body = first;
         for (uint32_t e = 0; e < entries; e += 1)
         {
@@ -1860,7 +1824,7 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
             }
         }
     }
-    const uint32_t jobs = check_deferred_entries64((const uint64_t*)reader->specifier_finishes, begin, finish, pass->vector, positions);
+    const uint32_t jobs = check_deferred_entries64((const uint64_t*)reader->specifier_finishes, begin, finish, positions);
     uint32_t body = first;
     for (uint32_t e = 0; e < jobs; e += 1)
     {
@@ -1872,7 +1836,7 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
     }
     // Lanes share disjoint token columns but own their reader counters: the count of the tokens with a constant's
     // warning, which later declaration-time warning mutations keep through the same helper.
-    return check_deferred_count_bytes(reader->output->constant_warnings, begin, finish < count ? finish : count, pass->vector);
+    return check_deferred_count_bytes(reader->output->constant_warnings, begin, finish < count ? finish : count);
 }
 
 // A 2 MB region of the merged stream's columns, faulted in on the calling thread before the lanes write them: a
@@ -2351,7 +2315,6 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         .parts = parts,
         .costs = costs,
         .positions = positions,
-        .vector = !BUSTER_SCALAR_PATH(parser->options.scalar) && !deferred->scalar_merge,
         .event_map = event_map,
         .event_bases = event_bases,
         .top_events = top_events,
@@ -2980,7 +2943,6 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
         const bool fail_after_replay = deferred->fail_after_replay;
         const bool hold_lanes = deferred->hold_lanes;
         const bool late_first = deferred->late_first;
-        const bool scalar_merge = deferred->scalar_merge;
         const uint32_t base_page_tokens = deferred->base_page_tokens;
         const CheckDeferredMemory memory = deferred->memory;
         const bool fail_after_expressions = deferred->fail_after_expressions;
@@ -2993,7 +2955,6 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
             .flow = flow,
             .leased = leased,
             .every_lane = every_lane,
-            .scalar_merge = scalar_merge,
             .base_page_tokens = base_page_tokens,
             .fail_after_replay = fail_after_replay,
             .fail_after_expressions = fail_after_expressions,
