@@ -4,11 +4,15 @@
 // Raw-IR dataflow qualification, included after ir_dataflow.c by ir_source_test.c. The independent oracle enumerates
 // operands by semantic opcode, NOT ir_operand_table/ir_operand. It scans instructions backwards and places phi uses
 // on the actual incoming edges. Small fixtures also use byte-per-original-value fixpoints, with numeric reverse block
-// order rather than dataflow.c's postorder. Every source form gets scalar/vector identity and independent equation,
-// dense-map, CFG and padding checks. No oracle is in a measured kernel.
+// order rather than dataflow.c's postorder. IR dataflow is AVX-512 alone (#2924). Every source form gets independent
+// equation, dense-map, CFG and padding checks; two preparations that must agree; the layout check of its successor
+// columns, postorder and phi records from the IR; and dataflow_sweeps_test.c's search for its live bits and sweep
+// count. No oracle is in a measured kernel.
 
 #include <sys/mman.h>
 #include <unistd.h>
+
+#include "dataflow_sweeps_test.c"
 
 // IR_FENCE (#1059) uses no value: the default case's. IR_INTRINSIC uses a, and b where it has one: splat's (#1450) and
 // the unary kinds' is none. IR_ATOMIC_RMW (#1059) uses its address and its operand, as a store does, and a
@@ -301,6 +305,79 @@ static bool ir_dataflow_test_equations(const IrFunction* f, const IrDataflow* re
     return valid;
 }
 
+// The columns the equations don't read, from the IR itself. Each block's successors are its terminator's distinct
+// targets in their first order; the postorder holds every block once. Each predecessor's phi inputs are the phis'
+// pairs naming it, in block, phi and pair order, with their dense IDs and the phi's block.
+static bool ir_dataflow_test_layout(const IrFunction* f, const IrDataflow* result, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t blocks = f->block_count;
+    bool valid = result->instruction_count == f->instruction_count && result->flow.block_count == blocks;
+    uint32_t* seen = ir_allocate(scratch, blocks, sizeof(uint32_t), &valid);
+    uint32_t* cursor = ir_allocate(scratch, blocks, sizeof(uint32_t), &valid);
+    valid = valid && result->flow.successor_offsets[0] == 0 && result->flow.successor_offsets[blocks] == result->flow.edge_count;
+    valid = valid && result->phi_offsets[0] == 0 && result->phi_offsets[blocks] == result->phi_use_count;
+    for (uint32_t block = 0; valid && block < blocks; block += 1)
+    {
+        seen[block] = BUSTER_IR_NONE;
+        cursor[block] = result->phi_offsets[block];
+        valid = result->phi_offsets[block] <= result->phi_offsets[block + 1];
+    }
+    for (uint32_t block = 0; valid && block < blocks; block += 1)
+    {
+        const uint32_t last = f->block_offsets[block + 1] - 1;
+        uint32_t place = result->flow.successor_offsets[block];
+        for (uint32_t e = 0; valid && e < ir_successor_count(f, last); e += 1)
+        {
+            const uint32_t target = ir_successor(f, last, e);
+            if (seen[target] != block)
+            {
+                seen[target] = block;
+                valid = place < result->flow.successor_offsets[block + 1] && result->flow.successors[place] == target;
+                place += 1;
+            }
+        }
+        valid = valid && place == result->flow.successor_offsets[block + 1];
+    }
+    for (uint32_t block = 0; valid && block < blocks; block += 1)
+    {
+        seen[block] = BUSTER_IR_NONE;
+    }
+    for (uint32_t order = 0; valid && order < blocks; order += 1)
+    {
+        const uint32_t block = result->flow.postorder[order];
+        valid = block < blocks && seen[block] == BUSTER_IR_NONE;
+        if (valid)
+        {
+            seen[block] = order;
+        }
+    }
+    uint64_t pairs = 0;
+    for (uint32_t target = 0; valid && target < blocks; target += 1)
+    {
+        for (uint32_t phi = f->block_offsets[target]; valid && phi < f->block_offsets[target + 1] && f->op[phi] == IR_PHI; phi += 1)
+        {
+            for (uint32_t p = 0; valid && p < f->b[phi]; p += 1)
+            {
+                const uint32_t predecessor = f->extra[f->a[phi] + p * 2];
+                const uint32_t value = f->extra[f->a[phi] + p * 2 + 1];
+                const uint32_t place = cursor[predecessor];
+                valid = place < result->phi_offsets[predecessor + 1] && result->phi_values[place] == result->ids[value] &&
+                    result->phi_targets[place] == target;
+                cursor[predecessor] += 1;
+                pairs += 1;
+            }
+        }
+    }
+    valid = valid && pairs == result->phi_use_count;
+    for (uint32_t block = 0; valid && block < blocks; block += 1)
+    {
+        valid = cursor[block] == result->phi_offsets[block + 1];
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
 // A second algorithm for fixtures: full original-ID BYTE rows, reverse instruction transfer, reverse numeric block
 // order, and raw branch/phi semantics. It does not use the adapter's use/def, map, phi CSR, CFG CSR or postorder.
 static bool ir_dataflow_test_byte_oracle(const IrFunction* f, const IrDataflow* result, Arena* scratch)
@@ -383,21 +460,27 @@ static bool ir_dataflow_test_function(const IrFunction* f, Arena* output, Arena*
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     const uint64_t failures = tests->failures;
+    // A second preparation, at another place in the output arena, must give the same columns and, solved, the same rows:
+    // the reference the poisoned re-solve below must reproduce.
     IrDataflow vector = { 0 };
-    IrDataflow scalar = { 0 };
+    IrDataflow again = { 0 };
     const IrCheck vector_check = ir_dataflow_prepare(f, output, scratch, &vector);
     const bool vector_scratch = scratch->length == scratch_mark;
-    const IrCheck scalar_check = ir_dataflow_prepare_scalar(f, output, scratch, &scalar);
-    const bool prepared = vector_check.error == IR_OK && scalar_check.error == IR_OK;
+    const IrCheck again_check = ir_dataflow_prepare(f, output, scratch, &again);
+    const bool prepared = vector_check.error == IR_OK && again_check.error == IR_OK;
     ir_dataflow_expect(tests, prepared, "an accepted IR function could not be prepared");
     ir_dataflow_expect(tests, vector_scratch && scratch->length == scratch_mark, "preparation retained scratch");
     if (prepared)
     {
         const uint64_t vector_iterations = ir_dataflow_solve(&vector);
-        const uint64_t scalar_iterations = ir_dataflow_solve_scalar(&scalar);
-        ir_dataflow_expect(tests, vector_iterations == scalar_iterations, "scalar/vector sweep counts disagree");
-        ir_dataflow_expect(tests, ir_dataflow_test_equal(&vector, &scalar), "scalar/vector maps, edge uses or matrices disagree");
+        const uint64_t again_iterations = ir_dataflow_solve(&again);
+        uint64_t expected_iterations = 0;
+        ir_dataflow_expect(tests, dataflow_test_sweeps(&vector.flow, scratch, &expected_iterations) && expected_iterations == vector_iterations,
+            "the sweep search's live pairs or count disagree");
+        ir_dataflow_expect(tests, again_iterations == vector_iterations && ir_dataflow_test_equal(&vector, &again),
+            "a second preparation and solve disagree");
         ir_dataflow_expect(tests, ir_dataflow_test_equations(f, &vector, scratch), "independent IR equations, dense IDs or padding disagree");
+        ir_dataflow_expect(tests, ir_dataflow_test_layout(f, &vector, scratch), "CFG columns, postorder or phi lists differ from the IR");
         const uint64_t bytes = (uint64_t)vector.flow.block_count * vector.flow.row_words * 8;
         ir_dataflow_expect(tests, bytes == 0 ? vector.flow.in == NULL && vector.flow.out == NULL && vector.flow.use == NULL && vector.flow.def == NULL :
             (((uintptr_t)vector.flow.in | (uintptr_t)vector.flow.out | (uintptr_t)vector.flow.use | (uintptr_t)vector.flow.def) & 63) == 0,
@@ -409,11 +492,11 @@ static bool ir_dataflow_test_function(const IrFunction* f, Arena* output, Arena*
             {
                 memset(vector.flow.in, 0xff, bytes);
                 memset(vector.flow.out, 0xff, bytes);
-                memset(scalar.flow.in, 0xa5, bytes);
-                memset(scalar.flow.out, 0x5a, bytes);
+                memset(again.flow.in, 0xa5, bytes);
+                memset(again.flow.out, 0x5a, bytes);
             }
-            ir_dataflow_expect(tests, ir_dataflow_solve(&vector) == vector_iterations && ir_dataflow_solve_scalar(&scalar) == scalar_iterations &&
-                ir_dataflow_test_equal(&vector, &scalar) && ir_dataflow_test_byte_oracle(f, &vector, scratch), "re-solving poisoned rows changed liveness");
+            ir_dataflow_expect(tests, ir_dataflow_solve(&vector) == vector_iterations && ir_dataflow_solve(&again) == vector_iterations &&
+                ir_dataflow_test_equal(&vector, &again) && ir_dataflow_test_byte_oracle(f, &vector, scratch), "re-solving poisoned rows changed liveness");
         }
     }
     ir_dataflow_expect(tests, scratch->length == scratch_mark, "a dataflow check retained scratch");
@@ -456,6 +539,36 @@ static bool ir_dataflow_test_diamond(Arena* memory, IrFunction* f)
         ir_dataflow_test_node(f, 7, IR_PHI, IR_I64, 4, 2, BUSTER_IR_NONE);
         ir_dataflow_test_node(f, 8, IR_ADD, IR_I64, 6, 7, BUSTER_IR_NONE);
         ir_dataflow_test_node(f, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    return created;
+}
+
+// A loop whose body (block 1) is numbered before its header (block 2), so the header's first instruction, a phi, is
+// where the body's instruction range ends. In mode 0 the body uses that phi; in mode 1 the second phi takes it from
+// the latch, an edge use from the predecessor whose range it ends. Each alone, since either use sets the body's use
+// bit: an off-by-one at the end of a block's range takes the value for a local one (#2924's mutation check of the
+// range test). The entry reaches the header first, which dominates the body.
+static bool ir_dataflow_test_backward(Arena* memory, IrFunction* f, uint32_t mode)
+{
+    const IrSizes sizes = { .instruction_count = 9, .block_count = 4, .extra_count = 8, .constant_count = 1 };
+    const bool created = ir_create(memory, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->result_type = IR_I64;
+        f->constants[0].low = 7;
+        const uint32_t offsets[] = { 0, 2, 4, 8, 9 };
+        const uint32_t extra[] = { 0, 0, 1, 2, 0, 0, 1, mode == 0 ? 2 : 4 };
+        memcpy(f->block_offsets, offsets, sizeof(offsets));
+        memcpy(f->extra, extra, sizeof(extra));
+        ir_dataflow_test_node(f, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 1, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 2, IR_ADD, IR_I64, mode == 0 ? 4 : 0, 0, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 3, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 4, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 5, IR_PHI, IR_I64, 4, 2, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 6, IR_UNDEF, IR_I1, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_dataflow_test_node(f, 7, IR_CBR, IR_VOID, 6, 1, 3);
+        ir_dataflow_test_node(f, 8, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
     }
     return created;
 }
@@ -739,46 +852,43 @@ static void ir_dataflow_test_failures(IrFunction* function, Arena* output, Arena
     memset(&result, 0xa5, sizeof(result));
     uint8_t before[sizeof(result)];
     memcpy(before, &result, sizeof(result));
-    for (uint32_t path = 0; path < 2; path += 1)
+    Arena empty = *output;
+    empty.capacity = empty.length;
+    IrCheck check = ir_dataflow_prepare(function, &empty, scratch, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && empty.length == mark && scratch->length == temporary &&
+        memcmp(before, &result, sizeof(result)) == 0, "output exhaustion was not transactional");
+    empty = *scratch;
+    empty.capacity = empty.length;
+    check = ir_dataflow_prepare(function, output, &empty, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && output->length == mark && empty.length == temporary &&
+        memcmp(before, &result, sizeof(result)) == 0, "scratch exhaustion was not transactional");
+    check = ir_dataflow_prepare(function, output, output, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_STRUCTURE && output->length == mark &&
+        memcmp(before, &result, sizeof(result)) == 0, "aliased arenas were not rejected transactionally");
+    IrFunction invalid = *function;
+    invalid.instruction_count = UINT32_MAX;
+    check = ir_dataflow_prepare(&invalid, output, scratch, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_LIMIT && output->length == mark && scratch->length == temporary &&
+        memcmp(before, &result, sizeof(result)) == 0, "signed-gather limit was not rejected before column access");
+    const uint32_t value = function->extra[1];
+    function->extra[1] = function->instruction_count;
+    check = ir_dataflow_prepare(function, output, scratch, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_PHI && output->length == mark && scratch->length == temporary &&
+        memcmp(before, &result, sizeof(result)) == 0, "malformed phi was not rejected transactionally");
+    function->extra[1] = value;
+    IrDataflow sizing = { 0 };
+    check = ir_dataflow_prepare(function, output, scratch, &sizing);
+    const uint64_t needed = sizing.arena_bytes;
+    ir_dataflow_expect(tests, check.error == IR_OK && needed != 0, "could not size the allocation-failure fixture");
+    arena_pop_to(output, mark);
+    // Fail inside the output's mapping, not only at its first push, including the final matrix allocation.
+    for (uint64_t room = 1; room < needed; room += 31)
     {
-        Arena empty = *output;
-        empty.capacity = empty.length;
-        IrCheck check = ir_dataflow_prepare_path(function, &empty, scratch, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && empty.length == mark && scratch->length == temporary &&
-            memcmp(before, &result, sizeof(result)) == 0, "output exhaustion was not transactional");
-        empty = *scratch;
-        empty.capacity = empty.length;
-        check = ir_dataflow_prepare_path(function, output, &empty, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && output->length == mark && empty.length == temporary &&
-            memcmp(before, &result, sizeof(result)) == 0, "scratch exhaustion was not transactional");
-        check = ir_dataflow_prepare_path(function, output, output, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_STRUCTURE && output->length == mark &&
-            memcmp(before, &result, sizeof(result)) == 0, "aliased arenas were not rejected transactionally");
-        IrFunction invalid = *function;
-        invalid.instruction_count = UINT32_MAX;
-        check = ir_dataflow_prepare_path(&invalid, output, scratch, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_LIMIT && output->length == mark && scratch->length == temporary &&
-            memcmp(before, &result, sizeof(result)) == 0, "signed-gather limit was not rejected before column access");
-        const uint32_t value = function->extra[1];
-        function->extra[1] = function->instruction_count;
-        check = ir_dataflow_prepare_path(function, output, scratch, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_PHI && output->length == mark && scratch->length == temporary &&
-            memcmp(before, &result, sizeof(result)) == 0, "malformed phi was not rejected transactionally");
-        function->extra[1] = value;
-        IrDataflow sizing = { 0 };
-        check = ir_dataflow_prepare_path(function, output, scratch, &sizing, path == 0);
-        const uint64_t needed = sizing.arena_bytes;
-        ir_dataflow_expect(tests, check.error == IR_OK && needed != 0, "could not size the allocation-failure fixture");
-        arena_pop_to(output, mark);
-        // Fail inside the output's mapping, not only at its first push, including the final matrix allocation.
-        for (uint64_t room = 1; room < needed; room += 31)
-        {
-            Arena bounded = *output;
-            bounded.capacity = mark + room;
-            check = ir_dataflow_prepare_path(function, &bounded, scratch, &result, path == 0);
-            ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && bounded.length == mark && scratch->length == temporary &&
-                memcmp(before, &result, sizeof(result)) == 0, "intermediate output exhaustion was not transactional");
-        }
+        Arena bounded = *output;
+        bounded.capacity = mark + room;
+        check = ir_dataflow_prepare(function, &bounded, scratch, &result);
+        ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && bounded.length == mark && scratch->length == temporary &&
+            memcmp(before, &result, sizeof(result)) == 0, "intermediate output exhaustion was not transactional");
     }
 }
 
@@ -806,6 +916,17 @@ static bool ir_dataflow_tests(Arena* memory, Arena* output, Arena* scratch)
         ir_dataflow_test_failures(&f, output, scratch, &tests);
     }
     arena_pop_to(memory, mark);
+    for (uint32_t mode = 0; mode < 2; mode += 1)
+    {
+        created = ir_dataflow_test_backward(memory, &f, mode);
+        ir_dataflow_expect(&tests, created, "backward-numbered loop fixture allocation failed");
+        if (created)
+        {
+            ir_dataflow_test_function(&f, output, scratch, true, &tests);
+            ir_dataflow_test_guarded(&f, output, scratch, &tests);
+        }
+        arena_pop_to(memory, mark);
+    }
     created = ir_dataflow_test_swap(memory, &f);
     ir_dataflow_expect(&tests, created, "parallel-phi fixture allocation failed");
     if (created)
@@ -886,6 +1007,6 @@ static bool ir_dataflow_tests(Arena* memory, Arena* output, Arena* scratch)
     }
     ir_dataflow_expect(&tests, output->length == output_mark && scratch->length == scratch_mark, "self-tests retained arena storage");
     arena_pop_to(memory, mark);
-    printf("ir-dataflow: self-tests checks=%" PRIu64 " failures=%" PRIu64 " vector_host=%u\n", tests.checks, tests.failures, BUSTER_HOST_VECTOR);
+    printf("ir-dataflow: self-tests checks=%" PRIu64 " failures=%" PRIu64 "\n", tests.checks, tests.failures);
     return tests.failures == 0;
 }

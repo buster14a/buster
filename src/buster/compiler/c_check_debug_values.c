@@ -109,6 +109,11 @@ struct CheckDebugValues
     uint32_t* enum_owners;
     uint32_t* local_ids;
     uint32_t* scopes;
+    // Beside each open scope of a body's walk, its block's opening token: in check_debug_value_own_blocks, the block its
+    // declarations mark; in the write, where it has a DIE to close (BUSTER_CHECK_NONE where it has none, #2543).
+    uint32_t* scope_tokens;
+    // Whether each body's blocks have their CHECK_DEBUG_OWN marks, which the first of the writer's two passes sets.
+    bool blocks_marked;
     // By token: CHECK_DEBUG_ROOT where the token is in one of the unit's roots, CHECK_DEBUG_USED at a file-scope typedef's
     // name that one names (check_debug_value_roots).
     uint8_t* marks;
@@ -847,8 +852,7 @@ static uint32_t check_debug_inline_end(const CheckDebugBody* source, uint32_t k)
 }
 
 // The range list of instance subtree [first, end) in body `source`, whose .debug_addr entry is `address`: its spans
-// (CheckDebugValueSpan.inline_instance) adjacent ones coalesced; how many pairs it has (0 writes nothing but the list's
-// end, which the caller doesn't refer to).
+// (CheckDebugValueSpan.inline_instance) with adjacent ones coalesced. A subtree without a pair writes no bytes.
 static uint32_t check_debug_inline_ranges(const CheckDebugBody* source, DebugWriter* out, uint32_t address, uint32_t first, uint32_t end)
 {
     uint32_t pairs = 0;
@@ -968,15 +972,14 @@ static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, ui
         }
         const bool placed = j == k || depth != 0;
         const uint32_t subtree = check_debug_inline_end(source, j);
-        // The pairs first, by measuring into a writer of no bytes: a list of none isn't referred to.
-        DebugWriter probe = { 0 };
-        const bool spanned = placed && instance.described && check_debug_inline_ranges(source, &probe, values->address_indices[body], j, subtree) != 0;
+        // A list without spans writes nothing. Save its start so the DIE can refer to the list after writing it.
+        const uint64_t range_offset = values->ranges.size;
+        const bool spanned = placed && instance.described && check_debug_inline_ranges(source, &values->ranges, values->address_indices[body], j, subtree) != 0;
         if (spanned)
         {
             debug_uleb(&values->info, CHECK_DEBUG_INLINED);
             debug_integer(&values->info, values->function_offsets[instance.body], 4);
-            check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
-            check_debug_inline_ranges(source, &values->ranges, values->address_indices[body], j, subtree);
+            check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, range_offset);
             debug_uleb(&values->info, instance.call_file);
             debug_uleb(&values->info, instance.call_line);
             check_debug_inline_parameters(values, body, instance);
@@ -1005,6 +1008,8 @@ static int check_debug_inline_compare(const void* x, const void* y)
 #define CHECK_DEBUG_USED 2u
 #define CHECK_DEBUG_BODY 4u
 #define CHECK_DEBUG_SCANNED 8u
+// At a block's opening token, where its scope declares something of its own (check_debug_value_own_blocks, #2543).
+#define CHECK_DEBUG_OWN 16u
 
 // The unit's roots, as clang's DWARF has them (#2531): its file-scope declarations that define what the unit emits, a
 // function's body or an object's storage (any declaration of a defined object), with everything inside them; and the
@@ -1126,6 +1131,55 @@ static bool check_debug_body_ends(CheckDebugValues* values, uint32_t opening, ui
     return result;
 }
 
+// Whether `token` declares a local the walk writes a DIE of (an object's or a typedef's) in the innermost open scope.
+static bool check_debug_value_scoped(const CheckDebugValues* values, uint32_t token)
+{
+    const CheckInput* input = values->program->input;
+    const uint8_t kind = input->declaration_kinds[token];
+    return check_debug_value_declaration(input, token) && type_is_valid(values->program->types, input->declared_types[token]) &&
+           values->parser->tokens.names[token] != 0 && (kind == C_BINDING_OBJECT || kind == C_BINDING_TYPEDEF);
+}
+
+// CHECK_DEBUG_OWN at the opening token of each block of body `b` (`opening` to `closing`) whose scope declares an object
+// or a typedef of its own (#2543): only such a block gets a DW_TAG_lexical_block, as clang's, whose LLVM drops a scope
+// without children and gives the children of one that holds only scopes to its parent (DwarfCompileUnit). A block that
+// declares nothing told a debugger nothing, and cost a DIE, a range list and, in an object, a relocation: sqlite3.c's
+// 24,839 blocks are 2,139 (clang's 2,120). The walk check_debug_values_write takes, with its stack of the scopes' ends,
+// once per body before the first of its two passes, so that both write the same blocks.
+static void check_debug_value_own_blocks(CheckDebugValues* values, uint32_t b, uint32_t opening, uint32_t closing)
+{
+    const CheckInput* input = values->program->input;
+    const Parser* parser = values->parser;
+    uint32_t depth = 0;
+    for (uint32_t token = opening + 1; token <= closing; token += 1)
+    {
+        const uint32_t role = parser->tree.roles[token];
+        const bool block = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION;
+        if (block && values->ends == NULL)
+        {
+            values->ends_ready[b] = values->ends_ready[b] != 0 || check_debug_body_ends(values, opening, closing);
+            values->ends_failed = values->ends_failed || values->ends_ready[b] == 0;
+        }
+        if (block)
+        {
+            const uint32_t parent = parser->tree.parents[token];
+            const uint32_t* ends = values->ends != NULL ? values->ends : values->derived_ends;
+            values->scopes[depth] = parent < input->token_count ? ends[parent] : input->token_count;
+            values->scope_tokens[depth] = token;
+            values->marks[token] &= (uint8_t)~CHECK_DEBUG_OWN;
+            depth += 1;
+        }
+        if (depth != 0 && check_debug_value_scoped(values, token))
+        {
+            values->marks[values->scope_tokens[depth - 1]] |= CHECK_DEBUG_OWN;
+        }
+        while (depth != 0 && values->scopes[depth - 1] <= token)
+        {
+            depth -= 1;
+        }
+    }
+}
+
 static void check_debug_values_write(CheckDebugValues* values)
 {
     const CheckProgram* program = values->program;
@@ -1230,6 +1284,10 @@ static void check_debug_values_write(CheckDebugValues* values)
             {
                 check_debug_value_variable(values, p, b, closing, true);
             }
+            if (!values->blocks_marked)
+            {
+                check_debug_value_own_blocks(values, b, body.opening, closing);
+            }
             uint32_t depth = 0;
             for (uint32_t token = body.opening + 1; token <= closing; token += 1)
             {
@@ -1245,11 +1303,19 @@ static void check_debug_values_write(CheckDebugValues* values)
                     const uint32_t parent = parser->tree.parents[token];
                     const uint32_t* ends = values->ends != NULL ? values->ends : values->derived_ends;
                     const uint32_t end = parent < input->token_count ? ends[parent] : input->token_count;
-                    debug_uleb(&values->info, CHECK_DEBUG_BLOCK);
-                    check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
-                    check_debug_value_range(values, b, token, end, NULL, 0);
-                    values->scopes[depth++] = end;
+                    // (Its own declarations' block alone, #2543: a block's without puts its children in its parent.)
+                    const bool own = (values->marks[token] & CHECK_DEBUG_OWN) != 0;
+                    if (own)
+                    {
+                        debug_uleb(&values->info, CHECK_DEBUG_BLOCK);
+                        check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
+                        check_debug_value_range(values, b, token, end, NULL, 0);
+                    }
+                    values->scopes[depth] = end;
+                    values->scope_tokens[depth] = own ? token : BUSTER_CHECK_NONE;
+                    depth += 1;
                 }
+                // (check_debug_value_scoped's test, which marks the blocks.)
                 if (check_debug_value_declaration(input, token) && type_is_valid(program->types, input->declared_types[token]) && parser->tokens.names[token] != 0)
                 {
                     if (input->declaration_kinds[token] == C_BINDING_OBJECT)
@@ -1268,7 +1334,10 @@ static void check_debug_values_write(CheckDebugValues* values)
                 }
                 while (depth != 0 && values->scopes[depth - 1] <= token)
                 {
-                    debug_integer(&values->info, 0, 1);
+                    if (values->scope_tokens[depth - 1] != BUSTER_CHECK_NONE)
+                    {
+                        debug_integer(&values->info, 0, 1);
+                    }
                     depth -= 1;
                 }
             }
@@ -1284,6 +1353,7 @@ static void check_debug_values_write(CheckDebugValues* values)
         }
     }
     debug_integer(&values->info, 0, 1); // compilation unit children
+    values->blocks_marked = true;
     debug_length(&values->info, 0, values->info.size - 4);
     debug_length(&values->ranges, 0, values->ranges.size - 4);
     debug_length(&values->locations, 0, values->locations.size - 4);
@@ -1302,6 +1372,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.enum_owners = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->enum_value_count + 1);
     values.local_ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     values.scopes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
+    values.scope_tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     values.marks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)tokens + 1);
     // The spans' index (#1640), room for the largest function's; without it, each list scans its function's spans.
     uint32_t most_spans = 0;
@@ -1335,7 +1406,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.ends_ready = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : NULL;
     const bool ends_valid = !derive || (values.derived_ends != NULL && values.ends_children != NULL && values.ends_queue != NULL && values.ends_ready != NULL);
     bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL &&
-                 values.scopes != NULL && values.marks != NULL && ends_valid && values.function_offsets != NULL && values.expanded != NULL && values.address_indices != NULL &&
+                 values.scopes != NULL && values.scope_tokens != NULL && values.marks != NULL && ends_valid && values.function_offsets != NULL && values.expanded != NULL && values.address_indices != NULL &&
                  values.parameter_dies != NULL && values.inline_open != NULL && values.inline_order != NULL;
     if (valid)
     {

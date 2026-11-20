@@ -14,7 +14,7 @@ static uint32_t check_tier1_debug_region_space(const CheckTier1DebugValues* proo
 
 static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const Tier1EmitResult* emitted,
                                           const uint32_t* places, const uint32_t* record_order, uint8_t* cuts,
-                                          bool vector, Arena* scratch)
+                                          Arena* scratch)
 {
     const IrFunction* ir = proof->ir;
     const IrDebugInfo* debug = ir->debug;
@@ -171,7 +171,7 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     }
     if (valid && needed)
     {
-        phi_keys = c_bindings_sort(phi_keys, phi_sorting, phi_count, vector, UINT32_MAX);
+        phi_keys = c_bindings_sort(phi_keys, phi_sorting, phi_count, true, UINT32_MAX);
         uint32_t writers[32];
         memset(writers, 0xff, sizeof(writers));
         uint32_t cursor = 0;
@@ -298,7 +298,7 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     }
     if (valid && regions != 0)
     {
-        proof->region_events = c_bindings_sort(events, sorting, proof->region_event_count, vector, UINT32_MAX);
+        proof->region_events = c_bindings_sort(events, sorting, proof->region_event_count, true, UINT32_MAX);
     }
     return valid;
 }

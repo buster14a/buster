@@ -4,12 +4,12 @@
 // Value hints (Tier1AllocationInput.hint_values, #140, and hint_intervals, #1216): literal traces of two values that
 // end and restart at one position, which the level rule alone gives each other's registers, of a range that takes an
 // earlier one's opening register over its own value's last, and of one that takes an earlier one's closing register
-// (BUSTER_TIER1_ALLOCATE_HINT_EXIT, #2553) after the scan moved it; and random inputs on both paths against the interval
-// verifier, the position occupancy oracle and an independent reference of the common path's hint rule; traces of a
-// recipe that gives its register to a value its hint names (#2618); traces of a range that waits in its value's slot
-// for its next required use (#2768); and traces of a victim that continues in its slot and of an interval evicted where
-// it starts, whose opening is its slot (#2774), whose random inputs take continuations too. Included by
-// tier1_allocate_test.c.
+// (BUSTER_TIER1_ALLOCATE_HINT_EXIT, #2553) after the scan moved it; and random inputs on tier1_allocate and the scan
+// reference against the interval verifier, the position occupancy oracle and an independent reference of the common
+// path's hint rule; traces of a recipe that gives its register to a value its hint names (#2618); traces of a range
+// that waits in its value's slot for its next required use (#2768); and traces of a victim that continues in its slot
+// and of an interval evicted where it starts, whose opening is its slot (#2774), whose random inputs take continuations
+// too. Included by tier1_allocate_test.c.
 
 // The common path's rule with hints, written over positions as tier1_allocation_test_levels writes it, with the free
 // registers as a set per level: a start whose hinted register is free takes it, from the level above that holds it
@@ -103,7 +103,7 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
 // Literal traces cover spare registers, another start's claim despite a conflicting physical hint, no free register,
 // eviction by a later required value before any use, which leaves the range recomputed from its start (#2618), and a
 // stored value's unused continuation. Restricted masks force the scan on
-// both production paths, so the regular-class coloring path cannot hide a regression in the required-use policy.
+// the production path, so the regular-class coloring path cannot hide a regression in the required-use policy.
 static void tier1_allocation_test_idle(Tier1AllocationTestTally* tally, Arena* arena)
 {
     const uint32_t starts[][5] = {
@@ -201,11 +201,11 @@ static void tier1_allocation_test_idle(Tier1AllocationTestTally* tally, Arena* a
             .position_count = 16,
             .registers = { 7 },
         };
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
             const uint64_t saved = arena->length;
             Tier1Allocation output = { 0 };
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
             const bool valid = error == TIER1_ALLOCATION_OK && output.scalar_intervals == input.count && output.fragment_count == fragments[fixture] && output.splits == fragments[fixture] - input.count && output.spill_count == (fixture == 4 ? 1u : 0u) && tier1_allocation_verify(&input, &output) && tier1_allocation_test_occupancy(&input, &output) && memcmp(output.kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output.registers, expected_registers[fixture], fragments[fixture]) == 0;
             tier1_allocation_test_expect(tally, valid, names[fixture]);
             arena_pop_to(arena, saved);
@@ -216,7 +216,7 @@ static void tier1_allocation_test_idle(Tier1AllocationTestTally* tally, Arena* a
 // A value without a recipe takes its hinted register from a recipe that no use requires there (#2618): value 0 leaves r0
 // at 4 and starts again at 8, where its hint names r0, which recipe value 1, defined at 5, holds. In the first trace the
 // recipe leaves r0 at 8, recomputed into r1 for its required use at 11; in the second its use at 8 requires it there, so
-// it keeps r0 and value 0 takes r1. The masks keep both production paths on the scan.
+// it keeps r0 and value 0 takes r1. The masks keep the production path on the scan.
 static void tier1_allocation_test_yields(Tier1AllocationTestTally* tally, Arena* arena)
 {
     const uint32_t starts[3] = { 0, 5, 8 };
@@ -270,17 +270,15 @@ static void tier1_allocation_test_yields(Tier1AllocationTestTally* tally, Arena*
             .position_count = 12,
             .registers = { 7 },
         };
-        Tier1Allocation outputs[3] = { { 0 } };
-        bool produced = true;
+        Tier1Allocation outputs[2] = { { 0 } };
         const uint64_t saved = arena->length;
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
             const Tier1Allocation* output = &outputs[path];
             bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments[fixture] && output->spill_count == 0 && tier1_allocation_verify(&input, output) && tier1_allocation_test_occupancy(&input, output);
             valid = valid && memcmp(output->kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output->registers, expected_registers[fixture], fragments[fixture]) == 0;
             valid = valid && memcmp(output->starts, expected_starts[fixture], fragments[fixture] * sizeof(uint32_t)) == 0;
-            produced &= error == TIER1_ALLOCATION_OK;
             tier1_allocation_test_expect(tally, valid, names[fixture]);
             if (!valid && error == TIER1_ALLOCATION_OK)
             {
@@ -292,7 +290,6 @@ static void tier1_allocation_test_yields(Tier1AllocationTestTally* tally, Arena*
                 fprintf(stderr, "\n");
             }
         }
-        tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths give a recipe's register to a hinted value alike");
         arena_pop_to(arena, saved);
     }
 }
@@ -369,17 +366,15 @@ static void tier1_allocation_test_unread(Tier1AllocationTestTally* tally, Arena*
             .position_count = 14,
             .registers = { 1 },
         };
-        Tier1Allocation outputs[3] = { { 0 } };
-        bool produced = true;
+        Tier1Allocation outputs[2] = { { 0 } };
         const uint64_t saved = arena->length;
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
             const Tier1Allocation* output = &outputs[path];
             bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments[fixture] && output->spill_count == 0 && tier1_allocation_verify(&input, output) && tier1_allocation_test_occupancy(&input, output);
             valid = valid && memcmp(output->kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output->registers, expected_registers[fixture], fragments[fixture]) == 0;
             valid = valid && memcmp(output->starts, expected_starts[fixture], fragments[fixture] * sizeof(uint32_t)) == 0;
-            produced &= error == TIER1_ALLOCATION_OK;
             tier1_allocation_test_expect(tally, valid, names[fixture]);
             if (!valid && error == TIER1_ALLOCATION_OK)
             {
@@ -391,7 +386,6 @@ static void tier1_allocation_test_unread(Tier1AllocationTestTally* tally, Arena*
                 fprintf(stderr, "\n");
             }
         }
-        tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths give up an unread recipe's register alike");
         arena_pop_to(arena, saved);
     }
 }
@@ -407,7 +401,7 @@ static void tier1_allocation_test_unread(Tier1AllocationTestTally* tally, Arena*
 // - required at 6, it takes r0 there too;
 // - a range of another value d, hinted to its own value but to the closing of a's first range, as a loop's body before
 //   its header is to its phi's operand (#2784): a's slot is no place of d's, and d takes r0 at 6.
-// The masks keep both production paths on the scan.
+// The masks keep the production path on the scan.
 static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Arena* arena)
 {
     const uint32_t starts[4] = { 0, 1, 2, 6 };
@@ -498,17 +492,15 @@ static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Ar
             .position_count = 20,
             .registers = { 7 },
         };
-        Tier1Allocation outputs[3] = { { 0 } };
-        bool produced = true;
+        Tier1Allocation outputs[2] = { { 0 } };
         const uint64_t saved = arena->length;
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
             const Tier1Allocation* output = &outputs[path];
             bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments[fixture] && output->spill_count == 1 && tier1_allocation_verify(&input, output) && tier1_allocation_test_occupancy(&input, output);
             valid = valid && memcmp(output->kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output->registers, expected_registers[fixture], fragments[fixture]) == 0;
             valid = valid && memcmp(output->starts, expected_starts[fixture], fragments[fixture] * sizeof(uint32_t)) == 0;
-            produced &= error == TIER1_ALLOCATION_OK;
             tier1_allocation_test_expect(tally, valid, names[fixture]);
             if (!valid && error == TIER1_ALLOCATION_OK)
             {
@@ -520,24 +512,21 @@ static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Ar
                 fprintf(stderr, "\n");
             }
         }
-        tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths place a range from its value's slot alike");
         arena_pop_to(arena, saved);
     }
 }
 
-// The allocation's outputs against one fixture's expected fragments, on the three paths alike.
+// The allocation's outputs against one fixture's expected fragments, by tier1_allocate and by the scan reference.
 static void tier1_allocation_test_fragments(Tier1AllocationTestTally* tally, Arena* arena, const Tier1AllocationInput* input, uint32_t fragments, const uint8_t* kinds, const uint8_t* registers, const uint32_t* starts, const char* name)
 {
-    Tier1Allocation outputs[3] = { { 0 } };
-    bool produced = true;
+    Tier1Allocation outputs[2] = { { 0 } };
     const uint64_t saved = arena->length;
-    for (uint32_t path = 0; path < 3; path += 1)
+    for (uint32_t path = 0; path < 2; path += 1)
     {
-        const Tier1AllocationError error = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
+        const Tier1AllocationError error = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
         const Tier1Allocation* output = &outputs[path];
         bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments && output->spill_count == 0 && tier1_allocation_verify(input, output) && tier1_allocation_test_occupancy(input, output);
         valid = valid && memcmp(output->kinds, kinds, fragments) == 0 && memcmp(output->registers, registers, fragments) == 0 && memcmp(output->starts, starts, fragments * sizeof(uint32_t)) == 0;
-        produced &= error == TIER1_ALLOCATION_OK;
         tier1_allocation_test_expect(tally, valid, name);
         if (!valid && error == TIER1_ALLOCATION_OK)
         {
@@ -549,7 +538,6 @@ static void tier1_allocation_test_fragments(Tier1AllocationTestTally* tally, Are
             fprintf(stderr, "\n");
         }
     }
-    tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(input, &outputs[0], &outputs[1]), "both production paths place a recipe's later range alike");
     arena_pop_to(arena, saved);
 }
 
@@ -615,20 +603,18 @@ static void tier1_allocation_test_waits(Tier1AllocationTestTally* tally, Arena* 
     }
 }
 
-// One trace on all three paths: its fragments' kinds, registers and starts, and its slots, each path's the same.
+// One trace by tier1_allocate and by the scan reference: its fragments' kinds, registers and starts, and its slots.
 static void tier1_allocation_test_trace(Tier1AllocationTestTally* tally, Arena* arena, const Tier1AllocationInput* input, uint32_t fragments, const uint8_t* kinds, const uint8_t* registers, const uint32_t* starts, uint32_t spills,
-                                        const char* name, const char* alike)
+                                        const char* name)
 {
-    Tier1Allocation outputs[3] = { { 0 } };
-    bool produced = true;
+    Tier1Allocation outputs[2] = { { 0 } };
     const uint64_t saved = arena->length;
-    for (uint32_t path = 0; path < 3; path += 1)
+    for (uint32_t path = 0; path < 2; path += 1)
     {
-        const Tier1AllocationError error = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
+        const Tier1AllocationError error = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
         const Tier1Allocation* output = &outputs[path];
         bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments && output->spill_count == spills && tier1_allocation_verify(input, output) && tier1_allocation_test_occupancy(input, output);
         valid = valid && memcmp(output->kinds, kinds, fragments) == 0 && memcmp(output->registers, registers, fragments) == 0 && memcmp(output->starts, starts, fragments * sizeof(uint32_t)) == 0;
-        produced &= error == TIER1_ALLOCATION_OK;
         tier1_allocation_test_expect(tally, valid, name);
         if (!valid && error == TIER1_ALLOCATION_OK)
         {
@@ -640,7 +626,6 @@ static void tier1_allocation_test_trace(Tier1AllocationTestTally* tally, Arena* 
             fprintf(stderr, "\n");
         }
     }
-    tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(input, &outputs[0], &outputs[1]), alike);
     arena_pop_to(arena, saved);
 }
 
@@ -713,7 +698,7 @@ static void tier1_allocation_test_stored_victims(Tier1AllocationTestTally* tally
             .registers = { 3 },
         };
         const uint32_t k = stored[fixture] ? 0 : 1;
-        tier1_allocation_test_trace(tally, arena, &input, 7, kinds[k], registers[k], fragment_starts[k], stored[fixture] ? 1 : 2, names[fixture], "both production paths choose a victim by its continuation alike");
+        tier1_allocation_test_trace(tally, arena, &input, 7, kinds[k], registers[k], fragment_starts[k], stored[fixture] ? 1 : 2, names[fixture]);
     }
 }
 
@@ -775,7 +760,7 @@ static void tier1_allocation_test_empty_openings(Tier1AllocationTestTally* tally
             .position_count = 20,
             .registers = { 3 },
         };
-        tier1_allocation_test_trace(tally, arena, &input, 6, kinds[fixture], registers[fixture], fragment_starts[fixture], 1, names[fixture], "both production paths open an interval evicted at its start alike");
+        tier1_allocation_test_trace(tally, arena, &input, 6, kinds[fixture], registers[fixture], fragment_starts[fixture], 1, names[fixture]);
     }
 }
 
@@ -844,20 +829,20 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         for (uint32_t hinted = 0; hinted < 2; hinted += 1)
         {
             input.hint_values = hinted != 0 ? hint_values : 0;
-            for (uint32_t path = 0; path < 3; path += 1)
+            for (uint32_t path = 0; path < 2; path += 1)
             {
                 const uint64_t saved = arena->length;
                 Tier1Allocation output = { 0 };
-                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
                 const bool produced = error == TIER1_ALLOCATION_OK && output.fragment_count == 4;
                 tier1_allocation_test_expect(tally, produced && tier1_allocation_verify(&input, &output), "hint trace allocates");
                 if (produced)
                 {
                     const bool kept = output.registers[2] == output.registers[0] && output.registers[3] == output.registers[1];
-                    // Both production paths swap them without hints; the independent scan, lowest free first, keeps
-                    // them anyway. The fixture distinguishes assignment policies even on a baseline host (#1395).
+                    // The production path swaps them without hints; the independent scan, lowest free first, keeps
+                    // them anyway. The fixture distinguishes assignment policies (#1395).
                     const bool swapped = output.registers[2] == output.registers[1] && output.registers[3] == output.registers[0];
-                    tier1_allocation_test_expect(tally, hinted != 0 ? kept : (path < 2 ? swapped : kept), hinted != 0 ? "a hinted range keeps its value's register" : "the level rule alone gives the ranges each other's registers");
+                    tier1_allocation_test_expect(tally, hinted != 0 ? kept : (path == 0 ? swapped : kept), hinted != 0 ? "a hinted range keeps its value's register" : "the level rule alone gives the ranges each other's registers");
                 }
                 arena_pop_to(arena, saved);
             }
@@ -888,7 +873,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         };
         input.classes = classes;
         input.hint_values = outside;
-        tier1_allocation_test_expect(tally, tier1_allocate_scalar(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "a hint past the values is refused");
+        tier1_allocation_test_expect(tally, tier1_allocate(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "a hint past the values is refused");
     }
     // Three values over [0, 10), then the first one's again over [10, 20), hinted to its own value and to the second
     // range's opening register: a dispatch loop's handler taking its sibling's entry convention. Without the interval
@@ -954,11 +939,11 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         for (uint32_t hinted = 0; hinted < 2; hinted += 1)
         {
             input.hint_intervals = hinted != 0 ? hint_intervals : 0;
-            for (uint32_t path = 0; path < 3; path += 1)
+            for (uint32_t path = 0; path < 2; path += 1)
             {
                 const uint64_t saved = arena->length;
                 Tier1Allocation output = { 0 };
-                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
                 const bool produced = error == TIER1_ALLOCATION_OK && output.fragment_count == 4;
                 tier1_allocation_test_expect(tally, produced && tier1_allocation_verify(&input, &output), "interval hint trace allocates");
                 if (produced)
@@ -1007,7 +992,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             input.hint_intervals = refused_hints[k];
             Tier1Allocation refused = { 0 };
             const uint64_t saved = arena->length;
-            const Tier1AllocationError error = k % 2 == 0 ? tier1_allocate(&input, arena, &refused) : tier1_allocate_scalar(&input, arena, &refused);
+            const Tier1AllocationError error = tier1_allocate(&input, arena, &refused);
             tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_INVALID && arena->length == saved, refused_names[k]);
         }
         const uint8_t mixed[] = {
@@ -1087,11 +1072,11 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
                         0xffff,
                     },
                 };
-                for (uint32_t path = 0; path < 3; path += 1)
+                for (uint32_t path = 0; path < 2; path += 1)
                 {
                     const uint64_t saved = arena->length;
                     Tier1Allocation output = { 0 };
-                    const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+                    const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
                     const bool produced = error == TIER1_ALLOCATION_OK && output.fragment_count == counts[k];
                     tier1_allocation_test_expect(tally, produced && tier1_allocation_verify(&input, &output), "alternate trace allocates");
                     if (produced)
@@ -1129,7 +1114,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             };
             Tier1Allocation output = { 0 };
             const uint64_t saved = arena->length;
-            const Tier1AllocationError error = k % 2 == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scalar(&input, arena, &output);
+            const Tier1AllocationError error = tier1_allocate(&input, arena, &output);
             tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_INVALID && arena->length == saved, "an alternate to itself, past the intervals or to a later range is refused");
         }
     }
@@ -1244,11 +1229,11 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(expected); k += 1)
         {
             input.hint_intervals = named[k];
-            for (uint32_t path = 0; path < 3; path += 1)
+            for (uint32_t path = 0; path < 2; path += 1)
             {
                 const uint64_t saved = arena->length;
                 Tier1Allocation output = { 0 };
-                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+                const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
                 const bool produced = error == TIER1_ALLOCATION_OK && tier1_allocation_verify(&input, &output) && tier1_allocation_test_occupancy(&input, &output);
                 // a's fragments: r0, then its slot from 3, then r1 from 9.
                 const uint32_t a = output.fragment_offsets[0];
@@ -1270,7 +1255,6 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         Tier1Allocation refused = { 0 };
         const uint64_t saved = arena->length;
         tier1_allocation_test_expect(tally, tier1_allocate(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "an exit hint to an interval that ends after the range starts is refused");
-        tier1_allocation_test_expect(tally, tier1_allocate_scalar(&input, arena, &refused) == TIER1_ALLOCATION_INVALID && arena->length == saved, "the scalar path refuses that exit hint too");
     }
     // Random ranges of a few values each, adjacent and apart, every one hinted to a random value of its class or to
     // none, at pressures to the class's registers and past them, with required uses and fixed ranges in some.
@@ -1412,17 +1396,14 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         };
         const uint64_t saved = arena->length;
         Tier1Allocation vector = { 0 };
-        Tier1Allocation scalar = { 0 };
         Tier1Allocation scan = { 0 };
         const Tier1AllocationError vector_error = tier1_allocate(&input, arena, &vector);
-        const Tier1AllocationError scalar_error = tier1_allocate_scalar(&input, arena, &scalar);
         const Tier1AllocationError scan_error = tier1_allocate_scan_reference(&input, arena, &scan);
-        tier1_allocation_test_expect(tally, vector_error == scalar_error && vector_error == scan_error && (vector_error == TIER1_ALLOCATION_OK || ((constrained || continued) && vector_error == TIER1_ALLOCATION_CONSTRAINT)), "hinted ranges allocate on both paths and the scan alike");
-        if (vector_error == TIER1_ALLOCATION_OK && scalar_error == TIER1_ALLOCATION_OK && scan_error == TIER1_ALLOCATION_OK)
+        tier1_allocation_test_expect(tally, vector_error == scan_error && (vector_error == TIER1_ALLOCATION_OK || ((constrained || continued) && vector_error == TIER1_ALLOCATION_CONSTRAINT)), "hinted ranges allocate on the production path and the scan alike");
+        if (vector_error == TIER1_ALLOCATION_OK && scan_error == TIER1_ALLOCATION_OK)
         {
-            tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar) && tier1_allocation_verify(&input, &scan), "hinted ranges pass the interval verifier");
-            tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scalar) && tier1_allocation_test_occupancy(&input, &scan), "hinted ranges pass the occupancy oracle");
-            tier1_allocation_test_expect(tally, tier1_allocation_test_equal(&input, &vector, &scalar), "hinted production paths choose identical allocation output");
+            tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scan), "hinted ranges pass the interval verifier");
+            tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scan), "hinted ranges pass the occupancy oracle");
             // A class the common path colors, against the reference; the classes are colored in order, sharing `last`.
             uint8_t reference[128];
             uint8_t last[25];

@@ -41,7 +41,11 @@ requirements. [Command index](README.md).
   a value in rax across a `lock cmpxchg`, which keeps rax in r11, and must be
   certified; the rule that keeps rax (`tier1_cert_emitted_kept`) is checked on
   its own cases too. Its realigned fixture's prologue, its allocation moved
-  before its push of rbx and its epilogue matched, must be refused. `test-tier1-masks` corrupts machine rows and wide vectors'
+  before its push of rbx and its epilogue matched, must be refused. Its barrier
+  fixture (#2963) keeps a value in its call-save row across an asm body's `lock
+  or dword [rsp], 0`, and must be certified; the barrier aimed at that row, its
+  writes that leave the row as it was must be certified and those that change
+  it refused. `test-tier1-masks` corrupts machine rows and wide vectors'
   moves: borrowed masks' reloads left out, staging copies onto live registers,
   claimed placements of roles sharing a register while both hold values, of k0
   for a numbered opmask register or of a corrupted split (#1283's early
@@ -103,7 +107,7 @@ requirements. [Command index](README.md).
   using the scalar form-choice oracle, and checks the concrete records and
   clobbers. Unsupported straight-line shapes publish no definition claims.
 - #938's harness allocates every problem it adapts through
-  `tier1_problem_allocate`, by both allocator paths, and reports an allocation
+  `tier1_problem_allocate`, by `tier1_allocate`, and reports an allocation
   only past `tier1_problem_certify`:
   - `tests/tier1-problem/report.c` reports problem files;
   - the integration fuzzer certifies every problem it decodes;
@@ -127,5 +131,7 @@ options] file...` times the emitted code's certificate, its decoding, its check
 and both, per IR instruction and per record, beside the emission it certifies,
 on every function whose code it certifies, with the certificates' sizes and the
 uncertified functions by reason. A refusal, or a step out of memory or past a
-limit, fails it with no report. The 9700X job runs it on
+limit, fails it with no report, naming the function by its index in the corpus
+and the emission's cause and error (a code certificate's reason by name,
+#2870). The 9700X job runs it on
 the frozen `sqlite3.c` where `changes`' `tier1-code-certificate` entry says.

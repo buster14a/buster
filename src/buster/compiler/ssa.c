@@ -390,9 +390,8 @@ static SsaError ssa_analyze(SsaWork* work, bool vector)
             .predecessor_offsets = work->result.predecessor_offsets,
             .predecessors = work->result.predecessors,
         };
-        // The vector path's frontier matrix is a bitset either way; its tree takes AUTO's solver (#1352).
+        // The vector path asks for the frontier bitsets as well as the tree.
         const DominatorOptions options = {
-            .path = BUSTER_VECTOR_PATH(vector) ? DOMINATOR_AUTO : DOMINATOR_SCALAR,
             .outputs = BUSTER_VECTOR_PATH(vector) ? BUSTER_DOMINATOR_FRONTIERS : 0,
             .max_matrix_bytes = BUSTER_SSA_DOMINANCE_BYTES,
         };
@@ -763,7 +762,7 @@ static SsaError ssa_place_phis(SsaWork* work)
     SsaError error = (blocks == 0 || frontiers != 0) && active != 0 && next != 0 && live != 0 && placed != 0 ? SSA_OK : SSA_ERROR_MEMORY;
     if (error == SSA_OK)
     {
-        dataflow_liveness_vector(&work->flow);
+        dataflow_liveness(&work->flow);
         for (uint32_t dense = 0; dense < work->promoted_count; dense += 1)
         {
             memset(active, 0, words * sizeof(uint64_t));
@@ -1011,9 +1010,6 @@ static SsaError ssa_rename_vector(SsaWork* work)
 
 static SsaError ssa_construct_vector(SsaWork* work)
 {
-#if !BUSTER_HOST_VECTOR
-    return ssa_construct_scalar(work);
-#else
     SsaError error = ssa_place_phis(work);
     if (error == SSA_OK)
     {
@@ -1024,7 +1020,6 @@ static SsaError ssa_construct_vector(SsaWork* work)
         error = ssa_rename_vector(work);
     }
     return error;
-#endif
 }
 
 // Cleanup is followed by compacting only the phis reachable from original promoted reads. Alias substitution can
@@ -1465,11 +1460,7 @@ static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* sc
 
 static SsaError ssa_build(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ssa_build_scalar(input, output, scratch, result);
-#else
     return ssa_build_path(input, output, scratch, result, true);
-#endif
 }
 
 static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)

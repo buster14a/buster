@@ -398,7 +398,7 @@ static void check_test_action_histories(CheckTest* test, TypeTable* table)
             graph.source_positions[late] = 20;
             for (uint32_t path = 0; path < 2; path += 1)
             {
-                const CheckOptions options = { .scalar = path == 0 };
+                const CheckOptions options = { 0 };
                 CheckStream stream;
                 const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &stream);
                 char message[192];
@@ -454,9 +454,8 @@ static void check_test_gnu_constant_contexts(CheckTest* test, TypeTable* table)
             for (uint32_t mode = 0; mode < 2; mode += 1)
             {
                 graph.contexts[root] = BUSTER_CHECK_CONTEXT_ASSERT | (mode != 0 ? BUSTER_CHECK_CONTEXT_GNU_CONSTANT : 0);
-                for (uint32_t path = 0; path < 2; path += 1)
                 {
-                    const CheckOptions options = { .scalar = path == 0 };
+                    const CheckOptions options = { 0 };
                     CheckStream stream;
                     const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &stream);
                     const bool accept = mode != 0 && form < 5;
@@ -685,9 +684,8 @@ static void check_test_qualifier_warnings(CheckTest* test, TypeTable* table)
         const uint32_t leaf = check_test_leaf(&graph, 10, source);
         const uint32_t node = check_graph_add(&graph, CHECK_OP_CONVERT, 11, leaf, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         graph.types[node] = plain;
-        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const CheckOptions options = { .scalar = path == 0 };
+            const CheckOptions options = { 0 };
             CheckStream stream;
             const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &stream);
             check_test_expect(test, checked && stream.report_count == 0 && stream.warnings[leaf] == 0 && stream.warnings[node] == CHECK_WARNING_DISCARDED_QUALIFIERS,

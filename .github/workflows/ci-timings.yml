@@ -5,12 +5,29 @@ on:
     - cron: '37 8 * * *'
       timezone: Europe/Madrid
   workflow_dispatch:
+    inputs:
+      split_at:
+        description: 'Optional UTC timestamp separating before and after cohorts (YYYY-MM-DDTHH:MM:SSZ)'
+        type: string
+        default: ''
+      run_limit:
+        description: 'Maximum recent runs per workflow/event/window (1-100); collection budgets may limit coverage further'
+        type: string
+        default: '10'
+      hosted_capacity:
+        description: 'Optional administrator-confirmed account-wide hosted job concurrency; leave empty if unknown'
+        type: string
+        default: ''
+      capacity_source:
+        description: 'Source and observation date for hosted_capacity; required when supplying a capacity'
+        type: string
+        default: ''
   pull_request:
     paths:
       - '.github/workflows/ci-timings.yml'
-      - 'tools/ci/timings.c'
-      - 'tools/ci/timings.sh'
-      - 'tests/ci/timings.sh'
+      - 'tools/ci/timings*'
+      - 'tests/ci/timings*'
+      - 'tests/ci/timings/**'
 
 permissions:
   contents: read
@@ -38,20 +55,31 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Collect hardware queue and phase durations, and the merge queue's candidates
+      - name: Account for CI phases and hosted capacity
+        id: collect
         env:
           GH_TOKEN: ${{ github.token }}
+          CI_TIMINGS_SPLIT_AT: ${{ inputs.split_at }}
+          CI_TIMINGS_RUN_LIMIT: ${{ inputs.run_limit || '10' }}
+          CI_TIMINGS_HOSTED_CAPACITY: ${{ inputs.hosted_capacity || vars.CI_TIMINGS_HOSTED_CAPACITY }}
+          CI_TIMINGS_CAPACITY_SOURCE: ${{ inputs.capacity_source || (!inputs.hosted_capacity && vars.CI_TIMINGS_CAPACITY_SOURCE) || '' }}
         run: bash tools/ci/timings.sh "$RUNNER_TEMP/ci-timings"
       - name: Publish summary
-        run: cat "$RUNNER_TEMP/ci-timings/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/ci-timings/summary.md" ]; then
+            cat "$RUNNER_TEMP/ci-timings/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'CI accounting did not produce a report. See the collection step and retained inputs; missing observations are unknown.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Retain timing inputs and report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-timings-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/ci-timings/*.json
-            ${{ runner.temp }}/ci-timings/*.tsv
-            ${{ runner.temp }}/ci-timings/*.md
+            ${{ runner.temp }}/ci-timings/**/*.json
+            ${{ runner.temp }}/ci-timings/**/*.tsv
+            ${{ runner.temp }}/ci-timings/**/*.md
           retention-days: 14
           if-no-files-found: warn

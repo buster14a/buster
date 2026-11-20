@@ -63,6 +63,8 @@ typedef enum Tier1BursNonterminal
     TIER1_BURS_FCOND,
     TIER1_BURS_ZCOND,
     TIER1_BURS_ZFCOND,
+    // A floating comparison by <, <=, > or >= itself, which its I1 copy takes (#2791).
+    TIER1_BURS_FCMP,
     TIER1_BURS_NONTERMINALS,
 } Tier1BursNonterminal;
 
@@ -112,6 +114,8 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_CBR_ADJ,
     // An integer select, which reads its condition (#2676): the select's values are its own root's registers.
     TIER1_BURS_OP_SELECT,
+    // An I1 copy of the floating comparison right before it, a truth value's link (tier1_select_truth, #2791).
+    TIER1_BURS_OP_COPY_TRUTH,
     TIER1_BURS_OPERATORS,
 } Tier1BursOperator;
 
@@ -165,6 +169,7 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_FCMP_ORD,
     TIER1_BURS_FAMILY_CBR_ADJ,
     TIER1_BURS_FAMILY_SELECT,
+    TIER1_BURS_FAMILY_COPY_TRUTH,
 } Tier1BursFamily;
 
 // What the plan takes as a root's pattern (tier1_burs_pick): the candidate of `kind`, with LEA_ADD's of a register or of
@@ -305,12 +310,20 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ZEXT_TRUTH, 0, { TIER1_BURS_COND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_FOLDED_COMPARE, TIER1_RULE_COMPARE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_ZEXT, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_PLAIN, TIER1_RULE_ZERO_EXTEND },
     { TIER1_BURS_FCOND, TIER1_BURS_FAMILY_FCMP_ORD, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
+    { TIER1_BURS_FCMP, TIER1_BURS_FAMILY_FCMP_ORD, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_FCMP_ORD, 0, { TIER1_BURS_REG, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_COMPARE },
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_COND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_BRANCH_COMPARE },
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_FCOND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_BRANCH_COMPARE },
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_BRANCH },
     // A select of an integer comparison's condition code, cmp and cmovCC (#2676), and one that tests its truth value.
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SELECT, 0, { TIER1_BURS_COND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_SELECT_COMPARE },
+    // A select of a floating comparison's flags, ucomis and cmovCC (#2791).
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SELECT, 0, { TIER1_BURS_FCOND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_SELECT_COMPARE },
+    // A floating comparison's I1 copy (#2791), which if-conversion makes of a test of it: a link of its chain (a select's
+    // or a branch's), or its own move. It reads the comparison itself, not every state's FCOND, which would take the
+    // tables past BUSTER_TIER1_BURS_MAX_STATES.
+    { TIER1_BURS_FCOND, TIER1_BURS_FAMILY_COPY_TRUTH, 0, { TIER1_BURS_FCMP, BUSTER_TIER1_BURS_NO_KID }, 0, TIER1_BURS_ACTION_NONE, TIER1_RULE_NONE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_COPY_TRUTH, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 1, TIER1_BURS_ACTION_KIND, TIER1_RULE_COPY },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SELECT, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_SELECT },
 };
 
@@ -503,6 +516,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
         break;
     case TIER1_BURS_FAMILY_SELECT:
         member = op == TIER1_BURS_OP_SELECT;
+        break;
+    case TIER1_BURS_FAMILY_COPY_TRUTH:
+        member = op == TIER1_BURS_OP_COPY_TRUTH;
         break;
     default:
         break;
@@ -968,41 +984,13 @@ static uint32_t tier1_burs_classify_node(const Tier1SelectForest* forest, const 
     {
         result = TIER1_BURS_OP_SELECT;
     }
+    else if (op == IR_COPY && type == IR_I1 && a + 1 == node && function->op[a] == IR_FCMP)
+    {
+        result = TIER1_BURS_OP_COPY_TRUTH;
+    }
     return result;
 }
 
-// Whether `child`, an operand of `node`, is visible to its patterns: a tree child (tier1_select_tree_child), a constant
-// (whose value any consumer folds), or a frame object's address in the same block or the entry (a memory operand may
-// fold the shared leaf too, tier1_select_address); and labeled before it.
-static bool tier1_burs_visible(const Tier1SelectForest* forest, const uint32_t* classes, uint32_t node, uint32_t child)
-{
-    const uint32_t class = child < node ? classes[child] : TIER1_BURS_OP_REG;
-    return child < node && (tier1_select_tree_child(forest, node, child) || (class >= TIER1_BURS_OP_CONST && class < TIER1_BURS_OP_ALU) || class == TIER1_BURS_OP_SLOT_X ||
-                            (class == TIER1_BURS_OP_SLOT && forest->blocks[child] == forest->blocks[node]));
-}
-
-// The nodes' operators and visible children: the scalar twin of tier1_burs_classify_vector, an exact one. `kids` is two
-// columns, each node's first operand (a) and second (b) where its operator reads one and it is visible, else
-// BUSTER_IR_NONE.
-static void tier1_burs_classify_scalar(const Tier1SelectForest* forest, const uint32_t* users, uint32_t* classes, uint32_t* kids)
-{
-    const IrFunction* function = forest->function;
-    const uint32_t count = function->instruction_count;
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        classes[node] = tier1_burs_classify_node(forest, users, node);
-    }
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        const uint32_t arity = tier1_burs_arity[classes[node]];
-        const uint32_t a = function->a[node];
-        const uint32_t b = function->b[node];
-        kids[node] = arity >= 1 && tier1_burs_visible(forest, classes, node, a) ? a : BUSTER_IR_NONE;
-        kids[count + node] = arity >= 2 && tier1_burs_visible(forest, classes, node, b) ? b : BUSTER_IR_NONE;
-    }
-}
-
-#if BUSTER_HOST_VECTOR
 // Per IR operation: an ALU operation's index (BUSTER_TIER1_BURS_ADD32 to XOR, 0xff for none), and a shift's operator.
 static uint32_t tier1_burs_alu_index(uint32_t op)
 {
@@ -1041,7 +1029,7 @@ static __m256i tier1_burs_constant_bits_vector(__m512i value, __m512i width)
     return _mm512_cvtepi64_epi32(bits);
 }
 
-// The nodes' operators and visible children, 16 at a time: tier1_burs_classify_scalar's, exactly. Each node's operation,
+// The nodes' operators and visible children, 16 at a time, a node's operator its tier1_burs_classify_node's. Each node's operation,
 // type and flags go first into one 32-bit word (`words`, `count` of them), whose gathers then stay in the columns; the
 // children's columns are gathered by their indices where those are nodes. A frame object's address, whose slot the
 // class reads, takes the scalar classifier.
@@ -1236,6 +1224,10 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         // Integer selects (#2676), of any condition: the kids' pass decides whether it is visible.
         const __mmask16 select = tier1_burs_types(active, type, width4 | width8) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SELECT));
         result = _mm512_mask_mov_epi32(result, select, _mm512_set1_epi32(TIER1_BURS_OP_SELECT));
+        // A truth value's I1 copy of the floating comparison right before it (#2791).
+        const __mmask16 copy = adjacent & _mm512_mask_cmpeq_epi32_mask(active, type, _mm512_set1_epi32(IR_I1)) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COPY)) &
+                               _mm512_cmpeq_epi32_mask(_mm512_and_si512(a_word, byte), _mm512_set1_epi32(IR_FCMP));
+        result = _mm512_mask_mov_epi32(result, copy, _mm512_set1_epi32(TIER1_BURS_OP_COPY_TRUTH));
         _mm512_mask_storeu_epi32(classes + first, active, result);
         // A frame object's address, and an address the vector rule leaves: the scalar classifier's, which reads its slot
         // or its displacement.
@@ -1273,33 +1265,7 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         }
     }
 }
-#endif
 
-// Each node's state, in node order: every visible child precedes its parent (tier1_burs_visible). This scalar twin of
-// tier1_burs_label_vector uses neither vector kernels nor the vector path's level traversal.
-static void tier1_burs_label_scalar(uint32_t count, const uint32_t* classes, const uint32_t* kids, uint32_t* states)
-{
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        const uint32_t op = classes[node];
-        const uint32_t left = kids[node] != BUSTER_IR_NONE ? states[kids[node]] : BUSTER_TIER1_BURS_REG_STATE;
-        const uint32_t right = kids[count + node] != BUSTER_IR_NONE ? states[kids[count + node]] : BUSTER_TIER1_BURS_REG_STATE;
-        const uint32_t row = tier1_burs_pool[tier1_burs_map_base[0][op] + left];
-        const uint32_t column = tier1_burs_pool[tier1_burs_map_base[1][op] + right];
-        states[node] = tier1_burs_pool[tier1_burs_table_base[op] + row * tier1_burs_table_width[op] + column];
-    }
-}
-
-// Each node's rule: its state's rule of its operator's goal. The scalar twin of tier1_burs_rules_vector.
-static void tier1_burs_rules_scalar(uint32_t count, const uint32_t* classes, const uint32_t* states, uint32_t* rules)
-{
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        rules[node] = tier1_burs_state_rules[states[node] * TIER1_BURS_NONTERMINALS + tier1_burs_goal[classes[node]]];
-    }
-}
-
-#if BUSTER_HOST_VECTOR
 // A 16-bit entry of the pool at each lane's index, by 32-bit gathers (the pool's pad covers the last one's high half).
 static __m512i tier1_burs_gather_pool(__mmask16 active, __m512i index)
 {
@@ -1375,7 +1341,6 @@ static void tier1_burs_rules_vector(uint32_t count, const uint32_t* classes, con
         _mm512_mask_storeu_epi32(rules + first, active, rule);
     }
 }
-#endif
 
 // The candidate of `node` that its rule names (Tier1BursAction): its index in `candidates`, or munch's choice where the
 // rule names none or the walks didn't make the one it names, which *munched says.

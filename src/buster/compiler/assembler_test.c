@@ -11,7 +11,39 @@ struct AsmTest
     Arena vector;
     uint64_t checks;
     uint64_t failures;
+    // The vector path's outputs, folded in order (FNV-1a) while `digesting`: the in-process checks before the file and
+    // GNU as checks, on every target but the host's own. With the default seed and fuzz count they must give
+    // BUSTER_ASM_TEST_DIGEST, recorded where the scalar paths gave the same outputs (#2924).
+    uint64_t digest;
+    bool digesting;
 };
+
+#define BUSTER_ASM_TEST_DIGEST 0x29134b61c976fff1ull
+
+static void asm_test_fold(AsmTest* test, const void* bytes, uint64_t size)
+{
+    if (test->digesting)
+    {
+        const uint8_t* at = bytes;
+        for (uint64_t i = 0; i < size; i += 1)
+        {
+            test->digest = (test->digest ^ at[i]) * 0x100000001b3ull;
+        }
+    }
+}
+
+static void asm_test_fold_u64(AsmTest* test, uint64_t value)
+{
+    asm_test_fold(test, &value, sizeof(value));
+}
+
+// A diagnostic's text with its terminator, or nothing for none, so that no error and an empty one differ.
+static void asm_test_fold_text(AsmTest* test, const char* text)
+{
+    const uint64_t length = text != 0 ? strlen(text) + 1 : 0;
+    asm_test_fold_u64(test, length);
+    asm_test_fold(test, text, length);
+}
 
 static void asm_test_check(AsmTest* test, bool accepted, const char* name, const char* detail)
 {
@@ -54,22 +86,19 @@ static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, X86A
     }
     test->scalar.length = 0;
     test->vector.length = 0;
-    AsmParser lex_scalar =
-        {
-            .source = source,
-            .tokens = BUSTER_ARENA_PUSH_ARRAY(&test->scalar, AsmToken, source.length + 4),
-    };
     AsmParser lex_vector =
         {
             .source = source,
             .tokens = BUSTER_ARENA_PUSH_ARRAY(&test->vector, AsmToken, source.length + 4),
     };
-    if (lex_scalar.tokens != 0 && lex_vector.tokens != 0)
+    if (lex_vector.tokens != 0)
     {
-        asm_lex_scalar(&lex_scalar);
         asm_lex_vector(&lex_vector);
-        const bool same = lex_scalar.token_count == lex_vector.token_count && memcmp(lex_scalar.tokens, lex_vector.tokens, (lex_scalar.token_count + 1) * sizeof(AsmToken)) == 0;
-        asm_test_check(test, same, "scalar/vector token spans and kinds", 0);
+        if (architecture != X86_ARCH_NATIVE)
+        {
+            asm_test_fold_u64(test, lex_vector.token_count);
+            asm_test_fold(test, lex_vector.tokens, (lex_vector.token_count + 1) * sizeof(AsmToken));
+        }
     }
     else
     {
@@ -92,11 +121,25 @@ static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, X86A
             fprintf(stderr, "source: %.*s\nlocation: %u\n", (int)source.length, source.pointer, vector.location);
         }
     }
+    const bool folded = architecture != X86_ARCH_NATIVE;
+    if (folded)
+    {
+        asm_test_fold_text(test, vector.error);
+        asm_test_fold_u64(test, vector.location);
+        asm_test_fold_u64(test, vector.error_name.length);
+        asm_test_fold(test, vector.error_name.pointer, vector.error_name.length);
+    }
     if (scalar.error == 0 && vector.error == 0)
     {
         const Object a = asm_object(&scalar, BUSTER_S8("fixture.s"), &test->scalar);
         const Object b = asm_object(&vector, BUSTER_S8("fixture.s"), &test->vector);
         asm_test_check(test, a.error == OBJECT_ERROR_NONE && b.error == OBJECT_ERROR_NONE && a.size == b.size && memcmp(a.bytes, b.bytes, a.size) == 0, "scalar/vector ELF", "objects differ");
+        if (folded)
+        {
+            asm_test_fold_u64(test, b.error);
+            asm_test_fold_u64(test, b.size);
+            asm_test_fold(test, b.bytes, b.size);
+        }
     }
     return vector;
 }
@@ -754,18 +797,17 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                         }
                     }
                 }
-                const X86Match scalar = x86_match(test->index, &request, false);
-                const X86Match vector = x86_match(test->index, &request, true);
-                const bool same = scalar.found == vector.found && scalar.ambiguous == vector.ambiguous && (!scalar.found || (scalar.length == vector.length && memcmp(&scalar.instruction, &vector.instruction, sizeof(X86Instruction)) == 0));
-                asm_test_check(test, same, "catalogue matcher scalar/vector operands and selected bytes", form->mnemonic);
-                if (scalar.found)
+                const X86Match match = x86_match(test->index, &request);
+                asm_test_fold_u64(test, (uint64_t)match.found | (uint64_t)match.ambiguous << 1 | (uint64_t)match.length << 2);
+                if (match.found)
                 {
+                    asm_test_fold(test, &match.instruction, sizeof(X86Instruction));
                     uint8_t checked[BUSTER_X86_ENCODER_CAPACITY(1)];
                     uint8_t direct[BUSTER_X86_ENCODER_CAPACITY(1)];
-                    const int64_t checked_length = x86_encode_scalar(&scalar.instruction, 1, checked, sizeof(checked), 0, 0);
-                    const uint32_t direct_length = encode_one(&scalar.instruction, direct, X86_ENCODER_MODE_64);
-                    const bool identical = checked_length > 0 && checked_length == scalar.length && direct_length == scalar.length && direct_length <= BUSTER_X86_MAX_INSTRUCTION_BYTES && memcmp(checked, direct, direct_length) == 0;
-                    asm_test_check(test, identical, "validated matcher length and bytes against checked scalar encoder", form->mnemonic);
+                    const int64_t checked_length = x86_validate(&match.instruction, 1) == 1 ? x86_encode(&match.instruction, 1, checked, sizeof(checked), 0, 0) : -1;
+                    const uint32_t direct_length = encode_one(&match.instruction, direct, X86_ENCODER_MODE_64);
+                    const bool identical = checked_length > 0 && checked_length == match.length && direct_length == match.length && direct_length <= BUSTER_X86_MAX_INSTRUCTION_BYTES && memcmp(checked, direct, direct_length) == 0;
+                    asm_test_check(test, identical, "validated matcher length and bytes against the validated encoder", form->mnemonic);
                     length_checks += 1;
                 }
             }
@@ -877,33 +919,34 @@ static void asm_test_lex_guard(AsmTest* test)
     }
 }
 
-// asm_assemble_code by both paths (#147: C's inline assembly), which must give the same records, branch columns and
-// references, and each failure alike, with both arenas as they were after it and scratch as it was after a success.
-// `expected` is the record count, -1 for a failure.
+// asm_assemble_code (#147: C's inline assembly), whose records, branch columns, references and failures go into the
+// digest, with its scratch arena as it was after it and its output as it was after a failure. `expected` is the record
+// count, -1 for a failure.
 static AsmCode asm_test_code_pair(AsmTest* test, const char* source, int64_t expected, const char* name)
 {
     const String8 text = { .pointer = (char*)source, .length = strlen(source) };
     test->scalar.length = 0;
     test->vector.length = 0;
-    // The scalar path's result in the scalar arena, its scratch the vector one; then the other way round, above it.
-    const AsmCode scalar = asm_assemble_code(text, test->index, (AsmOptions){ 0 }, &test->scalar, &test->vector);
-    const bool scalar_restored = test->vector.length == 0 && (scalar.error == 0 || test->scalar.length == 0);
-    const uint64_t kept = test->scalar.length;
-    const AsmCode vector = asm_assemble_code(text, test->index, (AsmOptions){ .vectorized = true }, &test->vector, &test->scalar);
-    const bool vector_restored = test->scalar.length == kept && (vector.error == 0 || test->vector.length == 0);
-    bool same = (scalar.error == 0) == (vector.error == 0) && scalar.count == vector.count && scalar.branch_count == vector.branch_count &&
-                scalar.reference_count == vector.reference_count && (scalar.error == 0 || (strcmp(scalar.error, vector.error) == 0 && scalar.location == vector.location));
-    same = same && (scalar.count == 0 || memcmp(scalar.records, vector.records, scalar.count * sizeof(X86Instruction)) == 0);
-    same = same && (scalar.branch_count == 0 || (memcmp(scalar.branches, vector.branches, scalar.branch_count * sizeof(uint32_t)) == 0 &&
-                                                 memcmp(scalar.targets, vector.targets, scalar.branch_count * sizeof(uint32_t)) == 0));
-    for (uint32_t i = 0; same && i < scalar.reference_count; i += 1)
+    // The result in the vector arena, its scratch the scalar one.
+    const AsmCode vector = asm_assemble_code(text, test->index, (AsmOptions){ 0 }, &test->vector, &test->scalar);
+    const bool restored = test->scalar.length == 0 && (vector.error == 0 || test->vector.length == 0);
+    asm_test_check(test, restored, name, "inline code leaves an arena moved");
+    asm_test_fold_text(test, vector.error);
+    asm_test_fold_u64(test, vector.location);
+    asm_test_fold_u64(test, (uint64_t)vector.count | (uint64_t)vector.branch_count << 32);
+    asm_test_fold_u64(test, vector.reference_count);
+    asm_test_fold(test, vector.records, vector.count * sizeof(X86Instruction));
+    asm_test_fold(test, vector.branches, vector.branch_count * sizeof(uint32_t));
+    asm_test_fold(test, vector.targets, vector.branch_count * sizeof(uint32_t));
+    for (uint32_t i = 0; i < vector.reference_count; i += 1)
     {
-        const AsmCodeReference* a = scalar.references + i;
-        const AsmCodeReference* b = vector.references + i;
-        same = a->record == b->record && a->field == b->field && a->kind == b->kind && a->addend == b->addend && a->name.length == b->name.length &&
-               memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0;
+        const AsmCodeReference* reference = vector.references + i;
+        asm_test_fold_u64(test, (uint64_t)reference->record | (uint64_t)reference->field << 32);
+        asm_test_fold_u64(test, (uint64_t)reference->kind);
+        asm_test_fold_u64(test, (uint64_t)reference->addend);
+        asm_test_fold_u64(test, reference->name.length);
+        asm_test_fold(test, reference->name.pointer, reference->name.length);
     }
-    asm_test_check(test, same && scalar_restored && vector_restored, name, "inline code differs between the paths or leaves an arena moved");
     asm_test_check(test, expected < 0 ? vector.error != 0 : vector.error == 0 && vector.count == (uint64_t)expected, name, vector.error);
     return vector;
 }
@@ -920,7 +963,7 @@ static void asm_test_code(AsmTest* test)
         const AsmCode scans = asm_test_code_pair(test, "rep bsfl %ecx,%eax\nrep bsrq %rcx,%rax\n", 2, "inline code: baseline rep scans");
         uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(2)];
         static const uint8_t expected[] = { 0xf3, 0x0f, 0xbc, 0xc1, 0xf3, 0x48, 0x0f, 0xbd, 0xc1 };
-        const int64_t length = scans.error == 0 ? x86_encode_scalar(scans.records, scans.count, bytes, sizeof(bytes), 0, 0) : -1;
+        const int64_t length = scans.error == 0 && x86_validate(scans.records, scans.count) == scans.count ? x86_encode(scans.records, scans.count, bytes, sizeof(bytes), 0, 0) : -1;
         asm_test_check(test, length == sizeof(expected) && memcmp(bytes, expected, sizeof(expected)) == 0, "inline code: baseline rep scan bytes", 0);
     }
     // Every feature, as the C lowering's index has them: a template's instructions are its author's to choose.
@@ -1513,6 +1556,51 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
 #include "assembler_programs_test.c"
 #include "assembler_round_trip_test.c"
 
+// A late fill of slot zero shadows an indexed spelling. Earlier file rows keep their original directory numbers.
+static void asm_test_line_directories(AsmTest* test)
+{
+    const String8 file = BUSTER_S8("unit.c");
+    const String8 missing = {0};
+    for (uint32_t implicit = 0; implicit < 2; implicit += 1)
+    {
+        uint8_t storage[8192];
+        memset(storage, 0xa5, sizeof(storage));
+        Arena arena = {.base = storage, .capacity = sizeof(storage)};
+        AsmParser parser = {.arena = &arena, .instruction_capacity = 40, .line_dwarf5 = true};
+        char names[17][8];
+        bool okay = asm_line_tables(&parser, 0);
+        if (okay)
+        {
+            asm_line_slot(&parser, 0, 1, missing, file, 0);
+            asm_line_slot(&parser, 0, 1, BUSTER_S8("hidden"), file, 0);
+            okay = parser.line_directory_count == 0;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+            {
+                const int length = snprintf(names[i], sizeof(names[i]), "d%02u//", i);
+                asm_line_slot(&parser, 0, i + 2, (String8){.pointer = names[i], .length = length}, file, 0);
+            }
+            asm_line_slot(&parser, 0, 19, missing, BUSTER_S8("d07//alias.c"), 0);
+            okay = okay && parser.line_directory_count == 18 && parser.line_directories[0].pointer == 0 && parser.line_files[19].directory == 8;
+            if (implicit)
+            {
+                asm_line_slot(&parser, 0, 1, missing, BUSTER_S8("d07//unit.c"), 0);
+            }
+            else
+            {
+                asm_line_slot(&parser, 0, 1, BUSTER_S8("d07/"), file, 0);
+            }
+            asm_line_slot(&parser, 0, 0, BUSTER_S8("d07//"), BUSTER_S8("root.c"), 0);
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+            {
+                asm_line_slot(&parser, 0, i + 20, (String8){.pointer = names[i], .length = sizeof("d00//") - 1}, file, 0);
+                okay = okay && parser.line_files[i + 2].directory == i + 1 && parser.line_files[i + 20].directory == (i == 7 ? 0 : i + 1);
+            }
+            okay = okay && parser.result.error == 0 && parser.line_directory_count == 18 && parser.line_files[0].directory == 0 && asm_line_same(parser.line_directories[0], BUSTER_S8("d07/"));
+        }
+        asm_test_check(test, okay, "directory aliases across growth and a late slot-zero fill", parser.result.error);
+    }
+}
+
 static int run_assembler_tests(int count, char** arguments)
 {
     const bool epoch = oracle_epoch_begin();
@@ -1556,6 +1644,8 @@ static int run_assembler_tests(int count, char** arguments)
     {
         const X86Target baseline = {0};
         x86_match_initialize(test.index, &baseline);
+        test.digest = 0xcbf29ce484222325ull;
+        test.digesting = true;
         asm_test_targets(&test);
         Arena tiny = arena_reserve(4096);
         tiny.length = 16;
@@ -1795,6 +1885,14 @@ static int run_assembler_tests(int count, char** arguments)
             asm_test_pair(&test, (String8){.pointer = source, .length = length}, -1, X86_ARCH_V4);
         }
         asm_test_lex_guard(&test);
+        test.digesting = false;
+        asm_test_line_directories(&test);
+        if (seed == 1 && fuzz == 2000)
+        {
+            char detail[64];
+            snprintf(detail, sizeof(detail), "0x%016llx", (unsigned long long)test.digest);
+            asm_test_check(&test, test.digest == BUSTER_ASM_TEST_DIGEST, "the vector path's outputs give the recorded digest", detail);
+        }
         char directory[] = "/tmp/buster-assembler-XXXXXX";
         if (mkdtemp(directory) != 0)
         {

@@ -13,12 +13,14 @@
 
 // clang's rule for the parameter's type `parameter` of the function, which the variable's address (a pointer to
 // `variable`) converts to: _Bool, a pointer to void, or a pointer to a type compatible with the variable's, whatever
-// either's qualifiers. A pointer of another signedness, or to a pointer of other qualifiers, which an assignment only
-// warns about, is clang's error here.
+// either's qualifiers, or an atomic type of one of them, which clang's CheckAssignmentConstraints checks as its value's
+// type (#1844: `_Atomic(int *)`, `_Atomic(void *)`, `_Atomic _Bool`). A pointer of another signedness, or to a pointer
+// of other qualifiers, which an assignment only warns about, is clang's error here.
 static bool check_input_cleanup_parameter(CheckInputReader* reader, TypeId parameter, TypeId variable)
 {
     const TypeTable* types = reader->types;
-    const TypeId target = type_unqualified(type_strip_aligned(types, parameter));
+    const TypeId declared = type_unqualified(type_strip_aligned(types, parameter));
+    const TypeId target = type_kind(types, declared) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(type_strip_aligned(types, type_element(types, declared))) : declared;
     bool accepted = target == BUSTER_TYPE_BOOL;
     if (type_kind(types, target) == BUSTER_TYPE_KIND_POINTER)
     {

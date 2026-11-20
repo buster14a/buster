@@ -27,21 +27,20 @@ case " $* " in
     *' -dumpversion '*) echo 23.1.4 ;;
     *' --version '*) echo 'clang version 23.1.4 (fixture)' ;;
     *' -dM -E '*)
-        march= vector=0
+        march=
         for argument in "$@"; do case "$argument" in -march=*) march=${argument#-march=} ;; esac; done
-        # The explicit vector target's flags select the vector path, unless the fixture says they don't.
-        if [ "$march" = x86-64-v4 ] && [ -z "${FIXTURE_SCALAR_TARGET:-}" ]; then vector=1; fi
-        printf '#define __x86_64__ 1\n#define FIXTURE_MARCH_%s 1\n#define BUSTER_HOST_VECTOR %s\n' "${march//-/_}" "$vector" ;;
+        # host_isa.h takes the explicit vector target's flags, unless the fixture says it refuses them (#2924).
+        if [ "$march" != x86-64-v4 ] || [ -n "${FIXTURE_REFUSED_TARGET:-}" ]; then
+            echo "host_isa.h: error: buster's host needs AVX-512 (fixture, -march=$march)" >&2
+            exit 1
+        fi
+        printf '#define __x86_64__ 1\n#define FIXTURE_MARCH_%s 1\n' "${march//-/_}" ;;
     *) echo "fixture clang: $*" >&2; exit 1 ;;
 esac
 CLANG
 printf '#!/usr/bin/env bash\necho 23.1.4\n' > "$toolchain/llvm/bin/llvm-config"
 chmod +x "$toolchain/llvm/bin/clang" "$toolchain/llvm/bin/llvm-config"
 export PATH="$toolchain/llvm/bin:$PATH"
-
-# The baseline runtime that the x86-64 plain row links against.
-mkdir -p "$work/runtime/usr/lib"
-printf 'libc fixture\n' > "$work/runtime/usr/lib/libc.so.6"
 
 # The checkout: a build.sh whose configuration record names the toolchain, the settings and the checkout's path (as
 # build.sh's does), an inventory with the ownership heading, and the oracle's and the server's builds.
@@ -57,8 +56,8 @@ tree="$PWD/build/cmake/fixture-${BUSTER_HOST_ARCH:-native}-${BUSTER_SANITIZER:-n
 configure()
 {
     mkdir -p "$tree"
-    printf 'clang %s\nsettings %s %s %s %s\nroot %s\n' "$(command -v clang)" "${BUSTER_HOST_ARCH:-native}" \
-        "${BUSTER_SANITIZER:-}" "${BUSTER_SANITIZER_OPTIMIZATION:-3}" "${BUSTER_HOST_RUNTIME:-}" "$PWD" > "$tree/build.sh.configuration"
+    printf 'clang %s\nsettings %s %s %s\nroot %s\n' "$(command -v clang)" "${BUSTER_HOST_ARCH:-native}" \
+        "${BUSTER_SANITIZER:-}" "${BUSTER_SANITIZER_OPTIMIZATION:-3}" "$PWD" > "$tree/build.sh.configuration"
 }
 case "$1" in
     configure) configure ;;
@@ -147,8 +146,22 @@ run()
         bash tools/ci/hosted-product.sh "$@"
     )
 }
-export GITHUB_REPOSITORY_ID=1421805693 GITHUB_RUN_ID=42 BUSTER_HOST_ARCH=x86-64 BUSTER_SANITIZER=none
-export BUSTER_SANITIZER_OPTIMIZATION=3 BUSTER_HOST_RUNTIME="$work/runtime"
+# The vector row's probe on a fixture CPU, which the shared target's every product and install runs again:
+# FIXTURE_PROBE `no` lacks a feature, `lies` answers no but passes, `stops` doesn't run.
+probe="$work/probe"
+cat > "$probe" <<'PROBE'
+#!/usr/bin/env bash
+case "${FIXTURE_PROBE:-yes}" in
+    yes) printf 'x86-64-v4\tyes\navx512vbmi\tyes\n' ;;
+    no) printf 'x86-64-v4\tyes\navx512vbmi\tno\n'; exit 1 ;;
+    lies) printf 'x86-64-v4\tyes\navx512vbmi\tno\n' ;;
+    stops) exit 132 ;;
+esac
+PROBE
+chmod +x "$probe"
+# The shared target is the explicit vector one alone since the scalar host went (#2924).
+export GITHUB_REPOSITORY_ID=1421805693 GITHUB_RUN_ID=42 BUSTER_HOST_ARCH=vector BUSTER_SANITIZER=none
+export BUSTER_SANITIZER_OPTIMIZATION=3 BUSTER_VECTOR_PROBE="$probe"
 unset BUSTER_PRODUCT BUSTER_COMPILER BUSTER_CLANG_SERVER BUSTER_PPF_PRAGMA_ORACLE FIXTURE_SERVER FIXTURE_OWNERSHIP_SKIP
 
 # A producer: build (with or without a server), the ownership check, and the pack, into $work/products/NAME.
@@ -286,15 +299,11 @@ consume 1 'a product without a server' "$work/bad/serverless" "$(repack serverle
 grep -q 'lacks its executables' "$work/log" || { cat "$work/log"; fail 'a product without a server was refused for another reason'; }
 consume 1 'another identity, listed' "$work/bad/identity" "$(repack identity "sed -i 's/^run\t42/run\t41/' product/identity/summary && (cd product && find . -type f ! -path ./files.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > files.sha256)")"
 
-# A shard whose own configuration differs from the producer's: another run, revision, row, toolchain or runtime.
+# A shard whose own configuration differs from the producer's: another run, revision, row or toolchain.
 GITHUB_RUN_ID=43 consume 1 'another run' "$work/products/plain" "$digest"
 FIXTURE_COMMIT=HEAD~1 consume 1 'another revision' "$work/products/plain" "$digest"
 BUSTER_SANITIZER=address consume 1 'another sanitizer' "$work/products/plain" "$digest"
 BUSTER_SANITIZER_OPTIMIZATION=1 consume 1 'another optimization' "$work/products/plain" "$digest"
-BUSTER_HOST_RUNTIME= consume 1 'no baseline runtime' "$work/products/plain" "$digest"
-printf 'changed\n' > "$work/runtime/usr/lib/libc.so.6"
-consume 1 'another baseline runtime' "$work/products/plain" "$digest"
-printf 'libc fixture\n' > "$work/runtime/usr/lib/libc.so.6"
 printf 'llvm 23.1.5 fixture\n' > "$toolchain/hosted-tools.lock"
 consume 1 'another toolchain' "$work/products/plain" "$digest"
 printf 'llvm 23.1.4 fixture\n' > "$toolchain/hosted-tools.lock"
@@ -317,41 +326,27 @@ PATH="$work/ldd:$PATH" consume 1 'a missing library' "$work/products/plain" "$di
 
 # A vector configuration's product (#2033): packed and installed only where the row's probe, run again, qualifies, and
 # only as the same target.
-probe="$work/probe"
-cat > "$probe" <<'PROBE'
-#!/usr/bin/env bash
-# The vector row's probe on a fixture CPU: FIXTURE_PROBE `no` lacks a feature, `stops` doesn't run.
-case "${FIXTURE_PROBE:-yes}" in
-    yes) printf 'x86-64-v4\tyes\navx512vbmi\tyes\n' ;;
-    no) printf 'x86-64-v4\tyes\navx512vbmi\tno\n'; exit 1 ;;
-    lies) printf 'x86-64-v4\tyes\navx512vbmi\tno\n' ;;
-    stops) exit 132 ;;
-esac
-PROBE
-chmod +x "$probe"
-export BUSTER_VECTOR_PROBE="$probe"
-BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= produce vector
+produce vector
 vector_digest=$(cat "$work/products/vector.digest")
 tar --zstd -xOf "$work/products/vector/product.tar.zst" product/identity/summary | grep -q $'^host-flags\t-march=x86-64-v4 -mavx512vbmi$' || fail "the vector product's identity lacks its flags"
-tar --zstd -xOf "$work/products/vector/product.tar.zst" product/identity/target | grep -qx '#define BUSTER_HOST_VECTOR 1' || fail "the vector product's identity lacks BUSTER_HOST_VECTOR 1"
+tar --zstd -xOf "$work/products/vector/product.tar.zst" product/identity/target | grep -qx '#define FIXTURE_MARCH_x86_64_v4 1' || fail "the vector product's identity lacks its target's macros"
 tar --zstd -xOf "$work/products/vector/product.tar.zst" product/identity/probe | grep -q $'^avx512vbmi\tyes$' || fail "the vector product's identity lacks the probe's answers"
 pass
-BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= consume 0 'a vector product on a qualifying runner' "$work/products/vector" "$vector_digest"
-FIXTURE_PROBE=no BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= consume 1 'a vector product on a runner that lacks a feature' "$work/products/vector" "$vector_digest"
+consume 0 'a vector product on a qualifying runner' "$work/products/vector" "$vector_digest"
+FIXTURE_PROBE=no consume 1 'a vector product on a runner that lacks a feature' "$work/products/vector" "$vector_digest"
 grep -q "doesn't run the vector target" "$work/log" || { cat "$work/log"; fail 'an unqualified runner was refused for another reason'; }
-FIXTURE_PROBE=lies BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= consume 1 "a vector product on a runner whose probe answers no but passes" "$work/products/vector" "$vector_digest"
-FIXTURE_PROBE=stops BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= consume 1 'a vector product on a runner whose probe stops' "$work/products/vector" "$vector_digest"
-BUSTER_VECTOR_PROBE= BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= consume 1 'a vector product without the probe' "$work/products/vector" "$vector_digest"
-BUSTER_HOST_ARCH=vector BUSTER_SANITIZER=address BUSTER_HOST_RUNTIME= consume 1 "another configuration's vector product" "$work/products/vector" "$vector_digest"
-BUSTER_HOST_RUNTIME= consume 1 'a vector product on an x86-64 shard' "$work/products/vector" "$vector_digest"
-BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= consume 1 'an x86-64 product on a vector item' "$work/products/plain" "$digest"
-FIXTURE_SCALAR_TARGET=1 BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= consume 1 'a vector target that selects the scalar path' "$work/products/vector" "$vector_digest"
-grep -q 'BUSTER_HOST_VECTOR 1' "$work/log" || { cat "$work/log"; fail 'a scalar vector target was refused for another reason'; }
+FIXTURE_PROBE=lies consume 1 "a vector product on a runner whose probe answers no but passes" "$work/products/vector" "$vector_digest"
+FIXTURE_PROBE=stops consume 1 'a vector product on a runner whose probe stops' "$work/products/vector" "$vector_digest"
+BUSTER_VECTOR_PROBE= consume 1 'a vector product without the probe' "$work/products/vector" "$vector_digest"
+BUSTER_SANITIZER=address consume 1 "another configuration's vector product" "$work/products/vector" "$vector_digest"
+BUSTER_HOST_ARCH=x86-64 consume 1 'a product on a baseline shard, whose target is none to share' "$work/products/vector" "$vector_digest"
+FIXTURE_REFUSED_TARGET=1 consume 1 "a target host_isa.h refuses" "$work/products/vector" "$vector_digest"
+grep -q 'host_isa.h refuses the vector target' "$work/log" || { cat "$work/log"; fail 'a refused target was refused for another reason'; }
 # No pack where the probe doesn't qualify.
 fresh_runner
-BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= run build > /dev/null 2>&1
-BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= run ownership > /dev/null 2>&1
-if FIXTURE_PROBE=no BUSTER_HOST_ARCH=vector BUSTER_HOST_RUNTIME= run pack "$RUNNER_TEMP/product" > "$work/log" 2>&1; then fail 'a vector product packed where the probe fails'; fi
+run build > /dev/null 2>&1
+run ownership > /dev/null 2>&1
+if FIXTURE_PROBE=no run pack "$RUNNER_TEMP/product" > "$work/log" 2>&1; then fail 'a vector product packed where the probe fails'; fi
 pass
 unset BUSTER_VECTOR_PROBE
 

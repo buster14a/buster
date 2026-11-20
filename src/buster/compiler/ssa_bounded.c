@@ -117,7 +117,6 @@ static SsaError ssa_bounded_rename(SsaWork* work, const uint32_t* accesses, uint
             limit += 1;
         }
         uint32_t current = kinds[accesses[first]] == BUSTER_SSA_READ ? ssa_read_entry(work, block, 0, stack) : BUSTER_SSA_NONE;
-#if BUSTER_HOST_VECTOR
         if (vector && work->construction_error == SSA_OK)
         {
             const __m512i positions = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -155,7 +154,6 @@ static SsaError ssa_bounded_rename(SsaWork* work, const uint32_t* accesses, uint
             }
         }
         else
-#endif
         {
             while (first < limit && work->construction_error == SSA_OK)
             {

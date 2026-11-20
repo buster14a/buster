@@ -16,11 +16,21 @@
 // - #2676's selects of comparisons (a maximum, a clamp, a loop's conditional sum, a comparison of a load with an
 //   immediate and with a register, a doubleword's comparison choosing quadwords, an unsigned one): a cmov of the
 //   comparison's flags for each, no setcc;
+// - #2791's selects of floating comparisons (<, a negated >, a loop's conditional count by >=, and a sign's nested `?:`,
+//   whose outer test stays a branch): ucomis and a cmov or jump of its flags for each, no setcc (== and != keep their
+//   truth values, whose selects the oracle checks on unordered operands too);
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
-// - and #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
-//   it from, as a range that waits in its slot (#2768) and is evicted after its reload did.
+// - #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
+//   it from, as a range that waits in its slot (#2768) and is evicted after its reload did;
+// - #2843's conditional sums whose arm is a load's extension to 64 bits while the comparison reads the load (#2838's
+//   arms: an int's sign extension, an unsigned int's and an unsigned short's zero extension): the select reads the
+//   load's register, which holds the extension, so no register is copied into another;
+// - and #2870's pager, SQLite's pagerWriteLargeSector cut down: a loop's bound reloaded from its slot at the loop's head
+//   and evicted again two blocks later, in that run of single-predecessor blocks, whose store the emitter leaves out as
+//   the slot already holds the value; the code's certificate must prove the slot from the run's entries (checked by
+//   --verify, and natively against the oracle).
 
 #if defined(BUSTER_TIER1_PATTERNS_SUBJECT)
 
@@ -304,6 +314,62 @@ __attribute__((noinline)) long patterns_gsub(void* state, struct patterns_buffer
     return n;
 }
 
+struct patterns_pager
+{
+    int sector;
+    long long page;
+    unsigned pages;
+    void* journal;
+};
+struct patterns_page
+{
+    struct patterns_pager* pager;
+    unsigned number;
+    unsigned short flags;
+};
+int patterns_journaled(void* journal, unsigned number);
+int patterns_fetch_page(struct patterns_pager* pager, unsigned number, struct patterns_page** page);
+struct patterns_page* patterns_find(struct patterns_pager* pager, unsigned number);
+
+__attribute__((noinline)) long patterns_sector(struct patterns_page* page)
+{
+    struct patterns_pager* pager = page->pager;
+    const unsigned per_sector = (unsigned)(pager->sector / pager->page);
+    const unsigned first = ((page->number - 1) & ~(per_sector - 1)) + 1;
+    int count = 0;
+    int rc = 0;
+    int sync = 0;
+    if (page->number > pager->pages)
+    {
+        count = (int)(page->number - first) + 1;
+    }
+    for (int i = 0; i < count && rc == 0; i += 1)
+    {
+        const unsigned number = first + (unsigned)i;
+        struct patterns_page* other;
+        if (number == page->number || !patterns_journaled(pager->journal, number))
+        {
+            rc = patterns_fetch_page(pager, number, &other);
+        }
+        else if ((other = patterns_find(pager, number)) != 0)
+        {
+            if ((other->flags & 8) != 0)
+            {
+                sync = 1;
+            }
+        }
+    }
+    long touched = 0;
+    if (sync)
+    {
+        for (int i = 0; i < count; i += 1)
+        {
+            touched += 1;
+        }
+    }
+    return rc * 1000 + touched;
+}
+
 __attribute__((noinline)) long patterns_max(long a, long b)
 {
     return a > b ? a : b;
@@ -342,9 +408,81 @@ __attribute__((noinline)) long patterns_mixed(int a, int b, long x, long y)
     return a < b ? x : y;
 }
 
+__attribute__((noinline)) long patterns_arms_signed(const int* p, long n)
+{
+    long s = 0;
+    for (long i = 0; i < n; i += 1)
+    {
+        s += p[i] > 0 ? p[i] : 1;
+    }
+    return s;
+}
+
+__attribute__((noinline)) unsigned long patterns_arms_unsigned(const unsigned* p, long n)
+{
+    unsigned long s = 0;
+    for (long i = 0; i < n; i += 1)
+    {
+        s += p[i] > 7u ? p[i] : 1u;
+    }
+    return s;
+}
+
+__attribute__((noinline)) long patterns_arms_half(const unsigned short* p, long n)
+{
+    long s = 0;
+    for (long i = 0; i < n; i += 1)
+    {
+        s += p[i] > 300 ? p[i] : 2;
+    }
+    return s;
+}
+
 __attribute__((noinline)) unsigned patterns_unsigned(unsigned a, unsigned b, unsigned x)
 {
     return a >= b ? x : 0;
+}
+
+__attribute__((noinline)) int patterns_float_less(double a, double b, int x, int y)
+{
+    return a < b ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_not_greater(float a, float b, long x, long y)
+{
+    return !(a > b) ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_count(const double* p, int n, double t)
+{
+    long c = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        if (p[i] >= t)
+        {
+            c += 3;
+        }
+        else
+        {
+            c -= 1;
+        }
+    }
+    return c;
+}
+
+__attribute__((noinline)) int patterns_float_sign(double x)
+{
+    return x < 0 ? -1 : x > 0 ? 1 : 0;
+}
+
+__attribute__((noinline)) int patterns_float_equal(double a, double b, int x, int y)
+{
+    return a == b ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_unequal(float a, float b, long x)
+{
+    return a != b ? x : 0;
 }
 
 typedef long long patterns_vector __attribute__((vector_size(64)));
@@ -431,6 +569,15 @@ int patterns_loaded(const int* p, int x, int y);
 int patterns_loaded_other(const int* p, int q, int x, int y);
 long patterns_mixed(int a, int b, long x, long y);
 unsigned patterns_unsigned(unsigned a, unsigned b, unsigned x);
+long patterns_arms_signed(const int* p, long n);
+unsigned long patterns_arms_unsigned(const unsigned* p, long n);
+long patterns_arms_half(const unsigned short* p, long n);
+int patterns_float_less(double a, double b, int x, int y);
+long patterns_float_not_greater(float a, float b, long x, long y);
+long patterns_float_count(const double* p, int n, double t);
+int patterns_float_sign(double x);
+int patterns_float_equal(double a, double b, int x, int y);
+long patterns_float_unequal(float a, float b, long x);
 struct patterns_state
 {
     long* base;
@@ -446,6 +593,20 @@ struct patterns_buffer
     unsigned long capacity;
 };
 long patterns_gsub(void* state, struct patterns_buffer* b, const char* src, unsigned long length, const char* p, long max_s, int tr);
+struct patterns_pager
+{
+    int sector;
+    long long page;
+    unsigned pages;
+    void* journal;
+};
+struct patterns_page
+{
+    struct patterns_pager* pager;
+    unsigned number;
+    unsigned short flags;
+};
+long patterns_sector(struct patterns_page* page);
 typedef long long patterns_vector __attribute__((vector_size(64)));
 typedef struct
 {
@@ -703,6 +864,95 @@ static bool gsub_runs(void)
     return valid;
 }
 
+// patterns_sector's callees: a journal that holds every third page, a fetch that fails on the journal's own number,
+// and a lookup that finds the odd pages, every fourth one needing a sync. Each counts its calls, and the fetch sums the
+// numbers it took.
+#define BUSTER_PATTERNS_SECTOR_PAGES 64
+static struct patterns_page sector_pages[BUSTER_PATTERNS_SECTOR_PAGES];
+static unsigned long sector_calls;
+static unsigned long sector_fetched;
+
+int patterns_journaled(void* journal, unsigned number)
+{
+    sector_calls += 1;
+    return journal != 0 && number % 3 == 0;
+}
+
+int patterns_fetch_page(struct patterns_pager* pager, unsigned number, struct patterns_page** page)
+{
+    sector_calls += 1;
+    sector_fetched += number;
+    *page = &sector_pages[number % BUSTER_PATTERNS_SECTOR_PAGES];
+    return pager->journal != 0 && number == *(const unsigned*)pager->journal ? 7 : 0;
+}
+
+struct patterns_page* patterns_find(struct patterns_pager* pager, unsigned number)
+{
+    sector_calls += 1 + (pager->journal != 0);
+    struct patterns_page* page = &sector_pages[number % BUSTER_PATTERNS_SECTOR_PAGES];
+    page->flags = (unsigned short)(number % 4 == 1 ? 8 : 0);
+    return number % 2 != 0 ? page : 0;
+}
+
+// patterns_sector's semantics, for Clang to compile.
+static long sector_reference(struct patterns_page* page)
+{
+    struct patterns_pager* pager = page->pager;
+    const unsigned per_sector = (unsigned)(pager->sector / pager->page);
+    const unsigned first = ((page->number - 1) & ~(per_sector - 1)) + 1;
+    const int count = page->number > pager->pages ? (int)(page->number - first) + 1 : 0;
+    int rc = 0;
+    bool sync = false;
+    for (int i = 0; i < count && rc == 0; i += 1)
+    {
+        const unsigned number = first + (unsigned)i;
+        struct patterns_page* other = 0;
+        if (number == page->number || !patterns_journaled(pager->journal, number))
+        {
+            rc = patterns_fetch_page(pager, number, &other);
+        }
+        else
+        {
+            other = patterns_find(pager, number);
+            sync = sync || (other != 0 && (other->flags & 8) != 0);
+        }
+    }
+    return rc * 1000 + (sync ? count : 0);
+}
+
+// patterns_sector against its reference on each sector size, page and journal: the same result, calls and fetches.
+static bool sector_runs(void)
+{
+    static const int sectors[] = { 512, 4096, 8192 };
+    static const unsigned numbers[] = { 1, 5, 9, 17, 23, 32 };
+    static const unsigned failing[] = { 0, 3, 21, 31 };
+    bool valid = true;
+    for (unsigned i = 0; i < sizeof(sectors) / sizeof(sectors[0]); i += 1)
+    {
+        for (unsigned j = 0; j < sizeof(numbers) / sizeof(numbers[0]); j += 1)
+        {
+            for (unsigned k = 0; k <= sizeof(failing) / sizeof(failing[0]); k += 1)
+            {
+                long results[2];
+                unsigned long calls[2];
+                unsigned long fetched[2];
+                for (unsigned reference = 0; reference < 2; reference += 1)
+                {
+                    struct patterns_pager pager = { .sector = sectors[i], .page = 512, .pages = j % 3 == 0 ? 0 : j % 3 == 1 ? numbers[j] - 1 : 1000, .journal = k == 0 ? 0 : (void*)&failing[k - 1] };
+                    struct patterns_page page = { .pager = &pager, .number = numbers[j], .flags = 0 };
+                    sector_calls = 0;
+                    sector_fetched = 0;
+                    results[reference] = reference != 0 ? sector_reference(&page) : patterns_sector(&page);
+                    calls[reference] = sector_calls;
+                    fetched[reference] = sector_fetched;
+                }
+                valid = results[0] == results[1] && calls[0] == calls[1] && fetched[0] == fetched[1] && valid;
+            }
+        }
+    }
+    return valid;
+}
+
 int main(void)
 {
     const long inputs[] = { LONG_MIN, -2, -1, 0, 1, 2, 3, LONG_MAX };
@@ -748,12 +998,58 @@ int main(void)
         valid = patterns_clamp(x) == (x < 0 ? 0 : x > 255 ? 255 : x) && valid;
         valid = patterns_loaded(&x, x * 3, x - 1) == (x == 7 ? x * 3 : x - 1) && valid;
     }
+    // #2843's arms, on every prefix of words around each comparison's bound and each type's sign.
+    const int armed[] = { 0, 1, -1, 7, 8, 300, 301, -2147483647 - 1, 2147483647, -300, 65535, 65536 };
+    for (long n = 0; n <= (long)(sizeof(armed) / sizeof(armed[0])); n += 1)
+    {
+        long signed_sum = 0;
+        unsigned long unsigned_sum = 0;
+        long half_sum = 0;
+        unsigned unsigned_words[sizeof(armed) / sizeof(armed[0])];
+        unsigned short half_words[sizeof(armed) / sizeof(armed[0])];
+        for (long i = 0; i < (long)(sizeof(armed) / sizeof(armed[0])); i += 1)
+        {
+            unsigned_words[i] = (unsigned)armed[i];
+            half_words[i] = (unsigned short)armed[i];
+        }
+        for (long i = 0; i < n; i += 1)
+        {
+            signed_sum += armed[i] > 0 ? armed[i] : 1;
+            unsigned_sum += unsigned_words[i] > 7u ? unsigned_words[i] : 1u;
+            half_sum += half_words[i] > 300 ? half_words[i] : 2;
+        }
+        valid = patterns_arms_signed(armed, n) == signed_sum && patterns_arms_unsigned(unsigned_words, n) == unsigned_sum && patterns_arms_half(half_words, n) == half_sum && valid;
+    }
     const int summed[] = { 0, 128, 129, 255, -129, 300, 7, 129 };
     long sum = 0;
     for (int n = 0; n <= 8; n += 1)
     {
         valid = patterns_sum(summed, n) == sum && valid;
         sum += n < 8 && summed[n] > 128 ? summed[n] : 0;
+    }
+    // #2791's floating selects, on NaN, zeros of both signs and infinities among the operands.
+    const double reals[] = { -__builtin_inf(), -2.5, -0.0, 0.0, 1.0, 2.5, __builtin_inf(), __builtin_nan(""), -__builtin_nan("") };
+    const int real_count = (int)(sizeof(reals) / sizeof(reals[0]));
+    for (int i = 0; i < real_count; i += 1)
+    {
+        for (int j = 0; j < real_count; j += 1)
+        {
+            const double a = reals[i];
+            const double b = reals[j];
+            const float f = (float)a;
+            const float g = (float)b;
+            valid = patterns_float_less(a, b, i, j + 100) == (a < b ? i : j + 100) && valid;
+            valid = patterns_float_not_greater(f, g, (long)i << 40, -(long)j) == (!(f > g) ? (long)i << 40 : -(long)j) && valid;
+            valid = patterns_float_equal(a, b, i + 7, j - 9) == (a == b ? i + 7 : j - 9) && valid;
+            valid = patterns_float_unequal(f, g, (long)i * 3 + 1) == (f != g ? (long)i * 3 + 1 : 0) && valid;
+        }
+        valid = patterns_float_sign(reals[i]) == (reals[i] < 0 ? -1 : reals[i] > 0 ? 1 : 0) && valid;
+        long counted = 0;
+        for (int n = 0; n < real_count; n += 1)
+        {
+            valid = patterns_float_count(reals, n, reals[i]) == counted && valid;
+            counted += reals[n] >= reals[i] ? 3 : -1;
+        }
     }
     const long values[] = { 4, 9, -3, 9, 12 };
     for (long n = -1; n <= 5; n += 1)
@@ -806,6 +1102,7 @@ int main(void)
     // Three lookups, two of which hit, and two misses, one of which asks for the hook: six calls.
     valid = spilled_results[0] == spilled_results[1] && memcmp(spilled_registers[0], spilled_registers[1], sizeof(spilled_registers[0])) == 0 && spilled_counts[0] == spilled_counts[1] && spilled_counts[0] == 6 && spilled_hooks[0] == spilled_hooks[1] && spilled_hooks[0] != 0 && valid;
     valid = gsub_runs() && valid;
+    valid = sector_runs() && valid;
     patterns_vector vector;
     unsigned long long lanes[8];
     for (int l = 0; l < 8; l += 1)
@@ -899,6 +1196,7 @@ typedef enum PatternsKind
     PATTERNS_WHOLE,
     PATTERNS_CLEARED,
     PATTERNS_GSUB,
+    PATTERNS_ARMS,
 } PatternsKind;
 
 typedef struct PatternsFunction PatternsFunction;
@@ -927,6 +1225,10 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_loaded_other", PATTERNS_SELECT },
     { "patterns_mixed", PATTERNS_SELECT },
     { "patterns_unsigned", PATTERNS_SELECT },
+    { "patterns_float_less", PATTERNS_SELECT },
+    { "patterns_float_not_greater", PATTERNS_SELECT },
+    { "patterns_float_count", PATTERNS_SELECT },
+    { "patterns_float_sign", PATTERNS_SELECT },
     { "patterns_whole_literal", PATTERNS_WHOLE },
     { "patterns_whole_declaration", PATTERNS_WHOLE },
     { "patterns_whole_union", PATTERNS_WHOLE },
@@ -934,6 +1236,9 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_whole_override", PATTERNS_CLEARED },
     { "patterns_whole_volatile", PATTERNS_CLEARED },
     { "patterns_gsub", PATTERNS_GSUB },
+    { "patterns_arms_signed", PATTERNS_ARMS },
+    { "patterns_arms_unsigned", PATTERNS_ARMS },
+    { "patterns_arms_half", PATTERNS_ARMS },
 };
 
 #define BUSTER_PATTERNS_COUNT (sizeof(patterns_functions) / sizeof(patterns_functions[0]))
@@ -983,6 +1288,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     unsigned stored_back = 0;
     // Stores of a zero immediate to memory: an object's clear's (#2745).
     unsigned zeros = 0;
+    // Moves of a register into another (#2843).
+    unsigned copies = 0;
     for (unsigned i = 0; i < body->count; i += 1)
     {
         const PatternsInstruction* instruction = &body->instructions[i];
@@ -1003,6 +1310,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         increments += strncmp(operation, "add", 3) == 0 && strncmp(operands, "$0x4,%", 6) == 0;
         const PatternsInstruction* before = i != 0 ? &body->instructions[i - 1] : NULL;
         const bool moved = before != NULL && strcmp(before->operation, "mov") == 0 && before->operands[0] == '%' && !patterns_memory(before->operands);
+        copies += strcmp(operation, "mov") == 0 && operands[0] == '%' && !patterns_memory(operands);
         clean += jump && operands[0] == '*' && !moved;
         const char* loaded_comma = before != NULL ? strrchr(before->operands, ',') : NULL;
         loaded += jump && operands[0] == '*' && loaded_comma != NULL && strcmp(before->operation, "mov") == 0 && patterns_memory(before->operands) && strcmp(loaded_comma + 1, operands + 1) == 0;
@@ -1055,11 +1363,14 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_GSUB:
         valid = valid && stored_back == 0;
         break;
+    case PATTERNS_ARMS:
+        valid = valid && moves >= 1 && copies == 0;
+        break;
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u\n",
-                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u register-copies=%u\n",
+                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back, copies);
     }
     return valid;
 }

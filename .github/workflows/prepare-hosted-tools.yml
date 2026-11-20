@@ -53,8 +53,8 @@ jobs:
         shell: bash
         run: bash tools/ci/hosted-release.sh prepare "$RUNNER_TEMP/hosted-release-inputs"
       # The jobs' other external inputs (#2275; docs/hosted-toolchain.md, "Offline inputs"): the apt closure of
-      # setup-hosted.sh's packages, which is this runner image's, and the baseline runtime's .debs, the corpus and the
-      # c-testsuite and SQLite mirrors, which their scripts pin. Each is keyed by what fixes its contents.
+      # setup-hosted.sh's packages, which is this runner image's, and the corpus, the c-testsuite and SQLite mirrors and
+      # Lua, which their scripts pin. Each is keyed by what fixes its contents.
       - name: Name the offline inputs' caches
         id: offline
         shell: bash

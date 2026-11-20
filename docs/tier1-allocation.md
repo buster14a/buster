@@ -100,7 +100,7 @@ caller registers separately. Thus this change addresses the allocator API's
 fixed-range scaling; it does not establish a speedup in the current native
 pipeline or the default Tier 0 compiler.
 
-`tier1_allocate` and `tier1_allocate_scalar` return an explicit status and an
+`tier1_allocate` returns an explicit status and an
 arena-owned `Tier1Allocation`. Each input interval owns the compact range
 `fragment_offsets[i] .. fragment_offsets[i+1]` in the output's start/end,
 location-kind and register columns. Fragments cover the input lifetime
@@ -454,7 +454,7 @@ start, in a transition that runs only after the edge's moves. Intervals are
 numbered by value, then position: each interval's uses are a slice of its
 value's, and the allocator borrows the input's use columns.
 
-After `tier1_allocate`, or its scalar twin, assigns the intervals, each edge
+After `tier1_allocate` assigns the intervals, each edge
 moves its successor's entry state, the live-in values and the phis, from their
 locations at the predecessor's last position to their entry locations
 (`tier1_cfg_entry_location`: the location at the block's start, or for a
@@ -719,18 +719,18 @@ and counted.
 
 `test-tier1-cfg-source [--simd] [--print NAME] [options] file...` prepares every
 function `-c` compiles as `test-ir-source` does, lowers and promotes it, adapts
-it, allocates it by both paths and checks both with `tier1_cfg_verify`; any
-refusal but the model's, a rejection or paths that disagree fail it. With
+it, allocates it and checks the allocation with `tier1_cfg_verify`; any
+refusal but the model's or a rejection fails it. With
 `--simd`, a function with vectors, which the SSA promoter takes (#141), and one
 whose only SIMD values are masks (#179) are promoted and allocated as any
 other: #732's `vcmp` results reach the opmask class from real C, and the run
 fails unless some do. On
 `tests/ir/vector-i32.c` with `-march=x86-64-v4`, its three functions' 3 masks
-allocate on both paths and pass the checker, and on `tests/ir/mask-builtins.c`
-its four functions of the `_k*` builtins, promoted, allocate their 76 masks on
-both paths and pass it. The correctness list runs it on both, and without
-`--simd` on c-testsuite's subset, the frozen `sqlite3.c` and musl's units, whose
-every function allocates and passes the checker on both paths:
+allocate and pass the checker, and on `tests/ir/mask-builtins.c` its four
+functions of the `_k*` builtins, promoted, allocate their 76 masks and pass it.
+The correctness list runs it on both, and without `--simd` on c-testsuite's
+subset, the frozen `sqlite3.c` and musl's units, whose every function allocates
+and passes the checker:
 
 | Corpus | Functions | Left out | IR instructions | Intervals | Left to the scan | Spilled values | Stores | Reloads | Moves | Split edges |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -738,15 +738,16 @@ every function allocates and passes the checker on both paths:
 | `sqlite3.c` | 2,602 | 2 | 493,470 | 541,061 | 93.4% | 4,654 | 20,270 | 23,882 | 70,982 | 2,626 |
 | musl | 2,883 | 223 | 228,216 | 228,195 | 88.1% | 1,995 | 5,980 | 7,277 | 22,004 | 982 |
 
-These are the vector path's; the scalar path spills the same values with the
-same stores and reloads, and its moves are within 0.4%. The scan takes most of
+These were the vector path's; the scalar twin, deleted since (#2924), spilled
+the same values with the same stores and reloads. The scan takes most of
 real code's intervals: a call's fixed ranges make every class that has one
 irregular, which the coloring path doesn't take.
 
-`benchmark-tier1-cfg-source [--only VARIANT] [--after-scalar MS] [options]
-file...` times both paths' allocation of the same functions per IR instruction
-and per typed entry, and the interval allocator's share (`tier1_allocate` on
-the CFG's own intervals), with 21-pass medians. On the 9700X (CPU 2), on
+`benchmark-tier1-cfg-source [--only cfg|intervals] [--after-scalar MS]
+[options] file...` times the allocation of the same functions per IR
+instruction and per typed entry, and the interval allocator's share
+(`tier1_allocate` on the CFG's own intervals), with 21-pass medians; at its
+first measurement it timed the scalar twins too. On the 9700X (CPU 2), on
 `sqlite3.c`'s 2,600 functions, the vector path took 815 cycles per IR
 instruction (1,014 per typed entry), 245 of them the interval allocator's; the
 scalar path 1,462 (1,817), 888 of them its. Tier 0's whole compile of the same
@@ -940,8 +941,8 @@ chain, or a block of a CFG (`Tier1EmitSaves`).
   registers' sequence, which stores those rows, forgets them. The rows are one
   vector of the 16 general registers' lanes, as the owners' first 16 locations
   are, so a call's kept registers are one compare and its rows one blend
-  (`tier1_emit_kept`, `tier1_emit_saved`), each with a scalar twin that
-  `test-tier1-emit` checks it against on random rows. A row stays its owner's
+  (`tier1_emit_kept`, `tier1_emit_saved`), which `test-tier1-emit` checks
+  against their definitions on random rows. A row stays its owner's
   while that SSA value's bits don't change, and they change only where the
   value is defined again, an iteration later.
 - **Every CFG block starts with no rows.** A row that a block's one
@@ -2025,7 +2026,10 @@ header registers, and each iteration swapped them back.
   stamps, in the CFG consumer). An SSA value never changes, and slots are
   shared only by values never live at once. A range that waits and is evicted
   again after its reload otherwise stored the value back where it had just read
-  it: `str_gsub`'s pattern and `max_s` at its loop's head.
+  it: `str_gsub`'s pattern and `max_s` at its loop's head. The code's
+  certificate asserts such a slot at each later block of the run, besides the
+  value's register (`Tier1EmitResult.entry_slots`, #2870): without it, a store
+  left out in a block after the run's first was unprovable, and refused.
 
 By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed) at main
 `20cd8e54`:
@@ -2078,6 +2082,83 @@ takes a free register at its start. `tests/driver/tier1_patterns.c`'s
 `patterns_gsub` stores nothing back where the instruction before loaded it, as
 main's does once.
 
+
+### Call arguments in their registers (#2646)
+
+A value whose last use is a call's register argument takes, where nothing else
+names a register for it, the register the call reads it in. Before, it took the
+lowest free register and the call's parallel move put it in place:
+`mov $0x81,%eax ... mov %rax,%rdx` for a constant third argument, `lea
+str(%rip),%rax; ...; mov %rax,%rdi` for a string's address, a load into `ecx`
+moved to `esi`. Tier 1's objects of `sqlite3.c` held 27,479 register moves into
+an argument register within a few instructions of a call, 82,048 bytes, where
+clang -O0 loads each argument into its register; they were most of the 40,142
+register-to-register moves against clang's 6,813, and the reason `sqlite3.c`
+and c-testsuite were above #2646's bound of clang -O0's bytes.
+
+- **Where it comes from.** The CFG consumer gives each use the register it reads
+  its value in (`Tier1CfgInput.use_registers`): a register argument's, by its
+  place (`tier1_select_parameter_registers`, or xmm n for a floating one), an
+  indirect callee's `r10` or `rax`, `UINT8_MAX` for any other use
+  (`tier1_emit_cfg_problem`). `tier1_cfg_prepare` gives an interval the register
+  of its last use where that use ends it (`Tier1AllocationInput.register_hints`):
+  a value that lives past the call doesn't take it, as the call would clobber it
+  there; one that lives across an earlier call takes callee-saved registers
+  alone in the preferred problem, where the hint isn't allowed and is ignored.
+  The straight-line consumer (`tier1_emit_prepare`), whose allocation has an
+  interval a value, gives the same register to each interval that ends at a
+  call reading it in a register, the first argument's for a value passed
+  twice; it then allocates with hints where before only a tie made it.
+- **Its rank.** `tier1_allocation_value_hint_registered` returns it only where no value
+  hint names a register (a named interval's opening or closing, the value's own
+  place, its hint value's): a range that enters a block keeps its value's
+  register, a phi its operand's, a tie its operand's, and the edges and ties
+  move nothing for it. Both the coloring path and the scan read it there, at a
+  start and at a reload.
+- **It evicts nothing.** A value hint takes its register from a recipe no use
+  requires there (#2618); a register hint alone doesn't (the hint functions' `registered`):
+  a call's argument would push the loop's addresses and constants out of the
+  argument registers they rest in. Where the register is taken, the value takes
+  another, as before.
+- **Scalar, and why.** The passes that name the registers have no vector
+  form: the CFG consumer's walks each call's arguments in order, whose places
+  (`tier1_select_argument_place`) count the registers taken before them, and
+  `tier1_cfg_prepare`'s reads each interval's last use through its use offsets,
+  a gather where it would be vectorized (`vpgatherdd` is one every 12.6 cycles
+  on Zen 5). By callgrind on `sqlite3.c`'s `--tier1 --lanes 1 -c` they add
+  about 6.2 M and 5.7 M instructions to its 16,962 M; on the 9700X the whole
+  change leaves that compile's cycles and wall time where they were (−0.007%,
+  −0.004%), so there is no time for a vector form to win.
+
+What stays: a function whose parameters live across its calls in their
+incoming registers, saved around each call, has no argument register free for
+its calls' other arguments (`sqlite3DeleteFrom`'s five, saved and reloaded at
+every call); an argument whose register an incoming parameter still holds takes
+another and moves (#2823's `v5`, now one move where it took a swap's three); a
+two-address result tied to its operand's register goes where the operand was;
+and an indirect callee's `r10` isn't among the registers its range may take.
+21,323 moves into argument registers remain in `sqlite3.c`'s object.
+
+| Objects' Tier 1 function bytes (`--tier1-no-inline`), against clang -O0 | main `d876a5e0` | this | clang -O0 |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 904,862 | 884,975 | 913,339 |
+| Lua's 34 sources | 205,026 | 196,906 | 248,990 |
+| c-testsuite's 220 programs | 48,365 | 45,227 | 47,293 |
+| `sqlite3.c`'s register-to-register moves | 40,142 | 33,335 | 6,813 |
+
+(Measured before #2924 removed the x86-64 host; its objects and the AVX-512 host's were the same bytes.)
+
+**Tests.** `tier1_cfg_test.c`'s use-registers fixture allocates, on both the
+coloring path and the scan, a call's argument in the register
+it is read in where the lowest free one is another; a second argument whose
+register a recipe holds, which it doesn't take; a value read by the call that
+lives on, which takes no hint; and a range that enters a block in its value's
+register though a call there reads it in another. `tier1_call_test.c` checks
+that the CFG consumer names each register argument's register at its call, and
+that the straight-line consumer hints it to each argument's interval that ends
+there, both of them over the call fixtures. A mutation of each rule fails its
+check.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
@@ -2099,8 +2180,8 @@ payload checks confirm width, stability, displacement range and optional
 comparable measured costs. Unknown costs prefer recomputation. Known
 rematerialization costs greater than the reload cost suppress the mark.
 `tier1_rematerialization_model_costs` fills those columns from the Zen 5 model
-(`x86_zen5.c`, #181), classifying 64 operations at a time as the marks do, its
-scalar twin a plain loop: each copy's GPR latency as `tier1_rematerialize`
+(`x86_zen5.c`, #181), classifying 64 operations at a time as the marks do:
+each copy's GPR latency as `tier1_rematerialize`
 emits it, against the model's L1-hit load (`mov r64, [base]`), the cheapest any
 reload of a slot can be, so that a copy no costlier than it is no costlier than
 the reload it saves. With #181's rows the reload is 4 cycles (an L1 load's

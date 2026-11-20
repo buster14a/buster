@@ -249,7 +249,7 @@ static void tier1_cert_test_expect(Tier1CertTest* test, bool condition, const ch
     }
 }
 
-static bool tier1_cert_test_pair(Tier1CertTest* test, const Tier1CertFixture* fixture, int expected, const char* name)
+static Tier1CertReport tier1_cert_test_pair(Tier1CertTest* test, const Tier1CertFixture* fixture, int expected, const char* name)
 {
     Tier1CertReport fast = { 0 };
     Tier1CertReport slow = { 0 };
@@ -264,7 +264,80 @@ static bool tier1_cert_test_pair(Tier1CertTest* test, const Tier1CertFixture* fi
         fprintf(stderr, "%s: fast=%u at %u/%u/%u, slow=%u at %u/%u/%u\n", name, a, fast.block, fast.edge, fast.instruction, b, slow.block, slow.edge, slow.instruction);
     }
     tier1_cert_test_expect(test, valid, name);
-    return accepted;
+    return fast;
+}
+
+static void tier1_cert_test_exit_error(Tier1CertTest* test, const Tier1CertFixture* fixture, Tier1CertError error, uint32_t block, uint32_t edge, uint32_t instruction, const char* name)
+{
+    const Tier1CertReport report = tier1_cert_test_pair(test, fixture, 0, name);
+    tier1_cert_test_expect(test, report.error == error && report.block == block && report.edge == edge && report.instruction == instruction, name);
+}
+
+static void tier1_cert_test_exits(Tier1CertTest* test)
+{
+    enum { sinks = 32 };
+    Tier1CertBlock blocks[sinks + 2];
+    Tier1CertEdge edges[sinks - 1] = { 0 };
+    Tier1CertFixture f;
+    tier1_cert_test_init(&f);
+    f.locations[16] = f.locations[0];
+    f.program.location_count = 17;
+    f.entry[1].location = 16;
+    f.entry[2] = (Tier1CertFact){
+        .value = 4,
+        .location = 1,
+    };
+    f.program.entry_count = 3;
+    f.program.exit_count = 3;
+    memcpy(f.exit, f.entry, 3 * sizeof(*f.exit));
+    for (uint32_t b = 0; b < 4; b += 1)
+    {
+        f.blocks[b].certificate = f.entry;
+        f.blocks[b].certificate_count = f.program.entry_count;
+    }
+
+    // In block order an edge writes the aliased exit span, sink 1 checks its shape, then block 2's edges read it.
+    f.blocks[0].edge_count = 2;
+    f.edges[0][0].destination = 1;
+    f.edges[0][1].destination = 2;
+    f.edges[0][1].move_count = 1;
+    f.moves[0][1][0] = tier1_cert_test_edit(TIER1_CERT_MOVE, 0, 16, 0);
+    f.blocks[2].edges = edges;
+    f.blocks[2].edge_count = sinks - 1;
+    tier1_cert_test_use(&f, 1, 1, 16, false);
+    tier1_cert_test_use(&f, 3, 0, 0, false);
+    memcpy(blocks, f.blocks, 3 * sizeof(*blocks));
+    for (uint32_t e = 0; e < sinks - 1; e += 1)
+    {
+        edges[e].destination = e + 3;
+        blocks[e + 3] = f.blocks[3];
+    }
+    f.program.blocks = blocks;
+    f.program.block_count = sinks + 2;
+    tier1_cert_test_pair(test, &f, 1, "equal-span exit aliases at every sink");
+
+    tier1_cert_test_def(&f, 3, 2, 0);
+    blocks[sinks + 1] = f.blocks[3];
+    tier1_cert_test_exit_error(test, &f, TIER1_CERT_VALUE, sinks + 1, BUSTER_CERT_NONE, 1, "only the last sink overwrites the exit value");
+    f.program.exit_count = 0;
+    tier1_cert_test_pair(test, &f, 1, "empty exit requirements at every sink");
+
+    f.program.exit_count = 3;
+    f.values[3].width = 4;
+    f.exit[1] = (Tier1CertFact){
+        .value = 3,
+        .location = 7,
+    };
+    tier1_cert_test_exit_error(test, &f, TIER1_CERT_VALUE, 1, BUSTER_CERT_NONE, 0, "partial exit overlap at the first sink");
+    f.code[1][0].opcode += 1;
+    tier1_cert_test_exit_error(test, &f, TIER1_CERT_CORRESPONDENCE, 1, BUSTER_CERT_NONE, 0, "first sink instruction failure precedes exit shape");
+    f.moves[0][1][0].b = 2;
+    tier1_cert_test_exit_error(test, &f, TIER1_CERT_EDGE, 0, 1, 0, "incoming edge failure precedes exit shape");
+
+    f.program.block_count = 2;
+    blocks[0].edge_count = 1;
+    f.edges[0][0].destination = 0;
+    tier1_cert_test_exit_error(test, &f, TIER1_CERT_INVALID, 0, BUSTER_CERT_NONE, BUSTER_CERT_NONE, "the only sink is unreachable");
 }
 
 static void tier1_cert_test_exchange(Tier1CertFixture* fixture, uint32_t a, uint32_t b)
@@ -790,8 +863,9 @@ static void tier1_cert_test_cases(Tier1CertTest* test)
     };
     f.code[0][f.blocks[0].code_count++] = tier1_cert_test_edit(TIER1_CERT_MOVE, 4, 0, 0);
     tier1_cert_test_pair(test, &f, 1, "exit assertions independently prove multiple homes per value");
+    f.values[3].width = 4;
     f.exit[1] = (Tier1CertFact){
-        .value = 1,
+        .value = 3,
         .location = 7,
     };
     tier1_cert_test_pair(test, &f, 0, "exit assertions refuse partially overlapping homes");
@@ -1386,6 +1460,7 @@ static int run_tier1_certificate_tests(void)
     else
     {
         tier1_cert_test_cases(&test);
+        tier1_cert_test_exits(&test);
         tier1_cert_test_homes(&test);
         tier1_cert_test_fuzz(&test);
         tier1_cert_test_bounds(&test);

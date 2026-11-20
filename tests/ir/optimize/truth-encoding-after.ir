@@ -1,0 +1,44 @@
+function (i64, i64, f64) -> i1 {
+b0:
+  %0 = param.i64 0
+  %1 = param.i64 1
+  %2 = param.f64 2
+  %3 = icmp.i1 %0, %1 lt
+  %4 = copy.i1 %3
+  %5 = zext.i8 %4
+  %6 = sext.i64 %5
+  %7 = copy.i64 %6
+  %8 = const.i64 0x00000000000000000000000000000001
+  %9 = copy.i64 %8
+  %10 = icmp.i1 %0, %1 lt
+  %11 = icmp.i1 %0, %1 ge
+  %12 = sext.i8 %4
+  %13 = sext.i64 %12
+  %14 = const.i64 0x0000000000000000ffffffffffffffff
+  %15 = icmp.i1 %0, %1 lt
+  %16 = icmp.i1 %13, %8 ne
+  %17 = zext.i64 %12
+  %18 = const.i8 0x000000000000000000000000000000ff
+  %19 = zext.i64 %18
+  %20 = sext.i64 %18
+  %21 = icmp.i1 %0, %1 ge
+  %22 = icmp.i1 %20, %17 eq
+  %23 = icmp.i1 %0, %1 ge
+  %24 = icmp.i1 %19, %7 eq
+  %25 = trunc.i1 %7
+  %26 = zext.i64 %25
+  %27 = icmp.i1 %26, %8 eq
+  %28 = fcmp.i1 %2, %2 eq
+  %29 = zext.i64 %28
+  %30 = icmp.i1 %29, %8 eq
+  %31 = icmp.i1 %8, %0 ne
+  %32 = zext.i128 %13
+  %33 = sext.i128 %13
+  %34 = const.i128 0x0000000000000000ffffffffffffffff
+  %35 = const.i128 0xffffffffffffffffffffffffffffffff
+  %36 = icmp.i1 %0, %1 lt
+  %37 = icmp.i1 %32, %35 ne
+  %38 = icmp.i1 %0, %1 ge
+  %39 = icmp.i1 %33, %34 eq
+  %40 = ret.void %10
+}
