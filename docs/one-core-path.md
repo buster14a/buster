@@ -2306,6 +2306,89 @@ the sweep where it was.
   second; their chunks are 526, 379 and 127 records.
 - **Next:** the branches' rows, then the entries' values.
 
+## The branches' rows on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x-branch-rows-2850-2026-11-20).
+`measure-node-machine --shadow --window-rows`
+([the guide](commands/lowering.md#xs-rows-on-the-window-2850)).
+
+X's rows on the window listed every expression with an operator evaluated as
+branches: 2,046 of `sqlite3.c`'s 49,155 that C takes there. X
+writes such an operator no entry, and each value it tests its test and a
+branch by its sense after the value's row. This piece makes those as the
+tested value's conversion's part's row (four rows of the rows' table), in a
+chunk where a condition branches: the update's sweep compresses the chunk's
+`!`, `&&` and `||` evaluated as branches into a second list, and a loop down
+that list gives each operand its sense and each tested value its shape. No
+compile takes any of it. [The node machine's
+page](node-machine.md#the-branches-rows-on-the-window) has it whole: the
+rows, the builds, the probes and the faults. [Its
+specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7037879405)
+had five gates.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release, TSC ticks, seven readings; in each
+one executable with the branches' rows on and off (an experiment's switch),
+and the piece before's executable between them:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions C takes on the window | 49,155 | 9,909 | 39,712 |
+| their tapes made here | 49,073 (99.83%) | 9,888 (99.79%) | 39,495 (99.45%) |
+| the piece before's | 47,027 (95.67%) | 9,689 (97.78%) | 38,705 (97.46%) |
+| tapes that differ from X's on T's columns | 0 | 0 | 0 |
+| operators with a turn | 3,415 (1.06% of the records swept) | 340 (0.37% of the records swept) | 1,487 (0.39% of the records swept) |
+| **the rows' sweeps and the part, a record swept** | **5.10 (5.01 to 5.28)** | **6.39 (6.31 to 9.88)** | **12.46 (10.37 to 14.48)** |
+| the piece before's executable, in the same readings | 4.80 | 6.08 | 13.34 |
+| **more than the piece before's** | **+0.32 (+0.17 to +0.40)** | **+0.34 (+0.07 to +2.13)** | **-0.45 (-1.82 to +0.17)** |
+| the lists and the two loops; with the branches' rows off | 0.83; 0.53 | 1.05; 0.83 | 1.94; 1.79 |
+| a second run over the same chunk; the piece before's | 4.08; 3.79 | 3.83; 3.54 | 5.12; 4.71 |
+| a record of the taken expressions | 6.09 | 9.48 | 24.98 |
+| X on T's columns, a record of theirs, with its values | 25.53 | 23.55 | 28.34 |
+
+### Against its gates
+
+- **B1, exact: met.** No tape made differs from X's on T's columns in its number of entries, a kind or a class, on
+  the three corpora and the compiler's own source.
+- **B2, how much: met.** 2,046, 199 and 790 tapes more (2,046, 199 and 790 asked): 99.83%, 99.79% and 99.45% of the
+  expressions C takes.
+- **B3, cost: met.** +0.32 ticks a record swept more than the piece before's on `sqlite3.c` (0.6 asked, 1.0 refutes)
+  and +0.34 on Lua (0.4 and 0.8); +0.29 and +0.29 on a chunk's second run.
+- **B4, nothing else moves: met.** The kernel, the tests' parts and C's sweeps read within 0.07 with the branches'
+  rows on (0.3 asked).
+- **B5, faults: met.** Three rounds. The first's 160 faults left 7: four change nothing a program reaches, and three found code to
+  change (the chunk's guard's count, and the listed expression's reason, which reads no consumer now). The second's
+  159 left 2, in that reason: one changes nothing, and one got its line in the fixture. The third's 158, on the code
+  as it is, are all caught.
+
+### What stays a record at a time, and why
+
+The branches' loop, a turn for each `!`, `&&` and `||` evaluated as branches:
+1.06% of `sqlite3.c`'s records swept, 0.37% of Lua's and 0.39% of
+musl's. An operator's first operand is at a distance only its own record
+has, and an operand's sense is its consumer's, a turn after it. The loop reads +0.29
+ticks a record swept on `sqlite3.c` and +0.22 on Lua by the switch (27 and 59 a turn), and the rows with it +0.32 and
++0.34 over the piece before's: within its gate, so that build was not made. What the update's piece read of a rare
+case's terms in a big sweep stands against it: as masks in the shapes' sweep an update's terms made that sweep
+read 0.22 ticks a record more on `sqlite3.c` and 0.49 on Lua, 0.18 and 0.47 of it with no update to make, and an
+operator with a turn is one record in 94 of `sqlite3.c`'s and one in 268 of Lua's.
+
+### What it means
+
+- **A tested value's test is a shape of the same table**, in the conversion's part its record has free: no slot
+  more, and one column more, a byte a record for a sense.
+- **What it reads more, against what it takes from the reference.** The rows read 102,859 ticks more over `sqlite3.c`'s
+  records swept and 31,026 over Lua's (a chunk's first run; musl's readings are -1.82 to +0.17 a record); X on T's columns
+  spends 763,708, 75,194 and 306,651 on the 25,806, 2,920 and 9,043 records of the expressions the branches' rows take from it.
+- **A chunk's first run is the dearer one.** The rows' sweeps read 5.10 ticks a record swept on `sqlite3.c`, 6.39 on
+  Lua and 12.46 on musl a chunk's first run, and 4.08, 3.83 and 5.12 its second; their chunks are 526, 379 and 127
+  records. The fourth build's one copy of a step was read there, and not on a second run.
+- **The tapes' kinds and classes are made for all but a few expressions:** 99.83%, 99.79% and 99.45% of those C takes on
+  the three corpora, and 98.15% of the compiler's own source's, where a qualified bool's read keeps 560 listed
+  ([#3185](https://github.com/buster14a/buster/issues/3185)).
+- **Next:** the entries' values.
+
 ## Step 4's first piece: a census of Tier 0's row
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-census-2874-2026-11-16)

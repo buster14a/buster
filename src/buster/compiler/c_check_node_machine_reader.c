@@ -81,7 +81,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
 // What the reference's C did with the expression at hand, for C on the window (BUSTER_NODE_READER_WINDOW_CONTEXTS):
 // whether it ran (0: it didn't; 1: it took the expression; 2: it refused it for a template), its ticks, and the
 // root's target.
-static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target);
+static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target, bool sense);
 static void node_facts_reader_rows(struct NodeFactsReader* state, uint64_t ticks);
 static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
                                          uint32_t operand, bool taken);
@@ -556,7 +556,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     NodeMachineRefusal swept = NODE_MACHINE_TAKEN;
                     if (typer->facts != NULL)
                     {
-                        node_facts_reader_contexts(typer->facts, BUSTER_NODE_CONTEXTS_RAN_NONE, 0, 0);
+                        node_facts_reader_contexts(typer->facts, BUSTER_NODE_CONTEXTS_RAN_NONE, 0, 0, false);
                     }
                     for (uint32_t step = 0; step < 2; step += 1)
                     {
@@ -596,7 +596,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         {
                             // The reference of C on the window: this run's answers, which the kernel's hook below keeps.
                             const uint8_t ran = swept == NODE_MACHINE_TAKEN ? BUSTER_NODE_CONTEXTS_RAN_TAKEN : BUSTER_NODE_CONTEXTS_RAN_REFUSED;
-                            node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target);
+                            node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target, (context & BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE) != 0);
                         }
                         const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
