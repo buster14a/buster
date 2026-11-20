@@ -690,11 +690,13 @@ static void tier1_float_unsigned_i32_storage(Tier1EmitTest* test)
                 const Tier1SelectRecords result = tier1_select_expand(&holes);
                 const bool clear = source == 1;
                 const uint16_t form = tier1_select_float_forms(target == IR_F32 ? 4 : 8)->from_integer[1];
-                tier1_emit_test_expect(test, result.count == 2u + clear &&
-                                      (!clear || (result.records[0].form == X86_FORM_MOV_R32_RM32 && result.records[0].rm == X86_REGISTER_RSI)) &&
-                                      result.records[clear].form == X86_FORM_XORPS_X_XM128 && result.records[1 + clear].form == form &&
-                                      result.records[1 + clear].rm == (clear ? BUSTER_TIER1_SELECT_SCRATCH : X86_REGISTER_RAX),
-                                      "only an uncertified I32 needs a zero-extending move before signed qword conversion");
+                // A parameter's conversion keeps the register path's zero-extending move; a loaded operand's folds into
+                // FLOAT_CONVERT_LOAD, whose dword memory reads into the scratch and whose qword converts as signed.
+                tier1_emit_test_expect(test, result.count == 3 &&
+                                      result.records[0].form == X86_FORM_MOV_R32_RM32 && result.records[0].rm == (clear ? X86_REGISTER_RSI : X86_REGISTER_RDI) &&
+                                      result.records[1].form == X86_FORM_XORPS_X_XM128 && result.records[2].form == form &&
+                                      result.records[2].rm == BUSTER_TIER1_SELECT_SCRATCH,
+                                      "an uncertified or folded I32 operand zero-extends through the scratch before signed qword conversion");
             }
             arena_pop_to(&test->output, 0);
         }
@@ -851,6 +853,40 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     arena_pop_to(&test->output, 0);
     arena_pop_to(&test->scratch, 0);
     arena_pop_to(&test->input, 0);
+}
+
+static void tier1_float_unsigned_dword_memory(Tier1EmitTest* test)
+{
+    for (uint32_t width = 4; width <= 8; width += 4)
+    {
+        for (uint32_t allowed = 0; allowed < 4; allowed += 1)
+        {
+            const Tier1SelectHoles holes =
+            {
+                .rule = TIER1_RULE_FLOAT_CONVERT_LOAD,
+                .condition = BUSTER_TIER1_FLOAT_FROM_UNSIGNED,
+                .width = (uint8_t)width,
+                .source_width = 4,
+                .destination = 23,
+                .unsigned_dword_memory_forms = (uint8_t)allowed,
+                .memory = { .rm = X86_REGISTER_RDI, .index = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = -13 },
+            };
+            const bool direct = (allowed & (width == 4 ? 1u : 2u)) != 0;
+            const Tier1SelectRecords code = tier1_select_expand(&holes);
+            const uint32_t convert = direct ? 1 : 2;
+            const X86Instruction memory = code.records[direct ? 1 : 0];
+            const X86Instruction conversion = code.records[convert];
+            const uint16_t form = direct ? (width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM32 : X86_FORM_VCVTUSI2SD_X_X_RM32) :
+                                         tier1_select_float_forms(width)->from_integer[1];
+            tier1_emit_test_expect(test, code.count == convert + 1 && conversion.form == form && conversion.reg == 7,
+                                   "an unsigned dword memory conversion observes the requested precision's form");
+            tier1_emit_test_expect(test, memory.mode == holes.memory.mode && memory.rm == X86_REGISTER_RDI && memory.index == X86_REGISTER_RSI && memory.displacement == -13,
+                                   "the sole dword read preserves the original base, scaled index and displacement");
+            tier1_emit_test_expect(test, code.records[convert - 1].form == X86_FORM_XORPS_X_XM128 && code.records[convert - 1].reg == 7 &&
+                                         (direct ? conversion.vvvv == 7 : memory.form == X86_FORM_MOV_R32_RM32 && memory.reg == BUSTER_TIER1_SELECT_SCRATCH && conversion.rm == BUSTER_TIER1_SELECT_SCRATCH),
+                                   "EVEX reads the zeroed merge source and baseline widens through reserved scratch");
+        }
+    }
 }
 
 // The real target can admit either form independently. A register conversion does not use
@@ -1226,6 +1262,7 @@ static void tier1_float_cases(Tier1EmitTest* test)
     test->width = 8;
     test->selects = false;
     tier1_float_conversion_loads(test);
+    tier1_float_unsigned_dword_memory(test);
     tier1_float_first_fma_load(test);
     tier1_float_fma_loads(test);
     tier1_float_fma_addend_addresses(test);
