@@ -16966,6 +16966,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
     input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
+    reader.const_values.declarations = (CheckObjectDeclarations)
+    {
+        .objects = input->objects,
+        .types = input->declared_types,
+        .count = count,
+    };
+    input->const_values = check_const_view(&reader.const_values);
     input->graph.const_values = &input->const_values;
     input->graph.warning_suppressed = valid ? warning_suppressed : NULL;
     input->graph.argument_tokens = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
