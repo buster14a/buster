@@ -248,6 +248,8 @@ typedef enum Tier1SelectRule
     // the prologue saves the callee-saved ones it touches. `immediate` is the body's index in IrFunction.asm_bodies (tier1_select_asm_supported).
     // Only the CFG consumer takes it.
     TIER1_RULE_ASM,
+    // A signed i32 or i64 in memory converted directly into an xmm register (#2829). Its scale belongs to the address.
+    TIER1_RULE_FLOAT_CONVERT_LOAD,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -456,7 +458,7 @@ static bool tier1_select_mask_rule(uint32_t rule)
 // Whether a rule is a floating value's (#141), which only the CFG consumer takes, its vector class's.
 static bool tier1_select_float_rule(uint32_t rule)
 {
-    return rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN;
+    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || rule == TIER1_RULE_FLOAT_CONVERT_LOAD;
 }
 
 // Register-only leaf bodies use caller-saved registers. R11 is reserved for a destructive instruction's second
@@ -3090,6 +3092,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             tier1_select_append(&result, (X86Instruction){0});
             break;
         }
+        break;
+    }
+    case TIER1_RULE_FLOAT_CONVERT_LOAD:
+    {
+        const uint8_t x = destination & 15;
+        X86Instruction record = holes->memory;
+        record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
+        record.reg = x;
+        // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_FLOAT_RETURN:
@@ -6281,6 +6294,14 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        if (op == IR_SITOFP && (source == IR_I32 || source == IR_I64) && tier1_select_load_folds(forest, node, a))
+        {
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_FLOAT_CONVERT_LOAD;
+            tier1_select_fold(forest, node, a, &folded);
+            tier1_select_memory(forest, node, function->a[a], &folded, 0);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
         // An integer constant's conversion is the floating constant it converts to, rounded as cvtsi2s* rounds under the
         // default rounding mode, to nearest: C's conversion on this host computes it so.
         uint64_t integer = 0;
@@ -7291,6 +7312,7 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const T
             break;
         case TIER1_RULE_LOAD_OPERAND:
         case TIER1_RULE_FLOAT_LOAD_OPERAND:
+        case TIER1_RULE_FLOAT_CONVERT_LOAD:
             rank = 7;
             break;
         case TIER1_RULE_MULTIPLY_LEA:
@@ -7963,6 +7985,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_MASK_LOAD_ADDRESS:
     case TIER1_RULE_MASK_STORE:
     case TIER1_RULE_MASK_STORE_ADDRESS:
+    case TIER1_RULE_FLOAT_CONVERT_LOAD:
     case TIER1_RULE_FLOAT_LOAD:
     case TIER1_RULE_FLOAT_LOAD_ADDRESS:
     case TIER1_RULE_FLOAT_STORE:
