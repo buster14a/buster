@@ -979,7 +979,7 @@ static bool check_deferred_test_empty_pass(void)
         CheckDeferred deferred = { .cuts = cuts, .body_count = BODIES };
         uint32_t position = UINT32_MAX;
         CheckDeferredPass pass = { .deferred = &deferred, .reader = &reader, .positions = &position };
-        valid = check_deferred_pass_items(&pass, (uint32_t)range.begin, (uint32_t)range.end) == 0 && position == UINT32_MAX;
+        valid = valid && check_deferred_pass_items(&pass, (uint32_t)range.begin, (uint32_t)range.end) == 0 && position == UINT32_MAX;
     }
     if (mapping != MAP_FAILED)
     {
