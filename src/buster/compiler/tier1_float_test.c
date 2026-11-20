@@ -805,6 +805,31 @@ static void tier1_float_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     arena_pop_to(&test->input, 0);
 }
 
+// The real target can admit either form independently. A register conversion does not use
+// embedded rounding or a mask, and preserves the software path on targets lacking its form.
+static void tier1_float_unsigned_i64_forms(Tier1EmitTest* test)
+{
+    for (uint32_t mask = 0; mask < 4; mask += 1)
+    {
+        for (uint32_t width = 4; width <= 8; width += 4)
+        {
+            const Tier1SelectHoles holes = { .rule = TIER1_RULE_FLOAT_CONVERT_WIDE, .scale = BUSTER_TIER1_FLOAT_FROM_UNSIGNED,
+                .source_width = 8, .width = (uint8_t)width, .left = X86_REGISTER_R9, .destination = 16 + 7,
+                .unsigned_i64_float_forms = (uint8_t)mask };
+            X86Instruction rows[32];
+            const uint32_t count = tier1_select_fixed(&holes, rows);
+            const bool hardware = (mask & (width == 4 ? 1u : 2u)) != 0;
+            const uint16_t form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM64 : X86_FORM_VCVTUSI2SD_X_X_RM64;
+            tier1_emit_test_expect(test, !hardware || x86_zen5_missing(rows, count, BUSTER_X86_COST_ALL_COLUMNS) == 0, "the emitted unsigned conversion has measured Zen 5 costs");
+            tier1_emit_test_expect(test, hardware ? count == 2 && rows[0].form == X86_FORM_XORPS_X_XM128 &&
+                                   rows[0].reg == 7 && rows[0].rm == 7 && rows[1].form == form &&
+                                   rows[1].reg == 7 && rows[1].vvvv == 7 && rows[1].rm == X86_REGISTER_R9 :
+                                   count > 2 && rows[count - 1].form != form,
+                                   "only the admitted unsigned qword register conversion replaces the software sequence");
+        }
+    }
+}
+
 static void tier1_float_conversion_loads(Tier1EmitTest* test)
 {
     const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .parameter_count = 2, .address_count = 1 };
@@ -1003,6 +1028,7 @@ static void tier1_float_fma_factor_addresses(Tier1EmitTest* test)
 
 static void tier1_float_cases(Tier1EmitTest* test)
 {
+    tier1_float_unsigned_i64_forms(test);
     test->terms = 0;
     test->width = 8;
     test->selects = false;
