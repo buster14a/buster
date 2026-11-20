@@ -46,18 +46,25 @@ is and counted under its first failing rule, which `--tier1-report` prints
 | It leaves by exactly one edge, from its header or its latch, and has no return or `unreachable`. | `exit` |
 | That edge's block ends in a conditional branch on an integer `icmp`. | `test` |
 | One of the compared values is defined outside the loop, or is a constant (wherever the lowering put it). | `bound` |
-| The loop continues while the other is `ult`, `ule`, `slt` or `sle` than it, in either operand order and on either edge. | `predicate` |
-| The other is a header phi of an integer type (8 to 64 bits), or it plus a constant c from 0 to 65,536 (its increment, or another sum, as `i + 1 < n`), and the phi's latch value adds it a positive constant step of at most 65,536 (each read through copies, extensions and truncations, as the lowering's `sext (const 1)`). | `induction` |
+| A count-up continues on `ult`, `ule`, `slt` or `sle`. A countdown's header, distinct from its latch, continues while its i32 phi differs from constant zero. Either operand order and either edge are accepted. | `predicate` |
+| A count-up compares an integer header phi (8 to 64 bits) or the phi plus a constant from 0 to 65,536, and its latch adds a positive constant step of at most 65,536. A countdown's latch subtracts one from the phi or adds the i32 bit pattern for minus one. Constants may come through copies, extensions and truncations. | `induction` |
 | Two copies' estimated cost fits the budget (below), and the loop has at most 1,024 instructions. | `size` |
 | The function's growth stays within its budget. | `growth` |
 
 These are the forms C's counted `for` loops take after promotion, threading and
 if-conversion: the test at the top on the induction phi (`for`), at the top on
 the increment, or at the bottom on either (a one-block loop, `do`/`while`). A
-body may branch and join inside itself; its phis are copied with it. A loop that
-counts down, steps by a variable, tests `!=` or exits early (#2743's `find_u8`)
-is refused today; each is a later rule with its own proof, not a weakening of
-these.
+body may branch and join inside itself, and its phis are copied with it.
+
+For `for (uint32_t i = n; i != 0; --i)`, the unsigned value of `i` is the
+number of iterations left. The entry and back edge both test `i >u f - 1`
+for a chunk of `f` iterations. Its copies therefore see positive values
+`i, i - 1, ..., i - (f - 1)`, and the next induction `i - f` is representable.
+This also proves that the zero-extended index of `a[i - 1]` in copy `k`
+equals the first copy's index minus `k`. The loads keep their order and
+the offsets fit the same addressing mode. A short or empty input goes
+straight to the original header. After the last chunk that header receives
+the exact remainder.
 
 ## The rewrite
 
@@ -402,8 +409,8 @@ invalidation tracked across if-conversion and LICM.
 ## What is left
 
 - **Default.** The pass stays off until the owner decides on the record above.
-- **Forms.** Count-down loops, `!=` tests, pointer inductions and early exits,
-  each with its own proof.
+- **Forms.** Other countdown widths, steps and bounds, other `!=` tests,
+  pointer inductions and early exits each need their own proof.
 - **Registers.** The pressure rule exists because Tier 1's leaf code takes no
   callee-saved register; giving a busy leaf loop those registers is the
   allocator's change ([#2819](https://github.com/buster14a/buster/issues/2819)),

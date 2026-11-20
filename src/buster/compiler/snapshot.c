@@ -158,6 +158,9 @@ static __attribute__((unused)) bool snapshot_discard(const char* directory, Runt
 // The writer's arena: the strings and the file's image.
 #define BUSTER_SNAPSHOT_WRITE_BYTES (256ull << 20)
 
+// Linux MADV_POPULATE_WRITE (5.14), including with libc headers that predate it.
+#define BUSTER_SNAPSHOT_MADV_POPULATE_WRITE 23
+
 // The runtime's strings that the header points to, by their place in it.
 typedef enum SnapshotPath
 {
@@ -866,9 +869,8 @@ static bool snapshot_pieces_contiguous(const Runtime* runtime)
     return result;
 }
 
-// Whether the writer copies a region from the runtime's column as it is: every one but the records with pointers, the
-// strings, the pieces' hashes and data, the names' and atoms' bytes (both regions of each) and the data, which it fills
-// itself.
+// Whether the writer copies the whole region from the runtime. The loader's and libgcc_s's version records retain
+// their source padding; their name pointers are replaced with string offsets below.
 static bool snapshot_region_copied(uint32_t region)
 {
     return region != SNAPSHOT_REGION_PROBES && region != SNAPSHOT_REGION_VERSIONS && region != SNAPSHOT_REGION_MEMBERS && region != SNAPSHOT_REGION_STRINGS &&
@@ -980,13 +982,26 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
     bool fits = image != 0 && snapshot_pieces_contiguous(runtime);
     if (fits)
     {
-        memset(image, 0, end);
+        // Fault in the fresh mapping before the individual records first touch its pages. If the kernel cannot
+        // populate them here, the writes below fault them in normally. Existing page contents are preserved.
+        if (arena->mapping_bytes != 0 && image == arena->base)
+        {
+            madvise(image, end, BUSTER_SNAPSHOT_MADV_POPULATE_WRITE);
+        }
+        // The header and each region have writers of their own. Only the alignment gaps have no writer.
+        uint64_t previous_end = sizeof(header);
         for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
         {
-            if (snapshot_region_copied(r) && header.regions[r].bytes != 0)
+            const SnapshotPlace place = header.regions[r];
+            if (place.offset != previous_end)
             {
-                memcpy(image + header.regions[r].offset, (const uint8_t*)*columns[r].column + columns[r].first * columns[r].element, header.regions[r].bytes);
+                memset(image + previous_end, 0, place.offset - previous_end);
             }
+            if (snapshot_region_copied(r) && place.bytes != 0)
+            {
+                memcpy(image + place.offset, (const uint8_t*)*columns[r].column + columns[r].first * columns[r].element, place.bytes);
+            }
+            previous_end = place.offset + place.bytes;
         }
         // The strings: the global names' first, so that their offset is the counts', then the paths, then the records'
         // strings, each written in its record as it goes in.
@@ -1005,6 +1020,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
             };
         }
         RuntimeProbe* probes = (RuntimeProbe*)(image + header.regions[SNAPSHOT_REGION_PROBES].offset);
+        const size_t flags_end = offsetof(RuntimeProbe, deferred) + sizeof(probes->deferred);
         for (uint32_t p = 0; p < header.counts.probes; p += 1)
         {
             const RuntimeProbe* probe = &runtime->probes[p];
@@ -1013,6 +1029,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
             probes[p].directory = probe->directory;
             probes[p].found = probe->found;
             probes[p].deferred = probe->deferred;
+            memset((uint8_t*)&probes[p] + flags_end, 0, offsetof(RuntimeProbe, device) - flags_end);
             probes[p].device = probe->device;
             probes[p].inode = probe->inode;
             probes[p].size = probe->size;
@@ -1033,10 +1050,15 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
             {
                 const ImportVersion* version = &source->versions[v];
                 versions[v].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, version->name.pointer, version->name.length, &fits);
-                versions[v].name.length = version->name.length;
-                versions[v].hash = version->hash;
-                versions[v].index = version->index;
-                versions[v].base = version->base;
+                if (region == SNAPSHOT_REGION_VERSIONS)
+                {
+                    versions[v].name.length = version->name.length;
+                    versions[v].hash = version->hash;
+                    versions[v].index = version->index;
+                    versions[v].base = version->base;
+                    const size_t fields_end = offsetof(ImportVersion, base) + sizeof(version->base);
+                    memset((uint8_t*)&versions[v] + fields_end, 0, sizeof(*version) - fields_end);
+                }
             }
         }
         ImportMember* members = (ImportMember*)(image + header.regions[SNAPSHOT_REGION_MEMBERS].offset);
@@ -1045,7 +1067,9 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
             const String8 name = runtime_member_name(runtime, m);
             members[m].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, name.pointer, name.length, &fits);
             members[m].name.length = name.length;
+            members[m].bytes = (String8){ 0 };
             members[m].offset = runtime->members[m].offset;
+            members[m].nested = 0;
         }
         fits = fits && strings.length == strings_bytes;
         // The data: the crt objects' names (the names run's first object_name_bytes bytes), then each piece's atoms' bytes
@@ -1066,6 +1090,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
         const uint32_t object_names = header.counts.object_names;
         uint64_t* object_name_column = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_NAME_BYTES].offset);
         uint64_t* member_name_column = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_MEMBER_NAME_BYTES].offset);
+        object_name_column[0] = 0;
         for (NameId name = 1; fits && name < header.counts.names; name += 1)
         {
             // A crt object's name is in the run's first part, a member's in the rest.
@@ -1089,6 +1114,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
         const uint32_t object_atoms = header.counts.object_atoms;
         uint64_t* object_atom_column = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_ATOM_BYTES].offset);
         uint64_t* member_atom_column = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_MEMBER_ATOM_BYTES].offset);
+        object_atom_column[0] = 0;
         uint64_t* piece_data = (uint64_t*)(image + header.regions[SNAPSHOT_REGION_PIECE_DATA].offset);
         uint64_t at = object_name_bytes;
         for (uint32_t p = 0; fits && p < header.counts.pieces; p += 1)

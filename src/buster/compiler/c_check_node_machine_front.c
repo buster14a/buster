@@ -106,6 +106,15 @@
 // meets another key's answer at its slot wherever the last answer was another's. The calls' loop then takes a slot's
 // answer for a key only where the slot has that key, or the kernel's records are not T's.
 #define BUSTER_NODE_READER_ONE_SLOT 256u
+// X's rows on that window too, first their shapes (measure-node-machine --shadow --window-rows, with
+// BUSTER_NODE_READER_WINDOW_CONTEXTS, whose answers they are made from; c_check_node_machine_rows.c's
+// node_rows_window_chunk; "X's rows on the window"): the kinds and the classes of the entries X writes for the
+// expressions C takes there, compared with X's tape on T's columns at reader time.
+#define BUSTER_NODE_READER_WINDOW_ROWS 512u
+// test-checker's control of that comparison (with BUSTER_NODE_READER_WINDOW_ROWS): the reference's tape is read with
+// one of its answers changed for each expression the rows take (its first entry's kind, its last's class or its
+// length, in turn), so that the comparison is seen to count every one of them (node_rows_window_compare).
+#define BUSTER_NODE_READER_WINDOW_ROWS_FAULT 1024u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u
 // What the reference did with an expression (NodeFactsReader.c_ran, which the reader gives the kernel's state at each
@@ -256,6 +265,43 @@ typedef enum NodeFactsCount
     // that are the CONDITION.
     NODE_FACTS_COUNT_CONTEXTS_BRANCHED,
     NODE_FACTS_COUNT_CONTEXTS_BRANCHED_ROOTS,
+    // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS): the expressions it ran on (those C takes on the window)
+    // and their records; those whose tape it made, their records and their entries; the listed ones by their first
+    // record's reason (BUSTER_NODE_ROWS_REASON_*, in its order); the made tapes that differ from the reference's, and
+    // those the reference kept no tape of; the chunks' records its sweeps ran over and the entries they wrote; the
+    // chunks whose second run wrote another number of entries; the records its loops read for (a target's word,
+    // where the target is not the record's type; a line or a table of the unit's; an update's plan) and the updates
+    // whose rows it made;
+    // and its ticks: the reads, the shapes, the rows' write, an expression's part, and the reference's X on the
+    // expressions taken; then the four's in a second run over the same chunk.
+    NODE_FACTS_COUNT_ROWS_EXPRESSIONS,
+    NODE_FACTS_COUNT_ROWS_RECORDS,
+    NODE_FACTS_COUNT_ROWS_TAKEN,
+    NODE_FACTS_COUNT_ROWS_TAKEN_RECORDS,
+    NODE_FACTS_COUNT_ROWS_ENTRIES,
+    NODE_FACTS_COUNT_ROWS_LISTED_UPDATE,
+    NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES,
+    NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION,
+    NODE_FACTS_COUNT_ROWS_LISTED_FLOATING,
+    NODE_FACTS_COUNT_ROWS_DIFFERENCES,
+    NODE_FACTS_COUNT_ROWS_UNKEPT,
+    NODE_FACTS_COUNT_ROWS_SWEPT,
+    NODE_FACTS_COUNT_ROWS_WRITTEN,
+    NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES,
+    NODE_FACTS_COUNT_ROWS_WORDS,
+    NODE_FACTS_COUNT_ROWS_LINES,
+    NODE_FACTS_COUNT_ROWS_UPDATES,
+    NODE_FACTS_COUNT_ROWS_READ_TICKS,
+    NODE_FACTS_COUNT_ROWS_SHAPE_TICKS,
+    NODE_FACTS_COUNT_ROWS_UPDATE_TICKS,
+    NODE_FACTS_COUNT_ROWS_WRITE_TICKS,
+    NODE_FACTS_COUNT_ROWS_PART_TICKS,
+    NODE_FACTS_COUNT_ROWS_REFERENCE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 
@@ -451,6 +497,10 @@ struct NodeFrontTypes
     uint64_t contexts_listed[BUSTER_NODE_CONTEXTS_REASONS];
     uint32_t contexts_tokens[BUSTER_NODE_FRONT_LISTED];
     uint32_t contexts_shown;
+    // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS): the first made tapes that differ from the reference's,
+    // each by its expression's root's token.
+    uint32_t rows_tokens[BUSTER_NODE_FRONT_LISTED];
+    uint32_t rows_shown;
 };
 
 #define BUSTER_NODE_FRONT_TYPED_REFUSAL 0x0fu

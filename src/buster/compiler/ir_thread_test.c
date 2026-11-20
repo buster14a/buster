@@ -591,6 +591,142 @@ static void ir_thread_test_scans(IrOptimizeTest* test)
     ir_optimize_test_expect(test, escaped && found != 0, "threading's escapes' scan, against its definition");
 }
 
+// Sweep the scratch limit through each aligned allocation of a wide join, including its index and rewrite.
+static void ir_thread_test_wide_rollback(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* scratch)
+{
+    const uint64_t capacity = scratch->capacity;
+    const uint64_t om = output->length;
+    const uint64_t sm = scratch->length;
+    bool restored = true;
+    bool success = false;
+    IrThreadResult sentinel;
+    memset(&sentinel, 0x5a, sizeof(sentinel));
+    for (uint64_t limit = sm; restored && !success && limit <= capacity; limit += 64)
+    {
+        scratch->capacity = limit;
+        IrThreadResult result;
+        memcpy(&result, &sentinel, sizeof(result));
+        const IrCheck check = ir_thread(f, output, scratch, &result);
+        success = check.error == IR_OK;
+        restored = scratch->length == sm && (success || (check.error == IR_ERROR_MEMORY && output->length == om && memcmp(&result, &sentinel, sizeof(result)) == 0));
+        arena_pop_to(output, om);
+    }
+    scratch->capacity = capacity;
+    ir_optimize_test_expect(test, restored && success, "wide threading restores both arenas and the result on scratch exhaustion");
+}
+
+// A distinct selector reaches the join from each predecessor, alternating true and false edges. The other edge tries
+// the next comparison. The second phi lists predecessors in reverse and uses a different bit of the selector.
+static void ir_thread_test_wide(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch, uint32_t width, bool two_phis)
+{
+    const uint64_t im = input->length;
+    const uint64_t om = output->length;
+    const uint64_t sm = scratch->length;
+    const uint32_t none = BUSTER_IR_NONE;
+    const uint32_t join = width + 1;
+    const uint32_t yes = join + 1;
+    const uint32_t no = join + 2;
+    const uint32_t first = 4 + 3 * width;
+    const uint32_t branch = first + (two_phis ? 3 : 1);
+    const IrSizes sizes = {
+        .instruction_count = branch + 3 + (uint32_t)two_phis,
+        .block_count = no + 1,
+        .constant_count = width,
+        .extra_count = two_phis ? 4 * width + 2 : 2 * width,
+        .parameter_count = 1,
+    };
+    IrFunction f = { 0 };
+    const bool created = ir_create(input, &sizes, &f) == IR_OK;
+    ir_optimize_test_expect(test, created, "wide threading fixture allocated");
+    if (created)
+    {
+        f.parameter_types[0] = IR_I32;
+        f.result_type = IR_I1;
+        ir_optimize_test_instruction(&f, 0, IR_PARAM, IR_I32, 0, none, none);
+        ir_optimize_test_instruction(&f, 1, IR_CONST, IR_I1, 0, none, none);
+        ir_optimize_test_instruction(&f, 2, IR_CONST, IR_I1, 1, none, none);
+        ir_optimize_test_instruction(&f, 3, IR_BR, IR_VOID, 1, none, none);
+        for (uint32_t k = 0; k < width; k += 1)
+        {
+            const uint32_t block = k + 1;
+            const uint32_t row = 4 + 3 * k;
+            f.constants[k].low = k;
+            f.block_offsets[block] = row;
+            ir_optimize_test_instruction(&f, row, IR_CONST, IR_I32, k, none, none);
+            const uint32_t other = block == width ? no : block + 1;
+            const bool reversed = (k & 1) != 0;
+            ir_optimize_test_instruction(&f, row + 1, IR_ICMP, IR_I1, 0, row, reversed ? IR_NE : IR_EQ);
+            ir_optimize_test_instruction(&f, row + 2, IR_CBR, IR_VOID, row + 1, reversed ? other : join, reversed ? join : other);
+            f.extra[2 * k] = block;
+            // A nonconstant input on the first edge keeps that edge and its phi entries in the two-phi case.
+            f.extra[2 * k + 1] = two_phis && k == 0 ? row + 1 : 1 + (k & 1);
+            if (two_phis)
+            {
+                const uint32_t at = 2 * (2 * width - 1 - k);
+                f.extra[at] = block;
+                f.extra[at + 1] = 1 + ((k >> 1) & 1);
+            }
+        }
+        f.block_offsets[join] = first;
+        f.block_offsets[yes] = branch + 1;
+        f.block_offsets[no] = branch + 2 + (uint32_t)two_phis;
+        f.block_offsets[no + 1] = f.instruction_count;
+        ir_optimize_test_instruction(&f, first, IR_PHI, IR_I1, 0, width, none);
+        if (two_phis)
+        {
+            ir_optimize_test_instruction(&f, first + 1, IR_PHI, IR_I1, 2 * width, width, none);
+            ir_optimize_test_instruction(&f, first + 2, IR_XOR, IR_I1, first, first + 1, none);
+        }
+        ir_optimize_test_instruction(&f, branch, IR_CBR, IR_VOID, branch - 1, yes, no);
+        if (two_phis)
+        {
+            // Redirects to yes also forward the second phi through a successor phi.
+            f.extra[4 * width] = join;
+            f.extra[4 * width + 1] = first + 1;
+            ir_optimize_test_instruction(&f, branch + 1, IR_PHI, IR_I1, 4 * width, 1, none);
+        }
+        ir_optimize_test_instruction(&f, f.block_offsets[no] - 1, IR_RET, IR_VOID, two_phis ? branch + 1 : 2, none, none);
+        ir_optimize_test_instruction(&f, f.block_offsets[no], IR_RET, IR_VOID, 1, none, none);
+
+        const bool valid = ir_verify_complete(&f, scratch).error == IR_OK;
+        ir_optimize_test_expect(test, valid, "wide threading input is complete SSA");
+        if (valid)
+        {
+            IrThreadResult result = { 0 };
+            const IrCheck check = ir_thread(&f, output, scratch, &result);
+            bool exact = check.error == IR_OK && result.blocks == 1 && result.rounds == 1 && result.copies == 0 && result.redirects == width - (uint32_t)two_phis;
+            exact = exact && scratch->length == sm && ir_verify_complete(&result.function, scratch).error == IR_OK;
+            for (uint32_t k = 0; exact && k < width; k += 1)
+            {
+                const uint32_t row = result.function.block_offsets[k + 2] - 1;
+                const uint32_t bit = (k & 1) ^ (two_phis ? (k >> 1) & 1 : 0);
+                const uint32_t target = two_phis && k == 0 ? join : bit != 0 ? yes : no;
+                const uint32_t other = k + 1 == width ? no : k + 2;
+                const bool reversed = (k & 1) != 0;
+                exact = target == other ? result.function.op[row] == IR_BR && result.function.a[row] == target :
+                                          result.function.op[row] == IR_CBR && result.function.b[row] == (reversed ? other : target) && result.function.c[row] == (reversed ? target : other);
+            }
+            if (exact && two_phis)
+            {
+                const IrFunction* out = &result.function;
+                const uint32_t phi = out->block_offsets[yes];
+                for (uint32_t p = 0; exact && p < out->b[phi]; p += 1)
+                {
+                    const uint32_t* pair = out->extra + out->a[phi] + 2 * p;
+                    exact = pair[1] == (pair[0] == join ? out->block_offsets[join] + 1 : 1 + (((pair[0] - 1) >> 1) & 1));
+                }
+            }
+            ir_optimize_test_expect(test, exact, "wide threading chooses each edge and forwards its own phi input");
+            if (exact && two_phis && width == 32)
+            {
+                ir_thread_test_wide_rollback(test, &f, output, scratch);
+            }
+        }
+    }
+    arena_pop_to(output, om);
+    arena_pop_to(input, im);
+}
+
 static void ir_thread_tests(IrOptimizeTest* test)
 {
     ir_thread_test_scans(test);
@@ -603,6 +739,12 @@ static void ir_thread_tests(IrOptimizeTest* test)
     for (uint32_t k = 0; ready && k < sizeof(ir_thread_test_fixtures) / sizeof(ir_thread_test_fixtures[0]); k += 1)
     {
         ir_thread_test_fixture(test, &ir_thread_test_fixtures[k], &input, &vector, &optimized, &scratch);
+    }
+    const uint32_t widths[] = { 2, 31, 32, 33, 64, 128, 256, 512 };
+    for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(widths); k += 1)
+    {
+        ir_thread_test_wide(test, &input, &vector, &scratch, widths[k], false);
+        ir_thread_test_wide(test, &input, &vector, &scratch, widths[k], true);
     }
     arena_release(&scratch);
     arena_release(&optimized);

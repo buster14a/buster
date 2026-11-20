@@ -4594,6 +4594,11 @@ static bool node_tests_window_lines(struct NodeCensusReader* tests, Arena* arena
 struct NodeContextsTables;
 static void node_contexts_tables(struct NodeContextsTables* tables);
 static void node_contexts_window_chunk(struct NodeFactsReader* state, const NodeFront* front);
+// X's rows on the same window (c_check_node_machine_rows.c, after it; BUSTER_NODE_READER_WINDOW_ROWS): from C's
+// answers there.
+struct NodeRowsTables;
+static void node_rows_tables(struct NodeRowsTables* tables);
+static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFront* front);
 
 // An expression's byte in the reader's batch (NodeFactsReader.placed).
 #define BUSTER_NODE_FACTS_PLACED 0x01u
@@ -4694,9 +4699,50 @@ struct NodeFactsReader
     uint8_t c_ran_now;
     uint64_t c_ticks_now;
     TypeId c_target_now;
+    // The chunk at hand's updates, the records C's loop gave the update's template: X's rows' updates' sweep runs
+    // for a chunk that has any.
+    uint64_t c_updates_now;
     // test-checker's control of the comparison (BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT), and its turn.
     bool c_fault;
     uint32_t c_fault_turn;
+    // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS; c_check_node_machine_rows.c), or null tables.
+    // - The window's columns, as C's: a record's own shape and its conversion's, its row's entries' number,
+    //   its target's class and facts and its first operand's conversion's class, and the entries before its row in
+    //   its eight records'; its type, which the tests' sweep makes with the records' bytes
+    //   (node_tests_window_bytes_by); three bits of its line (BUSTER_NODE_ROWS_BIT_*); and two masks a block, the
+    //   records that convert and those of them whose target's word the reads read.
+    // - The chunk's streams: its entries' kinds and their classes, a register's room past a chunk's most entries; and
+    //   the entries before each eight records'.
+    // - The reads' two lists, the numbers of the chunk's records whose target's word is read and of those whose line
+    //   is, and the updates' list, each a register's room past a chunk's records.
+    //   The loop over the updates' writes an update's two rows' shapes over the shapes' sweep's, its store's kind in
+    //   the bits' column and its computation's class in the first operand's conversion's (node_rows_window_update):
+    //   an update has no column of its own.
+    // - By the batch's expression: what the rows made of it (BUSTER_NODE_ROWS_LISTED or _TAKEN), and the reference's
+    //   X's ticks on it; and the expression at hand's ticks, from the reader's hook.
+    struct NodeRowsTables* x_tables;
+    TypeId* window_x_types;
+    uint8_t* window_x_owns;
+    uint8_t* window_x_conversions;
+    uint8_t* window_x_lengths;
+    uint8_t* window_x_targets;
+    uint8_t* window_x_facts;
+    uint8_t* window_x_operands;
+    uint8_t* window_x_offsets;
+    uint8_t* window_x_bits;
+    uint64_t* window_x_reads;
+    uint32_t* x_cursors;
+    uint32_t* x_words;
+    uint32_t* x_lines;
+    uint32_t* x_updates;
+    uint8_t* x_kinds;
+    uint8_t* x_classes;
+    uint8_t* x_verdicts;
+    uint64_t* x_ticks;
+    uint64_t x_ticks_now;
+    // test-checker's control of the rows' comparison (BUSTER_NODE_READER_WINDOW_ROWS_FAULT), and its turn.
+    bool x_fault;
+    uint32_t x_fault_turn;
 };
 
 static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader, NodeMachine* machine, NodeFrontTypes* types)
@@ -4834,6 +4880,59 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         else
         {
             state->c_tables = NULL;
+        }
+    }
+    if (room && state->c_tables != NULL && (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_ROWS) != 0)
+    {
+        // The rows' own: the window's columns as C's are, the chunk's two streams, and the batch's expressions'.
+        const uint64_t padded = (uint64_t)BUSTER_NODE_FRONT_RECORDS + 192;
+        const uint64_t stream = (uint64_t)BUSTER_NODE_FRONT_RECORDS * 8 + 64;
+        state->window_x_reads = arena_push_array(arena, 2 * ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2), sizeof(uint64_t), 64);
+        state->x_cursors = arena_push_array(arena, padded / 8, sizeof(uint32_t), 64);
+        state->x_words = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        state->x_lines = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        state->x_updates = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        state->window_x_types = arena_push_array(arena, padded, sizeof(TypeId), 64);
+        state->x_kinds = arena_push_array(arena, stream, 1, 64);
+        state->x_classes = arena_push_array(arena, stream, 1, 64);
+        state->x_verdicts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->x_ticks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->x_tables = arena_push_array(arena, 1, 2560, 64);
+        uint8_t** columns[] = { &state->window_x_owns,  &state->window_x_conversions, &state->window_x_lengths, &state->window_x_targets,
+                                &state->window_x_facts, &state->window_x_operands,    &state->window_x_offsets, &state->window_x_bits };
+        room = state->window_x_reads != NULL && state->x_cursors != NULL && state->x_words != NULL && state->x_lines != NULL && state->x_updates != NULL &&
+               state->window_x_types != NULL && state->x_kinds != NULL && state->x_classes != NULL && state->x_verdicts != NULL && state->x_ticks != NULL &&
+               state->x_tables != NULL;
+        for (uint32_t c = 0; room && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+        {
+            uint8_t* column = arena_push_array(arena, padded, 1, 64);
+            room = column != NULL;
+            if (room)
+            {
+                memset(column, 0, padded);
+                *columns[c] = column + 64;
+            }
+        }
+        if (room)
+        {
+            // Each page written here: one first written in a sweep would be that sweep's time.
+            memset(state->window_x_reads, 0, 2 * ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2) * sizeof(uint64_t));
+            memset(state->x_cursors, 0, padded / 8 * sizeof(uint32_t));
+            memset(state->x_words, 0, padded * sizeof(uint32_t));
+            memset(state->x_lines, 0, padded * sizeof(uint32_t));
+            memset(state->x_updates, 0, padded * sizeof(uint32_t));
+            memset(state->window_x_types, 0, padded * sizeof(TypeId));
+            memset(state->x_kinds, 0, stream);
+            memset(state->x_classes, 0, stream);
+            memset(state->x_verdicts, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+            memset(state->x_ticks, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS * sizeof(uint64_t));
+            node_rows_tables(state->x_tables);
+            state->x_fault = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_ROWS_FAULT) != 0;
+            state->x_fault_turn = 0;
+        }
+        else
+        {
+            state->x_tables = NULL;
         }
     }
     room = room && node_facts_begin(&state->facts, machine, BUSTER_NODE_FACTS_READER_RECORDS, 0, true, false, true, BUSTER_NODE_FACTS_READER_LINES, arena);
@@ -5778,6 +5877,11 @@ static void node_facts_window_run(struct NodeFactsReader* state, const NodeFront
         {
             // C's answers of the same records, from the bytes the tests' sweep has just made of them.
             node_contexts_window_chunk(state, front);
+            if (state->x_tables != NULL)
+            {
+                // X's rows of the expressions C takes there, from those answers.
+                node_rows_window_chunk(state, front);
+            }
         }
     }
     facts->windows = windows;
@@ -6122,6 +6226,10 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
             state->c_ran[e] = state->c_ran_now;
             state->c_targets[e] = state->c_target_now;
             state->c_ticks[e] = state->c_ticks_now;
+            if (state->x_tables != NULL)
+            {
+                state->x_ticks[e] = state->x_ticks_now;
+            }
             if (__builtin_expect(state->c_fault, 0) && placed && state->c_ran_now == BUSTER_NODE_CONTEXTS_RAN_TAKEN)
             {
                 node_facts_reader_fault(state, e, root_place);
@@ -6141,6 +6249,12 @@ static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ra
     state->c_ran_now = ran;
     state->c_ticks_now = ticks;
     state->c_target_now = target;
+}
+
+// The reference's X's ticks on the expression at hand, for X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS).
+static void node_facts_reader_rows(struct NodeFactsReader* state, uint64_t ticks)
+{
+    state->x_ticks_now = ticks;
 }
 
 static void node_facts_reader_tests(struct NodeFactsReader* state, struct NodeCensusReader* tests)

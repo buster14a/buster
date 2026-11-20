@@ -705,6 +705,18 @@ run every part of `test-checker` with `BUSTER_CHECK_RECORD_DIGESTS=FILE`, sort
 FILE's lines unique, and put them after the table's three comment lines; the
 PR says what vouches for the changed graphs.
 
+The checker's typed streams are recorded the same way, in
+`tests/checker/stream-digests.tsv` (#2924, C12c-3): each source fixture's
+stream, keyed as above, and each comparison's reference stream (a generated
+graph's, a builtin or x86 graph's, the transitions' and the scheduler's), keyed
+by its site and the graph (`check_test_graph_key`: its nodes, columns, leaves,
+extensions and suppressed warnings). They were recorded where the checker's
+scalar schedule and node order agreed; `-` marks a case whose interned types
+depend on the tests run before it (a part's against a whole run's). A case with
+no line passes, as above. A checker change that changes a recorded stream
+records again with `BUSTER_CHECK_RECORD_STREAM_DIGESTS=FILE`, every part and a
+whole run, a key with two digests `-`.
+
 Ten test files' own source tables, 596 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`
 (`c_checker_test.c`) reads and runs. Each case is written to a file, clang

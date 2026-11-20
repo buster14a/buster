@@ -1908,6 +1908,27 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     return same;
 }
 
+// The return facts' definition (#2924): check_program_return_node at every node in order, with the unknown declarations
+// and the library names check_program_return_facts gives it, a node's operands' facts made before it. Its `count` + 1
+// entries end with the sink, zero; null where scratch runs out.
+static uint8_t* check_test_return_facts_definition(CheckProgram* program, Arena* scratch)
+{
+    const uint32_t count = program->input->graph.count;
+    uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t* unknowns = NULL;
+    const bool ready = facts != NULL && check_program_return_unknowns(program, scratch, &unknowns, false);
+    const uint8_t* names = ready ? check_program_return_library_names(program->identifiers, scratch) : NULL;
+    for (uint32_t node = 0; ready && node < count; node += 1)
+    {
+        facts[node] = check_program_return_node(program, facts, node, unknowns, names);
+    }
+    if (ready)
+    {
+        facts[count] = 0;
+    }
+    return ready ? facts : NULL;
+}
+
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), for a target (null for
 // x86-64's), against clang's build of it with the same, or of `oracle_source` where it isn't null, which must differ
 // from it with `mismatch` (check_test_program_execute_with_alignment); its executable runs where `run_native` says the
@@ -1940,7 +1961,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         Arena bytes = arena_reserve(UINT64_C(1) << 22);
         Arena scratch = arena_reserve(plan_room);
         const ParseOptions parse_options = { .scalar = path == 0 };
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         bool ready = input_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
                      parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
         CheckInput input = { 0 };
@@ -1981,12 +2002,12 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
             check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
-            // The return facts' vector path visits only the nodes that can have facts (check_program_return_sparse): every
-            // node's must be what the scalar path, which visits each, gives it.
+            // The return facts' walk visits only the nodes that can have facts (check_program_return_sparse): every
+            // node's must be the definition's, check_program_return_node at every node in order.
             const uint64_t facts_mark = scratch.length;
-            const uint8_t* exact = check_program_return_facts(&program, &scratch, NULL, true);
+            const uint8_t* exact = check_test_return_facts_definition(&program, &scratch);
             const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
-            snprintf(description, sizeof(description), "%s: the return facts' vector path gives every node the scalar path's facts", name);
+            snprintf(description, sizeof(description), "%s: the return facts' walk gives every node the definition's facts", name);
             check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
             arena_pop_to(&scratch, facts_mark);
         }
@@ -2613,7 +2634,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
@@ -2770,7 +2791,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };

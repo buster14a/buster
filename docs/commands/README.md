@@ -179,6 +179,7 @@ The original section titles are retained in their owning guides.
 - [An update on the window (#2850)](lowering.md#an-update-on-the-window-2850).
 - [A condition's branches on the window (#2850)](lowering.md#a-conditions-branches-on-the-window-2850).
 - [The records' bytes' columns (#2850)](lowering.md#the-records-bytes-columns-2850).
+- [X's rows on the window (#2850)](lowering.md#xs-rows-on-the-window-2850).
 - [Type tests](types.md#type-tests).
 - [Type benchmark](types.md#type-benchmark).
 - [Checker corpus and semantic mutations](checker-corpus.md#checker-corpus-and-semantic-mutations).

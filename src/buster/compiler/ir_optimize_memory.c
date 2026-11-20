@@ -5,7 +5,8 @@
 // after SCCP and the identities and before dead-code removal, on the analyses it already has (CFG, uses, dominators,
 // SCCP's constants). A plain load takes the value of an earlier access of the same bytes, the same type and the same
 // memory: an earlier load's value, or the value an earlier store stored, where no write of that memory may come between
-// on any path from the access to the load. The load forwards that value as an identity does (IrOptimizeWork.forward):
+// on any path from the access to the load. A byte or word load can also take the operand of a zero extension that the
+// preceding memory event stored at the same address in this block. The load forwards its value as an identity does:
 // its users read the value, and the load is gone.
 //
 // An access's address is a root value, an optional index value and its scale, and a constant offset, read through the
@@ -907,6 +908,28 @@ static void ir_memory_count(IrMemoryUndo* undo, uint32_t* undo_count, uint32_t* 
     *counter = value;
 }
 
+// On x86-64 a wider integer's low bytes start at its address. If the preceding event is a plain store, it is also
+// access - 1. Matching its address family and offset excludes a different byte or a possibly aliasing address.
+static uint32_t ir_memory_narrow_load(const IrMemoryWork* m, uint32_t load, uint32_t access, uint32_t previous)
+{
+    const IrFunction* f = m->ir->function;
+    uint32_t value = load;
+    if ((m->info[previous] & BUSTER_IR_MEMORY_KIND) == BUSTER_IR_MEMORY_STORE &&
+        m->families[access - 1] == m->families[access] && m->offsets[access - 1] == m->offsets[access])
+    {
+        const uint32_t stored = ir_optimize_forwarded(m->ir, f->b[previous]);
+        if (f->op[stored] == IR_ZEXT)
+        {
+            const uint32_t narrow = ir_optimize_forwarded(m->ir, f->a[stored]);
+            if (f->type[narrow] == f->type[load] && f->op[narrow] != IR_UNDEF)
+            {
+                value = narrow;
+            }
+        }
+    }
+    return value;
+}
+
 // The decision: the dominator tree in preorder, each block's events in order (`access_first[b]` the first of block b's
 // accesses among them). A write adds to general memory's
 // count, a marker to its slot's class's (or general memory's), a store to its class's and its family's and enters its
@@ -946,7 +969,8 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
             }
             const bool executable = work->blocks[block] != 0;
             uint32_t k = access_first[block];
-            for (uint32_t event = m->event_first[block]; event < m->event_first[(uint64_t)block + 1]; event += 1)
+            const uint32_t first = m->event_first[block];
+            for (uint32_t event = first; event < m->event_first[(uint64_t)block + 1]; event += 1)
             {
                 const uint32_t i = m->events[event];
                 const uint32_t kind = m->info[i] & BUSTER_IR_MEMORY_KIND;
@@ -965,7 +989,6 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
                     const uint32_t family = m->families[k];
                     const uint32_t class = m->classes[k];
                     const uint32_t epoch = epochs[class != 0];
-                    k += 1;
                     if (kind == BUSTER_IR_MEMORY_STORE)
                     {
                         ir_memory_count(undo, &undo_count, &class_counts[class], class_counts[class] + 1);
@@ -978,14 +1001,17 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
                         const uint32_t writes = class_counts[class] - entry.class_count;
                         taken = m->key_overlapped[key] != 0 ? writes == 0 : writes == family_counts[family] - entry.family_count;
                     }
-                    if (taken)
+                    uint32_t value = taken ? entry.value : i;
+                    if (!taken)
                     {
-                        work->forward[i] = entry.value;
-                        forwarded += 1;
-                    }
-                    else
-                    {
-                        const uint32_t value = kind == BUSTER_IR_MEMORY_STORE ? ir_optimize_forwarded(work, f->b[i]) : i;
+                        if (kind == BUSTER_IR_MEMORY_STORE)
+                        {
+                            value = ir_optimize_forwarded(work, f->b[i]);
+                        }
+                        else if (executable && event != first && (f->type[i] == IR_I8 || f->type[i] == IR_I16))
+                        {
+                            value = ir_memory_narrow_load(m, i, k, m->events[event - 1]);
+                        }
                         undo[undo_count] = (IrMemoryUndo){ .key = key, .entry = entry };
                         undo_count += 1;
                         entries[key] = (IrMemoryEntry){
@@ -995,6 +1021,12 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
                             .epoch = f->op[value] == IR_UNDEF ? UINT32_MAX : epoch,
                         };
                     }
+                    if (kind == BUSTER_IR_MEMORY_LOAD && value != i)
+                    {
+                        work->forward[i] = value;
+                        forwarded += 1;
+                    }
+                    k += 1;
                 }
             }
         }

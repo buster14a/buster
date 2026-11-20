@@ -864,26 +864,32 @@ static const uint16_t ir_type_bits[IR_TYPE_COUNT] = {
     [IR_M32] = 32,
     [IR_M64] = 64,
 };
-static const char* const ir_type_names[IR_TYPE_COUNT] = {
-    "void",
-    "i1",
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "i128",
-    "f32",
-    "f64",
-    "f80",
-    "ptr",
-    "v4i32",
-    "v8i32",
-    "v16i32",
-    "m8",
-    "m16",
-    "m32",
-    "m64",
-};
+// The printer's spellings and the text reader's length column have the same enum order.
+#define BUSTER_IR_NAME_TEXT(word) word,
+#define BUSTER_IR_NAME_LENGTH(word) (sizeof(word) - 1),
+
+#define BUSTER_IR_TYPE_SPELLINGS(X) \
+    X("void") \
+    X("i1") \
+    X("i8") \
+    X("i16") \
+    X("i32") \
+    X("i64") \
+    X("i128") \
+    X("f32") \
+    X("f64") \
+    X("f80") \
+    X("ptr") \
+    X("v4i32") \
+    X("v8i32") \
+    X("v16i32") \
+    X("m8") \
+    X("m16") \
+    X("m32") \
+    X("m64")
+static const char* const ir_type_names[IR_TYPE_COUNT] = { BUSTER_IR_TYPE_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_type_name_lengths[IR_TYPE_COUNT] = { BUSTER_IR_TYPE_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_TYPE_SPELLINGS
 // A vector operation's lanes' names (#141's element types), by IrSimdLane, and its vector type's, by its width (16, 32 or
 // 64 bytes) and lanes: `add.v16i8` is an add of v4i32's 16 bytes as 8-bit lanes, its flags I8.
 static const char* const ir_lane_names[IR_SIMD_LANE_COUNT] = { "i32", "i8", "i16", "i64", "f32", "f64" };
@@ -892,78 +898,80 @@ static const char* const ir_lane_type_names[3][IR_SIMD_LANE_COUNT] = {
     { "v8i32", "v32i8", "v16i16", "v4i64", "v8f32", "v4f64" },
     { "v16i32", "v64i8", "v32i16", "v8i64", "v16f32", "v8f64" },
 };
-static const char* const ir_op_names[IR_OP_COUNT] = {
-    "invalid",
-    "const",
-    "undef",
-    "param",
-    "copy",
-    "add",
-    "sub",
-    "mul",
-    "sdiv",
-    "udiv",
-    "srem",
-    "urem",
-    "and",
-    "or",
-    "xor",
-    "shl",
-    "lshr",
-    "ashr",
-    "neg",
-    "not",
-    "fadd",
-    "fsub",
-    "fmul",
-    "fdiv",
-    "fneg",
-    "icmp",
-    "fcmp",
-    "select",
-    "trunc",
-    "zext",
-    "sext",
-    "ftrunc",
-    "fext",
-    "sitofp",
-    "uitofp",
-    "fptosi",
-    "fptoui",
-    "inttoptr",
-    "ptrtoint",
-    "bitcast",
-    "stack_addr",
-    "symbol_addr",
-    "address",
-    "load",
-    "store",
-    "call",
-    "call_indirect",
-    "phi",
-    "br",
-    "cbr",
-    "switch",
-    "ret",
-    "unreachable",
-    "alloca",
-    "stack_save",
-    "stack_restore",
-    "br_indirect",
-    "vconst",
-    "vcmp",
-    "vselect",
-    "lifetime",
-    "fence",
-    "intrinsic",
-    "rmw",
-    "masked_load",
-    "masked_store",
-    "compress_store",
-    "gather",
-    "fma",
-    "scatter",
-};
+#define BUSTER_IR_OP_SPELLINGS(X) \
+    X("invalid") \
+    X("const") \
+    X("undef") \
+    X("param") \
+    X("copy") \
+    X("add") \
+    X("sub") \
+    X("mul") \
+    X("sdiv") \
+    X("udiv") \
+    X("srem") \
+    X("urem") \
+    X("and") \
+    X("or") \
+    X("xor") \
+    X("shl") \
+    X("lshr") \
+    X("ashr") \
+    X("neg") \
+    X("not") \
+    X("fadd") \
+    X("fsub") \
+    X("fmul") \
+    X("fdiv") \
+    X("fneg") \
+    X("icmp") \
+    X("fcmp") \
+    X("select") \
+    X("trunc") \
+    X("zext") \
+    X("sext") \
+    X("ftrunc") \
+    X("fext") \
+    X("sitofp") \
+    X("uitofp") \
+    X("fptosi") \
+    X("fptoui") \
+    X("inttoptr") \
+    X("ptrtoint") \
+    X("bitcast") \
+    X("stack_addr") \
+    X("symbol_addr") \
+    X("address") \
+    X("load") \
+    X("store") \
+    X("call") \
+    X("call_indirect") \
+    X("phi") \
+    X("br") \
+    X("cbr") \
+    X("switch") \
+    X("ret") \
+    X("unreachable") \
+    X("alloca") \
+    X("stack_save") \
+    X("stack_restore") \
+    X("br_indirect") \
+    X("vconst") \
+    X("vcmp") \
+    X("vselect") \
+    X("lifetime") \
+    X("fence") \
+    X("intrinsic") \
+    X("rmw") \
+    X("masked_load") \
+    X("masked_store") \
+    X("compress_store") \
+    X("gather") \
+    X("fma") \
+    X("scatter")
+static const char* const ir_op_names[IR_OP_COUNT] = { BUSTER_IR_OP_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_op_name_lengths[IR_OP_COUNT] = { BUSTER_IR_OP_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_OP_SPELLINGS
 
 // The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
 // followed by their bytes (vector64, mask8).
@@ -994,51 +1002,55 @@ static const char* const ir_form_names[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUST
 
 // An intrinsic's operations' names in the text form (BUSTER_IR_INTRINSIC_*), after its operands as a comparison's
 // predicate is.
-static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
-    "mulhu",
-    "pdep",
-    "pext",
-    "bzhi",
-    "bextr",
-    "splat",
-    "tzcnt",
-    "bsf",
-    "lzcnt",
-    "bsr",
-    "popcnt",
-    "bswap",
-    "saddo",
-    "ssubo",
-    "smulo",
-    "extract",
-    "widen",
-    "insert",
-    "permute",
-    "shuffle",
-    "align",
-    "shuffle_lanes",
-    "extend",
-    "truncate",
-    "shift",
-    "lane_op",
-    "permute2",
-    "ternlog",
-    "compress",
-    "expand",
-    "funnel",
-    "dot",
-    "aes",
-    "lane_extract",
-    "lane_insert",
-    "movemask",
-    "reduce",
-    "lane_unary",
-    "fround",
-    "cvtt",
-    "bitshuffle",
-    "quadword_op",
-    "pairwise",
-};
+#define BUSTER_IR_INTRINSIC_SPELLINGS(X) \
+    X("mulhu") \
+    X("pdep") \
+    X("pext") \
+    X("bzhi") \
+    X("bextr") \
+    X("splat") \
+    X("tzcnt") \
+    X("bsf") \
+    X("lzcnt") \
+    X("bsr") \
+    X("popcnt") \
+    X("bswap") \
+    X("saddo") \
+    X("ssubo") \
+    X("smulo") \
+    X("extract") \
+    X("widen") \
+    X("insert") \
+    X("permute") \
+    X("shuffle") \
+    X("align") \
+    X("shuffle_lanes") \
+    X("extend") \
+    X("truncate") \
+    X("shift") \
+    X("lane_op") \
+    X("permute2") \
+    X("ternlog") \
+    X("compress") \
+    X("expand") \
+    X("funnel") \
+    X("dot") \
+    X("aes") \
+    X("lane_extract") \
+    X("lane_insert") \
+    X("movemask") \
+    X("reduce") \
+    X("lane_unary") \
+    X("fround") \
+    X("cvtt") \
+    X("bitshuffle") \
+    X("quadword_op") \
+    X("pairwise")
+static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = { BUSTER_IR_INTRINSIC_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_intrinsic_name_lengths[BUSTER_IR_INTRINSIC_COUNT] = { BUSTER_IR_INTRINSIC_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_INTRINSIC_SPELLINGS
+#undef BUSTER_IR_NAME_LENGTH
+#undef BUSTER_IR_NAME_TEXT
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
 static const char* const ir_fence_orders[BUSTER_IR_FENCE_SEQ_CST + 1] = {

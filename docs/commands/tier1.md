@@ -146,14 +146,14 @@ requirements. [Command index](README.md).
   and the Tier 1 compiler uses one lane:
 
   ```sh
-  ./build/compiler measure-tier1-programs --sizes-only --check-code-size=lua --clang clang --sqlite /path/to/sqlite --lua /path/to/lua/src
+  ./build/compiler measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite /path/to/sqlite --lua /path/to/lua/src
   ```
 
   The regular program measurement reports the same sizes before timing, and
-  its existing 9700X CI step enforces the Lua bound. Hosted correctness uses
-  the same Lua gate, the existing compiler build and verified offline inputs;
-  SQLite and `test-c-testsuite --tier1 --code-size` report their current size
-  status without enforcing the threshold. It also checks the size reader and
+  its existing 9700X CI step enforces both bounds. Hosted correctness uses
+  the same gates, the existing compiler build and verified offline inputs, and
+  enforces c-testsuite's with `test-c-testsuite --tier1 --check-code-size`
+  (#2646). It also checks the size reader and
   command with original synthetic sources. PR and merge-queue hardware policy
   is unchanged. These deterministic size checks make no runtime-performance
   claim and require no 9700X run.
@@ -201,15 +201,18 @@ native output, and the counters with the policy on and off.
 ## Integer truth round trips (#1218)
 
 The C driver's Tier 1 path runs `ir_truth_simplify` after wide-integer splitting
-and before optimizer preparation. It rewrites an integer comparison's result,
-possibly copied or sign/zero-extended, tested equal or unequal to zero into the
-original comparison or its integer complement. Copies and extensions of the
-zero operand are recognized too. The bounded walks stop at truncations,
-nonzero constants and other producers; they never complement floating-point
-predicates. The pass changes only comparison operands and predicates in the
+and before optimizer preparation. An equality test against an integer
+comparison's true encoding reuses its predicate. Inequality uses its complement.
+Against zero the choices are reversed. Bounded walks through copies and integer
+extensions on either operand establish the encoding. For example, sign-extending
+i1 to i8 and then zero-extending to i64 gives 255 for true. Reversing the
+extension kinds gives 1. Truncations, other producers and mismatched constants
+end the match. The pass changes only comparison operands and predicates in the
 lane-owned IR, before use lists and verified-analysis revisions exist. The
 optimizer then removes dead chains and verifies the resulting SSA. Its
-64-byte opcode/type candidate scan has an exact scalar twin and masked tails.
+64-byte opcode/type candidate scan uses masked tails. The `truth-encoding` IR
+pair in `test-ir-optimize` checks both constant positions, mixed extensions
+through i128 and the comparisons that must survive.
 If-conversion (#1382) runs `ir_truth_simplify_values` on its own rounds'
 columns, which also turns a select of truth values tested against zero into an
 i1 select (`c && x` as `select c, x, c`), as
