@@ -190,6 +190,57 @@ static void ir_if_convert_test_pairs(IrOptimizeTest* test, Arena* input, Arena* 
     }
 }
 
+// The false arm's row becomes a select of the two increments. It can no longer describe that arm's sum.
+static void ir_if_convert_test_pair_debug(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    IrFunction f = { 0 };
+    uint8_t flags[] = { BUSTER_IR_DEBUG_BIND_REGIONS, BUSTER_IR_DEBUG_BIND_REGIONS, BUSTER_IR_DEBUG_BIND_REGIONS };
+    IrDebugBinding bindings[] = {
+        { .local = 0, .entry = 5, .value = 5, .anchor = 5, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        { .local = 1, .entry = 7, .value = 7, .anchor = 7, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        { .local = 2, .entry = 9, .value = 9, .anchor = 9, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+    };
+    IrDebugRegion region = { .local = 1, .block = 2, .begin = 7, .end = 8, .block_end = 9, .value = 7, .next = BUSTER_IR_NONE,
+                             .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 };
+    const IrDebugInfo source = {
+        .local_count = BUSTER_ARRAY_LENGTH(flags),
+        .binding_flags = flags,
+        .bindings = bindings,
+        .binding_count = BUSTER_ARRAY_LENGTH(bindings),
+        .regions = &region,
+        .region_count = 1,
+        .entry_count = 11,
+        .first_block_end = 5,
+    };
+    const bool created = ir_if_convert_test_fixture(input, &f, IR_I64, 0, 1, 1, 1) && ir_debug_create(input, &f, &source);
+    ir_optimize_test_expect(test, created, "debug two-arm fixture allocation");
+    if (created)
+    {
+        ir_optimize_test_instruction(&f, 7, IR_ADD, IR_I64, 1, 2, BUSTER_IR_NONE);
+        const bool verified = ir_verify_complete(&f, scratch).error == IR_OK;
+        IrIfConvertResult result = { 0 };
+        const bool folded = verified && ir_if_convert(&f, output, scratch, &result).error == IR_OK && result.sunk == 1 &&
+                            ir_verify_complete(&result.function, scratch).error == IR_OK;
+        const IrFunction* g = &result.function;
+        const IrDebugInfo* debug = g->debug;
+        const bool mapped = folded && debug != NULL && debug->binding_count == BUSTER_ARRAY_LENGTH(bindings) && debug->region_count == 1;
+        ir_optimize_test_expect(test, mapped, "two-arm fold retains a valid debug sidecar");
+        if (mapped)
+        {
+            const uint32_t kept = debug->bindings[0].value;
+            ir_optimize_test_expect(test, debug->bindings[0].kind == IR_DEBUG_BIND_VALUE && kept < g->instruction_count &&
+                                        g->op[kept] == IR_ADD && g->a[kept] == 1 && g->b[kept] == 3 &&
+                                        debug->bindings[2].kind == IR_DEBUG_BIND_VALUE && debug->bindings[2].value == g->block_offsets[3],
+                                    "surviving arm and join bindings still identify their sums");
+            ir_optimize_test_expect(test, debug->bindings[1].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->bindings[1].value == BUSTER_IR_NONE &&
+                                        debug->regions[0].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->regions[0].value == BUSTER_IR_NONE,
+                                    "repurposed arm invalidates its value binding and region");
+        }
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+}
+
 static bool ir_if_convert_test_clamp(Arena* arena, IrFunction* f)
 {
     const IrSizes sizes = {
@@ -909,6 +960,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
         }
         arena_pop_to(&input, 0);
         ir_if_convert_test_pairs(test, &input, &vector, &scratch);
+        ir_if_convert_test_pair_debug(test, &input, &vector, &scratch);
     }
     arena_release(&scratch);
     arena_release(&optimized);

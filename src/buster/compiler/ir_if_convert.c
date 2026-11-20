@@ -183,6 +183,7 @@ struct IrIfConvertWork
     uint32_t recurrences;
     // An accepted head could be an arm of an outer region in the next round.
     bool nested;
+    bool paired;
 };
 
 _Static_assert(IR_OP_COUNT == 70, "a new operation needs its class in ir_if_convert_barriers");
@@ -672,6 +673,7 @@ static void ir_if_convert_plan_pairs(IrIfConvertWork* work, IrIfConvertRegion* r
             if ((left || right) && !ir_if_convert_shared(work, moved, region->moved_count, join_first, region->phis, phi, yes) &&
                 !ir_if_convert_shared(work, moved, region->moved_count, join_first, region->phis, phi, no))
             {
+                work->paired = true;
                 region->pairs |= 1u << p;
                 region->true_right |= (uint32_t)!left << p;
                 region->false_right |= (uint32_t)(na != (left ? ya : yb)) << p;
@@ -934,6 +936,40 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
     }
 }
 
+// With both arm operands in their final order, the later operation can select either differing
+// operand. The join applies the common operation, and normal DCE drops the earlier arm operation.
+static void ir_if_convert_rewrite_pairs(const IrIfConvertWork* work, IrFunction* view, const uint32_t* order)
+{
+    for (uint32_t r = 0; r < work->region_count; r += 1)
+    {
+        const IrIfConvertRegion* region = work->regions + r;
+        uint32_t pairs = region->pairs;
+        while (pairs != 0)
+        {
+            const uint32_t p = (uint32_t)__builtin_ctz(pairs);
+            const uint32_t phi = view->block_offsets[region->join] + p;
+            const uint32_t yes = view->b[phi];
+            const uint32_t no = view->c[phi];
+            const uint32_t select = yes > no ? yes : no;
+            const bool true_right = (region->true_right & (1u << p)) != 0;
+            const bool false_right = (region->false_right & (1u << p)) != 0;
+            const uint32_t common = true_right ? view->b[yes] : view->a[yes];
+            const uint32_t x = true_right ? view->a[yes] : view->b[yes];
+            const uint32_t y = false_right ? view->a[no] : view->b[no];
+            view->op[phi] = view->op[yes];
+            view->op[select] = IR_SELECT;
+            view->a[select] = view->a[phi];
+            view->b[select] = x;
+            view->c[select] = y;
+            view->a[phi] = common;
+            view->b[phi] = select;
+            view->c[phi] = BUSTER_IR_NONE;
+            work->sunk[order[select]] = order[phi];
+            pairs &= pairs - 1;
+        }
+    }
+}
+
 // Row i of the input as output row `out`: its operands by their representatives' new rows, a head's branch to its
 // join, an arm's branch as `unreachable`, a join's phi as its select or with one entry for the region's two, and the
 // phis' and calls' value slices appended from `extra` on. The next free extra word.
@@ -1192,35 +1228,9 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
                 extra = ir_if_convert_row(work, &view, values, fresh, i, out, extra);
             }
         }
-        // With both arm operands in their final order, the later operation can select either differing
-        // operand. The join applies the common operation, and normal DCE drops the earlier arm operation.
-        for (uint32_t r = 0; r < work->region_count && work->sunk_count != 0; r += 1)
+        if (work->paired)
         {
-            const IrIfConvertRegion* region = work->regions + r;
-            uint32_t pairs = region->pairs;
-            while (pairs != 0)
-            {
-                const uint32_t p = (uint32_t)__builtin_ctz(pairs);
-                const uint32_t phi = view.block_offsets[region->join] + p;
-                const uint32_t yes = view.b[phi];
-                const uint32_t no = view.c[phi];
-                const uint32_t select = yes > no ? yes : no;
-                const bool true_right = (region->true_right & (1u << p)) != 0;
-                const bool false_right = (region->false_right & (1u << p)) != 0;
-                const uint32_t common = true_right ? view.b[yes] : view.a[yes];
-                const uint32_t x = true_right ? view.a[yes] : view.b[yes];
-                const uint32_t y = false_right ? view.a[no] : view.b[no];
-                view.op[phi] = view.op[yes];
-                view.op[select] = IR_SELECT;
-                view.a[select] = view.a[phi];
-                view.b[select] = x;
-                view.c[select] = y;
-                view.a[phi] = common;
-                view.b[phi] = select;
-                view.c[phi] = BUSTER_IR_NONE;
-                work->sunk[order[select]] = order[phi];
-                pairs &= pairs - 1;
-            }
+            ir_if_convert_rewrite_pairs(work, &view, order);
         }
         // A sunk accumulation's operation row now holds its select, not the value a binding of it described.
         for (uint32_t k = 0; view.debug != NULL && work->sunk_count != 0 && k < view.debug->binding_count; k += 1)
