@@ -2297,36 +2297,44 @@ static uint16_t tier1_emit_cfg_x87_literal_bits(IrConstant constant, uint64_t* b
     return form;
 }
 
-// A constant is loaded at the original x87 use. Until the record is appended its displacement names the
-// pool index. The literal occupies one existing 16-byte mergeable entry, with unused bytes cleared.
+// x87 constants still wait at their original consumers. FLDZ and FLD1 push positive zero and one
+// directly. The displacement of a memory constant names its pool index until the record is appended.
 static X86Instruction tier1_emit_cfg_x87_load(Tier1EmitResult* emitted, uint32_t value, uint8_t base, int32_t offset)
 {
     const IrFunction* function = emitted->prepared.function;
-    if (function->op[value] != IR_CONST)
+    X86Instruction record = tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, offset);
+    if (function->op[value] == IR_CONST)
     {
-        return tier1_emit_cfg_x87_memory(X86_FORM_FLD_M80, base, offset);
+        const uint32_t index = function->a[value];
+        const bool valid = index < function->constant_count && emitted->x87_literal_of != NULL &&
+                           emitted->symbol_access_count <= BUSTER_TIER1_EMIT_LITERAL;
+        const IrConstant constant = valid ? function->constants[index] : (IrConstant){ 0 };
+        uint64_t bits = 0;
+        const uint16_t form = tier1_emit_cfg_x87_literal_bits(constant, &bits);
+        if (valid && form == X86_FORM_FLD_M32 && (bits == 0 || bits == UINT32_C(0x3f800000)))
+        {
+            record = (X86Instruction){ .form = (uint16_t)(bits == 0 ? X86_FORM_FLDZ : X86_FORM_FLD1) };
+        }
+        else
+        {
+            uint32_t literal = valid ? emitted->x87_literal_of[index] : 0;
+            if (valid && literal == 0 && emitted->literal_count < emitted->literal_capacity)
+            {
+                const IrSimdValue bytes = { .words = { bits, form == X86_FORM_FLD_M80 ? (uint16_t)constant.high : 0 } };
+                const uint32_t k = emitted->literal_count++;
+                emitted->literals[k] = bytes;
+                emitted->literal_widths[k] = 16;
+                literal = k + 1;
+                emitted->x87_literal_of[index] = literal;
+            }
+            record = (X86Instruction){
+                .form = (uint16_t)(form | BUSTER_X86_FORM_FIXUP),
+                .mode = BUSTER_X86_MEMORY_RIP,
+                .displacement = literal != 0 ? (int32_t)(literal - 1) : -1,
+            };
+        }
     }
-    const uint32_t index = function->a[value];
-    const bool valid = index < function->constant_count && emitted->x87_literal_of != NULL &&
-                       emitted->symbol_access_count <= BUSTER_TIER1_EMIT_LITERAL;
-    const IrConstant constant = valid ? function->constants[index] : (IrConstant){ 0 };
-    uint64_t bits = 0;
-    const uint16_t form = tier1_emit_cfg_x87_literal_bits(constant, &bits);
-    uint32_t literal = valid ? emitted->x87_literal_of[index] : 0;
-    if (valid && literal == 0 && emitted->literal_count < emitted->literal_capacity)
-    {
-        const IrSimdValue bytes = { .words = { bits, form == X86_FORM_FLD_M80 ? (uint16_t)constant.high : 0 } };
-        const uint32_t k = emitted->literal_count++;
-        emitted->literals[k] = bytes;
-        emitted->literal_widths[k] = 16;
-        literal = k + 1;
-        emitted->x87_literal_of[index] = literal;
-    }
-    return (X86Instruction){
-        .form = (uint16_t)(form | BUSTER_X86_FORM_FIXUP),
-        .mode = BUSTER_X86_MEMORY_RIP,
-        .displacement = literal != 0 ? (int32_t)(literal - 1) : -1,
-    };
+    return record;
 }
 
 static bool tier1_emit_cfg_x87_append(Tier1EmitResult* emitted, Tier1EmitBuffer* buffer, X86Instruction record)
