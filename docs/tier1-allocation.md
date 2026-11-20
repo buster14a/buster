@@ -2110,7 +2110,7 @@ character and for a failed match swapped `n` and `lastmatch` through it.
   function.
 - **A recipe's place.** An interval hinted to its own value that names
   another value's recipe takes the recipe's register only
-  (`tier1_allocation_value_hint`): a recipe without a register there was
+  (`tier1_allocation_valued_hint`): a recipe without a register there was
   recomputed, not stored, and its place says nothing of the value's slot. A
   phi of `sqlite3RunParser`'s token loop and one of Lua's `str_format`, each
   named to the constant that enters its loop, which was recomputed by then,

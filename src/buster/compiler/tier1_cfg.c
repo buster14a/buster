@@ -1339,7 +1339,7 @@ static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, 
 // two values with the header's on every iteration. The value's later ranges keep its own last place: a phi of
 // sqlite3VdbeExec's opcode loop that rested in its slot through the handlers took its entry's register in each of them
 // instead, and the dispatch, short of one, stored the step counter on every opcode. A recipe's exit without a register
-// names no place (tier1_allocation_value_hint).
+// names no place (tier1_allocation_valued_hint).
 static void tier1_cfg_body_hints(const Tier1CfgInput* input, const uint32_t* offsets, Tier1CfgPieces* pieces)
 {
     for (uint32_t v = 0; v < input->value_count; v += 1)
