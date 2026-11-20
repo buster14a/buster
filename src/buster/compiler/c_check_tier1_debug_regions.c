@@ -340,6 +340,12 @@ static uint32_t check_tier1_debug_value_region(const CheckTier1DebugValues* proo
     const uint32_t begin = proof->region_first[local];
     uint32_t first = begin;
     uint32_t end = proof->region_first[local + 1];
+    // Each local's source intervals are ordered and disjoint. Once the last interval has ended, no
+    // machine block or carrier can make that local visible at this entry.
+    if (begin == end || entry >= debug->regions[end - 1].end)
+    {
+        return BUSTER_IR_NONE;
+    }
     while (first < end)
     {
         const uint32_t middle = first + (end - first) / 2;
