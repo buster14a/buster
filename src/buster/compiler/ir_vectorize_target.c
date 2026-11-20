@@ -108,6 +108,13 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
                 }
             }
             target->popcount[from] |= !legacy && ir_vectorize_target_allows(allowed, ir_simd_lane_unary_forms[BUSTER_IR_LANE_UNARY_POPCOUNT][from][w]) ? bit : 0;
+            // The masked tail's (#2807): a masked load and store of the lanes (tier1_select_masked_move's), and the mask of
+            // width >> from lanes from a general register (TIER1_RULE_MASK_FROM_INTEGER's kmov, of at least a byte).
+            const uint32_t lanes = width >> from;
+            const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
+            const bool masked = ir_vectorize_target_allows(allowed, ir_simd_masked_moves[from][0][w]) && ir_vectorize_target_allows(allowed, ir_simd_masked_moves[from][1][w]) &&
+                                ir_vectorize_target_allows(allowed, tier1_select_mask_forms(mask_bytes)->from_general);
+            target->masked[from] |= !legacy && masked ? bit : 0;
         }
         // A reduction: tier1_select_reduce's halvings down to one lane, each with its combining form, then lane 0's move.
         for (uint32_t size = 2; moves && size < 4; size += 1)
