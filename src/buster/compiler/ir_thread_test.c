@@ -148,8 +148,8 @@ static const IrThreadTestFixture ir_thread_test_fixtures[] = {
         .flattened = false,
     },
     {
-        // The truth value read past the test (its successor's own instruction), which only the test reaches: the
-        // successor merges it again (#2608). A chain value read there is left alone (chain-escape).
+        // The truth value read past the test (its successor's own instruction), which only the test reaches: left alone.
+        // #2608 merges again only phis that the test doesn't read (ir_thread_decides).
         .name = "escape",
         .text = "function (i64) -> i64 {\n"
                 "b0:\n"
@@ -176,11 +176,11 @@ static const IrThreadTestFixture ir_thread_test_fixtures[] = {
                 "b4:\n"
                 "  %17 = ret.void %3\n"
                 "}\n",
-        .blocks = 1,
-        .copies = 1,
-        .redirects = 1,
-        .rounds = 1,
-        .merges = 1,
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
         .flattened = false,
     },
     {
@@ -682,10 +682,11 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
     },
     {
         // A loop's header, whose counter is read in the body, which it alone reaches, and whose last sum is read past
-        // its exit, which it alone reaches: each successor would merge one, but threading it would rotate the loop.
-        // Left alone. The `?:` join past the exit, which tests the sum, is threaded: a candidate that isn't a loop's,
-        // so that the CFG and the dominators are built and the header's own test refuses it (the cheap scan would
-        // refuse a function whose only candidate is the header before either).
+        // its exit, which it alone reaches: each successor would merge one, but its test reads the counter, and
+        // threading it would rotate the loop. Left alone. The `?:` join past the exit, which tests the sum, is
+        // threaded: a candidate that isn't a loop's, so that the CFG is built (the cheap scan would refuse a function
+        // whose only candidate is the header before it). later-header and backward-order refuse a header by its own
+        // test alone.
         .name = "loop-header",
         .text = "function (i64) -> i64 {\n"
                 "b0:\n"
@@ -980,9 +981,9 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
     },
     {
         // Two repairs in one round, one inside the other's subtree: the inner block's phi takes the outer number on an
-        // edge, its chain compares them, its true successor passes both to a call and its false one's phi takes the
-        // outer number on its edge. Every one of these reads, copied or merged into another predecessor, reads the
-        // outer merge.
+        // edge, its chain compares them for its false successor's phi (its test reads its truth value alone), its true
+        // successor passes both to a call and its false one's phis take the outer number and the comparison on its
+        // edge. Every one of these reads, copied or merged into another predecessor, reads the outer merge.
         .name = "nested",
         .text = "function (i64) -> i64 {\n"
                 "b0:\n"
@@ -1027,16 +1028,18 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
                 "  %31 = phi.i64 [%21, b5], [%5, b6]\n"
                 "  %32 = icmp.i1 %30, %9 ne\n"
                 "  %33 = icmp.i1 %31, %21 ule\n"
-                "  %34 = and.i1 %32, %33\n"
-                "  %35 = cbr.void %34, b8, b9\n"
+                "  %34 = zext.i64 %33\n"
+                "  %35 = cbr.void %32, b8, b9\n"
                 "b8:\n"
                 "  %36 = call.i64 @1(%31, %21) fixed=(i64, i64) variadic=0\n"
                 "  %37 = ret.void %36\n"
                 "b9:\n"
                 "  %38 = phi.i64 [%21, b7]\n"
-                "  %39 = ret.void %38\n"
+                "  %39 = phi.i64 [%34, b7]\n"
+                "  %40 = add.i64 %38, %39\n"
+                "  %41 = ret.void %40\n"
                 "b10:\n"
-                "  %40 = ret.void %6\n"
+                "  %42 = ret.void %6\n"
                 "}\n",
         .blocks = 2,
         .copies = 4,
@@ -1432,9 +1435,9 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
         .flattened = false,
     },
     {
-        // `n = c ? a : b; if (n < 3) r = n * n;` behind a switch that keeps its edge: the tested phi is the one merged
-        // again, the block's only phi, and every copy reaches the merge besides the block's own edge. A select reads
-        // the number as its false value.
+        // `n = c ? a : b; if (n < 3) r = n * n;` behind a switch that keeps its edge: the block's only phi is the one
+        // tested and read past it, a data select's join, which no edge decides: left alone (ir_thread_decides).
+        // select-kept is its repair with a truth value beside the number.
         .name = "single-phi-kept",
         .text = "function (i64) -> i64 {\n"
                 "b0:\n"
@@ -1462,6 +1465,48 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
                 "  %17 = ret.void %16\n"
                 "b5:\n"
                 "  %18 = ret.void %3\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // single-phi-kept's number beside a truth value that the switch's edge keeps and the jumps make 1 and 0: every
+        // copy reaches the merge besides the block's own edge, and a select reads the number as its false value.
+        .name = "select-kept",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %7 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %8 = trunc.i32 %5\n"
+                "  %9 = switch.void %2, default b3, [" BUSTER_IR_THREAD_TEST_C("00") ", b1], [" BUSTER_IR_THREAD_TEST_C("01") ", b2]\n"
+                "b1:\n"
+                "  %10 = add.i64 %5, %3\n"
+                "  %11 = br.void b3\n"
+                "b2:\n"
+                "  %12 = mul.i64 %5, %3\n"
+                "  %13 = br.void b3\n"
+                "b3:\n"
+                "  %14 = phi.i32 [%8, b0], [%7, b1], [%6, b2]\n"
+                "  %15 = phi.i64 [%5, b0], [%10, b1], [%12, b2]\n"
+                "  %16 = icmp.i1 %14, %6 ne\n"
+                "  %17 = cbr.void %16, b4, b5\n"
+                "b4:\n"
+                "  %18 = icmp.i1 %2, %3 eq\n"
+                "  %19 = select.i64 %18, %3, %15\n"
+                "  %20 = mul.i64 %19, %15\n"
+                "  %21 = ret.void %20\n"
+                "b5:\n"
+                "  %22 = ret.void %3\n"
                 "}\n",
         .blocks = 1,
         .copies = 2,
@@ -1558,8 +1603,8 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
     },
     {
         // The number read past both successors, each of which the other also reaches (a cycle of two blocks that only
-        // the test enters): no successor has the block alone, so no dominators are built for it, which the digest's
-        // count of analyses pins.
+        // the test enters): no successor has the block alone, so no walk runs for it, which the digest's count of the
+        // blocks walked pins.
         .name = "no-lone-successor",
         .text = "function (i64) -> i64 {\n"
                 "b0:\n"
@@ -1697,6 +1742,434 @@ static const IrThreadTestFixture ir_thread_test_repairs[] = {
         .merges = 0,
         .flattened = false,
     },
+    {
+        // `long y = x < lo ? lo : x; return y > hi ? hi : y;` (the driver's if_clamp): the first `?:`'s join is a data
+        // select, its phi tested and read past it on the second's edge, and no edge decides its test. Left alone, so
+        // that if-conversion makes both `?:`s selects (#2608's head threaded it, and the clamp took three branches).
+        .name = "if-clamp",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i64 " BUSTER_IR_THREAD_TEST_C("04") "\n"
+                "  %7 = lshr.i64 %0, %6\n"
+                "  %8 = and.i64 %7, %1\n"
+                "  %9 = icmp.i1 %2, %5 lt\n"
+                "  %10 = cbr.void %9, b1, b2\n"
+                "b1:\n"
+                "  %11 = br.void b3\n"
+                "b2:\n"
+                "  %12 = br.void b3\n"
+                "b3:\n"
+                "  %13 = phi.i64 [%5, b1], [%2, b2]\n"
+                "  %14 = icmp.i1 %13, %8 gt\n"
+                "  %15 = cbr.void %14, b4, b5\n"
+                "b4:\n"
+                "  %16 = br.void b6\n"
+                "b5:\n"
+                "  %17 = br.void b6\n"
+                "b6:\n"
+                "  %18 = phi.i64 [%8, b4], [%13, b5]\n"
+                "  %19 = ret.void %18\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // `y = x < 1 ? 0 : x; return y > 2 ? 2 : y;`, a clamp to constants: the edge of y's 0 decides the test, but the
+        // test reads y, which is read past it. Left alone, for if-conversion.
+        .name = "clamp-constant",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %4 = const.i64 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %5 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %6 = icmp.i1 %2, %3 lt\n"
+                "  %7 = cbr.void %6, b1, b2\n"
+                "b1:\n"
+                "  %8 = br.void b3\n"
+                "b2:\n"
+                "  %9 = br.void b3\n"
+                "b3:\n"
+                "  %10 = phi.i64 [%4, b1], [%2, b2]\n"
+                "  %11 = icmp.i1 %10, %5 gt\n"
+                "  %12 = cbr.void %11, b4, b5\n"
+                "b4:\n"
+                "  %13 = br.void b6\n"
+                "b5:\n"
+                "  %14 = br.void b6\n"
+                "b6:\n"
+                "  %15 = phi.i64 [%5, b4], [%10, b5]\n"
+                "  %16 = ret.void %15\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // `ok = c ? (n = a, a > 1) : (n = b, b < 2); if (ok) r = n + 1;`: the number isn't tested, but the truth value
+        // is a comparison on every edge, so no edge decides the test. Left alone.
+        .name = "undecided",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i64 " BUSTER_IR_THREAD_TEST_C("04") "\n"
+                "  %7 = lshr.i64 %0, %6\n"
+                "  %8 = and.i64 %7, %1\n"
+                "  %9 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %10 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %11 = icmp.i1 %2, %10 ult\n"
+                "  %12 = cbr.void %11, b1, b2\n"
+                "b1:\n"
+                "  %13 = icmp.i1 %5, %10 ugt\n"
+                "  %14 = zext.i32 %13\n"
+                "  %15 = br.void b3\n"
+                "b2:\n"
+                "  %16 = icmp.i1 %8, %3 ult\n"
+                "  %17 = zext.i32 %16\n"
+                "  %18 = br.void b3\n"
+                "b3:\n"
+                "  %19 = phi.i32 [%14, b1], [%17, b2]\n"
+                "  %20 = phi.i64 [%5, b1], [%8, b2]\n"
+                "  %21 = icmp.i1 %19, %9 ne\n"
+                "  %22 = cbr.void %21, b4, b5\n"
+                "b4:\n"
+                "  %23 = add.i64 %20, %10\n"
+                "  %24 = ret.void %23\n"
+                "b5:\n"
+                "  %25 = ret.void %3\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // A loop's header that the entering edge decides (`while (go) { f(n); go = 0; n = b; }`), whose number the body,
+        // which it alone reaches, passes to a call: its back edge comes from a later block, the cheap test of a loop's
+        // header, though every phi input is the entry's. Left alone.
+        .name = "later-header",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %4 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %5 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %6 = lshr.i64 %0, %5\n"
+                "  %7 = and.i64 %6, %1\n"
+                "  %8 = br.void b1\n"
+                "b1:\n"
+                "  %9 = phi.i32 [%4, b0], [%3, b2]\n"
+                "  %10 = phi.i64 [%2, b0], [%7, b2]\n"
+                "  %11 = icmp.i1 %9, %3 ne\n"
+                "  %12 = cbr.void %11, b2, b3\n"
+                "b2:\n"
+                "  %13 = call.i64 @1(%10, %2) fixed=(i64, i64) variadic=0\n"
+                "  %14 = br.void b1\n"
+                "b3:\n"
+                "  %15 = ret.void %7\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // A `?:` join, not a loop's header, whose number one predecessor takes from a block laid out after it: the
+        // cheap test of a loop's header (a phi input at or past the join) refuses it, a false refusal. The plain `?:`
+        // join on its false successor's path is threaded, so that the CFG is built: the cheap scan alone would refuse
+        // a function whose only candidate takes such a value.
+        .name = "backward-order",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %4 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %5 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %6 = lshr.i64 %0, %5\n"
+                "  %7 = and.i64 %6, %1\n"
+                "  %8 = icmp.i1 %2, %7 ult\n"
+                "  %9 = cbr.void %8, b3, b2\n"
+                "b1:\n"
+                "  %10 = br.void b2\n"
+                "b2:\n"
+                "  %11 = phi.i32 [%3, b0], [%4, b1]\n"
+                "  %12 = phi.i64 [%7, b0], [%15, b1]\n"
+                "  %13 = icmp.i1 %11, %3 ne\n"
+                "  %14 = cbr.void %13, b4, b5\n"
+                "b3:\n"
+                "  %15 = mul.i64 %2, %5\n"
+                "  %16 = br.void b1\n"
+                "b4:\n"
+                "  %17 = add.i64 %12, %1\n"
+                "  %18 = ret.void %17\n"
+                "b5:\n"
+                "  %19 = icmp.i1 %2, %5 eq\n"
+                "  %20 = cbr.void %19, b7, b6\n"
+                "b6:\n"
+                "  %21 = br.void b7\n"
+                "b7:\n"
+                "  %22 = phi.i32 [%4, b5], [%3, b6]\n"
+                "  %23 = icmp.i1 %22, %3 ne\n"
+                "  %24 = cbr.void %23, b8, b9\n"
+                "b8:\n"
+                "  %25 = ret.void %7\n"
+                "b9:\n"
+                "  %26 = ret.void %5\n"
+                "}\n",
+        .blocks = 1,
+        .copies = 1,
+        .redirects = 1,
+        .rounds = 1,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // A loop's header laid out after its body, its only back edge's block, with every phi input the entry's: the
+        // cheap test doesn't see it, and it is threaded, rotating the loop exactly. The entry's copy decides it for the
+        // body, and the body's copy, its back edge's, for the exit; the body merges the number from both. The number is
+        // the block's first phi, before the truth value the test reads.
+        .name = "rotated-header",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %4 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %5 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %6 = lshr.i64 %0, %5\n"
+                "  %7 = and.i64 %6, %1\n"
+                "  %8 = br.void b2\n"
+                "b1:\n"
+                "  %9 = call.i64 @1(%11, %2) fixed=(i64, i64) variadic=0\n"
+                "  %10 = br.void b2\n"
+                "b2:\n"
+                "  %11 = phi.i64 [%2, b0], [%7, b1]\n"
+                "  %12 = phi.i32 [%4, b0], [%3, b1]\n"
+                "  %13 = icmp.i1 %12, %3 ne\n"
+                "  %14 = cbr.void %13, b1, b3\n"
+                "b3:\n"
+                "  %15 = ret.void %7\n"
+                "}\n",
+        .blocks = 1,
+        .copies = 2,
+        .redirects = 0,
+        .rounds = 1,
+        .merges = 1,
+        .flattened = false,
+    },
+    {
+        // `ok = c ? 1 : (n = b, b > 1); if (ok < t) r = n + 1;`: the truth value is 1 on an edge, but the test compares
+        // it with a value from outside the block, which no edge makes a constant. Left alone.
+        .name = "outside-operand",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = trunc.i32 %5\n"
+                "  %7 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %8 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %9 = icmp.i1 %2, %8 ult\n"
+                "  %10 = cbr.void %9, b1, b2\n"
+                "b1:\n"
+                "  %11 = br.void b3\n"
+                "b2:\n"
+                "  %12 = icmp.i1 %2, %8 ugt\n"
+                "  %13 = zext.i32 %12\n"
+                "  %14 = br.void b3\n"
+                "b3:\n"
+                "  %15 = phi.i32 [%7, b1], [%13, b2]\n"
+                "  %16 = phi.i64 [%5, b1], [%2, b2]\n"
+                "  %17 = icmp.i1 %15, %6 ult\n"
+                "  %18 = cbr.void %17, b4, b5\n"
+                "b4:\n"
+                "  %19 = add.i64 %16, %8\n"
+                "  %20 = ret.void %19\n"
+                "b5:\n"
+                "  %21 = ret.void %3\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // The number read two blocks into the false successor's subtree, whose walk back meets that successor: the false
+        // successor merges it.
+        .name = "false-subtree",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %7 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %8 = icmp.i1 %2, %5 lt\n"
+                "  %9 = cbr.void %8, b1, b2\n"
+                "b1:\n"
+                "  %10 = mul.i64 %5, %3\n"
+                "  %11 = br.void b3\n"
+                "b2:\n"
+                "  %12 = icmp.i1 %5, %7 ugt\n"
+                "  %13 = zext.i32 %12\n"
+                "  %14 = br.void b3\n"
+                "b3:\n"
+                "  %15 = phi.i32 [%6, b1], [%13, b2]\n"
+                "  %16 = phi.i64 [%10, b1], [%2, b2]\n"
+                "  %17 = icmp.i1 %15, %6 ne\n"
+                "  %18 = cbr.void %17, b4, b5\n"
+                "b4:\n"
+                "  %19 = ret.void %3\n"
+                "b5:\n"
+                "  %20 = br.void b6\n"
+                "b6:\n"
+                "  %21 = add.i64 %16, %7\n"
+                "  %22 = ret.void %21\n"
+                "}\n",
+        .blocks = 1,
+        .copies = 2,
+        .redirects = 0,
+        .rounds = 1,
+        .merges = 1,
+        .flattened = false,
+    },
+    {
+        // The number read twice where both successors, each of which only the test enters, meet: the first read's walk
+        // meets both and leaves the number no successor, so the second read walks no more. Left alone.
+        .name = "join-reader",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %7 = const.i64 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %8 = icmp.i1 %2, %5 lt\n"
+                "  %9 = cbr.void %8, b1, b2\n"
+                "b1:\n"
+                "  %10 = mul.i64 %5, %3\n"
+                "  %11 = br.void b3\n"
+                "b2:\n"
+                "  %12 = icmp.i1 %5, %7 ugt\n"
+                "  %13 = zext.i32 %12\n"
+                "  %14 = br.void b3\n"
+                "b3:\n"
+                "  %15 = phi.i32 [%6, b1], [%13, b2]\n"
+                "  %16 = phi.i64 [%10, b1], [%2, b2]\n"
+                "  %17 = icmp.i1 %15, %6 ne\n"
+                "  %18 = cbr.void %17, b4, b5\n"
+                "b4:\n"
+                "  %19 = br.void b6\n"
+                "b5:\n"
+                "  %20 = br.void b6\n"
+                "b6:\n"
+                "  %21 = add.i64 %16, %7\n"
+                "  %22 = mul.i64 %21, %16\n"
+                "  %23 = ret.void %22\n"
+                "}\n",
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    },
+    {
+        // Two `?:` joins repaired in one round, the second in the first's true successor's subtree, its number its first
+        // phi: the first's evaluation knows both its phis, and the second's test must still read its truth value alone.
+        .name = "two-candidates",
+        .text = "function (i64) -> i64 {\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = const.i64 " BUSTER_IR_THREAD_TEST_C("03") "\n"
+                "  %2 = and.i64 %0, %1\n"
+                "  %3 = const.i64 " BUSTER_IR_THREAD_TEST_C("02") "\n"
+                "  %4 = lshr.i64 %0, %3\n"
+                "  %5 = and.i64 %4, %1\n"
+                "  %6 = const.i32 " BUSTER_IR_THREAD_TEST_C("00") "\n"
+                "  %7 = const.i32 " BUSTER_IR_THREAD_TEST_C("01") "\n"
+                "  %8 = const.i64 " BUSTER_IR_THREAD_TEST_C("05") "\n"
+                "  %9 = icmp.i1 %2, %5 lt\n"
+                "  %10 = cbr.void %9, b1, b2\n"
+                "b1:\n"
+                "  %11 = br.void b3\n"
+                "b2:\n"
+                "  %12 = icmp.i1 %5, %3 ugt\n"
+                "  %13 = zext.i32 %12\n"
+                "  %14 = br.void b3\n"
+                "b3:\n"
+                "  %15 = phi.i32 [%7, b1], [%13, b2]\n"
+                "  %16 = phi.i64 [%8, b1], [%2, b2]\n"
+                "  %17 = icmp.i1 %15, %6 ne\n"
+                "  %18 = cbr.void %17, b4, b9\n"
+                "b4:\n"
+                "  %19 = add.i64 %16, %5\n"
+                "  %20 = icmp.i1 %19, %3 ult\n"
+                "  %21 = cbr.void %20, b5, b6\n"
+                "b5:\n"
+                "  %22 = br.void b7\n"
+                "b6:\n"
+                "  %23 = icmp.i1 %2, %5 eq\n"
+                "  %24 = zext.i32 %23\n"
+                "  %25 = br.void b7\n"
+                "b7:\n"
+                "  %26 = phi.i64 [%19, b5], [%5, b6]\n"
+                "  %27 = phi.i32 [%7, b5], [%24, b6]\n"
+                "  %28 = icmp.i1 %27, %6 ne\n"
+                "  %29 = cbr.void %28, b8, b9\n"
+                "b8:\n"
+                "  %30 = mul.i64 %26, %3\n"
+                "  %31 = ret.void %30\n"
+                "b9:\n"
+                "  %32 = ret.void %1\n"
+                "}\n",
+        .blocks = 2,
+        .copies = 4,
+        .redirects = 0,
+        .rounds = 1,
+        .merges = 2,
+        .flattened = false,
+    },
 };
 
 #undef BUSTER_IR_THREAD_TEST_C
@@ -1751,7 +2224,7 @@ static void ir_thread_test_fixture(IrOptimizeTest* test, const IrThreadTestFixtu
             ir_optimize_test_fold(&test->thread_digest, v.rounds);
             ir_optimize_test_fold(&test->thread_digest, v.merges);
             ir_optimize_test_fold(&test->thread_digest, v.attempts);
-            ir_optimize_test_fold(&test->thread_digest, v.analyses);
+            ir_optimize_test_fold(&test->thread_digest, v.walked);
             snprintf(message, sizeof(message), "threading %s: the result is complete SSA", fixture->name);
             const IrCheck complete = ir_verify_complete(&v.function, scratch);
             ir_optimize_test_expect(test, complete.error == IR_OK, message);
@@ -1860,6 +2333,121 @@ static void ir_thread_test_many_phis(IrOptimizeTest* test, Arena* input, Arena* 
     ir_thread_test_fixture(test, &fixture, input, vector, optimized, scratch);
 }
 
+// A `?:` join whose number is read `chain` blocks of jumps past its true successor (#2608): the reader's walk back to
+// the successor visits the reader and the chain, which BUSTER_IR_THREAD_WALK_LIMIT bounds. One block past the limit,
+// the walk is refused and the join is left alone; at the limit, the successor merges the number. With `shortcut`, the
+// successor also branches to the reader, whose walk meets it at once: a walk past the limit is refused all the same.
+static void ir_thread_test_long_walk(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* optimized, Arena* scratch, uint32_t chain, bool shortcut)
+{
+    static const char head[] = "function (i64) -> i64 {\n"
+                               "b0:\n"
+                               "  %0 = param.i64 0\n"
+                               "  %1 = const.i64 0x00000000000000000000000000000003\n"
+                               "  %2 = and.i64 %0, %1\n"
+                               "  %3 = const.i32 0x00000000000000000000000000000000\n"
+                               "  %4 = const.i32 0x00000000000000000000000000000001\n"
+                               "  %5 = icmp.i1 %2, %1 ult\n"
+                               "  %6 = cbr.void %5, b1, b2\n"
+                               "b1:\n"
+                               "  %7 = br.void b3\n"
+                               "b2:\n"
+                               "  %8 = icmp.i1 %0, %1 ugt\n"
+                               "  %9 = zext.i32 %8\n"
+                               "  %10 = br.void b3\n"
+                               "b3:\n"
+                               "  %11 = phi.i32 [%4, b1], [%9, b2]\n"
+                               "  %12 = phi.i64 [%0, b1], [%2, b2]\n"
+                               "  %13 = icmp.i1 %11, %3 ne\n"
+                               "  %14 = cbr.void %13, b4, b5\n"
+                               "b4:\n";
+    char text[8192];
+    int length = snprintf(text, sizeof(text), "%s", head);
+    if (shortcut)
+    {
+        length += snprintf(text + length, sizeof(text) - (uint64_t)length, "  %%15 = cbr.void %%5, b6, b%u\n", 6 + chain);
+    }
+    else
+    {
+        length += snprintf(text + length, sizeof(text) - (uint64_t)length, "  %%15 = br.void b6\n");
+    }
+    length += snprintf(text + length, sizeof(text) - (uint64_t)length, "b5:\n  %%16 = ret.void %%1\n");
+    for (uint32_t k = 0; k < chain; k += 1)
+    {
+        length += snprintf(text + length, sizeof(text) - (uint64_t)length, "b%u:\n  %%%u = br.void b%u\n", 6 + k, 17 + k, 7 + k);
+    }
+    snprintf(text + length, sizeof(text) - (uint64_t)length, "b%u:\n  %%%u = add.i64 %%12, %%2\n  %%%u = ret.void %%%u\n}\n", 6 + chain, 17 + chain, 18 + chain, 17 + chain);
+    const bool repaired = chain + 1 <= BUSTER_IR_THREAD_WALK_LIMIT;
+    const IrThreadTestFixture fixture = {
+        .name = shortcut ? "walk-past-limit-met" : repaired ? "walk-limit" : "walk-past-limit",
+        .text = text,
+        .blocks = repaired ? 1 : 0,
+        .copies = repaired ? 2 : 0,
+        .redirects = 0,
+        .rounds = repaired ? 1 : 0,
+        .merges = repaired ? 1 : 0,
+        .flattened = false,
+    };
+    ir_thread_test_fixture(test, &fixture, input, vector, optimized, scratch);
+}
+
+// A loop's header that 17 jumps from a switch enter, its back edge's block past it the 18th of its predecessors (#2608):
+// the cheap test of a loop's header reads them 16 at a time, and the last 16 hold the later one. Left alone.
+static void ir_thread_test_header_predecessors(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* optimized, Arena* scratch)
+{
+    char text[8192];
+    int length = snprintf(text, sizeof(text), "function (i64) -> i64 {\n"
+                                              "b0:\n"
+                                              "  %%0 = param.i64 0\n"
+                                              "  %%1 = const.i64 0x0000000000000000000000000000000f\n"
+                                              "  %%2 = and.i64 %%0, %%1\n"
+                                              "  %%3 = const.i32 0x00000000000000000000000000000000\n"
+                                              "  %%4 = const.i32 0x00000000000000000000000000000001\n"
+                                              "  %%5 = const.i64 0x00000000000000000000000000000002\n"
+                                              "  %%6 = lshr.i64 %%0, %%5\n"
+                                              "  %%7 = switch.void %%2, default b17");
+    for (uint32_t k = 0; k < 16; k += 1)
+    {
+        length += snprintf(text + length, sizeof(text) - (uint64_t)length, ", [0x%032x, b%u]", k, k + 1);
+    }
+    length += snprintf(text + length, sizeof(text) - (uint64_t)length, "\n");
+    for (uint32_t k = 1; k <= 17; k += 1)
+    {
+        length += snprintf(text + length, sizeof(text) - (uint64_t)length, "b%u:\n  %%%u = br.void b18\n", k, 7 + k);
+    }
+    length += snprintf(text + length, sizeof(text) - (uint64_t)length, "b18:\n  %%25 = phi.i32");
+    for (uint32_t k = 1; k <= 17; k += 1)
+    {
+        length += snprintf(text + length, sizeof(text) - (uint64_t)length, " [%%4, b%u],", k);
+    }
+    length += snprintf(text + length, sizeof(text) - (uint64_t)length, " [%%3, b20]\n  %%26 = phi.i64");
+    for (uint32_t k = 1; k <= 17; k += 1)
+    {
+        length += snprintf(text + length, sizeof(text) - (uint64_t)length, " [%%2, b%u],", k);
+    }
+    snprintf(text + length, sizeof(text) - (uint64_t)length, " [%%6, b20]\n"
+                                                             "  %%27 = icmp.i1 %%25, %%3 ne\n"
+                                                             "  %%28 = cbr.void %%27, b19, b21\n"
+                                                             "b19:\n"
+                                                             "  %%29 = call.i64 @1(%%26, %%2) fixed=(i64, i64) variadic=0\n"
+                                                             "  %%30 = br.void b20\n"
+                                                             "b20:\n"
+                                                             "  %%31 = br.void b18\n"
+                                                             "b21:\n"
+                                                             "  %%32 = ret.void %%6\n"
+                                                             "}\n");
+    const IrThreadTestFixture fixture = {
+        .name = "header-predecessors",
+        .text = text,
+        .blocks = 0,
+        .copies = 0,
+        .redirects = 0,
+        .rounds = 0,
+        .merges = 0,
+        .flattened = false,
+    };
+    ir_thread_test_fixture(test, &fixture, input, vector, optimized, scratch);
+}
+
 // #2924: the conditional branches' scan against its definition, every count of a batch at several offsets.
 static void ir_thread_test_scans(IrOptimizeTest* test)
 {
@@ -1899,9 +2487,9 @@ static void ir_thread_test_scans(IrOptimizeTest* test)
     uint8_t expected[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
     uint8_t used[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
     uint32_t offsets[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS + 1];
-    uint32_t preorder[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
-    uint32_t ends[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
-    uint32_t idom[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t predecessor_offsets[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS + 1];
+    uint32_t predecessors[2 * BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t reachable[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
     bool escaped = true;
     bool covered = true;
     uint64_t found = 0;
@@ -1992,53 +2580,85 @@ static void ir_thread_test_scans(IrOptimizeTest* test)
         }
         // #2608's second pass over the same rows: the repairable blocks' values alone (every other candidate block),
         // each use outside its block narrowing the value's cover bits to the successors of its block that dominate the
-        // use's. A block's last row names two blocks as its successors and the tree is any interval per block, which the
-        // definition reads through the same ir_thread_cover; every value starts with all its bits, so an untracked value
-        // the scan narrowed would show. Its choices are the round's and the block's, not draws: the shared random stream
-        // stays the first pass's.
+        // use's (a walk back from the use's block, ir_thread_cover). A block's last row names two blocks as its
+        // successors, which are the CFG's edges; every value starts with all its bits, so an untracked value the scan
+        // narrowed would show. A walk takes the bits the value's earlier uses left, so the definition visits the uses
+        // in the scan's order: by 16 rows, each column's lanes, then the rows' extra operands. Its choices are the
+        // round's and the block's, not draws: the shared random stream stays the first pass's.
         const uint32_t block_count = block + 1;
         for (uint32_t i = count; i > 0; i -= 1)
         {
             offsets[blocks[i - 1]] = i - 1;
         }
         offsets[block_count] = count;
-        for (uint32_t k = 0; k < block_count; k += 1)
+        memset(predecessor_offsets, 0, sizeof(predecessor_offsets));
+        for (uint32_t pass = 0; pass < 2; pass += 1)
         {
-            const uint32_t last = offsets[k + 1] - 1;
-            const bool encoded = scan.op[last] == IR_INTRINSIC || scan.op[last] == IR_SCATTER;
-            candidates[k] |= candidates[k] != 0 && !encoded && (k + round) % 2 == 0 ? BUSTER_IR_THREAD_REPAIRABLE : 0;
-            b[last] = encoded ? b[last] : (k * 5 + round) % block_count;
-            c[last] = encoded ? c[last] : (k * 3 + round + 1) % block_count;
-            preorder[k] = k;
-            ends[k] = k + 1 + (k + round) % 3;
-            idom[k] = 0;
+            for (uint32_t k = 0; k < block_count; k += 1)
+            {
+                const uint32_t last = offsets[k + 1] - 1;
+                const bool encoded = scan.op[last] == IR_INTRINSIC || scan.op[last] == IR_SCATTER;
+                candidates[k] |= pass == 0 && candidates[k] != 0 && !encoded && (k + round) % 2 == 0 ? BUSTER_IR_THREAD_REPAIRABLE : 0;
+                b[last] = encoded ? b[last] : (k * 5 + round) % block_count;
+                c[last] = encoded ? c[last] : (b[last] + 1 + (k + round) % 3) % block_count;
+                reachable[k] = 1;
+                for (uint32_t g = 0; !encoded && g < 2; g += 1)
+                {
+                    const uint32_t successor = g == 0 ? b[last] : c[last];
+                    if (pass == 0)
+                    {
+                        predecessor_offsets[successor + 1] += 1;
+                    }
+                    else
+                    {
+                        predecessors[predecessor_offsets[successor]] = k;
+                        predecessor_offsets[successor] += 1;
+                    }
+                }
+            }
+            for (uint32_t k = 0; pass == 0 && k < block_count; k += 1)
+            {
+                predecessor_offsets[k + 1] += predecessor_offsets[k];
+            }
+            for (uint32_t k = block_count; pass == 1 && k > 0; k -= 1)
+            {
+                predecessor_offsets[k] = predecessor_offsets[k - 1];
+            }
+            predecessor_offsets[0] = 0;
         }
         IrFunction g = f;
         g.block_offsets = offsets;
         g.block_count = block_count;
         work.function = &g;
-        work.dominators = (Dominators){
-            .block_count = block_count,
-            .idom = idom,
-            .preorder = preorder,
-            .subtree_end = ends,
-        };
+        work.reachable = reachable;
+        work.cfg.predecessor_offsets = predecessor_offsets;
+        work.cfg.predecessors = predecessors;
         memset(escapes, BUSTER_IR_THREAD_ESCAPE | BUSTER_IR_THREAD_COVERS, sizeof(escapes));
         memset(expected, BUSTER_IR_THREAD_ESCAPE | BUSTER_IR_THREAD_COVERS, sizeof(expected));
         memset(used, 0, sizeof(used));
         ir_thread_escapes(&work, BUSTER_IR_THREAD_REPAIRABLE);
-        for (uint32_t i = 0; i < count; i += 1)
+        for (uint32_t chunk = 0; chunk < count; chunk += 16)
         {
-            const uint32_t mask = ir_value_mask(&g, i);
-            const uint32_t operands[3] = { a[i], b[i], c[i] };
-            for (uint32_t k = 0; k < 3 + ir_extra_value_count(&g, i); k += 1)
+            const uint32_t lanes = count - chunk < 16 ? count - chunk : 16;
+            for (uint32_t k = 0; k < 4; k += 1)
             {
-                const bool present = k < 3 ? (mask >> k & 1) != 0 : true;
-                const uint32_t value = k < 3 ? operands[k] : ir_extra_value(&g, i, k - 3);
-                if (present && (candidates[blocks[value]] & BUSTER_IR_THREAD_REPAIRABLE) != 0 && blocks[value] != blocks[i])
+                for (uint32_t lane = 0; lane < lanes; lane += 1)
                 {
-                    expected[value] &= (uint8_t)(BUSTER_IR_THREAD_ESCAPE | ir_thread_cover(&work, blocks[value], blocks[i]));
-                    used[value] = 1;
+                    const uint32_t i = chunk + lane;
+                    const uint32_t mask = ir_value_mask(&g, i);
+                    const uint32_t operands[3] = { a[i], b[i], c[i] };
+                    for (uint32_t x = 0; x < (k < 3 ? 1 : ir_extra_value_count(&g, i)); x += 1)
+                    {
+                        const bool present = k < 3 ? (mask >> k & 1) != 0 : true;
+                        const uint32_t value = k < 3 ? operands[k] : ir_extra_value(&g, i, x);
+                        if (present && (candidates[blocks[value]] & BUSTER_IR_THREAD_REPAIRABLE) != 0 && blocks[value] != blocks[i])
+                        {
+                            const uint32_t possible = expected[value] & BUSTER_IR_THREAD_COVERS;
+                            const uint32_t cover = possible != 0 ? ir_thread_cover(&work, blocks[value], blocks[i], possible) : 0;
+                            expected[value] &= (uint8_t)(BUSTER_IR_THREAD_ESCAPE | cover);
+                            used[value] = 1;
+                        }
+                    }
                 }
             }
         }
@@ -2214,6 +2834,10 @@ static void ir_thread_tests(IrOptimizeTest* test)
     if (ready)
     {
         ir_thread_test_many_phis(test, &input, &vector, &optimized, &scratch);
+        ir_thread_test_long_walk(test, &input, &vector, &optimized, &scratch, BUSTER_IR_THREAD_WALK_LIMIT - 1, false);
+        ir_thread_test_long_walk(test, &input, &vector, &optimized, &scratch, BUSTER_IR_THREAD_WALK_LIMIT, false);
+        ir_thread_test_long_walk(test, &input, &vector, &optimized, &scratch, BUSTER_IR_THREAD_WALK_LIMIT, true);
+        ir_thread_test_header_predecessors(test, &input, &vector, &optimized, &scratch);
     }
     test->random = shared;
     const uint32_t widths[] = { 2, 31, 32, 33, 64, 128, 256, 512 };

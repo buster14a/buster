@@ -24,10 +24,13 @@
 // such reader (an instruction's block, or a phi entry's predecessor). Threading gives S the predecessors that now reach
 // it, so the rewrite puts a phi at S's start that merges the phi again, each predecessor's input to it (and the phi
 // itself from J where J stays), and every reader outside J reads that merge: local SSA repair over S's dominance
-// subtree, which a new path still enters through S. J's chain values still may not be read past it, and a J that heads
-// a loop (a predecessor it dominates) isn't repaired: threading it would rotate the loop. The dominators are built only
-// in a round where some candidate needs the repair, after the escape scan, and a second pass of that scan over the
-// repairable candidates' values intersects the successors that dominate each reader.
+// subtree, which a new path still enters through S. J's chain values still may not be read past it. The repair is a
+// truth value's: J's test reads none of the phis read past J and is a constant on some predecessor's edge, so a data
+// select's join (`y = x < lo ? lo : x; return y > hi ? hi : y;`) is left to if-conversion (ir_thread_decides). A J that
+// looks like a loop's header in block order isn't repaired: threading it would rotate the loop. These tests are cheap,
+// and run before any walk: only then does a second pass of the escape scan, over the repairable candidates' values,
+// intersect the successors that dominate each reader, each by a bounded walk back from the reader (ir_thread_cover).
+// No dominator tree is built.
 //
 // Bounds: J is not the entry or a label's block, has at least one phi, then at most BUSTER_IR_THREAD_BLOCK_LIMIT pure
 // operations (constants, copies, extensions, truncations, integer comparisons and bitwise operations of integers and
@@ -39,11 +42,11 @@
 // is both threaded and another's threaded predecessor or successor: a round's rewrite reads one CFG.
 // BUSTER_IR_THREAD_ROUNDS rounds at most take the chains `a && b && c` makes, a next one only where a candidate was
 // left to it: by the roles, a repairable one whose readers no successor dominated yet, or a block of phis that took a
-// copy, which may have a candidate's shape with it (the `?:` join that jumps to an `&&`'s, #2608). A function whose
-// candidate blocks' phis all take a value from a later instruction (loops' headers) builds no CFG. A 64-byte opcode
-// scan finds the conditional branches; the rest runs only for blocks that pass it. A successful result borrows the
-// input's immutable tables, as ir_if_convert's does: the input and output arenas stay alive until the optimizer copies
-// the function. The input is never mutated.
+// copy and has a candidate's shape with it (the `?:` join that jumps to an `&&`'s, #2608; ir_thread_shaped). A
+// function whose candidate blocks' phis all take a value from a later instruction (loops' headers) builds no CFG. A
+// 64-byte opcode scan finds the conditional branches; the rest runs only for blocks that pass it. A successful result
+// borrows the input's immutable tables, as ir_if_convert's does: the input and output arenas stay alive until the
+// optimizer copies the function. The input is never mutated.
 
 #ifndef BUSTER_IR_THREAD_C
 #define BUSTER_IR_THREAD_C
@@ -53,6 +56,8 @@
 // A candidate's operations, its chain's and the dead ones beside it that the lowering left for the optimizer.
 #define BUSTER_IR_THREAD_BLOCK_LIMIT 32u
 #define BUSTER_IR_THREAD_COPY_LIMIT 16u
+// The blocks a repair's walk from a reader back to the successor that merges it may visit (#2608), a multiple of 16.
+#define BUSTER_IR_THREAD_WALK_LIMIT 64u
 #define BUSTER_IR_THREAD_WIDE_PHI 32u
 // A shape candidate whose wide phis have been indexed, after the escape scan.
 #define BUSTER_IR_THREAD_INDEXED 2u
@@ -92,10 +97,10 @@ struct IrThreadResult
     uint32_t rounds;
     // The phis read past a threaded block that a successor merges again (#2608).
     uint32_t merges;
-    // The work: the rounds run, changed or not (a round without a candidate is a byte scan alone), and the dominator
-    // analyses the repairs built.
+    // The work: the rounds run, changed or not (a round without a candidate is a byte scan alone), and the blocks the
+    // repairs' walks from their readers visited (ir_thread_cover).
     uint32_t attempts;
-    uint32_t analyses;
+    uint32_t walked;
 };
 
 typedef struct IrThreadWork IrThreadWork;
@@ -111,8 +116,6 @@ struct IrThreadWork
     // a repairable phi's covering successors (BUSTER_IR_THREAD_ESCAPE and _COVERS).
     uint32_t* candidates;
     uint8_t* escapes;
-    // Built only in a round with a repairable candidate (#2608).
-    Dominators dominators;
     // Per instruction of a threaded block: whether its branch or its successors' phis read it, through its chain: what a
     // copy takes. The block's other operations are pure and read by nothing else, which ir_thread_escapes checked.
     uint8_t* needed;
@@ -133,9 +136,11 @@ struct IrThreadWork
     uint32_t cloned;
     // The threaded blocks' phis their successors merge again: the rewrite's new instructions besides the copies.
     uint32_t merged;
-    uint32_t analyses;
+    // The blocks the repairs' walks visited (ir_thread_cover).
+    uint32_t walked;
     // Candidates or their predecessors left for another round by the roles, repairable candidates whose readers no
-    // successor dominated, and copying predecessors that begin with a phi: what a next round may still thread.
+    // successor dominated, and copying predecessors that have a candidate's shape with the copy: what a next round may
+    // still thread.
     uint32_t deferred;
 };
 
@@ -218,25 +223,72 @@ static bool ir_thread_alone(const IrCfg* cfg, uint32_t block)
     return block != 0 && cfg->predecessor_offsets[(uint64_t)block + 1] - cfg->predecessor_offsets[block] == 1;
 }
 
-// Which of the true and false successors of repairable block J dominate block `at`, as BUSTER_IR_THREAD_COVER_YES and
-// _NO. The escapes byte starts with the bits of those that J alone enters (ir_thread_alone), whose subtrees are apart:
-// one at most is left once a use narrowed it.
-static uint32_t ir_thread_cover(const IrThreadWork* work, uint32_t block, uint32_t at)
+// Which of repairable block J's successors that `possible` names (BUSTER_IR_THREAD_COVER_YES and _NO, of those J alone
+// enters) dominates block `at` (#2608): a backward walk from `at` over predecessors that stops at them. J's phi
+// dominates its reader, so J dominates `at` and the walk stays in J's region until it reaches J itself. Where it never
+// does, every path from J to `at` passes a stop it met, and so does every path from the entry, which passes J: the one
+// it met dominates `at`. None does where it reached J (through J's other successor: a path from the entry reaches J
+// without passing a stop, J being their only predecessor), met both (successors J alone enters dominate subtrees
+// apart), or would visit more than BUSTER_IR_THREAD_WALK_LIMIT blocks, which refuses the repair. The answer is the full
+// one's within `possible`, so a use's walk takes only what the value's earlier uses left. A repair's readers are a few
+// blocks past its successor (`tonumberns`'s number is read in the arithmetic past the test), so this bounded walk
+// replaces the whole function's dominator tree that #2608's first form built in each round with a repairable
+// candidate (1,153 of them on sqlite3.c, 160,053 blocks). Its queue is its visited set, padded with BUSTER_IR_NONE:
+// whether it holds a block is one compare of each 16 entries.
+static uint32_t ir_thread_cover(IrThreadWork* work, uint32_t block, uint32_t at, uint32_t possible)
 {
     const IrFunction* f = work->function;
+    const IrCfg* cfg = &work->cfg;
     const uint32_t last = f->block_offsets[(uint64_t)block + 1] - 1;
-    const uint32_t yes = dominators_dominates(&work->dominators, f->b[last], at) ? BUSTER_IR_THREAD_COVER_YES : 0;
-    const uint32_t no = dominators_dominates(&work->dominators, f->c[last], at) ? BUSTER_IR_THREAD_COVER_NO : 0;
-    return yes | no;
+    const uint32_t yes = (possible & BUSTER_IR_THREAD_COVER_YES) != 0 ? f->b[last] : BUSTER_IR_NONE;
+    const uint32_t no = (possible & BUSTER_IR_THREAD_COVER_NO) != 0 ? f->c[last] : BUSTER_IR_NONE;
+    _Alignas(64) uint32_t queue[BUSTER_IR_THREAD_WALK_LIMIT];
+    for (uint32_t k = 0; k < BUSTER_IR_THREAD_WALK_LIMIT; k += 16)
+    {
+        _mm512_store_si512(queue + k, _mm512_set1_epi32(-1));
+    }
+    uint32_t met = at == yes ? BUSTER_IR_THREAD_COVER_YES : at == no ? BUSTER_IR_THREAD_COVER_NO : 0;
+    queue[0] = at;
+    uint32_t count = met == 0;
+    bool reached = false;
+    bool full = false;
+    for (uint32_t next = 0; !reached && !full && next < count; next += 1)
+    {
+        const uint32_t from = queue[next];
+        reached = from == block;
+        for (uint32_t e = cfg->predecessor_offsets[from]; !reached && !full && e < cfg->predecessor_offsets[(uint64_t)from + 1]; e += 1)
+        {
+            const uint32_t predecessor = cfg->predecessors[e];
+            const __m512i key = _mm512_set1_epi32((int)predecessor);
+            uint32_t seen = 0;
+            for (uint32_t k = 0; k < BUSTER_IR_THREAD_WALK_LIMIT; k += 16)
+            {
+                seen |= _mm512_cmpeq_epi32_mask(_mm512_load_si512(queue + k), key);
+            }
+            met |= predecessor == yes ? BUSTER_IR_THREAD_COVER_YES : predecessor == no ? BUSTER_IR_THREAD_COVER_NO : 0;
+            const bool visit = predecessor != yes && predecessor != no && seen == 0;
+            full = visit && count == BUSTER_IR_THREAD_WALK_LIMIT;
+            if (visit && !full)
+            {
+                queue[count] = predecessor;
+                count += 1;
+            }
+        }
+    }
+    work->walked += count;
+    return !reached && !full && (met == BUSTER_IR_THREAD_COVER_YES || met == BUSTER_IR_THREAD_COVER_NO) ? met : 0;
 }
 
 // A tracked block's value used at block `at`, outside it: the first scan's escape, or for the second (a repairable
-// candidate's phi), the successors that dominate `at` intersected with those that dominate its other uses (#2608).
+// candidate's phi), the successors that dominate `at` intersected with those that dominate its other uses (#2608). A
+// value none is left to needs no walk.
 static void ir_thread_escape_use(IrThreadWork* work, uint32_t value, uint32_t at, uint32_t tracked)
 {
     if (tracked == BUSTER_IR_THREAD_REPAIRABLE)
     {
-        work->escapes[value] &= (uint8_t)(BUSTER_IR_THREAD_ESCAPE | ir_thread_cover(work, work->cfg.instruction_blocks[value], at));
+        const uint32_t possible = work->escapes[value] & BUSTER_IR_THREAD_COVERS;
+        const uint32_t cover = possible != 0 ? ir_thread_cover(work, work->cfg.instruction_blocks[value], at, possible) : 0;
+        work->escapes[value] &= (uint8_t)(BUSTER_IR_THREAD_ESCAPE | cover);
     }
     else
     {
@@ -343,97 +395,6 @@ static void ir_thread_escapes(IrThreadWork* work, uint32_t tracked)
             extra &= extra - 1;
         }
     }
-}
-
-// The candidates a repair may follow (#2608): those whose values used past them are all phis, with a successor of which
-// each is the only predecessor (else no repair could follow it, and the dominators would be built for nothing). A
-// candidate's escapes and phis are read 64 at a time, as masks. Whether any candidate is repairable.
-static bool ir_thread_repairable(IrThreadWork* work)
-{
-    const IrFunction* f = work->function;
-    const IrCfg* cfg = &work->cfg;
-    bool any = false;
-    for (uint32_t block = 1; block < f->block_count; block += 1)
-    {
-        if (work->candidates[block] != 0)
-        {
-            const uint32_t first = f->block_offsets[block];
-            const uint32_t last = f->block_offsets[(uint64_t)block + 1] - 1;
-            const uint32_t yes = f->b[last];
-            const uint32_t no = f->c[last];
-            const bool alone = ir_thread_alone(cfg, yes) || ir_thread_alone(cfg, no);
-            bool escapes = false;
-            bool chain = false;
-            for (uint32_t at = first; at < last; at += 64)
-            {
-                const uint32_t lanes = last - at < 64 ? last - at : 64;
-                const __mmask64 valid = UINT64_MAX >> (64 - lanes);
-                const __mmask64 escaping = _mm512_mask_test_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, work->escapes + at), _mm512_set1_epi8(BUSTER_IR_THREAD_ESCAPE));
-                const __mmask64 phi = _mm512_mask_cmpeq_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, f->op + at), _mm512_set1_epi8(IR_PHI));
-                escapes = escapes || escaping != 0;
-                chain = chain || (escaping & ~phi) != 0;
-            }
-            const bool repairable = escapes && !chain && alone;
-            work->candidates[block] |= repairable ? BUSTER_IR_THREAD_REPAIRABLE : 0;
-            any = any || repairable;
-        }
-    }
-    return any;
-}
-
-// The repairs' dominators, then the second scan over the repairable candidates' phis' uses (#2608). A repairable
-// candidate that heads a loop (a predecessor it dominates) is left as it was: threading it would rotate the loop, which
-// this pass doesn't set out to do (its counter's phi is read in the body, the successor it alone reaches). Each other
-// one's escaping phis take the cover bits of its successors of which it is the only predecessor, which the scan narrows
-// to the one that dominates every use, 64 escapes bytes at a time.
-static IrError ir_thread_repairs(IrThreadWork* work, Arena* output, Arena* scratch)
-{
-    const IrFunction* f = work->function;
-    const IrCfg* cfg = &work->cfg;
-    const DominatorCfg graph = {
-        .block_count = cfg->block_count,
-        .edge_count = cfg->edge_count,
-        .entry = 0,
-        .successor_offsets = cfg->successor_offsets,
-        .successors = cfg->successors,
-        .predecessor_offsets = cfg->predecessor_offsets,
-        .predecessors = cfg->predecessors,
-    };
-    DominatorOptions options = dominators_options();
-    options.outputs = 0;
-    // Its columns in scratch, which the round pops; the output arena is its scratch, restored.
-    const DominatorStatus status = dominators_analyze(scratch, output, &graph, options, &work->dominators);
-    work->analyses += 1;
-    const IrError error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
-    for (uint32_t block = 1; error == IR_OK && block < f->block_count; block += 1)
-    {
-        const bool repairable = (work->candidates[block] & BUSTER_IR_THREAD_REPAIRABLE) != 0;
-        bool header = false;
-        for (uint32_t e = cfg->predecessor_offsets[block]; repairable && e < cfg->predecessor_offsets[(uint64_t)block + 1]; e += 1)
-        {
-            header = header || dominators_dominates(&work->dominators, block, cfg->predecessors[e]);
-        }
-        work->candidates[block] &= header ? ~BUSTER_IR_THREAD_REPAIRABLE : UINT32_MAX;
-        const uint32_t first = f->block_offsets[block];
-        const uint32_t last = f->block_offsets[(uint64_t)block + 1] - 1;
-        const uint32_t yes = f->b[last];
-        const uint32_t no = f->c[last];
-        const bool yes_alone = repairable && ir_thread_alone(cfg, yes);
-        const bool no_alone = repairable && ir_thread_alone(cfg, no);
-        const uint32_t covers = (yes_alone ? BUSTER_IR_THREAD_COVER_YES : 0) | (no_alone ? BUSTER_IR_THREAD_COVER_NO : 0);
-        for (uint32_t at = first; repairable && !header && at < last; at += 64)
-        {
-            const uint32_t lanes = last - at < 64 ? last - at : 64;
-            const __mmask64 valid = UINT64_MAX >> (64 - lanes);
-            const __mmask64 escaping = _mm512_mask_test_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, work->escapes + at), _mm512_set1_epi8(BUSTER_IR_THREAD_ESCAPE));
-            _mm512_mask_storeu_epi8(work->escapes + at, escaping, _mm512_set1_epi8((char)(BUSTER_IR_THREAD_ESCAPE | covers)));
-        }
-    }
-    if (error == IR_OK)
-    {
-        ir_thread_escapes(work, BUSTER_IR_THREAD_REPAIRABLE);
-    }
-    return error;
 }
 
 // A br's only edge, or a cbr's true then false edge, as ir_cfg_validated writes them. Only these terminators
@@ -697,6 +658,151 @@ static bool ir_thread_redirectable(const IrThreadWork* work, uint32_t target, ui
     return redirectable;
 }
 
+// Whether a repair of candidate J pays (#2608): its test reads none of the phis read past J, and is a constant on the
+// edge of the first constant input of the first phi it reads. Lua's `tonumberns` is a `?:` whose join's truth value is
+// 1 or 0 on every edge and whose number is read past the test, which reads the truth value alone. A data select's join
+// is no truth value's: `y = x < lo ? lo : x; y > hi ? hi : y` is decided on no edge, and a clamp to a constant
+// (`y > 255`), decided on the edge of y's 0, reads y. If-conversion makes either a select, which threading would undo
+// for a test on every other path. The test's operands are marked in `known` back to J's phis (only phis of J escape
+// here, ir_thread_repairable having refused a chain value read past J), a walk of at most
+// BUSTER_IR_THREAD_BLOCK_LIMIT operations. Whether J's evaluation knows the test along an edge depends only on which of
+// the phis it reads are constants there (an operation is known where its operands are), so J is evaluated along one
+// edge, found by a scan of one phi's inputs: it decides the test wherever the test reads that phi alone.
+static bool ir_thread_decides(const IrThreadWork* work, uint32_t block, uint64_t* values, uint8_t* known)
+{
+    const IrFunction* f = work->function;
+    const uint32_t first = f->block_offsets[block];
+    const uint32_t last = f->block_offsets[(uint64_t)block + 1] - 1;
+    memset(known, 0, last - first);
+    known[f->a[last] - first] = 1;
+    bool escaping = false;
+    uint32_t tested = BUSTER_IR_NONE;
+    for (uint32_t i = last; i > first; i -= 1)
+    {
+        const uint32_t at = i - 1;
+        const bool read = known[at - first] != 0;
+        const uint32_t mask = read && f->op[at] != IR_PHI ? ir_value_mask(f, at) : 0;
+        const uint32_t operands[2] = { f->a[at], f->b[at] };
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            if (((mask >> k) & 1) != 0 && operands[k] >= first && operands[k] < last)
+            {
+                known[operands[k] - first] = 1;
+            }
+        }
+        escaping = escaping || (read && work->escapes[at] != 0);
+        tested = read && f->op[at] == IR_PHI ? at : tested;
+    }
+    uint32_t source = BUSTER_IR_NONE;
+    const uint32_t* entries = tested != BUSTER_IR_NONE ? f->extra + f->a[tested] : NULL;
+    for (uint32_t p = 0; entries != NULL && source == BUSTER_IR_NONE && p < f->b[tested]; p += 1)
+    {
+        source = f->op[entries[2 * p + 1]] == IR_CONST ? entries[2 * p] : BUSTER_IR_NONE;
+    }
+    return !escaping && source != BUSTER_IR_NONE && ir_thread_evaluate(work, block, source, values, known) != BUSTER_IR_NONE;
+}
+
+// The candidates a repair may follow (#2608): those whose values used past them are all phis, with a successor of which
+// each is the only predecessor (else no repair could follow it, and the walks would be for nothing), that don't look
+// like a loop's header, and that a repair pays for (ir_thread_decides). A loop's header is left as it was: threading it
+// would rotate the loop, which this pass doesn't set out to do. Its test is the cheap one of block order: a
+// predecessor past J, or a phi that takes a value from at or past J's start (ir_thread_backward); a header
+// laid out after its back edges' blocks that takes no such value isn't seen, and threading it is still exact (the
+// successor's merge takes the back edges' values, the rotated loop's). A candidate's escapes and phis, then its
+// predecessors, are read 64 and 16 at a time as masks, and only a candidate they pass is evaluated. Whether any
+// candidate is repairable.
+static bool ir_thread_repairable(IrThreadWork* work, uint64_t* values, uint8_t* known)
+{
+    const IrFunction* f = work->function;
+    const IrCfg* cfg = &work->cfg;
+    bool any = false;
+    for (uint32_t block = 1; block < f->block_count; block += 1)
+    {
+        if (work->candidates[block] != 0)
+        {
+            const uint32_t first = f->block_offsets[block];
+            const uint32_t last = f->block_offsets[(uint64_t)block + 1] - 1;
+            const uint32_t yes = f->b[last];
+            const uint32_t no = f->c[last];
+            const bool alone = ir_thread_alone(cfg, yes) || ir_thread_alone(cfg, no);
+            bool escapes = false;
+            bool chain = false;
+            for (uint32_t at = first; at < last; at += 64)
+            {
+                const uint32_t lanes = last - at < 64 ? last - at : 64;
+                const __mmask64 valid = UINT64_MAX >> (64 - lanes);
+                const __mmask64 escaping = _mm512_mask_test_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, work->escapes + at), _mm512_set1_epi8(BUSTER_IR_THREAD_ESCAPE));
+                const __mmask64 phi = _mm512_mask_cmpeq_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, f->op + at), _mm512_set1_epi8(IR_PHI));
+                escapes = escapes || escaping != 0;
+                chain = chain || (escaping & ~phi) != 0;
+            }
+            bool later = false;
+            const uint32_t begin = cfg->predecessor_offsets[block];
+            const uint32_t end = cfg->predecessor_offsets[(uint64_t)block + 1];
+            for (uint32_t e = begin; escapes && !chain && alone && e < end; e += 16)
+            {
+                const __mmask16 valid = (__mmask16)((UINT32_C(1) << (end - e < 16 ? end - e : 16)) - 1);
+                const __m512i predecessors = _mm512_maskz_loadu_epi32(valid, cfg->predecessors + e);
+                later = later || _mm512_mask_cmpgt_epu32_mask(valid, predecessors, _mm512_set1_epi32((int)block)) != 0;
+            }
+            const bool header = later || ir_thread_backward(f, first, last);
+            const bool repairable = escapes && !chain && alone && !header && ir_thread_decides(work, block, values, known);
+            work->candidates[block] |= repairable ? BUSTER_IR_THREAD_REPAIRABLE : 0;
+            any = any || repairable;
+        }
+    }
+    return any;
+}
+
+// The second scan over the repairable candidates' phis' uses (#2608): each one's escaping phis take the cover bits of
+// its successors of which it is the only predecessor, 64 escapes bytes at a time, which the scan's walks narrow to the
+// one that dominates every use.
+static void ir_thread_repairs(IrThreadWork* work)
+{
+    const IrFunction* f = work->function;
+    const IrCfg* cfg = &work->cfg;
+    for (uint32_t block = 1; block < f->block_count; block += 1)
+    {
+        const bool repairable = (work->candidates[block] & BUSTER_IR_THREAD_REPAIRABLE) != 0;
+        const uint32_t first = f->block_offsets[block];
+        const uint32_t last = f->block_offsets[(uint64_t)block + 1] - 1;
+        const uint32_t yes = f->b[last];
+        const uint32_t no = f->c[last];
+        const bool yes_alone = repairable && ir_thread_alone(cfg, yes);
+        const bool no_alone = repairable && ir_thread_alone(cfg, no);
+        const uint32_t covers = (yes_alone ? BUSTER_IR_THREAD_COVER_YES : 0) | (no_alone ? BUSTER_IR_THREAD_COVER_NO : 0);
+        for (uint32_t at = first; repairable && at < last; at += 64)
+        {
+            const uint32_t lanes = last - at < 64 ? last - at : 64;
+            const __mmask64 valid = UINT64_MAX >> (64 - lanes);
+            const __mmask64 escaping = _mm512_mask_test_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, work->escapes + at), _mm512_set1_epi8(BUSTER_IR_THREAD_ESCAPE));
+            _mm512_mask_storeu_epi8(work->escapes + at, escaping, _mm512_set1_epi8((char)(BUSTER_IR_THREAD_ESCAPE | covers)));
+        }
+    }
+    ir_thread_escapes(work, BUSTER_IR_THREAD_REPAIRABLE);
+}
+
+// Whether `predecessor`, which takes a copy of a threaded block's chain, will have a candidate's shape (#2608): a block
+// of phis whose other operations are chain operations. Only then may a next round thread it; a copy into any other
+// block leaves the next round nothing to do there.
+static bool ir_thread_shaped(const IrThreadWork* work, uint32_t predecessor)
+{
+    const IrFunction* f = work->function;
+    const uint32_t first = f->block_offsets[predecessor];
+    const uint32_t last = f->block_offsets[(uint64_t)predecessor + 1] - 1;
+    uint32_t i = first;
+    while (i < last && f->op[i] == IR_PHI)
+    {
+        i += 1;
+    }
+    bool shaped = i != first;
+    for (; shaped && i < last; i += 1)
+    {
+        shaped = ir_thread_chain_operation(f, i);
+    }
+    return shaped;
+}
+
 // Thread block J where its predecessors allow it: their actions, and the roles that keep a round's blocks apart.
 static bool ir_thread_block(IrThreadWork* work, uint32_t block, uint64_t* values, uint8_t* known, Arena* scratch)
 {
@@ -834,7 +940,7 @@ static bool ir_thread_block(IrThreadWork* work, uint32_t block, uint64_t* values
                 work->roles[predecessor] |= BUSTER_IR_THREAD_PREDECESSOR;
                 // A copy into a block of phis may give it a candidate's shape, which a next round may thread in its turn
                 // (#2608: Lua's `tonumberns` `?:` join, which jumps to its `&&`'s join, takes that join's test).
-                work->deferred += work->actions[predecessor] == BUSTER_IR_THREAD_COPY && f->op[f->block_offsets[predecessor]] == IR_PHI;
+                work->deferred += work->actions[predecessor] == BUSTER_IR_THREAD_COPY && ir_thread_shaped(work, predecessor);
                 work->copy_count += work->actions[predecessor] == BUSTER_IR_THREAD_COPY;
                 work->redirect_count += work->actions[predecessor] != BUSTER_IR_THREAD_COPY;
                 work->cloned += work->actions[predecessor] == BUSTER_IR_THREAD_COPY ? chain : 0;
@@ -1366,11 +1472,6 @@ static IrCheck ir_thread_round(const IrFunction* function, Arena* output, Arena*
             if (any)
             {
                 ir_thread_escapes(&work, BUSTER_IR_THREAD_TRACK_CANDIDATES);
-                // #2608's repairs, where a candidate's values used past it are phis a successor may merge again.
-                if (ir_thread_repairable(&work))
-                {
-                    check.error = ir_thread_repairs(&work, output, scratch);
-                }
                 // The chain's evaluation slots: a known flag and a value per instruction of the largest candidate.
                 uint32_t largest = 0;
                 for (uint32_t block = 1; block < blocks; block += 1)
@@ -1380,7 +1481,12 @@ static IrCheck ir_thread_round(const IrFunction* function, Arena* output, Arena*
                 }
                 uint64_t* slots = ir_allocate(scratch, largest, 8, &ok);
                 uint8_t* known = ir_allocate(scratch, largest, 1, &ok);
-                check.error = check.error == IR_OK && !ok ? IR_ERROR_MEMORY : check.error;
+                check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+                // #2608's repairs, where a candidate's values used past it are phis a successor may merge again.
+                if (check.error == IR_OK && ir_thread_repairable(&work, slots, known))
+                {
+                    ir_thread_repairs(&work);
+                }
                 for (uint32_t block = 1; check.error == IR_OK && block < blocks; block += 1)
                 {
                     if (work.candidates[block] != 0)
@@ -1396,7 +1502,7 @@ static IrCheck ir_thread_round(const IrFunction* function, Arena* output, Arena*
             *changed = check.error == IR_OK;
         }
         *deferred = work.deferred;
-        totals->analyses += work.analyses;
+        totals->walked += work.walked;
         if (check.error == IR_OK && *changed)
         {
             totals->blocks += work.block_count;
