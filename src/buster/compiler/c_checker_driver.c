@@ -12153,13 +12153,24 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528), and the tree
     // alone: the reader derives the traversal it reads into those pages (check_input_run).
     const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .scratch = scratch };
-    bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order)) && pp_initialize(pp, options, identifiers) &&
-                 parse_initialize(parser, &parser_options, options->language);
+    bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order));
+    // A preprocessor that refused to start on its own fatal error (an invalid SOURCE_DATE_EPOCH, #2996) has printed it;
+    // the unit ends with that error alone, not with a memory failure that didn't happen.
+    bool pp_refused = false;
+    if (ready)
+    {
+        ready = pp_initialize(pp, options, identifiers);
+        pp_refused = !ready && pp->fatal;
+    }
+    ready = ready && parse_initialize(parser, &parser_options, options->language);
     // Whether the unit reported its memory failure itself (arena_report_failure), which the notes at its end then don't.
     bool memory_reported = false;
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
-        arena_report_failure(errors, "checking", UINT64_C(1) << 36);
+        if (!pp_refused || scratch->base == 0 || output_arena->base == 0)
+        {
+            arena_report_failure(errors, "checking", UINT64_C(1) << 36);
+        }
         driver_fatal = true;
         memory_reported = true;
     }
@@ -12185,6 +12196,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         CheckDriverTypoEdits typo_edits = { .count = 0, .table = pp->table, .scratch = scratch };
         const CheckPrefixTails typo_tails = { .end = check_driver_typo_tail, .context = &typo_edits };
         bool parse_printed = false;
+        // A typo pass whose parse has no view (#3000): the unit then ends as one whose failed parse has none does.
+        bool unviewed = false;
         check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
         pp->options.collect_diagnostics = true;
         pp_driver_verbose(options, path);
@@ -12439,6 +12452,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     else
                     {
+                        // The views that failed cleared the one the unit was read as, and the reading is of another
+                        // parse: the unit has its parse's errors alone, and the view the stages after it read is the
+                        // parse itself, whose pragmas the earlier ones aren't.
+                        checking = recovered;
+                        original_pragmas_ready = false;
+                        unviewed = true;
                         ready = false;
                     }
                 }
@@ -12519,7 +12538,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             // A rejected reader may retain complete earlier expressions solely for diagnostics. Their typed
             // reports share source order with declaration reports, but this fragment can never be emitted.
-            if (grants.return_failed)
+            if (grants.return_failed || unviewed)
             {
                 result = 1;
             }

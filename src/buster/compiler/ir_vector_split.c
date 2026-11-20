@@ -33,9 +33,6 @@
 #ifndef BUSTER_IR_VECTOR_SPLIT_C
 #define BUSTER_IR_VECTOR_SPLIT_C
 
-// The most pieces a vector splits into: a 64-byte one into 16-byte ones.
-#define BUSTER_IR_VECTOR_PIECES 4u
-
 typedef struct IrVectorSplitResult IrVectorSplitResult;
 struct IrVectorSplitResult
 {
@@ -55,9 +52,8 @@ struct IrVectorSplitWork
     // The pieces' type (IR_V4I32 or IR_V8I32) and bytes.
     uint32_t piece_type;
     uint32_t piece_bytes;
-    // Each source value's pieces' output instructions, BUSTER_IR_VECTOR_PIECES apiece: a value no wider than a piece is
-    // its first alone. The counting pass places them; the writing pass, which makes the same instructions, keeps them.
-    uint32_t* pieces;
+    // The first output instruction of each source row, filled by the counting pass before any operand is remapped.
+    uint32_t* first;
     // The output's counts so far, 64-bit as ir_wide.c's.
     uint64_t instruction;
     uint64_t address;
@@ -133,19 +129,19 @@ static uint32_t ir_vector_split_count(const IrVectorSplitWork* work, uint32_t va
     return ir_vector_split_wide(type, work->piece_type) ? ir_type_bits[type] / ir_type_bits[work->piece_type] : 1;
 }
 
-// A value's piece j, as placed: the output instruction it is. Only the writing pass reads it.
+// Pieces are consecutive except for a load, whose later pieces each follow one address instruction.
 static uint32_t ir_vector_split_piece(const IrVectorSplitWork* work, uint32_t value, uint32_t j)
 {
-    return work->pieces[(uint64_t)value * BUSTER_IR_VECTOR_PIECES + j];
-}
-
-// The counting pass's place of `value`'s piece j; the writing pass, which makes the same instructions, keeps it.
-static void ir_vector_split_place(IrVectorSplitWork* work, uint32_t value, uint32_t j, uint32_t id)
-{
-    if (work->output == 0)
+    uint32_t id = 0;
+    if (work->output != NULL)
     {
-        work->pieces[(uint64_t)value * BUSTER_IR_VECTOR_PIECES + j] = id;
+        id = work->first[value] + j;
+        if (j != 0 && work->source->op[value] == IR_LOAD)
+        {
+            id += j;
+        }
     }
+    return id;
 }
 
 // A piece's memory access's flags and alignment: the access's, at most a piece's alignment.
@@ -222,19 +218,18 @@ static bool ir_vector_split_value(IrVectorSplitWork* work, uint32_t i)
                 {
                     work->output->flags[id] = f->flags[i];
                 }
-                ir_vector_split_place(work, i, j, id);
             }
         } break;
         case IR_UNDEF:
             for (uint32_t j = 0; j < pieces; j += 1)
             {
-                ir_vector_split_place(work, i, j, ir_vector_split_emit(work, IR_UNDEF, type, none, none, none));
+                ir_vector_split_emit(work, IR_UNDEF, type, none, none, none);
             }
             break;
         case IR_COPY:
             for (uint32_t j = 0; j < pieces; j += 1)
             {
-                ir_vector_split_place(work, i, j, ir_vector_split_emit(work, IR_COPY, type, ir_vector_split_piece(work, a, j), none, none));
+                ir_vector_split_emit(work, IR_COPY, type, ir_vector_split_piece(work, a, j), none, none);
             }
             break;
         case IR_LOAD:
@@ -243,7 +238,6 @@ static bool ir_vector_split_value(IrVectorSplitWork* work, uint32_t i)
             {
                 const uint32_t id = ir_vector_split_emit(work, IR_LOAD, type, ir_vector_split_address(work, a, j), none, none);
                 ir_vector_split_memory(work, id, i);
-                ir_vector_split_place(work, i, j, id);
             }
             break;
         case IR_PHI:
@@ -254,7 +248,7 @@ static bool ir_vector_split_value(IrVectorSplitWork* work, uint32_t i)
             for (uint32_t j = 0; j < pieces; j += 1)
             {
                 const uint32_t list = (uint32_t)(first + (uint64_t)j * b * 2);
-                ir_vector_split_place(work, i, j, ir_vector_split_emit(work, IR_PHI, type, list, b, none));
+                ir_vector_split_emit(work, IR_PHI, type, list, b, none);
                 for (uint32_t p = 0; work->output != 0 && p < b; p += 1)
                 {
                     work->output->extra[list + p * 2] = f->extra[a + p * 2];
@@ -300,11 +294,6 @@ static bool ir_vector_split_use(IrVectorSplitWork* work, uint32_t i)
         const uint32_t address = ir_vector_split_address(work, a, j);
         const uint32_t id = ir_vector_split_emit(work, IR_STORE, IR_VOID, address, ir_vector_split_piece(work, b, j), BUSTER_IR_NONE);
         ir_vector_split_memory(work, id, i);
-        // The store's own value, its first piece's.
-        if (j == 0)
-        {
-            ir_vector_split_place(work, i, 0, id);
-        }
     }
     return supported;
 }
@@ -358,7 +347,6 @@ static void ir_vector_split_copy(IrVectorSplitWork* work, uint32_t i)
             }
         }
     }
-    ir_vector_split_place(work, i, 0, id);
 }
 
 // One pass over the source's instructions, block by block: the counting one (work->output 0) or the writing one. A phi
@@ -380,6 +368,10 @@ static void ir_vector_split_pass(IrVectorSplitWork* work)
         for (uint32_t i = f->block_offsets[block]; work->error == IR_OK && i < f->block_offsets[block + 1]; i += 1)
         {
             const uint64_t first = work->instruction;
+            if (work->output == NULL)
+            {
+                work->first[i] = (uint32_t)first;
+            }
             bool supported = true;
             if (ir_vector_split_wide(f->type[i], work->piece_type))
             {
@@ -438,14 +430,13 @@ static __attribute__((unused)) IrCheck ir_vector_split(const IrFunction* functio
     if (check.error == IR_OK && present)
     {
         const uint32_t count = function->instruction_count;
-        bool ok = true;
         IrVectorSplitWork work = {
             .source = function,
             .piece_type = piece_type,
             .piece_bytes = piece_bytes,
-            .pieces = ir_allocate(scratch, (uint64_t)count * BUSTER_IR_VECTOR_PIECES, sizeof(uint32_t), &ok),
+            .first = arena_push_array(scratch, count, sizeof(uint32_t), 64),
         };
-        check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+        check.error = work.first != NULL ? IR_OK : IR_ERROR_MEMORY;
         if (check.error == IR_OK)
         {
             ir_vector_split_pass(&work);

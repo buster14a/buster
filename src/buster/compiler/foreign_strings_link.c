@@ -203,29 +203,14 @@ static ForeignStringsError foreign_strings_apply(Link* link, const ForeignString
     return error;
 }
 
-// The foreign metadata adapter preserves the information lost in Link: section compatibility and STT_SECTION.
-// It runs after COMDAT/GC has finalized converted->objects' section and symbol maps. A failure, including an
-// UNSUPPORTED consumer expression, leaves converted unchanged and releases all newly allocated output storage.
-static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const Foreign* foreign, Arena* arena, ForeignStringsMerge* output)
+// Wide strings import as RODATA. Use the original sections to mark eligible atoms after COMDAT and GC.
+// The first eligible section allocates the map; several sections may name the same atom.
+static ForeignStringsError foreign_strings_select(const ForeignLink* converted, const Foreign* foreign, Arena* arena, uint32_t** atom_inputs, uint32_t* count)
 {
-    Link* link = &converted->link;
-    const uint64_t saved = arena->length;
-    ForeignStringsMerge merged = { 0 };
-    uint32_t count = 0;
+    const Link* link = &converted->link;
     ForeignStringsError error = FOREIGN_STRINGS_ERROR_NONE;
-    Scratch scratch = scratch_begin(arena);
-    uint8_t* units = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, link->atoms.count);
-    if (units == 0)
-    {
-        error = FOREIGN_STRINGS_ERROR_MEMORY;
-    }
-    else
-    {
-        memset(units, 0, link->atoms.count);
-    }
-    // Generic import keeps wide strings as RODATA: Link's ordinary STRINGS class writes one-byte ET_REL entries.
-    // This final-executable adapter still has original ELF metadata and can select wide entries without losing it
-    // at the general importer/object-writer boundary. Zero means unselected; selected atoms carry unit_log2 + 1.
+    uint32_t* map = 0;
+    uint32_t selected = 0;
     for (uint32_t id = 1; error == FOREIGN_STRINGS_ERROR_NONE && id < foreign->object_count; id += 1)
     {
         const ForeignObject* original = &foreign->objects[id];
@@ -244,38 +229,54 @@ static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const F
                                      (header.sh_flags & (SHF_MERGE | SHF_STRINGS)) == (SHF_MERGE | SHF_STRINGS);
                 if (strings)
                 {
-                    count += units[atom] == 0 ? 1 : 0;
-                    units[atom] = header.sh_entsize == 4 ? 3 : header.sh_entsize == 2 ? 2 : 1;
+                    if (map == 0)
+                    {
+                        map = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, link->atoms.count);
+                        if (map == 0)
+                        {
+                            error = FOREIGN_STRINGS_ERROR_MEMORY;
+                            break;
+                        }
+                        memset(map, 0, (uint64_t)link->atoms.count * sizeof(*map));
+                    }
+                    selected += map[atom] == 0;
+                    map[atom] = 1;
                 }
             }
         }
     }
+    *atom_inputs = map;
+    *count = selected;
+    return error;
+}
+
+static ForeignStringsError foreign_strings_plan(const ForeignLink* converted, const Foreign* foreign, uint32_t count, Arena* arena, ForeignStringsMerge* merged)
+{
+    const Link* link = &converted->link;
+    ForeignStringsError error = FOREIGN_STRINGS_ERROR_NONE;
+    Scratch scratch = scratch_begin(arena);
     ForeignStringInput* inputs = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ForeignStringInput, (uint64_t)count + 1);
     String8* names = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, String8, (uint64_t)count + 1);
     uint64_t* flags = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count + 1);
-    uint8_t* sections = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, link->symbols.count);
-    merged.atom_inputs = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, link->atoms.count);
     uint64_t slots = 1;
     while (slots < 2 * (uint64_t)count)
     {
         slots *= 2;
     }
     uint32_t* groups = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, slots);
-    if (inputs == 0 || names == 0 || flags == 0 || sections == 0 || merged.atom_inputs == 0 || groups == 0)
+    if (inputs == 0 || names == 0 || flags == 0 || groups == 0)
     {
         error = FOREIGN_STRINGS_ERROR_MEMORY;
     }
     if (error == FOREIGN_STRINGS_ERROR_NONE)
     {
-        memset(merged.atom_inputs, 0, link->atoms.count * sizeof(uint32_t));
         memset(names, 0, ((uint64_t)count + 1) * sizeof(String8));
-        memset(sections, 0, link->symbols.count);
         memset(groups, 0, slots * sizeof(uint32_t));
     }
     uint32_t next = 0;
     for (AtomId atom = 1; error == FOREIGN_STRINGS_ERROR_NONE && atom < link->atoms.count; atom += 1)
     {
-        if (units[atom] != 0)
+        if (merged->atom_inputs[atom] != 0)
         {
             if (link->atoms.size[atom] > UINT32_MAX)
             {
@@ -291,10 +292,9 @@ static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const F
                     .bytes = link->atoms.bytes[atom],
                     .size = (uint32_t)link->atoms.size[atom],
                     .alignment_log2 = link->atoms.alignment_log2[atom],
-                    .unit_log2 = units[atom] - 1,
                 };
-                merged.input_bytes += link->atoms.size[atom];
-                merged.atom_inputs[atom] = next + 1;
+                merged->input_bytes += link->atoms.size[atom];
+                merged->atom_inputs[atom] = next + 1;
                 next += 1;
             }
         }
@@ -306,7 +306,7 @@ static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const F
         for (uint32_t section = 1; original->library == 0 && section < imported->section_count; section += 1)
         {
             const AtomId atom = imported->section_atoms[section];
-            const uint32_t index = merged.atom_inputs[atom];
+            const uint32_t index = merged->atom_inputs[atom];
             if (index != 0)
             {
                 const Elf64_Shdr header = import_section_header(&original->elf, section);
@@ -316,15 +316,6 @@ static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const F
                 flags[index - 1] = header.sh_flags;
                 inputs[index - 1].unit_log2 = header.sh_entsize == 4 ? 2 : header.sh_entsize == 2 ? 1 : 0;
                 error = valid ? error : FOREIGN_STRINGS_ERROR_INPUT;
-            }
-        }
-        for (uint32_t index = 1; original->library == 0 && index < imported->symbol_count; index += 1)
-        {
-            const SymbolId symbol = imported->symbols[index];
-            if (symbol != 0)
-            {
-                const Elf64_Sym value = import_symbol(&original->symbols, index);
-                sections[symbol] |= ELF64_ST_TYPE(value.st_info) == STT_SECTION ? 1 : 0;
             }
         }
     }
@@ -355,14 +346,58 @@ static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const F
     }
     if (error == FOREIGN_STRINGS_ERROR_NONE)
     {
-        error = foreign_strings_build(inputs, count, foreign->path, arena, &merged.strings);
-    }
-    if (error == FOREIGN_STRINGS_ERROR_NONE && merged.strings.size < merged.input_bytes)
-    {
-        error = foreign_strings_apply(link, &merged.strings, merged.atom_inputs, sections);
-        merged.applied = error == FOREIGN_STRINGS_ERROR_NONE;
+        error = foreign_strings_build_below(inputs, count, foreign->path, arena, &merged->strings, merged->input_bytes);
     }
     scratch_end(scratch);
+    return error;
+}
+
+// Gather the original STT_SECTION flags only when the validated pool will be used. An unsupported expression
+// leaves every Link column intact and the caller can write the unmerged executable.
+static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const Foreign* foreign, Arena* arena, ForeignStringsMerge* output)
+{
+    const uint64_t saved = arena->length;
+    ForeignStringsMerge merged = { 0 };
+    uint32_t count = 0;
+    ForeignStringsError error = foreign_strings_select(converted, foreign, arena, &merged.atom_inputs, &count);
+    if (error == FOREIGN_STRINGS_ERROR_NONE && count != 0)
+    {
+        error = foreign_strings_plan(converted, foreign, count, arena, &merged);
+    }
+    else if (error == FOREIGN_STRINGS_ERROR_NONE && !foreign_strings_path_valid(foreign->path))
+    {
+        error = FOREIGN_STRINGS_ERROR_INPUT;
+    }
+    if (error == FOREIGN_STRINGS_ERROR_NONE && merged.strings.bytes != 0)
+    {
+        Scratch scratch = scratch_begin(arena);
+        uint8_t* sections = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, converted->link.symbols.count);
+        if (sections == 0)
+        {
+            error = FOREIGN_STRINGS_ERROR_MEMORY;
+        }
+        else
+        {
+            memset(sections, 0, converted->link.symbols.count);
+            for (uint32_t id = 1; id < foreign->object_count; id += 1)
+            {
+                const ForeignObject* original = &foreign->objects[id];
+                const ImportObject* imported = &converted->objects[id];
+                for (uint32_t index = 1; original->library == 0 && index < imported->symbol_count; index += 1)
+                {
+                    const SymbolId symbol = imported->symbols[index];
+                    if (symbol != 0)
+                    {
+                        const Elf64_Sym value = import_symbol(&original->symbols, index);
+                        sections[symbol] |= ELF64_ST_TYPE(value.st_info) == STT_SECTION ? 1 : 0;
+                    }
+                }
+            }
+            error = foreign_strings_apply(&converted->link, &merged.strings, merged.atom_inputs, sections);
+            merged.applied = error == FOREIGN_STRINGS_ERROR_NONE;
+        }
+        scratch_end(scratch);
+    }
     if (error != FOREIGN_STRINGS_ERROR_NONE || !merged.applied)
     {
         arena_pop_to(arena, saved);

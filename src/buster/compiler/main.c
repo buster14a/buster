@@ -714,6 +714,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_node_machine_reads.c"
 // #2850's step 2, C on the window: C's answers from the window's bytes, 64 records a step (--shadow --window-contexts).
 #include "buster/compiler/c_check_node_machine_window.c"
+// #2850's step 2, X's rows on the window: the kinds and classes of X's entries from C's answers there (--shadow --window-rows).
+#include "buster/compiler/c_check_node_machine_rows.c"
 #endif
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).

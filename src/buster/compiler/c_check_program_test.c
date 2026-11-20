@@ -1908,6 +1908,27 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     return same;
 }
 
+// The return facts' definition (#2924): check_program_return_node at every node in order, with the unknown declarations
+// and the library names check_program_return_facts gives it, a node's operands' facts made before it. Its `count` + 1
+// entries end with the sink, zero; null where scratch runs out.
+static uint8_t* check_test_return_facts_definition(CheckProgram* program, Arena* scratch)
+{
+    const uint32_t count = program->input->graph.count;
+    uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t* unknowns = NULL;
+    const bool ready = facts != NULL && check_program_return_unknowns(program, scratch, &unknowns, false);
+    const uint8_t* names = ready ? check_program_return_library_names(program->identifiers, scratch) : NULL;
+    for (uint32_t node = 0; ready && node < count; node += 1)
+    {
+        facts[node] = check_program_return_node(program, facts, node, unknowns, names);
+    }
+    if (ready)
+    {
+        facts[count] = 0;
+    }
+    return ready ? facts : NULL;
+}
+
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), for a target (null for
 // x86-64's), against clang's build of it with the same, or of `oracle_source` where it isn't null, which must differ
 // from it with `mismatch` (check_test_program_execute_with_alignment); its executable runs where `run_native` says the
@@ -1981,12 +2002,12 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
             check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
-            // The return facts' vector path visits only the nodes that can have facts (check_program_return_sparse): every
-            // node's must be what the scalar path, which visits each, gives it.
+            // The return facts' walk visits only the nodes that can have facts (check_program_return_sparse): every
+            // node's must be the definition's, check_program_return_node at every node in order.
             const uint64_t facts_mark = scratch.length;
-            const uint8_t* exact = check_program_return_facts(&program, &scratch, NULL, true);
+            const uint8_t* exact = check_test_return_facts_definition(&program, &scratch);
             const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
-            snprintf(description, sizeof(description), "%s: the return facts' vector path gives every node the scalar path's facts", name);
+            snprintf(description, sizeof(description), "%s: the return facts' walk gives every node the definition's facts", name);
             check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
             arena_pop_to(&scratch, facts_mark);
         }
@@ -6242,8 +6263,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, true, 0, 1);
     }
     // The 128-bit integers, _BitInt(65) to _BitInt(128) and those past 128 bits (in memory, #137): lowered, the overflow
-    // builtins of a _BitInt of 65 to 127 bits too (#1447), but a bit-field of them spread over more than 8 bytes, or past 128
-    // bits.
+    // builtins of a _BitInt of 65 to 127 bits too (#1447), but a bit-field of them wider than 64 bits, or past 128 bits.
     if (check_test_takes())
     {
         check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
@@ -6251,7 +6271,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int tested(int n){_BitInt(129) x=n;return x>1;}", "bit-int-129", true, true, 0, 1);
         check_test_program_boundary(test, "_BitInt(200) g;int tested(int n){_BitInt(200) x=n;g=x*x;return g>1;}", "bit-int-200-global", true, true, 1, 1);
         check_test_program_boundary_reason(test, "struct W{unsigned _BitInt(200) x:150;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "bit-int-200-bit-field", true,
-                                           false, 0, 0, "bit-fields of this type or spread over more than 8 bytes");
+                                           false, 0, 0, "bit-fields of this type or wider than 64 bits");
         check_test_program_boundary(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, true, 0, 0);
         // A result SSE, SSEUP of 22 bytes where the target's vectors are 32 bytes, which clang returns as <2 x double> in
         // xmm0 (#2113). At x86-64's 16 bytes it is MEMORY, through a hidden pointer.
@@ -6279,10 +6299,11 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         }
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);
+        // A packed field in 9 bytes lowers, as its first 8 and its ninth (#2999).
         check_test_program_boundary(test,
                                     "struct __attribute__((packed)) P{unsigned char c:4;unsigned long long x:64;};"
                                     "int tested(int n){struct P p;p.x=(unsigned long long)n;return (int)p.x;}",
-                                    "bit-field-nine-byte-machine-boundary", true, false, 0, 0);
+                                    "bit-field-nine-byte-machine-boundary", true, true, 0, 0);
         check_test_program_boundary(test, "int tested(unsigned n){switch(n){case -1:return 1;case 4294967295U:return 2;}return 0;}",
                                     "case-conversion-collision", false, false, 0, 0);
         check_test_program_boundary(test, "int tested(int n){switch(n){case 1 ... 5:return 1;case 4 ... 7:return 2;}return 0;}",

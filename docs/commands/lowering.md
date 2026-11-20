@@ -366,7 +366,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -839,6 +839,11 @@ takes its entries.
   record's template, context and target, 64 records a step, beside C on T's
   columns at reader time. [Its section](#c-on-the-window-2850) has it, and
   [a call's](#a-calls-arguments-in-the-kernel-and-cs-call-2850).
+- `--window-rows` makes **X's rows on that window** too
+  (`PPOptions.node_reader`'s bit 512, with `--window-contexts`' bits): each
+  evaluated record's entries' kinds and classes, 64 records a step, beside X
+  on T's columns at reader time. [Its section](#xs-rows-on-the-window-2850)
+  has it.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -1543,8 +1548,10 @@ kernel's run in place (`node_facts_window_run`).
   may be void, an array). A record has its type's word whichever path wrote
   it.
 - **The records' bytes** (`node_tests_window_bytes`), sixteen records a
-  step: four gathers from the kernel's 64-byte records (the word, the flags,
-  the object, the standing), one of a name's declaration's line's byte
+  step: four columns of the kernel's 64-byte records (the word, the flags,
+  the object, the standing) by sixteen loads and twelve permutes ([the
+  columns](#the-records-bytes-columns-2850)), and one gather of a name's
+  declaration's line's byte
   (`NodeCensusReader.line_bytes`, which the census's code makes at the
   line's first leaf). Two byte columns come out: the type's byte and the
   value's (a constant a test may read, a bit-field, a declaration the tests
@@ -1754,7 +1761,7 @@ tests' chunk (`node_facts_window_run`).
   where a chunk's end took records from between a control's root and its
   operand; it says whether a record has a consumer yet.
 - **The records' bytes.** Where C runs, the tests' sweep
-  (`node_tests_window_bytes`) makes five byte columns more from its gathers:
+  (`node_tests_window_bytes`) makes five byte columns more from its columns:
   the type's word's low three bytes (its class, its facts and its kind), the
   standing's byte, and a byte of what C's rules read of the flags and the
   object (`BUSTER_NODE_CONTEXTS_*`: an effect, a vector's element, whether
@@ -2021,3 +2028,130 @@ on in C on the window's fixture (`node_contexts_test_source`), a line a case
 of a term, and six statements 64 times each for the blocks' ends. The
 branched records and the CONDITIONs among them are pinned
 (`NodeContextsExpected.branched` and `.branched_roots`).
+
+### The records' bytes' columns (#2850)
+
+No command of its own: the sweep that `--window-tests` and
+`--window-contexts` both run (`node_tests_window_bytes_by` in
+`c_check_node_census.c`). [The
+design](../node-machine.md#the-records-bytes-without-their-four-gathers) has
+what it measured.
+
+- **Four columns, no gather.** A step's sixteen records' words, flags,
+  objects and standings come from sixteen loads of the lines' first halves,
+  two records a register, one permute of two registers for each four
+  records, and eight lane shuffles. The last four are masked by the placed
+  records: a record the kernel didn't place reads as zeros.
+- **The columns' places** are `BUSTER_NODE_TESTS_COLUMN_*`, dwords of a
+  record's line; an assert beside them ties them to `NodeFactsRecord` and
+  the window's size to a whole number of steps, since a step reads its
+  sixteen lines whether placed or not.
+- **What is a gather still:** a name's declaration's line's byte, and the
+  reader's verify's two.
+
+`test-checker` (part 5 of 8) reads the sweep through the tests on the
+window's fixtures and C on the window's: a column that is another record's
+fails their pins, and one that is not masked fails the reader's verify, which
+counts a record the kernel didn't place that has a byte with the values it
+finds wrong (`own_values_wrong`, pinned at zero).
+
+### X's rows on the window (#2850)
+
+`./build/compiler measure-node-machine --shadow --window-rows [--passes 0] [--list N] [preprocessor options] file...`
+
+`--window-rows` adds X's rows to `--window-contexts`' run. For each
+expression C takes on the window, the kinds and the classes of each evaluated
+record's own entries and of its conversion's are made from C's answers there,
+64 records a step, and compared entry by entry with X's tape on T's columns
+at reader time (`node_machine_expand`), their reference. An entry's value is
+not made yet. No compile takes any of it. [The
+design](../node-machine.md#xs-rows-on-the-window-first-their-shapes) has what
+it measured.
+
+- **A shape a part** (`c_check_node_machine_rows.c`): a byte for a record's
+  own entries and one for its conversion's. Below 64 it is a typed kind's
+  number, one entry of the record's class. From 64 up
+  (`BUSTER_NODE_ROWS_ADDRESS` to `_FOLDED`) it is a row of `NodeRowsTables`:
+  for each of a part's four slots the entry's kind and its class, or where
+  the class comes from (`BUSTER_NODE_ROWS_CLASS_OWN`, `_TARGET`,
+  `_OPERAND`). `BUSTER_NODE_ROWS_LATER` is the mark of a template whose
+  rows are not made here (`NodeRowsTables.templates`).
+- **The reads** (`node_rows_window_reads`): masks, 64 records a step,
+  compress the numbers of the records to read for into two lists, and a loop
+  a list reads a record at a time: a target's type's word where a record
+  converts (its class and facts; none for void), and a record's line for a
+  member's offset, a truth's operand's conversion's class and whether an
+  address constant's object is a local's.
+- **The shapes** (`node_rows_window_shapes`), 64 records a step:
+  `node_machine_own`'s case of a record's template and
+  `node_machine_convert`'s cases as masks over the window's bytes and the
+  reads' columns. A term of the rules that no record on the window separates
+  is no mask, and the comments there say of each what makes it: the
+  discarded context, a complex's and a `_BitInt`'s source, the facts of a
+  complex's and an aggregate's conversion, an address constant's offset's
+  value.
+- **The rows** (`node_rows_window_write`), 64 records a step: a slot's kinds
+  and classes by one lookup each of the block's shapes, the classes made from
+  their sources, the eight slots transposed into eight records' rows a
+  register, and the entries compressed into the chunk's two streams
+  (`x_kinds`, `x_classes`). A row's place is `node_rows_window_place`.
+- **An expression's part** (`node_rows_window_part`): it is listed for X
+  where one of its operand's records is; else its tape is its operand's
+  records' rows, in a row in the streams, and its root's. A root's own record
+  never lists it alone (the comment there).
+- **What is listed**, and left to X on T's columns: an update's template and
+  an operator's evaluated as branches; a conversion from or to a class past
+  double's (a long double's, a 128-bit integer's, a half-precision one's, an
+  aggregate's, a complex type's), which X's rules refuse; and an integer
+  constant converted to float or double, whose fold reads its value.
+- **A record's type is a column** with `--window-rows`: the records' bytes'
+  sweep makes it with its four (`node_tests_window_bytes_by`,
+  `window_x_types`), so a target and a type are compared in registers.
+
+The report adds:
+
+- `node-shadow: window rows expressions=N records=N taken=N (P%)
+  their-records=N (P%) their-entries=N differences=N
+  not-kept-by-the-reference=N second-runs-that-differ=N records-swept=N
+  entries-written=N`: the expressions C takes on the window; those whose tape
+  is made here; the tapes that differ from X's on T's columns in their
+  number of entries, a kind or a class; the taken ones the reference kept no
+  tape for, for want of room; and the chunks whose second run wrote another
+  number of entries.
+- `node-shadow: window rows listed, by an expression's first record's
+  reason: update=N branches=N refused-conversion=N
+  constant-to-a-floating-class=N`.
+- `node-shadow: window rows records read a record at a time: a target's
+  word=N (P% of the records swept) a line or a table=N (P%)`: the two lists'
+  records.
+- `node-shadow: window rows ticks=N (T a record swept, T a record of the
+  taken): the reads=N (T) the shapes=N (T) the rows=N (T) an expression's
+  part=N (T); the reference's X on the taken expressions=N (T a record of
+  theirs)`: TSC ticks. The reference's are with its entries' values, which
+  the rows here don't make.
+- `node-shadow: window rows a second run over the same chunk, not counted:
+  ...`: the same four parts over the chunk once more, their code and tables
+  at hand.
+- `node-shadow: window rows difference file=F line=N token=N`, with `--list
+  N`: where a tape that differs is.
+
+The command fails where a tape differs or a chunk's second run wrote another
+number of entries.
+
+`test-checker` (part 5 of 8) reads the rows' fixture
+(`node_rows_test_source`): a line a shape, a line a term's case (a `_BitInt`'s
+target, the targets past double's, an aggregate converted to an aggregate, a
+store of a constant, records that are not evaluated), and two groups of
+statements 64 times each for the blocks' ends. It reads C on the window's
+fixture through the rows too. Every tape made is X's on T's columns; the
+reader's verify finds no byte of the window wrong, the types' column's among
+them; the expressions, the tapes, their entries, the listed ones by reason,
+the entries written and the records read for are pinned
+(`NodeRowsExpected`); and with one
+of the reference's answers changed for each tape
+(`BUSTER_NODE_READER_WINDOW_ROWS_FAULT`: its first entry's kind, its last's
+class and its length in turn) the comparison counts every tape.
+`node_rows_test_tables` checks the tables: each shape's entries and length,
+the classes' sources the write resolves, each template's shape with the mark
+of those whose rows are not made here, the order's permutation, and void's
+word, which the reads don't read.

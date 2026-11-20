@@ -525,12 +525,15 @@ pass; focused ASan/UBSan, guarded-capacity and deliberate-fault checks pass too.
 
 ## Row emission and measurement
 
-The vector path forms four address and line deltas together. Leading-zero
-counts determine their LEB128 byte counts. `vpmultishiftqb` spreads the
-seven-bit groups, a byte permutation inserts the three standard line opcodes,
-and `vpcompressb` packs the valid bytes directly into the final line program.
-The store is masked to exactly the byte count. The scalar twin writes each
-opcode and LEB128 value independently and handles partial groups.
+The header's line base is −5, its line range is 14 and its opcode base is 13.
+A row with line delta −5 through +8 uses one special opcode when
+`13 + 14 * address_delta + (line_delta + 5)` fits in a byte. The vector
+writer can emit four such rows in one four-byte store. In a mixed group,
+leading-zero counts determine the remaining rows' LEB128 lengths,
+`vpmultishiftqb` spreads their seven-bit groups and `vpcompressb` packs
+the selected bytes of all four rows. The store writes exactly that count.
+The scalar writer uses the same encoding for partial groups, file changes
+and rows marked with `DW_LNS_set_prologue_end`.
 
 `benchmark-debug [--functions N] [--rows N] [--only scalar|vector]
 [--after-scalar MS]` measures validation, size calculation, all five section
