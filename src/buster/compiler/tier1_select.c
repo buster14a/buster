@@ -3042,17 +3042,6 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
-    case TIER1_RULE_FLOAT_CONVERT_LOAD:
-    {
-        const uint8_t x = destination & 15;
-        X86Instruction record = holes->memory;
-        record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
-        record.reg = x;
-        // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
-        tier1_select_append(&result, record);
-        break;
-    }
     case TIER1_RULE_FLOAT_CONVERT:
     {
         const uint32_t source_width = holes->source_width;
@@ -3103,6 +3092,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             tier1_select_append(&result, (X86Instruction){0});
             break;
         }
+        break;
+    }
+    case TIER1_RULE_FLOAT_CONVERT_LOAD:
+    {
+        const uint8_t x = destination & 15;
+        X86Instruction record = holes->memory;
+        record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
+        record.reg = x;
+        // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_FLOAT_RETURN:
