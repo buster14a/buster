@@ -2455,6 +2455,449 @@ static bool node_contexts_test_fixture(const char* directory, const char* name, 
     return valid && same && controlled && single_same;
 }
 
+// X's rows on the window's fixture (#2850's step 2, c_check_node_machine_rows.c; docs/one-core-path.md, "X's rows on
+// the window"): a line a shape, and each kind of expression it lists.
+// - Names, constants and stores: a local's, a global's and a pointer's, read and written.
+// - A binary operator's kind, each; the two unary ones; a truth as a value and as a statement's condition, of a wide
+//   class and of a narrow one.
+// - A member with and without an offset, read for its value and for its address, through a pointer, of a local and
+//   of a global; a pointer's sum, its difference, its subscript read and addressed.
+// - An address constant: a local's and a global's, with and without an offset, an array's decay, a member's; one
+//   converted to an integer; one with no object, converted too; and a discarded one, with a discarded integer.
+// - Conversions: between classes, to bool from a wide class and from a narrow one, to void (a discarded value), and
+//   between two types of one class (none).
+// - An integer constant's folded: to another integer's class, an unsigned long's to and from, to bool; a floating
+//   one's, which is not folded.
+// - A bool's conversion to bool (a const one's read), an aggregate's read through a pointer to const and its
+//   discard, and an update that is not evaluated (a sizeof's operand).
+// - What it lists: an integer constant converted to a floating class; a conversion to a long double, a return's
+//   (its root's record's alone); an update; and a condition evaluated as branches.
+// - 64 statements of an odd number of records each, with a member's row of three entries and a conversion to bool of
+//   four: a step's eight records' entries straddle the streams' registers in turn.
+static const char node_rows_test_source[] =
+    "struct pair { int first; long second; char third; _Bool flag; };\n"
+    "struct outer { struct pair inner; struct pair* link; int list[4]; };\n"
+    "extern int global;\n"
+    "extern long global_long;\n"
+    "extern struct outer global_outer;\n"
+    "extern int table[8];\n"
+    "extern long double big;\n"
+    "int callee(int a, long b);\n"
+    "void nothing(void);\n"
+    "int rows(int a, long b, char c, short h, unsigned char u, int* p, struct outer* o, double d, _Bool t, float f, const _Bool cb, const struct outer* co)\n"
+    "{\n"
+    "    int local = 0;\n"
+    "    long wide = 0;\n"
+    "    char narrow = 0;\n"
+    "    _Bool flag = 0;\n"
+    "    double value = 0;\n"
+    "    float single = 0;\n"
+    "    int list[4];\n"
+    "    struct outer whole;\n"
+    "    int* q = 0;\n"
+    "    long* lp = 0;\n"
+    "    unsigned long ul = 0;\n"
+    // A _BitInt's target is an initialized object's: of its value's class it writes no entry; of another, a CONVERT,
+    // and a constant's is no fold. A complex, a long double's, a 128-bit integer's and a half-precision target's
+    // conversions are refused.
+    "    _BitInt(32) same_bits = a;\n"
+    "    _BitInt(17) odd_bits = a;\n"
+    "    _BitInt(8) narrow_bits = a;\n"
+    "    _BitInt(32) constant_bits = 5;\n"
+    "    unsigned _BitInt(64) wide_bits = 5;\n"
+    "    unsigned _BitInt(64) converted_bits = a;\n"
+    "    _Complex double complex_constant = 1;\n"
+    "    _Complex double complex_double = d;\n"
+    "    _Complex float complex_float = f;\n"
+    "    long double extended_local = a;\n"
+    "    __int128 huge = a;\n"
+    "    _Float16 half = f;\n"
+    "    local = a;\n"
+    "    local = 7;\n"
+    "    global = a;\n"
+    "    local = global;\n"
+    "    *p = a;\n"
+    "    local = *p;\n"
+    "    local = a + local;\n"
+    "    local = a - local;\n"
+    "    local = a * local;\n"
+    "    local = a / local;\n"
+    "    local = a % local;\n"
+    "    local = a & local;\n"
+    "    local = a | local;\n"
+    "    local = a ^ local;\n"
+    "    local = a << local;\n"
+    "    local = a >> local;\n"
+    "    local = a == local;\n"
+    "    local = a != local;\n"
+    "    local = a < local;\n"
+    "    local = a <= local;\n"
+    "    local = a > local;\n"
+    "    local = a >= local;\n"
+    "    local = u / u;\n"
+    "    local = u >> a;\n"
+    "    value = d * d;\n"
+    "    local = d < d;\n"
+    "    local = -a;\n"
+    "    local = ~a;\n"
+    "    value = -d;\n"
+    "    local = !a;\n"
+    "    local = !c;\n"
+    "    local = !b;\n"
+    "    local = !d;\n"
+    "    local = !p;\n"
+    "    if (a) local = 1;\n"
+    "    if (c) local = 2;\n"
+    "    if (b) local = 3;\n"
+    "    if (p) local = 4;\n"
+    "    if (d) local = 5;\n"
+    "    if (h) local = 6;\n"
+    "    if (t) local = 7;\n"
+    "    while (u) u = 0;\n"
+    "    local = o->inner.first;\n"
+    "    wide = o->inner.second;\n"
+    "    lp = &o->inner.second;\n"
+    "    q = &o->inner.first;\n"
+    "    local = o->link->first;\n"
+    "    wide = o->link->second;\n"
+    "    narrow = o->link->third;\n"
+    "    local = whole.inner.first;\n"
+    "    wide = whole.inner.second;\n"
+    "    local = global_outer.list[1];\n"
+    "    wide = global_outer.inner.second;\n"
+    "    o->inner.second = b;\n"
+    "    o->link->first = a;\n"
+    "    whole.inner.second = b;\n"
+    "    q = p + a;\n"
+    "    q = p - a;\n"
+    "    q = a + p;\n"
+    "    local = p[a];\n"
+    "    q = &p[a];\n"
+    "    local = *(p + a);\n"
+    "    local = list[a];\n"
+    "    local = table[a];\n"
+    "    q = &list[a];\n"
+    "    p[a] = local;\n"
+    "    q = &local;\n"
+    "    q = &global;\n"
+    "    q = &list[2];\n"
+    "    q = &table[2];\n"
+    "    q = list;\n"
+    "    q = table;\n"
+    "    lp = &whole.inner.second;\n"
+    "    lp = &global_outer.inner.second;\n"
+    "    q = &whole.inner.first;\n"
+    "    wide = (long)&global;\n"
+    "    wide = (long)&list[1];\n"
+    "    wide = (long)&local;\n"
+    "    wide = (long)&table[3];\n"
+    "    local = (int)(long)&global;\n"
+    "    q = (int*)16;\n"
+    "    wide = (long)(int*)16;\n"
+    "    local = *(int*)32;\n"
+    "    local = c;\n"
+    "    wide = a;\n"
+    "    local = h;\n"
+    "    local = u;\n"
+    "    value = a;\n"
+    "    local = d;\n"
+    "    single = d;\n"
+    "    value = f;\n"
+    "    narrow = a;\n"
+    "    wide = d;\n"
+    "    u = b;\n"
+    "    lp = (long*)p;\n"
+    "    wide = (long)p;\n"
+    "    p = (int*)b;\n"
+    "    flag = a;\n"
+    "    flag = c;\n"
+    "    flag = b;\n"
+    "    flag = d;\n"
+    "    flag = p;\n"
+    "    flag = h;\n"
+    "    flag = u;\n"
+    "    local = t;\n"
+    "    flag = t;\n"
+    "    flag = o->inner.flag;\n"
+    "    wide = 1;\n"
+    "    narrow = 2;\n"
+    "    flag = 1;\n"
+    "    flag = 0;\n"
+    "    q = 0;\n"
+    "    local = 'x';\n"
+    "    u = 300;\n"
+    "    wide = -1;\n"
+    "    h = 70000;\n"
+    "    b = 4000000000u;\n"
+    "    value = 1;\n"
+    "    single = 2;\n"
+    "    d = 16777217;\n"
+    "    f = 16777217;\n"
+    "    big = a;\n"
+    "    local = big;\n"
+    "    callee(a, b);\n"
+    "    local = callee(a, b);\n"
+    "    wide = callee(c, a);\n"
+    "    nothing();\n"
+    "    (void)a;\n"
+    "    (void)callee(a, 1);\n"
+    "    (void)o->inner.second;\n"
+    "    7;\n"
+    "    (void)7;\n"
+    "    &global;\n"
+    "    a;\n"
+    "    wide = (long)&((struct pair*)0)->second;\n"
+    "    local = (int)&((struct pair*)0)->third;\n"
+    "    lp = &((struct pair*)0)->second;\n"
+    "    ul = 5;\n"
+    "    narrow = 7ul;\n"
+    "    ul = (unsigned long)&global;\n"
+    "    local = 2.5;\n"
+    "    flag = cb;\n"
+    "    whole = *co;\n"
+    "    (void)*o;\n"
+    "    o->inner;\n"
+    // A store of a constant has an integer constant's kind, its value's, and no fold: its own entry and its
+    // conversion's.
+    "    wide = local = 5;\n"
+    "    o->inner.second = narrow = -1;\n"
+    "    global_long = wide = local = 0;\n"
+    "    flag = local = 3;\n"
+    "    local = sizeof(a++);\n"
+    "    wide = sizeof(o->inner.second) + sizeof(!a) + sizeof(&global) + sizeof((long)a);\n"
+    "    wide = (long)sizeof(whole);\n"
+    "    a++;\n"
+    "    local += 2;\n"
+    "    if (a && local) local = 1;\n"
+    "    if (!a) local = 2;\n"
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    wide = o->inner.second;\n    flag = c;\n")
+    BUSTER_NODE_CONTEXTS_TEST_BLOCK("    flag = o->link->third;\n")
+    "    return local + (int)wide + narrow + flag + (int)value + (int)single + list[0] + *q + (int)*lp;\n"
+    "}\n"
+    "long returned(int a)\n"
+    "{\n"
+    "    return a;\n"
+    "}\n"
+    "_Bool tested(char c)\n"
+    "{\n"
+    "    return c;\n"
+    "}\n"
+    "long constant(void)\n"
+    "{\n"
+    "    return 3;\n"
+    "}\n"
+    "double floated(void)\n"
+    "{\n"
+    "    return 1;\n"
+    "}\n"
+    "unsigned long addressed(void)\n"
+    "{\n"
+    "    return (unsigned long)&global;\n"
+    "}\n"
+    "long double extended(int a)\n"
+    "{\n"
+    "    return a;\n"
+    "}\n"
+    "float single_of(long b)\n"
+    "{\n"
+    "    return b;\n"
+    "}\n"
+    // An aggregate's conversion to an aggregate is refused, and its value with no conversion is taken.
+    "struct outer copied(const struct outer* co)\n"
+    "{\n"
+    "    return *co;\n"
+    "}\n"
+    "struct outer same(struct outer* o)\n"
+    "{\n"
+    "    return *o;\n"
+    "}\n";
+
+// The rows' tables against what the rows' write makes of them (node_rows_window_write): a shape's entries are its
+// first slots', as many as its length, each a typed kind's number; a class's source is the record's own class's in
+// any slot, its target's or its first operand's conversion's in a shape's first slot alone; and a conversion's shape
+// has its target's in its first slot at most, and the record's own class's there alone. And void's word, which the
+// reads don't read.
+static bool node_rows_test_tables(void)
+{
+    NodeRowsTables tables;
+    node_rows_tables(&tables);
+    static const uint8_t conversions[] = { BUSTER_TYPED_DISCARD, BUSTER_NODE_ROWS_BOOL, BUSTER_NODE_ROWS_BOOL + 1, BUSTER_NODE_ROWS_CONVERT };
+    uint32_t wrong = 0;
+    uint32_t rows = 0;
+    for (uint32_t shape = 0; shape < 128; shape += 1)
+    {
+        uint32_t length = 0;
+        bool ended = false;
+        for (uint32_t slot = 0; slot < BUSTER_NODE_ROWS_SLOTS; slot += 1)
+        {
+            const uint8_t kind = tables.kinds[slot][shape];
+            const uint8_t source = tables.sources[slot][shape];
+            const bool entry = kind != 0;
+            wrong += entry && ended;
+            wrong += kind >= BUSTER_NODE_ROWS_TABLE;
+            wrong += !entry && source != 0;
+            wrong += source >= BUSTER_TYPED_CLASSES && source != BUSTER_NODE_ROWS_CLASS_OWN && (slot != 0 || (source != BUSTER_NODE_ROWS_CLASS_TARGET && source != BUSTER_NODE_ROWS_CLASS_OPERAND));
+            length += entry;
+            ended = ended || !entry;
+        }
+        wrong += tables.lengths[shape] != length;
+        // A shape past the table's rows has no entry: the mark of a template whose rows are not made here among them.
+        wrong += shape >= BUSTER_NODE_ROWS_SHAPES && length != 0;
+        wrong += shape != 0 && shape < BUSTER_NODE_ROWS_TABLE && (length != 1 || tables.kinds[0][shape] != shape || tables.sources[0][shape] != BUSTER_NODE_ROWS_CLASS_OWN);
+        rows += shape >= BUSTER_NODE_ROWS_TABLE && length != 0;
+    }
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(conversions); c += 1)
+    {
+        const uint32_t shape = conversions[c];
+        wrong += tables.sources[0][shape] == BUSTER_NODE_ROWS_CLASS_OPERAND;
+        for (uint32_t slot = 1; slot < BUSTER_NODE_ROWS_SLOTS; slot += 1)
+        {
+            wrong += tables.sources[slot][shape] >= BUSTER_TYPED_CLASSES;
+        }
+    }
+    // The order the write reads a block's records in is a permutation of them.
+    uint64_t seen = 0;
+    for (uint32_t i = 0; i < 64; i += 1)
+    {
+        wrong += tables.order[i] >= 64;
+        seen |= UINT64_C(1) << (tables.order[i] & 63);
+    }
+    wrong += seen != ~UINT64_C(0);
+    // A template's own shape: one entry's kind for the seven a template alone gives; the mark for the five whose rows
+    // are not made here, three of which C on the window makes of no record (a logical operator's and a conditional's
+    // value's: no fixture reaches their bytes); and none for the others, whose cases the shapes' sweep makes.
+    static const uint8_t template_shapes[][2] = {
+        { CHECK_LOWER_TEMPLATE_CONSTANT, BUSTER_TYPED_CONST },
+        { CHECK_LOWER_TEMPLATE_LOCAL, BUSTER_TYPED_LOCAL },
+        { CHECK_LOWER_TEMPLATE_GLOBAL, BUSTER_TYPED_GLOBAL },
+        { CHECK_LOWER_TEMPLATE_STORE_LOCAL, BUSTER_TYPED_STORE_LOCAL },
+        { CHECK_LOWER_TEMPLATE_STORE_GLOBAL, BUSTER_TYPED_STORE_GLOBAL },
+        { CHECK_LOWER_TEMPLATE_STORE, BUSTER_TYPED_STORE },
+        { NODE_MACHINE_TEMPLATE_CALL, BUSTER_TYPED_CALL },
+        { NODE_MACHINE_TEMPLATE_BRANCH, BUSTER_NODE_ROWS_LATER },
+        { NODE_MACHINE_TEMPLATE_DECIDED, BUSTER_NODE_ROWS_LATER },
+        { NODE_MACHINE_TEMPLATE_SECOND, BUSTER_NODE_ROWS_LATER },
+        { NODE_MACHINE_TEMPLATE_UPDATE, BUSTER_NODE_ROWS_LATER },
+        { NODE_MACHINE_TEMPLATE_BRANCHES, BUSTER_NODE_ROWS_LATER },
+    };
+    for (uint32_t template = 0; template < 64; template += 1)
+    {
+        uint8_t shape = 0;
+        for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(template_shapes); t += 1)
+        {
+            shape = template_shapes[t][0] == template ? template_shapes[t][1] : shape;
+        }
+        wrong += tables.templates[template] != shape;
+    }
+    // And void's class is void's and it has no fact: the reads read no word for a target that is void, whose bytes
+    // the shapes' sweep takes for zeros.
+    CheckTestTypes types = { 0 };
+    const bool opened = check_test_types_open(&types);
+    wrong += !opened || check_lower_type_class(&types.table, BUSTER_TYPE_VOID) != BUSTER_TYPED_CLASS_VOID || check_lower_type_facts(&types.table, BUSTER_TYPE_VOID) != 0;
+    check_test_types_close(&types);
+    const bool valid = wrong == 0 && rows == BUSTER_NODE_ROWS_SHAPES - BUSTER_NODE_ROWS_TABLE;
+    if (!valid)
+    {
+        fprintf(stderr, "test-checker: node-rows: the tables have %u rows (%u expected) and %u entries, lengths or sources the rows' write does not make\n", rows,
+                BUSTER_NODE_ROWS_SHAPES - BUSTER_NODE_ROWS_TABLE, wrong);
+    }
+    return valid;
+}
+
+// What X's rows on the window make of a fixture: the expressions they run on (those C takes there), those whose tape
+// they make and its entries, and the listed ones by their first record's reason.
+typedef struct NodeRowsExpected NodeRowsExpected;
+struct NodeRowsExpected
+{
+    uint32_t expressions;
+    uint32_t taken;
+    uint32_t entries;
+    uint32_t listed_update;
+    uint32_t listed_branches;
+    uint32_t listed_conversion;
+    uint32_t listed_floating;
+    // The entries the rows' sweep wrote for the fixture's records, and the records the reads' two loops read for: a
+    // target's word, and a line or a table.
+    uint32_t written;
+    uint32_t words;
+    uint32_t lines;
+};
+
+// X's rows on the window on fixture `text` (written to `directory` as `name`, read with `options`): every tape they
+// make is X's on T's columns, entry by entry, and their counts are `expected`'s; and with one of the reference's
+// answers changed for each (its first entry's kind, its last's class and its length in turn), every one differs.
+static bool node_rows_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, const NodeRowsExpected* expected)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    bool valid = parse_test_write(path, text, strlen(text));
+    NodeShadow shadow = {
+        .verify = true,
+        .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN,
+        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
+                  BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS,
+        .passes = 1,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const uint64_t* counts = shadow.reader_facts;
+    const uint64_t listed = counts[NODE_FACTS_COUNT_ROWS_LISTED_UPDATE] + counts[NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES] + counts[NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION] +
+                            counts[NODE_FACTS_COUNT_ROWS_LISTED_FLOATING];
+    const bool same = counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS] == expected->expressions && counts[NODE_FACTS_COUNT_ROWS_TAKEN] == expected->taken &&
+                      counts[NODE_FACTS_COUNT_ROWS_ENTRIES] == expected->entries && counts[NODE_FACTS_COUNT_ROWS_LISTED_UPDATE] == expected->listed_update &&
+                      counts[NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES] == expected->listed_branches &&
+                      counts[NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION] == expected->listed_conversion &&
+                      counts[NODE_FACTS_COUNT_ROWS_LISTED_FLOATING] == expected->listed_floating && counts[NODE_FACTS_COUNT_ROWS_WRITTEN] == expected->written &&
+                      counts[NODE_FACTS_COUNT_ROWS_WORDS] == expected->words && counts[NODE_FACTS_COUNT_ROWS_LINES] == expected->lines &&
+                      counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] == 0 &&
+                      counts[NODE_FACTS_COUNT_ROWS_UNKEPT] == 0 && counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] == 0 &&
+                      counts[NODE_FACTS_COUNT_ROWS_TAKEN] + listed == counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS] &&
+                      counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS] == counts[NODE_FACTS_COUNT_CONTEXTS_DECIDED] - counts[NODE_FACTS_COUNT_CONTEXTS_REFUSED] &&
+                      counts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] == 0 &&
+                      counts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0 && shadow.own_values_wrong == 0;
+    if (!valid || !same)
+    {
+        fprintf(stderr, "test-checker: node-rows %s: %s: X's rows on the window ran on %" PRIu64 " expressions (%u expected; C takes %" PRIu64 " there) and made %" PRIu64
+                " tapes (%u) of %" PRIu64 " entries (%u); listed: update=%" PRIu64 " (%u) branches=%" PRIu64 " (%u) refused-conversion=%" PRIu64
+                " (%u) constant-to-a-floating-class=%" PRIu64 " (%u); entries written=%" PRIu64 " (%u), records read for a target's word=%" PRIu64
+                " (%u) and for a line or a table=%" PRIu64 " (%u); %" PRIu64 " tapes differ from X's on T's columns, the reference kept none for %" PRIu64
+                ", %" PRIu64 " chunks' second run wrote another number of entries, and the reader's verify finds %" PRIu64
+                " bytes wrong (a record the kernel didn't place has none, its type's column's among them)\n",
+                name, valid ? "read" : "NOT READ", counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS], expected->expressions,
+                counts[NODE_FACTS_COUNT_CONTEXTS_DECIDED] - counts[NODE_FACTS_COUNT_CONTEXTS_REFUSED], counts[NODE_FACTS_COUNT_ROWS_TAKEN], expected->taken,
+                counts[NODE_FACTS_COUNT_ROWS_ENTRIES], expected->entries, counts[NODE_FACTS_COUNT_ROWS_LISTED_UPDATE], expected->listed_update,
+                counts[NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES], expected->listed_branches, counts[NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION], expected->listed_conversion,
+                counts[NODE_FACTS_COUNT_ROWS_LISTED_FLOATING], expected->listed_floating, counts[NODE_FACTS_COUNT_ROWS_WRITTEN], expected->written,
+                counts[NODE_FACTS_COUNT_ROWS_WORDS], expected->words, counts[NODE_FACTS_COUNT_ROWS_LINES], expected->lines, counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES],
+                counts[NODE_FACTS_COUNT_ROWS_UNKEPT],
+                counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES], shadow.own_values_wrong);
+    }
+    // The comparison's control: with one of the reference's answers changed for each tape made, every one differs.
+    NodeShadow faulted = {
+        .verify = true,
+        .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN,
+        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
+                  BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS | BUSTER_NODE_READER_WINDOW_ROWS_FAULT,
+        .passes = 1,
+        .repeat = 1,
+    };
+    NodeCensus faulted_census = { .shadow = &faulted };
+    const bool faulted_read = valid && node_census_file(&faulted_census, path, options, option_count) && faulted_census.files == 1;
+    const uint64_t* faulted_counts = faulted.reader_facts;
+    const bool controlled = faulted_read && faulted_counts[NODE_FACTS_COUNT_ROWS_TAKEN] == expected->taken && faulted_counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] == expected->taken &&
+                            expected->taken >= 3;
+    if (!controlled)
+    {
+        fprintf(stderr, "test-checker: node-rows %s: %s: with one of the reference's answers changed for each tape, the comparison counts %" PRIu64 " of the %" PRIu64
+                " tapes made (%u expected: every one)\n",
+                name, faulted_read ? "read" : "NOT READ", faulted_counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES], faulted_counts[NODE_FACTS_COUNT_ROWS_TAKEN], expected->taken);
+    }
+    unlink(path);
+    return valid && same && controlled;
+}
+
 // --facts' fixture (#2850's step 1, c_check_node_machine_facts.c): each kind of identifier's leaf (an automatic object, a
 // parameter, a static object, a function, enumerators) and each lookup the fact words' rules take: `->` and `.`, chained
 // and through a const record; a static record's member, an address constant; `*p`; subscripts of a pointer, of an
@@ -3821,6 +4264,37 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     check_test_expect(test, ready && node_contexts_test_fixture(directory, "spaced.c", node_contexts_test_spaced_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &spaced_expected),
                       "node-contexts: in a unit with a type in a space of its own, C on the window lists an update whose destination is in a segment's and takes the others");
+    // X's rows on the window: its tables; its own fixture's counts, a line a shape; and C's fixture's, each of C's
+    // rules' records.
+    check_test_expect(test, node_rows_test_tables(), "node-rows: each shape's row has its length's entries, and no class's source where the rows' write resolves none");
+    static const NodeRowsExpected rows_expected = {
+        .expressions = 371,
+        .taken = 356,
+        .entries = 2375,
+        .listed_update = 2,
+        .listed_branches = 1,
+        .listed_conversion = 10,
+        .listed_floating = 2,
+        .written = 2453,
+        .words = 237,
+        .lines = 327,
+    };
+    check_test_expect(test, ready && node_rows_test_fixture(directory, "rows.c", node_rows_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_expected),
+                      "node-rows: X's rows on the window make each shape's entries' kinds and classes as X does on T's columns, and list what they don't make");
+    static const NodeRowsExpected rows_contexts_expected = {
+        .expressions = 1493,
+        .taken = 679,
+        .entries = 3164,
+        .listed_update = 575,
+        .listed_branches = 225,
+        .listed_conversion = 10,
+        .listed_floating = 4,
+        .written = 8204,
+        .words = 426,
+        .lines = 540,
+    };
+    check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_contexts_expected),
+                      "node-rows: on C's fixture, X's rows on the window make the tape of each expression C takes there, or list it");
     if (written)
     {
         unlink(header);

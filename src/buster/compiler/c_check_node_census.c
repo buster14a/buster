@@ -10,7 +10,8 @@
 //   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
 //                                       [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--front | --front-first] [--front-lean]
 //                                       [--front-warm] [--front-types] [--front-sweeps] [--front-tests] [--front-tests-last] [--passes N]
-//                                       [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--repeat N]] [preprocessor options]
+//                                       [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--repeat N]]
+//                                       [preprocessor options]
 //                                       file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
@@ -3580,7 +3581,8 @@ static __attribute__((noinline)) uint8_t node_tests_window_wants(NodeCensusReade
 // the chunk's last record to its block's end.
 // With `contexts` (a constant where this is inlined), C on the window's bytes of the same records too
 // (c_check_node_machine_window.c), from the same gathers, and a declaration's line's byte says whether its object has
-// a symbol.
+// a symbol. With `rows` (another), each record's type too, a dword of the same lines' halves, for X's rows on the
+// window (c_check_node_machine_rows.c), which compare it with the record's target.
 // The sweep's four columns' places among a record's line's first eight dwords, and what reading sixteen lines' first
 // halves a step asks: a line is sixteen dwords, and the window's array is a whole number of steps, so a step whose
 // first record is one of a chunk's reads lines of the array alone.
@@ -3594,7 +3596,7 @@ _Static_assert(offsetof(NodeFactsRecord, word) == 4 * BUSTER_NODE_TESTS_COLUMN_W
                "the sweep's four columns are dwords of a line's first half, and a step's sixteen lines are the window's");
 
 static inline __attribute__((always_inline)) void node_tests_window_bytes_by(NodeCensusReader* tests, const struct NodeFactsReader* state, const NodeFront* front,
-                                                                           uint64_t* made, const bool contexts)
+                                                                           uint64_t* made, const bool contexts, const bool rows)
 {
     NodeCensusScratch* s = &tests->scratch;
     const uint8_t* const records = (const uint8_t*)state->facts.records;
@@ -3611,6 +3613,8 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                                              16 + BUSTER_NODE_TESTS_COLUMN_FLAGS, BUSTER_NODE_TESTS_COLUMN_FLAGS + 8, BUSTER_NODE_TESTS_COLUMN_FLAGS,
                                              16 + BUSTER_NODE_TESTS_COLUMN_WORD + 8, 16 + BUSTER_NODE_TESTS_COLUMN_WORD, BUSTER_NODE_TESTS_COLUMN_WORD + 8,
                                              BUSTER_NODE_TESTS_COLUMN_WORD);
+    // And the four records' types, a line's first dword, in the permute's first lane (the rows' column).
+    const __m512i type_columns = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16 + 8, 16, 8, 0);
     uint64_t lines_made = 0;
     uint64_t values_checked = 0;
     uint64_t values_wrong = 0;
@@ -3624,6 +3628,7 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
         __m128i type_kind_bytes = _mm_setzero_si128();
         __m128i standing_bytes = _mm_setzero_si128();
         __m128i flag_bytes = _mm_setzero_si128();
+        __m512i type_dwords = zero;
         if (x < count)
         {
             const uint32_t live = count - x < 16 ? count - x : 16;
@@ -3638,6 +3643,7 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
             // permutes, the records the kernel didn't place read as zeros, as a masked gather's were. A step reads its
             // sixteen lines whether placed or not: the window's own array's (the assert above the sweep).
             __m512i fours[4];
+            __m128i types[4] = { _mm_setzero_si128(), _mm_setzero_si128(), _mm_setzero_si128(), _mm_setzero_si128() };
             for (uint32_t four = 0; four < 4; four += 1)
             {
                 const uint8_t* const at = base + 4 * sizeof(NodeFactsRecord) * (uint64_t)four;
@@ -3646,6 +3652,16 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                 const __m512i second = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(const void*)(at + 2 * sizeof(NodeFactsRecord)))),
                                                           _mm256_loadu_si256((const __m256i*)(const void*)(at + 3 * sizeof(NodeFactsRecord))), 1);
                 fours[four] = _mm512_permutex2var_epi32(first, columns, second);
+                if (rows)
+                {
+                    types[four] = _mm512_castsi512_si128(_mm512_permutex2var_epi32(first, type_columns, second));
+                }
+            }
+            if (rows)
+            {
+                // The step's sixteen types, four a lane, the records the kernel didn't place as zeros like the columns.
+                const __m512i joined = _mm512_inserti32x4(_mm512_inserti32x4(_mm512_inserti32x4(_mm512_castsi128_si512(types[0]), types[1], 1), types[2], 2), types[3], 3);
+                type_dwords = _mm512_maskz_mov_epi32(placed, joined);
             }
             const __m512i words_flags_low = _mm512_shuffle_i32x4(fours[0], fours[1], 0x44);
             const __m512i words_flags_high = _mm512_shuffle_i32x4(fours[2], fours[3], 0x44);
@@ -3791,6 +3807,10 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
                 const __m128i unplaced_bytes = _mm_or_si128(_mm_or_si128(_mm_or_si128(own_bytes, value_bytes), _mm_or_si128(class_bytes, fact_bytes)),
                                                             _mm_or_si128(_mm_or_si128(type_kind_bytes, standing_bytes), flag_bytes));
                 values_wrong += (uint64_t)_mm_popcnt_u32(_mm_mask_test_epi8_mask((__mmask16)~placed, unplaced_bytes, unplaced_bytes));
+                if (rows)
+                {
+                    values_wrong += (uint64_t)_mm_popcnt_u32(_mm512_mask_test_epi32_mask((__mmask16)~placed, type_dwords, type_dwords));
+                }
             }
         }
         _mm_storeu_si128((__m128i*)(void*)(tests->window_types + x), own_bytes);
@@ -3803,24 +3823,33 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
             _mm_storeu_si128((__m128i*)(void*)(state->window_c_standings + x), standing_bytes);
             _mm_storeu_si128((__m128i*)(void*)(state->window_c_flags + x), flag_bytes);
         }
+        if (rows)
+        {
+            _mm512_storeu_si512(state->window_x_types + x, type_dwords);
+        }
     }
     *made += lines_made;
     tests->types->own_values_checked += values_checked;
     tests->types->own_values_wrong += values_wrong;
 }
 
-// The sweep in its two forms, each its own code: the tests' bytes alone, as it was before C ran on the window, and
-// with C's bytes where C runs. One sweep with a test a step of whether C runs read the tests' bytes 0.2 to 2 ticks a
-// record over the first on the 9700X with C off (`sqlite3.c` to musl).
+// The sweep in its three forms, each its own code: the tests' bytes alone, as it was before C ran on the window; with
+// C's bytes where C runs; and with the records' types too where X's rows are made. One sweep with a test a step of
+// whether C runs read the tests' bytes 0.2 to 2 ticks a record over the first on the 9700X with C off (`sqlite3.c` to
+// musl).
 static void node_tests_window_bytes(NodeCensusReader* tests, const struct NodeFactsReader* state, const NodeFront* front, uint64_t* made)
 {
-    if (state->c_tables != NULL)
+    if (state->x_tables != NULL)
     {
-        node_tests_window_bytes_by(tests, state, front, made, true);
+        node_tests_window_bytes_by(tests, state, front, made, true, true);
+    }
+    else if (state->c_tables != NULL)
+    {
+        node_tests_window_bytes_by(tests, state, front, made, true, false);
     }
     else
     {
-        node_tests_window_bytes_by(tests, state, front, made, false);
+        node_tests_window_bytes_by(tests, state, front, made, false, false);
     }
 }
 
@@ -4678,6 +4707,8 @@ struct NodeShadow
     // C on the window: the listed expressions by reason, and the differences shown.
     uint64_t contexts_listed[BUSTER_NODE_CONTEXTS_REASONS];
     uint32_t contexts_shown;
+    // X's rows on the window: the differences shown.
+    uint32_t rows_shown;
     uint64_t front_plain_ticks;
     uint64_t front_plain_records;
     uint64_t front_plain_differences;
@@ -6352,6 +6383,49 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
                    (double)(later_loop + later_targets + later_part) * per_decided, later_loop, (double)later_loop * per, later_targets, (double)later_targets * per, later_part,
                    (double)later_part * per);
         }
+        if ((shadow->reader & BUSTER_NODE_READER_WINDOW_ROWS) != 0)
+        {
+            // X's rows on the window: the expressions C takes there.
+            const uint64_t expressions = counts[NODE_FACTS_COUNT_ROWS_EXPRESSIONS];
+            const uint64_t taken = counts[NODE_FACTS_COUNT_ROWS_TAKEN];
+            const uint64_t taken_records = counts[NODE_FACTS_COUNT_ROWS_TAKEN_RECORDS];
+            const uint64_t swept = counts[NODE_FACTS_COUNT_ROWS_SWEPT];
+            const uint64_t reads = counts[NODE_FACTS_COUNT_ROWS_READ_TICKS];
+            const uint64_t shapes = counts[NODE_FACTS_COUNT_ROWS_SHAPE_TICKS];
+            const uint64_t write = counts[NODE_FACTS_COUNT_ROWS_WRITE_TICKS];
+            const uint64_t part = counts[NODE_FACTS_COUNT_ROWS_PART_TICKS];
+            const uint64_t reference = counts[NODE_FACTS_COUNT_ROWS_REFERENCE_TICKS];
+            const uint64_t later_reads = counts[NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS];
+            const uint64_t later_shapes = counts[NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS];
+            const uint64_t later_write = counts[NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS];
+            const uint64_t later_part = counts[NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS];
+            const double per = swept != 0 ? 1.0 / (double)swept : 0.0;
+            const double per_taken = taken_records != 0 ? 1.0 / (double)taken_records : 0.0;
+            printf("node-shadow: window rows expressions=%" PRIu64 " records=%" PRIu64 " taken=%" PRIu64 " (%.2f%%) their-records=%" PRIu64 " (%.2f%%) their-entries=%" PRIu64
+                   " differences=%" PRIu64 " not-kept-by-the-reference=%" PRIu64 " second-runs-that-differ=%" PRIu64 " records-swept=%" PRIu64 " entries-written=%" PRIu64 "\n",
+                   expressions, counts[NODE_FACTS_COUNT_ROWS_RECORDS], taken, node_census_share(taken, expressions), taken_records,
+                   node_census_share(taken_records, counts[NODE_FACTS_COUNT_ROWS_RECORDS]), counts[NODE_FACTS_COUNT_ROWS_ENTRIES], counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES],
+                   counts[NODE_FACTS_COUNT_ROWS_UNKEPT], counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES], swept, counts[NODE_FACTS_COUNT_ROWS_WRITTEN]);
+            printf("node-shadow: window rows listed, by an expression's first record's reason: update=%" PRIu64 " branches=%" PRIu64 " refused-conversion=%" PRIu64
+                   " constant-to-a-floating-class=%" PRIu64 "\n",
+                   counts[NODE_FACTS_COUNT_ROWS_LISTED_UPDATE], counts[NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES], counts[NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION],
+                   counts[NODE_FACTS_COUNT_ROWS_LISTED_FLOATING]);
+            printf("node-shadow: window rows records read a record at a time: a target's word=%" PRIu64 " (%.2f%% of the records swept) a line or a table=%" PRIu64
+                   " (%.2f%%)\n",
+                   counts[NODE_FACTS_COUNT_ROWS_WORDS], node_census_share(counts[NODE_FACTS_COUNT_ROWS_WORDS], swept), counts[NODE_FACTS_COUNT_ROWS_LINES],
+                   node_census_share(counts[NODE_FACTS_COUNT_ROWS_LINES], swept));
+            const uint64_t sum = reads + shapes + write + part;
+            const uint64_t later_sum = later_reads + later_shapes + later_write + later_part;
+            printf("node-shadow: window rows ticks=%" PRIu64 " (%.2f a record swept, %.2f a record of the taken): the reads=%" PRIu64 " (%.2f) the shapes=%" PRIu64
+                   " (%.2f) the rows=%" PRIu64 " (%.2f) an expression's part=%" PRIu64 " (%.2f); the reference's X on the taken expressions=%" PRIu64
+                   " (%.2f a record of theirs)\n",
+                   sum, (double)sum * per, (double)sum * per_taken, reads, (double)reads * per, shapes, (double)shapes * per, write, (double)write * per, part,
+                   (double)part * per, reference, (double)reference * per_taken);
+            printf("node-shadow: window rows a second run over the same chunk, not counted: ticks=%" PRIu64 " (%.2f a record swept, %.2f a record of the taken): the reads=%"
+                   PRIu64 " (%.2f) the shapes=%" PRIu64 " (%.2f) the rows=%" PRIu64 " (%.2f) an expression's part=%" PRIu64 " (%.2f)\n",
+                   later_sum, (double)later_sum * per, (double)later_sum * per_taken, later_reads, (double)later_reads * per, later_shapes, (double)later_shapes * per,
+                   later_write, (double)later_write * per, later_part, (double)later_part * per);
+        }
         printf("node-shadow: reader-time fact words chunks' ends: waiting values kept whole=%" PRIu64 " (their records %" PRIu64 ") kept as their place alone, cut=%" PRIu64
                "; the calls' arguments' list at most=%" PRIu64 " (room %u)\n",
                shadow->front_window_kept_values, shadow->front_window_kept_records, shadow->front_window_cut_values, shadow->front_window_arguments_most,
@@ -7035,6 +7109,12 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                         shadow->contexts_shown += 1;
                         printf("node-shadow: window contexts difference file=%s line=%u token=%u\n", file, node_census_line(&source.pp, &source.parser, token), token);
                     }
+                    for (uint32_t d = 0; d < typed->rows_shown && shadow->rows_shown < node_census_list; d += 1)
+                    {
+                        const uint32_t token = typed->rows_tokens[d];
+                        shadow->rows_shown += 1;
+                        printf("node-shadow: window rows difference file=%s line=%u token=%u\n", file, node_census_line(&source.pp, &source.parser, token), token);
+                    }
                     for (uint32_t t = 0; t < NODE_TESTS_TRIGGERS; t += 1)
                     {
                         shadow->own_triggers[t] += typed->own_triggers[t] / 2;
@@ -7309,6 +7389,15 @@ static int run_node_census(int count, char** arguments)
             shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
                              BUSTER_NODE_READER_WINDOW_CONTEXTS;
         }
+        else if (strcmp(arguments[i], "--window-rows") == 0)
+        {
+            // X's rows on the same window (c_check_node_machine_rows.c), beside X's tape on T's columns at reader time,
+            // their reference: --window-contexts' options with it, whose answers they are made from.
+            shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN |
+                                     ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
+            shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
+                             BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS;
+        }
         else if (strcmp(arguments[i], "--front-tests-last") == 0)
         {
             // The tests after C and X at reader time, on what those take.
@@ -7402,6 +7491,8 @@ static int run_node_census(int count, char** arguments)
                                           shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] != 0 ||
                                           shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] != 0 || shadow.front_plain_differences != 0 ||
                                           shadow.reader_facts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES] != 0 ||
+                                          shadow.reader_facts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] != 0 ||
+                                          shadow.reader_facts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] != 0 ||
                                           shadow.front_window_name_differences != 0 || shadow.front_window_arguments_most > BUSTER_NODE_FRONT_RECORDS);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }

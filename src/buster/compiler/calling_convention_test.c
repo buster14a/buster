@@ -7515,15 +7515,12 @@ struct AbiTestSseFixture
     const char* directory;
     const char* callee[2];
     const char* targets[3];
-    // Whether Tier 1 builds strictly, every function its own; else it leaves the records it doesn't take to Tier 0
-    // (#2798).
-    bool strict;
 };
 
 // #2113's original fixture: 17--23-byte records carry 16-byte register payloads at v3 and v4, and are MEMORY at x86-64,
 // every function Tier 1's. And the larger records' (wide-sse.c): <size / 8 x double> in a ymm or zmm register, on the
 // stack in its register's width in a variadic call and where LLVM has no vector register left, and byval or va_arg
-// copies of every byte, which Tier 1 leaves to Tier 0.
+// copies of every byte, every function Tier 1's too since #2798.
 static const AbiTestSseFixture abi_test_sse_fixtures[] = {
     {
         .name = "short SSE cross-check",
@@ -7531,7 +7528,6 @@ static const AbiTestSseFixture abi_test_sse_fixtures[] = {
         .directory = "buster-abi-short-sse",
         .callee = { "-DBUSTER_SHORT_SSE_CALLEE=0", "-DBUSTER_SHORT_SSE_CALLEE=1" },
         .targets = { "-DBUSTER_SHORT_SSE_REGISTERS=0", "-DBUSTER_SHORT_SSE_REGISTERS=1", "-DBUSTER_SHORT_SSE_REGISTERS=1" },
-        .strict = true,
     },
     {
         .name = "wide SSE cross-check",
@@ -7539,13 +7535,12 @@ static const AbiTestSseFixture abi_test_sse_fixtures[] = {
         .directory = "buster-abi-wide-sse",
         .callee = { "-DBUSTER_WIDE_SSE_CALLEE=0", "-DBUSTER_WIDE_SSE_CALLEE=1" },
         .targets = { "-DBUSTER_WIDE_SSE_VECTOR_BYTES=16", "-DBUSTER_WIDE_SSE_VECTOR_BYTES=32", "-DBUSTER_WIDE_SSE_VECTOR_BYTES=64" },
-        .strict = false,
     },
 };
 
 // A fixture crosses in both directions: the other compiler owns either main or its callees, at x86-64, x86-64-v3 and
-// x86-64-v4. Both tiers and the vector/scalar paths must pass; with a strict fixture, Tier 1 builds strictly, so that a
-// refusal can't silently fall back.
+// x86-64-v4. Both tiers and the vector/scalar paths must pass; Tier 1 builds strictly, every function its own (#2798), so
+// that a refusal can't silently fall back to Tier 0.
 static bool abi_test_sse_fixture(const char* clang, const char* buster, bool keep, const AbiTestSseFixture* fixture)
 {
     AbiTestTally tally = { 0 };
@@ -7643,7 +7638,7 @@ static bool abi_test_sse_fixture(const char* clang, const char* buster, bool kee
                 if (tier1)
                 {
                     build[count++] = "--tier1";
-                    build[count++] = fixture->strict ? "--tier1-strict" : "--tier1-report";
+                    build[count++] = "--tier1-strict";
                 }
                 build[count++] = "-std=gnu23";
                 build[count++] = march;

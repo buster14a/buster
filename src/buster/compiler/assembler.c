@@ -436,6 +436,8 @@ struct AsmParser
     AsmLineRow* line_rows;
     AsmLineFile* line_files;
     String8* line_directories;
+    uint32_t* line_directory_slots;
+    uint32_t line_directory_mask;
     AsmLineState line;
     uint32_t line_row_count;
     uint32_t line_file_count;

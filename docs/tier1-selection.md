@@ -488,7 +488,20 @@ patterns are:
   bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the target's
   registers are that wide, moved by `movups`, `vmovdqu` or `vmovdqu64`
   (`tier1_select_part_form`); and a struct's whose high eightbyte is padding,
-  which its copy keeps as padding. A result in registers comes back as parts in rax and rdx or xmm0
+  which its copy keeps as padding. A record SSE, SSEUP of a size no vector
+  register has (#2113, #2798) holds its payload there, `<size / 8 x double>`:
+  a 17–23-byte record's first 16 bytes in an xmm register, and past them its
+  size rounded down to 8 in the ymm or zmm register LLVM widens it to, a part
+  of its payload's bytes in its register's width (`tier1_select_part_width`).
+  Its loads from and stores to an object of the record's size are Tier 0's
+  pieces, which stay inside it (`tier0_payload_load`, `tier0_payload_store`:
+  a call's result, a zmm argument's load into zmm16 and on, the function's own
+  result); its staging slots and a parameter's copy are as wide as its
+  register, which they move whole. A `PAYLOAD` stack slot, which holds the
+  payload alone, is a part of the payload's bytes with no register: a call
+  copies those bytes into it, and the entry copies the slot whole into the
+  parameter's copy through the vector scratch register.
+  A result in registers comes back as parts in rax and rdx or xmm0
   and xmm1 (`tier1_select_result_parts`, eightbyte 1 alone with `HIGH`), and
   one of the memory class through the hidden pointer (up to 4,096 bytes for a
   function's own, which its return copies). An aggregate parameter's value is
@@ -505,8 +518,9 @@ patterns are:
   the stack while a general register is free), since a call without them would
   place that address in the next general register. Refused: a result LLVM
   demotes to a hidden pointer (`DEMOTED`), which only a vector type makes. A call's parts in registers take staging
-  slots of 8 bytes, a whole vector register's its bytes'
-  (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
+  slots of 8 bytes, a whole vector register's its register's bytes'
+  (`tier1_select_part_slots`, a payload's too, #2798), but a zmm register's
+  (a 64-byte vector's, or a 40-, 48- or 56-byte payload's), which waits in
   zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
   register past xmm15, and only an AVX-512F target passes a zmm one), so that a
   call takes all eight of its vector registers' 64-byte vectors. Up to 14

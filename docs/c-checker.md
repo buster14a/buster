@@ -7144,15 +7144,15 @@ tests can warn (`check_common_candidate_bits`): a constant whose value an initia
 an assignment's, a conversion's or a call's argument's conversion changes (the
 types alone rule out a widening conversion, before the value's row is read), a
 self-assignment's names, a constant index outside its array, a source comma.
-What its warning tests past them only takes warnings away. The scalar path
-makes the facts in one pass in graph order and the evaluated nodes by a pass
-from the roots down. The vector path works on the graph's tree
-(`check_common_parents`: each node's reader, 16 nodes at a time, each operand
-slot's present children compressed to the front and written a child at a time,
-since a scatter costs as much whatever its mask and most slots are absent; a
-tree where every operand and argument precedes its node and no node has two
-readers, which counting the distinct children against the edges tells, and
-otherwise the scalar path). It visits only the nodes whose operators may have a
+What its warning tests past them only takes warnings away. The facts come
+from the graph's tree (`check_common_parents`: each node's reader, 16 nodes at
+a time, each operand slot's present children compressed to the front and
+written a child at a time, since a scatter costs as much whatever its mask and
+most slots are absent; a tree where every operand and argument precedes its
+node and no node has two readers, which counting the distinct children against
+the edges tells). A graph that isn't one takes the fallback: the facts in one
+pass in graph order and the evaluated nodes by a pass from the roots down
+(#2924 left it for its phase D). The tree path visits only the nodes whose operators may have a
 bit of their own, 16 at a time, and carries each bit up to the first ancestor
 that has it; and takes the evaluated nodes as everything with a parent, then
 clears, with all below them, the roots the control and selection walks left
@@ -7162,8 +7162,8 @@ frames, which would find nothing else. The comma markers' subtree starts come
 from a search back from the operand by doubling steps, then halving, each
 probe's climb stopping at a token shallower than the operand
 (`check_common_emission_subtree_start`), rather than from a column of every
-token's start. `test-checker-driver` checks the parents by both paths and the
-starts against their definitions on random graphs and trees whose columns end
+token's start. `test-checker-driver` checks the parents and the starts against
+their definitions on random graphs and trees whose columns end
 at `PROT_NONE` pages (`c_check_common_tree_test.c`).
 
 The vector warning driver classifies its immutable operator column once
@@ -7184,19 +7184,19 @@ emission scans reuse it instead of reloading four bytes of parent per node.
 Control flow and selections still change their separate evaluated marks.
 Displaced roots, statement expressions and initializer publication still use
 the existing root-order machinery. A graph that fails the tree check keeps
-the original fallback; the scalar driver allocates neither index and still
-visits every node as its independent oracle. Empty graphs allocate nothing,
+the original fallback. Empty graphs allocate nothing,
 and allocation failure reports the existing common-warning capacity error.
 Both indexes belong to the warning driver's scratch region and expire before
 backend processing. Their combined payload is about 1.125 bytes per node;
 this is a storage and scan-work description, not a measured timing result.
 
-`c_check_common_candidates_test.c` compares the lookup and scalar classifier
-with independent operator predicates, every operator across lane boundaries,
+`c_check_common_candidates_test.c` compares the lookup classifier with
+independent operator predicates, every operator across lane boundaries,
 invalid operator IDs, protected input and exact-capacity output tails,
-independent readers, and allocation failure. The tree tests also compare the
-root bitmap with an independent edge walk on valid and rejected trees and
-verify cached, uncached and scalar root enumeration.
+independent readers, and allocation failure, and the token, operator, reach
+and unevaluated scans with their definitions at every length to 300. The tree
+tests also compare the root bitmap with an independent edge walk on valid and
+rejected trees and verify cached and uncached root enumeration.
 
 The expression walk starts only at a root that reaches something or whose
 discarded expression may get the statement's unused-value warning, and enters

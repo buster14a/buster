@@ -359,6 +359,73 @@ static void ir_interpreter_test_control(IrInterpreterTestTally* tally, Arena* me
     arena_pop_to(memory, mark);
 }
 
+// A wide run between single-phi blocks, with the carried value in its last position. The two arms of the first
+// join supply either a 128-bit constant or undef; all the other phis in the wide run have defined inputs.
+static void ir_interpreter_test_phi_runs(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    const uint32_t joins = 65;
+    const uint32_t width = 33;
+    const uint32_t phis = joins - 1 + width;
+    const IrSizes sizes = {
+        .instruction_count = 6 + phis + joins,
+        .block_count = 3 + joins,
+        .constant_count = 1,
+        .extra_count = 2 * phis + 2,
+        .parameter_count = 1,
+    };
+    IrFunction function = { 0 };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_interpreter_test_expect(tally, created, "mixed-width phi fixture allocation");
+    if (created)
+    {
+        const InterpreterValue bits = { .low = UINT64_C(0x1122334455667788), .high = UINT64_C(0xfedcba9876543210) };
+        function.result_type = IR_I128;
+        function.parameter_types[0] = IR_I1;
+        function.constants[0] = (IrConstant){ .low = bits.low, .high = bits.high };
+        ir_interpreter_test_instruction(&function, 0, IR_PARAM, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 1, IR_CONST, IR_I128, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 2, IR_UNDEF, IR_I128, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 3, IR_CBR, IR_VOID, 0, 1, 2);
+        function.block_offsets[1] = 4;
+        function.block_offsets[2] = 5;
+        ir_interpreter_test_instruction(&function, 4, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t i = 6;
+        uint32_t extra = 0;
+        uint32_t carried = 1;
+        for (uint32_t b = 3; b < function.block_count; b += 1)
+        {
+            function.block_offsets[b] = i;
+            const uint32_t count = b == 3 + joins / 2 ? width : 1;
+            for (uint32_t p = 0; p < count; p += 1)
+            {
+                ir_interpreter_test_instruction(&function, i++, IR_PHI, IR_I128, extra, b == 3 ? 2 : 1, BUSTER_IR_NONE);
+                if (b == 3)
+                {
+                    function.extra[extra++] = 2;
+                    function.extra[extra++] = 2;
+                }
+                function.extra[extra++] = b == 3 ? 1 : b - 1;
+                function.extra[extra++] = p + 1 == count ? carried : 1;
+            }
+            carried = i - 1;
+            const bool last = b + 1 == function.block_count;
+            ir_interpreter_test_instruction(&function, i++, last ? IR_RET : IR_BR, IR_VOID, last ? carried : b + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        function.block_offsets[function.block_count] = i;
+        const IrInterpreterFunction binding = { .symbol = 71, .function = &function };
+        const IrInterpreterProgram program = { .functions = &binding, .function_count = 1 };
+        for (uint32_t arm = 0; arm < 2; arm += 1)
+        {
+            const InterpreterValue argument = { .low = arm };
+            const InterpreterResult result = ir_interpreter_test_run(tally, &program, 71, &argument, 1, 0, execution, arm != 0 ? INTERPRETER_OK : INTERPRETER_UNDEFINED, bits, "mixed-width phis carry both words and definedness");
+            ir_interpreter_test_expect(tally, result.steps == i - 1 && result.function == 0 && result.entry == i - 1, "both arms reach the final return after the same phi steps");
+        }
+    }
+    arena_pop_to(memory, mark);
+}
+
 static void ir_interpreter_test_dominance(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const uint64_t mark = memory->length;
@@ -463,6 +530,15 @@ static void ir_interpreter_test_calls(IrInterpreterTestTally* tally, Arena* memo
         ir_interpreter_test_run(tally, &program, 10, &argument, 1, 0, execution, INTERPRETER_OK, argument, "recursive calls use explicit arena frames");
         ir_interpreter_test_run(tally, &program, 77, &argument, 1, 0, execution, INTERPRETER_OK, argument, "indirect calls resolve internal function pointer tokens");
         InterpreterOptions options = interpreter_default_options();
+        // All 129 frames are live at the base case. Their values fit in 80 KiB with the frame and symbol tables;
+        // reserving another pair of instruction-sized columns per frame exceeded it.
+        options.max_frames = 129;
+        options.max_memories = 1;
+        const uint64_t capacity = execution->capacity;
+        execution->capacity = execution->length + (80u << 10);
+        ir_interpreter_test_run(tally, &program, 10, &argument, 1, &options, execution, INTERPRETER_OK, argument, "phi-free recursion fits its bounded arena");
+        execution->capacity = capacity;
+        options = interpreter_default_options();
         options.max_frames = 8;
         ir_interpreter_test_run(tally, &program, 77, &argument, 1, &options, execution, INTERPRETER_FRAME_LIMIT, (InterpreterValue){ 0 }, "recursive call depth limit");
         options = interpreter_default_options();
@@ -1171,6 +1247,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
             ir_interpreter_test_masks(&tally);
             ir_interpreter_test_numbers(&tally, &memory, &execution);
             ir_interpreter_test_control(&tally, &memory, &execution);
+            ir_interpreter_test_phi_runs(&tally, &memory, &execution);
             ir_interpreter_test_dominance(&tally, &memory, &execution);
             ir_interpreter_test_calls(&tally, &memory, &execution);
             ir_interpreter_test_native_callbacks(&tally, &memory, &execution);

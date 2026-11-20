@@ -61,7 +61,7 @@ static bool check_program_return_unknowns(const CheckProgram* program, Arena* sc
 // Library noreturn depends on builtin options and named typedef visibility. Those policies are not the declaration's
 // FUNCTION_NORETURN bit, so a call to a declaration named as a catalogue entry with the 'r' attribute stays unknown
 // rather than guessed from its name. The answer depends on the interned name alone (#1709).
-// The scalar answer, and the twin of the table below: a search of the catalogue by name.
+// The answer without the table below, and its definition: a search of the catalogue by name.
 static uint8_t check_program_return_library_search(const InternTable* identifiers, uint32_t name)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(identifiers, name), intern_length(identifiers, name));
@@ -229,12 +229,13 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
     return fact;
 }
 
-// check_program_return_facts' vector path: only a source, a node whose own contract may be a stop or unknown (a call, a
+// check_program_return_facts' walk: only a source, a node whose own contract may be a stop or unknown (a call, a
 // miscellaneous or x86 builtin, a query), or a node one of whose operands' or arguments' facts isn't zero can have facts,
 // so that each node's test reads its operands' facts, a byte each (an absent one the sink's, `facts[count]`, zero), and
 // only those nodes take check_program_return_node. A node's operands precede it, so their facts are made; one that doesn't
 // precede it has none yet, which check_program_return_node reads as none too. The sources are 16 operators at a time,
-// whose bits each block's nodes then take. Every other node's facts are zero, as the scalar path makes them.
+// whose bits each block's nodes then take. Every other node's facts are zero, as check_program_return_node would make
+// them.
 static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, const uint32_t* unknowns, const uint8_t* names, uint64_t* work)
 {
     const CheckGraph* graph = &program->input->graph;
@@ -284,12 +285,10 @@ static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, c
 }
 
 // One postorder reduction gives each node a guaranteed stop and a possible unknown control contract
-// (check_program_return_node). The scalar path visits every node in order; the vector path
-// (check_program_return_sparse), only the nodes that can have facts. Their `count` + 1 entries end with a sink, zero.
+// (check_program_return_node), visiting only the nodes that can have facts (check_program_return_sparse). Their
+// `count` + 1 entries end with a sink, zero. `scalar` is only the attributes' scan's (check_program_return_unknowns).
 static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch, uint64_t* work, bool scalar)
 {
-    (void)scalar;
-
     const CheckGraph* graph = &program->input->graph;
     const uint32_t count = graph->count;
     uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
@@ -302,17 +301,9 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
     }
     // The names' answers are an optimisation only: without them every call searches the catalogue, as before.
     const uint8_t* names = ready && count != 0 ? check_program_return_library_names(program->identifiers, scratch) : NULL;
-    if (ready && !BUSTER_SCALAR_PATH(scalar) && count != 0)
+    if (ready && count != 0)
     {
         check_program_return_sparse(program, facts, unknowns, names, work);
-    }
-    for (uint32_t node = 0; ready && BUSTER_SCALAR_PATH(scalar) && node < count; node += 1)
-    {
-        facts[node] = check_program_return_node(program, facts, node, unknowns, names);
-        if (work != NULL)
-        {
-            *work += 1;
-        }
     }
     if (ready && count != 0)
     {

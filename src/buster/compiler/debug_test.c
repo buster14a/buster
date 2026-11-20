@@ -60,10 +60,36 @@ static uint64_t debug_test_leb(const uint8_t* bytes, uint64_t size, uint64_t* po
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
+// Decode a single unflagged row. With this header PC 16 fits every special line, and PC 17 only lines -5 through -1.
+static bool debug_test_delta(const uint8_t* bytes, uint64_t size, uint64_t* position, uint32_t pc, int32_t line)
+{
+    bool valid = *position < size;
+    if (valid)
+    {
+        const uint8_t opcode = bytes[(*position)++];
+        if (opcode >= 13)
+        {
+            const int32_t adjusted = opcode - 13;
+            valid = (uint32_t)(adjusted / 14) == pc && adjusted % 14 - 5 == line;
+        }
+        else
+        {
+            const bool fits = line >= -5 && line <= 8 && (pc < 17 || (pc == 17 && line < 0));
+            valid = !fits && opcode == 2;
+            const uint64_t address = debug_test_leb(bytes, size, position, false, &valid);
+            valid = valid && address == pc && *position < size && bytes[(*position)++] == 3;
+            const int64_t advance = (int64_t)debug_test_leb(bytes, size, position, true, &valid);
+            valid = valid && advance == line && *position < size && bytes[(*position)++] == 1;
+        }
+    }
+    return valid;
+}
+
 static bool debug_test_rows(void)
 {
-    const uint32_t offsets[] = { 0, 1, 63, 64, 127, 128, 16383, 16384, 2097151, 2097152, 268435455, 268435456, UINT32_MAX };
-    const int32_t lines[] = { 0, 1, -1, 63, 64, -64, -65, 8191, 8192, -8192, -8193, INT32_MIN, INT32_MAX };
+    const uint32_t offsets[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 63, 64, 127, 128, 16383, 16384,
+                                 2097151, 2097152, 268435455, 268435456, 0x80000000u, UINT32_MAX };
+    const int32_t lines[] = { -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 63, 64, -64, -65, 8191, 8192, -8192, -8193, INT32_MIN, INT32_MAX };
     bool valid = true;
     uint64_t checks = 0;
     for (uint32_t pc = 0; pc < BUSTER_ARRAY_LENGTH(offsets); pc += 1)
@@ -92,17 +118,13 @@ static bool debug_test_rows(void)
             uint64_t position = 0;
             for (uint32_t row = 0; valid && row < 4; row += 1)
             {
-                valid &= vector[position++] == 2;
-                valid &= debug_test_leb(vector, b.size, &position, false, &valid) == delta[row];
-                valid &= vector[position++] == 3;
-                valid &= (int64_t)debug_test_leb(vector, b.size, &position, true, &valid) == advance[row];
-                valid &= vector[position++] == 1;
+                valid &= debug_test_delta(vector, b.size, &position, delta[row], advance[row]);
             }
             valid &= position == b.size;
             checks += 1;
         }
     }
-    printf("debug LEB rows: %llu boundary batches, %s\n", (unsigned long long)checks, valid ? "pass" : "FAIL");
+    printf("debug special and LEB rows: %llu boundary batches, %s\n", (unsigned long long)checks, valid ? "pass" : "FAIL");
     return valid;
 }
 
@@ -124,6 +146,11 @@ static bool debug_test_random_rows(void)
             delta[row] = (uint32_t)(state >> 32);
             state = state * 6364136223846793005ull + 1442695040888963407ull;
             advance[row] = (int32_t)(state >> 32);
+            if ((batch & (1u << row)) != 0)
+            {
+                delta[row] %= 17;
+                advance[row] = (int32_t)((uint32_t)advance[row] % 14) - 5;
+            }
             debug_row_scalar(&a, delta[row], advance[row], false);
         }
         debug_rows_vector(&b, _mm_loadu_si128((const __m128i*)delta), _mm_loadu_si128((const __m128i*)advance));
@@ -131,15 +158,11 @@ static bool debug_test_random_rows(void)
         uint64_t position = 0;
         for (uint32_t row = 0; valid && row < 4; row += 1)
         {
-            valid &= vector[position++] == 2;
-            valid &= debug_test_leb(vector, b.size, &position, false, &valid) == delta[row];
-            valid &= vector[position++] == 3;
-            valid &= (int64_t)debug_test_leb(vector, b.size, &position, true, &valid) == advance[row];
-            valid &= vector[position++] == 1;
+            valid &= debug_test_delta(vector, b.size, &position, delta[row], advance[row]);
         }
         valid &= position == b.size;
     }
-    printf("debug LEB rows: 4096 deterministic random batches, %s\n", valid ? "pass" : "FAIL");
+    printf("debug special and LEB rows: 4096 deterministic mixed batches, %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 #endif
@@ -159,12 +182,23 @@ static DebugOutput debug_test_output(uint8_t* bytes, uint32_t* addresses, uint32
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
-// Walk the line machine independently; the header is skipped by its encoded length, not by emitter constants.
+// Walk the line machine independently, taking the special-opcode parameters from the section's header.
 static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, const uint64_t* addresses)
 {
     const DebugSection* section = &output->sections[DEBUG_SECTION_LINE];
     uint32_t header = 0;
-    memcpy(&header, section->bytes + 8, 4);
+    int32_t line_base = 0;
+    uint32_t line_range = 0;
+    uint32_t opcode_base = 0;
+    bool valid = section->size >= 18;
+    if (valid)
+    {
+        memcpy(&header, section->bytes + 8, 4);
+        line_base = (int8_t)section->bytes[15];
+        line_range = section->bytes[16];
+        opcode_base = section->bytes[17];
+        valid = header >= 6 && section->bytes[12] == 1 && section->bytes[13] == 1 && line_range != 0 && opcode_base > 10;
+    }
     uint64_t position = 12ull + header;
     uint64_t address = 0;
     int64_t line = 1;
@@ -172,7 +206,7 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
     uint32_t function = 0;
     uint32_t row = 0;
     bool prologue_end = false;
-    bool valid = position <= section->size;
+    valid &= position <= section->size;
     while (valid && position < section->size)
     {
         const uint8_t opcode = section->bytes[position++];
@@ -190,7 +224,11 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
                 }
                 else if (extended == 1 && size == 1 && function < unit->function_count)
                 {
-                    valid &= address == addresses[function] + unit->functions[function].size && row == unit->functions[function].row_count;
+                    const DebugFunction* entry = &unit->functions[function];
+                    const uint32_t end = entry->first_row + entry->row_count;
+                    const uint32_t last_file = entry->row_count != 0 && unit->row_files != 0 ? unit->row_files[end - 1] : entry->file;
+                    const uint32_t last_line = entry->row_count != 0 ? unit->lines[end - 1] : 1;
+                    valid &= address == addresses[function] + entry->size && row == entry->row_count && line == last_line && file == last_file && !prologue_end;
                     function += 1;
                     row = 0;
                     line = 1;
@@ -219,10 +257,14 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
         {
             prologue_end = true;
         }
-        else if (opcode == 1 && function < unit->function_count && row < unit->functions[function].row_count)
+        else if ((opcode == 1 || opcode >= opcode_base) && function < unit->function_count && row < unit->functions[function].row_count)
         {
-            // The row, with DW_LNS_set_prologue_end before it exactly when it is the function's body's (DW_LNS_copy then
-            // clears the flag).
+            if (opcode >= opcode_base)
+            {
+                const uint32_t adjusted = opcode - opcode_base;
+                address += adjusted / line_range;
+                line += line_base + (int32_t)(adjusted % line_range);
+            }
             const DebugFunction* entry = &unit->functions[function];
             const uint32_t index = entry->first_row + row;
             const uint32_t row_file = unit->row_files != 0 ? unit->row_files[index] : entry->file;
@@ -284,14 +326,21 @@ static bool debug_test_units(void)
     valid &= a_bytes != 0 && b_bytes != 0;
     // Every count with each row in its function's file, then with rows in other files (DebugUnit.row_files, #2541): runs of
     // three and four, so that a change falls at every place of a vector group and on the body's row.
-    for (uint32_t test = 0; valid && test < 2 * 130; test += 1)
+    // One dense sequence also makes file switches and the prologue marker coincide with duplicate addresses.
+    for (uint32_t test = 0; valid && test <= 2 * 130; test += 1)
     {
-        const uint32_t count = test % 130;
+        const bool dense = test == 2 * 130;
+        const uint32_t count = dense ? 22 : test % 130;
         unit.row_files = test >= 130 ? row_files : 0;
         for (uint32_t row = 0; row < count; row += 1)
         {
             offsets[row] = row * 30000000u;
             lines[row] = row % 3 == 0 ? INT32_MAX : row % 3 == 1 ? 0 : row * 10000000u;
+            if (dense)
+            {
+                offsets[row] = row / 2;
+                lines[row] = 8 - row % 7;
+            }
             row_files[row] = row % 7 < 3 ? 1 : 0;
         }
         unit.row_count = count;
@@ -616,14 +665,16 @@ static bool debug_test_guards(void)
     {
         valid &= mprotect(mapping, page, PROT_READ | PROT_WRITE) == 0 && mprotect(mapping + 2 * page, page, PROT_READ | PROT_WRITE) == 0 &&
                  mprotect(mapping + 4 * page, page, PROT_READ | PROT_WRITE) == 0;
-        for (uint32_t count = 0; valid && count <= 65; count += 1)
+        // The second sweep puts both four-byte stores and mixed groups against the protected output.
+        for (uint32_t test = 0; valid && test < 2 * 66; test += 1)
         {
+            const uint32_t count = test % 66;
             uint32_t* offsets = (uint32_t*)(mapping + page - count * 4);
             uint32_t* lines = (uint32_t*)(mapping + 3 * page - count * 4);
             for (uint32_t row = 0; row < count; row += 1)
             {
                 offsets[row] = row * 7;
-                lines[row] = row % 2 ? INT32_MAX : 0;
+                lines[row] = test >= 66 ? 1 + row % 11 : (row % 2 ? INT32_MAX : 0);
             }
             const String8 file = BUSTER_S8("guard.c");
             const DebugFunction function = {
