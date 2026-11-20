@@ -219,13 +219,13 @@ static void tier1_branch_layout_tests(Tier1EmitTest* test)
                 const bool pointer = (variant & 4) != 0;
                 IrFunction function;
                 const bool created = tier1_branch_layout_function(test, floating != 0, predicate, true_next, &function);
-                const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+                const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
                 tier1_emit_test_expect(test, valid, "critical-edge layout fixture is valid IR");
                 IrDominance dominance;
-                const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+                const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
-                const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+                const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
                 tier1_emit_test_expect(test, planned, "critical-edge layout fixture selects by both paths");
                 const Tier1EmitOptions options = {
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI),

@@ -11,8 +11,8 @@
 // floating operations move among the other records. An adjacent cmp/test and conditional branch remains adjacent.
 // The weighted heights are priorities, not cycle predictions: a register's or a flag's RAW edge carries the writer's
 // measured latency, or its class's weight where the model has none (tier1_schedule_weight); a barrier's is zero.
-// AVX-512 resolves effects, compares eight prior records at once and reduces contiguous height columns by level.
-// The scalar twin computes heights backwards; both list schedulers break equal priorities by original position.
+// AVX-512 resolves effects, compares eight prior records at once and reduces contiguous height columns by level; the
+// list scheduler breaks equal priorities by original position.
 // tier1_schedule_verify independently reconstructs scalar effects and checks the resulting permutation, the register
 // and memory hazards and each flag's reaching writers. The C driver's --tier1-schedule=post runs it on every block of
 // Tier 1's code (c_check_tier1_schedule.c); docs/tier1-scheduling.md describes the boundary, the scratch/tail contract and
@@ -219,36 +219,8 @@ static void tier1_schedule_add_edges(Tier1ScheduleGraph* graph, uint32_t current
 // The registers and flags whose RAW edges carry the writer's weight into its readers' path (data_successors).
 #define BUSTER_TIER1_SCHEDULE_DATA (BUSTER_X86_RESOURCE_GPRS | BUSTER_X86_RESOURCE_VECTORS | BUSTER_X86_RESOURCE_FLAGS)
 
-static void tier1_schedule_graph_scalar(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
-{
-    #pragma clang loop vectorize(disable) interleave(disable)
-    for (uint32_t current = 0; current < count; current += 1)
-    {
-        for (uint32_t previous = 0; previous < current; previous += 1)
-        {
-            // WAW between two dead flag writers is no hazard: either may be last, the later live writer overwrites both.
-            const bool hazard = (graph->writes[previous] & graph->reads[current]) != 0 || (graph->reads[previous] & graph->writes[current]) != 0 ||
-                                (graph->writes[previous] & graph->live_writes[current]) != 0 || (graph->live_writes[previous] & graph->writes[current]) != 0 ||
-                                graph->barriers[previous] != 0 || graph->barriers[current] != 0;
-            if (hazard)
-            {
-                graph->predecessors[current][previous / 64] |= UINT64_C(1) << (previous & 63);
-                graph->successors[previous][current / 64] |= UINT64_C(1) << (current & 63);
-                if (graph->writes[previous] & graph->reads[current] & BUSTER_TIER1_SCHEDULE_DATA)
-                {
-                    graph->data_successors[previous][current / 64] |= UINT64_C(1) << (current & 63);
-                }
-                stats->edges += 1;
-            }
-        }
-    }
-}
-
 static void tier1_schedule_graph_vector(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
 {
-#if !BUSTER_HOST_VECTOR
-    tier1_schedule_graph_scalar(graph, count, stats);
-#else
     for (uint32_t current = 0; current < count; current += 1)
     {
         const __m512i written = _mm512_set1_epi64((int64_t)graph->writes[current]);
@@ -271,7 +243,6 @@ static void tier1_schedule_graph_vector(Tier1ScheduleGraph* graph, uint32_t coun
             tier1_schedule_add_edges(graph, current, first, hazards & active, data, stats);
         }
     }
-#endif
 }
 
 static bool tier1_schedule_intersects(const uint64_t* left, const uint64_t* right, uint32_t words)
@@ -294,36 +265,8 @@ static void tier1_schedule_pending(uint64_t* pending, uint32_t count)
     }
 }
 
-static void tier1_schedule_heights_scalar(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
-{
-    for (uint32_t remaining = count; remaining != 0; remaining -= 1)
-    {
-        const uint32_t current = remaining - 1;
-        uint32_t height = 0;
-        uint16_t level = 1;
-        for (uint32_t next = current + 1; next < count; next += 1)
-        {
-            if ((graph->successors[current][next / 64] >> (next & 63)) & 1)
-            {
-                level = level > graph->levels[next] ? level : graph->levels[next] + 1;
-            }
-            if ((graph->data_successors[current][next / 64] >> (next & 63)) & 1)
-            {
-                height = height > graph->heights[next] ? height : graph->heights[next];
-            }
-        }
-        // A pinned node ends the weighted path. The value zero is a selection priority, not a modeled zero latency.
-        graph->heights[current] = graph->barriers[current] ? 0 : graph->latencies[current] + height;
-        graph->levels[current] = level;
-        stats->levels = stats->levels > level ? stats->levels : level;
-    }
-}
-
 static void tier1_schedule_heights_vector(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
 {
-#if !BUSTER_HOST_VECTOR
-    tier1_schedule_heights_scalar(graph, count, stats);
-#else
     uint64_t pending[BUSTER_TIER1_SCHEDULE_WORDS];
     tier1_schedule_pending(pending, count);
     const uint32_t words = (count + 63) / 64;
@@ -368,7 +311,6 @@ static void tier1_schedule_heights_vector(Tier1ScheduleGraph* graph, uint32_t co
         }
     }
     stats->levels = level;
-#endif
 }
 
 static void tier1_schedule_order(const Tier1ScheduleGraph* graph, uint32_t count, uint16_t* order, Tier1ScheduleStats* stats)
@@ -402,10 +344,8 @@ static void tier1_schedule_order(const Tier1ScheduleGraph* graph, uint32_t count
 // required padding or alignment beyond their C types. All slices, graph and stats are disjoint. The caller owns them.
 // Zero count permits null pointers. Rejection preserves order and stats and touches no input; callers retain their
 // original block for counts above the bound. Encoding and all branch/relocation offsets are finalized afterwards.
-static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1ScheduleInput input, Tier1ScheduleGraph* graph, uint16_t* order, uint32_t capacity, bool vector, Tier1ScheduleStats* statistics)
+static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1ScheduleInput input, Tier1ScheduleGraph* graph, uint16_t* order, uint32_t capacity, Tier1ScheduleStats* statistics)
 {
-    (void)vector;
-
     Tier1ScheduleStatus status = TIER1_SCHEDULE_OK;
     if (input.count > BUSTER_TIER1_SCHEDULE_MAX_RECORDS || capacity < input.count)
     {
@@ -423,14 +363,7 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
             memset(graph->predecessors, 0, input.count * sizeof(graph->predecessors[0]));
             memset(graph->successors, 0, input.count * sizeof(graph->successors[0]));
             memset(graph->data_successors, 0, input.count * sizeof(graph->data_successors[0]));
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                x86_instructions_effects(input.instructions, input.count, graph->reads, graph->writes);
-            }
-            else
-            {
-                x86_instructions_effects_scalar(input.instructions, input.count, graph->reads, graph->writes);
-            }
+            x86_instructions_effects(input.instructions, input.count, graph->reads, graph->writes);
             // Whether each record loads (its own effects: an access reads and writes memory from here on), then its
             // ordering resources.
             uint64_t loads[BUSTER_TIER1_SCHEDULE_WORDS] = { 0 };
@@ -449,14 +382,7 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
                     stats.missing_columns[column] += x86_zen5_columns[column][id] == BUSTER_X86_COST_UNKNOWN;
                 }
             }
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                x86_zen5_lookup(graph->cost_ids, input.count, X86_COST_LATENCY, graph->latencies);
-            }
-            else
-            {
-                x86_zen5_lookup_scalar(graph->cost_ids, input.count, X86_COST_LATENCY, graph->latencies);
-            }
+            x86_zen5_lookup(graph->cost_ids, input.count, X86_COST_LATENCY, graph->latencies);
             // The model's latency where it has one for the record's operand case, its class's weight where
             // it hasn't (tier1_schedule_weight).
             for (uint32_t i = 0; i < input.count; i += 1)
@@ -472,16 +398,8 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
             {
                 stats.dead_flags += graph->live_writes[i] != graph->writes[i];
             }
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                tier1_schedule_graph_vector(graph, input.count, &stats);
-                tier1_schedule_heights_vector(graph, input.count, &stats);
-            }
-            else
-            {
-                tier1_schedule_graph_scalar(graph, input.count, &stats);
-                tier1_schedule_heights_scalar(graph, input.count, &stats);
-            }
+            tier1_schedule_graph_vector(graph, input.count, &stats);
+            tier1_schedule_heights_vector(graph, input.count, &stats);
             tier1_schedule_order(graph, input.count, order, &stats);
         }
         if (statistics)

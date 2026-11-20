@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #938's harness's report of buster's allocations (#939): each problem file decoded, adapted and allocated by both of
-// buster's allocator paths, every allocation reported only past its certificate (tier1_problem_allocate). A line per
-// file, its function and its one terminal reason, the allocations' sizes where it was accepted, then the tally. The exit
+// #938's harness's report of buster's allocations (#939): each problem file decoded, adapted and allocated by buster's
+// allocator, the allocation reported only past its certificate (tier1_problem_allocate). A line per file, its function
+// and its one terminal reason, the allocation's sizes where it was accepted, then the tally. The exit
 // status is 1 where an allocation fails its certificate, a file can't be read or none is given, else 0: a refusal is an
 // outcome the harness reports, not a failure.
 #define _GNU_SOURCE
@@ -57,8 +57,8 @@ int main(int argc, char** argv)
             printf("%s\t%.*s\t%s", argv[k], (int)name.size, name.data != 0 ? (const char*)name.data : "", tier1_problem_reason_name(reason));
             if (reason == TIER1_PROBLEM_OK)
             {
-                printf("\tinstructions=%" PRIu32 "\toperands=%" PRIu32 "\tintervals=%" PRIu32 "\tfragments=%" PRIu32 "/%" PRIu32 "\tspills=%" PRIu32 "/%" PRIu32 "\tcertified=2", made.stats.original_instructions, made.stats.original_operands,
-                       made.input.count, made.allocations[0].fragment_count, made.allocations[1].fragment_count, made.allocations[0].spill_count, made.allocations[1].spill_count);
+                printf("\tinstructions=%" PRIu32 "\toperands=%" PRIu32 "\tintervals=%" PRIu32 "\tfragments=%" PRIu32 "\tspills=%" PRIu32 "\tcertified=1", made.stats.original_instructions, made.stats.original_operands,
+                       made.input.count, made.allocation.fragment_count, made.allocation.spill_count);
             }
             printf("\n");
             failed |= reason == TIER1_PROBLEM_CERTIFICATE_REJECTED;

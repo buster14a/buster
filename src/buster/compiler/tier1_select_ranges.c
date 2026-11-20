@@ -200,7 +200,7 @@ static void tier1_select_range_scoped_use(const IrFunction* function, const IrDo
 // predecessor and dominate the conversion. Another entrance, including any address-taken label, refuses the fact.
 // Both scratch columns are dead here, before the plan orders levels or uses its pending worklist; no allocation.
 static void tier1_select_scoped_ranges(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks,
-                                       const uint16_t* known, uint8_t* storage, uint32_t* guards, uint32_t* predecessors, bool vector)
+                                       const uint16_t* known, uint8_t* storage, uint32_t* guards, uint32_t* predecessors)
 {
     const bool enabled = dominance != 0 && blocks != 0 && function->block_count >= 2 && tier1_select_range_predecessors(function, predecessors);
     if (enabled)
@@ -248,32 +248,19 @@ static void tier1_select_scoped_ranges(const IrFunction* function, const IrDomin
                 }
             }
         }
-        if (BUSTER_VECTOR_PATH(vector))
+        for (uint32_t first = 0; first < function->instruction_count;)
         {
-            for (uint32_t first = 0; first < function->instruction_count;)
+            const uint32_t left = function->instruction_count - first;
+            const __mmask32 active = left >= 32 ? UINT32_MAX : (UINT32_C(1) << left) - 1;
+            const __m256i op = _mm256_maskz_loadu_epi8(active, function->op + first);
+            const __m256i type = _mm256_maskz_loadu_epi8(active, function->type + first);
+            uint32_t uses = active & _mm256_cmpeq_epi8_mask(op, _mm256_set1_epi8(IR_SEXT)) & _mm256_cmpeq_epi8_mask(type, _mm256_set1_epi8(IR_I64));
+            while (uses != 0)
             {
-                const uint32_t left = function->instruction_count - first;
-                const __mmask32 active = left >= 32 ? UINT32_MAX : (UINT32_C(1) << left) - 1;
-                const __m256i op = _mm256_maskz_loadu_epi8(active, function->op + first);
-                const __m256i type = _mm256_maskz_loadu_epi8(active, function->type + first);
-                uint32_t uses = active & _mm256_cmpeq_epi8_mask(op, _mm256_set1_epi8(IR_SEXT)) & _mm256_cmpeq_epi8_mask(type, _mm256_set1_epi8(IR_I64));
-                while (uses != 0)
-                {
-                    tier1_select_range_scoped_use(function, dominance, blocks, guards, storage, first + (uint32_t)__builtin_ctz(uses));
-                    uses &= uses - 1;
-                }
-                first += left < 32 ? left : 32;
+                tier1_select_range_scoped_use(function, dominance, blocks, guards, storage, first + (uint32_t)__builtin_ctz(uses));
+                uses &= uses - 1;
             }
-        }
-        else
-        {
-            for (uint32_t node = 0; node < function->instruction_count; node += 1)
-            {
-                if (function->op[node] == IR_SEXT && function->type[node] == IR_I64)
-                {
-                    tier1_select_range_scoped_use(function, dominance, blocks, guards, storage, node);
-                }
-            }
+            first += left < 32 ? left : 32;
         }
     }
 }
@@ -443,41 +430,27 @@ static bool tier1_select_range_phi_endpoint(const IrFunction* function, const ui
     return changed;
 }
 
-static bool tier1_select_induction_bounds(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
+static bool tier1_select_induction_bounds(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known)
 {
     bool changed = false;
     if (blocks != 0 && function->block_count >= 2)
     {
         const uint32_t* predecessors = tier1_select_range_predecessors(function, workspace) ? workspace : 0;
-        if (BUSTER_VECTOR_PATH(vector))
+        for (uint32_t first = 0; first < function->instruction_count;)
         {
-            for (uint32_t first = 0; first < function->instruction_count;)
+            const uint32_t left = function->instruction_count - first;
+            const __mmask32 active = left >= 32 ? UINT32_MAX : (UINT32_C(1) << left) - 1;
+            const __m256i op = _mm256_maskz_loadu_epi8(active, function->op + first);
+            const __m256i type = _mm256_maskz_loadu_epi8(active, function->type + first);
+            uint32_t candidates = active & _mm256_cmpeq_epi8_mask(op, _mm256_set1_epi8(IR_PHI)) & _mm256_cmpeq_epi8_mask(type, _mm256_set1_epi8(IR_I32));
+            while (candidates != 0)
             {
-                const uint32_t left = function->instruction_count - first;
-                const __mmask32 active = left >= 32 ? UINT32_MAX : (UINT32_C(1) << left) - 1;
-                const __m256i op = _mm256_maskz_loadu_epi8(active, function->op + first);
-                const __m256i type = _mm256_maskz_loadu_epi8(active, function->type + first);
-                uint32_t candidates = active & _mm256_cmpeq_epi8_mask(op, _mm256_set1_epi8(IR_PHI)) & _mm256_cmpeq_epi8_mask(type, _mm256_set1_epi8(IR_I32));
-                while (candidates != 0)
-                {
-                    const uint32_t node = first + (uint32_t)__builtin_ctz(candidates);
-                    changed |= tier1_select_induction_phi(function, dominance, blocks, predecessors, known, node);
-                    changed |= tier1_select_range_phi_endpoint(function, blocks, predecessors, known, node);
-                    candidates &= candidates - 1;
-                }
-                first += left < 32 ? left : 32;
+                const uint32_t node = first + (uint32_t)__builtin_ctz(candidates);
+                changed |= tier1_select_induction_phi(function, dominance, blocks, predecessors, known, node);
+                changed |= tier1_select_range_phi_endpoint(function, blocks, predecessors, known, node);
+                candidates &= candidates - 1;
             }
-        }
-        else
-        {
-            for (uint32_t node = 0; node < function->instruction_count; node += 1)
-            {
-                if (function->op[node] == IR_PHI && function->type[node] == IR_I32)
-                {
-                    changed |= tier1_select_induction_phi(function, dominance, blocks, predecessors, known, node);
-                    changed |= tier1_select_range_phi_endpoint(function, blocks, predecessors, known, node);
-                }
-            }
+            first += left < 32 ? left : 32;
         }
     }
     return changed;

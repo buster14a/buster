@@ -163,7 +163,7 @@ function(buster_settings_normalize)
     endif()
     # The name is clang's -march value, or `vector`, and part of the build tree's directory name.
     if(NOT arch MATCHES "^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
-        buster_settings_fail("BUSTER_HOST_ARCH must be a -march name, such as native, x86-64 or znver5, or vector")
+        buster_settings_fail("BUSTER_HOST_ARCH must be a -march name, such as native or znver5, or vector")
     endif()
     # The host target's flags: clang's -march=ARCH, or for `vector`, the explicit target that is exactly host_isa.h's
     # predicate (#2033): x86-64-v4 and the predicate's features beyond it, the same on every runner, so that any CPU whose
@@ -177,9 +177,6 @@ function(buster_settings_normalize)
 
     set(optimization "")
     if(NOT sanitizer STREQUAL "none")
-        if(NOT "${BUSTER_HOST_RUNTIME}" STREQUAL "")
-            buster_settings_fail("sanitizers require the host runtime, not BUSTER_HOST_RUNTIME")
-        endif()
         set(optimization "${BUSTER_SANITIZER_OPTIMIZATION}")
         if(optimization STREQUAL "")
             set(optimization 3)
@@ -213,9 +210,6 @@ function(buster_settings_normalize)
     elseif(pgo STREQUAL "1")
         if(NOT sanitizer STREQUAL "none")
             buster_settings_fail("BUSTER_PGO builds the production executable, not a sanitizer build")
-        endif()
-        if(NOT "${BUSTER_HOST_RUNTIME}" STREQUAL "")
-            buster_settings_fail("BUSTER_PGO links the profile's runtime, which BUSTER_HOST_RUNTIME's link leaves out")
         endif()
         if(NOT pgo_train STREQUAL "")
             get_filename_component(pgo_train "${pgo_train}" REALPATH BASE_DIR "${BUSTER_SOURCE_DIR}")
@@ -256,7 +250,7 @@ function(buster_settings_normalize)
     # build's flags allow it and the tools are there (CMakeLists.txt checks them); 1 requires them; 0 never. Release
     # generates its two longest units' native code in parts after the ordinary O3 IR pipeline (a sanitizer build's too:
     # its module is instrumented by that pipeline, so the parts generate the single compile's code, #2639), and Develop
-    # splits its main.c units before the optimizer. Fuzzing, PGO, an explicit host runtime and BUSTER_BUILD_DEFINES
+    # splits its main.c units before the optimizer. Fuzzing, PGO and BUSTER_BUILD_DEFINES
     # keep the single compile.
     set(parallel_codegen "${BUSTER_PARALLEL_CODEGEN}")
     if(parallel_codegen STREQUAL "")
@@ -270,9 +264,9 @@ function(buster_settings_normalize)
         set(parallel_codegen_required TRUE)
     endif()
     if(NOT parallel_codegen STREQUAL "0")
-        if(fuzz OR pgo OR NOT "${BUSTER_HOST_RUNTIME}" STREQUAL "" OR defines)
+        if(fuzz OR pgo OR defines)
             if(parallel_codegen_required)
-                buster_settings_fail("BUSTER_PARALLEL_CODEGEN=1 requires no fuzzing, PGO, host runtime or BUSTER_BUILD_DEFINES")
+                buster_settings_fail("BUSTER_PARALLEL_CODEGEN=1 requires no fuzzing, PGO or BUSTER_BUILD_DEFINES")
             endif()
             set(parallel_codegen 0)
         else()
@@ -292,7 +286,7 @@ function(buster_settings_normalize)
         buster_settings_fail("BUSTER_RELEASE_PARTS must be 0 or 1")
     endif()
     if(release_parts AND (parallel_codegen STREQUAL "0" OR NOT sanitizer STREQUAL "none"))
-        buster_settings_fail("BUSTER_RELEASE_PARTS=1 requires the units in parts: BUSTER_PARALLEL_CODEGEN not 0, and no sanitizer, fuzzing, PGO, host runtime or BUSTER_BUILD_DEFINES")
+        buster_settings_fail("BUSTER_RELEASE_PARTS=1 requires the units in parts: BUSTER_PARALLEL_CODEGEN not 0, and no sanitizer, fuzzing, PGO or BUSTER_BUILD_DEFINES")
     endif()
 
     set(bake 1)
@@ -301,9 +295,6 @@ function(buster_settings_normalize)
     endif()
 
     set(variant "${arch}")
-    if(NOT "${BUSTER_HOST_RUNTIME}" STREQUAL "")
-        string(APPEND variant "-runtime")
-    endif()
     if(NOT sanitizer STREQUAL "none")
         string(APPEND variant "-${sanitizer}-O${optimization}")
     endif()
@@ -346,7 +337,6 @@ endfunction()
 #   buster_sanitizer_flags  what a sanitizer build adds to every unit and to the link
 #   buster_link_mode        -no-pie (with -static from buster_settings_linker), or -pie for TSan and MSan
 #   buster_fuzz_libraries   what a fuzzing build links after the objects
-#   buster_host_vector      1 when the host has the complete vector feature set, else 0
 # buster_settings_normalize must have run.
 function(buster_settings_tools clang)
     # The stack-protector policy is pinned (#916): a distribution's Clang may default to -fstack-protector-strong
@@ -386,23 +376,12 @@ function(buster_settings_tools clang)
     # compiled without it, to be linked alone (measure-tier1-rows' lexer), has its own copy.
     list(APPEND flags -DBUSTER_EXECUTABLE_UNIT)
 
-    # The scalar host build retains the vector kernels in source but does not emit them. Their unused helpers are
-    # expected in that build alone.
-    execute_process(COMMAND "${clang}" ${flags} -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null
+    # host_isa.h stops a build whose target lacks its feature set (#2924): every build is the vector one.
+    execute_process(COMMAND "${clang}" ${flags} -E -include src/buster/compiler/host_isa.h -x c /dev/null
         WORKING_DIRECTORY "${BUSTER_SOURCE_DIR}"
-        OUTPUT_VARIABLE host_defines ERROR_VARIABLE error RESULT_VARIABLE status)
+        OUTPUT_QUIET ERROR_VARIABLE error RESULT_VARIABLE status)
     if(NOT status EQUAL 0)
-        buster_settings_fail("${clang} ${buster_host_flags} can't preprocess host_isa.h:\n${error}")
-    endif()
-    if(host_defines MATCHES "(^|\n)#define BUSTER_HOST_VECTOR 1\n")
-        set(host_vector 1)
-    elseif(buster_arch STREQUAL "vector")
-        # The explicit vector target exists to run the vector path: a scalar build of it would pass for one.
-        buster_settings_fail("BUSTER_HOST_ARCH=vector (${buster_host_flags}) doesn't select host_isa.h's vector path: its flags and the predicate differ")
-    else()
-        set(host_vector 0)
-        list(APPEND flags -Wno-unused-function -Wno-psabi)
-        message(NOTICE "buster: host execution: scalar (${buster_arch})")
+        buster_settings_fail("BUSTER_HOST_ARCH=${buster_arch} (${buster_host_flags}) isn't a host buster runs on: host_isa.h needs AVX-512 with its extensions (native on such a CPU, znver5 or vector):\n${error}")
     endif()
 
     set(optimization -O3)
@@ -465,12 +444,11 @@ function(buster_settings_tools clang)
     endif()
 
     # A static link (#652) where nothing needs the loader: the sanitizers' runtimes need it, libFuzzer's runtime
-    # C++'s shared libraries, and BUSTER_HOST_RUNTIME links an old runtime's shared libraries explicitly
-    # (CMakeLists.txt's buster_link). The dynamic loader took 8% to 12% of a small compile's task-clock on the 9700X
+    # C++'s shared libraries. The dynamic loader took 8% to 12% of a small compile's task-clock on the 9700X
     # (an empty file's -fsyntax-only, -E -P and a one-line -c, buster-performance's small-unit-start-652-2026-11-05).
     # buster_settings_linker decides it with the linker, which must not be wild.
     set(static_candidate FALSE)
-    if(buster_sanitizer STREQUAL "none" AND NOT buster_fuzz AND "${BUSTER_HOST_RUNTIME}" STREQUAL "")
+    if(buster_sanitizer STREQUAL "none" AND NOT buster_fuzz)
         set(static_candidate TRUE)
     endif()
 
@@ -481,7 +459,6 @@ function(buster_settings_tools clang)
     set(buster_sanitizer_flags ${sanitizer_flags} PARENT_SCOPE)
     set(buster_link_mode ${link_mode} PARENT_SCOPE)
     set(buster_fuzz_libraries ${fuzz_libraries} PARENT_SCOPE)
-    set(buster_host_vector ${host_vector} PARENT_SCOPE)
 endfunction()
 
 # The Debug configuration's debug information and optimization, in place of the Release configuration's. Debug keeps

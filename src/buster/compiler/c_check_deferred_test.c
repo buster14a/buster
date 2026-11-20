@@ -1371,7 +1371,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 // calling thread: no expression parts and no retry (#447).
                 const bool serial_post = outcome.deferred_active < BUSTER_CHECK_DEFERRED_POST_LANES;
                 const bool expressions = !postmerge ||
-                                         (serial_post || BUSTER_SCALAR_PATH(false) ? outcome.deferred_expression_parts == 0 && !outcome.deferred_expression_retry :
+                                         (serial_post ? outcome.deferred_expression_parts == 0 && !outcome.deferred_expression_retry :
                                           outcome.deferred_expression_parts != 0 && outcome.deferred_expression_parallel_tokens != 0 && outcome.deferred_expression_serial_tokens == 0 && !outcome.deferred_expression_retry);
                 const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right &&
                                     !outcome.source_shared && expressions;
@@ -1539,7 +1539,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
             check_corpus_measure(path, &options, false, true, &parallel);
             check_corpus_deferred_late_first = false;
             const uint64_t workers = parallel.deferred_expression_worker_mask;
-            const bool executed = BUSTER_SCALAR_PATH(false) ? workers == 0 : (workers & 1) != 0 && (workers & ~UINT64_C(1)) != 0;
+            const bool executed = (workers & 1) != 0 && (workers & ~UINT64_C(1)) != 0;
             const bool shared = parallel.prepared && parallel.equal && parallel.deferred_equal && parallel.deferred &&
                                 !parallel.deferred_expression_retry && executed;
             checks += 1;
@@ -1553,7 +1553,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
             CheckCorpusOutcome outcome;
             check_corpus_measure(path, &options, false, true, &outcome);
             check_corpus_deferred_fail_expressions = false;
-            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred_expression_retry == !BUSTER_SCALAR_PATH(false);
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred_expression_retry;
             checks += 1;
             failures += !passed;
             if (!passed)

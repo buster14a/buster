@@ -1150,7 +1150,7 @@ static uint32_t check_test_tier1_function(const char* path, const char* name, X8
     // no precondition.
     valid = valid && text != NULL && function->st_size != 0 && function->st_value <= text->sh_size && function->st_size <= text->sh_size - function->st_value &&
             check_test_elf_range(elf.file, text->sh_offset, text->sh_size) && x86_disassembler_initialize();
-    const X86DecodeResult decoded = valid ? x86_disassemble_scalar((const uint8_t*)bytes + text->sh_offset + function->st_value, function->st_size, records, capacity)
+    const X86DecodeResult decoded = valid ? x86_disassemble((const uint8_t*)bytes + text->sh_offset + function->st_value, function->st_size, records, capacity)
                                           : (X86DecodeResult){ .status = X86_DECODE_BAD_ARGUMENT };
     valid = valid && decoded.status == X86_DECODE_OK && decoded.consumed == function->st_size;
     *relocation_count = 0;
@@ -3336,9 +3336,12 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
 // status word in %ax, flag outputs, a template's own loop (`1: decl; jnz 1b`), a bswap and an lfence (Tier 0's rows,
 // asm bodies under --tier1), callee-saved clobbers inside a loop of live values across a call, xmm clobbers beside live
 // floating values, rsp's alignment at the template, rsp's explicit register variable read and moved back, 16-byte
-// vectors through their addresses, in an explicit register variable's XMM register and as a matching input (#1846), and
+// vectors through their addresses, in an explicit register variable's XMM register and as a matching input (#1846),
 // register operands passed in their registers (#2144): mulq's in a loop whose values keep out of the registers it
-// touches, and an xmm operand's. Clang -O0's build is its oracle.
+// touches, and an xmm operand's, and musl's pshared_barrier_wait cut down (#2963): a value saved across a call in its
+// row at rsp, then a lock xadd, a store fenced by `lock ; orl $0,(%rsp)`, which writes that row and leaves it as it was,
+// and a futex wake, with the row carried into the wake's block or read back after another call. Clang -O0's build is its
+// oracle.
 static const char check_test_tier1_asm_source[] =
     "int printf(const char* format, ...);\n"
     "static inline __attribute__((always_inline)) unsigned long tier1_rdtsc(void)\n"
@@ -3489,6 +3492,45 @@ static const char check_test_tier1_asm_source[] =
     "    }\n"
     "    return d;\n"
     "}\n"
+    "static long tier1_syscall3(long n, long a, long b, long c)\n"
+    "{\n"
+    "    unsigned long ret;\n"
+    "    __asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a), \"S\"(b), \"d\"(c) : \"rcx\", \"r11\", \"memory\");\n"
+    "    return (long)ret;\n"
+    "}\n"
+    "static volatile int tier1_locks;\n"
+    "static void __attribute__((noinline)) tier1_lock(void)\n"
+    "{\n"
+    "    tier1_locks += 1;\n"
+    "}\n"
+    "static inline int tier1_fetch_add(volatile int* p, int v)\n"
+    "{\n"
+    "    __asm__ __volatile__(\"lock ; xadd %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");\n"
+    "    return v;\n"
+    "}\n"
+    "static inline void tier1_store(volatile int* p, int x)\n"
+    "{\n"
+    "    __asm__ __volatile__(\"mov %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*p) : \"r\"(x) : \"memory\");\n"
+    "}\n"
+    "int __attribute__((noinline)) tier1_barrier(volatile int* vi, int limit)\n"
+    "{\n"
+    "    tier1_lock();\n"
+    "    if (tier1_fetch_add(&vi[3], -1) == 1 - limit)\n"
+    "    {\n"
+    "        tier1_store(&vi[3], 0);\n"
+    "        if (vi[4])\n"
+    "            tier1_syscall3(202, (long)&vi[3], 1, 0x7fffffff);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n"
+    "int __attribute__((noinline)) tier1_barrier_kept(volatile int* vi, int limit)\n"
+    "{\n"
+    "    tier1_lock();\n"
+    "    tier1_store(&vi[3], limit);\n"
+    "    if (vi[4])\n"
+    "        tier1_lock();\n"
+    "    return limit + vi[3];\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    printf(\"cpuid %u\\n\", tier1_cpuid(7, 1, 2, 3, 4, 5, 6, 7));\n"
@@ -3500,6 +3542,11 @@ static const char check_test_tier1_asm_source[] =
     "    printf(\"vectors %.3f aligned %d\\n\", tier1_vectors(1.25, 4), tier1_aligned());\n"
     "    printf(\"stack %d packed %.2f\\n\", tier1_stack(), (double)tier1_packed(1.25f));\n"
     "    printf(\"mulq %lu addsd %.2f\\n\", tier1_mulq(1000), tier1_addsd(0.5, 100));\n"
+    "    volatile int words[5] = { 0, 0, 0, 1, 1 };\n"
+    "    const int entered = tier1_barrier(words, 0) + words[3] * 10;\n"
+    "    const int skipped = tier1_barrier(words, 5) + words[3] * 10;\n"
+    "    const int kept = tier1_barrier_kept(words, 7);\n"
+    "    printf(\"barrier %d %d %d locks %d\\n\", entered, skipped, kept, tier1_locks);\n"
     "    return 0;\n"
     "}\n";
 
@@ -3537,7 +3584,7 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             char message[256];
             snprintf(message, sizeof(message), "the asm bodies' fixture's code is certified but the long doubles' functions' (%" PRIu64 " certified, %" PRIu64 " not)", build.code_certified,
                      build.code_uncertified);
-            check_test_expect(test, compiled && build.code_certified == 14 && build.code_uncertified == 4, message);
+            check_test_expect(test, compiled && build.code_certified == 20 && build.code_uncertified == 4, message);
             char actual[4096] = { 0 };
             check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                               "Tier 1's asm bodies print clang -O0's build's output");
@@ -4534,8 +4581,8 @@ static void check_test_driver_tier1_extremes(CheckTest* test, const char* clang,
 }
 
 // The wide vectors' fixture (#1624): GNU C's 32- and 64-byte vectors at targets whose registers are narrower (x86-64's
-// and x86-64-v2's 16 bytes, x86-64-v3's 32), which ir_vector_split.c splits into the target's widest: the scalar host's
-// emulations' shape (host_scalar_vectors.h: a union of a vector and its lanes, the lanes computed, the vector returned),
+// and x86-64-v2's 16 bytes, x86-64-v3's 32), which ir_vector_split.c splits into the target's widest: a union of a
+// vector and its lanes, the lanes computed and the vector returned,
 // vectors passed and returned by value (the results split across xmm0 to xmm3 or ymm0 and ymm1), loaded and stored
 // through pointers in a loop, chosen at a join (a phi), and constants; and a vector operator, which Tier 0 computes in
 // pieces. The other unit (clang -O2's) passes random vectors and hashes every result.

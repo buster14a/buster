@@ -971,38 +971,6 @@ static uint32_t tier1_burs_classify_node(const Tier1SelectForest* forest, const 
     return result;
 }
 
-// Whether `child`, an operand of `node`, is visible to its patterns: a tree child (tier1_select_tree_child), a constant
-// (whose value any consumer folds), or a frame object's address in the same block or the entry (a memory operand may
-// fold the shared leaf too, tier1_select_address); and labeled before it.
-static bool tier1_burs_visible(const Tier1SelectForest* forest, const uint32_t* classes, uint32_t node, uint32_t child)
-{
-    const uint32_t class = child < node ? classes[child] : TIER1_BURS_OP_REG;
-    return child < node && (tier1_select_tree_child(forest, node, child) || (class >= TIER1_BURS_OP_CONST && class < TIER1_BURS_OP_ALU) || class == TIER1_BURS_OP_SLOT_X ||
-                            (class == TIER1_BURS_OP_SLOT && forest->blocks[child] == forest->blocks[node]));
-}
-
-// The nodes' operators and visible children: the scalar twin of tier1_burs_classify_vector, an exact one. `kids` is two
-// columns, each node's first operand (a) and second (b) where its operator reads one and it is visible, else
-// BUSTER_IR_NONE.
-static void tier1_burs_classify_scalar(const Tier1SelectForest* forest, const uint32_t* users, uint32_t* classes, uint32_t* kids)
-{
-    const IrFunction* function = forest->function;
-    const uint32_t count = function->instruction_count;
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        classes[node] = tier1_burs_classify_node(forest, users, node);
-    }
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        const uint32_t arity = tier1_burs_arity[classes[node]];
-        const uint32_t a = function->a[node];
-        const uint32_t b = function->b[node];
-        kids[node] = arity >= 1 && tier1_burs_visible(forest, classes, node, a) ? a : BUSTER_IR_NONE;
-        kids[count + node] = arity >= 2 && tier1_burs_visible(forest, classes, node, b) ? b : BUSTER_IR_NONE;
-    }
-}
-
-#if BUSTER_HOST_VECTOR
 // Per IR operation: an ALU operation's index (BUSTER_TIER1_BURS_ADD32 to XOR, 0xff for none), and a shift's operator.
 static uint32_t tier1_burs_alu_index(uint32_t op)
 {
@@ -1041,7 +1009,7 @@ static __m256i tier1_burs_constant_bits_vector(__m512i value, __m512i width)
     return _mm512_cvtepi64_epi32(bits);
 }
 
-// The nodes' operators and visible children, 16 at a time: tier1_burs_classify_scalar's, exactly. Each node's operation,
+// The nodes' operators and visible children, 16 at a time, a node's operator its tier1_burs_classify_node's. Each node's operation,
 // type and flags go first into one 32-bit word (`words`, `count` of them), whose gathers then stay in the columns; the
 // children's columns are gathered by their indices where those are nodes. A frame object's address, whose slot the
 // class reads, takes the scalar classifier.
@@ -1273,33 +1241,7 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         }
     }
 }
-#endif
 
-// Each node's state, in node order: every visible child precedes its parent (tier1_burs_visible). This scalar twin of
-// tier1_burs_label_vector uses neither vector kernels nor the vector path's level traversal.
-static void tier1_burs_label_scalar(uint32_t count, const uint32_t* classes, const uint32_t* kids, uint32_t* states)
-{
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        const uint32_t op = classes[node];
-        const uint32_t left = kids[node] != BUSTER_IR_NONE ? states[kids[node]] : BUSTER_TIER1_BURS_REG_STATE;
-        const uint32_t right = kids[count + node] != BUSTER_IR_NONE ? states[kids[count + node]] : BUSTER_TIER1_BURS_REG_STATE;
-        const uint32_t row = tier1_burs_pool[tier1_burs_map_base[0][op] + left];
-        const uint32_t column = tier1_burs_pool[tier1_burs_map_base[1][op] + right];
-        states[node] = tier1_burs_pool[tier1_burs_table_base[op] + row * tier1_burs_table_width[op] + column];
-    }
-}
-
-// Each node's rule: its state's rule of its operator's goal. The scalar twin of tier1_burs_rules_vector.
-static void tier1_burs_rules_scalar(uint32_t count, const uint32_t* classes, const uint32_t* states, uint32_t* rules)
-{
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        rules[node] = tier1_burs_state_rules[states[node] * TIER1_BURS_NONTERMINALS + tier1_burs_goal[classes[node]]];
-    }
-}
-
-#if BUSTER_HOST_VECTOR
 // A 16-bit entry of the pool at each lane's index, by 32-bit gathers (the pool's pad covers the last one's high half).
 static __m512i tier1_burs_gather_pool(__mmask16 active, __m512i index)
 {
@@ -1375,7 +1317,6 @@ static void tier1_burs_rules_vector(uint32_t count, const uint32_t* classes, con
         _mm512_mask_storeu_epi32(rules + first, active, rule);
     }
 }
-#endif
 
 // The candidate of `node` that its rule names (Tier1BursAction): its index in `candidates`, or munch's choice where the
 // rule names none or the walks didn't make the one it names, which *munched says.

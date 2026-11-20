@@ -8,14 +8,14 @@ requirements. [Command index](README.md).
 
 - Tier 1 selection publishes effective uses for `tier1_liveness.c`; the native
   consumer connects required locations, allocation, frames and spill/remat
-  records. Both host paths cover the integer core by bottom-up rewriting over
-  state tables `tier1_select_initialize` compiles from a grammar of the
-  candidates' patterns (`tier1_select_burs.c`, baked). Vector labeling takes
-  16 nodes of a depth level; the independent scalar kernels use the same costs
-  and tie-breaks. Maximal munch remains the grammar's fallback and a separate
-  test reference. `test-tier1-select` checks identical plans and records;
-  `test-tier1-pipeline` checks the kernel twins and complete plans on every
-  function, and `benchmark-tier1-select-source` checks the kernels before timing.
+  records. The integer core is covered by bottom-up rewriting over state tables
+  `tier1_select_initialize` compiles from a grammar of the candidates' patterns
+  (`tier1_select_burs.c`, baked), the AVX-512 labeling taking 16 nodes of a depth
+  level. Maximal munch remains the grammar's fallback and a separate test
+  reference. `test-tier1-select` checks every fixture's plan against a frozen
+  digest (#2924) and its records; `test-tier1-pipeline` checks the kernels'
+  definitions and complete plans on every function, and
+  `benchmark-tier1-select-source` checks the kernels before timing.
   `test-checker-driver` requires byte-identical Tier 1 scalar/vector objects for
   the #1395 regressions at the same target, with either rematerialization mode,
   including a parameter-free leaf with volatile loads. Both production
@@ -41,7 +41,7 @@ requirements. [Command index](README.md).
   move values, before a jump, at a successor's start or in a split critical
   edge's stub. The preference's crossing test counts the calls before each
   position with a vector prefix sum, which `test-tier1-emit` checks against its
-  scalar twin. A straight line whose allocation can't place a value (an evicted
+  definition. A straight line whose allocation can't place a value (an evicted
   parameter whose incoming register another operand holds) goes through the CFG
   consumer too. The 128-bit integers are split into 64-bit halves before the
   optimizer (`ir_wide.c`, #141): `test-tier1-wide [--seed N] [--programs N]
@@ -73,9 +73,8 @@ requirements. [Command index](README.md).
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source
-  [--only select|select-scalar] [-E's options] file...` selection's core cycles
-  per IR instruction on real C's functions, as `--tier1` prepares them, by both
-  paths (#141). A division by a constant that isn't a power of two is a
+  [--only select] [-E's options] file...` selection's core cycles per IR
+  instruction on real C's functions, as `--tier1` prepares them (#141). A division by a constant that isn't a power of two is a
   multiplication by its reciprocal (Granlund and Montgomery), in either consumer,
   which saves the values `mul`'s `rax` and `rdx` would clobber (the [selection
   guide](../../docs/tier1-selection.md)). `measure-mask-spills` times a mask's spill and
@@ -316,13 +315,13 @@ each removed where it is made:
   the entry or a label's block, and its chain has at most four operations, at
   most sixteen predecessors take copies, and the rewrite runs up to four rounds
   (`a && b && c`). A block no reachable predecessor reaches any more is left an
-  `unreachable` alone. Its candidate scan has a scalar twin. `test-ir-optimize`
+  `unreachable` alone. `test-ir-optimize`
   runs nine IR text fixtures (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's
   found flag, a value read past the test, a switch's kept edge with mapped
   successor phis, a collapse, `a && b && c`, a label's block and a self-loop.
-  Each runs through both paths, which must agree, and is verified as complete
-  SSA. Each is executed against its input before and after the truth rewrite
-  and the optimizer.
+  Each is verified as complete SSA, folded into a frozen digest (#2924), and
+  executed against its input after threading and after the truth rewrite and
+  the optimizer. The candidate scan is checked against its definition.
 - **Stored constants** (`tier1_select.c`, `tier1_select_burs.c`). A store of a
   constant is `mov $imm, mem` at its width, an 8-byte store's where the constant
   fits a sign-extended imm32, rather than the constant's register. The candidates
@@ -367,7 +366,10 @@ designator moves to another member after the vector's keep their eight. In
 into the memory the instruction before loaded it from. In #2843's conditional
 sums, `s += p[i] > 0 ? p[i] : 1` over an `int`, an `unsigned` and an
 `unsigned short` array, whose select reads the load's register for its
-extension, each must have a cmov and no register moved into another:
+extension, each must have a cmov and no register moved into another. #2870's
+`patterns_sector`, SQLite's `pagerWriteLargeSector` cut down, leaves out a
+store into a slot two blocks after its reload, which the code's certificate
+must prove from the run's entries:
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"

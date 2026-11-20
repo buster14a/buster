@@ -637,48 +637,100 @@ static uint32_t oracle_root_in(const OracleRoot* roots, uint32_t count, const ui
     return result;
 }
 
+// Discovered roots share the first byte of their temporary directory. Stored roots are bounded names whose
+// lengths have been checked, so only use that shortcut if all of their initial bytes actually agree.
+static int oracle_root_initial(const OracleRoot* roots, uint32_t count)
+{
+    int initial = (uint8_t)roots[0].name[0];
+    for (uint32_t r = 1; r < count; r += 1)
+    {
+        if ((uint8_t)roots[r].name[0] != initial)
+        {
+            initial = -1;
+            break;
+        }
+    }
+    return initial;
+}
+
+// Advances to the next whole root or the end. Only the caller advances past a match, including after a rewrite.
+static uint32_t oracle_root_next(const OracleRoot* roots, uint32_t count, int initial, const uint8_t* bytes, uint64_t length, uint64_t* at)
+{
+    uint64_t pos = *at;
+    uint32_t r = count;
+    while (pos < length)
+    {
+        if (initial >= 0 && bytes[pos] != initial)
+        {
+            const uint8_t* candidate = memchr(bytes + pos + 1, initial, length - pos - 1);
+            if (candidate == 0)
+            {
+                pos = length;
+                break;
+            }
+            pos = (uint64_t)(candidate - bytes);
+        }
+        r = oracle_root_in(roots, count, bytes, length, pos);
+        if (r < count)
+        {
+            break;
+        }
+        pos += 1;
+    }
+    *at = pos;
+    return r;
+}
+
 // `text` as a part of the key, each of the run's roots in it with its random characters as a placeholder for its
 // place: \x01, the place and four \x01, as many as the characters they stand for.
 static void oracle_hash_rooted(OracleHash* hash, const OracleRoots* roots, const char* text)
 {
     const size_t length = strlen(text);
     oracle_hash_length(hash, length);
-    size_t at = 0;
-    while (at < length)
+    size_t literal = 0;
+    const uint32_t count = roots->count;
+    if (count != 0 && length != 0)
     {
-        const uint32_t r = oracle_root_in(roots->roots, roots->count, (const uint8_t*)text, length, at);
-        if (r < roots->count)
+        const int initial = oracle_root_initial(roots->roots, count);
+        uint64_t at = 0;
+        while (at < length)
         {
+            const uint32_t r = oracle_root_next(roots->roots, count, initial, (const uint8_t*)text, length, &at);
+            if (r == count)
+            {
+                break;
+            }
             const OracleRoot* root = &roots->roots[r];
             const uint8_t placeholder[BUSTER_ORACLE_RANDOM] = { 1, (uint8_t)r, 1, 1, 1, 1 };
-            oracle_hash_raw(hash, text + at, root->random);
+            const size_t random = at + root->random;
+            oracle_hash_raw(hash, text + literal, random - literal);
             oracle_hash_raw(hash, placeholder, sizeof(placeholder));
-            oracle_hash_raw(hash, text + at + root->random + BUSTER_ORACLE_RANDOM, root->length - root->random - BUSTER_ORACLE_RANDOM);
+            literal = random + sizeof(placeholder);
             at += root->length;
         }
-        else
-        {
-            oracle_hash_raw(hash, text + at, 1);
-            at += 1;
-        }
+    }
+    if (literal < length)
+    {
+        oracle_hash_raw(hash, text + literal, length - literal);
     }
 }
 
 // Replaces each of `old`'s roots in `bytes` with `new`'s root of the same place, as long, in one pass.
 static void oracle_roots_replace(const OracleRoot* old, const OracleRoot* new, uint32_t count, uint8_t* bytes, uint64_t length)
 {
-    uint64_t at = 0;
-    while (at < length)
+    if (count != 0 && length != 0)
     {
-        const uint32_t r = oracle_root_in(old, count, bytes, length, at);
-        if (r < count)
+        const int initial = oracle_root_initial(old, count);
+        uint64_t at = 0;
+        while (at < length)
         {
+            const uint32_t r = oracle_root_next(old, count, initial, bytes, length, &at);
+            if (r == count)
+            {
+                break;
+            }
             memcpy(bytes + at, new[r].name, new[r].length);
             at += new[r].length;
-        }
-        else
-        {
-            at += 1;
         }
     }
 }
@@ -2647,7 +2699,7 @@ static bool oracle_run_wait(OracleRun* run, int* status)
     {
         kill(-run->pid, SIGKILL);
     }
-    pid_t waited = run->pid > 0 ? -1 : 0;
+    pid_t waited;
     struct rusage usage = { 0 };
     do
     {

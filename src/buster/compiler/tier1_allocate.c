@@ -5,8 +5,7 @@
 // its liveness adapter supplies half-open ranges in loop-contiguous machine order. This is not a second IR.
 // tier1_allocate builds position events, colors unrestricted classes by LIFO reuse in event order (each start takes
 // the register of the most recent end at its pressure level), and defers constrained or overfull classes to
-// tier1_allocate_scan. The scalar production twin uses the same assignment policy with scalar fixed-range filtering;
-// tier1_allocate_scan_reference retains the independent scan for tests. Host ISA changes kernels, not register choices.
+// tier1_allocate_scan. tier1_allocate_scan_reference retains the independent scan for tests.
 // tier1_allocation_verify independently checks fragments, interference and fixed ranges. tier1_resolve_moves orders
 // edge/phi assignments, breaking cycles with a caller-reserved location. No function emits spill machine code.
 //
@@ -103,7 +102,7 @@ struct Tier1AllocationInput
     const uint32_t* use_offsets;
     const uint32_t* use_positions;
     // Optional byte per use: 1 requires a physical register at that position, 0 permits a memory/rematerialized
-    // operand. Required uses trigger reload/resplit in the scalar path. A position denotes one simultaneous phase;
+    // operand. Required uses trigger reload/resplit in the scan. A position denotes one simultaneous phase;
     // a producer uses separate input/output phases when the instruction may reuse a dying input register.
     const uint8_t* use_required;
     // Optional, with use_required (#2574): positions, nondecreasing, where the registers clobber_registers[class] lose
@@ -919,34 +918,25 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
     }
 }
 
-// Keep the cross-product for tiny fixed sets and as an independent scalar reference. All borrowed tails are masked.
-static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* input, bool vector, uint32_t* allowed)
+// The cross-product for small fixed sets, 16 intervals at a time. All borrowed tails are masked.
+static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* input, uint32_t* allowed)
 {
-    (void)vector;
-
     const Tier1AllocationInput columns = *input;
     for (uint32_t f = 0; f < columns.fixed.count; f += 1)
     {
-        for (uint32_t first = 0; first < columns.count; first += BUSTER_VECTOR_PATH(vector) ? 16 : 1)
+        for (uint32_t first = 0; first < columns.count; first += 16)
         {
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                const uint32_t remaining = columns.count - first;
-                const uint32_t length = remaining < 16 ? remaining : 16;
-                const __mmask16 lanes = (__mmask16)((1u << length) - 1);
-                const __m512i start = _mm512_maskz_loadu_epi32(lanes, columns.starts + first);
-                const __m512i end = _mm512_maskz_loadu_epi32(lanes, columns.ends + first);
-                const __m128i classes = _mm_maskz_loadu_epi8(lanes, columns.classes + first);
-                const __mmask16 same = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8((char)columns.fixed.classes[f]));
-                const __mmask16 overlap = lanes & same & _mm512_cmplt_epu32_mask(start, _mm512_set1_epi32((int32_t)columns.fixed.ends[f])) & _mm512_cmpgt_epu32_mask(end, _mm512_set1_epi32((int32_t)columns.fixed.starts[f]));
-                const __m512i current = _mm512_maskz_loadu_epi32(lanes, allowed + first);
-                const __m512i trimmed = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)columns.fixed.registers[f]), current);
-                _mm512_mask_storeu_epi32(allowed + first, overlap, trimmed);
-            }
-            else if (columns.classes[first] == columns.fixed.classes[f] && columns.starts[first] < columns.fixed.ends[f] && columns.ends[first] > columns.fixed.starts[f])
-            {
-                allowed[first] &= ~columns.fixed.registers[f];
-            }
+            const uint32_t remaining = columns.count - first;
+            const uint32_t length = remaining < 16 ? remaining : 16;
+            const __mmask16 lanes = (__mmask16)((1u << length) - 1);
+            const __m512i start = _mm512_maskz_loadu_epi32(lanes, columns.starts + first);
+            const __m512i end = _mm512_maskz_loadu_epi32(lanes, columns.ends + first);
+            const __m128i classes = _mm_maskz_loadu_epi8(lanes, columns.classes + first);
+            const __mmask16 same = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8((char)columns.fixed.classes[f]));
+            const __mmask16 overlap = lanes & same & _mm512_cmplt_epu32_mask(start, _mm512_set1_epi32((int32_t)columns.fixed.ends[f])) & _mm512_cmpgt_epu32_mask(end, _mm512_set1_epi32((int32_t)columns.fixed.starts[f]));
+            const __m512i current = _mm512_maskz_loadu_epi32(lanes, allowed + first);
+            const __m512i trimmed = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)columns.fixed.registers[f]), current);
+            _mm512_mask_storeu_epi32(allowed + first, overlap, trimmed);
         }
     }
 }
@@ -955,10 +945,8 @@ static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* inp
 // register r overlaps iff its prefix maximum fixed end is > start. Ends at start and starts at end do not overlap.
 // Reuse the dead event buckets as start-position lists. Work is O(positions + fixed + events), with 32 register
 // lanes per class; scratch is one u32 per fixed range. Required-use/start events do not query or advance the sweep.
-static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Arena* arena, bool vector, const uint32_t* events, uint32_t event_count, uint32_t* buckets, uint32_t* allowed)
+static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Arena* arena, const uint32_t* events, uint32_t event_count, uint32_t* buckets, uint32_t* allowed)
 {
-    (void)vector;
-
     const Tier1AllocationInput columns = *input;
     bool valid = true;
     if (columns.fixed.count != 0 && columns.count != 0)
@@ -966,10 +954,10 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
         // Avoid index overhead when the cross-product fits sixteen comparisons per input row plus the already-paid
         // position domain. This keeps tiny functions/small fixed sets simple while bounding that work linearly too.
         const uint64_t simple_budget = columns.position_count + 16ull * (columns.count + columns.fixed.count);
-        const bool simple = !BUSTER_VECTOR_PATH(vector) || (uint64_t)columns.fixed.count * columns.count <= simple_budget;
+        const bool simple = (uint64_t)columns.fixed.count * columns.count <= simple_budget;
         if (simple)
         {
-            tier1_allocation_filter_fixed_simple(input, BUSTER_VECTOR_PATH(vector), allowed);
+            tier1_allocation_filter_fixed_simple(input, allowed);
         }
         else
         {
@@ -1022,12 +1010,10 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
 
 // The allocator, compiled twice (tier1_allocate_impl): `hinted`, a constant, says whether the input has hint_values.
 // Without them the body has no hint code at all, so that an input without hints runs the code it ran before them.
-// Both production paths color regular classes; `color` is false only for the independent scan reference. The production
-// class-event column is eight temporary bytes per interval on either host, independent of `vector`'s filtering kernels.
-static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool color, bool hinted, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
+// The production path colors regular classes; `color` is false only for the independent scan reference. The production
+// class-event column is eight temporary bytes per interval.
+static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool color, bool hinted, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
 {
-    (void)vector;
-
     // A local copy keeps the column pointers in registers: under -fno-strict-aliasing each store below could change
     // *input, and clang would reload them after every one. Its address must not escape, or the stores could alias
     // it as well: the helpers take input and make their own copies.
@@ -1216,7 +1202,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         {
             memset(value_last, UINT8_MAX, tier1_allocation_hint_bytes(&columns));
         }
-        if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
+        if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, events, event_count, buckets, allowed))
         {
             error = TIER1_ALLOCATION_CAPACITY;
         }
@@ -1494,55 +1480,44 @@ static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
 }
 
 // The hinted copy: valid hints, then the body with its hint code, and with `verdict` another problem's.
-static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
+static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
 {
-    return tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, vector, true, true, verdict, result) : TIER1_ALLOCATION_INVALID;
+    return tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, true, true, verdict, result) : TIER1_ALLOCATION_INVALID;
 }
 
-static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
-    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, 0, result) : tier1_allocate_body(input, arena, vector, true, false, 0, result);
+    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, 0, result) : tier1_allocate_body(input, arena, true, false, 0, result);
 }
 
-// #2538: tier1_allocate (or with `vector` false its scalar twin), and another problem's verdict over the same intervals
+// #2538: tier1_allocate, and another problem's verdict over the same intervals
 // (Tier1AllocationVerdict), whose scans share this call's validation and sorted events. Only a hinted input without
 // fixed ranges, as tier1_cfg's are, takes one; `verdict->taken` says so.
-static __attribute__((unused)) Tier1AllocationError tier1_allocate_verdict(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
+static __attribute__((unused)) Tier1AllocationError tier1_allocate_verdict(const Tier1AllocationInput* input, Arena* arena, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
 {
     const bool hinted = input != 0 && input->hint_values != 0 && input->fixed.count == 0;
     verdict->taken = false;
     verdict->constraint = false;
-    return hinted ? tier1_allocate_hinted(input, arena, BUSTER_HOST_VECTOR && vector, verdict, result) : tier1_allocate_impl(input, arena, BUSTER_HOST_VECTOR && vector, result);
+    return hinted ? tier1_allocate_hinted(input, arena, verdict, result) : tier1_allocate_impl(input, arena, result);
 }
-
-static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result);
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier1_allocate_scalar(input, arena, result);
-#else
-    return tier1_allocate_impl(input, arena, true, result);
-#endif
+    return tier1_allocate_impl(input, arena, result);
 }
 
-static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
-{
-    return tier1_allocate_impl(input, arena, false, result);
-}
-
-// The former scalar policy, independent of regular-class coloring: every class takes the constrained scan, and fixed
-// ranges use the scalar cross-product. Tests retain it as a validity oracle, not as a production host policy (#1395).
+// The former scan policy, independent of regular-class coloring: every class takes the constrained scan. Tests retain it
+// as a validity oracle, not as a production host policy (#1395).
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scan_reference(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     if (input != 0 && input->hint_values != 0)
     {
-        error = tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, false, false, true, 0, result) : TIER1_ALLOCATION_INVALID;
+        error = tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, false, true, 0, result) : TIER1_ALLOCATION_INVALID;
     }
     else
     {
-        error = tier1_allocate_body(input, arena, false, false, false, 0, result);
+        error = tier1_allocate_body(input, arena, false, false, 0, result);
     }
     return error;
 }
@@ -1835,10 +1810,8 @@ static uint32_t tier1_move_ready_pop(uint32_t* ready, uint32_t* count)
     return result;
 }
 
-static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result, bool vector)
+static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
-    (void)vector;
-
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     const uint64_t saved = arena != 0 ? arena->length : 0;
     Tier1ResolvedMoves output = { 0 };
@@ -1864,7 +1837,7 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
             error = TIER1_ALLOCATION_CAPACITY;
         }
     }
-    if (error == TIER1_ALLOCATION_OK && BUSTER_VECTOR_PATH(vector))
+    if (error == TIER1_ALLOCATION_OK)
     {
         const __m256i scratch = _mm256_set1_epi32((int)input->scratch);
         const __m512i indices = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7);
@@ -1884,18 +1857,6 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
             const __m512i locations = _mm512_slli_epi64(_mm512_cvtepu32_epi64(destinations), 32);
             const __m512i positions = _mm512_add_epi64(indices, _mm512_set1_epi64(i));
             _mm512_mask_storeu_epi64(keys + i, mask, _mm512_or_si512(locations, positions));
-        }
-    }
-    else if (error == TIER1_ALLOCATION_OK)
-    {
-        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && i < input->count; i += 1)
-        {
-            if (input->sources[i] == input->scratch || input->destinations[i] == input->scratch)
-            {
-                error = TIER1_ALLOCATION_INVALID;
-            }
-            uses[i] = input->sources[i] == input->destinations[i] ? UINT32_MAX : 0;
-            keys[i] = ((uint64_t)input->destinations[i] << 32) | i;
         }
     }
     if (error == TIER1_ALLOCATION_OK)
@@ -2000,6 +1961,6 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
 static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
     const bool small = input != 0 && input->count <= BUSTER_TIER1_MOVE_SMALL_COUNT;
-    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result, BUSTER_HOST_VECTOR);
+    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result);
     return error;
 }

@@ -2322,7 +2322,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         // A link that fails after opening a file it writes beside the output leaves the output, its other link and no
         // file beside them; and a file a killed link left under the name without random digits doesn't block the next
         // one.
-        written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
+        executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
         const String8 before_failure = executable_test_read(scratch.arena, path.pointer);
         unlink(other.pointer);
         link(path.pointer, other.pointer);
@@ -2389,7 +2389,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         const String8 fifo = executable_test_path(directory, "fifo", fifo_bytes);
         const String8 copy = executable_test_path(directory, "copy", copy_bytes);
         unlink(path.pointer);
-        written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
+        executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
         const String8 regular = executable_test_read(scratch.arena, path.pointer);
         unlink(fifo.pointer);
         const bool made = mkfifo(fifo.pointer, 0644) == 0;

@@ -537,8 +537,7 @@ static void tier1_select_request(Tier1SelectRecords* result, X86Operation operat
 }
 
 // A function's requests, in its records' order, held until x86_choose_forms' 32 lanes are full or the function's records
-// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context. On the
-// scalar path (`vector` false) each is chosen as it comes, by the twin, and none is held.
+// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context.
 #define BUSTER_TIER1_SELECT_BATCH 32
 typedef struct Tier1SelectRequests Tier1SelectRequests;
 struct Tier1SelectRequests
@@ -550,7 +549,6 @@ struct Tier1SelectRequests
     uint16_t forms[BUSTER_TIER1_SELECT_BATCH];
     uint8_t destinations[BUSTER_TIER1_SELECT_BATCH];
     uint32_t count;
-    bool vector;
 };
 
 // The held requests' forms, chosen in one batch by x86_choose_forms: each record the chosen form's, or left empty where
@@ -570,19 +568,10 @@ static void tier1_select_requests_flush(Tier1SelectRequests* requests, X86Instru
 }
 
 // The node's request, if it has one, its record at `first` among the function's `records`: held, a full batch's forms
-// chosen into the records first, or on the scalar path chosen at once.
+// chosen into the records first.
 static void tier1_select_requests_add(Tier1SelectRequests* requests, const Tier1SelectRecords* selected, uint32_t first, X86Instruction* records)
 {
-    if (selected->requested && !requests->vector)
-    {
-        uint16_t form = X86_FORM_NONE;
-        x86_choose_forms_scalar(&selected->row, &selected->value, &selected->context, 1, &form);
-        if (form != X86_FORM_NONE)
-        {
-            records[first + selected->request] = x86_choice_instruction(form, (X86Instruction){ .rm = selected->destination }, selected->value);
-        }
-    }
-    else if (selected->requested)
+    if (selected->requested)
     {
         if (requests->count == BUSTER_TIER1_SELECT_BATCH)
         {
@@ -3493,8 +3482,6 @@ struct Tier1SelectPlan
     uint32_t* costs;
     uint64_t estimated_cost;
     uint64_t arena_bytes;
-    // The path that planned it, which the legacy emitter's choice of immediates' forms takes too.
-    bool vector;
     // Whether `function` passed a full verification, the selector's own or its caller's (tier1_select_plan_verified):
     // every plan the selector publishes has, so the liveness build doesn't verify its function again (#1379). A plan
     // made otherwise (a test's) leaves it false.
@@ -3554,7 +3541,7 @@ struct Tier1SelectForest
     // directly, as Tier1EmitOptions.symbol_access's null does.
     const uint8_t* symbol_access;
     uint32_t symbol_count;
-    // By node, for a leaf the lowering repeats (a symbol's address, or an extension, tier1_select_repeated_leaf) that
+    // By node, for a leaf the lowering repeats (a symbol's address, or an extension, tier1_select_leaves_mask) that
     // another of the same operation, type and operand precedes in its block, that first one's node plus one; for an
     // extension to I64 whose operand's register already holds its value, that operand's node plus one (#2843,
     // tier1_select_extension_forwards), and so for its block's repeats of it; 0 for any other node. Null where no node
@@ -3583,28 +3570,6 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     // the plan materializes whatever their uses.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
            op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || op == IR_SCATTER || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
-}
-
-// Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
-// doesn't carry a C access's volatility, so that an IR load without BUSTER_IR_VOLATILE may still be a volatile object's,
-// and two volatile reads must keep their order. A load still folds into its own consumer (tier1_select_load_folds:
-// the last of these before the consumer the load itself), but past no other load.
-static bool tier1_select_fold_barrier(const IrFunction* function, uint32_t node)
-{
-    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD || function->op[node] == IR_MASKED_LOAD || function->op[node] == IR_GATHER;
-}
-
-// Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
-// scalar twin of tier1_select_barriers. A pass of its own, apart from the plan's pass over the nodes, where the store
-// would make the operands' walk reload the function's columns.
-static void tier1_select_barriers_scalar(const IrFunction* function, uint32_t count, uint32_t* barriers)
-{
-    uint32_t barrier = 0;
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        barriers[node] = barrier;
-        barrier = tier1_select_fold_barrier(function, node) ? node + 1 : barrier;
-    }
 }
 
 // The same, 16 nodes at a time: their kinds compared at once, each barrier's lane its position plus one, the
@@ -3708,7 +3673,7 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 // Compact, monotone range facts, shared by both selection paths. Unknown is the type's full width. Starting there
 // (including at phis) is essential: a loop must never prove its own invariant from an optimistic backedge. Bounded
 // sweeps handle forward block references too; facts not reached within the bound remain conservative.
-static void tier1_select_known_bits_passes(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector, bool seed)
+static void tier1_select_known_bits_passes(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool seed)
 {
     const uint32_t count = function->instruction_count;
     // The caller's fresh scratch column is disjoint from this immutable IR and its arrays. Cache the stable array
@@ -3719,7 +3684,7 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
     const uint32_t* const inputs_b = function->b;
     const uint32_t* const inputs_c = function->c;
     const IrConstant* const constants = function->constants;
-    if (seed && BUSTER_VECTOR_PATH(vector))
+    if (seed)
     {
         // Independent seed classification, 32 nodes at a time. Both loads and stores are masked at the logical tail.
         for (uint32_t first = 0; first < count; first += 32)
@@ -3733,14 +3698,6 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
             bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I16)), _mm512_set1_epi16(16));
             bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I32)), _mm512_set1_epi16(32));
             _mm512_mask_storeu_epi16(known + first, active, _mm512_or_si512(bits, _mm512_slli_epi16(bits, 8)));
-        }
-    }
-    else if (seed)
-    {
-        for (uint32_t node = 0; node < count; node += 1)
-        {
-            const uint32_t bits = tier1_select_width(types[node]) != 0 ? ir_type_bits[types[node]] : 64;
-            known[node] = (uint16_t)(bits | (bits << 8));
         }
     }
     for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
@@ -3859,12 +3816,12 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
     }
 }
 
-static void tier1_select_known_bits(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
+static void tier1_select_known_bits(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known)
 {
-    tier1_select_known_bits_passes(function, blocks, known, vector, true);
-    if (tier1_select_induction_bounds(function, dominance, blocks, workspace, known, vector))
+    tier1_select_known_bits_passes(function, blocks, known, true);
+    if (tier1_select_induction_bounds(function, dominance, blocks, workspace, known))
     {
-        tier1_select_known_bits_passes(function, blocks, known, vector, false);
+        tier1_select_known_bits_passes(function, blocks, known, false);
     }
 }
 
@@ -3891,7 +3848,7 @@ static void tier1_select_known_bits(const IrFunction* function, const IrDominanc
 // The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
 // probes (tier1_narrow_test.c) check the supported producers natively. Inlined by force into the plan: the bottom-up
 // rewrite's check (tier1_select_burs_test.c) calls it too, and with a second caller clang outlined it.
-static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, const uint16_t* known, uint8_t* canonical, uint32_t* workspace, bool vector)
+static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, const uint16_t* known, uint8_t* canonical, uint32_t* workspace)
 {
     const uint32_t count = function->instruction_count;
     for (uint32_t node = 0; node < count; node += 1)
@@ -3946,7 +3903,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             }
         }
     }
-    tier1_select_sign_requests(function, known, canonical, workspace, vector);
+    tier1_select_sign_requests(function, known, canonical, workspace);
     for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
     {
         bool changed = false;
@@ -4047,7 +4004,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             break;
         }
     }
-    tier1_select_storage_components(function, canonical, workspace, vector);
+    tier1_select_storage_components(function, canonical, workspace);
 }
 
 // A call's argument's type: a fixed parameter's, or an unnamed one's (a variadic call's past its parameters) its value's,
@@ -5197,20 +5154,7 @@ static void tier1_select_sinkable(const IrFunction* function, uint8_t* sinkable)
     }
 }
 
-// Whether `node` is one of the pure leaves the lowering makes again at each use (#2601): a symbol's address, or a sign or
-// zero extension to 64 bits (an index's, which every access of an array extends again). An extension to I32 is not: its
-// register holds the value sign-extended, zero-extended or neither by its own users' needs (tier1_select_storage.c's
-// column), so two of one operand may differ, and a pattern that reads the other's would see the wrong upper half
-// (sqlite3LogEstAdd's `a + x[a - b]`, whose index read the addition's zero-extended `a` as sign-extended).
-static bool tier1_select_repeated_leaf(const IrFunction* function, uint32_t node)
-{
-    const uint32_t op = function->op[node];
-    const uint32_t type = function->type[node];
-    return op == IR_SYMBOL_ADDR || ((op == IR_SEXT || op == IR_ZEXT) && type == IR_I64);
-}
-
-// The repeated leaves among the 64 nodes from `first` (tier1_select_repeated_leaf's), their operations and types compared
-// at once: the vector path's scan, whose twin is the scalar loop over the nodes.
+// The repeated leaves among the 64 nodes from `first`, their operations and types compared at once.
 static uint64_t tier1_select_leaves_mask(const IrFunction* function, uint32_t first, uint32_t count)
 {
     const uint32_t left = count - first;
@@ -5290,23 +5234,13 @@ static bool tier1_select_first_leaf(const IrFunction* function, const uint32_t* 
 // others in their block, so it dominates their users, and a leaf is pure, so it is their value. The vector path finds
 // the leaves 64 nodes at a time (tier1_select_leaves_mask); the table's inserts, a function's few leaves', are scalar on
 // either path, in the nodes' order, so both make the same column.
-static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, const uint32_t* uses, const uint16_t* known, const uint8_t* canonical, Arena* scratch, bool vector, bool* ok)
+static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, const uint32_t* uses, const uint16_t* known, const uint8_t* canonical, Arena* scratch, bool* ok)
 {
     const uint32_t count = function->instruction_count;
     uint32_t leaves = 0;
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; first < count; first += 64)
     {
-        for (uint32_t first = 0; first < count; first += 64)
-        {
-            leaves += (uint32_t)__builtin_popcountll(tier1_select_leaves_mask(function, first, count));
-        }
-    }
-    else
-    {
-        for (uint32_t node = 0; node < count; node += 1)
-        {
-            leaves += tier1_select_repeated_leaf(function, node);
-        }
+        leaves += (uint32_t)__builtin_popcountll(tier1_select_leaves_mask(function, first, count));
     }
     uint32_t capacity = 4;
     while (capacity < 2 * (uint64_t)leaves)
@@ -5318,7 +5252,7 @@ static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, co
     uint32_t* firsts = candidates ? ir_allocate(scratch, count, 4, ok) : 0;
     uint32_t* slots = candidates ? ir_allocate(scratch, capacity, 4, ok) : 0;
     bool repeated = false;
-    if (*ok && candidates && BUSTER_VECTOR_PATH(vector))
+    if (*ok && candidates)
     {
         for (uint32_t first = 0; first < count; first += 64)
         {
@@ -5326,13 +5260,6 @@ static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, co
             {
                 repeated |= tier1_select_first_leaf(function, blocks, uses, known, canonical, slots, capacity, firsts, first + (uint32_t)__builtin_ctzll(mask));
             }
-        }
-    }
-    else if (*ok && candidates)
-    {
-        for (uint32_t node = 0; node < count; node += 1)
-        {
-            repeated |= tier1_select_repeated_leaf(function, node) && tier1_select_first_leaf(function, blocks, uses, known, canonical, slots, capacity, firsts, node);
         }
     }
     return repeated && *ok ? firsts : 0;
@@ -7570,9 +7497,8 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
 // `vector` changes only kernel implementations, never the cover's cost model or tie-breaking.
 // `symbol_access` is how each symbol below `symbol_count` is reached (Tier1SelectForest.symbol_access; null for every
 // symbol directly).
-static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, bool verify, bool costed, Tier1SelectPlan* result, uint32_t* error_node)
+static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool verify, bool costed, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    (void)vector;
 
     Tier1SelectError error = TIER1_SELECT_OK;
     uint32_t failed_node = BUSTER_IR_NONE;
@@ -7582,7 +7508,6 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     const uint32_t count = function != 0 ? function->instruction_count : 0;
     Tier1SelectPlan plan = {
         .function = function,
-        .vector = BUSTER_VECTOR_PATH(vector),
         .symbol_access = symbol_access,
         .symbol_count = symbol_access != 0 ? symbol_count : 0,
     };
@@ -7596,7 +7521,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     else
     {
-        const IrCheck check = !verify ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : BUSTER_VECTOR_PATH(vector) ? ir_verify(function, scratch, dominance) : ir_verify_scalar(function, scratch, dominance);
+        const IrCheck check = !verify ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify(function, scratch, dominance);
         if (check.error != IR_OK)
         {
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
@@ -7737,20 +7662,16 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             failed_node = node;
         }
     }
-    if (error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector))
+    if (error == TIER1_SELECT_OK)
     {
         tier1_select_barriers(function, count, barriers);
-    }
-    else if (error == TIER1_SELECT_OK)
-    {
-        tier1_select_barriers_scalar(function, count, barriers);
     }
     if (error == TIER1_SELECT_OK)
     {
         tier1_select_sinkable(function, sinkable);
-        tier1_select_known_bits(function, dominance, blocks, positions, known_bits, vector);
-        tier1_select_canonical(function, blocks, known_bits, canonical, positions, vector);
-        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending, vector);
+        tier1_select_known_bits(function, dominance, blocks, positions, known_bits);
+        tier1_select_canonical(function, blocks, known_bits, canonical, positions);
+        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending);
     }
     if (error == TIER1_SELECT_OK)
     {
@@ -7783,7 +7704,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
-        symbol_first = tier1_select_symbol_firsts(function, blocks, uses, known_bits, canonical, scratch, vector, &ok);
+        symbol_first = tier1_select_symbol_firsts(function, blocks, uses, known_bits, canonical, scratch, &ok);
         error = ok ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     const Tier1SelectForest forest =
@@ -7799,22 +7720,19 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .symbol_access = plan.symbol_access,
         .symbol_count = plan.symbol_count,
         .symbol_first = symbol_first,
-        .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
+        .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors(function),
     };
-    // Both host paths use the bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children,
-    // its state, and its rule. The independent scalar kernels visit nodes one at a time; the vector kernels label depth
-    // levels in batches. Both read the same grammar's costs and tie-breaks. Nodes outside that grammar take munch's,
-    // made in the levels' order on either path so that unsupported nodes are refused at the same place. Other patterns
-    // are made as the code needs them, in the walk below. Only the tests' reference disables the costed cover.
+    // The bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children, its state, and its
+    // rule, the AVX-512 kernels labeling depth levels in batches. Nodes outside that grammar take munch's, made in the
+    // levels' order so that unsupported nodes are refused at one place. Other patterns are made as the code needs them,
+    // in the walk below. Only the tests' reference disables the costed cover.
     const bool burs = error == TIER1_SELECT_OK && costed;
     uint32_t* classes = 0;
     uint32_t* rules = 0;
     uint8_t* built = 0;
     uint32_t* kids = 0;
     uint32_t* states = 0;
-#if BUSTER_HOST_VECTOR
     uint32_t* words = 0;
-#endif
     if (burs)
     {
         bool ok = tier1_select_initialize();
@@ -7824,27 +7742,14 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         states = ir_allocate(scratch, count, 4, &ok);
         rules = ir_allocate(scratch, count, 4, &ok);
         built = ir_allocate(scratch, count, 1, &ok);
-#if BUSTER_HOST_VECTOR
-        words = BUSTER_VECTOR_PATH(vector) ? ir_allocate(scratch, count, 4, &ok) : 0;
-#endif
+        words = ir_allocate(scratch, count, 4, &ok);
         error = ok || error != TIER1_SELECT_OK ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     if (burs && error == TIER1_SELECT_OK)
     {
-#if BUSTER_HOST_VECTOR
-        if (vector)
-        {
-            tier1_burs_classify_vector(&forest, users, words, classes, kids);
-            tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
-            tier1_burs_rules_vector(count, classes, states, rules);
-        }
-        else
-#endif
-        {
-            tier1_burs_classify_scalar(&forest, users, classes, kids);
-            tier1_burs_label_scalar(count, classes, kids, states);
-            tier1_burs_rules_scalar(count, classes, states, rules);
-        }
+        tier1_burs_classify_vector(&forest, users, words, classes, kids);
+        tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
+        tier1_burs_rules_vector(count, classes, states, rules);
         const Tier1SelectPattern none = {
             .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
             .stack_object = BUSTER_IR_NONE,
@@ -7976,27 +7881,27 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     return error;
 }
 
-// The plan of a function that hasn't been verified: ir_verify (or ir_verify_scalar on the scalar path) with `dominance`
+// The plan of a function that hasn't been verified: ir_verify with `dominance`
 // first, which refuses what the plan can't read.
 // Every symbol is reached directly (a rip-relative memory operand may fold any, #2573).
-static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, 0, 0, output, scratch, vector, true, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, 0, 0, output, scratch, true, true, result, error_node);
 }
 
 // tier1_select_plan's, with each symbol below `symbol_count` reached as `symbol_access` says (BUSTER_TIER1_ACCESS_*, the
 // emitter's Tier1EmitOptions.symbol_access): only a direct one folds into a memory operand (#2573).
-static __attribute__((unused)) Tier1SelectError tier1_select_plan_access(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+static __attribute__((unused)) Tier1SelectError tier1_select_plan_access(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, vector, true, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, true, true, result, error_node);
 }
 
 // The plan of a function its caller has verified with `dominance`, as ir_optimize verifies its result: the same plan as
 // tier1_select_plan_access's, without verifying it again. On the frozen sqlite3.c, the verification was a quarter of
 // selection's cycles (#141). Unverified IR here may be read outside its columns.
-static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, vector, false, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, false, true, result, error_node);
 }
 
 static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* pattern, const uint8_t* registers, uint32_t first)
@@ -8189,7 +8094,7 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             failed_node = node;
         }
     }
-    Tier1SelectRequests requests = { .vector = plan != 0 && plan->vector };
+    Tier1SelectRequests requests = { 0 };
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;

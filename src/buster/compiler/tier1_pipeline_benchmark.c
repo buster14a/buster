@@ -86,7 +86,7 @@ static uint8_t* tier1_pipeline_benchmark_tier1(Tier1PipelineTest* test, const Ti
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
         ok = tier1_pipeline_upstream(test, &fixture->program, f, &functions, &function, &dominance);
-        ok = ok && tier1_select_plan(&function, &dominance, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], true, &plan, &node) == TIER1_SELECT_OK;
+        ok = ok && tier1_select_plan(&function, &dominance, &test->arenas[TIER1_PIPELINE_SELECTED], &test->arenas[TIER1_PIPELINE_SCRATCH], &plan, &node) == TIER1_SELECT_OK;
         ok = ok && tier1_emit_function(&plan, &options, test->allowed, &test->arenas[TIER1_PIPELINE_EMITTED], &test->arenas[TIER1_PIPELINE_SCRATCH], &bodies[f], &node) == TIER1_EMIT_OK;
     }
     uint64_t starts[BUSTER_TIER1_PIPELINE_FUNCTIONS] = { 0 };

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #140's compile time on real C (benchmark-tier1-cfg-source): the time per IR instruction of allocating every function
-// -c compiles of a set of files over its CFG, by both of tier1_cfg.c's paths, and the interval allocator's share
+// -c compiles of a set of files over its CFG (tier1_cfg_allocate), and the interval allocator's share
 // (tier1_allocate on the CFG's own intervals), per IR instruction and per typed entry: benchmark-backend-source times
 // Tier 0's compile of the same functions per typed entry (this command runs in the backend's unit, whose copies of Tier
 // 0's tables ir_source_prepare's emission doesn't initialize: tier1_cfg_source_test.c). Include after
@@ -11,33 +11,29 @@
 //   build/compiler benchmark-tier1-cfg-source [--only VARIANT] [--after-scalar MS] [preprocessor options] file...
 //
 // The files' functions are prepared, lowered and promoted as test-tier1-cfg-source prepares them, each adapted once
-// (tier1_cfg_ir.c) and allocated once by both paths outside the time, whose results must pass tier1_cfg_verify; a
-// function the model has no class for is left out of every variant, and counted. Any other failure fails
-// the benchmark, which then reports no time. Each variant's run takes every function once, after a warm-up, in
-// BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of each pair runs first; --only times one alone, back to
-// back, and --after-scalar MS runs a vector variant's scalar twin, untimed, for MS ms before each of its passes. Run it
-// under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
+// (tier1_cfg_ir.c) and allocated once outside the time, whose result must pass tier1_cfg_verify; a function the model
+// has no class for is left out of every variant, and counted. Any other failure fails the benchmark, which then reports
+// no time. Each variant's run takes every function once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that
+// alternate which of the two runs first; --only times one alone, back to back, and --after-scalar MS runs MS ms of
+// scalar integer work, untimed, before each of a variant's passes. Run it under the 9700X's lock pinned to one CPU
+// (taskset -c 2 ...).
 
 #define BUSTER_TIER1_CFG_SOURCE_CFG 0
-#define BUSTER_TIER1_CFG_SOURCE_CFG_SCALAR 1
-#define BUSTER_TIER1_CFG_SOURCE_INTERVALS 2
-#define BUSTER_TIER1_CFG_SOURCE_INTERVALS_SCALAR 3
-#define BUSTER_TIER1_CFG_SOURCE_VARIANTS 4
+#define BUSTER_TIER1_CFG_SOURCE_INTERVALS 1
+#define BUSTER_TIER1_CFG_SOURCE_VARIANTS 2
 
 static const char* const tier1_cfg_source_variant_names[BUSTER_TIER1_CFG_SOURCE_VARIANTS] = {
     "cfg",
-    "cfg-scalar",
     "intervals",
-    "intervals-scalar",
 };
 
-// The corpus: each function's allocation problem, with the intervals the vector path made of it.
+// The corpus: each function's allocation problem, with the intervals its allocation made of it.
 typedef struct Tier1CfgSourceCorpus Tier1CfgSourceCorpus;
 struct Tier1CfgSourceCorpus
 {
     Tier1CfgInput* problems;
     Tier1AllocationInput* intervals;
-    // Optional (benchmark-tier1-certificate's): each function's vector-path allocation, in the kept arena.
+    // Optional (benchmark-tier1-certificate's): each function's allocation, in the kept arena.
     Tier1CfgAllocation* allocations;
     uint32_t count;
     uint32_t capacity;
@@ -62,17 +58,9 @@ static Tier0BenchmarkReading tier1_cfg_source_run(uint32_t variant, const Tier1C
         {
             failures += tier1_cfg_allocate(&corpus->problems[f], output, scratch, &result) != TIER1_CFG_OK;
         }
-        else if (variant == BUSTER_TIER1_CFG_SOURCE_CFG_SCALAR)
-        {
-            failures += tier1_cfg_allocate_scalar(&corpus->problems[f], output, scratch, &result) != TIER1_CFG_OK;
-        }
-        else if (variant == BUSTER_TIER1_CFG_SOURCE_INTERVALS)
-        {
-            failures += tier1_allocate(&corpus->intervals[f], output, &allocation) != TIER1_ALLOCATION_OK;
-        }
         else
         {
-            failures += tier1_allocate_scalar(&corpus->intervals[f], output, &allocation) != TIER1_ALLOCATION_OK;
+            failures += tier1_allocate(&corpus->intervals[f], output, &allocation) != TIER1_ALLOCATION_OK;
         }
         arena_pop_to(output, output_mark);
         arena_pop_to(scratch, scratch_mark);
@@ -88,8 +76,8 @@ static Tier0BenchmarkReading tier1_cfg_source_run(uint32_t variant, const Tier1C
     return taken;
 }
 
-// Adds `file`'s functions to the corpus: each one's problem and intervals in `kept`, after both paths' allocations of
-// it passed the checker. Each function is lowered into `ir` and promoted into `output`, which ssa_ir_promote takes apart
+// Adds `file`'s functions to the corpus: each one's problem and intervals in `kept`, after its allocation passed the
+// checker. Each function is lowered into `ir` and promoted into `output`, which ssa_ir_promote takes apart
 // from its input's arena, both emptied after it. Returns false on any failure but a function the model has no class for.
 static bool tier1_cfg_source_corpus_file(Tier1CfgSourceCorpus* corpus, const char* name, char** options, uint32_t option_count, Arena* lowered, Arena* table, Arena* kept, Arena* ir, Arena* output, Arena* scratch)
 {
@@ -117,27 +105,23 @@ static bool tier1_cfg_source_corpus_file(Tier1CfgSourceCorpus* corpus, const cha
         corpus->left_out += adapted == TIER1_CFG_IR_UNSUPPORTED;
         if (valid && adapted == TIER1_CFG_IR_OK)
         {
-            // Both paths' allocations, checked; the vector path's intervals kept for the interval allocator's variants.
-            Tier1CfgAllocation results[2];
-            for (uint32_t p = 0; valid && p < 2; p += 1)
-            {
-                Tier1CfgCheck check;
-                valid = (p == 0 ? tier1_cfg_allocate(&problem.input, kept, scratch, &results[p]) : tier1_cfg_allocate_scalar(&problem.input, output, scratch, &results[p])) == TIER1_CFG_OK;
-                valid = valid && tier1_cfg_verify(&problem.input, &results[p], scratch, &check);
-            }
+            // The allocation, checked; its intervals kept for the interval allocator's variant.
+            Tier1CfgAllocation result;
+            Tier1CfgCheck check;
+            valid = tier1_cfg_allocate(&problem.input, kept, scratch, &result) == TIER1_CFG_OK && tier1_cfg_verify(&problem.input, &result, scratch, &check);
             valid = valid && corpus->count < corpus->capacity;
             if (valid)
             {
                 corpus->problems[corpus->count] = problem.input;
-                corpus->intervals[corpus->count] = results[0].intervals;
+                corpus->intervals[corpus->count] = result.intervals;
                 if (corpus->allocations != 0)
                 {
-                    corpus->allocations[corpus->count] = results[0];
+                    corpus->allocations[corpus->count] = result;
                 }
                 corpus->count += 1;
                 corpus->entries += source->function->count;
                 corpus->instructions += problem.instructions;
-                corpus->interval_count += results[0].intervals.count;
+                corpus->interval_count += result.intervals.count;
                 joined += 1;
             }
         }
@@ -171,17 +155,24 @@ static bool tier1_cfg_source_measure(const Tier1CfgSourceCorpus* corpus, Arena* 
     {
         for (uint32_t k = 0; k < BUSTER_TIER1_CFG_SOURCE_VARIANTS && failed == BUSTER_TIER1_CFG_SOURCE_VARIANTS; k += 1)
         {
-            // Each pair's two paths take turns running first.
+            // The two variants take turns running first.
             const uint32_t v = (pass & 1) != 0 ? k ^ 1 : k;
             if (only == BUSTER_TIER1_CFG_SOURCE_VARIANTS || v == only)
             {
-                if ((v & 1) == 0 && after_scalar != 0)
+                if (after_scalar != 0)
                 {
                     const uint64_t until = tier0_benchmark_now() + after_scalar * 1000000ull;
-                    while (tier0_benchmark_now() < until && failed == BUSTER_TIER1_CFG_SOURCE_VARIANTS)
+                    // Scalar integer work, no vector instructions: a multiply-xor chain the compiler can't vectorize.
+                    uint64_t state = UINT64_C(0xcbf29ce484222325);
+                    while (tier0_benchmark_now() < until)
                     {
-                        failed = tier1_cfg_source_run(v + 1, corpus, output, scratch, counters).failures != 0 ? v + 1 : failed;
+                        #pragma clang loop vectorize(disable) interleave(disable)
+                        for (uint32_t i = 0; i < 4096; i += 1)
+                        {
+                            state = (state ^ i) * UINT64_C(0x100000001b3);
+                        }
                     }
+                    __asm__ volatile("" : : "r"(state));
                 }
                 const Tier0BenchmarkReading taken = failed == BUSTER_TIER1_CFG_SOURCE_VARIANTS ? tier1_cfg_source_run(v, corpus, output, scratch, counters) : (Tier0BenchmarkReading){ 0 };
                 failed = taken.failures != 0 ? v : failed;
@@ -304,7 +295,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_benchmark(int count, cha
     }
     else if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-tier1-cfg-source [--only cfg|cfg-scalar|intervals|intervals-scalar] [--after-scalar MS] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-tier1-cfg-source [--only cfg|intervals] [--after-scalar MS] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);

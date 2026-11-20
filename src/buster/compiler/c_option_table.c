@@ -544,6 +544,7 @@
     ENTRY(MVZEROUPPER, "-mvzeroupper") \
     ENTRY(MX32, "-mx32") \
     ENTRY(MZVECTOR, "-mzvector") \
+    ENTRY(NO_PIE, "-no-pie") \
     ENTRY(NO_PTHREAD, "-no-pthread") \
     ENTRY(NOBUILTININC, "-nobuiltininc") \
     ENTRY(NOSTDINC, "-nostdinc") \

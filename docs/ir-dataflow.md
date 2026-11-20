@@ -10,10 +10,12 @@ machine liveness are different interfaces.
 
 Include `ir_dataflow.c` after `lane.c`, `ir.c` and `dataflow.c`.
 
-- `ir_dataflow_prepare` and `ir_dataflow_prepare_scalar` validate the function and
-  build identical owned maps, CFG, use/def matrices and outgoing phi records.
-- `ir_dataflow_solve` and `ir_dataflow_solve_scalar` compute live-in/live-out and
-  return the underlying solver's sweep count, including its final stable sweep.
+- `ir_dataflow_prepare` validates the function and builds the owned maps, CFG,
+  use/def matrices and outgoing phi records. It is AVX-512 alone (#2924); its
+  scalar twin `ir_dataflow_prepare_scalar` went once the vector path won every
+  class of function (#2950, below).
+- `ir_dataflow_solve` computes live-in/live-out and returns the underlying
+  solver's sweep count, including its final stable sweep.
 - `IrDataflow.ids` maps original instruction IDs to dense IDs, with
   `BUSTER_IR_NONE` for ordinary block-local values. `values` is the inverse map,
   ordered by original ID. Every phi input is an edge use and receives a bit,
@@ -83,17 +85,23 @@ address indices, return values and aggregate call-result destinations participat
 only when present. Indirect callees and all call arguments are real operands.
 Variable call slices and interleaved phi predecessor/value pairs have masked tails.
 
-Cross-block classification uses masked indexed loads only for real operands.
-Dense IDs use mask popcounts, prefix ranks and compressed stores. Bit updates use
-`VPCONFLICTD` on **64-bit-word indices**, mask out inactive predecessors, combine
-each word's contributions and perform one ordinary 64-bit OR store per group.
-There is no hardware scatter and no `uint32_t*` alias of the bitset storage.
-The scalar twin enumerates individual operands and uses ordinary scalar bit ORs.
-
-The existing measured fixpoints, their selected dispatch and intersection
-primitives are unchanged. Introducing an adapter is not evidence that every new
-construction kernel is faster than its scalar twin; target measurements must
-establish that separately.
+Cross-block classification compares each real operand with its block's
+instruction range, two compares against `block_offsets` and no memory access:
+the blocks' instructions are contiguous, so an operand is local exactly when it
+falls in its block's range. A masked gather of each operand's block cost the
+smallest functions' preparation more than the scalar twin's lookups (#2950).
+Dense IDs use mask popcounts, prefix ranks and compressed stores. The one gather
+left reads cross-block operands' dense IDs, only in a batch that has one: a
+`zmm` gather is 64 uops whatever its mask. A batch of phi inputs gathers once,
+for both the inputs from other blocks, which join the predecessor's use row, and
+the dense values that replace the original IDs. Bit updates take the first
+active ID's **64-bit word**, combine every active ID's bit in that word with one
+masked reduction of both halves, store it with one ordinary 64-bit OR and retire
+those IDs, until none is active. A batch with no active ID does nothing.
+`VPCONFLICTD`, which grouped the words before #2950, cost more than it saved
+for the few IDs of a block's phi inputs. There is no hardware scatter and no
+`uint32_t*` alias of the bitset storage. Until #2924 a scalar twin enumerated
+individual operands and used ordinary scalar bit ORs.
 
 ## Qualification
 
@@ -104,11 +112,18 @@ producer separately; it does not label them as tested functions. The existing
 correctness manifest's c-testsuite subset, SQLite and musl invocations therefore
 exercise dataflow on the same declared corpus and forms.
 
-For each form, scalar and vector preparation/solving must agree on dense maps,
-CFG/postorder, phi records, use/def/in/out, and sweep counts. An independently
+For each form, two preparations at different places in the output arena must
+agree on dense maps, CFG/postorder, phi records and use/def, and, solved, on
+in/out and sweep counts; until #2924 the second was the scalar twin's. An independently
 written opcode-based checker reconstructs dense membership, ordinary uses,
 edge-specific phi uses, reverse-instruction transfer equations, and zero padding.
 It does not use the adapter's operand-mask tables or phi CSR for those checks.
+A layout check reads the rest from the IR: each block's successors are its
+terminator's distinct targets in their first order, the postorder holds every
+block once, and each predecessor's phi records are the pairs naming it, in
+block, phi and pair order, with their dense values and target blocks. dataflow's
+sweep search ([`dataflow.md`](dataflow.md#the-sweep-search)) checks every live
+bit and the exact sweep count.
 
 The raw fixtures run only under `--dataflow-self-test`; ordinary source
 invocations run the per-function checks above and do not repeat them, so a
@@ -137,21 +152,18 @@ not a claim that the frozen corpus or target measurements have run.
 ## Measuring the source functions
 
 The optional `--dataflow-benchmark` flag measures the same accepted source forms.
-For each function it reports the scalar and host-vector paths for both
-`solve` and `prepare-solve`. The latter includes structural verification, CFG and
+For each function it reports `solve` and `prepare-solve`; until #2924 it
+reported the scalar twin's beside them. The latter includes structural verification, CFG and
 dense-map construction, allocation, use/def construction and solving. Neither
 operation includes frontend preparation, IR lowering, SSA promotion, printing,
 or correctness oracles.
 
 The benchmark requires readable hardware CPU-cycle and instruction counters.
 It never labels TSC ticks or missing counters as CPU cycles. A warm-up estimates
-batch repetition counts, matched between the two paths. Twenty-one passes rotate
-the four variants' order. The output includes every raw batch, medians in cycles
+batch repetition counts. Twenty-one passes alternate the two operations' order. The output includes every raw batch, medians in cycles
 per function and cycles per block/sweep, the actual sweep count, matrix bytes,
 retained bytes, dense-value count and phi-use count. For `prepare-solve`, the
 block/sweep normalization includes setup; it is not a pure solver metric.
-`vector_host=0` explicitly means the vector entry used the baseline scalar
-fallback; such a run is not Zen 5 vector evidence.
 
 On the 9700X, hold the shared exclusive lock for the complete run and pin to CPU 2:
 
@@ -195,3 +207,30 @@ The record covers the adapter's two operations, not whole-compiler time:
 frontend preparation, IR lowering, SSA promotion and output are outside every
 sample. It has one process for c-testsuite and two for SQLite and musl; its
 README lists the host, manifests, checksums and complete raw logs.
+
+### #2950: the vector paths win every class
+
+#2924's gate (main `8bd7f27ec`, sqlite3.c's 7,806 forms and `edges.c`, CPU 2
+under the lock) found the vector paths faster in total but slower in three
+classes of functions: solves with phis (1.12 to 1.15 times the scalar twin's
+cycles at 3 to 128 blocks), the solver at 33 to 128 blocks with 64 values or
+fewer (1.10), and the preparation of one- and two-block functions (1.09 to
+1.27). #2950 changed four things:
+- the solver keeps the previous block's row in a register (`dataflow.md`, "The
+  previous block's row");
+- the operands' locality is two compares with the block's range, not a gather;
+- the bit updates group by word without `VPCONFLICTD`;
+- a batch gathers only when it has an operand from another block, and a phi
+  batch gathers once.
+
+With those (run 6 of buster-performance's
+`scalar-paths-removal-2924-2026-11-17/dataflow-2950/`), the vector path takes
+0.586 of the scalar twin's cycles to solve and 0.604 to prepare and solve,
+summed over every form. Every class of block count, phis and row width wins the
+solve (0.72 to 0.95). The preparation of one- and two-block functions with no
+value across blocks is the one class it loses, by 9% (134 forms, about 50 cycles
+each). That is the IR's own checks: the scalar preparation runs
+`ir_check_rows` and `ir_check_graph`'s scalar twins, which are faster than
+their vector paths on functions that small. With both preparations on the
+vector checks, isolating dataflow's own code, every class wins (0.71 to 0.993;
+0.856 in total).

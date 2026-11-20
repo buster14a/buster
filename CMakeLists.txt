@@ -47,8 +47,7 @@ endforeach()
 
 # The settings, which build.sh takes from its environment variables of the same names (docs/commands/build.md). An
 # empty value is the default, but for BUSTER_DEBUG_INFO and BUSTER_LINKER.
-set(BUSTER_HOST_ARCH native CACHE STRING "The host ISA: clang's -march (native, x86-64, znver5, ...)")
-set(BUSTER_HOST_RUNTIME "" CACHE PATH "A baseline runtime's root to link against (BUSTER_HOST_ARCH=x86-64 alone)")
+set(BUSTER_HOST_ARCH native CACHE STRING "The host ISA: clang's -march with AVX-512 and host_isa.h's extensions (native, znver5, ...), or vector")
 set(BUSTER_DEBUG_INFO 1 CACHE STRING "1: Release has -g; 0: Release has no debug information")
 set(BUSTER_LINKER auto CACHE STRING "auto, system, wild, mold, lld, bfd or an absolute path")
 set(BUSTER_BUILD_DEFINES "" CACHE STRING "Arguments every unit's compile adds, split on whitespace")
@@ -338,13 +337,10 @@ endforeach()
 # selected linker. As a PIE, its 10.6 MB of pointer tables (.data.rel.ro) took 366,684 relative relocations at every
 # start, whose 2,800 page faults made a run that does nothing take 8 to 13 ms, where linked at its address it takes
 # 1.5 ms with 113 (#86: link-foreign and the tests run it as a process of its own, and a small link's work is 0.8 ms).
-# With BUSTER_HOST_RUNTIME, CI's emulated old CPU's runtime, linked explicitly: the host's startup objects and loader
-# can require a newer ISA even with -march=x86-64.
-# The link's arguments before the objects and after them, without BUSTER_HOST_RUNTIME, which buster_link adds itself:
-# into `before` and `after`. libm is a needed library only where the link references it (#652): the compiler's own
+# The link's arguments before the objects and after them: into `before` and `after`. libm is a needed library only where the link references it (#652): the compiler's own
 # floating operations are host_math.h's and its tests' libm calls go through dlopen (test_libm.c), so that a compile
 # doesn't load libm.so.6 at its start, 24 microseconds and 12 page faults on the 9700X; a build whose code still calls
-# libm (the baseline host's rounding functions, a fuzzing runtime) takes it.
+# libm (a fuzzing runtime) takes it.
 function(buster_link_arguments before after)
     set(${before} ${buster_link_mode} ${buster_sanitizer_flags} ${buster_linker_flags} PARENT_SCOPE)
     set(${after} ${buster_fuzz_libraries} -Wl,--push-state,--as-needed -lm -Wl,--pop-state -ldl PARENT_SCOPE)
@@ -352,23 +348,9 @@ endfunction()
 
 function(buster_link target)
     set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)
-    if(NOT BUSTER_HOST_RUNTIME STREQUAL "")
-        if(NOT buster_arch STREQUAL "x86-64")
-            message(FATAL_ERROR "buster: BUSTER_HOST_RUNTIME requires BUSTER_HOST_ARCH=x86-64")
-        endif()
-        set(library "${BUSTER_HOST_RUNTIME}/usr/lib/x86_64-linux-gnu")
-        set(support "${BUSTER_HOST_RUNTIME}/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a")
-        target_link_options(${target} PRIVATE ${buster_link_mode} -nostdlib ${buster_linker_flags}
-            "${library}/crt1.o" "${library}/crti.o")
-        # Paths in link options aren't tracked as inputs, so record these startup objects explicitly.
-        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${library}/crt1.o" "${library}/crti.o")
-        target_link_libraries(${target} PRIVATE -Wl,--push-state,--as-needed "${library}/libm.so.6" -Wl,--pop-state
-            "${library}/libc.so.6" "${support}" "${library}/crtn.o")
-    else()
-        buster_link_arguments(before after)
-        target_link_options(${target} PRIVATE ${before})
-        target_link_libraries(${target} PRIVATE ${after})
-    endif()
+    buster_link_arguments(before after)
+    target_link_options(${target} PRIVATE ${before})
+    target_link_libraries(${target} PRIVATE ${after})
     if(buster_start_order)
         set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${start_order_script}" "${start_order_symbols}")
     endif()
@@ -623,7 +605,6 @@ add_dependencies(check-call-graph compiler)
 enable_testing()
 set(settings_environment
     "BUSTER_HOST_ARCH=${BUSTER_HOST_ARCH}"
-    "BUSTER_HOST_RUNTIME=${BUSTER_HOST_RUNTIME}"
     "BUSTER_DEBUG_INFO=${BUSTER_DEBUG_INFO}"
     "BUSTER_LINKER=${BUSTER_LINKER}"
     "BUSTER_BUILD_DEFINES=${BUSTER_BUILD_DEFINES}"
