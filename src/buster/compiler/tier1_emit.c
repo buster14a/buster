@@ -1346,11 +1346,13 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     // (tier1_emit_cfg_stack_argument): `argument_registers` holds a location for the others alone (a general register's
     // number, or an xmm register's BUSTER_TIER1_EMIT_VECTOR_LOCATION + n), and the callee's at the arguments' count.
     // A static chain (#148) is a general argument in r10, and its indirect call's callee goes to rax instead
-    // (tier1_select_callee_register).
+    // (tier1_select_callee_register). A destination that is a pointer value (#2820) is the last effective use, after the
+    // callee's, which the moves put in rdi, the hidden pointer's register, which no argument takes then.
     const bool indirect = function->op[node] == IR_CALL_INDIRECT;
     const uint8_t callee = tier1_select_callee_register(function, call);
-    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
-    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
+    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 3];
+    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 3];
     uint32_t vector_sources[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t vector_destinations[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t general = 0;
@@ -1418,6 +1420,13 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     {
         sources[general] = argument_registers[call->argument_count];
         destinations[general] = callee;
+        general += 1;
+    }
+    if (pointer)
+    {
+        sources[general] = argument_registers[call->argument_count + indirect];
+        destinations[general] = X86_REGISTER_RDI;
+        error = sources[general] < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? error : TIER1_EMIT_ALLOCATION;
         general += 1;
     }
     const Tier1ParallelMoves moves = {
@@ -1492,11 +1501,12 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         };
         error = !staged.valid ? TIER1_EMIT_ALLOCATION : tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     }
-    // An aggregate result through the hidden pointer (#789): rdi, which no argument takes then, the result object's address.
+    // An aggregate result through the hidden pointer (#789): rdi, which no argument takes then, the result object's
+    // address, or the pointer the moves put there (#2820).
     const bool hidden = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY;
     const bool parts_returned = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_REGISTERS;
-    error = error != TIER1_EMIT_OK || (!hidden && !parts_returned) || (into != 0 && into->valid) ? error : TIER1_EMIT_ALLOCATION;
-    if (error == TIER1_EMIT_OK && hidden)
+    error = error != TIER1_EMIT_OK || (!hidden && !parts_returned) || (hidden && pointer) || (into != 0 && into->valid) ? error : TIER1_EMIT_ALLOCATION;
+    if (error == TIER1_EMIT_OK && hidden && !pointer)
     {
         const X86Instruction address = { .displacement = into->displacement, .reg = X86_REGISTER_RDI, .rm = into->base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_LEA_R64_M };
         error = tier1_emit_append(buffer, address) ? error : TIER1_EMIT_MEMORY;

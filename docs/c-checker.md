@@ -2580,11 +2580,10 @@ What the lowering covers past scalars (#145's programs):
   function (`check_lower_init_reentry`), from the body's controls 16 kinds at a
   time on the vector path (`check_lower_control_kinds`, shared with the named
   result's search) with a scalar twin. The function's `hidden_size` and
-  `hidden_alignment` give the bytes such a call writes: Tier 1's IR returns
-  them into a slot of its own and copies them there ([the IR](ir.md)), as it
-  did, past 256 bytes by the `memmove` the lowering registers for it
-  (`hidden_copy`, which no Tier 0 entry calls); Tier 0 and the interpreter copy
-  nothing.
+  `hidden_alignment` give the bytes such a call writes. Tier 0, the
+  interpreter and, since #2820, Tier 1 ([the IR](ir.md)) copy nothing: the
+  `memmove` the lowering still registers for such a copy past 256 bytes
+  (`hidden_copy`) is called by none of them.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the

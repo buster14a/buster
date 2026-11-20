@@ -4521,12 +4521,27 @@ static bool tier1_select_call_arity(const IrCall* call)
 // Whether the call-wide part of a call's ABI records is one Tier 1 takes (#789), or the call has none: its result, as
 // parts or through the hidden pointer into the frame object its into operand (c) is the address of, and its outgoing
 // area's bytes.
+// A call's aggregate result's destination that is a pointer value, no frame object's address (#2820): through the hidden
+// pointer, as a call that passes its function's own hidden pointer on has it (ir_typed_call). The call's general moves
+// put it in rdi, its last effective use, after an indirect call's callee (tier1_emit_call). BUSTER_IR_NONE for any other
+// call, and for an IR_STACK_ADDR destination, which must be a frame object's (tier1_select_call_abi).
+static uint32_t tier1_select_call_destination(const IrFunction* function, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    const IrCall* call = op == IR_CALL || op == IR_CALL_INDIRECT ? &function->calls[function->b[node]] : 0;
+    const IrAbiCall* abi = call != 0 && call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
+    const uint32_t into = function->c[node];
+    const bool pointer = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY && into < function->instruction_count && function->op[into] != IR_STACK_ADDR;
+    return pointer ? into : BUSTER_IR_NONE;
+}
+
 static bool tier1_select_call_abi(const IrFunction* function, uint32_t node, const IrCall* call)
 {
     const IrAbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
     const uint32_t into = function->c[node];
     const bool object = into != BUSTER_IR_NONE && into < function->instruction_count && function->op[into] == IR_STACK_ADDR && tier1_select_stack_object(function, function->a[into]);
-    return abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (function->type[node] == IR_VOID && object)) &&
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
+    return abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (function->type[node] == IR_VOID && (object || pointer))) &&
                         abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
 }
 
@@ -7540,6 +7555,12 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
         {
             pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count);
         }
+        // A destination that is a pointer value (#2820), which the call's moves put in rdi.
+        const uint32_t destination = pattern->rule == TIER1_RULE_CALL ? tier1_select_call_destination(function, node) : BUSTER_IR_NONE;
+        if (destination != BUSTER_IR_NONE)
+        {
+            pending_count = tier1_select_need(needed, destination, walked || destination > node, pending, pending_count);
+        }
     }
     for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && pattern->rule != TIER1_RULE_ASM && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
     {
@@ -7685,7 +7706,8 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
-        effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 1 : BUSTER_TIER1_SELECT_VALUES;
+        // A call's arguments, an indirect one's callee and a destination that is a pointer value (#2820).
+        effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 2 : BUSTER_TIER1_SELECT_VALUES;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
         const bool pure = op == IR_ADDRESS || op == IR_ADD || op == IR_INTTOPTR || op == IR_PTRTOINT;
         const uint32_t address_operand = tier1_select_address_operand(function, node, op, pure);
@@ -7910,10 +7932,16 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                     {
                         plan.effective_use_values[plan.effective_use_count++] = function->extra[call.argument_first + argument];
                     }
-                    // An indirect call's callee after its arguments.
+                    // An indirect call's callee after its arguments, and a destination that is a pointer value after
+                    // them (#2820).
                     if (function->op[node] == IR_CALL_INDIRECT)
                     {
                         plan.effective_use_values[plan.effective_use_count++] = function->a[node];
+                    }
+                    const uint32_t destination = pattern->rule == TIER1_RULE_CALL ? tier1_select_call_destination(function, node) : BUSTER_IR_NONE;
+                    if (destination != BUSTER_IR_NONE)
+                    {
+                        plan.effective_use_values[plan.effective_use_count++] = destination;
                     }
                 }
                 else
