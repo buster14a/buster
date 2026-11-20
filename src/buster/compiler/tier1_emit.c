@@ -288,7 +288,7 @@ struct Tier1EmitResult
     // The references' room: a call's each, and in the CFG consumer a symbol's address's each too, with its options'
     // symbols' access (Tier1EmitOptions.symbol_access).
     uint32_t reference_capacity;
-    // The literals its code loads (#2744, tier1_emit_cfg_literal): each one of the function's vector constants
+    // The literals its code loads (#2744, #1387): an F80 constant at its selected format or one of the function's vector constants
     // (IrFunction.vector_constants) at one width, `literal_count` of them, its bytes past the width zero; a reference whose
     // target is BUSTER_TIER1_EMIT_LITERAL + k is to literal k (the emitted code's EmittedLiteral, which the C driver's
     // merge places in the unit's pool). And by constant, each width's literal (16, 32 and 64 bytes, three entries a
@@ -298,6 +298,8 @@ struct Tier1EmitResult
     uint32_t literal_count;
     uint32_t literal_capacity;
     uint32_t* literal_of;
+    // Private F80 constants' pool indices plus one, indexed by the scalar constant table.
+    uint32_t* x87_literal_of;
     // The nodes of fixed-register rules (tier1_select_fixed_registers), whose sequences take records past a node's share.
     uint32_t fixed_count;
     // In the CFG consumer, the callee-saved registers its values may take (live across a call), and those they took,

@@ -33,6 +33,8 @@ static const char check_test_x87_harness[] =
     "void x87_literals(long double*); void x87_alias(long double*);\n"
     "void x87_trap(volatile int*, long double*, const long double*);\n"
     "long double x87_join(int); long double x87_call(long double);\n"
+    "long double x87_single_min(void),x87_single_max(void),x87_negative_zero(void);\n"
+    "long double x87_below_single_normal(void),x87_above_single_max(void),x87_extra_fraction(void);\n"
     "volatile int marker; long double x87_pending(void);\n"
     "static void pending_trapped(int s) { _exit(s==SIGFPE && marker==1 ? 0 : 92); }\n"
     "static volatile sig_atomic_t trap_marker;\n"
@@ -61,6 +63,9 @@ static const char check_test_x87_harness[] =
     "__asm__ volatile(\"fnstsw %0\":\"=a\"(expected_flags));\n"
     "errors+=memcmp(&actual,&expected,10)!=0; errors+=(actual_flags&0x3f)!=(expected_flags&0x3f);\n"
     "__asm__ volatile(\"fnstcw %0\":\"=m\"(after)); errors+=after!=control; }\n"
+    "long double (*leaves[])(void)={x87_single_min,x87_single_max,x87_negative_zero,x87_below_single_normal,x87_above_single_max,x87_extra_fraction};\n"
+    "static const long double boundary[]={0x1p-126L,-0x1.fffffep127L,-0.0L,0x1p-127L,0x1p128L,0x1.000001p0L};\n"
+    "for(unsigned i=0;i<6;++i){long double got=leaves[i]();errors+=memcmp(&got,boundary+i,10)!=0;}\n"
     "long double values[7]; static const long double constants[]={0.0L,-0.0L,0.5L,-1.5L,0x1.0000000000000002p+0L,0x1p-16382L,0x1p-16445L};\n"
     "x87_literals(values); for(unsigned i=0;i<7;++i) errors+=memcmp(values+i,constants+i,10)!=0; }\n"
     "__asm__ volatile(\"fnclex; fldcw %0\"::\"m\"(saved));\n"
@@ -136,7 +141,7 @@ static void check_test_driver_x87(CheckTest* test, const char* clang, const char
         }
         if (status == 0 && tier1)
         {
-            // The consumer must load the representation stored in the private home, including at both ends
+            // The consumer loads a PC-relative literal, including at both ends
             // of binary32's normal range. Keeping denormals in extended format preserves the exception flags.
             static const struct { const char* name; uint32_t form; } widths[] = {
                 { "x87_single_min", X86_FORM_FLD_M32 },
@@ -154,9 +159,14 @@ static void check_test_driver_x87(CheckTest* test, const char* clang, const char
                 uint32_t loads = 0;
                 for (uint32_t r = 0; r < n; r += 1)
                 {
-                    loads += (records[r].instruction.form & BUSTER_X86_FORM_NUMBER) == widths[i].form;
+                    const X86Decoded record = records[r];
+                    if ((record.instruction.form & BUSTER_X86_FORM_NUMBER) == widths[i].form && record.instruction.mode == BUSTER_X86_MEMORY_RIP &&
+                        relocations == 1 && offsets[0] + 4 == record.offset + record.length)
+                    {
+                        loads += 1;
+                    }
                 }
-                check_test_expect(test, n != 0 && loads == 1 && relocations == 0, widths[i].name);
+                check_test_expect(test, n != 0 && loads == 1 && relocations == 1 && types[0] == R_X86_64_PC32, widths[i].name);
             }
         }
         char captured[128] = "";
