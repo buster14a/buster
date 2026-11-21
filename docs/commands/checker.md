@@ -82,7 +82,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
-  --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
+  --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
@@ -178,15 +178,24 @@ unused-warning fixtures also check exact scope-completion tokens.
   `.cases` file records case number, expected exit status and whether the first
   error must be the string-literal error. `--label-attributes-only` runs these
   cases plus the existing label and unknown-attribute suites, including the
-  label execution controls. Attributed implicit-int declarations (#2332)
-  compare complete GNU99/GNU17 diagnostics on both readers and deferred checking
-  with one, two and three lanes; C23's unsupported cases retain a frozen baseline
-  stream instead of claiming Clang parity. Typed controls include GNU89/C23 and
+  label execution controls. Attributed declarations without a type (#2332)
+  compare complete GNU99/GNU17/C23 diagnostics on both readers and deferred checking
+  with one, two and three lanes. C23 invalid declarations retain their initializer
+  checks and the earlier binding in the same scope. The runtime
+  `attribute_declarations.cases` records case number, expected status and check
+  bits (1: Clang comparison, 2: parser boundary). Typed controls include GNU89/C23 and
   require an ELF object that links and runs. Invalid inputs preserve existing
   output or create none. Prefix/reparse contract checks also retain the complete
   meaning metadata and a separate mutable table for each reparse (#2748).
   `--attribute-recovery-only` runs the balanced string-list, mixed-label,
-  implicit-int-declaration and attribute-led-call fixtures together. The string
+  missing-type-declaration and attribute-led-call fixtures together. The runtime
+  `suppress_recovery.cases` adds mixed GNU/C23 lists, macro delimiter locations
+  and unmatched attribute delimiters. Each row names a source, its decimal case
+  count, and hexadecimal masks for accepted and executable cases. These cases
+  compare complete ordered diagnostics and status in GNU17/C23, both readers,
+  syntax/object modes, one/three deferred lanes, warning policies and a one-error
+  limit; rejected output is preserved and accepted statement effects execute.
+  The string
   lists include malformed string subscripts through parentheses and macros,
   repeated and split lists, valid adjacent-string controls and an assumption
   with a subscript. A malformed C23 suppress separator discards the remaining
@@ -196,7 +205,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   output, and accepted controls must produce an ELF object. Its `attribute-recovery-integration.c`
   combines their recovery paths in two functions, preserving the complete
   diagnostic order and later independent errors. The declaration portion runs
-  in C99–C17, the call portion before C23, and the label portion in every
+  in C99–C23, the call portion before C23, and the label portion in every
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
   `--malformed-calls-only` runs the ordinary balanced type-first call recovery
@@ -226,7 +235,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   `tests/driver/fp_contract.c` for float/double result bits, expression
   boundaries, option ordering, scoped pragmas and dynamic rounding. It covers
   both readers, object/direct output and strict Tier 1 without fallback,
-  with transition verification enabled). The Tier 1 asm-body suite initializes
+  with transition verification enabled). `--imaginary-bit-int-only` runs
+  `c_check_imaginary_bit_int_driver_test.c` (#2219):
+  `tests/driver/imaginary-bit-int/`'s diagnostics sources (constants in every
+  spelling and constant context, refused suffixes, the complex `_BitInt` types
+  in errors and failed static assertions' printing) in the standards
+  `cases.txt` names, by the shared default-warning harness, and its program
+  (arithmetic, comparisons, parts, casts, static and automatic initializers,
+  calls, returns and `va_arg` of complex `_BitInt`s of 3 to 256 bits and
+  `_Complex __int128`), whose output at Tier 0 and strict Tier 1, by both
+  readers, as an object and directly, must be Clang -O0's build's. The Tier 1
+  asm-body suite initializes
   and checks its object decoder before inspecting instructions (#2737,
   `check_test_driver_tier1_asm`). An initialization failure is reported directly
   and skips decoding, so partitioned runs do not depend on another suite's setup.
@@ -746,6 +765,12 @@ as the tables' own loops did. There are no generated cases.
 | `musttail` | 63 | `check_test_musttail_sources` (`c_check_musttail_test.c`) |
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
 | `transparent-types` | 17 | the end of `check_test_transparent_types` (`c_check_transparent_type_test.c`) |
+
+`tests/checker/overload-placeholders` (#2935) is a warning catalog of
+`test-checker-driver`'s (`check_test_driver_warning_catalog`, as
+`initializer-comma` is: `buster-fixtures v1 checker-warnings`, then FILE,
+WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
+compared with clang's in every policy, mode, lane request and reader.
 
 `tests/checker/constant-conversions` (#2678) is in the same format, three
 programs that `check_test_constant_conversions`

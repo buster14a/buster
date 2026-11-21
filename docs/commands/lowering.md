@@ -2464,21 +2464,14 @@ survey of those passes, what it measured and its gates.
 - **A condition's truth and a constant's fold** are a summary node's
   value's to answer, with nothing in the side record.
   `check_program_branch_truth` knows a branch's condition's truth where the
-  condition's value has none in two cases, and the window lists both.
-  - **By one operand of an `&&` or an `||`:** the turns list an `&&` or an
-    `||` whose second operand's truth is known (`node_rows_window_decided`:
-    a constant's, but an object's lvalue's), whether it is evaluated as
-    branches or as a value (reason `branches`).
-  - **Through a cast:** the walk gives a cast its operand's truth (#3204),
-    so a cast that is no constant itself, over an operand whose truth may
-    be known, passes a truth its own value has not (`(char)(long)&x`: an
-    address is not null, and its low byte is no constant). C's loop lists
-    its expression (`node_contexts_window_loop`'s `passes_truth`, reason
-    `operator`) where its consumer may ask its truth: a CONDITION, a `!`,
-    an `&&` or an `||`, or another wrapper. A cast that is a constant with
-    an effect's flag is listed too, and a cast to void never. A `!` and a
-    CONDITION are a constant wherever their operand's truth is known
-    (`check_action_logic`), and ask for no term.
+  condition's value has none when one operand decides a logical operator,
+  including under a cast or `!`. The turns list an `&&` or an `||` whose
+  second operand has a known truth (`node_rows_window_decided`, reason
+  `branches`). A cast with no known value can pass an inferred logical
+  result of 0 or 1. It cannot inherit the truth of an address before
+  truncation. The branch walk retains its handling of numeric conversions
+  under `FENV_ACCESS`. The type machine already lists that context. The
+  window needs no separate cast refusal (#3204).
 
   The controls' fold (`check_control_fold_truth`) does not fold a comma
   whose left operand is no constant: C lists a folded comma.
@@ -2502,8 +2495,6 @@ The report adds:
   sweep lists for a reference, in any expression, the calls it asks and the
   expressions the reduction runs on; the chunks whose second run made other
   facts; and the operators the turns list.
-- `node-shadow: window contexts casts-listed-for-a-truth-their-value-has-not=N`,
-  with `--window-contexts` too: the casts C's loop lists.
 - `node-shadow: window summaries compared=N (not kept: N) the program's
   references=N reference-differences=N fact-differences=N (the program's:
   a stop=N an unknown=N); folds asked=N fold-differences=N (of the
@@ -2736,6 +2727,16 @@ A successful return gets one checked value at its return token and one retained
 native CONST entry. The lowering emits this entry in the ordinary body's tape.
 For example, `return 18 + 24;` replaces two literal nodes, the addition and the
 return conversion with one summary carrying 42.
+
+The reader also accepts `return x;` and `return +x;` for an unqualified,
+ordinary automatic int or int parameter. The LOCAL entry keeps the declared
+object. The lowering relocates it to the enclosing body's local number.
+The entry records the source identifier's token offset within the return.
+The uninitialized pass uses the summary node's reach and order together with
+that token, so that it still reports the first evaluated read of an
+uninitialized variable, including its source position and note. An
+unreachable read still counts as a syntactic use of a written parameter.
+Other storage classes, special registers and qualified types keep their graph.
 
 Admission requires the entire expression in the same coded chunk. Other types,
 operators and spellings, debug information, deferred parts, and units requiring

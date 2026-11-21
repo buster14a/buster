@@ -41,3 +41,41 @@ int muted(void) { return 1 / 0; }
 #pragma clang diagnostic pop
 
 int restored(void) { return 3 / 0; }
+
+int local_uninitialized(void)
+{
+    int value;
+    return +value;
+}
+
+int initialized_parameter(int parameter, int new_value)
+{
+    parameter = new_value;
+    return parameter;
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic warning "-Wunused-but-set-parameter"
+int syntactic_use(int parameter)
+{
+    parameter = 4;
+    return 8;
+    return parameter;
+}
+#pragma clang diagnostic pop
+
+int bare_self_initialize(void)
+{
+    int value = value;
+    return value;
+}
+
+int earliest(int branch)
+{
+    int value;
+    if (branch)
+    {
+        return +value;
+    }
+    return value;
+}

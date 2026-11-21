@@ -307,7 +307,8 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_predefines.c` | Original predefined macros of the target and the options; Default, with the clang-generated tables noted below. The options' rules follow clang 23's driver (`clang/lib/Driver/ToolChains/Clang.cpp`, `CommonArgs.cpp`, `Arch/X86.cpp`, `SanitizerArgs.cpp`, `ToolChain.cpp`, `ToolChains/Linux.cpp`, `clang/lib/Options/OptionUtils.cpp`, and `clang/include/clang/Options/Options.td`'s option groups, aliases and marshalling) and frontend (`InitPreprocessor.cpp`, `Basic/Targets/X86.cpp`, `Frontend/CompilerInvocation.cpp`, and `clang/include/clang/Basic/Features.def`'s sanitizer features), LLVM 23's `llvm/lib/Support/StringRef.cpp` (how both read a number), and `-march=native`'s detection LLVM 23's `llvm/lib/TargetParser/Host.cpp`: read for their rules (which option wins, which values an option takes and which options clang refuses together, which sanitizers clang supports on x86-64 Linux and which it refuses together, which CPUID bit names which feature, which family and model name which CPU) and written again in C, none of their code copied. The sanitizers' and their groups' names and members are those of clang 23.1.3's `clang/include/clang/Basic/Sanitizers.def`, in its order. |
 | `src/buster/compiler/c_predefines_test.c` | Original tests and table generator; Default. clang runs externally as the oracle and the generator's source of answers, and is not vendored. |
 | `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs. `pp_test_keyword_candidates` and `pp_test_feature_names` list names from clang 23's `TokenKinds.def` and companions and from its `Features.def` (names only, noted below). |
-| `src/buster/compiler/c_preprocessor_history.c`, `src/buster/compiler/c_preprocessor_history_impl.c`, `src/buster/compiler/c_preprocessor_history_test.c` | Original expansion-history readers, recording, diagnostic rendering and tests; Default. Shared readers and declarations remain in `c_preprocessor_history.c`; private recording and rendering definitions are in `c_preprocessor_history_impl.c`. Original fixture inputs are checked against the installed Clang as an external oracle. No Clang implementation or external fixture source is copied. |
+| `src/buster/compiler/c_preprocessor_history.c`, `src/buster/compiler/c_preprocessor_history_impl.c`, `src/buster/compiler/c_preprocessor_history_test.c` | Original expansion-history readers, recording, diagnostic rendering and tests; Default. Shared readers and declarations remain in `c_preprocessor_history.c`; private recording and rendering definitions are in `c_preprocessor_history_impl.c`. Original fixture inputs are checked against the installed Clang as an external oracle. No Clang implementation or external fixture source is copied. The caret display (#2376) follows the rules of clang's `TextDiagnostic`, read for behavior ("Unicode column widths" below). |
+| `src/buster/compiler/c_caret_test.c`, `tests/carets/` | Original `test-carets` harness and fixtures (#2376); Default. The installed Clang runs externally as the oracle; no Clang test is copied. |
 | `src/buster/compiler/c_preprocessor_batch_test.c`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-cloud-2026-10-23/) | Original macro-batch fixtures, measurement helpers and cloud observations; Default. Existing project benchmarks supply the preprocessor workload and retain their notices. Clang is an external oracle; the downloaded SQLite amalgamation and installed system headers are runtime inputs, not vendored implementation or fixtures. |
 | `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
@@ -527,6 +528,42 @@ character names and by routines that follow LLVM's.
   was copied there. Clang 23.1.6 runs externally as the oracle of the tests,
   whose fixtures are original.
 
+## Unicode column widths (#2376)
+
+Clang's caret diagnostics place a source line's characters by LLVM's column
+widths, which the caret display (`pp_diagnostic_snippet`) follows.
+
+- **Data:** `src/buster/compiler/c_unicode_widths.inc` holds three range
+  tables copied, as C rows, from `llvm/lib/Support/Unicode.cpp` at the tag
+  `llvmorg-23.1.4` (sha256
+  `5f45338939950fecf74c266d476b80be0d1e3da41c168a7b1f4723c5344af9d5`; the
+  file is the same at `llvmorg-23.1.6`, the oracle clang's release):
+  `charWidth`'s `CombiningCharacterRanges` (367 ranges) and
+  `DoubleWidthCharacterRanges` (126), and the two ranges of `isPrintable`'s
+  `PrintableRanges` that `c_unicode_names.inc`'s printable table doesn't
+  have (U+16D80 to U+16D9D and U+16DA0 to U+16DA9, the draft Chisoi code
+  points the section above names). The file keeps the LLVM Project's
+  `Apache-2.0 WITH LLVM-exception` terms
+  ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), and since the ranges reflect the
+  Unicode Character Database 18.0.0, the Unicode data notice as well:
+  **Copyright © 1991-2026 Unicode, Inc.**, under the
+  [Unicode License V3](LICENSES/Unicode-3.0.txt). Its header says both. The
+  rows were made from the fetched file's ranges by `grep -o '{0x[0-9A-F]*,
+  0x[0-9A-F]*}'` over each table's lines, and nothing else changed.
+- **Routine:** `unicode_column_width` in `src/buster/compiler/c_unicode_names.c`
+  is a C translation of `charWidth` at the same tag, under that file's LLVM
+  terms (the section above).
+- **Behavior references:** `clang/lib/Frontend/TextDiagnostic.cpp` (sha256
+  `8d12089c0fccde6d638e9b236bc9c36893558a1e2d2a03fcf3fc56e7de520286`) and
+  `clang/lib/Frontend/DiagnosticRenderer.cpp` (sha256
+  `00c0defcd3df5f2e968f214577556b83b0a438bf1a7922b6ba99a283b724e7ef`), and
+  `llvm/lib/Support/ConvertUTF.cpp`'s `isLegalUTF8`, at the same tag, were read
+  for the rules of the caret display in `c_preprocessor_history_impl.c`
+  (`emitSnippetAndCaret`, `emitSnippet`, `printableTextForNextCharacter`,
+  `SourceColumnMap` and the `LastLoc` rule), which is original project code
+  under the default terms; no implementation was copied there. Clang 23.1.6
+  runs externally as the oracle of `test-carets`, whose fixtures are original.
+
 ## RAD Debugger
 
 The lane interface/base-layer reference is
@@ -707,6 +744,15 @@ musl's: they exercise the same instructions, constraints and operand shapes,
 and copy no function of musl's. No file of this tree holds musl's code.
 
 ## C semantic compatibility references
+
+The suppress attribute recovery and its original runtime fixtures (#2332)
+use Clang 23.1.4 externally as a diagnostic and acceptance oracle.
+`clang/lib/Parse/ParseDecl.cpp`, `clang/lib/Parse/ParseDeclCXX.cpp` and
+`clang/lib/Parse/Parser.cpp` at `llvmorg-23.1.4` (revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`) were read as behavior references
+for argument parsing, delimiter recovery and discarded attribute lists.
+No LLVM implementation or test fixtures were copied. The new code and
+fixtures use the project default terms.
 
 The TLS redeclaration diagnostics and for-initializer unused-warning scope fixes
 for #1784 are original project code and fixtures under the default terms.

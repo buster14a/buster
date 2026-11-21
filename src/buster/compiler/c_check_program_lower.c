@@ -6790,9 +6790,39 @@ static void check_lower_complex_constant(CheckLowerWriter* writer, const CheckVa
     // A _Complex __float128's parts are their bits (#1250, check_quad_complex_set), four words a store each; a real one's
     // imaginary part +0.
     const bool quad = element == BUSTER_TYPE_FLOAT128;
-    if (value->constant_kind != CHECK_CONSTANT_COMPLEX && value->constant_kind != real)
+    // An integer element past 64 bits' parts are limbs (#2219, c_check_complex.c): their object representation's words, a
+    // store each, the bits past the width extended as the ABI keeps them, as a part read from memory is extended from it.
+    uint32_t width = 0;
+    bool sign = false;
+    const bool wide = integer && check_complex_wide_element(types, element, &width, &sign);
+    if ((value->constant_kind != CHECK_CONSTANT_COMPLEX && value->constant_kind != real) || (wide && value->constant_kind != CHECK_CONSTANT_COMPLEX))
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (wide)
+    {
+        const uint32_t count = check_wide_count(width);
+        const uint64_t* parts[2] = { check_complex_wide_limbs(value, false, count), check_complex_wide_limbs(value, true, count) };
+        const uint32_t result = parts[0] != NULL && parts[1] != NULL && size % 8 == 0 && size >= (uint64_t)count * 8 ?
+                                check_lower_object(writer, 2 * size, type_alignment_log2(types, element)) : BUSTER_CHECK_NONE;
+        if (result == BUSTER_CHECK_NONE)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+        for (uint32_t part = 0; part < 2 && result != BUSTER_CHECK_NONE && writer->output->status == CHECK_PROGRAM_OK; part += 1)
+        {
+            const bool negative = check_wide_negative(parts[part], width, sign);
+            for (uint64_t word = 0; word < size / 8 && writer->output->status == CHECK_PROGRAM_OK; word += 1)
+            {
+                check_lower_complex_place(writer, result, (uint32_t)(part * (size / 8) + word), 8);
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, check_complex_wide_word(parts[part], count, width, negative, word));
+                check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+            }
+        }
+        if (result != BUSTER_CHECK_NONE)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
+        }
     }
     else if (quad)
     {
@@ -15709,12 +15739,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         else if (!discard)
         {
             const uint32_t before = writer->count;
-            const CheckInput* input = writer->program->input;
-            const uint32_t entry = input->window_count != 0 && op == CHECK_OP_VALUE ? graph->members[node] : 0;
-            if (__builtin_expect(entry != 0 && entry <= input->window_count && input->window_entries[entry - 1].node == node, 0))
+            const CheckInputWindowEntry* row = check_input_window_row(program->input, node);
+            if (__builtin_expect(row != NULL, 0))
             {
-                const CheckInputWindowEntry row = input->window_entries[entry - 1];
-                check_lower_emit(writer, row.kind, row.class, row.value);
+                check_lower_emit(writer, row->kind, row->class, row->value);
             }
             else
             {
@@ -15730,8 +15758,21 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_VALUE)
     {
+        const CheckInputWindowEntry* row = check_input_window_row(program->input, node);
         const uint32_t object = value->object;
-        if (value->type == BUSTER_TYPE_VOID)
+        if (__builtin_expect(row != NULL, 0))
+        {
+            const uint32_t local = row->value < program->object_count ? check_lower_local_of(writer, (uint32_t)row->value) : BUSTER_CHECK_NONE;
+            if (row->kind == BUSTER_TYPED_LOCAL && local < writer->local_count)
+            {
+                check_lower_emit(writer, row->kind, row->class, local);
+            }
+            else
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+        }
+        else if (value->type == BUSTER_TYPE_VOID)
         {
             // The final value of a statement region without an expression statement is void.
         }

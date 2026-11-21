@@ -31,6 +31,7 @@
 #: cpu 3 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
 #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+#: unmeasured Test the caret display against clang
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
@@ -226,6 +227,7 @@
 1136.0 Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
 3.0 Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
 13.2 Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
+17.7 Test the caret display against clang
 66.2 Test the preprocessor's cases against clang (part 1 of 4)
 45.7 Test the preprocessor's cases against clang (part 2 of 4)
 157.1 Test the preprocessor's cases against clang (part 3 of 4)

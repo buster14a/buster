@@ -3956,12 +3956,8 @@ static const char node_rows_test_branch_source[] =
 // another operator, and an address constant's; a value's with one; conditions with none, an object's lvalue for a
 // second operand among them;
 // constants a statement of each kind tests; a folded comma for a condition, of each truth; and a `switch`'s selector.
-// `passed`: a cast that passes a truth its own value has not (an address's, through a char's cast) to each consumer
-// that may ask it, a CONDITION, a `!`, another cast and an `||`, which list their expression; the same cast where no one
-// asks its truth, an assignment's source and a sum's operand; a cast of what has no truth; a cast that is a constant
-// itself; an operator that is no cast over a constant; a cast to void under a cast; a cast that is a constant with an
-// effect, which is listed; and a constant that is no address's whose record has an object (`(_Bool)&g`, 1: its
-// entry's value is no object's number).
+// `passed`: casts of an address through integer types, with consumers that test their truth or use their value;
+// casts of variables and constants, to void, and with effects; and a boolean cast of an address with an object.
 // `lanes`: a statement of eleven records 64 times, with a plain call, a call through a pointer and four references;
 // two conditionals with an arm that stops 64 times each, of fifteen records and of eleven, one unknown by its other
 // arm with a string's reference and one with no fact, in chunks one after another (the reduction's bytes of one
@@ -4912,8 +4908,7 @@ static bool node_rows_test_fixture(const char* directory, const char* name, cons
 // expression for a second operand whose truth is known, the branches' conditions among the kept and those of them
 // whose truth the program knows, and the kept roots whose constant the controls fold. And with the control: the roots
 // reader time typed, whose truth and fold are then asked whether kept or not, and those of them the two comparisons
-// count: the conditions an operand of which decides, and the constants the controls do not fold. And its chunks, and
-// the casts C's loop lists for a truth their operand may have and their own value has not.
+// count: the conditions an operand of which decides, and the constants the controls do not fold. And its chunks.
 typedef struct NodeSummaryExpected NodeSummaryExpected;
 struct NodeSummaryExpected
 {
@@ -4933,7 +4928,6 @@ struct NodeSummaryExpected
     uint32_t control_truths;
     uint32_t control_folds;
     uint32_t chunks;
-    uint32_t passed;
 };
 
 // Six of the fixture's nine selectors are enums, from two different definitions. An explicit cast to int,
@@ -4988,7 +4982,7 @@ static bool node_summary_test_fixture(const char* directory, const char* name, c
                       counts[NODE_FACTS_COUNT_SUMMARY_STOPS] == expected->stops && shadow.summary_stops == expected->stops &&
                       counts[NODE_FACTS_COUNT_SUMMARY_REDUCED] == expected->reduced && counts[NODE_FACTS_COUNT_SUMMARY_DECIDED] == expected->decided &&
                       shadow.summary_conditions == expected->conditions && shadow.summary_truths == expected->truths && shadow.summary_folds == expected->folds &&
-                      counts[NODE_FACTS_COUNT_TESTS_CHUNKS] == expected->chunks && counts[NODE_FACTS_COUNT_CONTEXTS_PASSED] == expected->passed;
+                      counts[NODE_FACTS_COUNT_TESTS_CHUNKS] == expected->chunks;
     if (!valid || !exact || !same)
     {
         fprintf(stderr, "test-checker: node-summary %s: %s: the side facts are kept for %" PRIu64 " expressions (%u expected; X makes %" PRIu64 " tapes, and %" PRIu64
@@ -4996,7 +4990,7 @@ static bool node_summary_test_fixture(const char* directory, const char* name, c
                 " (%u) calls asked a record at a time=%" PRIu64 " (%u); with an unknown=%" PRIu64 " (%u; the program's %" PRIu64 ") with a stop=%" PRIu64
                 " (%u; the program's %" PRIu64 ") reduced=%" PRIu64 " (%u); operators whose turn lists for a known second operand=%" PRIu64
                 " (%u); branches' conditions=%" PRIu64 " (%u) with a truth=%" PRIu64 " (%u); constants folded=%" PRIu64 " (%u); chunks=%" PRIu64
-                " (%u); casts listed for a truth their value has not=%" PRIu64 " (%u). Differences: references=%" PRIu64 " facts=%" PRIu64 " truths=%" PRIu64
+                " (%u). Differences: references=%" PRIu64 " facts=%" PRIu64 " truths=%" PRIu64
                 " folds=%" PRIu64 " not kept=%" PRIu64 " second runs=%" PRIu64 "; X's tapes=%" PRIu64 "\n",
                 name, valid ? "read" : "NOT READ", counts[NODE_FACTS_COUNT_SUMMARY_EXPRESSIONS], expected->taken, counts[NODE_FACTS_COUNT_ROWS_TAKEN], shadow.summary_compared,
                 counts[NODE_FACTS_COUNT_SUMMARY_REFERENCES], expected->references, shadow.summary_references, expected->program_references,
@@ -5004,7 +4998,7 @@ static bool node_summary_test_fixture(const char* directory, const char* name, c
                 counts[NODE_FACTS_COUNT_SUMMARY_UNKNOWN], expected->unknowns, shadow.summary_unknowns, counts[NODE_FACTS_COUNT_SUMMARY_STOPS], expected->stops,
                 shadow.summary_stops, counts[NODE_FACTS_COUNT_SUMMARY_REDUCED], expected->reduced, counts[NODE_FACTS_COUNT_SUMMARY_DECIDED], expected->decided,
                 shadow.summary_conditions, expected->conditions, shadow.summary_truths, expected->truths, shadow.summary_folds, expected->folds,
-                counts[NODE_FACTS_COUNT_TESTS_CHUNKS], expected->chunks, counts[NODE_FACTS_COUNT_CONTEXTS_PASSED], expected->passed, shadow.summary_reference_differences,
+                counts[NODE_FACTS_COUNT_TESTS_CHUNKS], expected->chunks, shadow.summary_reference_differences,
                 shadow.summary_fact_differences, shadow.summary_truth_differences, shadow.summary_fold_differences, shadow.summary_unkept,
                 counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES], counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES]);
     }
@@ -5016,7 +5010,7 @@ static bool node_summary_test_fixture(const char* directory, const char* name, c
     const bool switched = off_read && off_counts[NODE_FACTS_COUNT_ROWS_TAKEN] == expected->taken && off_counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] == 0 &&
                           off_counts[NODE_FACTS_COUNT_ROWS_ENTRIES] == counts[NODE_FACTS_COUNT_ROWS_ENTRIES] && off_counts[NODE_FACTS_COUNT_SUMMARY_EXPRESSIONS] == 0 &&
                           off_counts[NODE_FACTS_COUNT_SUMMARY_LISTED] == 0 && off_counts[NODE_FACTS_COUNT_SUMMARY_DECIDED] == expected->decided && off.summary_compared == 0 &&
-                          off.summary_asked == 0 && off_counts[NODE_FACTS_COUNT_CONTEXTS_PASSED] == expected->passed;
+                          off.summary_asked == 0;
     if (!switched)
     {
         fprintf(stderr, "test-checker: node-summary %s: %s: with the switch X makes %" PRIu64 " tapes (%u expected) of %" PRIu64 " entries (%" PRIu64
@@ -6150,11 +6144,12 @@ static void node_window_test_compile(CheckTest* test)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        check_test_expect(test, reference->window_count == 0 && input->window_count == 7 && input->window_nodes == 23,
-                          "node-window admits each of the seven returns on baked and runtime-initialized transition tables");
+        check_test_expect(test, reference->window_count == 0 && input->window_count == 9 && input->window_nodes == 28,
+                          "node-window admits nine returns on baked and runtime-initialized transition tables");
         check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
-                          "node-window replaces the 23 ordinary nodes by the seven return summaries");
+                          "node-window replaces 28 ordinary nodes by nine return summaries");
         bool same = true;
+        uint32_t reads = 0;
         for (uint32_t i = 0; same && i < input->window_count; i += 1)
         {
             const CheckInputWindowEntry* row = input->window_entries + i;
@@ -6168,11 +6163,20 @@ static void node_window_test_compile(CheckTest* test)
             }
             const CheckValue value = check_stream_value(&window.path.stream, node);
             const CheckValue regular = check_stream_value(&plain.path.stream, other);
-            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && check_test_value_equal(&value, &regular) &&
-                   row->kind == BUSTER_TYPED_CONST && row->class == BUSTER_TYPED_CLASS_I32 &&
-                   row->value == (uint64_t)(int64_t)(int32_t)value.integer;
+            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 &&
+                   check_test_value_equal(&value, &regular) && row->class == BUSTER_TYPED_CLASS_I32;
+            if (row->read_offset != 0)
+            {
+                const uint32_t token = returned + row->read_offset;
+                same &= row->kind == BUSTER_TYPED_LOCAL && token < input->token_count && input->declarations[token] + 1 == row->value;
+                reads += 1;
+            }
+            else
+            {
+                same &= row->kind == BUSTER_TYPED_CONST && row->value == (uint64_t)(int64_t)(int32_t)value.integer;
+            }
         }
-        check_test_expect(test, same, "node-window publishes the full ordinary checked value and native row for each admitted return");
+        check_test_expect(test, same && reads == 2, "node-window publishes each complete ordinary checked value and its native row, including two local read events");
         CheckProgramLowered original = { 0 };
         CheckProgramLowered first = { 0 };
         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
@@ -6812,26 +6816,39 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, node_summary_test_selectors(quiet, BUSTER_ARRAY_LENGTH(quiet), false) && node_summary_test_selectors(loud, BUSTER_ARRAY_LENGTH(loud), true),
                       "node-summary: a switch retains its selector type before promotion and the comparison catches every changed type");
     static const NodeSummaryExpected summary_expected = {
-        .taken = 371,
-        .references = 800,
-        .program_references = 797,
+        .taken = 375,
+        .references = 804,
+        .program_references = 801,
         .listed = 808,
         .suspects = 362,
         .unknowns = 146,
         .stops = 74,
         .reduced = 141,
         .decided = 9,
-        .conditions = 15,
+        .conditions = 16,
         .truths = 3,
         .folds = 5,
         .control_asked = 389,
-        .control_truths = 5,
+        .control_truths = 4,
         .control_folds = 2,
         .chunks = 6,
-        .passed = 5,
     };
     check_test_expect(test, ready && node_summary_test_fixture(directory, "summaries.c", node_summary_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &summary_expected),
                       "node-summary: an expression's references and return fact on the window are the program's own walks', a kept condition's truth is its value's and a kept constant folds");
+    // The ordinary checker folds a strong pointer comparison in these required constant contexts. In particular,
+    // only the selected string in the conditional initializer is referenced alongside the condition's string.
+    char pointer_path[PATH_MAX + 128];
+    snprintf(pointer_path, sizeof(pointer_path), "%s/checker/sources/pointer-constant-equality.c", check_test_fixture_root);
+    NodeShadow pointer_shadow = {
+        .verify = true, .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN,
+        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW |
+                  BUSTER_NODE_READER_WINDOW_TESTS | BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS,
+        .repeat = 1,
+    };
+    NodeCensus pointer_census = { .shadow = &pointer_shadow };
+    check_test_expect(test, ready && node_census_file(&pointer_census, pointer_path, quiet, BUSTER_ARRAY_LENGTH(quiet)) && pointer_census.files == 1 &&
+                                pointer_census.failures == 0 && pointer_shadow.typed_expressions != 0 && !node_shadow_differs(&pointer_shadow),
+                      "node-summary: a static pointer comparison in a conditional initializer agrees with the ordinary reference walk");
     static const NodeSummaryExpected summary_unknowns_expected = {
         .taken = 16,
         .references = 15,
@@ -6849,7 +6866,6 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .control_truths = 0,
         .control_folds = 0,
         .chunks = 1,
-        .passed = 0,
     };
     check_test_expect(test, ready && node_summary_test_fixture(directory, "summaries-unknowns.c", node_summary_test_unknowns_source, quiet, BUSTER_ARRAY_LENGTH(quiet),
                                                                &summary_unknowns_expected),
