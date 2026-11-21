@@ -32,29 +32,27 @@
 // the rest one branch at a time, recomputing only the displacements of the short branches near each growth: so sizing
 // takes time linear in the branches whatever the function's shape.
 //
-// Entry points: size_branches (the vector path), size_branches_scalar (the scalar path: the same phases, a branch or a
-// record at a time, its twin and the tests' oracle; both give identical results, rounds included),
-// branch_sizing_validate, and branch_sizing_validate_branches with its twin branch_sizing_validate_branches_scalar.
-// Like x86_encode, the two paths are the code generator's, internal functions: they take records and branch columns
+// Entry points: size_branches, branch_sizing_validate and branch_sizing_validate_branches. Each has one
+// implementation, the vector one (#2924); the tests' oracle is their own relaxation over the records.
+// Like x86_encode, size_branches is the code generator's, an internal function: it takes records and branch columns
 // that branch_sizing_validate accepts, which the code generator makes so, and check nothing about them in their loops
 // (#182's rule for the encoder: validation belongs to the tests and to debugging). branch_sizing_validate_branches is
 // the part of that check a code generator whose records are valid by construction still needs: the branch columns,
-// which the two paths read and write by, without x86_validate (the C driver's emission of Tier 0's code, #532). They
+// which sizing reads and writes by, without x86_validate (the C driver's emission of Tier 0's code, #532). They
 // require x86_encoder_initialize and take their memory from the thread's scratch arenas (lane.c). Files that use them
 // include this file after x86_64_encoder.c and lane.c; every function in it is static.
 //
 // Layout, in this order:
-//   - API: BranchSizingError, BranchSizing, BranchSizingCheck, size_branches, size_branches_scalar,
-//     branch_sizing_validate, branch_sizing_validate_branches and branch_sizing_validate_branches_scalar.
+//   - API: BranchSizingError, BranchSizing, BranchSizingCheck, size_branches, branch_sizing_validate and
+//     branch_sizing_validate_branches.
 //   - Forms: the branches' rel8 forms (branch_sizing_forms, and as a bitmap branch_sizing_form_words),
 //     branch_sizing_growth and the rel8 range.
 //   - Columns: BranchSizingColumns and branch_sizing_allocate.
-//   - Validation: branch_sizing_check, branch_sizing_validate_branches_scalar, branch_sizing_validate_branches and
-//     branch_sizing_validate.
-//   - The phases, each a vector function and a scalar one: lengths (x86_measure's offsets: the first round), setup (D0,
-//     each branch's growth if it's long, and the first round's growths), ranks (only when a branch grew), round, prefix,
-//     the worklist's marks (branch_sizing_mark_vector and branch_sizing_mark_scalar) and offsets; then the shared ones,
-//     branch_sizing_worklist (the rare cases) and branch_sizing_write (the records).
+//   - Validation: branch_sizing_validate_branches and branch_sizing_validate.
+//   - The phases: lengths (x86_measure's offsets: the first round), setup (D0, each branch's growth if it's long, and
+//     the first round's growths), ranks (only when a branch grew), round, prefix, the worklist's marks
+//     (branch_sizing_mark_vector) and offsets; then branch_sizing_worklist (the rare cases) and branch_sizing_write
+//     (the records).
 //   - The driver: branch_sizing_run.
 
 #include <stdint.h>
@@ -119,9 +117,6 @@ struct BranchSizingCheck
 // are unspecified. Requires x86_encoder_initialize.
 static __attribute__((unused)) BranchSizing size_branches(X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets,
                                                           uint64_t branch_count, uint32_t* offsets);
-// The same, a branch or a record at a time: the vector path's twin and oracle, with the same result.
-static __attribute__((unused)) BranchSizing size_branches_scalar(X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets,
-                                                                 uint64_t branch_count, uint32_t* offsets);
 // Whether size_branches takes the function, for the tests and for debugging: the record count, then each branch in
 // order (its record index below the count and above the branch before it's, its target at most the count, and its
 // record's form one of the branches' rel8 forms, without a segment override or the fixup flag), then every record
@@ -130,14 +125,11 @@ static __attribute__((unused)) BranchSizingCheck branch_sizing_validate(const X8
                                                                         const uint32_t* targets, uint64_t branch_count);
 // branch_sizing_validate without x86_validate: the record count, then each branch in order, with the same first error,
 // but it takes records x86_validate would reject. For a code generator whose records are valid by construction, which
-// still owes size_branches branch columns inside the function: past them, the paths would read and write outside the
-// records and their offsets. 16 branches at a time, with the branch records' forms gathered.
+// still owes size_branches branch columns inside the function: past them, sizing would read and write outside the
+// records and their offsets. 16 branches at a time, with the branch records' forms gathered; branch_sizing_validate's
+// first part.
 static __attribute__((unused)) BranchSizingCheck branch_sizing_validate_branches(const X86Instruction* records, uint64_t count, const uint32_t* branches,
                                                                                  const uint32_t* targets, uint64_t branch_count);
-// The same, a branch at a time: the vector path's twin and oracle, and branch_sizing_validate's first part.
-static __attribute__((unused)) BranchSizingCheck branch_sizing_validate_branches_scalar(const X86Instruction* records, uint64_t count,
-                                                                                        const uint32_t* branches, const uint32_t* targets,
-                                                                                        uint64_t branch_count);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Forms
@@ -261,8 +253,9 @@ _Static_assert(__builtin_offsetof(X86Instruction, form) == 12, "the vector path 
 _Static_assert(BUSTER_X86_ENCODER_MAX_INSTRUCTIONS < (1u << 30), "a record's index, doubled for the form's gather, fits in a signed dword");
 
 // How many bytes a branch of the form grows by from rel8 to rel32: BUSTER_BRANCH_SIZING_JMP_GROWTH for JMP_REL8 and
-// BUSTER_BRANCH_SIZING_JCC_GROWTH for a Jcc_REL8, the only forms a branch has.
-static uint32_t branch_sizing_growth(uint32_t form)
+// BUSTER_BRANCH_SIZING_JCC_GROWTH for a Jcc_REL8, the only forms a branch has. The assembler's, which sizes its
+// fragments by it; the vector setup takes the growths from its forms' table.
+static __attribute__((unused)) uint32_t branch_sizing_growth(uint32_t form)
 {
     return form == X86_FORM_JMP_REL8 ? BUSTER_BRANCH_SIZING_JMP_GROWTH : BUSTER_BRANCH_SIZING_JCC_GROWTH;
 }
@@ -343,13 +336,11 @@ static uint64_t branch_sizing_lines(uint64_t count, uint64_t bytes)
 
 // The columns of a function of `count` records and `branch_count` branches, with the vector path's map if `vector`:
 // one push, cut into cache-line-aligned columns (a push per column cost small functions tens of cycles).
-static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, uint64_t branch_count, bool vector)
+static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, uint64_t branch_count)
 {
-    (void)vector;
-
     const uint64_t padded = ((branch_count + BUSTER_BRANCH_SIZING_LANES - 1) & ~(uint64_t)(BUSTER_BRANCH_SIZING_LANES - 1)) + BUSTER_BRANCH_SIZING_LANES;
     const uint64_t units = count / BUSTER_BRANCH_SIZING_MAP_RECORDS + 1;
-    const uint64_t map_bytes = BUSTER_VECTOR_PATH(vector) ? branch_sizing_lines(units * BUSTER_BRANCH_SIZING_MAP_RECORDS, 1) : 0;
+    const uint64_t map_bytes = branch_sizing_lines(units * BUSTER_BRANCH_SIZING_MAP_RECORDS, 1);
     const uint64_t ranks_bytes = branch_sizing_lines(units * (BUSTER_BRANCH_SIZING_MAP_RECORDS / BUSTER_BRANCH_SIZING_RANK_RECORDS), sizeof(uint64_t));
     const uint64_t column_bytes = branch_sizing_lines(padded, sizeof(uint32_t));
     const uint64_t prefix_bytes = branch_sizing_lines(padded + BUSTER_BRANCH_SIZING_LANES, sizeof(uint32_t));
@@ -360,7 +351,7 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
     };
     if (base != 0)
     {
-        result.map = BUSTER_VECTOR_PATH(vector) ? base : 0;
+        result.map = base;
         uint8_t* columns = base + map_bytes;
         result.ranks = (uint64_t*)columns;
         columns += ranks_bytes;
@@ -381,56 +372,13 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
 // Validation: the tests' and debugging's, which the two paths leave to the code generator; and its branch columns'
 // part, which a code generator of valid records runs.
 
-// Branch k's error, or BRANCH_SIZING_OK: its record must be below `count` and above the branch before it's, its
-// target at most `count`, and its record's form one of the branches' rel8 forms.
-static BranchSizingError branch_sizing_check(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t k)
-{
-    const uint32_t record = branches[k];
-    BranchSizingError result = BRANCH_SIZING_OK;
-    if (record >= count || (k != 0 && record <= branches[k - 1]))
-    {
-        result = BRANCH_SIZING_ERROR_BRANCH_INDEX;
-    }
-    else if (targets[k] > count)
-    {
-        result = BRANCH_SIZING_ERROR_TARGET;
-    }
-    else
-    {
-        bool branch = false;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(branch_sizing_forms); i += 1)
-        {
-            branch = branch || records[record].form == branch_sizing_forms[i];
-        }
-        result = branch ? BRANCH_SIZING_OK : BRANCH_SIZING_ERROR_FORM;
-    }
-    return result;
-}
-
-static BranchSizingCheck branch_sizing_validate_branches_scalar(const X86Instruction* records, uint64_t count, const uint32_t* branches,
-                                                                const uint32_t* targets, uint64_t branch_count)
-{
-    BranchSizingCheck result = {
-        .error = count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS ? BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS : BRANCH_SIZING_OK,
-    };
-    for (uint64_t k = 0; result.error == BRANCH_SIZING_OK && k < branch_count; k += 1)
-    {
-        result.error = branch_sizing_check(records, count, branches, targets, k);
-        result.index = k;
-    }
-    result.index = result.error != BRANCH_SIZING_OK ? result.index : 0;
-    return result;
-}
-
-// 16 branches at a time: each lane's errors as masks, and the first lane with one, its error the first of the scalar
-// check's order (the index's, the target's, the form's). The forms are gathered only for records below the count, and
+// A branch's error, or BRANCH_SIZING_OK: its record must be below `count` and above the branch before it's, its target
+// at most `count`, and its record's form one of the branches' rel8 forms. 16 branches at a time: each lane's errors as
+// masks, and the first lane with one, its error the first in that order (the index's, the target's, the form's). The forms are gathered only for records below the count, and
 // looked up in branch_sizing_form_words.
 static BranchSizingCheck branch_sizing_validate_branches(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets,
                                                          uint64_t branch_count)
 {
-#if !BUSTER_HOST_VECTOR
-    return branch_sizing_validate_branches_scalar(records, count, branches, targets, branch_count);
-#else
     BranchSizingCheck result = {
         .error = count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS ? BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS : BRANCH_SIZING_OK,
     };
@@ -477,13 +425,12 @@ static BranchSizingCheck branch_sizing_validate_branches(const X86Instruction* r
     }
     result.index = result.error != BRANCH_SIZING_OK ? result.index : 0;
     return result;
-#endif
 }
 
 static BranchSizingCheck branch_sizing_validate(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets,
                                                 uint64_t branch_count)
 {
-    BranchSizingCheck result = branch_sizing_validate_branches_scalar(records, count, branches, targets, branch_count);
+    BranchSizingCheck result = branch_sizing_validate_branches(records, count, branches, targets, branch_count);
     if (result.error == BRANCH_SIZING_OK)
     {
         result.index = x86_validate(records, count);
@@ -496,13 +443,10 @@ static BranchSizingCheck branch_sizing_validate(const X86Instruction* records, u
 // ---------------------------------------------------------------------------------------------------------------------
 // Lengths: the first round's offsets, directly from the encoder's length rules, without assembling discarded bytes
 // or rebasing chunks. The driver has already checked the count; records and offsets are disjoint bounded slices.
-// The scalar twin derives its lengths independently by encoding one record at a time into a local buffer.
 
-static uint64_t branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets, bool vector)
+static uint64_t branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets)
 {
-    (void)vector;
-
-    return (uint64_t)(BUSTER_VECTOR_PATH(vector) ? x86_measure(records, count, offsets) : x86_measure_scalar(records, count, offsets));
+    return (uint64_t)x86_measure(records, count, offsets);
 }
 
 // Whether a function of `length` bytes with every branch short could pass INT32_MAX bytes with every branch long.
@@ -516,42 +460,11 @@ static bool branch_sizing_too_large(uint64_t length, uint64_t branch_count)
 // Setup: each branch's growth if it's long, from its record's form, and its displacement with every branch short,
 // D0 = offset(t) - offset(r) - 2 (the function's length for a target at its end), which is the first round's: the
 // branches out of range grow, the prefix sums are theirs, and the prefix sums of no growth, the round before's, are
-// zero. Returns whether any branch grew.
-
-static bool branch_sizing_setup_scalar(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count,
-                                       const uint32_t* offsets, uint32_t length, BranchSizingColumns* columns)
-{
-    uint32_t* prefix = columns->prefix[0];
-    uint32_t sum = 0;
-    prefix[0] = 0;
-    columns->prefix[1][0] = 0;
-    for (uint64_t k = 0; k < branch_count; k += 1)
-    {
-        const uint32_t record = branches[k];
-        const uint32_t target = targets[k];
-        const uint32_t end = target < count ? offsets[target] : length;
-        const int32_t displacement = (int32_t)(end - offsets[record] - BUSTER_BRANCH_SIZING_SHORT_BYTES);
-        const uint32_t grow = branch_sizing_growth(records[record].form);
-        const uint32_t growth = branch_sizing_out_of_range(displacement) ? grow : 0;
-        columns->grow[k] = grow;
-        columns->displacement0[k] = displacement;
-        columns->displacement[k] = displacement;
-        columns->growth[k] = growth;
-        sum += growth;
-        prefix[k + 1] = sum;
-        columns->prefix[1][k + 1] = 0;
-    }
-    return sum != 0;
-}
-
-// The same, 16 branches at a time, with the records' and the targets' offsets gathered, and the records' forms
-// (as their fourth dwords).
+// zero. Returns whether any branch grew. 16 branches at a time, with the records' and the targets' offsets gathered,
+// and the records' forms (as their fourth dwords).
 static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count,
                                        const uint32_t* offsets, uint32_t length, BranchSizingColumns* columns)
 {
-#if !BUSTER_HOST_VECTOR
-    return branch_sizing_setup_scalar(records, count, branches, targets, branch_count, offsets, length, columns);
-#else
     const __m512i zero = _mm512_setzero_si512();
     const __m512i count_vector = _mm512_set1_epi32((int32_t)count);
     const __m512i length_vector = _mm512_set1_epi32((int32_t)length);
@@ -592,7 +505,6 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
         grown |= _mm512_test_epi32_mask(growth, growth);
     }
     return grown != 0;
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -600,50 +512,11 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
 // branch has grown. The table has an entry per 32 records, their branch bits and the branches before them; a rank is
 // the entry's count plus the bits below the target's.
 
-static uint32_t branch_sizing_rank(const uint64_t* ranks, uint32_t record)
-{
-    const uint64_t entry = ranks[record / BUSTER_BRANCH_SIZING_RANK_RECORDS];
-    const uint32_t below = (1u << (record % BUSTER_BRANCH_SIZING_RANK_RECORDS)) - 1;
-    return (uint32_t)(entry >> 32) + (uint32_t)__builtin_popcount((uint32_t)entry & below);
-}
-
-// The table, by setting each branch's bit and summing the bits of each entry before it; then each target's rank.
-static void branch_sizing_ranks_scalar(uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count, BranchSizingColumns* columns)
-{
-    const uint64_t entries = (count / BUSTER_BRANCH_SIZING_MAP_RECORDS + 1) * (BUSTER_BRANCH_SIZING_MAP_RECORDS / BUSTER_BRANCH_SIZING_RANK_RECORDS);
-    uint64_t* ranks = columns->ranks;
-    memset(ranks, 0, entries * sizeof(uint64_t));
-    // The branches are ascending, so an entry's bits gather in a register, stored whole each time rather than ORed into
-    // memory, which would make each branch wait for the store before.
-    uint64_t entry = 0;
-    uint64_t bits = 0;
-    for (uint64_t k = 0; k < branch_count; k += 1)
-    {
-        const uint64_t at = branches[k] / BUSTER_BRANCH_SIZING_RANK_RECORDS;
-        bits = (at == entry ? bits : 0) | 1ull << (branches[k] % BUSTER_BRANCH_SIZING_RANK_RECORDS);
-        entry = at;
-        ranks[at] = bits;
-    }
-    uint64_t before = 0;
-    for (uint64_t i = 0; i < entries; i += 1)
-    {
-        const uint64_t bits = ranks[i];
-        ranks[i] = bits | before << 32;
-        before += (uint64_t)__builtin_popcountll(bits);
-    }
-    for (uint64_t k = 0; k < branch_count; k += 1)
-    {
-        columns->rank[k] = branch_sizing_rank(ranks, targets[k]);
-    }
-}
-
-// The same, with a byte per record in the map, whose 64 bytes at a time become two entries' bits; and the ranks 16 at a
-// time, with each target's entry gathered (8 at a time, as 64-bit elements) and the bits below it counted.
+// The table, by setting each branch's byte in the map, whose 64 bytes at a time become two entries' bits, and summing
+// the bits of each entry before it; then each target's rank, 16 at a time, with each target's entry gathered (8 at a
+// time, as 64-bit elements) and the bits below it counted.
 static void branch_sizing_ranks_vector(uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count, BranchSizingColumns* columns)
 {
-#if !BUSTER_HOST_VECTOR
-    branch_sizing_ranks_scalar(count, branches, targets, branch_count, columns);
-#else
     const uint64_t units = count / BUSTER_BRANCH_SIZING_MAP_RECORDS + 1;
     uint8_t* map = columns->map;
     uint64_t* ranks = columns->ranks;
@@ -680,43 +553,15 @@ static void branch_sizing_ranks_vector(uint64_t count, const uint32_t* branches,
         const __m512i rank = _mm512_add_epi32(counts, _mm512_popcnt_epi32(_mm512_and_si512(bits, below)));
         _mm512_store_si512(columns->rank + k, rank);
     }
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Rounds: every branch's displacement from the prefix sums of the round before, D0 + P[rank] - P[k + 1]; a branch out of
 // range grows (and a long one stays long), and the new growths' prefix sums go to the other buffer. Returns whether a
-// growth changed. `current` is the buffer with the prefix sums of the growths in the column.
-
-static bool branch_sizing_round_scalar(uint64_t branch_count, BranchSizingColumns* columns, uint32_t current)
-{
-    const uint32_t* before = columns->prefix[current];
-    uint32_t* after = columns->prefix[current ^ 1];
-    uint32_t sum = 0;
-    bool result = false;
-    after[0] = 0;
-    for (uint64_t k = 0; k < branch_count; k += 1)
-    {
-        const int32_t displacement = columns->displacement0[k] + (int32_t)(before[columns->rank[k]] - before[k + 1]);
-        const uint32_t old = columns->growth[k];
-        // A select rather than a branch on the long branches, which are 20% to 40% of compiled code's.
-        const uint32_t grows = (uint32_t)(old != 0) | (uint32_t)branch_sizing_out_of_range(displacement);
-        const uint32_t growth = grows != 0 ? columns->grow[k] : 0;
-        result |= growth != old;
-        columns->growth[k] = growth;
-        columns->displacement[k] = displacement;
-        sum += growth;
-        after[k + 1] = sum;
-    }
-    return result;
-}
-
-// The same, 16 branches at a time, with the prefix sums at the ranks gathered.
+// growth changed. `current` is the buffer with the prefix sums of the growths in the column. 16 branches at a time,
+// with the prefix sums at the ranks gathered.
 static bool branch_sizing_round_vector(uint64_t branch_count, BranchSizingColumns* columns, uint32_t current)
 {
-#if !BUSTER_HOST_VECTOR
-    return branch_sizing_round_scalar(branch_count, columns, current);
-#else
     const uint32_t* before = columns->prefix[current];
     uint32_t* after = columns->prefix[current ^ 1];
     __m512i carry = _mm512_setzero_si512();
@@ -740,27 +585,11 @@ static bool branch_sizing_round_vector(uint64_t branch_count, BranchSizingColumn
         carry = branch_sizing_last(sums);
     }
     return changed != 0;
-#endif
 }
 
 // The prefix sums of the growths in the column, into buffer `into`.
-static void branch_sizing_prefix_scalar(uint64_t branch_count, BranchSizingColumns* columns, uint32_t into)
-{
-    uint32_t* prefix = columns->prefix[into];
-    uint32_t sum = 0;
-    prefix[0] = 0;
-    for (uint64_t k = 0; k < branch_count; k += 1)
-    {
-        sum += columns->growth[k];
-        prefix[k + 1] = sum;
-    }
-}
-
 static void branch_sizing_prefix_vector(uint64_t branch_count, BranchSizingColumns* columns, uint32_t into)
 {
-#if !BUSTER_HOST_VECTOR
-    branch_sizing_prefix_scalar(branch_count, columns, into);
-#else
     uint32_t* prefix = columns->prefix[into];
     __m512i carry = _mm512_setzero_si512();
     prefix[0] = 0;
@@ -770,7 +599,6 @@ static void branch_sizing_prefix_vector(uint64_t branch_count, BranchSizingColum
         _mm512_storeu_si512(prefix + k + 1, sums);
         carry = branch_sizing_last(sums);
     }
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -784,34 +612,10 @@ static void branch_sizing_prefix_vector(uint64_t branch_count, BranchSizingColum
 
 // Marks the short branches whose spans hold branch k, and returns the word of the lowest one it could have marked. The
 // marks gather in a register and go to each word once: an OR into memory per branch made each wait for the one before
-// (a store and its reload).
-static uint64_t branch_sizing_mark_scalar(uint64_t branch_count, uint64_t k, const uint32_t* rank, const uint32_t* growth, uint64_t* dirty)
-{
-    const uint64_t first = k >= BUSTER_BRANCH_SIZING_REACH ? k - BUSTER_BRANCH_SIZING_REACH : 0;
-    const uint64_t end = branch_count - k > BUSTER_BRANCH_SIZING_REACH ? k + BUSTER_BRANCH_SIZING_REACH + 1 : branch_count;
-    uint64_t marks = 0;
-    for (uint64_t i = first; i < end; i += 1)
-    {
-        // A forward branch's span holds the branches after it and before its target; a backward one's, the branches from
-        // its target's on, up to itself.
-        const bool holds = (i < k && rank[i] > k) || (i > k && rank[i] <= k);
-        marks |= (uint64_t)(holds && growth[i] == 0) << (i % 64);
-        if (i % 64 == 63 || i + 1 == end)
-        {
-            dirty[i / 64] |= marks;
-            marks = 0;
-        }
-    }
-    return first / 64;
-}
-
-// The same, 16 branches at a time: their indices and ranks against k, and their growths against zero, make a mask of 16
+// (a store and its reload). 16 branches at a time: their indices and ranks against k, and their growths against zero, make a mask of 16
 // marks, which goes to the dirty word it starts in and the next (which branch_sizing_allocate has room for).
 static uint64_t branch_sizing_mark_vector(uint64_t branch_count, uint64_t k, const uint32_t* rank, const uint32_t* growth, uint64_t* dirty)
 {
-#if !BUSTER_HOST_VECTOR
-    return branch_sizing_mark_scalar(branch_count, k, rank, growth, dirty);
-#else
     const uint64_t first = k >= BUSTER_BRANCH_SIZING_REACH ? k - BUSTER_BRANCH_SIZING_REACH : 0;
     const uint64_t end = branch_count - k > BUSTER_BRANCH_SIZING_REACH ? k + BUSTER_BRANCH_SIZING_REACH + 1 : branch_count;
     const __m512i key = _mm512_set1_epi32((int32_t)k);
@@ -829,7 +633,6 @@ static uint64_t branch_sizing_mark_vector(uint64_t branch_count, uint64_t k, con
         dirty[i / 64 + 1] |= (uint64_t)(marks >> 64);
     }
     return first / 64;
-#endif
 }
 
 // Branch j's displacement with the growths in the column: D0 plus the growth in its span, which is negative for a
@@ -856,13 +659,10 @@ static int32_t branch_sizing_displacement(uint64_t j, const int32_t* displacemen
 }
 
 // `current` is the buffer with the prefix sums of the growths in the column, and the other one has the round before's.
-// The vector path marks 16 branches at a time, the scalar path one at a time, both the same branches. It stays out of
-// line: inlined into branch_sizing_run, its code changed how clang allocated the hot phases' registers, and functions
+// The marks take 16 branches at a time. It stays out of line: inlined into branch_sizing_run, its code changed how clang allocated the hot phases' registers, and functions
 // that never reach it were sized up to 20% slower on the 9700X.
-__attribute__((noinline)) static uint64_t branch_sizing_worklist(uint64_t branch_count, BranchSizingColumns* columns, uint32_t current, bool vector)
+__attribute__((noinline)) static uint64_t branch_sizing_worklist(uint64_t branch_count, BranchSizingColumns* columns, uint32_t current)
 {
-    (void)vector;
-
     const uint32_t* now = columns->prefix[current];
     const uint32_t* before = columns->prefix[current ^ 1];
     const uint64_t words = (branch_count + 63) / 64;
@@ -875,8 +675,7 @@ __attribute__((noinline)) static uint64_t branch_sizing_worklist(uint64_t branch
         // The branches the last round grew.
         if (now[k + 1] - now[k] != before[k + 1] - before[k])
         {
-            const uint64_t lowest = BUSTER_VECTOR_PATH(vector) ? branch_sizing_mark_vector(branch_count, k, columns->rank, columns->growth, dirty)
-                                           : branch_sizing_mark_scalar(branch_count, k, columns->rank, columns->growth, dirty);
+            const uint64_t lowest = branch_sizing_mark_vector(branch_count, k, columns->rank, columns->growth, dirty);
             word = lowest < word ? lowest : word;
         }
     }
@@ -895,8 +694,7 @@ __attribute__((noinline)) static uint64_t branch_sizing_worklist(uint64_t branch
             if (columns->growth[j] == 0 && branch_sizing_out_of_range(displacement))
             {
                 columns->growth[j] = columns->grow[j];
-                const uint64_t lowest = BUSTER_VECTOR_PATH(vector) ? branch_sizing_mark_vector(branch_count, j, columns->rank, columns->growth, dirty)
-                                               : branch_sizing_mark_scalar(branch_count, j, columns->rank, columns->growth, dirty);
+                const uint64_t lowest = branch_sizing_mark_vector(branch_count, j, columns->rank, columns->growth, dirty);
                 word = lowest < word ? lowest : word;
             }
         }
@@ -911,21 +709,8 @@ __attribute__((noinline)) static uint64_t branch_sizing_worklist(uint64_t branch
 // no step waits for the one before.
 
 // The first long branch, or branch_count if none is.
-static uint64_t branch_sizing_first_long_scalar(uint64_t branch_count, const uint32_t* growth)
-{
-    uint64_t k = 0;
-    while (k < branch_count && growth[k] == 0)
-    {
-        k += 1;
-    }
-    return k;
-}
-
 static uint64_t branch_sizing_first_long_vector(uint64_t branch_count, const uint32_t* growth)
 {
-#if !BUSTER_HOST_VECTOR
-    return branch_sizing_first_long_scalar(branch_count, growth);
-#else
     uint64_t k = 0;
     __mmask16 grown = 0;
     while (k < branch_count && grown == 0)
@@ -935,33 +720,14 @@ static uint64_t branch_sizing_first_long_vector(uint64_t branch_count, const uin
         k += grown == 0 ? BUSTER_BRANCH_SIZING_LANES : (uint64_t)__builtin_ctz(grown);
     }
     return k < branch_count ? k : branch_count;
-#endif
 }
 
-static void branch_sizing_offsets_scalar(uint64_t count, const uint32_t* branches, uint64_t branch_count, uint32_t* offsets, const BranchSizingColumns* columns,
-                                         uint32_t current)
-{
-    const uint32_t* prefix = columns->prefix[current];
-    const uint64_t first = branch_sizing_first_long_scalar(branch_count, columns->growth);
-    if (first < branch_count)
-    {
-        const uint64_t start = branches[first] / BUSTER_BRANCH_SIZING_RANK_RECORDS * BUSTER_BRANCH_SIZING_RANK_RECORDS;
-        for (uint64_t i = start; i < count; i += 1)
-        {
-            offsets[i] += prefix[branch_sizing_rank(columns->ranks, (uint32_t)i)];
-        }
-    }
-}
-
-// The same, 16 records at a time: record i + j's rank is the branches before record i (k, from the ranks' table) and the
+// 16 records at a time: record i + j's rank is the branches before record i (k, from the ranks' table) and the
 // branch bits below j among the 16 (a vpopcntd of the bits masked per lane), at most 15, so a vpermd looks its prefix
 // sum up among the 16 from k.
 static void branch_sizing_offsets_vector(uint64_t count, const uint32_t* branches, uint64_t branch_count, uint32_t* offsets, const BranchSizingColumns* columns,
                                          uint32_t current)
 {
-#if !BUSTER_HOST_VECTOR
-    branch_sizing_offsets_scalar(count, branches, branch_count, offsets, columns, current);
-#else
     const uint32_t* prefix = columns->prefix[current];
     const __m512i below = _mm512_setr_epi32(0, 0x1, 0x3, 0x7, 0xf, 0x1f, 0x3f, 0x7f, 0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff, 0x1fff, 0x3fff, 0x7fff);
     const uint64_t first = branch_sizing_first_long_vector(branch_count, columns->growth);
@@ -981,7 +747,6 @@ static void branch_sizing_offsets_vector(uint64_t count, const uint32_t* branche
             _mm512_mask_storeu_epi32(offsets + i, lanes, _mm512_add_epi32(offset, growth));
         }
     }
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1006,13 +771,11 @@ static uint64_t branch_sizing_write(X86Instruction* records, const uint32_t* bra
 // ---------------------------------------------------------------------------------------------------------------------
 // The driver
 
-// Sizes the branches on the vector path or on the scalar one, going to branch_sizing_worklist after `round_limit`
-// rounds (BUSTER_BRANCH_SIZING_ROUNDS for the entry points; the tests take others).
+// Sizes the branches, going to branch_sizing_worklist after `round_limit` rounds (BUSTER_BRANCH_SIZING_ROUNDS for the
+// entry point; the tests take others).
 static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count,
-                                      uint32_t* offsets, bool vector, uint32_t round_limit)
+                                      uint32_t* offsets, uint32_t round_limit)
 {
-    (void)vector;
-
     BranchSizing result = {
         .error = BRANCH_SIZING_OK,
     };
@@ -1023,7 +786,7 @@ static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, c
     else
     {
         Scratch scratch = scratch_begin(0);
-        BranchSizingColumns columns = branch_sizing_allocate(scratch.arena, count, branch_count, BUSTER_VECTOR_PATH(vector));
+        BranchSizingColumns columns = branch_sizing_allocate(scratch.arena, count, branch_count);
         uint64_t length = 0;
         if (!columns.valid)
         {
@@ -1031,55 +794,33 @@ static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, c
         }
         else
         {
-            length = branch_sizing_lengths(records, count, offsets, BUSTER_VECTOR_PATH(vector));
+            length = branch_sizing_lengths(records, count, offsets);
             result.error = branch_sizing_too_large(length, branch_count) ? BRANCH_SIZING_ERROR_TOO_LARGE : BRANCH_SIZING_OK;
         }
         if (result.error == BRANCH_SIZING_OK)
         {
-            bool changed = BUSTER_VECTOR_PATH(vector) ? branch_sizing_setup_vector(records, count, branches, targets, branch_count, offsets, (uint32_t)length, &columns)
-                                  : branch_sizing_setup_scalar(records, count, branches, targets, branch_count, offsets, (uint32_t)length, &columns);
+            bool changed = branch_sizing_setup_vector(records, count, branches, targets, branch_count, offsets, (uint32_t)length, &columns);
             uint32_t current = 0;
             bool listed = false;
             result.rounds = 1;
             if (changed)
             {
-                if (BUSTER_VECTOR_PATH(vector))
-                {
-                    branch_sizing_ranks_vector(count, branches, targets, branch_count, &columns);
-                }
-                else
-                {
-                    branch_sizing_ranks_scalar(count, branches, targets, branch_count, &columns);
-                }
+                branch_sizing_ranks_vector(count, branches, targets, branch_count, &columns);
             }
             while (changed)
             {
                 if (result.rounds >= round_limit && !listed)
                 {
-                    result.evaluations = branch_sizing_worklist(branch_count, &columns, current, BUSTER_VECTOR_PATH(vector));
-                    if (BUSTER_VECTOR_PATH(vector))
-                    {
-                        branch_sizing_prefix_vector(branch_count, &columns, current ^ 1);
-                    }
-                    else
-                    {
-                        branch_sizing_prefix_scalar(branch_count, &columns, current ^ 1);
-                    }
+                    result.evaluations = branch_sizing_worklist(branch_count, &columns, current);
+                    branch_sizing_prefix_vector(branch_count, &columns, current ^ 1);
                     current ^= 1;
                     listed = true;
                 }
-                changed = BUSTER_VECTOR_PATH(vector) ? branch_sizing_round_vector(branch_count, &columns, current) : branch_sizing_round_scalar(branch_count, &columns, current);
+                changed = branch_sizing_round_vector(branch_count, &columns, current);
                 current ^= 1;
                 result.rounds += 1;
             }
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                branch_sizing_offsets_vector(count, branches, branch_count, offsets, &columns, current);
-            }
-            else
-            {
-                branch_sizing_offsets_scalar(count, branches, branch_count, offsets, &columns, current);
-            }
+            branch_sizing_offsets_vector(count, branches, branch_count, offsets, &columns, current);
             result.length = length + columns.prefix[current][branch_count];
             result.long_branches = branch_sizing_write(records, branches, branch_count, &columns);
         }
@@ -1088,21 +829,8 @@ static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, c
     return result;
 }
 
-static BranchSizing size_branches_scalar(X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count,
-                                         uint32_t* offsets);
-
 static BranchSizing size_branches(X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count,
                                   uint32_t* offsets)
 {
-#if !BUSTER_HOST_VECTOR
-    return size_branches_scalar(records, count, branches, targets, branch_count, offsets);
-#else
-    return branch_sizing_run(records, count, branches, targets, branch_count, offsets, true, BUSTER_BRANCH_SIZING_ROUNDS);
-#endif
-}
-
-static BranchSizing size_branches_scalar(X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count,
-                                         uint32_t* offsets)
-{
-    return branch_sizing_run(records, count, branches, targets, branch_count, offsets, false, BUSTER_BRANCH_SIZING_ROUNDS);
+    return branch_sizing_run(records, count, branches, targets, branch_count, offsets, BUSTER_BRANCH_SIZING_ROUNDS);
 }

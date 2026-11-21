@@ -43,7 +43,7 @@ Four commits, one per step, steps 1, 2, 4 and 3 in that order:
 2. The CFG consumer allocates both problems in one call
    (`tier1_emit_cfg_one_call`): another problem's column over the prepared
    intervals (`tier1_cfg_column`, with `tier1_cfg_input_valid`'s two checks on a
-   value's registers as a vector kernel and a scalar twin), and lookup columns,
+   value's registers as a vector kernel), and lookup columns,
    slot sharing and edge moves once, for the allocation that stands. Today's
    order is `tier1_emit_cfg_two_calls`: the path for fixed ranges, and the
    reference `--verify` runs after the one-call order on every function,

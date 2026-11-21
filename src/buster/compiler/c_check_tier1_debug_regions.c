@@ -13,8 +13,8 @@ static uint32_t check_tier1_debug_region_space(const CheckTier1DebugValues* proo
 }
 
 static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const Tier1EmitResult* emitted,
-                                          const uint32_t* places, const uint32_t* record_order, uint8_t* cuts,
-                                          bool vector, Arena* scratch)
+                                          const uint32_t* places, const uint32_t* record_order, uint8_t* cuts, uint32_t* last_event,
+                                          Arena* scratch)
 {
     const IrFunction* ir = proof->ir;
     const IrDebugInfo* debug = ir->debug;
@@ -171,7 +171,7 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     }
     if (valid && needed)
     {
-        phi_keys = c_bindings_sort(phi_keys, phi_sorting, phi_count, vector, UINT32_MAX);
+        phi_keys = c_bindings_sort(phi_keys, phi_sorting, phi_count, true, UINT32_MAX);
         uint32_t writers[32];
         memset(writers, 0xff, sizeof(writers));
         uint32_t cursor = 0;
@@ -293,12 +293,29 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     for (uint32_t k = 0; valid && k < regions; k += 1)
     {
         const IrDebugRegion region = debug->regions[k];
-        events[proof->region_event_count++] = (uint64_t)region.begin << 32 | k;
-        events[proof->region_event_count++] = (uint64_t)region.end << 32 | k;
+        // Regions are ordered by local, then disjoint source interval. At equal entries the local has the same
+        // order as its original region index. The cursor needs only that local. Adjacent regions of the same
+        // local have one shared boundary, and it queues the local once.
+        const uint32_t local = proof->local_index[region.local];
+        if (k == 0 || debug->regions[k - 1].local != region.local || debug->regions[k - 1].end != region.begin)
+        {
+            events[proof->region_event_count++] = (uint64_t)region.begin << 32 | local;
+        }
+        events[proof->region_event_count++] = (uint64_t)region.end << 32 | local;
     }
     if (valid && regions != 0)
     {
-        proof->region_events = c_bindings_sort(events, sorting, proof->region_event_count, vector, UINT32_MAX);
+        proof->region_events = c_bindings_sort(events, sorting, proof->region_event_count, true, UINT32_MAX);
+        // The other sort buffer holds the previous event of each dense local, plus one (zero for its first).
+        // The value-range walk uses it to visit each local once per crossed interval, in first-occurrence order.
+        proof->region_previous = (uint32_t*)(proof->region_events == events ? sorting : events);
+        memset(last_event, 0, (uint64_t)proof->local_count * sizeof(*last_event));
+        for (uint32_t at = 0; at < proof->region_event_count; at += 1)
+        {
+            const uint32_t local = (uint32_t)proof->region_events[at];
+            proof->region_previous[at] = last_event[local];
+            last_event[local] = at + 1;
+        }
     }
     return valid;
 }

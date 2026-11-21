@@ -43,7 +43,7 @@ static uint32_t check_tier1_debug_object_store(const IrFunction* ir, const Tier1
 
 static bool check_tier1_debug_object_clips(const Tier0Function* function, const IrFunction* ir, const Tier1EmitResult* emitted,
                                          const uint32_t* record_order, const uint32_t* uses, const uint32_t* local_slots,
-                                         const Tier0Home* homes, bool vector, Arena* scratch, CheckTier1DebugSpan** result)
+                                         const Tier0Home* homes, Arena* scratch, CheckTier1DebugSpan** result)
 {
     const uint32_t locals = function->local_count;
     const uint32_t slots = ir->slot_count;
@@ -210,8 +210,8 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
     }
     if (valid && prove && event_count != 0)
     {
-        keys = c_bindings_sort(keys, sorting, key_count, vector, UINT32_MAX);
-        events = c_bindings_sort(events, event_sorting, event_count, vector, UINT32_MAX);
+        keys = c_bindings_sort(keys, sorting, key_count, true, UINT32_MAX);
+        events = c_bindings_sort(events, event_sorting, event_count, true, UINT32_MAX);
         memset(owners, 0xff, (uint64_t)frame->slot_count * 4);
         uint32_t event = 0;
         for (uint32_t r = 0; valid && r < count; r += 1)

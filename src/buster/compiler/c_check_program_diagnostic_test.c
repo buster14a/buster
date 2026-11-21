@@ -31,7 +31,7 @@ static uint32_t check_test_program_diagnostic(CheckTest* test, const char* sourc
             ready = !input.resource && (accepted || input.diagnostic_graph);
         }
         CheckStream stream = { 0 };
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         ready = ready && check_graph_run(&types.table, &input.graph, &stream_arena, &scratch, &options, &stream);
         uint8_t* prefix = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 64) : 0;
         ready = ready && prefix != 0;

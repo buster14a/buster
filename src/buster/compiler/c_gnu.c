@@ -229,37 +229,19 @@ static GnuSyntaxStatus gnu_syntax_asm_label(const ParseTokens* tokens, const Par
     return result;
 }
 
-static uint64_t gnu_syntax_candidates_scalar(const uint8_t* kinds, uint32_t count)
-{
-    uint64_t result = 0;
-    // Keep the reference and scalar-conditioning path scalar even when the compiler recognizes the reduction.
-#pragma clang loop vectorize(disable) interleave(disable)
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        result |= (uint64_t)(kinds[i] == PARSE_KIND_ATTRIBUTE || kinds[i] == PARSE_KIND_ASM) << i;
-    }
-    return result;
-}
-
 static uint64_t gnu_syntax_candidates(const uint8_t* kinds, uint32_t count)
 {
-#if !BUSTER_HOST_VECTOR
-    return gnu_syntax_candidates_scalar(kinds, count);
-#else
     const uint64_t active = count == 64 ? UINT64_MAX : (1ull << count) - 1;
     const __m512i values = _mm512_maskz_loadu_epi8(active, kinds);
     return active & (_mm512_cmpeq_epi8_mask(values, _mm512_set1_epi8(PARSE_KIND_ATTRIBUTE)) |
                      _mm512_cmpeq_epi8_mask(values, _mm512_set1_epi8(PARSE_KIND_ASM)));
-#endif
 }
 
 // Resets counts, retaining the caller's arrays/capacities. On any failure all counts are zero, even when earlier
 // rows were written. Measurement ignores arrays/capacities. The successful-parse input contract is required; the
 // structural checks defend the slices this reader follows, not every invariant of an arbitrary foreign tree.
-static GnuSyntaxStatus gnu_syntax_collect(const ParseTokens* tokens, const ParseTree* tree, GnuSyntax* syntax, bool scalar, bool measure)
+static GnuSyntaxStatus gnu_syntax_collect(const ParseTokens* tokens, const ParseTree* tree, GnuSyntax* syntax, bool measure)
 {
-    (void)scalar;
-
     syntax->group_count = 0;
     syntax->attribute_count = 0;
     syntax->asm_label_count = 0;
@@ -278,7 +260,7 @@ static GnuSyntaxStatus gnu_syntax_collect(const ParseTokens* tokens, const Parse
     for (uint32_t begin = 0; result == GNU_SYNTAX_OK && begin < tokens->count; begin += 64)
     {
         const uint32_t count = tokens->count - begin < 64 ? tokens->count - begin : 64;
-        uint64_t candidates = BUSTER_SCALAR_PATH(scalar) ? gnu_syntax_candidates_scalar(tokens->kinds + begin, count) : gnu_syntax_candidates(tokens->kinds + begin, count);
+        uint64_t candidates = gnu_syntax_candidates(tokens->kinds + begin, count);
         while (result == GNU_SYNTAX_OK && candidates != 0)
         {
             const uint32_t token = begin + (uint32_t)__builtin_ctzll(candidates);
@@ -307,13 +289,11 @@ static GnuSyntaxStatus gnu_syntax_collect(const ParseTokens* tokens, const Parse
     return result;
 }
 
-static GnuSyntaxStatus gnu_syntax_build(const ParseTokens* tokens, const ParseTree* tree, Arena* arena, GnuSyntax* syntax, bool scalar)
+static GnuSyntaxStatus gnu_syntax_build(const ParseTokens* tokens, const ParseTree* tree, Arena* arena, GnuSyntax* syntax)
 {
-    (void)scalar;
-
     const uint64_t mark = arena->length;
     GnuSyntax result = { 0 };
-    GnuSyntaxStatus status = gnu_syntax_collect(tokens, tree, &result, BUSTER_SCALAR_PATH(scalar), true);
+    GnuSyntaxStatus status = gnu_syntax_collect(tokens, tree, &result, true);
     if (status == GNU_SYNTAX_OK)
     {
         result.group_capacity = result.group_count;
@@ -329,7 +309,7 @@ static GnuSyntaxStatus gnu_syntax_build(const ParseTokens* tokens, const ParseTr
         }
         else
         {
-            status = gnu_syntax_collect(tokens, tree, &result, BUSTER_SCALAR_PATH(scalar), false);
+            status = gnu_syntax_collect(tokens, tree, &result, false);
         }
     }
     if (status != GNU_SYNTAX_OK)

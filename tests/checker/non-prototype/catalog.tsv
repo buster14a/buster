@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-warnings
+merge.c	11	0	8	deprecated non-prototype declarations and their conflicting prototypes
+incompatible.c	2	3	5	prototype warnings precede type conflict errors in either declaration order
+static-builtins.c	2	0	2	static functions named like library and compiler builtins still warn

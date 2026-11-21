@@ -22,9 +22,17 @@ requirements. [Command index](README.md).
   bytes with the matching Clang `-O0` functions' sum. `--check-code-size`
   enables that measurement and requires the first sum not to exceed the
   second. A Tier 1 body without a Clang counterpart stays in the first sum
-  and contributes no reference bytes, making the bound stricter. It reads the object
-  compile's explicit `--tier1-function-sizes` report and the same two objects
-  used by the symbol comparison. Unpaired counts and bytes show the portion
+  and contributes no reference bytes, making the bound stricter. After a
+  passing cross-check it compiles the test once more, with `-c`,
+  `--tier1-no-inline` and the explicit `--tier1-function-sizes` report (#2646):
+  the bound compares each function with Clang's same function, as
+  `measure-tier1-programs` measures SQLite and Lua, which the cross-check's
+  object, whose callers hold their inlined callees' bodies, can't give (it
+  measured 62,350 bytes against 45,748 at `d876a5e0`, 48,365 against 47,293
+  without inlining). That object must link with `cc` and run as the
+  cross-check's does; its report is read against it and the symbol
+  comparison's Clang object. The cross-check's own object keeps the driver's
+  inlining. Unpaired counts and bytes show the portion
   already included in the Tier 1 total; fallback and whole executable-section
   bytes are separate. Both modes reject empty comparisons, missing or invalid
   evidence, and inconsistent matched/unmatched counts. `--code-size` reports
@@ -35,7 +43,9 @@ requirements. [Command index](README.md).
   compiler, in seven scenarios that run at once, each in a process of its own
   (each changes the directory and environment, and its results' shared mapping
   is its own), including a working object whose requested size report is
-  absent, which fails even in report-only mode. It also checks the size reader,
+  absent, which fails even in report-only mode; the stand-in fails any compile
+  that asks for the report without `--tier1-no-inline`, or for that without the
+  report. It also checks the size reader,
   the enforced and report-only aggregate thresholds, conservative unpaired-body
   accounting, invalid and empty evidence, disabled measurement, and the
   command's invalid size-option combinations.
@@ -43,10 +53,9 @@ requirements. [Command index](README.md).
   `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
   and runs both, and the subset again with `--tier1`, which compiles them by the
   driver's `--tier1` and runs both paths' programs. Hosted and native
-  correctness use `--code-size` on that Tier 1 run: its current size excess
-  remains visible as `gate=fail` with `enforced=0`. #1116's enforced corpus is
-  the original 34-file Lua corpus (`measure-tier1-programs
-  --check-code-size=lua`); the strict c-testsuite flag remains available.
+  correctness use `--check-code-size` on that Tier 1 run (#2646), as
+  `measure-tier1-programs --check-code-size` enforces the bound on SQLite and
+  on #1116's 34-file Lua corpus.
   [The c-testsuite guide](../../docs/c-testsuite.md) has the details.
 
 ## SQLite's tests (#146)
@@ -100,8 +109,9 @@ through `testfixture` (below).
     runs it with `tests/sqlite/testfixture-subset.txt`, the 1,215 scripts
     that took under 100 ms each in Tier 0's full run, about a minute in all.
   - **Nightly and dispatched runs:** `hosted-correctness.yml`'s `sqlite-full`
-    job runs the whole permutation by the plain portable row's compiler,
-    about 9 minutes a build on a 4-CPU runner. Main's pushes skip it (#2334):
+    job runs the whole permutation by a compiler it builds for its own drawn
+    AVX-512 runner (`drawn.yml`'s `sqlite-full` row, #2924), beside the native
+    plain row, about 9 minutes a build on a 4-CPU runner. Main's pushes skip it (#2334):
     it took 27 to 41 runner-minutes of each push run.
   - **Tcl's pin:** the distribution's package. Hosted: Ubuntu 26.04's
     `tcl8.6-dev` 8.6.17+dfsg-1build1 (`setup-hosted.sh` installs it;

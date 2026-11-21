@@ -3,10 +3,10 @@
 //
 // Bounded scalar if-conversion (#1382). Include after ir.c. The caller supplies verified SSA, before publishing use
 // lists or a verified-analysis revision, and immediately runs the ordinary optimizer. A successful result borrows the
-// input's immutable tables: both the input and output arena must remain alive until that optimizer materializes its
-// result. The input is never mutated, including shared/overlapping extra slices.
+// input's immutable tables, extending the constant table only for missing AND identities. Both arenas stay alive until
+// the optimizer materializes its result. The input is never mutated, including shared/overlapping extra slices.
 //
-// A 64-byte opcode mask finds conditional terminators, with an exact scalar twin and no padded-tail reads. A region is
+// A 64-byte opcode mask finds conditional terminators, with no padded-tail reads. A region is
 // a reachable head ending in a conditional branch whose two sides reach one join: each side is either the join itself
 // (a triangle) or an arm, a chain of at most four blocks, each with the previous block (or the head) as its only
 // reachable predecessor and an unconditional branch to the next. The join's phis take at most four selects.
@@ -32,11 +32,11 @@
 // entry from the head (LLVM SimplifyCFG's FoldTwoEntryPHINode and SpeculativelyExecuteBB, for the C lowering's
 // shapes). The head then branches to the join. A region's blocks overlap no other region's in a round, except that a
 // join may head another region (sequential clamps). Rows are permuted, and new ones are only the folded selects and
-// the sunk accumulations' zeros.
+// the sunk accumulations' identity constants.
 //
 // Two cost rules: a head whose condition reads a phi that the join's phis flow into (a running maximum) stays a
 // branch, since the select would put the comparison on the loop's carried chain; and an in-place phi of `s op x` and
-// `s` becomes `s op select(c, x, 0)`, so that an accumulator waits for the operation alone.
+// `s` becomes `s op select(c, x, identity)`, so that an accumulator waits for the operation alone.
 //
 // A converted head whose only reachable predecessor chain leads up to a conditional branch may now be an arm of an
 // outer region (a nested `?:`, `&&` inside `||`), so the pass runs again, at most four rounds. Between rounds and
@@ -72,10 +72,10 @@
 #define BUSTER_IR_IF_CONVERT_KEY_FLAGS 16u
 // The rows the head reads its condition through, for a recurrence of the join's values (below).
 #define BUSTER_IR_IF_CONVERT_RECURRENCE_ROWS 16u
-// A round's new rows: a folded join's select, and the zero a sunk accumulation selects on its true or false side.
+// A new row holds a folded join's select or the identity for an operation originally on the true or false side.
 #define BUSTER_IR_IF_CONVERT_FRESH_SELECT 0u
-#define BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE 1u
-#define BUSTER_IR_IF_CONVERT_FRESH_ZERO_FALSE 2u
+#define BUSTER_IR_IF_CONVERT_FRESH_OP_TRUE 1u
+#define BUSTER_IR_IF_CONVERT_FRESH_OP_FALSE 2u
 
 typedef struct IrIfConvertResult IrIfConvertResult;
 struct IrIfConvertResult
@@ -105,19 +105,23 @@ struct IrIfConvertRegion
     uint32_t false_from;
     // The region's rows moving to the head, a slice of IrIfConvertWork.moved.
     uint32_t moved;
-    uint32_t moved_count;
+    uint8_t moved_count;
+    // One bit per in-place phi records a two-arm fold and its common operand in each arm.
+    uint8_t pairs;
+    uint8_t true_right;
+    uint8_t false_right;
     uint32_t phis;
-    // The region's new rows, a slice of IrIfConvertWork.fresh: its sunk accumulations' zeros, then a folded join's
+    // The region's new rows, a slice of IrIfConvertWork.fresh: its sunk accumulations' identities, then a folded join's
     // selects, the first of which is `selects` (BUSTER_IR_NONE where the join's phis become the selects).
     uint32_t fresh;
-    uint32_t zeros;
+    uint32_t identities;
     uint32_t selects;
 };
 
 typedef struct IrIfConvertFresh IrIfConvertFresh;
 struct IrIfConvertFresh
 {
-    // A select's phi, or a zero's operation row and the phi it accumulates.
+    // A select's phi, or an identity's operation row and the phi it accumulates.
     uint32_t row;
     uint32_t phi;
     uint32_t kind;
@@ -159,7 +163,7 @@ struct IrIfConvertWork
     uint32_t* alias;
     uint32_t* moved;
     IrIfConvertFresh* fresh;
-    // A sunk accumulation's phi: its operation row; the operation row: its zero's index in `fresh`.
+    // A sunk accumulation's phi: its operation row; the operation row: its identity's index in `fresh`.
     uint32_t* sunk;
     // 1 for an accepted region's arm block, 2 for the candidate's while it is analyzed.
     uint8_t* arms;
@@ -172,6 +176,8 @@ struct IrIfConvertWork
     uint32_t fresh_count;
     // A zero in the constant table, or BUSTER_IR_NONE: a sunk accumulation's zero rows name it.
     uint32_t zero;
+    // One bit per integer type whose accepted AND needs its all-ones constant.
+    uint32_t and_types;
     uint32_t folded;
     uint32_t reused;
     uint32_t loads;
@@ -179,7 +185,7 @@ struct IrIfConvertWork
     uint32_t recurrences;
     // An accepted head could be an arm of an outer region in the next round.
     bool nested;
-    bool scalar;
+    bool paired;
 };
 
 _Static_assert(IR_OP_COUNT == 70, "a new operation needs its class in ir_if_convert_barriers");
@@ -261,28 +267,15 @@ static const uint8_t ir_if_convert_numbered[BUSTER_IR_OP_TABLE] = {
     [IR_LOAD] = 1,
 };
 
-static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t count, bool scalar)
+static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t count)
 {
     uint64_t candidates = 0;
     if (count != 0 && count <= BUSTER_IR_IF_CONVERT_BATCH)
     {
-#if BUSTER_HOST_VECTOR
-        if (!scalar)
-        {
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - count);
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
-            candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
-        }
-        else
-#endif
-        {
-            for (uint32_t lane = 0; lane < count; lane += 1)
-            {
-                candidates |= (uint64_t)(operations[lane] == IR_CBR) << lane;
-            }
-        }
+        const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - count);
+        const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
+        candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
     }
-    (void)scalar;
     return candidates;
 }
 
@@ -291,96 +284,58 @@ static bool ir_if_convert_scalar_type(uint32_t type)
     return (type >= IR_I1 && type <= IR_I64) || type == IR_PTR;
 }
 
-// The last row of [first, end) whose class has one of `classes`' bits, or BUSTER_IR_NONE. Its vector twin looks the
-// classes up 64 opcodes at a time (vpermi2b over the 128-entry table) and tests the observable loads' flags beside.
-static uint32_t ir_if_convert_barrier(const IrFunction* f, uint32_t first, uint32_t end, uint32_t classes, bool scalar)
+// The last row of [first, end) whose class has one of `classes`' bits, or BUSTER_IR_NONE: the classes looked up 64
+// opcodes at a time (vpermi2b over the 128-entry table), the observable loads' flags tested beside.
+static uint32_t ir_if_convert_barrier(const IrFunction* f, uint32_t first, uint32_t end, uint32_t classes)
 {
     uint32_t found = BUSTER_IR_NONE;
-#if BUSTER_HOST_VECTOR
-    if (!scalar)
+    const __m512i low = _mm512_loadu_si512(ir_if_convert_barriers);
+    const __m512i high = _mm512_loadu_si512(ir_if_convert_barriers + 64);
+    uint32_t limit = end;
+    while (limit > first && found == BUSTER_IR_NONE)
     {
-        const __m512i low = _mm512_loadu_si512(ir_if_convert_barriers);
-        const __m512i high = _mm512_loadu_si512(ir_if_convert_barriers + 64);
-        uint32_t limit = end;
-        while (limit > first && found == BUSTER_IR_NONE)
+        const uint32_t start = limit - first > BUSTER_IR_IF_CONVERT_BATCH ? limit - BUSTER_IR_IF_CONVERT_BATCH : first;
+        const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - (limit - start));
+        const __m512i op = _mm512_maskz_loadu_epi8(valid, f->op + start);
+        const __m512i flags = _mm512_maskz_loadu_epi8(valid, f->flags + start);
+        const __m512i class = _mm512_permutex2var_epi8(low, op, high);
+        uint64_t hits = _mm512_mask_test_epi8_mask(valid, class, _mm512_set1_epi8((char)classes));
+        if ((classes & BUSTER_IR_IF_CONVERT_WRITE) != 0)
         {
-            const uint32_t start = limit - first > BUSTER_IR_IF_CONVERT_BATCH ? limit - BUSTER_IR_IF_CONVERT_BATCH : first;
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - (limit - start));
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, f->op + start);
-            const __m512i flags = _mm512_maskz_loadu_epi8(valid, f->flags + start);
-            const __m512i class = _mm512_permutex2var_epi8(low, op, high);
-            uint64_t hits = _mm512_mask_test_epi8_mask(valid, class, _mm512_set1_epi8((char)classes));
-            if ((classes & BUSTER_IR_IF_CONVERT_WRITE) != 0)
-            {
-                hits |= _mm512_mask_cmpeq_epi8_mask(valid, op, _mm512_set1_epi8(IR_LOAD)) & _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_IR_OBSERVABLE));
-            }
-            found = hits != 0 ? start + 63 - (uint32_t)__builtin_clzll(hits) : BUSTER_IR_NONE;
-            limit = start;
+            hits |= _mm512_mask_cmpeq_epi8_mask(valid, op, _mm512_set1_epi8(IR_LOAD)) & _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_IR_OBSERVABLE));
         }
+        found = hits != 0 ? start + 63 - (uint32_t)__builtin_clzll(hits) : BUSTER_IR_NONE;
+        limit = start;
     }
-    else
-#endif
-    {
-        for (uint32_t i = end; i > first && found == BUSTER_IR_NONE; i -= 1)
-        {
-            const uint32_t row = i - 1;
-            const uint32_t op = f->op[row];
-            const bool observable = op == IR_LOAD && (f->flags[row] & BUSTER_IR_OBSERVABLE) != 0 && (classes & BUSTER_IR_IF_CONVERT_WRITE) != 0;
-            found = (ir_if_convert_barriers[op] & classes) != 0 || observable ? row : BUSTER_IR_NONE;
-        }
-    }
-    (void)scalar;
     return found;
 }
 
 // The rows of [first, first + count), count 1 to 16, that pass a key's filter, as bits; the caller checks each.
-static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32_t count, IrIfConvertKey key, bool scalar)
+static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32_t count, IrIfConvertKey key)
 {
-    uint32_t matches = 0;
-#if BUSTER_HOST_VECTOR
-    if (!scalar)
+    const __mmask16 valid = (__mmask16)(0xffffu >> (BUSTER_IR_IF_CONVERT_LANES - count));
+    __mmask16 m = _mm_mask_cmpeq_epi8_mask(valid, _mm_maskz_loadu_epi8(valid, f->op + first), _mm_set1_epi8((char)key.op));
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) != 0)
     {
-        const __mmask16 valid = (__mmask16)(0xffffu >> (BUSTER_IR_IF_CONVERT_LANES - count));
-        __mmask16 m = _mm_mask_cmpeq_epi8_mask(valid, _mm_maskz_loadu_epi8(valid, f->op + first), _mm_set1_epi8((char)key.op));
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) != 0)
-        {
-            m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->type + first), _mm_set1_epi8((char)key.type));
-        }
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) != 0)
-        {
-            m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->flags + first), _mm_set1_epi8((char)key.flags));
-        }
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_A) != 0)
-        {
-            m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->a + first), _mm512_set1_epi32((int)key.a));
-        }
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_B) != 0)
-        {
-            m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->b + first), _mm512_set1_epi32((int)key.b));
-        }
-        if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_C) != 0)
-        {
-            m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->c + first), _mm512_set1_epi32((int)key.c));
-        }
-        matches = m;
+        m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->type + first), _mm_set1_epi8((char)key.type));
     }
-    else
-#endif
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) != 0)
     {
-        for (uint32_t lane = 0; lane < count; lane += 1)
-        {
-            const uint32_t row = first + lane;
-            bool match = f->op[row] == key.op;
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_TYPE) == 0 || f->type[row] == key.type);
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_FLAGS) == 0 || f->flags[row] == key.flags);
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_A) == 0 || f->a[row] == key.a);
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_B) == 0 || f->b[row] == key.b);
-            match = match && ((key.fields & BUSTER_IR_IF_CONVERT_KEY_C) == 0 || f->c[row] == key.c);
-            matches |= (uint32_t)match << lane;
-        }
+        m &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, f->flags + first), _mm_set1_epi8((char)key.flags));
     }
-    (void)scalar;
-    return matches;
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_A) != 0)
+    {
+        m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->a + first), _mm512_set1_epi32((int)key.a));
+    }
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_B) != 0)
+    {
+        m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->b + first), _mm512_set1_epi32((int)key.b));
+    }
+    if ((key.fields & BUSTER_IR_IF_CONVERT_KEY_C) != 0)
+    {
+        m &= _mm512_cmpeq_epi32_mask(_mm512_maskz_loadu_epi32(valid, f->c + first), _mm512_set1_epi32((int)key.c));
+    }
+    return m;
 }
 
 // Whether row q computes row r's value: the same operation, type, flags and fields, value operands compared by their
@@ -436,7 +391,7 @@ static uint32_t ir_if_convert_equal(const IrIfConvertWork* work, uint32_t first,
     while (limit > first && found == BUSTER_IR_NONE)
     {
         const uint32_t start = limit - first > BUSTER_IR_IF_CONVERT_LANES ? limit - BUSTER_IR_IF_CONVERT_LANES : first;
-        uint32_t matches = ir_if_convert_filter(f, start, limit - start, key, work->scalar);
+        uint32_t matches = ir_if_convert_filter(f, start, limit - start, key);
         while (matches != 0 && found == BUSTER_IR_NONE)
         {
             const uint32_t lane = 31 - (uint32_t)__builtin_clz(matches);
@@ -463,9 +418,9 @@ static bool ir_if_convert_accessed(const IrIfConvertWork* work, uint32_t first, 
     {
         const uint32_t start = limit - first > BUSTER_IR_IF_CONVERT_LANES ? limit - BUSTER_IR_IF_CONVERT_LANES : first;
         key.op = IR_LOAD;
-        uint32_t matches = ir_if_convert_filter(f, start, limit - start, key, work->scalar);
+        uint32_t matches = ir_if_convert_filter(f, start, limit - start, key);
         key.op = IR_STORE;
-        matches |= ir_if_convert_filter(f, start, limit - start, key, work->scalar);
+        matches |= ir_if_convert_filter(f, start, limit - start, key);
         while (matches != 0 && !found)
         {
             const uint32_t q = start + (uint32_t)__builtin_ctz(matches);
@@ -647,19 +602,35 @@ static bool ir_if_convert_shared(const IrIfConvertWork* work, const uint32_t* ro
     return shared;
 }
 
-// An in-place phi whose arm value is its other value s combined with x, `s op x` (an addition, a subtraction from s,
-// an or or a xor of an integer), and which nothing else reads: the operation's row selects x or zero instead, and the
-// phi becomes `s op select`, so that a loop's accumulator waits for one operation, not for the select as well
-// (InstCombine's fold of a select of a binary operation; clang -O2's conditional sums add a cmov of zero).
-static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint32_t row_count, uint32_t join_first, uint32_t phis, uint32_t true_from, uint32_t false_from)
+// A boolean parameter or a direct integer comparison. A copy or extension can hide the C truth test of an fcmp;
+// leave those forms to the truth pass and the selector.
+static bool ir_if_convert_integer_condition(const IrFunction* f, uint32_t condition)
+{
+    bool integer = f->op[condition] == IR_PARAM;
+    if (f->op[condition] == IR_ICMP)
+    {
+        const uint32_t operands[] = { f->a[condition], f->b[condition] };
+        integer = ir_integer(f->type[operands[0]]);
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
+        {
+            const uint32_t op = f->op[operands[k]];
+            integer = integer && op != IR_FCMP && op != IR_COPY && op != IR_ZEXT && op != IR_SEXT;
+        }
+    }
+    return integer;
+}
+
+// An unshared arm's s op x selected against s becomes s op select(c, x, identity). AND selects all ones at its
+// width. Admit it only for register arithmetic: a C arm reload can reach this pass without its volatile flag.
+static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint32_t row_count, uint32_t join_first, const IrIfConvertRegion* region, bool arm_load)
 {
     const IrFunction* const f = work->function;
     const IrCfg* const cfg = &work->cfg;
-    for (uint32_t phi = join_first; work->zero != BUSTER_IR_NONE && phi < join_first + phis; phi += 1)
+    for (uint32_t phi = join_first; phi < join_first + region->phis; phi += 1)
     {
         const uint32_t values[2] = {
-            work->alias[ir_if_convert_incoming(f, phi, true_from)],
-            work->alias[ir_if_convert_incoming(f, phi, false_from)],
+            work->alias[ir_if_convert_incoming(f, phi, region->true_from)],
+            work->alias[ir_if_convert_incoming(f, phi, region->false_from)],
         };
         uint32_t chosen = BUSTER_IR_NONE;
         uint32_t side = 0;
@@ -669,11 +640,17 @@ static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint
             const uint32_t other = values[1 - s];
             const uint32_t op = f->op[r];
             const uint32_t type = f->type[r];
+            const bool zero_op = op == IR_ADD || op == IR_SUB || op == IR_OR || op == IR_XOR;
             bool candidate = work->moving[r] != 0 && work->arms[cfg->instruction_blocks[r]] == 2 && work->arms[cfg->instruction_blocks[other]] != 2 &&
-                             work->sunk[r] == BUSTER_IR_NONE && (op == IR_ADD || op == IR_SUB || op == IR_OR || op == IR_XOR) && type == f->type[phi] &&
-                             type >= IR_I8 && type <= IR_I64;
+                             work->sunk[r] == BUSTER_IR_NONE && (op == IR_AND || (zero_op && work->zero != BUSTER_IR_NONE)) &&
+                             type == f->type[phi] && type >= IR_I8 && type <= IR_I64;
             candidate = candidate && (work->alias[f->a[r]] == other || (op != IR_SUB && work->alias[f->b[r]] == other));
-            candidate = candidate && !ir_if_convert_shared(work, rows, row_count, join_first, phis, phi, r);
+            if (candidate && op == IR_AND)
+            {
+                const uint32_t branch = f->block_offsets[(uint64_t)region->head + 1] - 1;
+                candidate = !arm_load && ir_if_convert_integer_condition(f, f->a[branch]);
+            }
+            candidate = candidate && !ir_if_convert_shared(work, rows, row_count, join_first, region->phis, phi, r);
             chosen = candidate ? r : BUSTER_IR_NONE;
             side = s;
         }
@@ -682,12 +659,54 @@ static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint
             work->fresh[work->fresh_count] = (IrIfConvertFresh){
                 .row = chosen,
                 .phi = phi,
-                .kind = side == 0 ? BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE : BUSTER_IR_IF_CONVERT_FRESH_ZERO_FALSE,
+                .kind = side == 0 ? BUSTER_IR_IF_CONVERT_FRESH_OP_TRUE : BUSTER_IR_IF_CONVERT_FRESH_OP_FALSE,
             };
+            if (f->op[chosen] == IR_AND)
+            {
+                work->and_types |= 1u << f->type[chosen];
+            }
             work->sunk[chosen] = work->fresh_count;
             work->sunk[phi] = chosen;
             work->fresh_count += 1;
             work->sunk_count += 1;
+        }
+    }
+}
+
+// A pair of private arm operations can distribute over their join's select. Record operand order
+// while the current arms are marked, before permuting the rows into their final blocks.
+static void ir_if_convert_plan_pairs(IrIfConvertWork* work, IrIfConvertRegion* region, uint32_t join_first)
+{
+    _Static_assert(2 * BUSTER_IR_IF_CONVERT_ARM_ROWS <= UINT8_MAX, "the two arm row lists fit the moved count");
+    _Static_assert(BUSTER_IR_IF_CONVERT_PHI_LIMIT <= 8, "the pair masks hold one bit per phi");
+    const IrFunction* f = work->function;
+    for (uint32_t p = 0; p < region->phis; p += 1)
+    {
+        const uint32_t phi = join_first + p;
+        const uint32_t yes = work->alias[ir_if_convert_incoming(f, phi, region->true_from)];
+        const uint32_t no = work->alias[ir_if_convert_incoming(f, phi, region->false_from)];
+        const uint32_t op = f->op[yes];
+        if (yes != no && op == f->op[no] && (op == IR_ADD || op == IR_SUB || op == IR_OR || op == IR_XOR) &&
+            f->type[phi] >= IR_I8 && f->type[phi] <= IR_I64 && work->moving[yes] != 0 && work->moving[no] != 0 &&
+            work->arms[work->cfg.instruction_blocks[yes]] == 2 && work->arms[work->cfg.instruction_blocks[no]] == 2)
+        {
+            const uint32_t ya = work->alias[f->a[yes]];
+            const uint32_t yb = work->alias[f->b[yes]];
+            const uint32_t na = work->alias[f->a[no]];
+            const uint32_t nb = work->alias[f->b[no]];
+            const bool commute = op != IR_SUB;
+            const bool left = ya == na || (commute && ya == nb);
+            const bool right = commute && (yb == na || yb == nb);
+            const uint32_t* moved = work->moved + region->moved;
+            if ((left || right) && !ir_if_convert_shared(work, moved, region->moved_count, join_first, region->phis, phi, yes) &&
+                !ir_if_convert_shared(work, moved, region->moved_count, join_first, region->phis, phi, no))
+            {
+                work->paired = true;
+                region->pairs |= 1u << p;
+                region->true_right |= (uint32_t)!left << p;
+                region->false_right |= (uint32_t)(na != (left ? ya : yb)) << p;
+                work->sunk_count += 1;
+            }
         }
     }
 }
@@ -774,8 +793,8 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
     uint32_t released = BUSTER_IR_NONE;
     if (safe && row_count != 0)
     {
-        written = ir_if_convert_barrier(f, head_first, terminator, BUSTER_IR_IF_CONVERT_WRITE, work->scalar);
-        released = ir_if_convert_barrier(f, head_first, terminator, BUSTER_IR_IF_CONVERT_RELEASE, work->scalar);
+        written = ir_if_convert_barrier(f, head_first, terminator, BUSTER_IR_IF_CONVERT_WRITE);
+        released = ir_if_convert_barrier(f, head_first, terminator, BUSTER_IR_IF_CONVERT_RELEASE);
     }
     const uint32_t readable = written == BUSTER_IR_NONE ? head_first : written + 1;
     const uint32_t proven = released == BUSTER_IR_NONE ? head_first : released + 1;
@@ -882,11 +901,15 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
             }
         }
         region.moved_count = work->moved_count - region.moved;
+        if (!fold && sides[0].count != 0 && sides[1].count != 0 && region.moved_count >= 2)
+        {
+            ir_if_convert_plan_pairs(work, &region, join_first);
+        }
         if (!fold)
         {
-            ir_if_convert_sink(work, rows, row_count, join_first, phis, true_from, false_from);
+            ir_if_convert_sink(work, rows, row_count, join_first, &region, loads != 0);
         }
-        region.zeros = work->fresh_count - region.fresh;
+        region.identities = work->fresh_count - region.fresh;
         region.selects = fold ? work->fresh_count : BUSTER_IR_NONE;
         for (uint32_t p = 0; fold && p < phis; p += 1)
         {
@@ -941,6 +964,40 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
     }
 }
 
+// With both arm operands in their final order, the later operation can select either differing
+// operand. The join applies the common operation, and normal DCE drops the earlier arm operation.
+static void ir_if_convert_rewrite_pairs(const IrIfConvertWork* work, IrFunction* view, const uint32_t* order)
+{
+    for (uint32_t r = 0; r < work->region_count; r += 1)
+    {
+        const IrIfConvertRegion* region = work->regions + r;
+        uint32_t pairs = region->pairs;
+        while (pairs != 0)
+        {
+            const uint32_t p = (uint32_t)__builtin_ctz(pairs);
+            const uint32_t phi = view->block_offsets[region->join] + p;
+            const uint32_t yes = view->b[phi];
+            const uint32_t no = view->c[phi];
+            const uint32_t select = yes > no ? yes : no;
+            const bool true_right = (region->true_right & (1u << p)) != 0;
+            const bool false_right = (region->false_right & (1u << p)) != 0;
+            const uint32_t common = true_right ? view->b[yes] : view->a[yes];
+            const uint32_t x = true_right ? view->a[yes] : view->b[yes];
+            const uint32_t y = false_right ? view->a[no] : view->b[no];
+            view->op[phi] = view->op[yes];
+            view->op[select] = IR_SELECT;
+            view->a[select] = view->a[phi];
+            view->b[select] = x;
+            view->c[select] = y;
+            view->a[phi] = common;
+            view->b[phi] = select;
+            view->c[phi] = BUSTER_IR_NONE;
+            work->sunk[order[select]] = order[phi];
+            pairs &= pairs - 1;
+        }
+    }
+}
+
 // Row i of the input as output row `out`: its operands by their representatives' new rows, a head's branch to its
 // join, an arm's branch as `unreachable`, a join's phi as its select or with one entry for the region's two, and the
 // phis' and calls' value slices appended from `extra` on. The next free extra word.
@@ -967,11 +1024,11 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
     const uint32_t sunk = work->sunk[i];
     if (sunk != BUSTER_IR_NONE && f->op[i] != IR_PHI)
     {
-        // A sunk accumulation's operation selects its other operand x or zero, on the side the operation was.
-        const IrIfConvertFresh zero = work->fresh[sunk];
-        const IrIfConvertRegion region = work->regions[work->joins[work->cfg.instruction_blocks[zero.phi]] - 1];
-        const bool on_true = zero.kind == BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE;
-        const uint32_t other = alias[ir_if_convert_incoming(f, zero.phi, on_true ? region.false_from : region.true_from)];
+        // A sunk accumulation's operation selects its other operand x or the identity, on the side the operation was.
+        const IrIfConvertFresh identity = work->fresh[sunk];
+        const IrIfConvertRegion region = work->regions[work->joins[work->cfg.instruction_blocks[identity.phi]] - 1];
+        const bool on_true = identity.kind == BUSTER_IR_IF_CONVERT_FRESH_OP_TRUE;
+        const uint32_t other = alias[ir_if_convert_incoming(f, identity.phi, on_true ? region.false_from : region.true_from)];
         const uint32_t x = alias[f->a[i]] == other ? alias[f->b[i]] : alias[f->a[i]];
         view->op[out] = IR_SELECT;
         view->a[out] = values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]];
@@ -981,9 +1038,9 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
     else if (sunk != BUSTER_IR_NONE)
     {
         // Its phi: the operation of the other value and the select.
-        const IrIfConvertFresh zero = work->fresh[work->sunk[sunk]];
+        const IrIfConvertFresh identity = work->fresh[work->sunk[sunk]];
         const IrIfConvertRegion region = work->regions[join - 1];
-        const bool on_true = zero.kind == BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE;
+        const bool on_true = identity.kind == BUSTER_IR_IF_CONVERT_FRESH_OP_TRUE;
         view->op[out] = f->op[sunk];
         view->a[out] = values[alias[ir_if_convert_incoming(f, i, on_true ? region.false_from : region.true_from)]];
         view->b[out] = values[sunk];
@@ -1056,6 +1113,55 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
     return extra;
 }
 
+// The input's constant indices stay valid. Borrow its table when it already holds the masks, otherwise append
+// just the missing widths to one private copy. Functions without a sunk AND need no search or copy.
+static IrError ir_if_convert_ones(const IrIfConvertWork* work, Arena* output, IrFunction* view, uint32_t* indices)
+{
+    const IrFunction* const f = work->function;
+    IrConstant added[IR_I64 - IR_I8 + 1];
+    uint32_t count = 0;
+    IrError error = IR_OK;
+    for (uint32_t types = work->and_types; types != 0 && error == IR_OK; types &= types - 1)
+    {
+        const uint32_t type = (uint32_t)__builtin_ctz(types);
+        const uint64_t mask = UINT64_MAX >> (64 - ir_type_bits[type]);
+        uint32_t index = 0;
+        while (index < f->constant_count && (f->constants[index].low != mask || f->constants[index].high != 0))
+        {
+            index += 1;
+        }
+        if (index == f->constant_count)
+        {
+            if (count == UINT32_MAX - index)
+            {
+                error = IR_ERROR_LIMIT;
+            }
+            else
+            {
+                index += count;
+                added[count++] = (IrConstant){ .low = mask };
+            }
+        }
+        indices[type - IR_I8] = index;
+    }
+    if (error == IR_OK && count != 0)
+    {
+        bool ok = true;
+        view->constant_count += count;
+        view->constants = ir_allocate(output, view->constant_count, sizeof(IrConstant), &ok);
+        if (ok)
+        {
+            if (f->constant_count != 0)
+            {
+                memcpy(view->constants, f->constants, (uint64_t)f->constant_count * sizeof(IrConstant));
+            }
+            memcpy(view->constants + f->constant_count, added, count * sizeof(IrConstant));
+        }
+        error = ok ? IR_OK : IR_ERROR_MEMORY;
+    }
+    return error;
+}
+
 static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output, Arena* scratch, IrFunction* result)
 {
     const IrFunction* const f = work->function;
@@ -1103,6 +1209,11 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
         view.extra_count = (uint32_t)extras;
         error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
+    uint32_t ones[IR_I64 - IR_I8 + 1] = { 0 };
+    if (error == IR_OK && work->and_types != 0)
+    {
+        error = ir_if_convert_ones(work, output, &view, ones);
+    }
     if (error == IR_OK && !ir_debug_create(output, &view, f->debug))
     {
         error = IR_ERROR_MEMORY;
@@ -1119,7 +1230,7 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
         {
             memcpy(view.calls, f->calls, (uint64_t)f->call_count * sizeof(IrCall));
         }
-        // A head keeps its rows, then takes its sunk accumulations' zeros, its arms' moving rows and a folded region's
+        // A head keeps its rows, then takes its sunk accumulations' identities, its arms' moving rows and a folded region's
         // selects before its branch. An arm keeps the rows that don't move, as an unreachable stub.
         uint32_t next = 0;
         for (uint32_t block = 0; block < blocks; block += 1)
@@ -1134,7 +1245,7 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
                 {
                     order[next++] = i;
                 }
-                for (uint32_t z = 0; z < region.zeros; z += 1)
+                for (uint32_t z = 0; z < region.identities; z += 1)
                 {
                     order[next++] = count + region.fresh + z;
                 }
@@ -1172,6 +1283,38 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
             }
         }
         ir_debug_remap(f, &view, values, NULL, NULL);
+        uint32_t extra = f->extra_count;
+        for (uint32_t out = 0; out < total; out += 1)
+        {
+            const uint32_t i = order[out];
+            if (i >= count)
+            {
+                // A folded region's select of a phi's two entries, or a sunk accumulation's identity, in the head.
+                const IrIfConvertFresh entry = work->fresh[i - count];
+                const IrIfConvertRegion region = work->regions[work->joins[work->cfg.instruction_blocks[entry.phi]] - 1];
+                const bool select = entry.kind == BUSTER_IR_IF_CONVERT_FRESH_SELECT;
+                view.op[out] = select ? IR_SELECT : IR_CONST;
+                view.type[out] = f->type[entry.row];
+                view.flags[out] = 0;
+                view.alignment_log2[out] = 0;
+                view.a[out] = select ? values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]] :
+                              f->op[entry.row] == IR_AND ? ones[view.type[out] - IR_I8] : work->zero;
+                view.b[out] = select ? values[alias[ir_if_convert_incoming(f, entry.phi, region.true_from)]] : BUSTER_IR_NONE;
+                view.c[out] = select ? values[alias[ir_if_convert_incoming(f, entry.phi, region.false_from)]] : BUSTER_IR_NONE;
+                if (view.debug != NULL)
+                {
+                    view.debug->origins[out] = BUSTER_IR_NONE;
+                }
+            }
+            else
+            {
+                extra = ir_if_convert_row(work, &view, values, fresh, i, out, extra);
+            }
+        }
+        if (work->paired)
+        {
+            ir_if_convert_rewrite_pairs(work, &view, order);
+        }
         // A sunk accumulation's operation row now holds its select, not the value a binding of it described.
         for (uint32_t k = 0; view.debug != NULL && work->sunk_count != 0 && k < view.debug->binding_count; k += 1)
         {
@@ -1191,33 +1334,6 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
             {
                 scope->kind = IR_DEBUG_BIND_UNAVAILABLE;
                 scope->value = BUSTER_IR_NONE;
-            }
-        }
-        uint32_t extra = f->extra_count;
-        for (uint32_t out = 0; out < total; out += 1)
-        {
-            const uint32_t i = order[out];
-            if (i >= count)
-            {
-                // A folded region's select of a phi's two entries, or a sunk accumulation's zero, in the head.
-                const IrIfConvertFresh entry = work->fresh[i - count];
-                const IrIfConvertRegion region = work->regions[work->joins[work->cfg.instruction_blocks[entry.phi]] - 1];
-                const bool select = entry.kind == BUSTER_IR_IF_CONVERT_FRESH_SELECT;
-                view.op[out] = select ? IR_SELECT : IR_CONST;
-                view.type[out] = f->type[entry.row];
-                view.flags[out] = 0;
-                view.alignment_log2[out] = 0;
-                view.a[out] = select ? values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]] : work->zero;
-                view.b[out] = select ? values[alias[ir_if_convert_incoming(f, entry.phi, region.true_from)]] : BUSTER_IR_NONE;
-                view.c[out] = select ? values[alias[ir_if_convert_incoming(f, entry.phi, region.false_from)]] : BUSTER_IR_NONE;
-                if (view.debug != NULL)
-                {
-                    view.debug->origins[out] = BUSTER_IR_NONE;
-                }
-            }
-            else
-            {
-                extra = ir_if_convert_row(work, &view, values, fresh, i, out, extra);
             }
         }
         view.arena_bytes = output->length - mark;
@@ -1260,29 +1376,22 @@ static bool ir_if_convert_fold_cast(IrFunction* function, uint32_t row)
     return operation != IR_OP_COUNT;
 }
 
-static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
+// The narrowing casts among `lanes` (1 to 64) operations, a bit each.
+static uint64_t ir_if_convert_truncations(const uint8_t* operations, uint32_t lanes)
+{
+    const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - lanes);
+    const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
+    return valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_TRUNC));
+}
+
+static void ir_if_convert_fold_casts(IrFunction* function)
 {
     const uint32_t count = function->instruction_count;
     const uint8_t* const operations = function->op;
     for (uint64_t first = 0; first < count; first += BUSTER_IR_IF_CONVERT_BATCH)
     {
         const uint32_t lanes = count - first < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first : BUSTER_IR_IF_CONVERT_BATCH;
-        uint64_t candidates = 0;
-#if BUSTER_HOST_VECTOR
-        if (!scalar)
-        {
-            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - lanes);
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, operations + first);
-            candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_TRUNC));
-        }
-        else
-#endif
-        {
-            for (uint32_t lane = 0; lane < lanes; lane += 1)
-            {
-                candidates |= (uint64_t)(operations[first + lane] == IR_TRUNC) << lane;
-            }
-        }
+        uint64_t candidates = ir_if_convert_truncations(operations + first, lanes);
         while (candidates != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
@@ -1290,15 +1399,13 @@ static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
             candidates &= candidates - 1;
         }
     }
-    (void)scalar;
 }
 
 // One round over `function`: its regions found, then rewritten into output. A round without regions borrows it.
-static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_candidate, Arena* output, Arena* scratch, bool scalar, IrIfConvertResult* converted, bool* again)
+static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_candidate, Arena* output, Arena* scratch, IrIfConvertResult* converted, bool* again)
 {
     IrIfConvertWork work = {
         .function = function,
-        .scalar = scalar,
     };
     const uint32_t count = function->instruction_count;
     const uint8_t* const operations = function->op;
@@ -1367,7 +1474,7 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
         for (uint64_t first = first_candidate; first < count; first += BUSTER_IR_IF_CONVERT_BATCH)
         {
             const uint32_t lanes = count - first < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first : BUSTER_IR_IF_CONVERT_BATCH;
-            uint64_t candidates = ir_if_convert_candidates(operations + first, lanes, scalar);
+            uint64_t candidates = ir_if_convert_candidates(operations + first, lanes);
             while (candidates != 0)
             {
                 ir_if_convert_region(&work, (uint32_t)first + (uint32_t)__builtin_ctzll(candidates));
@@ -1383,8 +1490,8 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
         {
             // The new selects' truth values tested against zero, as i1 selects (ir_truth.c), on the owned columns.
             // Then trunc(zext/sext x) becomes one cast of x, so a sunk _Bool conversion is not a second arm row (#2846).
-            ir_truth_simplify_values(&rewritten, scalar);
-            ir_if_convert_fold_casts(&rewritten, scalar);
+            ir_truth_simplify_values(&rewritten);
+            ir_if_convert_fold_casts(&rewritten);
             converted->function = rewritten;
             converted->regions += work.region_count;
             converted->selects += work.select_count;
@@ -1400,7 +1507,7 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
     return check;
 }
 
-static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* scratch, bool scalar, IrIfConvertResult* result)
+static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* scratch, IrIfConvertResult* result)
 {
     const uint64_t om = output->length;
     const uint64_t sm = scratch->length;
@@ -1415,7 +1522,7 @@ static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* s
         while (first_candidate < count && !candidate)
         {
             const uint32_t lanes = count - first_candidate < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first_candidate : BUSTER_IR_IF_CONVERT_BATCH;
-            candidate = ir_if_convert_candidates(operations + first_candidate, lanes, scalar) != 0;
+            candidate = ir_if_convert_candidates(operations + first_candidate, lanes) != 0;
             first_candidate += candidate ? 0 : BUSTER_IR_IF_CONVERT_BATCH;
         }
     }
@@ -1430,7 +1537,7 @@ static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* s
         const uint64_t mark = scratch->length;
         const IrFunction input = converted.function;
         // A later round's input has no conditional branch before the first one's.
-        check = ir_if_convert_round(&input, round == 0 ? first_candidate : 0, output, scratch, scalar, &converted, &again);
+        check = ir_if_convert_round(&input, round == 0 ? first_candidate : 0, output, scratch, &converted, &again);
         again = again && check.error == IR_OK;
         arena_pop_to(scratch, mark);
     }

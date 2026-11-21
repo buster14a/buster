@@ -158,9 +158,13 @@ typedef enum Tier1SelectRule
     // result, ucomis and setcc, and for == and != the parity flag's setcc and their and or or, since unordered sets ZF. A branch
     // on one, < and <= with its operands swapped, `condition` the unsigned condition (UGT, UGE, or their negations ULE and
     // ULT) whose jump reads ucomis's flags: ja and jae are false for unordered operands, and jbe and jb, !(a > b) and
-    // !(a >= b), true. The conversions (FLOAT_CONVERT, `scale` its kind: BUSTER_TIER1_FLOAT_FROM_SIGNED and the others,
-    // `width` and `source_width` the result's and the operand's bytes, an integer's by its memory width). A return of
-    // values[0] in xmm0. Only the CFG consumer takes them.
+    // !(a >= b), true. A select of one (FLOAT_SELECT_COMPARE, #2791), whose integer result is a general register's:
+    // values[0] and values[1] the ucomis's operands and `condition` as the branch's, or EQ and NE, unswapped, which read
+    // the parity flag too (#2922); values[2] and values[3] the select's values where the comparison holds and where it
+    // doesn't, `width` the select's and `source_width` the comparison's (tier1_select_expand's records). The conversions
+    // (FLOAT_CONVERT, `scale` its kind: BUSTER_TIER1_FLOAT_FROM_SIGNED and the others, `width` and `source_width` the
+    // result's and the operand's bytes, an integer's by its memory width). A return of values[0] in xmm0. Only the CFG
+    // consumer takes them.
     TIER1_RULE_FLOAT_CONSTANT,
     TIER1_RULE_FLOAT_COPY,
     TIER1_RULE_FLOAT_BINARY,
@@ -176,6 +180,7 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_STORE_ADDRESS,
     TIER1_RULE_FLOAT_COMPARE,
     TIER1_RULE_FLOAT_BRANCH_COMPARE,
+    TIER1_RULE_FLOAT_SELECT_COMPARE,
     TIER1_RULE_FLOAT_CONVERT,
     TIER1_RULE_FLOAT_CONVERT_WIDE,
     TIER1_RULE_FLOAT_RETURN,
@@ -248,6 +253,10 @@ typedef enum Tier1SelectRule
     // the prologue saves the callee-saved ones it touches. `immediate` is the body's index in IrFunction.asm_bodies (tier1_select_asm_supported).
     // Only the CFG consumer takes it.
     TIER1_RULE_ASM,
+    // A signed i32 or i64 in memory converted directly into an xmm register (#2829). Its scale belongs to the address.
+    TIER1_RULE_FLOAT_CONVERT_LOAD,
+    // The second multiplicand or the addend is in memory. The two register operands precede the base and index.
+    TIER1_RULE_FLOAT_FMA_LOAD,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -433,9 +442,9 @@ typedef enum Tier1SelectRule
 // - FROM_BITS and TO_BITS, a bitcast between an F32 and an I32 or an F64 and an I64: movd or movq.
 // Each conversion to a floating value zeroes its destination first (xorps), but a resize: cvtsi2s* writes its low
 // element alone, which would otherwise wait for the register's last writer.
-// TIER1_RULE_FLOAT_CONVERT_WIDE is an unsigned I64's (#141), FROM_UNSIGNED or TO_UNSIGNED by its `scale`, whose values
-// past INT64_MAX no single conversion takes: a sequence longer than a node's room, through the fixed-register path's
-// (tier1_select_fixed), which names the scratch register alone, holding no value (tier1_select_fixed_registers).
+// TIER1_RULE_FLOAT_CONVERT_WIDE is an unsigned I64's (#141), FROM_UNSIGNED or TO_UNSIGNED by its `scale`.
+// The fixed-register path (tier1_select_fixed) holds the software sequence or, for FROM_UNSIGNED on targets
+// admitting its EVEX register form, a cleared destination and a direct conversion using MXCSR rounding.
 #define BUSTER_TIER1_FLOAT_FROM_SIGNED 0
 #define BUSTER_TIER1_FLOAT_FROM_UNSIGNED 1
 #define BUSTER_TIER1_FLOAT_TO_SIGNED 2
@@ -446,6 +455,8 @@ typedef enum Tier1SelectRule
 // The vector class's scratch register, which holds no value: a non-commutative operation's right operand where the
 // allocation gave it the destination.
 #define BUSTER_TIER1_SELECT_FLOAT_SCRATCH 15
+#define BUSTER_TIER1_FMA_MEMORY_ADDEND 1
+#define BUSTER_TIER1_FMA_COMMUTATIVE_ADDEND 2
 
 // Whether a rule is a mask's (#179), which the uniform-register consumer and the straight-line one don't take.
 static bool tier1_select_mask_rule(uint32_t rule)
@@ -456,7 +467,7 @@ static bool tier1_select_mask_rule(uint32_t rule)
 // Whether a rule is a floating value's (#141), which only the CFG consumer takes, its vector class's.
 static bool tier1_select_float_rule(uint32_t rule)
 {
-    return rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN;
+    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || (rule >= TIER1_RULE_FLOAT_CONVERT_LOAD && rule <= TIER1_RULE_FLOAT_FMA_LOAD);
 }
 
 // Register-only leaf bodies use caller-saved registers. R11 is reserved for a destructive instruction's second
@@ -537,8 +548,7 @@ static void tier1_select_request(Tier1SelectRecords* result, X86Operation operat
 }
 
 // A function's requests, in its records' order, held until x86_choose_forms' 32 lanes are full or the function's records
-// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context. On the
-// scalar path (`vector` false) each is chosen as it comes, by the twin, and none is held.
+// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context.
 #define BUSTER_TIER1_SELECT_BATCH 32
 typedef struct Tier1SelectRequests Tier1SelectRequests;
 struct Tier1SelectRequests
@@ -550,7 +560,6 @@ struct Tier1SelectRequests
     uint16_t forms[BUSTER_TIER1_SELECT_BATCH];
     uint8_t destinations[BUSTER_TIER1_SELECT_BATCH];
     uint32_t count;
-    bool vector;
 };
 
 // The held requests' forms, chosen in one batch by x86_choose_forms: each record the chosen form's, or left empty where
@@ -570,19 +579,10 @@ static void tier1_select_requests_flush(Tier1SelectRequests* requests, X86Instru
 }
 
 // The node's request, if it has one, its record at `first` among the function's `records`: held, a full batch's forms
-// chosen into the records first, or on the scalar path chosen at once.
+// chosen into the records first.
 static void tier1_select_requests_add(Tier1SelectRequests* requests, const Tier1SelectRecords* selected, uint32_t first, X86Instruction* records)
 {
-    if (selected->requested && !requests->vector)
-    {
-        uint16_t form = X86_FORM_NONE;
-        x86_choose_forms_scalar(&selected->row, &selected->value, &selected->context, 1, &form);
-        if (form != X86_FORM_NONE)
-        {
-            records[first + selected->request] = x86_choice_instruction(form, (X86Instruction){ .rm = selected->destination }, selected->value);
-        }
-    }
-    else if (selected->requested)
+    if (selected->requested)
     {
         if (requests->count == BUSTER_TIER1_SELECT_BATCH)
         {
@@ -804,11 +804,15 @@ struct Tier1SelectHoles
     // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
     // (tier1_select_vector_forms, tier1_select_class_forms). The CFG consumer sets it (Tier1EmitPrepared.vex).
     bool vex;
+    // Two target allowlist bits, one for each precision of an unsigned dword memory conversion.
+    uint8_t unsigned_dword_memory_forms;
     // The target has no AVX either (the x86-64 baseline, x86-64-v2: #141's SSE targets): its 16-byte vectors take legacy
     // SSE's forms, two operands the destination's the first (Tier1EmitPrepared.sse; `vex` is set too).
     bool sse;
     // The target has AVX2 (Tier1EmitPrepared.avx2): without it, a VEX target's 32-byte vectors take AVX's forms alone.
     bool avx2;
+    // Bits 0 and 1 allow the target's unsigned qword register conversion to float and double.
+    uint8_t unsigned_i64_float_forms;
 };
 
 static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
@@ -877,6 +881,22 @@ static X86Instruction tier1_select_shift(X86Operation operation, uint32_t width,
     const uint16_t form = operation == X86_OPERATION_SAR ? (width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8) : (width == 8 ? X86_FORM_SHR_RM64_IMM8 : X86_FORM_SHR_RM32_IMM8);
     const X86Instruction result = { .immediate = (int32_t)count, .rm = reg, .form = form };
     return result;
+}
+
+// A fused select's records past its comparison's (#2676, #2791): a move of the value the destination doesn't hold, then a
+// cmov of the other value by the comparison's condition, inverted where the destination holds the value it chooses.
+// Neither writes the flags, as the xor zero idiom would.
+static void tier1_select_fused_moves(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination, uint32_t width)
+{
+    const bool inverse = destination == holes->third;
+    const uint8_t initial = inverse ? holes->third : holes->fourth;
+    const uint8_t alternate = inverse ? holes->fourth : holes->third;
+    const uint8_t condition = inverse ? tier1_select_negations[holes->condition] : holes->condition;
+    if (destination != initial)
+    {
+        tier1_select_append(result, tier1_select_move(width, destination, initial));
+    }
+    tier1_select_append(result, tier1_select_register_record(tier1_select_condition_moves[width == 8][condition], destination, alternate));
 }
 
 static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
@@ -2397,19 +2417,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_SELECT_COMPARE:
     {
         // The comparison at its own width first, which reads its operands before the move can overwrite one in the
-        // destination; then the move and the cmov, neither of which writes the flags (#2676). The xor zero idiom would.
+        // destination; then the move and the cmov (#2676).
         Tier1SelectHoles comparison = *holes;
         comparison.width = holes->source_width;
         tier1_select_compare(&result, &comparison);
-        const bool inverse = destination == holes->third;
-        const uint8_t initial = inverse ? holes->third : holes->fourth;
-        const uint8_t alternate = inverse ? holes->fourth : holes->third;
-        const uint8_t condition = inverse ? tier1_select_negations[holes->condition] : holes->condition;
-        if (destination != initial)
-        {
-            tier1_select_append(&result, tier1_select_move(width, destination, initial));
-        }
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_condition_moves[width == 8][condition], destination, alternate));
+        tier1_select_fused_moves(&result, holes, destination, width);
         break;
     }
     case TIER1_RULE_JUMP:
@@ -2944,47 +2956,76 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     }
     case TIER1_RULE_FLOAT_FMA:
+    case TIER1_RULE_FLOAT_FMA_LOAD:
     {
         // a * b + c: x86's FMA3 forms take a NaN in the formula's order whatever their form (IR_FMA), so the form is the
         // one whose destination holds an operand already: 213 where it is b's (x = a * x + c), 231 where it
-        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c); otherwise b's copy into the destination, then
-        // 213. vvvv and rm are the other two, in the formula's order.
+        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c). A fresh destination starts from a copy
+        // of b for a register 213, or of c for a memory 231. vvvv and rm preserve the formula's operand order.
         static const uint16_t forms[2][3] = {
             { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
             { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
         };
         const uint8_t x = destination & 15;
         const uint8_t a = holes->left & 15;
-        const uint8_t b = holes->right & 15;
-        const uint8_t c = holes->third & 15;
+        const bool memory = holes->rule == TIER1_RULE_FLOAT_FMA_LOAD;
+        const uint8_t b = memory ? BUSTER_TIER1_SELECT_NO_REGISTER : holes->right & 15;
+        const uint8_t c = (memory ? holes->right : holes->third) & 15;
         const uint32_t d = width == 8 ? 1 : 0;
-        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : 0;
+        if (memory && holes->condition != 0)
+        {
+            // 213 takes its addend in r/m. When x holds a, exchanging the multiplicands would select
+            // a different NaN if both carry one. Load the addend separately in that case.
+            const uint8_t multiplier = holes->right & 15;
+            const bool keep_a = x == a && a != multiplier && holes->condition == BUSTER_TIER1_FMA_MEMORY_ADDEND;
+            X86Instruction record = holes->memory;
+            if (keep_a)
+            {
+                record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load;
+                record.reg = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+                tier1_select_append(&result, record);
+                record = tier1_select_register_record(forms[d][2], x, multiplier);
+                record.vvvv = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+            }
+            else
+            {
+                if (x != a && x != multiplier)
+                {
+                    tier1_select_append(&result, tier1_select_float_move(x, multiplier));
+                }
+                record.form = forms[d][0];
+                record.reg = x;
+                record.vvvv = x == a ? multiplier : a;
+            }
+            tier1_select_append(&result, record);
+            break;
+        }
+        // With b in memory, use a's register for 132 or c's for 231. In a fresh register copy c and keep a in vvvv.
+        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : memory ? 1 : 0;
         if (x != b && x != c && x != a)
         {
-            tier1_select_append(&result, tier1_select_float_move(x, b));
+            tier1_select_append(&result, tier1_select_float_move(x, memory ? c : b));
         }
-        const X86Instruction record = {
-            .form = forms[d][kind],
-            .reg = x,
-            .vvvv = kind == 2 ? c : a,
+        X86Instruction record = memory ? holes->memory : (X86Instruction){
             .rm = kind == 0 ? c : b,
             .mode = BUSTER_X86_REGISTER_DIRECT,
         };
+        record.form = forms[d][kind];
+        record.reg = x;
+        record.vvvv = kind == 2 ? c : a;
         tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_FLOAT_NEGATE:
     {
-        // The sign bit in the vector class's scratch register, through the scratch general register, and the value's
-        // copy in the destination xor it: the value stays in its class, and its other bits as they were.
+        // When the source stays live in another register the destination can hold the sign mask itself. For an
+        // in-place negate the vector scratch holds the mask. XOR leaves every other bit of the source unchanged.
         const uint8_t x = destination & 15;
+        const uint8_t source = holes->left & 15;
+        const uint8_t mask = x == source ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : x;
         tier1_select_request(&result, X86_OPERATION_MOV, width, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(UINT64_C(1) << (width * 8 - 1)), 0);
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, BUSTER_TIER1_SELECT_FLOAT_SCRATCH, BUSTER_TIER1_SELECT_SCRATCH));
-        if (x != (holes->left & 15))
-        {
-            tier1_select_append(&result, tier1_select_float_move(x, holes->left & 15));
-        }
-        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, BUSTER_TIER1_SELECT_FLOAT_SCRATCH));
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, mask, BUSTER_TIER1_SELECT_SCRATCH));
+        tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x == source ? mask : source));
         break;
     }
     // One movss or movsd each, the node's last record, which the CFG consumer's frame-object patch rewrites; a masked
@@ -3051,6 +3092,43 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
+    case TIER1_RULE_FLOAT_SELECT_COMPARE:
+    {
+        // ucomis, then the select's mov and cmov (#2791), whose condition is the branch's: true for unordered operands only
+        // negated. The comparison's operands are in the vector class, so the general destination holds neither. == and !=
+        // (#2922) take their equal value only where ZF is set and PF clear: the select's true value for ==, its false value
+        // for !=, then cmovne and cmovp of the other one, as clang's select of an `fcmp oeq`. Where the destination holds
+        // that other value, the scratch register keeps it for the cmovp past the cmove of the equal value.
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(holes->source_width)->compare, holes->left & 15, holes->right & 15));
+        const uint32_t condition = holes->condition;
+        if (condition == IR_EQ || condition == IR_NE)
+        {
+            const uint16_t* moves = tier1_select_condition_moves[width == 8];
+            const uint8_t equal = condition == IR_EQ ? holes->third : holes->fourth;
+            const uint8_t other = condition == IR_EQ ? holes->fourth : holes->third;
+            const uint16_t parity = width == 8 ? X86_FORM_CMOVP_R64_RM64 : X86_FORM_CMOVP_R32_RM32;
+            if (destination == other && other != equal)
+            {
+                tier1_select_append(&result, tier1_select_move(width, BUSTER_TIER1_SELECT_SCRATCH, other));
+                tier1_select_append(&result, tier1_select_register_record(moves[IR_EQ], destination, equal));
+                tier1_select_append(&result, tier1_select_register_record(parity, destination, BUSTER_TIER1_SELECT_SCRATCH));
+            }
+            else
+            {
+                if (destination != equal)
+                {
+                    tier1_select_append(&result, tier1_select_move(width, destination, equal));
+                }
+                tier1_select_append(&result, tier1_select_register_record(moves[IR_NE], destination, other));
+                tier1_select_append(&result, tier1_select_register_record(parity, destination, other));
+            }
+        }
+        else
+        {
+            tier1_select_fused_moves(&result, holes, destination, width);
+        }
+        break;
+    }
     case TIER1_RULE_FLOAT_CONVERT:
     {
         const uint32_t source_width = holes->source_width;
@@ -3101,6 +3179,44 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             tier1_select_append(&result, (X86Instruction){0});
             break;
         }
+        break;
+    }
+    case TIER1_RULE_FLOAT_CONVERT_LOAD:
+    {
+        X86Instruction record = holes->memory;
+        record.reg = destination & 15;
+        if (holes->condition == BUSTER_TIER1_FLOAT_FROM_SIGNED)
+        {
+            record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
+            // Legacy cvtsi2ss/sd preserve the upper lanes of their destination. Break that dependency as for a register input.
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, record.reg, record.reg));
+        }
+        else if (holes->condition == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
+        {
+            const uint8_t x = destination & 15;
+            if ((holes->unsigned_dword_memory_forms & (width == 4 ? 1u : 2u)) == 0)
+            {
+                // A dword load zero-extends into the reserved scratch. Its qword is safe to convert as signed.
+                record.form = X86_FORM_MOV_R32_RM32;
+                record.reg = BUSTER_TIER1_SELECT_SCRATCH;
+                tier1_select_append(&result, record);
+                record = tier1_select_register_record(tier1_select_float_forms(width)->from_integer[1], x, BUSTER_TIER1_SELECT_SCRATCH);
+            }
+            else
+            {
+                record.form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM32 : X86_FORM_VCVTUSI2SD_X_X_RM32;
+                record.reg = x;
+                record.vvvv = x;
+            }
+            // Legacy destinations and EVEX merge inputs both get a dependency-breaking zero.
+            tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+        }
+        else
+        {
+            // Truncate to a general register. An unsigned I32 fits in the signed 64-bit conversion's result.
+            record.form = tier1_select_float_forms(holes->source_width)->to_integer[width == 8 || holes->condition == BUSTER_TIER1_FLOAT_TO_UNSIGNED];
+        }
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_FLOAT_RETURN:
@@ -3317,6 +3433,18 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
             records[count++] = tier1_select_move(8, holes->destination, X86_REGISTER_RDX);
         }
     }
+    else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED &&
+             (holes->unsigned_i64_float_forms & (width == 4 ? 1u : 2u)) != 0)
+    {
+        // A zero merge source breaks the destination dependency and clears the other scalar lanes.
+        // The register form uses MXCSR rounding, including when a large positive integer rounds up.
+        const uint8_t x = holes->destination & 15;
+        const uint16_t form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM64 : X86_FORM_VCVTUSI2SD_X_X_RM64;
+        records[count++] = tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x);
+        X86Instruction conversion = tier1_select_register_record(form, x, holes->left);
+        conversion.vvvv = x;
+        records[count++] = conversion;
+    }
     else if (holes->rule == TIER1_RULE_FLOAT_CONVERT_WIDE && holes->scale == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
     {
         // An unsigned I64 to a floating value (#141), the source s unchanged: s, converted as a signed one where its sign
@@ -3381,6 +3509,9 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // The most links a pattern's walk follows through a truth value's chain or an address's (tier1_select_truth,
 // tier1_select_address): a bound on each node's walk, which every node of a chain takes again as its own pattern's.
 #define BUSTER_TIER1_SELECT_WALK 8
+// The rows a select's recurrence walk visits back from its values (tier1_select_recurrent, #2922): if-conversion's bound
+// for its condition's (BUSTER_IR_IF_CONVERT_RECURRENCE_ROWS).
+#define BUSTER_TIER1_SELECT_RECURRENCE_ROWS 16u
 
 // Cold per-node emission metadata. The hot rule-choice pass uses contiguous 16-lane cost arrays; the emitter consumes
 // all fields of one selected pattern. `values` preserve operand roles, including absent slots, while the effective-use
@@ -3493,8 +3624,6 @@ struct Tier1SelectPlan
     uint32_t* costs;
     uint64_t estimated_cost;
     uint64_t arena_bytes;
-    // The path that planned it, which the legacy emitter's choice of immediates' forms takes too.
-    bool vector;
     // Whether `function` passed a full verification, the selector's own or its caller's (tier1_select_plan_verified):
     // every plan the selector publishes has, so the liveness build doesn't verify its function again (#1379). A plan
     // made otherwise (a test's) leaves it false.
@@ -3554,10 +3683,11 @@ struct Tier1SelectForest
     // directly, as Tier1EmitOptions.symbol_access's null does.
     const uint8_t* symbol_access;
     uint32_t symbol_count;
-    // By node, for a leaf the lowering repeats (a symbol's address, or an extension, tier1_select_repeated_leaf) that
-    // another of the same operation, type and operand precedes in its block, that first one's node plus one; 0 for any
-    // other node. Null where no block repeats one (#2601, tier1_select_symbol_firsts): every pattern reads the first
-    // instead (tier1_select_add_candidate).
+    // By node, for a leaf the lowering repeats (a symbol's address, or an extension, tier1_select_leaves_mask) that
+    // another of the same operation, type and operand precedes in its block, that first one's node plus one; for an
+    // extension to I64 whose operand's register already holds its value, that operand's node plus one (#2843,
+    // tier1_select_extension_forwards), and so for its block's repeats of it; 0 for any other node. Null where no node
+    // has one (#2601, tier1_select_symbol_firsts): every pattern reads that node instead (tier1_select_add_candidate).
     const uint32_t* symbol_first;
     // Whether the function has vectors (#141, ir_function_has_vectors_path): one scan of it, so that a function without
     // one pays no node's vector checks (tier1_select_candidates).
@@ -3582,28 +3712,6 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     // the plan materializes whatever their uses.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
            op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || op == IR_SCATTER || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
-}
-
-// Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
-// doesn't carry a C access's volatility, so that an IR load without BUSTER_IR_VOLATILE may still be a volatile object's,
-// and two volatile reads must keep their order. A load still folds into its own consumer (tier1_select_load_folds:
-// the last of these before the consumer the load itself), but past no other load.
-static bool tier1_select_fold_barrier(const IrFunction* function, uint32_t node)
-{
-    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD || function->op[node] == IR_MASKED_LOAD || function->op[node] == IR_GATHER;
-}
-
-// Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
-// scalar twin of tier1_select_barriers. A pass of its own, apart from the plan's pass over the nodes, where the store
-// would make the operands' walk reload the function's columns.
-static void tier1_select_barriers_scalar(const IrFunction* function, uint32_t count, uint32_t* barriers)
-{
-    uint32_t barrier = 0;
-    for (uint32_t node = 0; node < count; node += 1)
-    {
-        barriers[node] = barrier;
-        barrier = tier1_select_fold_barrier(function, node) ? node + 1 : barrier;
-    }
 }
 
 // The same, 16 nodes at a time: their kinds compared at once, each barrier's lane its position plus one, the
@@ -3707,7 +3815,7 @@ static uint32_t tier1_select_narrow_width(uint32_t type)
 // Compact, monotone range facts, shared by both selection paths. Unknown is the type's full width. Starting there
 // (including at phis) is essential: a loop must never prove its own invariant from an optimistic backedge. Bounded
 // sweeps handle forward block references too; facts not reached within the bound remain conservative.
-static void tier1_select_known_bits_passes(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool vector, bool seed)
+static void tier1_select_known_bits_passes(const IrFunction* function, const uint32_t* blocks, uint16_t* known, bool seed)
 {
     const uint32_t count = function->instruction_count;
     // The caller's fresh scratch column is disjoint from this immutable IR and its arrays. Cache the stable array
@@ -3718,7 +3826,7 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
     const uint32_t* const inputs_b = function->b;
     const uint32_t* const inputs_c = function->c;
     const IrConstant* const constants = function->constants;
-    if (seed && BUSTER_VECTOR_PATH(vector))
+    if (seed)
     {
         // Independent seed classification, 32 nodes at a time. Both loads and stores are masked at the logical tail.
         for (uint32_t first = 0; first < count; first += 32)
@@ -3732,14 +3840,6 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
             bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I16)), _mm512_set1_epi16(16));
             bits = _mm512_mask_mov_epi16(bits, _mm512_cmpeq_epi16_mask(type, _mm512_set1_epi16(IR_I32)), _mm512_set1_epi16(32));
             _mm512_mask_storeu_epi16(known + first, active, _mm512_or_si512(bits, _mm512_slli_epi16(bits, 8)));
-        }
-    }
-    else if (seed)
-    {
-        for (uint32_t node = 0; node < count; node += 1)
-        {
-            const uint32_t bits = tier1_select_width(types[node]) != 0 ? ir_type_bits[types[node]] : 64;
-            known[node] = (uint16_t)(bits | (bits << 8));
         }
     }
     for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
@@ -3858,12 +3958,12 @@ static void tier1_select_known_bits_passes(const IrFunction* function, const uin
     }
 }
 
-static void tier1_select_known_bits(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known, bool vector)
+static void tier1_select_known_bits(const IrFunction* function, const IrDominance* dominance, const uint32_t* blocks, uint32_t* workspace, uint16_t* known)
 {
-    tier1_select_known_bits_passes(function, blocks, known, vector, true);
-    if (tier1_select_induction_bounds(function, dominance, blocks, workspace, known, vector))
+    tier1_select_known_bits_passes(function, blocks, known, true);
+    if (tier1_select_induction_bounds(function, dominance, blocks, workspace, known))
     {
-        tier1_select_known_bits_passes(function, blocks, known, vector, false);
+        tier1_select_known_bits_passes(function, blocks, known, false);
     }
 }
 
@@ -3890,7 +3990,7 @@ static void tier1_select_known_bits(const IrFunction* function, const IrDominanc
 // The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
 // probes (tier1_narrow_test.c) check the supported producers natively. Inlined by force into the plan: the bottom-up
 // rewrite's check (tier1_select_burs_test.c) calls it too, and with a second caller clang outlined it.
-static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, const uint16_t* known, uint8_t* canonical, uint32_t* workspace, bool vector)
+static inline __attribute__((always_inline)) void tier1_select_canonical(const IrFunction* function, const uint32_t* blocks, const uint16_t* known, uint8_t* canonical, uint32_t* workspace)
 {
     const uint32_t count = function->instruction_count;
     for (uint32_t node = 0; node < count; node += 1)
@@ -3945,7 +4045,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             }
         }
     }
-    tier1_select_sign_requests(function, known, canonical, workspace, vector);
+    tier1_select_sign_requests(function, known, canonical, workspace);
     for (uint32_t pass = 0; pass < BUSTER_TIER1_SELECT_CANONICAL_PASSES; pass += 1)
     {
         bool changed = false;
@@ -4046,7 +4146,7 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
             break;
         }
     }
-    tier1_select_storage_components(function, canonical, workspace, vector);
+    tier1_select_storage_components(function, canonical, workspace);
 }
 
 // A call's argument's type: a fixed parameter's, or an unnamed one's (a variadic call's past its parameters) its value's,
@@ -4238,26 +4338,25 @@ struct Tier1SelectPart
 // registers[0], its low one padding; with `slot` (#141) a SPLIT location's two eightbytes, one in a register and the other
 // in its stack slot, or with `high` or `low` a STACK location's one eightbyte in its slot (the low one alone of a larger
 // value), each part with no register its slot's. Returns how many, into `parts`, or 0 for a shape Tier 1 doesn't take: no
-// part in a register (a whole STACK location's), a second register for 8 bytes or less, more than 16 bytes (a value in
-// one vector register whole, which only a vector makes, among them), or a register outside the general ones in `general`
-// and the first `vectors` xmm ones.
+// part in a register (a whole STACK location's), a second register for 8 bytes or less, more than 16 bytes but in one
+// vector register alone (a vector's whole, or a record's payload, #2113), or a register outside the general ones in
+// `general` and the first `vectors` xmm ones.
 static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool low, bool slot, uint32_t size, uint32_t general, uint32_t vectors, Tier1SelectPart* parts)
 {
     const bool one = high || low;
     const bool first = registers[0] != BUSTER_ABI_REGISTER_NONE;
     const bool second = registers[1] != BUSTER_ABI_REGISTER_NONE;
     const bool shape = one ? !(high && low) && !second && size > 8 && first != slot : slot ? first != second && size > 8 : first && (!second || size > 8);
-    // A vector register alone of 16 bytes or more holds the aggregate whole (#141), as Tier 0's tier0_parts_of has it: a
-    // vector's (SSE then SSEUP), 16 bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the target's registers
-    // are that wide; a struct's whose high eightbyte is padding too, whose bytes past the low eightbyte it carries, and its
-    // copy keeps them as padding.
+    // A vector register alone of 16 bytes or more holds the aggregate's payload (#141, #2113), as Tier 0's tier0_parts_of
+    // has it: a vector's whole (SSE then SSEUP), 16 bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the
+    // target's registers are that wide; a struct's whose high eightbyte is padding too, whose bytes past the low eightbyte
+    // it carries, and its copy keeps them as padding; and a record SSE, SSEUP of a size no vector register has,
+    // GetByteVectorType's <size / 8 x double> (abi_vector_payload_bytes): a 17--23-byte record's first 16 bytes in an xmm
+    // register, and past them its size rounded down to 8 in the ymm or zmm register LLVM widens it to
+    // (tier1_select_part_width), the rest of the record lost.
     const bool vector_first = first && (registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
-    const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 ? (size >= 64 ? 64 : size >= 32 ? 32 : 16) : 0;
-    // GetByteVectorType's two doubles carry a 17--23-byte record's first 16 bytes; stack copies retain its C size. A
-    // larger record of a size no vector register has (#2113) carries its <size / 8 x double> in a YMM or ZMM register
-    // wider than it, which Tier 0 loads and stores in pieces (tier0_payload_load): Tier 1 leaves its functions to Tier 0
-    // (no part matches here), as it does a PAYLOAD stack slot (tier1_select_record_supported's flags), until #2798.
-    bool valid = size != 0 && (size <= 16 || (whole != 0 && (whole == size || (whole == 16 && size < 24)))) && shape;
+    const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 && size <= 64 ? abi_vector_payload_bytes(size) : 0;
+    bool valid = size != 0 && (size <= 16 || whole != 0) && shape;
     uint32_t count = 0;
     for (uint32_t k = 0; valid && k < (one ? 1u : 2u); k += 1)
     {
@@ -4276,42 +4375,70 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
 }
 
 // Whether an aggregate argument's or parameter's `location` has it on the stack whole, its bytes in its slots from its
-// first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot.
+// first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot, and a record's vector
+// payload alone (PAYLOAD, #2798), whose slot is a part's (tier1_select_location_parts).
 static bool tier1_select_location_whole(AbiLocation location)
 {
-    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0;
+}
+
+// The bytes of the vector register a part of `bytes` takes whole (#141, #2798): its own 16, 32 or 64, or a payload's
+// register's, LLVM's widening of <size / 8 x double> to the next power of two (abi_vector_register_bytes): 24 bytes' ymm,
+// and 40's, 48's and 56's zmm. An eightbyte's (8 or less) is its own.
+static uint32_t tier1_select_part_width(uint32_t bytes)
+{
+    return bytes <= 8 ? bytes : abi_vector_register_bytes(bytes);
+}
+
+// Whether a vector register's part of `bytes` is a payload its register is wider than (#2113, tier0_vector_payload): 24,
+// 40, 48 or 56 bytes, which the consumers load from and store to an object of the record's size in pieces that stay inside
+// it (tier0_payload_load, tier0_payload_store), and move whole between registers and the staging slots.
+static bool tier1_select_part_payload(uint32_t bytes)
+{
+    return tier1_select_part_width(bytes) != bytes;
 }
 
 // The parts of an aggregate argument or parameter of `size` bytes at `location` (#789, #141): in argument registers, a
 // SPLIT location's register and stack slot, or a STACK location's high or low eightbyte alone in its slot
-// (tier1_select_parts_of); none on the stack whole or ignored.
+// (tier1_select_parts_of), or a PAYLOAD one's (#2798) record's vector payload alone in its slot of the payload's
+// register's width (tier1_select_part_width), its bytes past the payload lost: one part of the payload's bytes, with no
+// register; none on the stack whole or ignored.
 static uint32_t tier1_select_location_parts(AbiLocation location, uint32_t size, Tier1SelectPart* parts)
 {
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
-    const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS && !low;
-    const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT && !high && !low;
-    const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low);
+    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS && !low && !payload;
+    const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT && !high && !low && !payload;
+    const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low) && !payload;
     const bool taken = registers || split || slot;
-    return taken ? tier1_select_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
+    const uint32_t payload_bytes = abi_vector_payload_bytes(size);
+    const bool payload_slot = location.kind == BUSTER_ABI_LOCATION_STACK && payload && !high && !low && size <= 64 && payload_bytes >= 16 && payload_bytes < size;
+    uint32_t count = taken ? tier1_select_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
+    if (payload_slot)
+    {
+        parts[0] = (Tier1SelectPart){ .reg = BUSTER_ABI_REGISTER_NONE, .offset = 0, .bytes = (uint8_t)payload_bytes };
+        count = 1;
+    }
+    return count;
 }
 
 // The 8-byte staging slots a part of `bytes` takes below rsp (#789, tier1_emit_staging): one an eightbyte's, and a whole
-// vector register's (#141) its bytes'.
+// vector register's (#141) its register's bytes', a payload's (#2798) among them, which its register's load reads whole.
 static uint32_t tier1_select_part_slots(uint32_t bytes)
 {
-    return bytes <= 8 ? 1 : bytes / 8;
+    return bytes <= 8 ? 1 : tier1_select_part_width(bytes) / 8;
 }
 
 // A call argument's whole 64-byte vector register part (#141) waits in zmm16 and on rather than in the red zone, whose 14
 // staging slots two such parts would overflow: Tier 1 allocates nothing to registers past xmm15, a call clobbers them all,
-// and only a target with AVX-512F, which has them, passes a vector in a zmm register. The first of them, by the call's
-// parts in order.
+// and only a target with AVX-512F, which has them, passes a vector in a zmm register. And so does a payload a zmm register
+// carries (#2798: 40, 48 or 56 bytes). The first of them, by the call's parts in order.
 #define BUSTER_TIER1_SELECT_PART_ZMM 16u
 
 static bool tier1_select_part_in_zmm(uint32_t bytes)
 {
-    return bytes == 64;
+    return tier1_select_part_width(bytes) == 64;
 }
 
 // The red zone's staging slots a call argument's part takes (tier1_select_part_slots), none for one in zmm16 and on.
@@ -4322,12 +4449,14 @@ static uint32_t tier1_select_argument_part_slots(uint32_t bytes)
 
 // The form that loads (`load`) or stores a vector register's part of `bytes` (#789, #141) whole: an eightbyte's or less
 // movsd (its bytes past the part's padding), and a whole register's movups, vmovdqu (AVX's) or vmovdqu64 (AVX512F's), as
-// the convention passes it at the target's width, whose forms the target then has.
+// the convention passes it at the target's width, whose forms the target then has; a payload's (#2798) its register's
+// (tier1_select_part_width), which moves it between registers, the staging slots and a copy as wide as the register.
 static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 {
-    return bytes <= 8 ? (load ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOVSD_XM64_X) : bytes == 16 ? (load ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOVUPS_XM_X) :
-           bytes == 32                                                        ? (load ? X86_FORM_VMOVDQU_Y_YM256 : X86_FORM_VMOVDQU_YM256_Y) :
-           bytes == 64                                                        ? (load ? X86_FORM_VMOVDQU64_Z_ZM512 : X86_FORM_VMOVDQU64_ZM512_Z) :
+    const uint32_t width = tier1_select_part_width(bytes);
+    return width <= 8 ? (load ? X86_FORM_MOVSD_X_XM64 : X86_FORM_MOVSD_XM64_X) : width == 16 ? (load ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOVUPS_XM_X) :
+           width == 32                                                        ? (load ? X86_FORM_VMOVDQU_Y_YM256 : X86_FORM_VMOVDQU_YM256_Y) :
+           width == 64                                                        ? (load ? X86_FORM_VMOVDQU64_Z_ZM512 : X86_FORM_VMOVDQU64_ZM512_Z) :
                                                                                 X86_FORM_NONE;
 }
 
@@ -4340,7 +4469,8 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 
 // Whether a function's own result part is loaded straight from the result's address on the way out (#1847): a whole
 // vector register's, 16, 32 or 64 bytes of a split vector (tier1_select_result_parts), which no byte past the object's
-// widens and whose load can't overwrite the address, a general register. Any other part is staged in the red zone.
+// widens and whose load can't overwrite the address, a general register; and a record's payload (#2798), in pieces that
+// stay inside it (tier0_payload_load). Any other part is staged in the red zone.
 static bool tier1_select_part_direct(Tier1SelectPart part)
 {
     return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16;
@@ -4400,9 +4530,10 @@ static bool tier1_select_result_staged(const Tier1SelectPart* parts, uint32_t co
 // Whether Tier 1 takes an argument's or a parameter's ABI record for a value of IR type `type` (#789): a scalar in one
 // register of its class (a general argument register for an integer or a pointer, xmm0 to xmm7 for a floating value) or
 // in a stack slot, its extension the IR's; or a by-value aggregate, a ptr to its bytes, on the stack whole or in its
-// parts (tier1_select_location_parts): in registers, and since #141 a part LLVM put in a stack slot (SPLIT) and a
-// value's high or low eightbyte alone (HIGH, LOW); or one passed in no place (IGNORE, #141), which a call copies
-// nothing for and a function's copy of has no bytes it must keep.
+// parts (tier1_select_location_parts): in registers, a record's payload among them (#2798), and since #141 a part LLVM
+// put in a stack slot (SPLIT), a value's high or low eightbyte alone (HIGH, LOW) and a record's payload alone in its slot
+// (PAYLOAD, #2798); or one passed in no place (IGNORE, #141), which a call copies nothing for and a function's copy of
+// has no bytes it must keep.
 static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
 {
     const AbiLocation location = record->location;
@@ -4436,7 +4567,9 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
         {
             placed &= parts[k].reg != BUSTER_ABI_REGISTER_NONE || slotted;
         }
-        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0 && (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
+        // A PAYLOAD slot (#2798) is a part's, its payload alone (tier1_select_location_parts).
+        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0 &&
+                    (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
     }
     return supported;
 }
@@ -4494,12 +4627,27 @@ static bool tier1_select_call_arity(const IrCall* call)
 // Whether the call-wide part of a call's ABI records is one Tier 1 takes (#789), or the call has none: its result, as
 // parts or through the hidden pointer into the frame object its into operand (c) is the address of, and its outgoing
 // area's bytes.
+// A call's aggregate result's destination that is a pointer value, no frame object's address (#2820): through the hidden
+// pointer, as a call that passes its function's own hidden pointer on has it (ir_typed_call). The call's general moves
+// put it in rdi, its last effective use, after an indirect call's callee (tier1_emit_call). BUSTER_IR_NONE for any other
+// call, and for an IR_STACK_ADDR destination, which must be a frame object's (tier1_select_call_abi).
+static uint32_t tier1_select_call_destination(const IrFunction* function, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    const IrCall* call = op == IR_CALL || op == IR_CALL_INDIRECT ? &function->calls[function->b[node]] : 0;
+    const IrAbiCall* abi = call != 0 && call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
+    const uint32_t into = function->c[node];
+    const bool pointer = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY && into < function->instruction_count && function->op[into] != IR_STACK_ADDR;
+    return pointer ? into : BUSTER_IR_NONE;
+}
+
 static bool tier1_select_call_abi(const IrFunction* function, uint32_t node, const IrCall* call)
 {
     const IrAbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
     const uint32_t into = function->c[node];
     const bool object = into != BUSTER_IR_NONE && into < function->instruction_count && function->op[into] == IR_STACK_ADDR && tier1_select_stack_object(function, function->a[into]);
-    return abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (function->type[node] == IR_VOID && object)) &&
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
+    return abi == 0 || (tier1_select_result_supported(abi->call.result, abi->result_size) && (abi->result_size == 0 || (function->type[node] == IR_VOID && (object || pointer))) &&
                         abi->call.stack_bytes <= BUSTER_TIER1_SELECT_MAX_STACK_OFFSET + BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE);
 }
 
@@ -4956,7 +5104,8 @@ static inline __attribute__((always_inline)) void tier1_select_add_candidate(con
     pattern.intrinsic_cost += pattern.sign_result;
     // A symbol's address or an extension the pattern reads is its block's first of the same (#2601): the lowering makes
     // one for every access, and an indexed access, which needs its base and index in registers, would make each one's
-    // lea and move.
+    // lea and move. An extension whose operand's register holds its value is that operand (#2843), whose register the
+    // pattern reads rather than its copy's.
     for (uint32_t k = 0; forest->symbol_first != 0 && k < BUSTER_TIER1_SELECT_VALUES; k += 1)
     {
         const uint32_t value = pattern.values[k];
@@ -4977,13 +5126,29 @@ static bool tier1_select_constant(const IrFunction* function, uint32_t value, ui
     return result;
 }
 
+// The multiplicands of a fused multiply-add can trade places if only one can carry a NaN payload.
+static bool tier1_select_fma_non_nan(const IrFunction* function, uint32_t value)
+{
+    const uint32_t op = value < function->instruction_count ? function->op[value] : IR_UNDEF;
+    bool known = op == IR_SITOFP || op == IR_UITOFP;
+    if (op == IR_CONST)
+    {
+        const uint64_t bits = function->constants[function->a[value]].low;
+        known = function->type[value] == IR_F32 ? (bits & UINT32_C(0x7fffffff)) <= UINT32_C(0x7f800000) :
+                                                 (bits & UINT64_C(0x7fffffffffffffff)) <= UINT64_C(0x7ff0000000000000);
+    }
+    return known;
+}
+
 // C's truth values reach the IR as integers: `a < b` is `zext (icmp lt a, b)`, which `if`, `!` and `&&` test against
 // zero again, `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source nests. The walk follows such a
 // chain back from `value`, an I1, to the value it tests, through links that only `root`'s pattern uses, at most
 // BUSTER_TIER1_SELECT_WALK of them: each a zero extension, a zero and their comparison in consecutive nodes, right after
-// the value it extends, so that nothing the pattern doesn't compute runs between the test and the root. It returns the
-// node it stops at, counts the nodes it passed among the pattern's folds, and says whether an odd number of the links
-// were `eq`, where the root's truth is the stopped node's negation.
+// the value it extends, so that nothing the pattern doesn't compute runs between the test and the root. A link may also
+// be an I1 copy of the floating comparison right before it: if-conversion's truth simplification makes a test of one,
+// which no integer comparison can take the place of, its copy (ir_truth.c's values variant, #2791). It returns the node
+// it stops at, counts the nodes it passed among the pattern's folds, and says whether an odd number of the links were
+// `eq`, where the root's truth is the stopped node's negation.
 static uint32_t tier1_select_truth(const Tier1SelectForest* forest, uint32_t root, uint32_t value, Tier1SelectPattern* pattern, bool* negated)
 {
     const IrFunction* function = forest->function;
@@ -5002,6 +5167,13 @@ static uint32_t tier1_select_truth(const Tier1SelectForest* forest, uint32_t roo
             odd ^= function->c[value] == IR_EQ;
             pattern->fold_count += 3;
             value = function->a[extended];
+        }
+        else if (function->op[value] == IR_COPY && function->type[value] == IR_I1 && function->a[value] + 1 == value && function->op[function->a[value]] == IR_FCMP &&
+                 tier1_select_tree_child(forest, root, value))
+        {
+            walking = true;
+            pattern->fold_count += 1;
+            value = function->a[value];
         }
     }
     *negated = odd;
@@ -5117,21 +5289,92 @@ static inline __attribute__((always_inline)) void tier1_select_add_comparison(co
     tier1_select_add_candidate(forest, node, candidates, pattern);
 }
 
+// Whether a select's values recur through it by an operation (#2922): a walk back from its two values, through their
+// operands and the incoming values of the phis it meets, reaches the select itself within
+// BUSTER_TIER1_SELECT_RECURRENCE_ROWS rows along a path through a row that is neither a phi nor a copy, as a loop's
+// accumulator does (`c = select(p[i] == t, c + 5, c + 1)`). A select of a floating == or != by two cmovs puts both on the
+// path from each value to the result, where its truth value's single cmov is one, so that such a chain takes an
+// operation and two cmovs an iteration: the select keeps its truth value, its comparison's path off the chain (as
+// ir_if_convert_recurrence keeps a branch whose condition is on it). A running choice whose values are its own earlier
+// results through phis alone (`best = select(p[i] == t, i, best)`) fuses: its chain is the two cmovs, which the 9700X
+// runs at the loop's pace, faster than the truth value's longer sequence (docs/tier1-selection.md). Its condition isn't
+// walked: two cmovs shorten the comparison's path to the result. A row reached through an operation is walked again
+// where an earlier visit reached it through phis alone. Both selection paths ask it of the same select
+// (tier1_select_candidates and tier1_burs_equality), the scalar rare case of the classifiers.
+static __attribute__((noinline)) bool tier1_select_recurrent(const IrFunction* function, uint32_t select)
+{
+    const uint32_t count = function->instruction_count;
+    // Each row to visit and whether its path from the select's values passed an operation.
+    uint32_t stack[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
+    bool operated[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
+    uint32_t seen[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
+    bool seen_operated[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
+    uint32_t depth = 2;
+    uint32_t visited = 0;
+    bool found = false;
+    stack[0] = function->b[select];
+    stack[1] = function->c[select];
+    operated[0] = false;
+    operated[1] = false;
+    while (depth != 0 && !found && visited < BUSTER_TIER1_SELECT_RECURRENCE_ROWS)
+    {
+        depth -= 1;
+        const uint32_t row = stack[depth];
+        const bool through = operated[depth];
+        bool known = row >= count;
+        for (uint32_t k = 0; k < visited && !known; k += 1)
+        {
+            known = seen[k] == row && (seen_operated[k] || !through);
+        }
+        if (!known)
+        {
+            seen[visited] = row;
+            seen_operated[visited] = through;
+            visited += 1;
+            const uint32_t op = function->op[row];
+            const bool passed = through || (op != IR_PHI && op != IR_COPY);
+            const uint32_t operands = (uint32_t)ir_operand_count(function, row);
+            for (uint32_t p = 0; p < operands && !found && depth < BUSTER_TIER1_SELECT_RECURRENCE_ROWS; p += 1)
+            {
+                const uint32_t value = ir_operand(function, row, p, 0).value;
+                found = value == select && passed;
+                stack[depth] = value;
+                operated[depth] = passed;
+                depth += value != select ? 1 : 0;
+            }
+        }
+    }
+    return found;
+}
+
+// Whether `select` may take the comparison `tested` by two cmovs (#2922): a floating == or != that is its condition, or
+// whose I1 copy is, through no truth value's chain, and the select's values don't recur through it.
+static bool tier1_select_equality_select(const IrFunction* function, uint32_t select, uint32_t tested)
+{
+    const uint32_t condition = function->a[select];
+    const bool direct = tested == condition || (function->op[condition] == IR_COPY && function->a[condition] == tested);
+    return direct && function->op[tested] == IR_FCMP && function->c[tested] <= IR_NE && !tier1_select_recurrent(function, select);
+}
+
 // The comparison `tested`, an FCMP of F32 or F64 values by <, <=, > or >= that only `root`'s pattern uses, as the
 // pattern's own (#141, TIER1_RULE_FLOAT_BRANCH_COMPARE): ucomis of its operands, swapped for < and <=, and the unsigned
 // condition that reads its flags, UGT (ja) for a strict one and UGE (jae) for the other, which are false for unordered
 // operands; with `negated`, their negations ULE and ULT (jbe and jb), which are true for them, as !(a > b) and
-// !(a >= b) are. == and != read the parity flag too, which a single jump can't: their truth value is tested instead.
-static bool tier1_select_float_comparison(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, Tier1SelectPattern* pattern)
+// !(a >= b) are. == and != read the parity flag too, which a single jump can't: a branch tests their truth value
+// instead. A select's two cmovs can (`equality`, TIER1_RULE_FLOAT_SELECT_COMPARE, #2922): their operands in order, and
+// the predicate, negated to the other one, since !(a == b) is a != b for unordered operands too.
+static bool tier1_select_float_comparison(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, bool equality, Tier1SelectPattern* pattern)
 {
     const IrFunction* function = forest->function;
     const uint32_t left = function->a[tested];
     const uint32_t predicate = function->c[tested];
-    const bool result = function->op[tested] == IR_FCMP && tier1_select_tree_child(forest, root, tested) && tier1_select_float_width(function->type[left]) != 0 && predicate >= IR_LT && predicate <= IR_GE;
+    const bool equal = predicate == IR_EQ || predicate == IR_NE;
+    const bool result = function->op[tested] == IR_FCMP && tier1_select_tree_child(forest, root, tested) && tier1_select_float_width(function->type[left]) != 0 &&
+                        ((predicate >= IR_LT && predicate <= IR_GE) || (equality && equal));
     if (result)
     {
         const bool swapped = predicate == IR_LT || predicate == IR_LE;
-        const uint8_t condition = predicate == IR_LT || predicate == IR_GT ? IR_UGT : IR_UGE;
+        const uint8_t condition = equal ? (uint8_t)predicate : predicate == IR_LT || predicate == IR_GT ? IR_UGT : IR_UGE;
         pattern->values[0] = swapped ? function->b[tested] : left;
         pattern->values[1] = swapped ? left : function->b[tested];
         pattern->width = (uint8_t)tier1_select_float_width(function->type[left]);
@@ -5195,20 +5438,7 @@ static void tier1_select_sinkable(const IrFunction* function, uint8_t* sinkable)
     }
 }
 
-// Whether `node` is one of the pure leaves the lowering makes again at each use (#2601): a symbol's address, or a sign or
-// zero extension to 64 bits (an index's, which every access of an array extends again). An extension to I32 is not: its
-// register holds the value sign-extended, zero-extended or neither by its own users' needs (tier1_select_storage.c's
-// column), so two of one operand may differ, and a pattern that reads the other's would see the wrong upper half
-// (sqlite3LogEstAdd's `a + x[a - b]`, whose index read the addition's zero-extended `a` as sign-extended).
-static bool tier1_select_repeated_leaf(const IrFunction* function, uint32_t node)
-{
-    const uint32_t op = function->op[node];
-    const uint32_t type = function->type[node];
-    return op == IR_SYMBOL_ADDR || ((op == IR_SEXT || op == IR_ZEXT) && type == IR_I64);
-}
-
-// The repeated leaves among the 64 nodes from `first` (tier1_select_repeated_leaf's), their operations and types compared
-// at once: the vector path's scan, whose twin is the scalar loop over the nodes.
+// The repeated leaves among the 64 nodes from `first`, their operations and types compared at once.
 static uint64_t tier1_select_leaves_mask(const IrFunction* function, uint32_t first, uint32_t count)
 {
     const uint32_t left = count - first;
@@ -5243,54 +5473,77 @@ static bool tier1_select_first_insert(const IrFunction* function, const uint32_t
     return firsts[node] != 0;
 }
 
+// Whether extension `node` is its operand's register (#2843): an extension to I64 that tier1_select_candidates selects as
+// a copy of its operand (TIER1_RULE_COPY), whose register holds its 64-bit value at every point of its life by its
+// storage (tier1_select_canonical), which spills, reloads and edge moves keep: an I32 that holds its signed value
+// (STORAGE_SIGN's eight bytes) extended by sign, or a narrow value or an I32 whose bits past its width are zero
+// (STORAGE_ZERO, 32-bit writes) extended by zero, or by sign where it is nonnegative there. A pattern that reads the
+// extension's register reads the operand's then, so that the operand and its extension are one value, in one register.
+// Only an operand with other uses: its extension's copy would move it into a register of its own while it stays live
+// (`movslq (%rdi,%rcx,4),%rdx; mov %rdx,%r8`, then `test %edx,%edx` reading the load), and no pattern folds it, a tree
+// child's single use alone folding, so it is computed in its own register for the pattern to read. A single-use operand
+// dies at its extension, whose copy takes its register (Tier1CfgInput.ties), or whose pattern folds it (a load's movsx).
+static bool tier1_select_extension_forwards(const IrFunction* function, const uint32_t* uses, const uint16_t* known, const uint8_t* canonical, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    bool forwards = false;
+    if ((op == IR_SEXT || op == IR_ZEXT) && function->type[node] == IR_I64)
+    {
+        const uint32_t operand = function->a[node];
+        const uint32_t source = function->type[operand];
+        const bool zero_source = op == IR_ZEXT && (source == IR_I1 || source == IR_I8 || source == IR_I16 || source == IR_I32);
+        const bool sign_source = op == IR_SEXT && (source == IR_I8 || source == IR_I16 || source == IR_I32);
+        const bool zero = (canonical[operand] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+        const bool sign = source == IR_I32 && (canonical[operand] & BUSTER_TIER1_STORAGE_SIGN) != 0;
+        const bool nonnegative = (known[operand] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) < ir_type_bits[source] || (canonical[node] & BUSTER_TIER1_RANGE_NONNEGATIVE_USE) != 0;
+        forwards = uses[operand] >= 2 && ((zero_source && zero) || (sign_source && (sign || (zero && nonnegative))));
+    }
+    return forwards;
+}
+
+// Leaf `node`'s entry in the column of firsts: its block's first of the same (tier1_select_first_insert), or for a
+// forwarded extension its operand (tier1_select_extension_forwards). A block's repeats of an extension are forwarded
+// alike: the decision reads their one operand's facts and the block's nonnegative guard. Returns whether it has one.
+static bool tier1_select_first_leaf(const IrFunction* function, const uint32_t* blocks, const uint32_t* uses, const uint16_t* known, const uint8_t* canonical, uint32_t* slots, uint32_t capacity, uint32_t* firsts, uint32_t node)
+{
+    tier1_select_first_insert(function, blocks, slots, capacity, firsts, node);
+    firsts[node] = tier1_select_extension_forwards(function, uses, known, canonical, node) ? function->a[node] + 1 : firsts[node];
+    return firsts[node] != 0;
+}
+
 // Each repeated leaf's first in its block (#2601, Tier1SelectForest.symbol_first): the first node of the same operation,
 // type and operand (a symbol's address's symbol), by an open-addressed table of them, a power of two at least twice the
-// function's leaves, in `scratch`, which the plan keeps until it is made. Null where no block repeats one. The first
-// precedes the others in their block, so it dominates their users, and a leaf is pure, so it is their value. The vector
-// path finds the leaves 64 nodes at a time (tier1_select_leaves_mask); the table's inserts, a function's few leaves',
-// are scalar on either path, in the nodes' order, so both make the same column.
-static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, Arena* scratch, bool vector, bool* ok)
+// function's leaves, in `scratch`, which the plan keeps until it is made; and each forwarded extension's operand (#2843),
+// which precedes it, so dominates its users, and holds its value. Null where no leaf has either. The first precedes the
+// others in their block, so it dominates their users, and a leaf is pure, so it is their value. The vector path finds
+// the leaves 64 nodes at a time (tier1_select_leaves_mask); the table's inserts, a function's few leaves', are scalar on
+// either path, in the nodes' order, so both make the same column.
+static const uint32_t* tier1_select_symbol_firsts(const IrFunction* function, const uint32_t* blocks, const uint32_t* uses, const uint16_t* known, const uint8_t* canonical, Arena* scratch, bool* ok)
 {
     const uint32_t count = function->instruction_count;
     uint32_t leaves = 0;
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; first < count; first += 64)
     {
-        for (uint32_t first = 0; first < count; first += 64)
-        {
-            leaves += (uint32_t)__builtin_popcountll(tier1_select_leaves_mask(function, first, count));
-        }
-    }
-    else
-    {
-        for (uint32_t node = 0; node < count; node += 1)
-        {
-            leaves += tier1_select_repeated_leaf(function, node);
-        }
+        leaves += (uint32_t)__builtin_popcountll(tier1_select_leaves_mask(function, first, count));
     }
     uint32_t capacity = 4;
     while (capacity < 2 * (uint64_t)leaves)
     {
         capacity *= 2;
     }
-    const bool candidates = leaves >= 2;
+    // One leaf may be a forwarded extension.
+    const bool candidates = leaves != 0;
     uint32_t* firsts = candidates ? ir_allocate(scratch, count, 4, ok) : 0;
     uint32_t* slots = candidates ? ir_allocate(scratch, capacity, 4, ok) : 0;
     bool repeated = false;
-    if (*ok && candidates && BUSTER_VECTOR_PATH(vector))
+    if (*ok && candidates)
     {
         for (uint32_t first = 0; first < count; first += 64)
         {
             for (uint64_t mask = tier1_select_leaves_mask(function, first, count); mask != 0; mask &= mask - 1)
             {
-                repeated |= tier1_select_first_insert(function, blocks, slots, capacity, firsts, first + (uint32_t)__builtin_ctzll(mask));
+                repeated |= tier1_select_first_leaf(function, blocks, uses, known, canonical, slots, capacity, firsts, first + (uint32_t)__builtin_ctzll(mask));
             }
-        }
-    }
-    else if (*ok && candidates)
-    {
-        for (uint32_t node = 0; node < count; node += 1)
-        {
-            repeated |= tier1_select_repeated_leaf(function, node) && tier1_select_first_insert(function, blocks, slots, capacity, firsts, node);
         }
     }
     return repeated && *ok ? firsts : 0;
@@ -5309,6 +5562,37 @@ struct Tier1SelectAddress
     uint8_t folds;
     bool rip;
 };
+
+// A register-register LEA can encode one operand's multiplication in its SIB byte (#2700). Both operations have
+// the addition's width, so wrapping the product before the addition gives the same low 32 or 64 bits.
+static void tier1_select_product_index(const Tier1SelectForest* forest, uint32_t node, Tier1SelectPattern* lea)
+{
+    const IrFunction* function = forest->function;
+    for (uint32_t side = 0; side < 2; side += 1)
+    {
+        const uint32_t product = lea->values[1 - side];
+        if (function->op[product] == IR_MUL && tier1_select_tree_child(forest, node, product))
+        {
+            uint32_t index = function->a[product];
+            uint32_t factor = function->b[product];
+            if (function->op[factor] != IR_CONST)
+            {
+                factor = index;
+                index = function->b[product];
+            }
+            uint64_t value = 0;
+            if (tier1_select_constant(function, factor, &value) && (value == 2 || value == 4 || value == 8))
+            {
+                lea->values[0] = lea->values[side];
+                lea->values[1] = index;
+                lea->scale = (uint8_t)tier1_select_log2(value);
+                tier1_select_fold(forest, node, product, lea);
+                tier1_select_fold(forest, node, factor, lea);
+                break;
+            }
+        }
+    }
+}
 
 // An address's index through single-use I64 arithmetic in its block, at most BUSTER_TIER1_SELECT_WALK nodes: additions
 // and subtractions of constants join the displacement at the current scale; shifts and power-of-two multiplies join
@@ -6190,6 +6474,36 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[2] = c;
         base.intrinsic_cost = 4;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // Prefer the existing second multiplicand and addend folds. A first multiplicand can
+        // occupy r/m too when exchanging the two factors cannot change which NaN is propagated.
+        uint32_t load = BUSTER_IR_NONE;
+        if (tier1_select_load_folds(forest, node, b))
+        {
+            load = b;
+        }
+        else if (tier1_select_load_folds(forest, node, c))
+        {
+            load = c;
+        }
+        else if (tier1_select_load_folds(forest, node, a) && tier1_select_fma_non_nan(function, b))
+        {
+            load = a;
+        }
+        if (load != BUSTER_IR_NONE)
+        {
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_FLOAT_FMA_LOAD;
+            if (load == c)
+            {
+                const bool commute = a == b || tier1_select_fma_non_nan(function, a) || tier1_select_fma_non_nan(function, b);
+                folded.condition = commute ? BUSTER_TIER1_FMA_COMMUTATIVE_ADDEND : BUSTER_TIER1_FMA_MEMORY_ADDEND;
+            }
+            folded.values[0] = load == a ? b : a;
+            folded.values[1] = load == c ? b : c;
+            tier1_select_fold(forest, node, load, &folded);
+            tier1_select_memory(forest, node, function->a[load], &folded, 2);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (float_width != 0 && op == IR_FNEG)
     {
@@ -6352,8 +6666,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.source_width = (uint8_t)(operand_float != 0 ? operand_float : source == IR_I1 ? 1 : tier1_select_memory_width(source));
         base.scale = (uint8_t)(op == IR_SITOFP ? BUSTER_TIER1_FLOAT_FROM_SIGNED : op == IR_UITOFP ? BUSTER_TIER1_FLOAT_FROM_UNSIGNED : op == IR_FPTOSI ? BUSTER_TIER1_FLOAT_TO_SIGNED :
                                op == IR_FPTOUI ? BUSTER_TIER1_FLOAT_TO_UNSIGNED : op == IR_BITCAST ? (float_width != 0 ? BUSTER_TIER1_FLOAT_FROM_BITS : BUSTER_TIER1_FLOAT_TO_BITS) : BUSTER_TIER1_FLOAT_RESIZE);
+        // A zero-extended I32 already holds its unsigned value as a nonnegative signed qword.
+        if (op == IR_UITOFP && source == IR_I32 && forest->canonical != NULL && (forest->canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0)
+        {
+            base.source_width = 8;
+        }
         base.intrinsic_cost = op == IR_BITCAST ? 1 : wide ? 10 : 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        const bool from_integer = (op == IR_SITOFP && (source == IR_I32 || source == IR_I64)) || (op == IR_UITOFP && source == IR_I32);
+        const bool to_integer = (op == IR_FPTOSI && (type == IR_I32 || type == IR_I64)) || (op == IR_FPTOUI && type == IR_I32);
+        if ((from_integer || to_integer) && tier1_select_load_folds(forest, node, a))
+        {
+            Tier1SelectPattern folded = base;
+            folded.rule = TIER1_RULE_FLOAT_CONVERT_LOAD;
+            // The selected address takes scale. Keep the conversion kind in condition.
+            folded.condition = base.scale;
+            tier1_select_fold(forest, node, a, &folded);
+            tier1_select_memory(forest, node, function->a[a], &folded, 0);
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
         // An integer constant's conversion is the floating constant it converts to, rounded as cvtsi2s* rounds under the
         // default rounding mode, to nearest: C's conversion on this host computes it so.
         uint64_t integer = 0;
@@ -6764,6 +7095,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             Tier1SelectPattern lea = base;
             lea.rule = TIER1_RULE_LEA_ADD;
             lea.intrinsic_cost = 1;
+            if (function->op[b] == IR_MUL || function->op[a] == IR_MUL)
+            {
+                tier1_select_product_index(forest, node, &lea);
+            }
             tier1_select_add_candidate(forest, node, &candidates, lea);
         }
         uint32_t constant = b;
@@ -7122,6 +7457,20 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[3] = c;
             tier1_select_add_comparison(forest, node, &candidates, folded, base.width);
         }
+        // A floating comparison (#2791): its ucomis, then the select's mov and cmovCC. For == and != a cmovne and a cmovp
+        // (#2922), where the condition is their comparison or its copy (ir_truth.c's), no truth value's chain of theirs,
+        // and the select's values don't recur through it (tier1_select_recurrent); the grammar takes the same
+        // (tier1_burs_equality).
+        else if (tier1_select_float_comparison(forest, node, tested, negated, tier1_select_equality_select(function, node, tested), &folded))
+        {
+            folded.rule = TIER1_RULE_FLOAT_SELECT_COMPARE;
+            folded.source_width = folded.width;
+            folded.width = base.width;
+            folded.values[2] = b;
+            folded.values[3] = c;
+            folded.intrinsic_cost = folded.condition == IR_EQ || folded.condition == IR_NE ? 4 : 3;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (op == IR_BR)
     {
@@ -7187,7 +7536,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.rule = TIER1_RULE_BRANCH_COMPARE;
             tier1_select_add_comparison(forest, node, &candidates, folded, 0);
         }
-        else if (tested != BUSTER_IR_NONE && tier1_select_float_comparison(forest, node, tested, negated, &folded))
+        else if (tested != BUSTER_IR_NONE && tier1_select_float_comparison(forest, node, tested, negated, false, &folded))
         {
             folded.rule = TIER1_RULE_FLOAT_BRANCH_COMPARE;
             tier1_select_add_candidate(forest, node, &candidates, folded);
@@ -7358,12 +7707,15 @@ static inline __attribute__((always_inline)) uint32_t tier1_select_munch(const T
         case TIER1_RULE_MASK_LOAD_ADDRESS:
         case TIER1_RULE_MASK_STORE_ADDRESS:
         case TIER1_RULE_FLOAT_BRANCH_COMPARE:
+        case TIER1_RULE_FLOAT_SELECT_COMPARE:
         case TIER1_RULE_FLOAT_LOAD_ADDRESS:
         case TIER1_RULE_FLOAT_STORE_ADDRESS:
             rank = 8;
             break;
         case TIER1_RULE_LOAD_OPERAND:
         case TIER1_RULE_FLOAT_LOAD_OPERAND:
+        case TIER1_RULE_FLOAT_CONVERT_LOAD:
+        case TIER1_RULE_FLOAT_FMA_LOAD:
             rank = 7;
             break;
         case TIER1_RULE_MULTIPLY_LEA:
@@ -7500,6 +7852,12 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
         {
             pending_count = tier1_select_need(needed, function->a[node], walked || function->a[node] > node, pending, pending_count);
         }
+        // A destination that is a pointer value (#2820), which the call's moves put in rdi.
+        const uint32_t destination = pattern->rule == TIER1_RULE_CALL ? tier1_select_call_destination(function, node) : BUSTER_IR_NONE;
+        if (destination != BUSTER_IR_NONE)
+        {
+            pending_count = tier1_select_need(needed, destination, walked || destination > node, pending, pending_count);
+        }
     }
     for (uint32_t operand = 0; pattern->rule != TIER1_RULE_CALL && pattern->rule != TIER1_RULE_ROW && pattern->rule != TIER1_RULE_ASM && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
     {
@@ -7528,9 +7886,8 @@ static uint32_t tier1_select_need_values(const IrFunction* function, const Tier1
 // `vector` changes only kernel implementations, never the cover's cost model or tie-breaking.
 // `symbol_access` is how each symbol below `symbol_count` is reached (Tier1SelectForest.symbol_access; null for every
 // symbol directly).
-static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, bool verify, bool costed, Tier1SelectPlan* result, uint32_t* error_node)
+static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool verify, bool costed, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    (void)vector;
 
     Tier1SelectError error = TIER1_SELECT_OK;
     uint32_t failed_node = BUSTER_IR_NONE;
@@ -7540,7 +7897,6 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     const uint32_t count = function != 0 ? function->instruction_count : 0;
     Tier1SelectPlan plan = {
         .function = function,
-        .vector = BUSTER_VECTOR_PATH(vector),
         .symbol_access = symbol_access,
         .symbol_count = symbol_access != 0 ? symbol_count : 0,
     };
@@ -7554,7 +7910,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     }
     else
     {
-        const IrCheck check = !verify ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : BUSTER_VECTOR_PATH(vector) ? ir_verify(function, scratch, dominance) : ir_verify_scalar(function, scratch, dominance);
+        const IrCheck check = !verify ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify(function, scratch, dominance);
         if (check.error != IR_OK)
         {
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
@@ -7647,7 +8003,8 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
-        effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 1 : BUSTER_TIER1_SELECT_VALUES;
+        // A call's arguments, an indirect one's callee and a destination that is a pointer value (#2820).
+        effective_capacity += (op == IR_CALL || op == IR_CALL_INDIRECT) && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count + 2 : BUSTER_TIER1_SELECT_VALUES;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
         const bool pure = op == IR_ADDRESS || op == IR_ADD || op == IR_INTTOPTR || op == IR_PTRTOINT;
         const uint32_t address_operand = tier1_select_address_operand(function, node, op, pure);
@@ -7695,20 +8052,16 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             failed_node = node;
         }
     }
-    if (error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector))
+    if (error == TIER1_SELECT_OK)
     {
         tier1_select_barriers(function, count, barriers);
-    }
-    else if (error == TIER1_SELECT_OK)
-    {
-        tier1_select_barriers_scalar(function, count, barriers);
     }
     if (error == TIER1_SELECT_OK)
     {
         tier1_select_sinkable(function, sinkable);
-        tier1_select_known_bits(function, dominance, blocks, positions, known_bits, vector);
-        tier1_select_canonical(function, blocks, known_bits, canonical, positions, vector);
-        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending, vector);
+        tier1_select_known_bits(function, dominance, blocks, positions, known_bits);
+        tier1_select_canonical(function, blocks, known_bits, canonical, positions);
+        tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending);
     }
     if (error == TIER1_SELECT_OK)
     {
@@ -7735,12 +8088,13 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             level_nodes[positions[depths[node]]++] = node;
         }
     }
-    // A symbol's address or an extension read in place of another of its block's (#2601).
+    // A symbol's address or an extension read in place of another of its block's (#2601), and an extension in place of
+    // its operand, whose register holds its value (#2843).
     const uint32_t* symbol_first = 0;
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
-        symbol_first = tier1_select_symbol_firsts(function, blocks, scratch, vector, &ok);
+        symbol_first = tier1_select_symbol_firsts(function, blocks, uses, known_bits, canonical, scratch, &ok);
         error = ok ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     const Tier1SelectForest forest =
@@ -7756,22 +8110,19 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         .symbol_access = plan.symbol_access,
         .symbol_count = plan.symbol_count,
         .symbol_first = symbol_first,
-        .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors_path(function, vector),
+        .vectors = error == TIER1_SELECT_OK && ir_function_has_vectors(function),
     };
-    // Both host paths use the bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children,
-    // its state, and its rule. The independent scalar kernels visit nodes one at a time; the vector kernels label depth
-    // levels in batches. Both read the same grammar's costs and tie-breaks. Nodes outside that grammar take munch's,
-    // made in the levels' order on either path so that unsupported nodes are refused at the same place. Other patterns
-    // are made as the code needs them, in the walk below. Only the tests' reference disables the costed cover.
+    // The bottom-up rewrite's cover (tier1_select_burs.c): each node's class and visible children, its state, and its
+    // rule, the AVX-512 kernels labeling depth levels in batches. Nodes outside that grammar take munch's, made in the
+    // levels' order so that unsupported nodes are refused at one place. Other patterns are made as the code needs them,
+    // in the walk below. Only the tests' reference disables the costed cover.
     const bool burs = error == TIER1_SELECT_OK && costed;
     uint32_t* classes = 0;
     uint32_t* rules = 0;
     uint8_t* built = 0;
     uint32_t* kids = 0;
     uint32_t* states = 0;
-#if BUSTER_HOST_VECTOR
     uint32_t* words = 0;
-#endif
     if (burs)
     {
         bool ok = tier1_select_initialize();
@@ -7781,27 +8132,14 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         states = ir_allocate(scratch, count, 4, &ok);
         rules = ir_allocate(scratch, count, 4, &ok);
         built = ir_allocate(scratch, count, 1, &ok);
-#if BUSTER_HOST_VECTOR
-        words = BUSTER_VECTOR_PATH(vector) ? ir_allocate(scratch, count, 4, &ok) : 0;
-#endif
+        words = ir_allocate(scratch, count, 4, &ok);
         error = ok || error != TIER1_SELECT_OK ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     if (burs && error == TIER1_SELECT_OK)
     {
-#if BUSTER_HOST_VECTOR
-        if (vector)
-        {
-            tier1_burs_classify_vector(&forest, users, words, classes, kids);
-            tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
-            tier1_burs_rules_vector(count, classes, states, rules);
-        }
-        else
-#endif
-        {
-            tier1_burs_classify_scalar(&forest, users, classes, kids);
-            tier1_burs_label_scalar(count, classes, kids, states);
-            tier1_burs_rules_scalar(count, classes, states, rules);
-        }
+        tier1_burs_classify_vector(&forest, users, words, classes, kids);
+        tier1_burs_label_vector(maximum_depth, level_offsets, level_nodes, count, classes, kids, states);
+        tier1_burs_rules_vector(count, classes, states, rules);
         const Tier1SelectPattern none = {
             .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
             .stack_object = BUSTER_IR_NONE,
@@ -7892,10 +8230,16 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
                     {
                         plan.effective_use_values[plan.effective_use_count++] = function->extra[call.argument_first + argument];
                     }
-                    // An indirect call's callee after its arguments.
+                    // An indirect call's callee after its arguments, and a destination that is a pointer value after
+                    // them (#2820).
                     if (function->op[node] == IR_CALL_INDIRECT)
                     {
                         plan.effective_use_values[plan.effective_use_count++] = function->a[node];
+                    }
+                    const uint32_t destination = pattern->rule == TIER1_RULE_CALL ? tier1_select_call_destination(function, node) : BUSTER_IR_NONE;
+                    if (destination != BUSTER_IR_NONE)
+                    {
+                        plan.effective_use_values[plan.effective_use_count++] = destination;
                     }
                 }
                 else
@@ -7933,27 +8277,27 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     return error;
 }
 
-// The plan of a function that hasn't been verified: ir_verify (or ir_verify_scalar on the scalar path) with `dominance`
+// The plan of a function that hasn't been verified: ir_verify with `dominance`
 // first, which refuses what the plan can't read.
 // Every symbol is reached directly (a rip-relative memory operand may fold any, #2573).
-static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, 0, 0, output, scratch, vector, true, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, 0, 0, output, scratch, true, true, result, error_node);
 }
 
 // tier1_select_plan's, with each symbol below `symbol_count` reached as `symbol_access` says (BUSTER_TIER1_ACCESS_*, the
 // emitter's Tier1EmitOptions.symbol_access): only a direct one folds into a memory operand (#2573).
-static __attribute__((unused)) Tier1SelectError tier1_select_plan_access(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+static __attribute__((unused)) Tier1SelectError tier1_select_plan_access(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, vector, true, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, true, true, result, error_node);
 }
 
 // The plan of a function its caller has verified with `dominance`, as ir_optimize verifies its result: the same plan as
 // tier1_select_plan_access's, without verifying it again. On the frozen sqlite3.c, the verification was a quarter of
 // selection's cycles (#141). Unverified IR here may be read outside its columns.
-static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
+static Tier1SelectError tier1_select_plan_verified(const IrFunction* function, const IrDominance* dominance, const uint8_t* symbol_access, uint32_t symbol_count, Arena* output, Arena* scratch, Tier1SelectPlan* result, uint32_t* error_node)
 {
-    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, vector, false, true, result, error_node);
+    return tier1_select_plan_checked(function, dominance, symbol_access, symbol_count, output, scratch, false, true, result, error_node);
 }
 
 static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* pattern, const uint8_t* registers, uint32_t first)
@@ -7990,13 +8334,16 @@ static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1S
                       (rule == TIER1_RULE_INTRINSIC && pattern->immediate == BUSTER_IR_INTRINSIC_BSWAP) || rule == TIER1_RULE_FLOAT_COPY || rule == TIER1_RULE_FLOAT_BINARY ||
                       rule == TIER1_RULE_FLOAT_LOAD_OPERAND || rule == TIER1_RULE_FLOAT_NEGATE;
     const bool select = rule == TIER1_RULE_SELECT;
-    // A fused select's values are past its comparison's (#2676): where its comparison holds in values[2], else values[3].
-    const bool fused = rule == TIER1_RULE_SELECT_COMPARE;
+    // A fused select's values are past its comparison's (#2676, #2791): where its comparison holds in values[2], else
+    // values[3]. A floating == keeps its true value instead (#2922), the one equal operands choose, as != keeps its false
+    // one; it takes the other value's register through the scratch register.
+    const bool equality = rule == TIER1_RULE_FLOAT_SELECT_COMPARE && pattern->condition == IR_EQ;
+    const bool fused = (rule == TIER1_RULE_SELECT_COMPARE || rule == TIER1_RULE_FLOAT_SELECT_COMPARE) && !equality;
     // An address from a register (#2592): `lea d(%r),%r` costs what a lea into another register does, and an incremented
     // pointer, Lua's `pc + 1` in OP_LFALSESKIP, keeps the register its dispatch takes it in.
     const bool address = rule == TIER1_RULE_ADDRESS && !pattern->rip && pattern->stack_object == BUSTER_IR_NONE;
-    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : fused ? pattern->values[3] : BUSTER_IR_NONE;
-    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : fused ? pattern->values[2] : BUSTER_IR_NONE;
+    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : fused ? pattern->values[3] : equality ? pattern->values[2] : BUSTER_IR_NONE;
+    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : fused ? pattern->values[2] : equality ? pattern->values[3] : BUSTER_IR_NONE;
 }
 
 // Marks each node whose value a return reads in `returned` (one byte per node, cleared here). Such a value takes no tie
@@ -8058,6 +8405,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_MASK_LOAD_ADDRESS:
     case TIER1_RULE_MASK_STORE:
     case TIER1_RULE_MASK_STORE_ADDRESS:
+    case TIER1_RULE_FLOAT_CONVERT_LOAD:
     case TIER1_RULE_FLOAT_LOAD:
     case TIER1_RULE_FLOAT_LOAD_ADDRESS:
     case TIER1_RULE_FLOAT_STORE:
@@ -8079,6 +8427,9 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     case TIER1_RULE_LOAD_OPERAND:
     case TIER1_RULE_FLOAT_LOAD_OPERAND:
         holes.memory = tier1_select_memory_holes(pattern, registers, 1);
+        break;
+    case TIER1_RULE_FLOAT_FMA_LOAD:
+        holes.memory = tier1_select_memory_holes(pattern, registers, 2);
         break;
     default:
         break;
@@ -8146,7 +8497,7 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             failed_node = node;
         }
     }
-    Tier1SelectRequests requests = { .vector = plan != 0 && plan->vector };
+    Tier1SelectRequests requests = { 0 };
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;

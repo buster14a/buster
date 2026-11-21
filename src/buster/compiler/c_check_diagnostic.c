@@ -228,9 +228,12 @@ static bool check_diagnostic_option(String8 option, const char* expected)
 
 #include "c_check_warning_policy.c"
 
-static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, bool* quiet)
+// A floating-point pragma's warning of policy `id` at output token `source`: its command-line severity, and in *quiet
+// whether -w or a system header without -Wsystem-headers hides it (-Wignored-pragmas' empty stack, and #1970's
+// -Wunknown-pragmas: an STDC pragma's state that is no ON, OFF or DEFAULT).
+static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, uint32_t id, bool* quiet)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, CHECK_WARNING_ID_IGNORED_PRAGMA, false, false);
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, false, false);
     pp_history_ensure(pp);
     const bool system = pp_system_level_at(pp, pp_expansion_location(pp, source, pp_history_at(pp, source))) != BUSTER_PP_USER_FILE;
     *quiet = command.quiet || (system && !command.system_headers);
@@ -745,6 +748,17 @@ static const char* check_diagnostic_pragma_message(const CheckInputFpPragma* rec
     return result;
 }
 
+// The severity of an STDC pragma's state that is no ON, OFF or DEFAULT (#1970): clang's ext_on_off_switch_syntax, a
+// -Wunknown-pragmas extension on by default, its command line's policy (the reader's, check_input_fp_warning_policy) and
+// then a source pragma's at the directive. Ignored for any other record.
+static CheckWarningSeverity check_diagnostic_unknown_state_severity(const CheckInput* input, const CheckInputFpPragma* record)
+{
+    const bool unknown = (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 && !record->warning_quiet;
+    const CheckWarningSeverity result = unknown ? check_diagnostic_severity_id_from(input, record->token, record->source_begin, CHECK_WARNING_ID_UNKNOWN_PRAGMA,
+                                                                                    (CheckWarningSeverity)record->warning_severity) : CHECK_WARNING_IGNORE;
+    return result;
+}
+
 // The name of the C23 attribute whose scope is at `token`, where clang's parser reads its arguments its own way (#1447,
 // ParseClangAttributeArgs: availability's, external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's,
 // with parentheses), or BUSTER_CHECK_NONE: clang's attribute is located at its name, not at its scope, as each of these
@@ -807,8 +821,7 @@ static bool check_diagnostic_first_pragma_error_mode(const CheckInput* input, ui
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
         const bool invalid = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
-        const bool unknown = (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
-                             check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR;
+        const bool unknown = check_diagnostic_unknown_state_severity(input, record) >= CHECK_WARNING_ERROR;
         const bool empty = (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 && !record->warning_quiet &&
                            check_diagnostic_severity_id_from(input, record->token, record->source_begin, CHECK_WARNING_ID_IGNORED_PRAGMA,
                                                              (CheckWarningSeverity)record->warning_severity) >= CHECK_WARNING_ERROR;
@@ -1105,6 +1118,12 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
                     .kind = complex ? CHECK_FP_PRAGMA_CX_LIMITED_RANGE : contract ? CHECK_FP_PRAGMA_FP_CONTRACT : CHECK_FP_PRAGMA_FENV_ACCESS,
                     .warnings = impossible ? CHECK_FP_PRAGMA_INVALID_PLACEMENT : CHECK_FP_PRAGMA_UNKNOWN_STATE,
                 };
+                if (!recognized)
+                {
+                    // As the ordinary reader's (check_input_fp_pragmas): -Wunknown-pragmas' command-line policy (#1970).
+                    CheckInputFpPragma* record = records + result->fp_pragma_count - 1;
+                    record->warning_severity = check_input_fp_warning_policy(pp, source + 2, CHECK_WARNING_ID_UNKNOWN_PRAGMA, &record->warning_quiet);
+                }
             }
         }
     }

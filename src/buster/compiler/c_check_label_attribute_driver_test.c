@@ -238,6 +238,28 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
           "case 5: ap(); __attribute__((fallthrough)); x++;\ncase 6: dp(); __attribute__((fallthrough)); x++;\n"
           "case 7: arr[x](); __attribute__((fallthrough)); x++;\ncase 8: ((N)v)(); __attribute__((fallthrough)); x++;\n"
           "case 9: (*fp)(); __attribute__((fallthrough)); x++;\ncase 10: return 1;\n}\nreturn 0;\n}\n" },
+        // A call through a member whose function pointer type GNU's noreturn marks (its declaration's attribute, its typedef's,
+        // an element of an array of them), through `.`, `->` and `*`, and through a conditional whose arms both are or a
+        // comma's right operand, which clang's CFG reads by the callee's type (#1844).
+        { "unreachable fallthroughs after calls through noreturn members, conditionals and commas",
+          "void die(void) __attribute__((noreturn));\nvoid stop(void) __attribute__((noreturn));\ntypedef void (*N)(void) __attribute__((noreturn));\n"
+          "typedef void T(void) __attribute__((noreturn));\n"
+          "struct S { void (*cb)(void) __attribute__((noreturn)); N n; T *t; N table[2]; struct S *next; };\n"
+          "int f(int x, int c, struct S s, struct S *ps, N p) {\nswitch (x) {\n"
+          "case 1: s.cb(); __attribute__((fallthrough)); x++;\ncase 2: ps->cb(); __attribute__((fallthrough)); x++;\n"
+          "case 3: (&s)->n(); __attribute__((fallthrough)); x++;\ncase 4: s.t(); __attribute__((fallthrough)); x++;\n"
+          "case 5: ps->next->table[c](); __attribute__((fallthrough)); x++;\ncase 6: (c ? die : stop)(); __attribute__((fallthrough)); x++;\n"
+          "case 7: (c ? s.cb : p)(); __attribute__((fallthrough)); x++;\ncase 8: (0, die)(); __attribute__((fallthrough)); x++;\n"
+          "case 9: (*ps->cb)(); __attribute__((fallthrough)); x++;\ncase 10: (c ? (x ? die : ps->n) : (0, s.t))(); __attribute__((fallthrough)); x++;\n"
+          "case 11: return 1;\n}\nreturn 0;\n}\n" },
+        // But not a conditional of an arm that returns, a member of no noreturn type, nor one of a union's other member.
+        { "reachable fallthroughs after calls through a returning arm and plain members",
+          "void die(void) __attribute__((noreturn));\nvoid go(void);\n"
+          "struct S { void (*cb)(void) __attribute__((noreturn)); void (*plain)(void); };\nunion U { void (*cb)(void); void (*other)(void) __attribute__((noreturn)); };\n"
+          "int f(int x, int c, struct S s, union U u) {\nswitch (x) {\n"
+          "case 1: (c ? die : go)(); __attribute__((fallthrough)); x++;\ncase 2: s.plain(); __attribute__((fallthrough)); x++;\n"
+          "case 3: u.cb(); __attribute__((fallthrough)); x++;\ncase 4: (x++, go)(); __attribute__((fallthrough)); x++;\n"
+          "case 5: return 1;\n}\nreturn 0;\n}\n" },
         // But not a typeof of a function the _Noreturn keyword or C23's [[noreturn]] marks: its declaration's, not its type's
         // (each alone).
         { "a reachable fallthrough after a call through a typeof of a _Noreturn function", "_Noreturn void quit(void);\n__typeof__(quit) *qp;\n"

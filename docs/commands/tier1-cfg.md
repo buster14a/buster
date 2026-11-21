@@ -33,10 +33,10 @@ requirements. [Command index](README.md).
   three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
   slot fragments overlap one slot), and #2553's two: a join whose dominating critical edge moves nothing, and a phi web
   around a loop that keeps one slot; #2784's loop whose body precedes its header, whose path for a character moves
-  nothing; every allocation's continuations (#2774) are checked against a twin that recomputes them from the intervals
+  nothing; #2834's loop whose latch lies between its body and its header, whose entry edge moves nothing; every allocation's continuations (#2774) are checked against a twin that recomputes them from the intervals
   alone; `test-tier1-cfg-source` adapts every function `-c`
   compiles of real C, lowered and promoted, through a machine model
-  (`tier1_cfg_ir.c`) and checks both paths' allocations, and with `--simd`
+  (`tier1_cfg_ir.c`) and checks each allocation, and with `--simd`
   allocates #732's SIMD functions as lowered, their masks in the opmask class.
   The allocation guide's "Allocation over a CFG (#140)" and "The opmask class
   (#179)" have the contract and what is pending.
@@ -84,7 +84,7 @@ the scratch back. Without fixed ranges the intervals serve every problem over
 the same values: `tier1_cfg_column` writes another problem's column (each
 value's run its allowed set, its definition's interval its bound registers),
 after `tier1_cfg_input_valid`'s two checks on a value's registers, 16 values a
-step with a scalar twin, and refuses an input with fixed ranges.
+step, and refuses an input with fixed ranges.
 `tier1_cfg_order_prepare` and `tier1_cfg_order_run` are the CFG consumer's
 order: the intervals, then the preferred problem (`Tier1CfgPreference`: its
 registers and each value's set, to which `tier1_cfg_preferred` adds a bound
@@ -105,7 +105,7 @@ position. Then the scans' columns go back for the assignment's own.
 
 `test-tier1-cfg` runs each case as two problems, in one call (with the verdict
 inside, and with the plain problem first) and in two whole `tier1_cfg_allocate`
-calls, on both paths (`tier1_cfg_test_two_orders`): a random preferred problem
+calls (`tier1_cfg_test_two_orders`): a random preferred problem
 (the general class widened, each value's set its own, the new registers or
 both, and in a case of four one required value given no register), with the
 definitions unbound, bound at random and bound in clashing pairs, two values

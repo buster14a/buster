@@ -450,7 +450,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   a full expression of its own, checked first, and a brace initializer's list is one, checked once its last value
   is walked (`check_unseq_plans`, a range's value once per element). Candidates come from one vector pass over the
   graph's operators for a modification; a root whose postorder node range names no modified variable twice (counting
-  its modifications; `check_unseq_repeats`, vector and scalar twins, a superset of the walk's usages) can't report and
+  its modifications; `check_unseq_repeats`, 16 nodes at a time, a superset of the walk's usages) can't report and
   isn't walked, as most aren't; the walk is scalar, an ordered tree walk with a union-find. A random
   differential of 21,000 full expressions over three variables, without constant first operands, matches clang
   23.1.6 exactly. Differences left: buster's evaluation facts take an assignment's or a statement expression's value
@@ -675,7 +675,7 @@ Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#c
 
 ## Runtime fixtures
 
-`test-checker`'s shared source fixtures (`check_test_sources`, 420 cases) are
+`test-checker`'s shared source fixtures (`check_test_sources`) are
 runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
 a case, which the test reads when it runs, so that editing a case's source or
 flags, or adding a case, compiles, links and bakes nothing. The catalog's first
@@ -699,6 +699,32 @@ is skipped. The fixture root is `tests/` under the working directory, or
 line. The cases' bytes are the table's literals as clang compiled them, compared
 byte for byte when they moved (buster-performance's
 `fixtures-runtime-2053-2026-11-13`).
+
+Each case `check_test_source` accepts also checks the reader's graph and
+enumerations (what its two paths' comparison reads: every node's columns and
+leaf, the arguments, the overload calls, the tokens' nodes and the enumeration
+records) against `tests/checker/source-digests.tsv`, from the repository's
+root, keyed by the case's name and its source's hash (#2924). The digests were
+recorded where the reader's vector path and its scalar twin agreed. A case
+with no line passes: a new case, or an edited source (a new key), has no such
+agreement to record, and clang's acceptance and first error and the checker's
+typed streams check it. Each run prints how many cases had a line and how many
+had none. A reader change that changes a recorded case's graph records again:
+run every part of `test-checker` with `BUSTER_CHECK_RECORD_DIGESTS=FILE`, sort
+FILE's lines unique, and put them after the table's three comment lines; the
+PR says what vouches for the changed graphs.
+
+The checker's typed streams are recorded the same way, in
+`tests/checker/stream-digests.tsv` (#2924, C12c-3): each source fixture's
+stream, keyed as above, and each comparison's reference stream (a generated
+graph's, a builtin or x86 graph's, the transitions' and the scheduler's), keyed
+by its site and the graph (`check_test_graph_key`: its nodes, columns, leaves,
+extensions and suppressed warnings). They were recorded where the checker's
+scalar schedule and node order agreed; `-` marks a case whose interned types
+depend on the tests run before it (a part's against a whole run's). A case with
+no line passes, as above. A checker change that changes a recorded stream
+records again with `BUSTER_CHECK_RECORD_STREAM_DIGESTS=FILE`, every part and a
+whole run, a key with two digests `-`.
 
 Ten test files' own source tables, 596 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`
@@ -725,9 +751,10 @@ programs that `check_test_constant_conversions`
 (`c_check_constant_conversion_test.c`) runs natively against clang by
 `check_test_program_source`, whose catalog names select the checks of their
 entries and code ([the lowering guide](lowering.md#node-templates-1048)).
-`tests/checker/branch-conditions` (#2883) is too: two programs that
+`tests/checker/branch-conditions` (#2883) is too: three programs that
 `check_test_branch_conditions` (`c_check_branch_condition_test.c`) runs the same
-way ([the lowering guide](lowering.md#conditions-as-branches-2883)).
+way ([the lowering guide](lowering.md#conditions-as-branches-2883)), the third
+for a condition on an lvalue at an absolute address (#3028).
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
