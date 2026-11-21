@@ -1025,6 +1025,7 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "parallel_warning_ranges", CHECK_ATTESTED_FIELD_AMBIENT },
     { "declaration_specifiers", CHECK_ATTESTED_FIELD_OWN },
     { "declaration_deduced", CHECK_ATTESTED_FIELD_OWN },
+    { "declaration_deduced_first", CHECK_ATTESTED_FIELD_OWN },
     { "declaration_bases", CHECK_ATTESTED_FIELD_OWN },
     { "declaration_starts", CHECK_ATTESTED_FIELD_OWN },
     { "declaration_storage", CHECK_ATTESTED_FIELD_OWN },

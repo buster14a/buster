@@ -2059,6 +2059,9 @@ struct CheckInputReader
     bool parallel_warning_ranges;
     uint32_t* declaration_specifiers;
     TypeId* declaration_deduced;
+    // The declarator whose deduction a group's declaration_deduced is (#1844), for clang's "deduced as" error of a later
+    // one that differs, and BUSTER_CHECK_NONE once that error is given: clang compares no further declarator of the group.
+    uint32_t* declaration_deduced_first;
     TypeId* declaration_bases;
     // The declaration-start column: entry q is the first token of the declaration whose declarator name is q, the
     // start a candidate's implicit declaration or a declarator's attribute begins at (check_input_declaration_starts).
@@ -17103,6 +17106,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(vla_ends, uint32_t) \
     X(declaration_specifiers, uint32_t) \
     X(declaration_deduced, TypeId) \
+    X(declaration_deduced_first, uint32_t) \
     X(initializer_finish_next, uint32_t) \
     X(designator_indices, uint64_t) \
     X(designator_ranges, uint32_t) \

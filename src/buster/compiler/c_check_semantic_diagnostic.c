@@ -433,6 +433,20 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
             "variable '%.*s' with type %.*s has incompatible initializer of type %.*s", (int)name.length, name.pointer,
             (int)type.length, type.pointer, (int)initializer.length, initializer.pointer);
     }
+    else if ((report->message == CHECK_INPUT_AUTO_TYPE_MISMATCH || report->message == CHECK_INPUT_AUTO_DEDUCED_MISMATCH) && report->type != 0 &&
+             report->subject != 0 && report->subject - 1 < count && report->detail < count)
+    {
+        // Two declarators' deductions that differ (#1844), each type as its initializer spells it, each declarator named.
+        const String8 first = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+        const String8 second = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, (uint32_t)(report->value >> 32));
+        const String8 first_name = check_semantic_name(parser, pp, report->subject - 1);
+        const String8 second_name = check_semantic_name(parser, pp, report->detail);
+        result = first.length == 0 || second.length == 0 || first_name.length == 0 || second_name.length == 0 ? NULL :
+                 check_warning_text(scratch, "'%s' deduced as %.*s in declaration of '%.*s' and deduced as %.*s in declaration of '%.*s'",
+                                    report->message == CHECK_INPUT_AUTO_TYPE_MISMATCH ? "__auto_type" : "auto", (int)first.length, first.pointer,
+                                    (int)first_name.length, first_name.pointer, (int)second.length, second.pointer, (int)second_name.length,
+                                    second_name.pointer);
+    }
     else if (report->message == CHECK_INPUT_AUTO_TYPE_INITIALIZER && report->type != 0 && name.length != 0)
     {
         const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, token, scratch);
