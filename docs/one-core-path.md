@@ -19,9 +19,9 @@ there by making what a rule decides on a byte its producer wrote: T's, C's and
 X's rules as arithmetic over byte columns, 64 records to a register, and the
 leaves and lookups, which no lane helps, from words that are one load away.
 Step 0 met its 20-cycle gate on the dumped nodes with leaves and lookups given.
-With distant operands repaired before template selection, the sweeps took 14.12
-cycles per taken SQLite node and 18.40 on musl on repeated passes, or 19.15
-and 19.86 after scalar work. Step 1
+Producing the packed template key in T and repairing distant operand lanes
+before X gave 13.76 cycles per taken SQLite node and 18.05 on musl on repeated
+passes, or 18.29 and 19.37 after scalar work. Step 1
 measured the leaves and lookups: every record is T's, a leaf takes about 5
 cycles, and a lookup takes 18 to 63 by its operator, 25 to 46 on average,
 where the gate was 10 and the design's own refutation line 20. T is bound by
@@ -101,8 +101,8 @@ token; the issue has each row's source:
 
 | step | what | gate | state |
 | --- | --- | --- | --- |
-| 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | met on the frozen SQLite and musl streams: 14.12 and 18.40 cycles on repeated passes, 19.15 and 19.86 after scalar work; at most 0.055 median branch misses per taken node |
-| 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
+| 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | met on the frozen SQLite and musl streams: 13.76 and 18.05 cycles on repeated passes, 18.29 and 19.37 after scalar work, with the largest of the 20 round means at 19.59 |
+| 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2. On the later call-argument rules, completing a call in one visit gave 27.00 on SQLite in lean mode. |
 | 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35. The tests on the window measured: exact; 54.1 TSC ticks a record on `sqlite3.c` where their pass over T's columns reads 83.0 (gate 40, refuted at 65): the loop 0.7, its inputs 8.9, and 37.2 the tests that read T's records still. Their second half's first piece: an operator a constant sends for nothing is left out of the loop's list (20,898 of 48,645): 48.7. Its second: the tree's tests listed by the operator above (6 operators for 27,794 records), and an expression with nothing listed has its verdict from the window alone (21,157 of 50,993): 42.0. Its third: a call with no test to make is left out of the list (12,064 of 12,918) and a statement that discards nothing is not listed (35,069 expressions with nothing listed): 35.8. Its fourth: a pointer's cast to void or to a pointer, its subscript by a constant and its sum with one are left out of the list (9,744 of 15,688 listed operators; 41,456 expressions with nothing listed): 31.2. C on the window measured: C's templates, contexts and targets for the expressions with no call, logical operator, update or comma (63% of `sqlite3.c`'s placed expressions), exact; 12.6 TSC ticks a record of theirs where C on T's columns reads 40.2, and 13.9 with its bytes, where its gate was 10. A call on the window measured: the kernel makes each argument's conversion (every one for 99.6%, 98.8% and 98.0% of the calls) and C's answers for a call are made on the window from them, exact; 86%, 84% and 86% of the placed expressions are decided there, at 8.2 TSC ticks a record of theirs on `sqlite3.c` and 9.2 with its bytes (gate 10); the kernel in place reads 1.2 ticks a record more, where its gate was 1.0 |
 | 3 | The front's row, into the window | 35 cycles a token or less | first part measured, in the shadow: the node machine's front writes the kernel's window and the kernel reads it in place, exact; the kernel with its inputs 29.9 TSC ticks a record on `sqlite3.c` (gate 35), 38.4 on Lua, 61.5 on musl. The lexer's and the parser's rows are not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates. Designed (#2874): a body's row at 14 cycles a typed entry. Its first piece, Tier 0's back half on byte templates, measured in the shadow: exact, and refuted on its cost (62.8 cycles an entry where today's back half takes 43.7). Its second, in the compile: a fixed frame's unwind descriptor from Tier 0's frame, the objects unchanged, 403 cycles a body where main's frame events take 1,512 (its gate 300), 4.0 cycles a token less on `sqlite3.c` |
@@ -153,6 +153,14 @@ sweep. Musl measured 18.40 cycles on repeated passes and 19.86 after scalar work
 one of the 20 round means met the 20-cycle gate. The highest median branch
 miss rate was 0.055 per taken node and every entry still matched.
 [Paired rerun, full counters and sanitizer results](https://github.com/buster14a/buster-performance/tree/67d089abc0fa325b3bd76435e4d937ee5426fed1/docs/measurements/per-core-step0-2850-2026-11-21/qualification/qualrepair)
+
+T can also produce the packed template key while its deciding bytes are live.
+Repairing the distant lanes before X retained all 346,998 SQLite entries and
+154,132 musl entries. SQLite measured 13.7625 cycles per taken node on repeated
+passes and 18.2908 after the scalar twin. Musl measured 18.0476 and 19.3685.
+The largest of the 20 round means was 19.588 and the largest median branch-miss
+rate was 0.0555 per taken node.
+[Producer and full qualification](https://github.com/buster14a/buster-performance/tree/3272eaf9c4bfc10d14f7bdfc1dc4970acacafcc3/docs/measurements/per-core-step0-2850-2026-11-21/qualification/qualproduced)
 
 ## Step 1: the fact words
 
@@ -257,6 +265,31 @@ kernel's functions (`perf record`, 121 runs of the unit):
   `sqlite3.c` and about 8 on musl to step 0's 16.7 and 20.6: 29 to 33 a node,
   inside the 38 the budget gives a body node, with 5 to 9 left for the
   statements and the front's own pass.
+
+### Operand placement and call arguments on the later rules
+
+On `f4f8dd9a1`, the lean kernel checks the call argument conversions used by
+the later C pass. Two experiments on that revision measured improvements over
+six-operation dispatch. The price includes building the lists for each body.
+
+| Locked 9700X, cycles per taken leaf or lookup | SQLite reference | SQLite candidate | Paired difference | Rounds faster |
+| --- | ---: | ---: | ---: | ---: |
+| List each lookup with its first operand | 28.365 | 27.470 | −1.250 | 5/5 |
+| Complete the callee and its arguments together | 28.5125 | 26.995 | −1.4675 | 4/4 |
+
+Both changes also improved the complete timed pass in every SQLite lean round.
+The first reduced it by a paired median of 0.610 cycles per window record and
+the second by 0.515. Every run across SQLite, Lua and musl matched the original
+record, order and decoy checks. These comparisons used separate executables
+and rotations. The 10-cycle Step 1 gate remains open.
+[Lookup layouts](https://github.com/buster14a/buster-performance/tree/31d3ef51e03e3a6e5a1ab0fc54d1469466aef321/docs/measurements/per-core-step1-2850-2026-11-21/lookup-list-layouts)
+· [Call conversions](https://github.com/buster14a/buster-performance/tree/296c5d0edbcb3d6fe287f9a28d2d91c8e04f6371/docs/measurements/per-core-step1-2850-2026-11-21/call-conversions)
+
+The public compiler at `fbef2d68d` took 113.044 ms for fresh `-c` on the
+9,507,037-byte frozen SQLite file. That gives 84.10 MB/s. The separate counter
+series measured 870.34 user and kernel cycles per preprocessed token. The target
+is 9.507 ms for the complete object.
+[Seven-round public baseline](https://github.com/buster14a/buster-performance/tree/296c5d0edbcb3d6fe287f9a28d2d91c8e04f6371/docs/measurements/window-compile-2850-2026-11-21/ce67967f5/sqlite)
 
 ### The figures are a difference of two passes (#2872)
 
