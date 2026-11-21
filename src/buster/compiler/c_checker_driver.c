@@ -14873,8 +14873,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     options.semantic_pragmas = true;
     options.timing = time_stages;
-    options.node_window_assignments = node_window_assignments;
-    options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
+    options.node_window_assignments = node_window_assignments && !options.predefines.debug && !options.predefines.debug_modules;
+    options.node_window = node_window;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
     // The preprocessor's phases' ticks in pp_run, for the report.
     uint64_t pp_ticks[PP_PHASE_COUNT] = { 0 };

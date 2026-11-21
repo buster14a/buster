@@ -2014,6 +2014,7 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
     if (admitted)
     {
         CheckInputWindowRow row;
+        // The ordinary folded return conversion owns its CONST at the return token.
         check_node_window_int_entry(&row, value, name ? tokens[first] : returned, name);
         CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
         if (name)
