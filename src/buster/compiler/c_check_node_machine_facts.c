@@ -4696,6 +4696,9 @@ struct NodeFactsReader
     uint8_t* window_c_standings;
     uint8_t* window_c_flags;
     uint8_t* window_c_templates;
+    // A record's key, which its operands' rows are read by (BUSTER_NODE_CONTEXTS_KEY_*): its template's number, but
+    // for an update, a comma and a conditional.
+    uint8_t* window_c_keys;
     uint8_t* window_c_contexts;
     uint8_t* window_c_sources;
     uint8_t* window_c_reasons;
@@ -4780,6 +4783,40 @@ struct NodeFactsReader
     uint8_t* x_verdicts;
     uint64_t* x_ticks;
     uint64_t x_ticks_now;
+    // A summary's side facts on the window (c_check_node_machine_rows.c's node_rows_window_summary; `summaries`: not
+    // with the shadow's switch, BUSTER_NODE_READER_WINDOW_SUMMARY_OFF):
+    // - a name's leaf's declaration's line's byte, which the tests' sweep copies beside the records' bytes
+    //   (BUSTER_NODE_ROWS_LINE_*: a plain function's, and one declared noreturn); another record's is zero;
+    // - a mask a block: the calls whose callee is no plain function's name in the block or the block before, which
+    //   the tests' loop makes;
+    // - the two lists, the chunk's records' numbers (the references' and those calls'), and a reference's object by
+    //   its place on its list;
+    // - the reduction's two bytes a record (its fact, and its operands' joined), for the expressions it runs on;
+    // - the references through each record (entry x is the count of those in the window's records up to x, and the
+    //   entry before the first is zero): an expression's are the list's from the count through the record before its
+    //   operand's first to the count through its last;
+    // - an expression's root's return fact;
+    // - and a chunk's first run's counts, facts and objects, which its second run's are compared with.
+    bool summaries;
+    uint8_t* window_x_lines;
+    uint8_t* window_x_returns;
+    uint8_t* window_x_joined;
+    uint64_t* window_x_suspects;
+    uint16_t* x_summary_references;
+    uint16_t* x_summary_suspects;
+    uint32_t* x_summary_objects;
+    uint16_t* window_x_referenced;
+    uint8_t* x_summary_facts;
+    uint16_t* x_first_summary_referenced;
+    uint8_t* x_first_summary_facts;
+    uint32_t* x_first_summary_objects;
+    // The operators whose turn listed their expression this run for a second operand whose truth is known
+    // (node_rows_window_decided). And test-checker's control of the side facts' comparison
+    // (BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT), with its turn of an expression's kept facts.
+    uint32_t x_decided_now;
+    bool summary_fault;
+    uint32_t summary_fault_turn;
+    uint32_t summary_again_turn;
     // test-checker's control of the rows' comparisons (BUSTER_NODE_READER_WINDOW_ROWS_FAULT): its turn of the
     // reference's answers, a tape, and of a chunk's first run's, a chunk.
     bool x_fault;
@@ -4889,7 +4926,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->window_c_masks = arena_push_array(arena, 8 * ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2), sizeof(uint64_t), 64);
         state->c_tables = arena_push_array(arena, 1, 256, 64);
         uint8_t** columns[] = { &state->window_c_classes, &state->window_c_facts, &state->window_c_kinds, &state->window_c_standings, &state->window_c_flags,
-                                &state->window_c_templates, &state->window_c_contexts, &state->window_c_sources, &state->window_c_reasons };
+                                &state->window_c_templates, &state->window_c_keys, &state->window_c_contexts, &state->window_c_sources, &state->window_c_reasons };
         room = state->place_c_states != NULL && state->place_c_contexts != NULL && state->place_c_templates != NULL && state->place_c_targets != NULL &&
                state->c_ran != NULL && state->c_targets != NULL && state->c_ticks != NULL && state->c_verdicts != NULL && state->window_c_targets != NULL &&
                state->window_c_masks != NULL && state->c_tables != NULL && state->window_c_strides != NULL;
@@ -4959,8 +4996,26 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->x_verdicts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->x_ticks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->x_tables = arena_push_array(arena, 1, 3072, 64);
+        const uint64_t summary_blocks = (uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2;
+        // (A list and the counts have a register's room past a chunk's records: the sweep stores one whole.)
+        state->window_x_suspects = arena_push_array(arena, summary_blocks, sizeof(uint64_t), 64);
+        state->x_summary_references = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        state->x_summary_suspects = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        state->x_summary_objects = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        // (The counts' column starts a register in: its stores are on a line's first byte, and the entry before its
+        // first is its own to keep zero.)
+        uint16_t* referenced = arena_push_array(arena, padded + 32, sizeof(uint16_t), 64);
+        state->window_x_referenced = referenced != NULL ? referenced + 32 : NULL;
+        state->x_summary_facts = arena_push_array(arena, padded, 1, 64);
+        state->x_first_summary_referenced = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        state->x_first_summary_facts = arena_push_array(arena, padded, 1, 64);
+        state->x_first_summary_objects = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        listed = listed && state->window_x_suspects != NULL && state->x_summary_references != NULL && state->x_summary_suspects != NULL &&
+                 state->x_summary_objects != NULL && state->window_x_referenced != NULL && state->x_summary_facts != NULL && state->x_first_summary_referenced != NULL &&
+                 state->x_first_summary_facts != NULL && state->x_first_summary_objects != NULL;
         uint8_t** columns[] = { &state->window_x_owns,  &state->window_x_conversions, &state->window_x_lengths, &state->window_x_targets, &state->window_x_facts,
-                                &state->window_x_operands, &state->window_x_offsets, &state->window_x_bits, &state->window_x_senses };
+                                &state->window_x_operands, &state->window_x_offsets, &state->window_x_bits, &state->window_x_senses, &state->window_x_lines,
+                                &state->window_x_returns, &state->window_x_joined };
         room = state->window_x_reads != NULL && state->x_cursors != NULL && state->x_words != NULL && state->x_lines != NULL && state->x_updates != NULL &&
                state->x_branches != NULL && state->x_first_kinds != NULL && state->x_first_classes != NULL && state->window_x_types != NULL && state->x_kinds != NULL && state->x_classes != NULL && state->x_verdicts != NULL && state->x_ticks != NULL &&
                state->x_tables != NULL && state->x_values != NULL && state->x_first_values != NULL && state->window_x_marks != NULL && state->x_owners != NULL && state->x_marked != NULL && state->window_x_values != NULL && state->window_x_ends != NULL &&
@@ -5003,10 +5058,24 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
             }
             memset(state->x_verdicts, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
             memset(state->x_ticks, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS * sizeof(uint64_t));
+            memset(state->window_x_suspects, 0, summary_blocks * sizeof(uint64_t));
+            memset(state->x_summary_references, 0, padded * sizeof(uint16_t));
+            memset(state->x_summary_suspects, 0, padded * sizeof(uint16_t));
+            memset(state->x_summary_objects, 0, padded * sizeof(uint32_t));
+            memset(state->window_x_referenced - 32, 0, (padded + 32) * sizeof(uint16_t));
+            memset(state->x_summary_facts, 0, padded);
+            memset(state->x_first_summary_referenced, 0, padded * sizeof(uint16_t));
+            memset(state->x_first_summary_facts, 0, padded);
+            memset(state->x_first_summary_objects, 0, padded * sizeof(uint32_t));
+            state->summaries = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_SUMMARY_OFF) == 0;
             node_rows_tables(state->x_tables);
             state->x_fault = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_ROWS_FAULT) != 0;
             state->x_fault_turn = 0;
             state->x_again_turn = 0;
+            state->x_decided_now = 0;
+            state->summary_fault = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT) != 0;
+            state->summary_fault_turn = 0;
+            state->summary_again_turn = 0;
         }
         else
         {

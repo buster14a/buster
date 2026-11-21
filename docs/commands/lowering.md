@@ -366,7 +366,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -843,7 +843,11 @@ takes its entries.
   (`PPOptions.node_reader`'s bit 512, with `--window-contexts`' bits): each
   evaluated record's entries' kinds, classes and values, 64 records a step,
   beside X on T's columns at reader time. [Its
-  section](#xs-rows-on-the-window-2850) has it.
+  section](#xs-rows-on-the-window-2850) has it. And, for each expression
+  whose tape they make, **a summary node's side facts**: its references and
+  its root's return fact, beside the program's own walks after the pipeline
+  ([their section](#a-summary-nodes-side-facts-on-the-window-2850));
+  `--no-window-summaries` (bit 4096) leaves them out, for their cost.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -1743,9 +1747,11 @@ tests' chunk (`node_facts_window_run`).
   ran on is decided on the window unless one of its records is listed: a
   call whose record doesn't say every argument's conversion is made, or
   whose callee is no name's leaf and has an object ([a call's
-  arguments](#a-calls-arguments-in-the-kernel-and-cs-call-2850)); `&&`, `||`
-  or `?:`; an update (`++`, `--`, a compound assignment); a
-  comma or a selection; a division or a remainder by an integer constant
+  arguments](#a-calls-arguments-in-the-kernel-and-cs-call-2850)); an `&&`,
+  an `||`, a `?:` or a comma that the masks don't take ([an operator's
+  value and a comma](#an-operators-value-and-a-comma-on-the-window-2850));
+  an update the masks don't take; a selection; a division or a remainder by
+  an integer constant
   (the tasks' rule for a power of two reads the divisor's value); a record
   whose value the columns don't hold whole (a bit-field's, a faulted
   constant's and an overload set's are); a cast to a union; a leaf with an
@@ -2002,11 +2008,13 @@ measured.
 - **A CONDITION is branched** where its operand is `&&` or `||`; `&&` and
   `||` are under a CONDITION, an `&&`, an `||` or a `!`; `!` is under an
   `&&` or an `||`.
-- **What one level cannot say lists the expression:** an `&&` or an `||`
-  that is not branched (a value, or one whose first operand's truth is
-  known); a `!` that is a value over `&&` or `||`, which a CONDITION over it
-  is too; and a branched `!` over a `!`. The reason is
-  `logical-or-conditional`.
+- **What that cannot say lists the expression,** with the reason
+  `logical-or-conditional`. Since [an operator's value and a
+  comma](#an-operators-value-and-a-comma-on-the-window-2850) a record that
+  has its consumer's answer reads it from the next record, down a run of
+  such records, and what is listed is there: an `&&` or an `||` whose first
+  operand's truth may be known, a `!` over `&&` or `||` under a CONDITION,
+  and a run of more than three.
 - **A branched record's operands** are each evaluated: one branched in its
   turn with no target, a value to T's conversion of it, which C then tests.
   An operand of a type no truth's entries test leaves the record no
@@ -2165,8 +2173,10 @@ entries' values](../node-machine.md#the-entries-values-on-the-window).
     own shape's byte of `NodeRowsTables.value_owns` says
     (`BUSTER_NODE_ROWS_LIST_*`), and a loop a list writes its values at the
     rows' places. What a loop reads is a column: a record's value
-    (`window_x_values`: its object's number where it has one, else its
-    payload; the records' bytes' sweep makes it with the records' types, and
+    (`window_x_values`: its object's number where it has one and its
+    constant is an address's, else its payload, which is what `(_Bool)&x`,
+    a 1 of x's record, has; the records' bytes' sweep makes it with the
+    records' types, and
     the reads leave a member's offset in bytes there) and a pointer's stride
     (`window_c_strides`, which
     C's loop keeps as it asks for it, `node_contexts_stride`). An integer
@@ -2287,3 +2297,219 @@ slot; a postfix update's destination's two parts by its own entries' shape;
 each template's shape with the mark of those whose rows are not made here,
 the order's permutation, void's word, which the reads don't read, and the
 values' two tables' bytes by a record's own shape.
+
+### An operator's value and a comma on the window (#2850)
+
+The same commands, `measure-node-machine --shadow --window-contexts` and
+`--window-rows`. `&&` and `||` as values, `?:` and a comma are made in C's
+loop and in X's rows on the window, where both listed them. No compile takes
+any of it. [The design](../node-machine.md#an-operators-value-and-a-comma-on-the-window)
+has the rules, what it measured and its gates.
+
+- **A comma** (`node_contexts_window_loop`): a free record of a comma's
+  class and a number's that is not read for its address has a wrapper's
+  template and a key of its own (`BUSTER_NODE_CONTEXTS_KEY_COMMA`): its
+  first operand is converted to void (`BUSTER_NODE_CONTEXTS_SOURCE_VOID`,
+  which the targets' sweep writes) and its second to the comma's type. A
+  discarded comma (`_KEY_COMMA_DISCARD`: a comma's first operand, or one
+  whose consumer, a wrapper or a conditional with the comma for an arm, is
+  of void's class, a byte read a record at a time) converts its second
+  operand to void too and has the discard's context. Listed: a comma read for its
+  address, a folded one, and a comma's second operand that is a comma.
+- **Which operators are branches.** A branch operator (`!`, `&&`, `||`,
+  free, the last two with a first operand whose truth is not known) is
+  entered as an `&&`'s or an `||`'s first operand, and, where it is an `&&`,
+  an `||` or a `!` over one with `!`s alone between (a deep `!`), as a
+  CONDITION's operand or a conditional's condition; it is chained, with its
+  consumer's answer, as an `&&`'s or an `||`'s second operand or a `!`'s
+  operand. The answers go down a run of chained records by two doubling
+  steps, with a bit from the block after. Any other is a value.
+- **An operator's value** (`NODE_MACHINE_TEMPLATE_BRANCH`): an `&&` or an
+  `||` that is a value, and a conditional whose condition's truth is not
+  known (its key `BUSTER_NODE_CONTEXTS_KEY_CONDITIONAL`: its arms are
+  converted to its own type). A record at a time, for these records alone:
+  a conditional of one operand twice, and the conversion its consumer puts
+  into its arms (`node_contexts_sinks`: three of the reference's terms,
+  which list a little more than the reference leaves to the tasks), asked of
+  a root in its expression's part. Each lists.
+- **Listed still:** a condition whose truth may be known, a value whose
+  first operand is a `!`, a `!` over `&&` or `||` under a CONDITION, a run
+  of more than three chained records, a block's last record that is a branch
+  operator under a `!`, and a selection (reason `operator`).
+- **X's turns** (`node_rows_window_held`, from the branches' loop): the
+  condition's test and branch, a tested value's shape with its operator's
+  label; a conditional's first arm's jump after its conversion
+  (`BUSTER_NODE_ROWS_ARM`, by `NodeRowsTables.arms`); a logical operator's
+  own four entries (`BUSTER_NODE_ROWS_LOGIC`); a conditional's own part with
+  no entry (`BUSTER_NODE_ROWS_HELD`). Listed for X: an arm whose conversion
+  leaves its jump no slot, and a logical operator whose second operand's
+  conversion is of a narrow class.
+- **The labels:** an operator's value has two. The values' sweep counts the
+  records with a label apart from those with a call's row or a temporary
+  (`BUSTER_NODE_ROWS_VALUE_LABELED`), and the numbering
+  (`node_rows_window_label`) counts labels: two a value's, one an operator's
+  evaluated as branches with a label of its own.
+
+The report adds:
+
+- `node-shadow: window contexts valued=N (P% of the records swept)
+  of-them-listed-for-their-target=N commas=N`: the records the loop gives an
+  operator's value's two labels, those of them whose consumer's conversion
+  lists their expression, and the commas it takes. `comma-or-selection`
+  among the listed reasons is `comma` now.
+
+`test-checker` (part 5 of 8) reads the function `valued` in C on the
+window's fixture (`node_contexts_test_source`), which the rows' fixture run
+reads too: a line a case of each term (commas discarded and not, of each
+operand and consumer; conditionals with each arm's conversion and each kind
+of condition; `&&` and `||` as values with each operand's class and each
+operator for an operand; runs of `!`s and of chained operators of each
+length; what the tasks sink; operands and consumers past two blocks), and
+six statements 64 times each for the blocks' ends. The operators' values,
+those listed for their target and the commas are pinned
+(`NodeContextsExpected.valued`, `.sunk` and `.commas`), and
+`node_rows_test_tables` has the new shapes' rows, the arms' table and the
+values' bytes.
+
+### A summary node's side facts on the window (#2850)
+
+`./build/compiler measure-node-machine --shadow --window-rows [--no-window-summaries] [--passes 0] [--list N] [preprocessor options] file...`
+
+`--window-rows` makes, for each expression whose tape X makes whole on the
+window, what a pass after the reader reads below a full expression's root
+today: the facts one summary node in its nodes' place would have to answer
+from a side record. After the pipeline they are compared with the program's
+own walks on each such root. No compile takes any of it. [The
+design](../node-machine.md#a-summary-nodes-side-facts-on-the-window) has the
+survey of those passes, what it measured and its gates.
+
+- **Its references** (`check_program_references`: the static objects its
+  leaves name, a set an expression). A reference is a leaf whose object
+  that walk takes, evaluated or not: a name's with a symbol of its own, or
+  a literal's with an object, a string's. The sweep
+  (`node_rows_window_summary`, 64 records a step) lists the chunk's by a
+  table of the flags a record of each kind needs and writes the count of
+  the references through each record
+  (`NodeFactsReader.window_x_referenced`: one multiplication and three steps
+  of sums in a register); a gather then writes each listed record's object,
+  eight a step. An expression's references are the list's between
+  the count through the record before its operand's first and the count
+  through its last: two loads where its summary's record is written, and
+  no step of the sweep is an expression's own.
+- **Its root's return fact** (`check_program_return_facts`: a stop, an
+  unknown, which `-Wreturn-type` reads). A call of a plain function's name
+  has none: the name of a function that is not declared noreturn and whose
+  name is none of the library's that the flow leaves unknown. A function's
+  declaration's line has a bit for that and one for noreturn
+  (`BUSTER_NODE_TESTS_LINE_PLAIN` and `_STOPS`, made with the line), and the
+  tests' sweep copies a name's leaf's line's byte to `window_x_lines`. The
+  tests' loop (`node_tests_window_loop_by`) gives each block a mask of its
+  other calls, those whose callee is no plain function's leaf in the block
+  or the block before. The sweep lists the ones the kernel placed, and each
+  is asked its own fact a record at a time (`node_rows_summary_call`, the
+  flow's `check_program_return_call` by the callee's record's byte: a stop
+  where it is the leaf of a function declared noreturn, none where it is a
+  plain function's, and an unknown for any other: a call through a value,
+  or of a library's name the flow leaves unknown). The flow reads a callee
+  through `*` and `&` to a function's name; C lists an expression that
+  calls `*f` or `&f` of one, so the window asks no such call. An
+  expression's fact is its calls' facts together, but where a call stops
+  and the expression has an `&&`, an `||` or a `?:`: that expression has
+  the flow's reduction over its records (`node_rows_summary_reduce`). In a
+  unit with a function the flow leaves unknown from a declaration on
+  (`check_program_return_unknowns`, made at the reader's start) no call is
+  plain: each is asked a record at a time, and a call of such a function
+  after that declaration is unknown.
+- **A condition's truth and a constant's fold** are a summary node's
+  value's to answer, with nothing in the side record.
+  `check_program_branch_truth` knows a branch's condition's truth where the
+  condition's value has none in two cases, and the window lists both.
+  - **By one operand of an `&&` or an `||`:** the turns list an `&&` or an
+    `||` whose second operand's truth is known (`node_rows_window_decided`:
+    a constant's, but an object's lvalue's), whether it is evaluated as
+    branches or as a value (reason `branches`).
+  - **Through a cast:** the walk gives a cast its operand's truth (#3204),
+    so a cast that is no constant itself, over an operand whose truth may
+    be known, passes a truth its own value has not (`(char)(long)&x`: an
+    address is not null, and its low byte is no constant). C's loop lists
+    its expression (`node_contexts_window_loop`'s `passes_truth`, reason
+    `operator`) where its consumer may ask its truth: a CONDITION, a `!`,
+    an `&&` or an `||`, or another wrapper. A cast that is a constant with
+    an effect's flag is listed too, and a cast to void never. A `!` and a
+    CONDITION are a constant wherever their operand's truth is known
+    (`check_action_logic`), and ask for no term.
+
+  The controls' fold (`check_control_fold_truth`) does not fold a comma
+  whose left operand is no constant: C lists a folded comma.
+- **Not made: a `switch`'s selector's type.** `-Wswitch` reads the node at
+  the selector's first token (#3200), which only the walk makes: a
+  `switch`'s condition stays the walk's.
+
+`--no-window-summaries` is the cost's switch: the same run with no lines'
+column, no calls' mask and no sweep, and with nothing kept or compared. The
+turns list the same expressions with it.
+
+The report adds:
+
+- `node-shadow: window summaries expressions=N their-references=N (R a
+  record swept) with-an-unknown=N with-a-stop=N; records listed for a
+  reference=N calls asked a record at a time=N (R a record swept)
+  expressions reduced=N second-runs-that-differ=N; operators whose turn
+  lists for a second operand whose truth is known=N`: the expressions whose
+  facts are kept (those whose tape is made), their references as the sweep
+  gives them (an object once a leaf), those with each fact; the records the
+  sweep lists for a reference, in any expression, the calls it asks and the
+  expressions the reduction runs on; the chunks whose second run made other
+  facts; and the operators the turns list.
+- `node-shadow: window contexts casts-listed-for-a-truth-their-value-has-not=N`,
+  with `--window-contexts` too: the casts C's loop lists.
+- `node-shadow: window summaries compared=N (not kept: N) the program's
+  references=N reference-differences=N fact-differences=N (the program's:
+  a stop=N an unknown=N); folds asked=N fold-differences=N (of the
+  compared: a constant folded=N); branches' conditions' truths asked=N
+  truth-differences=N (of the compared: a truth known=N)`: after the
+  pipeline, each kept root's references against `check_program_references`
+  run on it alone (the same set of objects) and its fact against
+  `check_program_return_facts`' byte; whether `check_control_fold_truth`
+  folds it exactly where a leaf of its value would; and, where it is a
+  branch's condition, whether `check_program_branch_truth` knows its truth
+  exactly where its value says it. The four differences, `not kept` and the
+  second runs that differ must be 0: the command exits 1 otherwise.
+- `node-shadow: window summaries ticks=N (T a record swept, T a chunk); a
+  second run over the same chunk, not counted: ticks=N (T a record swept,
+  T a chunk)`: the sweep's TSC ticks.
+- `node-shadow: window summaries difference file=F line=N token=N
+  kept|not kept: references=same|DIFFERENT (the program's N, reader time's
+  N) fact=N (reader N) truth=same|DIFFERENT fold=same|DIFFERENT`, with
+  `--list N`.
+
+`test-checker` (part 5 of 8) has a fixture of its own
+(`node_summary_test_source`), a line a case: references of each kind of
+leaf in each place; calls of each form, with an unknown and with a stop in
+each place an operator puts them; conditions an operand decides; and, 64
+times each for a block's every lane, a statement of eleven records with a
+plain call, a call through a pointer and four references, two conditionals
+with an arm that stops (in chunks one after another: the reduction's bytes
+of one chunk's records are the next's to clear) and a call that stops; and
+calls whose callee is before the block before. A
+second (`node_summary_test_unknowns_source`) is a unit with a function
+unknown from a declaration on. `node_summary_test_fixture` pins each count
+(`NodeSummaryExpected`), asks that no fact differ and that the switch keep
+none with the same tapes, and runs the control
+(`BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT`): reader time keeps each
+expression's facts with one changed (a reference more, a reference's
+object, the fact's stop, its unknown, in turn), and the comparison must
+count every expression by its turn; one of a chunk's first run's facts is
+changed (the count of the references through its last record, its first
+expression's fact, its references' count, its first reference's object, in
+turn), and every chunk's second run must differ; and the truths and the
+folds are asked of every root reader time typed, kept or not, where they
+must count the fixture's lines the window lists for them. The rows'
+fixtures' runs ask that their expressions' facts not differ either.
+The fixture's function `passed` has the cast's rule a term a line (the cast
+under each consumer that may ask its truth, and each case that keeps its
+expression: no such consumer, an operand with no truth, a cast that is a
+constant, an operator that is no cast, a cast to void), with the count of
+the casts listed pinned (`NodeSummaryExpected.passed`), and two constants
+that are no address's whose record has an object (`(_Bool)&g`), whose
+entries' values must be the reference's.

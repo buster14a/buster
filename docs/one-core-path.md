@@ -2467,6 +2467,200 @@ work ([#3196](https://github.com/buster14a/buster/issues/3196)).
   526, 379 and 127 records. A gate for a pass over the window is two numbers: cycles a chunk and work a record.
 - **Next:** `&&` and `||` as values, `?:` and a comma, in C and in X on the window together.
 
+## An operator's value and a comma on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/logical-values-2850-2026-11-20).
+`measure-node-machine --shadow --window-rows`
+([the guide](commands/lowering.md#an-operators-value-and-a-comma-on-the-window-2850)).
+
+`&&` and `||` as values, `?:` and a comma were what C on the window listed
+most: it decided no expression with one, and X made no row of theirs. They
+are made now in the sweeps that exist. In C's loop a comma and an operator's
+value are masks, each record says of itself whether it is evaluated as
+branches or is a value, and a record that has its consumer's answer reads it
+from the next record, down a run of such records by two doubling steps. In
+X's rows the branches' loop takes these operators' turns too: the
+condition's test and branch, a conditional's first arm's jump, a logical
+operator's own four entries; and the numbering counts labels, two an
+operator's value. No compile takes any of it. [The node machine's
+page](node-machine.md#an-operators-value-and-a-comma-on-the-window) has it
+whole: the census before it, the rules, the three builds and the faults. [Its
+specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7049301495)
+had six gates. It is exact and its faults are caught. It takes 11 expressions
+fewer than asked on `sqlite3.c` and 1 on musl; its work a record is within
+its gate for the rows and at C's bound; and its cost is a chunk's first run of
+C's loop, which no gate named.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release, TSC ticks, seven readings; in each
+the build, the piece before's executable twice, and the build again:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions C decides on the window; the piece before's | 50,109; 49,310 | 10,715; 10,079 | 42,776; 41,759 |
+| **expressions whose tape X makes, whole; the piece before's** | **49,842**; 49,073 | **10,248**; 9,888 | **40,444**; 39,495 |
+| more of them | +769 (1.51% of the expressions) | +360 (3.32% of the expressions) | +949 (2.19% of the expressions) |
+| their records; the piece before's | 278,867; 268,942 | 70,873; 61,509 | 204,846; 188,250 |
+| answers of C's; tapes of X's that differ from the reference's | 0; 0 | 0; 0 | 0; 0 |
+| operators' values C takes; of them listed for their target; commas | 715; 98; 330 | 414; 7; 283 | 940; 49; 184 |
+| listed for a logical operator or a conditional; the piece before's | 135; 674 | 22; 290 | 115; 964 |
+| listed for a comma; the piece before's (a selection among them) | 0; 264 | 5; 376 | 0; 169 |
+| listed for X by a turn (an arm with no room, a narrow second operand) | 3 | 0 | 0 |
+| expressions numbered; the piece before's | 428; 474 | 318; 163 | 1,071; 635 |
+| **C's sweeps, a record of the decided, a chunk's second run; the piece before's; more** | 6.79; 6.40; **+0.36 (+0.34 to +0.44)** | 7.25; 7.61; **-0.35 (-0.38 to -0.30)** | 12.31; 10.95; **+1.53 (+1.09 to +2.51)** |
+| **the rows' sweeps, a record of the taken, a second run; the piece before's; more** | 7.30; 7.32; **-0.04 (-0.52 to +0.31)** | 8.83; 9.14; **-0.29 (-0.44 to +0.09)** | 15.74; 16.05; **-0.20 (-0.96 to +5.21)** |
+| C's sweeps, a record of the decided, a first run; the piece before's; more | 9.02; 7.67; +1.22 (+1.12 to +1.83) | 13.09; 12.01; +1.02 (-0.14 to +2.36) | 34.48; 29.55; +4.93 (-0.79 to +17.16) |
+| the rows' sweeps, a record of the taken, a first run; the piece before's; more | 10.15; 10.00; +0.15 (-0.33 to +1.44) | 16.00; 16.36; -0.46 (-0.99 to +5.09) | 43.61; 44.22; -2.18 (-7.98 to +21.59) |
+| C's sweeps, a record swept: a first run, more; a second, more | +1.32 (+1.24 to +1.84); +0.52 (+0.50 to +0.59) | +2.41 (+1.59 to +3.50); +0.71 (+0.68 to +0.75) | +4.12 (+1.06 to +11.21); +1.38 (+1.15 to +2.04) |
+| the rows' sweeps, a record swept: a first run, more; a second, more | +0.44 (+0.03 to +1.55); +0.19 (-0.21 to +0.50) | +1.34 (+0.95 to +5.60); +0.71 (+0.65 to +1.01) | +0.81 (-2.07 to +13.62); +0.59 (+0.18 to +3.54) |
+| **the rows' sweeps, a first run less a second, ticks a chunk; the piece before's; more** | 1299; 1171; **+116 (-63 to +558)** | 2065; 1859; **+237 (+74 to +1876)** | 1884; 1778; **+63 (-505 to +1653)** |
+| C's sweeps, a first run less a second, ticks a chunk; the piece before's; more | 1021; 552; +410 (+379 to +668) | 1800; 1159; +630 (+324 to +1051) | 1635; 1246; +373 (-42 to +1162) |
+| the kernel in place, more; the tests on the window, more | -0.33 (-0.80 to -0.24); +0.21 (-0.17 to +0.39) | -0.36 (-2.67 to -0.12); -0.59 (-2.58 to +1.80) | -0.17 (-3.27 to +3.05); -4.12 (-5.91 to +5.21) |
+| the reference's C, a record of the decided; its X, a record of the taken | 40.50; 25.80 | 36.84; 23.50 | 43.70; 28.97 |
+| records a chunk; chunks | 526; 611 | 379; 241 | 127; 2,975 |
+
+### Against its gates
+
+- **L1, exact: met.** No answer of C's and no entry of X's tape differs from the reference's on the three corpora and
+  the compiler's own source; 6,414 one-statement programs agree.
+- **L2, how much: met on Lua alone.** 769, 360 and 949 expressions more are taken where 780, 355 and 950 were asked.
+  The rule for a conversion the tasks put into an operator's arms lists 16 and 6 expressions that the build before
+  took, since the first fault round: its terms no test separated are out.
+- **L3, work a record: met for the rows; C's is at its bound on `sqlite3.c`.** A chunk's second run of the rows' sweeps
+  reads -0.04 and -0.29 ticks a record of the taken more than the piece before's on `sqlite3.c` and Lua (0.30 and
+  0.40 asked); C's sweeps read +0.36 and -0.35 a record of the decided (0.35 asked, 0.70 refutes).
+- **L4, a chunk: met on `sqlite3.c` and musl by their medians, not on Lua.** The rows' sweeps' first run less their
+  second rose by +116, +237 and +63 ticks a chunk (150 asked, 300 refutes), and each corpus's range
+  reaches past 300. C's sweeps', which the gate did not name, rose by +410, +630 and +373.
+- **L5, nothing else moves: not as written.** The rows' reads are within 0.2 on `sqlite3.c` and Lua. The kernel in
+  place, whose source the piece does not touch, reads -0.33 and -0.36 (less in each of the three builds), and the
+  tests' sweeps +0.21 and -0.59: two builds read a sweep with no change a third of a tick apart or more.
+- **L6, faults: met, with five faults no test separates whose terms stay.** Two rounds. The first's 308 faults
+  left 46: 15 terms that what makes the records implies, which are out of the code; 18 of the first rule for
+  the tasks' conversions, which is three terms now; 10 that found a line of the fixture or a pin to add; and
+  3 that change nothing a program reaches. The second's 55, on the code as it is: 50 caught, and 5 that
+  change nothing a program reaches.
+
+### What stays a record at a time, and why
+
+In C's loop, one record in 308, 131 and 336 of those swept, an operator's value or a comma: whether a comma's consumer
+is of void's class, a discarded comma's context's byte, and the rule on an operator's value's target, which reads
+its type's class. The first build had the vector's forms of the first two, a permute of the block's classes by the
+consumer's lane in every block and a blend (and a second permute, for a `!`'s consumer's answer): its loop read 0.09
+and 0.11 ticks a record swept more a second run than the build without them. In X, an operator's value's turn, a byte or two at its operands' places; and the numbering,
+for 0.86%, 3.10% and 2.65% of the tapes.
+
+### What it means
+
+- **X's tapes are whole on the window** for 49,842, 10,248 and 40,444 of the three corpora's 50,993, 10,839 and
+  43,415 expressions: 769, 360 and 949 more, with 3.7%, 15.2% and 8.8% more records.
+- **What they cost against the reference.** By its averages a record, the reference's C and X read 658,028, 565,024 and 1,206,031
+  ticks on the newly taken records. Over all the records swept the piece adds 86%, 61% and 154% of that
+  a chunk's first run, and 35%, 23% and 62% its second. **On musl a first run costs more than the
+  reference's work it replaces:** its chunks are 127 records.
+- **The cost is C's loop's, by the chunk.** Its step has the new masks in every block: +1.02, +1.94 and +3.49
+  ticks a record swept more a first run, +0.44, +0.53 and +1.24 a second. The specification gated a chunk's cost for the
+  rows' sweeps and not for C's: the loop's cold start a chunk
+  ([#3196](https://github.com/buster14a/buster/issues/3196)) grew with the masks its step took on.
+- **Next:** a summary node's side facts, the flip's first piece, below; the window's sweeps run in a compile
+  after it, where their cost by the chunk is settled.
+
+## A summary node's side facts on the window
+
+[The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/summary-facts-2850-2026-11-21).
+`measure-node-machine --shadow --window-rows` ([the
+guide](commands/lowering.md#a-summary-nodes-side-facts-on-the-window-2850)).
+
+Step 2 ends with one summary node where a taken expression's nodes were. Every pass that reads below a full
+expression's root then needs its answer from that node. A survey of today's code found what a compile with the
+default warnings reads there: the static objects an expression's leaves name, its root's return fact, a branch's
+condition's truth and a constant root's fold. This piece makes the first two on the window, for each expression
+whose tape X makes whole: the references by one sweep of masks with a count of them through each record, so that an
+expression's are a range of one list, and the return fact from a mask of the calls that are no plain function's,
+asked a record at a time. The last two are the root's value's to answer, and the window lists the two cases where
+the program knows a truth its value has not. No compile takes any of it. [The node machine's
+page](node-machine.md#a-summary-nodes-side-facts-on-the-window) has it whole: the survey, the rules, the builds,
+what a generator of programs found after the code was frozen, and the faults. [Its
+specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7053609091) had six gates. It is exact
+on what it makes and its faults are caught; a `switch`'s selector's type is not made; its work a record is over its
+gate and under what refutes it; and by the chunk it is past what refutes its gate on musl.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release, TSC ticks, 7 readings; in each the facts on, off twice by the shadow's
+switch (`--no-window-summaries`), and on again, in one executable:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| records swept; chunks; records a chunk | 321,434; 611; 526 | 91,252; 241; 379 | 377,187; 2,975; 127 |
+| expressions whose facts are kept; their references; the program's (a set an expression) | 49,839; 14,634; 14,502 | 10,246; 4,959; 4,918 | 40,441; 10,247; 9,391 |
+| of them with an unknown for a return fact; with a stop | 250; 0 | 15; 112 | 64; 21 |
+| records listed for a reference; calls asked a record at a time; expressions reduced | 14,911; 255; 0 | 5,128; 127; 0 | 11,522; 99; 0 |
+| **the sweep, a record swept, a chunk's second run** | **0.27 (0.27 to 0.28)** | **0.31 (0.31 to 0.32)** | **0.31 (0.31 to 1.19)** |
+| the sweep, a record swept, a first run | 0.41 (0.39 to 0.43) | 0.80 (0.78 to 0.81) | 1.70 (1.57 to 2.28) |
+| the tests' records' bytes, a record swept, more with the facts (their one run) | -0.01 (-0.12 to +0.06) | -0.01 (-0.24 to +0.98) | -0.81 (-6.69 to +3.09) |
+| the tests' loop, more (its one run) | +0.12 (-0.07 to +0.32) | +0.06 (+0.01 to +1.22) | +0.67 (-1.20 to +4.47) |
+| **the three together, the sweep by its second run** | **+0.40 (+0.17 to +0.47)** | **+0.32 (+0.18 to +2.52)** | **+1.01 (-5.70 to +5.54)** |
+| the three together, the sweep by its first run | +0.55 (+0.29 to +0.61) | +0.81 (+0.68 to +3.00) | +2.33 (-3.74 to +7.00) |
+| **the sweep, a first run less a second, ticks a chunk** | **68 (63 to 80)** | **185 (178 to 186)** | **167 (86 to 249)** |
+| the sweep, ticks a chunk: a first run; a second | 215 (207 to 226); 144 (143 to 147) | 304 (295 to 306); 119 (116 to 122) | 216 (199 to 290); 40 (39 to 151) |
+| the tests' bytes and loop, ticks a chunk, more | +66 (-60 to +104) | +2 (-46 to +834) | +89 (-763 to +663) |
+| **the rows' sweeps, the facts' among them, a record swept, a second run, more** | **+0.34 (+0.31 to +0.38)** | **+0.39 (-0.18 to +0.40)** | **+0.36 (-0.39 to +1.14)** |
+| **the rows' sweeps, the facts' among them, a first run less a second, ticks a chunk, more** | **+23 (-44 to +64)** | **+115 (-11 to +372)** | **+232 (-1 to +248)** |
+| the rows' other sweeps, a second run, more | +0.06 (+0.03 to +0.10) | +0.07 (-0.49 to +0.07) | +0.03 (-0.70 to +0.26) |
+| of them the turns' lists and loops, where the listing is | +0.01 (-0.01 to +0.02) | +0.00 (-0.02 to +0.02) | -0.01 (-0.03 to +0.00) |
+| the rows' other sweeps, a first run less a second, ticks a chunk, more | -47 (-117 to +0) | -70 (-189 to +188) | +60 (-156 to +81) |
+| C's sweeps, a second run, more; a first run less a second, ticks a chunk, more | +0.01 (-0.03 to +0.06); +20 (-86 to +111) | +0.01 (-0.43 to +0.05); +7 (-37 to +61) | -0.06 (-1.40 to +0.28); +54 (-185 to +229) |
+| the kernel in place, more | +0.01 (-0.05 to +0.14) | +0.01 (-0.41 to +0.40) | +0.01 (-0.78 to +0.10) |
+| the tests' other parts, more | -0.02 (-0.27 to +0.20) | -0.43 (-2.81 to +0.71) | +2.14 (-1.49 to +2.94) |
+| the rows' sweeps without the facts, a record swept: a first run; a second | 8.82 (8.58 to 9.11); 6.27 (6.25 to 6.30) | 12.42 (12.20 to 13.06); 6.71 (6.65 to 7.23) | 24.27 (23.53 to 25.94); 8.14 (8.03 to 8.77) |
+| the timed region with no sweep in it, ticks a chunk | 27.0 (26.6 to 30.1) | 26.9 (25.6 to 28.6) | 27.4 (27.1 to 27.8) |
+
+### Against its gates
+
+- **F1, exact: met for what the piece makes.** Every kept expression's references and return fact are the program's
+  own walks' on the three corpora and the compiler's own source (49,842, 10,246, 40,441 and 41,890 expressions), a
+  kept branch's truth is its value's and a kept constant folds; 7,957 one-statement programs agree. A `switch`'s
+  selector's type is not made, and the control changes what reader time kept, not the program's answers.
+- **F2, how much: met.** The turns' listing leaves out 3, 2, 3 and 0 expressions the piece before took (5 a corpus
+  asked); the cast's term lists none.
+- **F3, work a record: met for the tests' sweep, over for the rows'.** A chunk's second run of the rows' sweeps
+  reads +0.34 and +0.39 ticks a record swept more with the facts on `sqlite3.c` and Lua (0.30 asked, 0.60 refutes);
+  the tests' bytes -0.01 and -0.01 (0.20 asked).
+- **F4, a chunk: refuted on musl, not met on Lua, met on `sqlite3.c`.** The rows' sweeps' first run less their
+  second rose by +23, +115 and +232 ticks a chunk (100 asked, 200 refutes), and by +46, +144 and +259 in a second
+  set. The tests' sweep reads +66 on `sqlite3.c` here and +41 and +181 in the two builds before (50 asked): with the
+  facts it is another copy of its code, and the switch reads the two copies' places.
+- **F5, nothing else moves: met for the kernel and C's sweeps** (+0.01, +0.01 and +0.01 and +0.01, +0.01 and -0.06);
+  the tests' other parts read -0.02, -0.43 and +2.14, one run a chunk, and +0.04, -0.13 and -0.14 in the second set.
+- **F6, faults: met, with one fault no test separates.** The whole list on the code here, 142 faults: 141 caught,
+  and one that changes nothing a program reaches. Nine terms no test separated in the rounds before are out of the
+  code.
+
+### What stays a record at a time, and why
+
+The objects, one a reference, were a loop of a load and a store, a third of the sweep; a gather of eight is the
+code, the same on `sqlite3.c` (+0.00 (-0.00 to +0.09) ticks a record swept against the loop, one executable) and
+less on Lua and musl (-0.07 (-0.08 to -0.05) and -0.14 (-0.19 to -0.13)), whose chunks' few references ended the
+loop on a mispredicted branch. A record at a time stay a call that is no plain function's (one record in 1,261, 719
+and 3,810 of those swept) and the flow's reduction, for an expression with a call that stops under an `&&`, an `||`
+or a `?:` (none in the three corpora, 18 in the compiler's own source).
+
+### What it means
+
+- **The side facts are exact on the window,** and the piece before's takes stand but for 3, 2, 3 and 0 expressions.
+- **The sweep is a third of a tick a record** (0.27, 0.31 and 0.31 on a second run), and a chunk's cold start of its
+  own (68, 185 and 167 ticks a chunk), which on musl's small chunks is past its gate. A compile that takes
+  expressions is where a chunk's first run is to be read ([#3196](https://github.com/buster14a/buster/issues/3196)).
+- **The corpora and the fixtures were not enough to call it exact:** a generator of programs and the regression
+  programs found a truth through a cast and a constant of an object's record here, and in earlier pieces what the
+  reader-time tests take with a warning ([#3201](https://github.com/buster14a/buster/issues/3201)), a `return` under
+  a cleanup ([#3202](https://github.com/buster14a/buster/issues/3202)) and a multiversioned function's object
+  ([#3203](https://github.com/buster14a/buster/issues/3203)). Those three are next, before the first compile that
+  takes expressions.
+
 ## Step 4's first piece: a census of Tier 0's row
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-census-2874-2026-11-16)

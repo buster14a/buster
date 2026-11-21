@@ -365,6 +365,14 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
     TypeId* declared = tested ? arena_push_array(reader->arena, capacity, sizeof(TypeId), _Alignof(TypeId)) : NULL;
     room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL));
+    // A summary's side facts by root node, and their references' store: no expression has more references than
+    // leaves, so a node each is room for all.
+    const bool summaries = (options & BUSTER_NODE_READER_WINDOW_ROWS) != 0;
+    uint32_t* summary_firsts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    uint16_t* summary_counts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint16_t), _Alignof(uint16_t)) : NULL;
+    uint8_t* summary_facts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
+    uint32_t* summary_objects = summaries ? arena_push_array(reader->arena, (uint64_t)capacity + 1, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    room = room && (!summaries || (summary_firsts != NULL && summary_counts != NULL && summary_facts != NULL && summary_objects != NULL));
     if (room)
     {
         typer->graph = reader->output->graph;
@@ -403,6 +411,15 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         types->tape_values = tape_values;
         types->tape_capacity = tape_capacity;
         types->node_capacity = capacity;
+        if (summaries)
+        {
+            memset(summary_firsts, 0xff, (uint64_t)capacity * sizeof(uint32_t));
+            types->summary_firsts = summary_firsts;
+            types->summary_counts = summary_counts;
+            types->summary_facts = summary_facts;
+            types->summary_objects = summary_objects;
+            types->summary_capacity = capacity;
+        }
         if (tested)
         {
             types->tests = tests;
