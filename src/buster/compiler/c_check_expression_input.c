@@ -1814,6 +1814,119 @@ static uint32_t check_input_window_code(const uint32_t* classes, uint32_t i)
     return (classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
 }
 
+bool check_node_window_compare(const TypeTable* types, CheckOp op, const CheckValue leaves[2], CheckValue* value, uint8_t* instruction);
+
+// The comparison subtree occupies contiguous source tokens. Match its bounding parentheses to the
+// parser's condition roles, stepping over complete parenthesized expressions. A control's closing
+// token follows the controlled statement in postorder, so its operand must be sealed earlier.
+static bool check_input_window_predicate(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const CheckOp op = check_input_binary(parser->tokens.kinds[token]);
+    if (op < CHECK_OP_LESS || op > CHECK_OP_NOT_EQUAL)
+    {
+        return false;
+    }
+    const uint32_t length = reader->subtree_sizes[reader->postorder_positions[token]];
+    uint32_t last = reader->ends[token];
+    if (length == 0 || length > 32 || length > last + 1)
+    {
+        return false;
+    }
+    uint32_t first = last + 1 - length;
+    const uint32_t count = parser->tokens.count;
+    while (first > 0 && last + 1 < count && last - first < 30 &&
+           parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.roles[last + 1] == PARSE_ROLE_CLOSE_GROUP)
+    {
+        first -= 1;
+        last += 1;
+    }
+    return first >= 2 && last + 1 < count && parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_CONDITION &&
+           parser->tree.roles[last + 1] == PARSE_ROLE_CLOSE_CONDITION && reader->first_child[last + 1] == first - 2 &&
+           (parser->tokens.kinds[first - 2] == PARSE_KIND_IF || parser->tokens.kinds[first - 2] == PARSE_KIND_WHILE);
+}
+
+static uint32_t check_input_window_condition_first(const CheckInputReader* reader, const uint32_t* tokens, uint32_t start, uint32_t end, uint32_t chunk)
+{
+    const uint32_t position = reader->postorder_positions[tokens[end]];
+    const uint32_t length = reader->subtree_sizes[position];
+    const uint32_t base = position + 1 - length;
+    uint32_t first = end;
+    if (length <= position + 1 && base >= chunk && (start == 0 || reader->postorder_positions[tokens[start - 1]] < base))
+    {
+        reader->output->window_condition_bounded += 1;
+        while (first > start && reader->postorder_positions[tokens[first - 1]] >= base)
+        {
+            first -= 1;
+        }
+    }
+    return first;
+}
+
+static bool check_input_window_local(const CheckInputReader* reader, const CheckInputIdentifiers* identifiers, uint32_t index);
+
+// The compacted reader actions and their bound leaves are this front's only inputs. A refused expression has
+// written no graph or lasting tape, so the ordinary walk starts with its original identifier and literal cursors.
+static bool check_input_window_comparison(CheckInputReader* reader, NodeFront* front, const uint32_t* tokens, const uint32_t* classes,
+                                          uint32_t first, uint32_t end, const CheckInputIdentifiers* identifiers, uint32_t identifier,
+                                          const CheckInputLiterals* literals, uint32_t literal, CheckValue leaves[2], uint32_t uses[2],
+                                          uint32_t* names, CheckValue* result, uint8_t* instruction)
+{
+    uint32_t count = 0;
+    uint32_t numbers = 0;
+    CheckInputLiterals decoded;
+    *names = 0;
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        const uint32_t code = check_input_window_code(classes, i);
+        if (code == CHECK_INPUT_CODE_IDENTIFIER)
+        {
+            if (count == 2 || !check_input_window_local(reader, identifiers, identifier + *names))
+            {
+                return false;
+            }
+            const uint32_t object = (uint32_t)identifiers->objects[identifier + *names];
+            leaves[count] = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_LVALUE, .flags = BUSTER_CHECK_NONNULL_ADDRESS,
+                                         .constant_kind = CHECK_CONSTANT_ADDRESS, .object = object };
+            uses[count++] = tokens[i];
+            *names += 1;
+        }
+        else if (code == CHECK_INPUT_CODE_LITERAL)
+        {
+            const uint32_t integer = literals->values[literal + numbers];
+            if (count == 2 || integer == BUSTER_CHECK_NONE || integer >= INT32_MAX)
+            {
+                return false;
+            }
+            decoded.values[numbers++] = integer;
+            leaves[count] = check_input_literal_value(reader, tokens[i], (CheckLiteral){ .type = BUSTER_TYPE_INT, .integer = integer, .valid = true });
+            uses[count++] = tokens[i];
+        }
+        else if (code != CHECK_INPUT_CODE_LIST && code != CHECK_INPUT_CODE_GROUP && code != CHECK_INPUT_CODE_SEPARATOR && code != CHECK_INPUT_CODE_BINARY)
+        {
+            return false;
+        }
+    }
+    if (count != 2 || *names == 0 || (leaves[0].object != 0 && leaves[0].object == leaves[1].object))
+    {
+        return false;
+    }
+    front->count = 0;
+    front->pending = 0;
+    front->made = 0;
+    front->stack_count = 0;
+    front->group_count = 0;
+    front->full = false;
+    front->ordinal = 0;
+    front->argument_count = 0;
+    front->wide_count = 0;
+    node_front_chunk_lean(front, reader, tokens + first, classes + first, end - first + 1, identifiers, &decoded);
+    return front->count == 3 && front->sizes[2] == 3 && front->tokens[2] == tokens[end] &&
+           front->ops[0] == CHECK_OP_VALUE && front->ops[1] == CHECK_OP_VALUE && front->tokens[0] == uses[0] && front->tokens[1] == uses[1] &&
+           front->distances[0][2] == 2 && front->distances[1][2] == 1 &&
+           check_node_window_compare(reader->types, (CheckOp)front->ops[2], leaves, result, instruction);
+}
+
 // Find a complete expression ending at this candidate. Its source tokens and postorder must agree: a match
 // cannot consume a sibling or only part of the expression. Return end to give the ordinary path all its actions.
 static uint32_t check_input_window_first(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t start, uint32_t end)
@@ -2032,9 +2145,42 @@ static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch*
     return node != BUSTER_CHECK_NONE;
 }
 
+// The ordinary control keeps its CONDITION, branch sense and target. Only the value it tests is a summary.
+static bool check_input_window_condition(CheckInputReader* reader, CheckInputBatch* batch, NodeFront* front, const uint32_t* tokens, const uint32_t* classes,
+                                         uint32_t first, uint32_t end, const CheckInputIdentifiers* identifiers, uint32_t* identifier,
+                                         const CheckInputLiterals* literals, uint32_t* literal)
+{
+    CheckValue leaves[2];
+    uint32_t uses[2];
+    CheckValue value;
+    uint32_t names;
+    uint8_t instruction;
+    if (!check_input_window_comparison(reader, front, tokens, classes, first, end, identifiers, *identifier, literals, *literal, leaves, uses, &names, &value, &instruction))
+    {
+        return false;
+    }
+    const uint32_t token = front->tokens[2];
+    CheckInputWindowRow rows[3];
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        const bool local = leaves[i].object != 0;
+        check_node_window_int_entry(rows + i, local ? leaves[i].object : (uint32_t)leaves[i].integer, uses[i], local);
+    }
+    rows[2] = (CheckInputWindowRow){ .token = token, .kind = instruction, .class = rows[0].class };
+    const uint32_t node = check_input_window_publish(reader, batch, token, value, rows, 3, 3);
+    if (node != BUSTER_CHECK_NONE)
+    {
+        check_input_expression_value(reader, token, node);
+        reader->output->window_condition_count += 1;
+        *identifier += names;
+        *literal += 2 - names;
+    }
+    return node != BUSTER_CHECK_NONE;
+}
+
 // List complete returns and potentially assignable statements 16 actions at a time. The ordinary action loop runs unchanged between admitted spans, including a
 // return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
-static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
+static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, NodeFront* conditions, uint32_t chunk, const uint32_t* tokens, const uint32_t* classes,
                                                                      uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
                                                                      uint64_t* visited)
 {
@@ -2050,7 +2196,27 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
         const __m512i before = _mm512_alignr_epi32(codes, previous, 15);
         const __mmask16 terminated = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
         const __mmask16 assignments = _mm512_mask_cmpeq_epi32_mask(terminated, before, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
-        const __mmask16 found = assignments | _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+        __mmask16 predicates = 0;
+        if (conditions != NULL)
+        {
+            const __mmask16 controls = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_CONDITION << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            for (uint32_t bits = controls; bits != 0; bits &= bits - 1)
+            {
+                const uint32_t keyword = reader->first_child[tokens[i + (uint32_t)__builtin_ctz(bits)]];
+                const uint32_t kind = keyword < reader->parser->tokens.count ? reader->parser->tokens.kinds[keyword] : 0;
+                reader->output->window_condition_candidates += kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE;
+            }
+            const __mmask16 binary = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            for (uint32_t bits = binary; bits != 0; bits &= bits - 1)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctz(bits);
+                if (check_input_window_predicate(reader, tokens[i + lane]))
+                {
+                    predicates |= (__mmask16)(1u << lane);
+                }
+            }
+        }
+        const __mmask16 found = assignments | predicates | _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
         previous = codes;
         for (uint32_t bits = found; bits != 0; bits &= bits - 1)
         {
@@ -2065,7 +2231,9 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
     {
         const uint32_t end = ends[k];
         const uint32_t start = k != 0 ? ends[k - 1] + 1 : 0;
-        const uint32_t first = k < candidates ? check_input_window_first(reader, tokens, classes, start, end) : end;
+        const bool condition = k < candidates && check_input_window_code(classes, end) == CHECK_INPUT_CODE_BINARY;
+        const uint32_t first = condition ? check_input_window_condition_first(reader, tokens, start, end, chunk) :
+                               k < candidates ? check_input_window_first(reader, tokens, classes, start, end) : end;
         for (; cursor < first && !reader->output->resource; cursor += 1)
         {
             check_input_expression_coded(reader, batch, tokens[cursor], (uint8_t)classes[cursor], true, identifiers, &identifier, literals, &literal, visited);
@@ -2073,7 +2241,8 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
         if (!reader->output->resource && first < end)
         {
             const bool statement = check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR;
-            const bool taken = statement ? check_input_window_assign(reader, batch, tokens[end], identifiers, &identifier, literals, &literal) :
+            const bool taken = condition ? check_input_window_condition(reader, batch, conditions, tokens, classes, first, end, identifiers, &identifier, literals, &literal) :
+                               statement ? check_input_window_assign(reader, batch, tokens[end], identifiers, &identifier, literals, &literal) :
                                check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier);
             if (taken)
             {
@@ -2180,6 +2349,23 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
     const bool window = reader->pp->options.node_window && coded && begin == 0 && stop == count && !timed && front == NULL &&
                         reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
+    NodeFront* conditions = NULL;
+    if (window && reader->pp->options.node_window_conditions)
+    {
+        conditions = arena_push_array(reader->scratch, 1, sizeof(*conditions), 64);
+        NodeFrontShadow* shadow = arena_push_array(reader->scratch, 1, sizeof(*shadow), _Alignof(NodeFrontShadow));
+        if (conditions != NULL && shadow != NULL)
+        {
+            memset(shadow, 0, sizeof(*shadow));
+            conditions->shadow = shadow;
+            conditions->lean = true;
+            conditions->window = false;
+        }
+        else
+        {
+            conditions = NULL;
+        }
+    }
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
@@ -2204,7 +2390,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         uint32_t i = 0;
         if (window)
         {
-            i = check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, &visited);
+            i = check_input_window_actions(reader, batch, conditions, first, tokens, classes, acting, &identifiers, &literals, &visited);
         }
         else if (!timed)
         {

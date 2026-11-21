@@ -62,6 +62,7 @@
     ENTRY(LOWER_ALL, "--lower-all") \
     ENTRY(NO_DEFERRED_BODIES, "--no-deferred-bodies") \
     ENTRY(NODE_WINDOW, "--node-window") \
+    ENTRY(NODE_WINDOW_CONDITIONS, "--node-window-conditions") \
     ENTRY(POISON_ARENAS, "--poison-arenas") \
     ENTRY(PREDEFINES, "--predefines") \
     ENTRY(PROVISIONAL_SELECTION, "--provisional-selection") \

@@ -2070,6 +2070,40 @@ static inline __attribute__((always_inline)) bool node_facts_fold(NodeFactsRecor
     return taken;
 }
 
+// The window's binary row for two plain int operands. All four of the rule's value and conversion
+// results must fit the I32 tape. A constant pair and a different or uninitialised row are left to the reader.
+bool check_node_window_compare(const TypeTable* types, CheckOp op, const CheckValue leaves[2], CheckValue* value, uint8_t* instruction)
+{
+    static const uint8_t standings[256] = {
+        [BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE)] = BUSTER_NODE_FACTS_STANDS_RVALUE,
+        [BUSTER_NODE_MACHINE_STANDING(CHECK_LVALUE, CHECK_CONSTANT_ADDRESS)] = BUSTER_NODE_FACTS_STANDS_LVALUE,
+        [BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER)] = BUSTER_NODE_FACTS_STANDS_LITERAL | BUSTER_NODE_FACTS_STANDS_CONSTANT,
+    };
+    NodeFactsRow rows[BUSTER_TYPE_CODE_INT + 1] = { 0 };
+    rows[BUSTER_TYPE_CODE_INT].word = node_machine_make_word(types, BUSTER_TYPE_CODE_INT, BUSTER_TYPED_CLASS_I32, check_lower_builtin_facts[BUSTER_TYPE_CODE_INT]);
+    const NodeFactsView view = { .rows = rows, .row_count = BUSTER_ARRAY_LENGTH(rows), .stands = standings };
+    NodeFactsRecord records[3] = { 0 };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        const CheckValue* leaf = leaves + i;
+        records[i] = (NodeFactsRecord){
+            .type = leaf->type, .word = rows[BUSTER_TYPE_CODE_INT].word, .flags = leaf->flags, .object = leaf->object,
+            .payload = (uint64_t)leaf->integer, .standing = BUSTER_NODE_MACHINE_STANDING(leaf->category, leaf->constant_kind),
+        };
+    }
+    const bool made = node_machine_tables_ready && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL &&
+                      node_facts_row_made(records, &view, 2, 0, 1, 1, op, false, false);
+    const NodeFactsRecord* result = records + 2;
+    const bool exact = made && result->type == BUSTER_TYPE_INT && result->standing == BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE) &&
+                       result->converted[0] == BUSTER_TYPE_INT && result->converted[1] == BUSTER_TYPE_INT;
+    if (exact)
+    {
+        *value = (CheckValue){ .type = result->type, .category = CHECK_RVALUE, .flags = result->flags, .object = result->object };
+        *instruction = check_lower_binary(op);
+    }
+    return exact;
+}
+
 // The first production window admits only unqualified int operands. The fold above reads signedness and the
 // result's carried word from these type rows. Its result is immediately published as a leaf, so no next rule
 // reads its word. The reader prepares the shared transition table once before admitting any windows.
