@@ -641,6 +641,10 @@ static void check_test_request_parity(CheckTest* test, const char* directory)
         { .label = "an always_inline callee's target the caller lacks", .fixture = 5, .options = { "-nostdinc", 0 }, .outcome = 2 },
         { .label = "an always_inline callee's target the unit has", .fixture = 5, .options = { "-nostdinc", "-march=x86-64-v3", 0 } },
         { .label = "a layout the checker doesn't implement", .fixture = 0, .options = { "-nostdinc", "-fshort-enums", 0 }, .outcome = 3 },
+        // The source clients compile as -c does, whose object may go into another link: -fPIC and -fpic, which a link's
+        // executable takes, are refused for it (#2101).
+        { .label = "-fPIC, which -c refuses", .fixture = 0, .options = { "-nostdinc", "-fPIC", 0 }, .outcome = 3 },
+        { .label = "-fpic, which -c refuses", .fixture = 0, .options = { "-nostdinc", "-fpic", 0 }, .outcome = 3 },
         { .label = "scalar code for the baseline, again last", .fixture = 0, .options = { "-nostdinc", 0 } },
     };
     char paths[FIXTURES][PATH_MAX];

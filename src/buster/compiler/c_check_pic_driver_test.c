@@ -306,6 +306,110 @@ static void check_test_driver_object_options(CheckTest* test, const char* execut
     unlink(saved);
 }
 
+// Links the `unit_count` files at `units` with `kind` (-no-pie, -static, -static-pie, or null for the default PIE) and
+// `flag` (-fPIC, -fpic, or null) into `output`, replacing what was there: whether the link succeeded and its executable
+// ran with status 0.
+static bool check_test_driver_pic_link_runs(const char* executable, const char* kind, const char* flag, const char* const* units, uint32_t unit_count,
+                                            const char* output)
+{
+    assert(unit_count <= 4);
+    char* arguments[16] = { 0 };
+    uint32_t count = 0;
+    arguments[count++] = (char*)executable;
+    arguments[count++] = "-std=gnu17";
+    if (kind != NULL)
+    {
+        arguments[count++] = (char*)kind;
+    }
+    if (flag != NULL)
+    {
+        arguments[count++] = (char*)flag;
+    }
+    arguments[count++] = "-o";
+    arguments[count++] = (char*)output;
+    for (uint32_t i = 0; i < unit_count; i += 1)
+    {
+        arguments[count++] = (char*)units[i];
+    }
+    unlink(output);
+    char* text = NULL;
+    const int status = check_test_driver_spawn(arguments, &text);
+    free(text);
+    char* run[] = { (char*)output, NULL };
+    char* run_text = NULL;
+    const int ran = status == 0 ? check_test_driver_spawn(run, &run_text) : -1;
+    free(run_text);
+    return status == 0 && ran == 0;
+}
+
+// #2101: code generation reads no PIC state, so a link's executable with -fPIC or -fpic is the one it links without
+// them, byte for byte, whatever executable it links: the default PIE, -no-pie's, -static's and -static-pie's. The units
+// are one with exported data and a function pointer, and three that share a thread-local variable, exported data and a
+// function pointer: clang 23.1.4's -fPIC code reads that variable through __tls_get_addr, where its -fPIE code doesn't.
+static void check_test_driver_pic_kinds(CheckTest* test, const char* executable, const char* directory, const char* ordinary)
+{
+    static const char* const texts[] = {
+        "_Thread_local int shared_tls = 1;\nextern int shared_data;\nint first(void);\nextern int (*second_pointer)(void);\n"
+        "int main(void) { shared_tls += shared_data; return first() + second_pointer() == 11 ? 0 : 1; }\n",
+        "extern _Thread_local int shared_tls;\nint shared_data = 3;\nint first(void) { return shared_tls + 1; }\n",
+        "extern _Thread_local int shared_tls;\nstatic int second(void) { return shared_tls + 2; }\nint (*second_pointer)(void) = second;\n",
+    };
+    static const char* const kinds[] = {
+        NULL,
+        "-no-pie",
+        "-static",
+        "-static-pie",
+    };
+    static const char* const flags[] = {
+        "-fPIC",
+        "-fpic",
+    };
+    char paths[BUSTER_ARRAY_LENGTH(texts)][256];
+    bool written = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(texts); i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/pic-kinds-%u.c", directory, i);
+        written &= parse_test_write(paths[i], texts[i], strlen(texts[i]));
+    }
+    check_test_expect(test, written, "PIC link kinds' units are written");
+    const char* const shared_units[] = {
+        paths[0],
+        paths[1],
+        paths[2],
+    };
+    const char* const ordinary_units[] = { ordinary };
+    char base[256];
+    char output[256];
+    char label[256];
+    snprintf(base, sizeof(base), "%s/pic-kinds-base.out", directory);
+    snprintf(output, sizeof(output), "%s/pic-kinds-flag.out", directory);
+    for (uint32_t set = 0; written && set < 2; set += 1)
+    {
+        const char* const* units = set == 0 ? ordinary_units : shared_units;
+        const uint32_t unit_count = set == 0 ? BUSTER_ARRAY_LENGTH(ordinary_units) : BUSTER_ARRAY_LENGTH(shared_units);
+        for (uint32_t kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+        {
+            const char* const kind_name = kinds[kind] != NULL ? kinds[kind] : "the default PIE";
+            const bool linked = check_test_driver_pic_link_runs(executable, kinds[kind], NULL, units, unit_count, base);
+            snprintf(label, sizeof(label), "PIC link kinds: %s of %u units without PIC links and runs", kind_name, unit_count);
+            check_test_expect(test, linked, label);
+            for (uint32_t flag = 0; linked && flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
+            {
+                const bool ran = check_test_driver_pic_link_runs(executable, kinds[kind], flags[flag], units, unit_count, output);
+                snprintf(label, sizeof(label), "PIC link kinds: %s of %u units with %s runs and is the executable without it, byte for byte", kind_name,
+                         unit_count, flags[flag]);
+                check_test_expect(test, ran && check_test_driver_same_files(base, output), label);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(texts); i += 1)
+    {
+        unlink(paths[i]);
+    }
+    unlink(base);
+    unlink(output);
+}
+
 static void check_test_driver_pic(CheckTest* test, const char* executable, const char* directory)
 {
     check_test_driver_object_options(test, executable, directory);
@@ -386,6 +490,10 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
     // The complete PIC/PIE family shares one last-option state in the predefines parser. Check both orders.
     const bool ordinary = parse_test_write(source, programs[0], strlen(programs[0]));
     check_test_expect(test, ordinary, "PIC option-order fixture is written");
+    if (ordinary)
+    {
+        check_test_driver_pic_kinds(test, executable, directory, source);
+    }
     for (uint32_t flag = 0; ordinary && flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
     {
         for (uint32_t override = 0; override < BUSTER_ARRAY_LENGTH(overrides); override += 1)
