@@ -522,8 +522,8 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     // any is in a segment's space (type_object_qualifiers, which check_lower_segment_override reads).
     const bool extended = state->facts.machine->types->extended;
     // The far lanes' bytes, a row a column: written a byte a lane where a block has any, and read by one masked load a
-    // column.
-    _Alignas(64) uint8_t far_bytes[BUSTER_NODE_CONTEXTS_FAR_ROWS][64] = { 0 };
+    // column. Each selected byte is written under the same lane mask before the load.
+    _Alignas(64) uint8_t far_bytes[BUSTER_NODE_CONTEXTS_FAR_ROWS][64];
     const uint32_t blocks = (count + 63) / 64;
     for (uint32_t block = blocks; block != 0; block -= 1)
     {
