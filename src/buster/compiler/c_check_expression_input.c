@@ -1808,10 +1808,42 @@ bool check_node_window_prepare(void);
 bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result);
 void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uint32_t token, bool local);
 void check_node_window_store(CheckInputWindowRow* rows, uint32_t object, uint32_t token);
+void check_node_window_void_rows(CheckInputWindowRow* rows, uint32_t value, uint32_t literal, uint32_t cast);
 
 static uint32_t check_input_window_code(const uint32_t* classes, uint32_t i)
 {
     return (classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+}
+
+// A block statement made only of an integer literal, its explicit (void) cast and grouping parentheses.
+// Walk the parent links as well as the adjacent postorder actions: a sibling's literal cannot complete this statement.
+static uint32_t check_input_window_void_first(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t start, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t terminator = tokens[end];
+    bool cast = false;
+    uint32_t parent = terminator;
+    for (uint32_t at = end; at > start;)
+    {
+        at -= 1;
+        const uint32_t token = tokens[at];
+        if (parser->tree.parents[token] != parent)
+        {
+            break;
+        }
+        const uint32_t code = check_input_window_code(classes, at);
+        if (code == CHECK_INPUT_CODE_CAST && !cast && reader->query_types[token] == BUSTER_TYPE_VOID && token >= 2 &&
+            parser->tokens.kinds[token - 2] == PARSE_KIND_L_PAREN && parser->tokens.kinds[token - 1] == PARSE_KIND_TYPE)
+        {
+            cast = true;
+        }
+        else if (code != CHECK_INPUT_CODE_GROUP)
+        {
+            return code == CHECK_INPUT_CODE_LITERAL && cast ? at : end;
+        }
+        parent = token;
+    }
+    return end;
 }
 
 // Find a complete expression ending at this candidate. Its source tokens and postorder must agree: a match
@@ -1823,29 +1855,39 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
     uint32_t first = end;
     if (check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR)
     {
-        // The first semicolon immediately after for (x = y has the same discarded value as a
-        // block-statement assignment. Check its own opener so the condition and increment use their usual consumers.
         const uint32_t parent = parser->tree.parents[token];
-        const bool for_init = token >= 5 && parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR &&
+        if (parser->tokens.kinds[token] != PARSE_KIND_SEMI || parser->tree.roles[token] != PARSE_ROLE_TERMINATOR ||
+            reader->conditions[token] != 0 || parent >= parser->tokens.count)
+        {
+            return end;
+        }
+        const bool block = parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BLOCK || parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY;
+        // A for initializer can discard a local assignment. Its condition and increment have different consumers.
+        const bool for_init = !block && token >= 5 && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR &&
                               parser->tree.roles[token - 4] == PARSE_ROLE_OPEN_FOR && parser->tree.parents[token - 4] == parent &&
                               parser->tokens.kinds[token - 5] == PARSE_KIND_FOR;
-        // A statement-expression's final value may escape.
-        if (end - start >= 3 && token >= 3 && parser->tokens.kinds[token] == PARSE_KIND_SEMI &&
-            parser->tree.roles[token] == PARSE_ROLE_TERMINATOR &&
-            reader->conditions[token] == 0 && parser->tree.parents[token] < parser->tokens.count &&
-            (for_init || parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BLOCK || parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY) &&
+        if (!block && !for_init)
+        {
+            return end;
+        }
+        const CheckInput* input = reader->output;
+        const uint32_t region = block && input->region_count != 0 ? input->expression_regions[parent] : 0;
+        if (region != 0 && input->regions[region - 1].final_statement == token)
+        {
+            return end;
+        }
+        if (end - start >= 3 && token >= 3 &&
             tokens[end - 3] == token - 3 && tokens[end - 2] == token - 1 && tokens[end - 1] == token - 2 &&
             check_input_window_code(classes, end - 3) == CHECK_INPUT_CODE_IDENTIFIER &&
             (check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_IDENTIFIER || check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL) &&
             check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_BINARY && parser->tokens.kinds[token - 2] == PARSE_KIND_EQUAL &&
             parser->tree.parents[token - 2] == token && parser->tree.parents[token - 3] == token - 2 && parser->tree.parents[token - 1] == token - 2)
         {
-            const CheckInput* input = reader->output;
-            const uint32_t region = input->region_count != 0 ? input->expression_regions[parser->tree.parents[token]] : 0;
-            if (region == 0 || input->regions[region - 1].final_statement != token)
-            {
-                first = end - 3;
-            }
+            first = end - 3;
+        }
+        else if (block)
+        {
+            first = check_input_window_void_first(reader, tokens, classes, start, end);
         }
     }
     else if (reader->return_types[token] == BUSTER_TYPE_INT && token < parser->tokens.count && parser->tokens.count - token >= 3 &&
@@ -2000,6 +2042,35 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
     return node != BUSTER_CHECK_NONE;
 }
 
+// The cast to void emits the literal's CONST and the conversion's DISCARD. The outer statement discard is already void.
+static bool check_input_window_void(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
+                                    uint32_t first, uint32_t end, const CheckInputLiterals* literals, uint32_t* literal)
+{
+    const uint32_t value = literals->values[*literal];
+    if (value == BUSTER_CHECK_NONE)
+    {
+        return false;
+    }
+    uint32_t cast = first + 1;
+    while (check_input_window_code(classes, cast) == CHECK_INPUT_CODE_GROUP)
+    {
+        cast += 1;
+    }
+    CheckInputWindowRow rows[2];
+    check_node_window_void_rows(rows, value, tokens[first], tokens[cast]);
+    const CheckValue summary = { .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .integer = value };
+    const uint32_t node = check_input_window_publish(reader, batch, tokens[end], summary, rows, BUSTER_ARRAY_LENGTH(rows), 3);
+    if (node != BUSTER_CHECK_NONE)
+    {
+        if (reader->region_roots != NULL)
+        {
+            reader->region_roots[tokens[end]] = node;
+        }
+        *literal += 1;
+    }
+    return node != BUSTER_CHECK_NONE;
+}
+
 // A write whose result is discarded. A literal or a distinct local supplies the only value read.
 // A self-assignment stays with the ordinary checker, which can report -Wself-assign.
 static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, const CheckInputIdentifiers* identifiers,
@@ -2041,6 +2112,7 @@ static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch*
 static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments)
 {
     uint32_t candidates = 0;
+    uint32_t previous_discard = 0;
     uint32_t previous_names = 0;
     uint32_t previous_rhs = 0;
     uint32_t previous_binary = 0;
@@ -2051,13 +2123,17 @@ static inline __attribute__((always_inline)) uint32_t check_input_window_ends(ui
         const __m512i bytes = _mm512_maskz_loadu_epi32(lanes, classes + i);
         const __m512i codes = _mm512_and_si512(bytes, _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
         __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+        const uint32_t ended = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+        const uint32_t discard = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_CAST << BUSTER_CHECK_EXPRESSION_CODE_SHIFT)) |
+                                 _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_GROUP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+        found |= ended & (((discard << 16) | previous_discard) >> 15);
+        previous_discard = discard;
         if (assignments)
         {
             // Match the four postorder actions even when they straddle adjacent groups of 16.
             const uint32_t names = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_IDENTIFIER << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
             const uint32_t rhs = names | _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
             const uint32_t binary = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
-            const uint32_t ended = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
             found |= ended & (((names << 16) | previous_names) >> 13) & (((rhs << 16) | previous_rhs) >> 14) & (((binary << 16) | previous_binary) >> 15);
             previous_names = names;
             previous_rhs = rhs;
@@ -2096,8 +2172,19 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
         if (!reader->output->resource && first < end)
         {
             const bool statement = check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR;
-            const bool taken = statement ? check_input_window_assign(reader, batch, tokens[end], identifiers, &identifier, literals, &literal) :
-                               check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier);
+            bool taken;
+            if (!statement)
+            {
+                taken = check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier);
+            }
+            else if (check_input_window_code(classes, first) == CHECK_INPUT_CODE_LITERAL)
+            {
+                taken = check_input_window_void(reader, batch, tokens, classes, first, end, literals, &literal);
+            }
+            else
+            {
+                taken = check_input_window_assign(reader, batch, tokens[end], identifiers, &identifier, literals, &literal);
+            }
             if (taken)
             {
                 cursor = end + 1;
