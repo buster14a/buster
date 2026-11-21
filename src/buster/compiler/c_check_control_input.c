@@ -1104,6 +1104,7 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         // The attributes the statement keeps whatever their own errors (#1844): read whole, and not dropped with a failed
         // declaration (#2332).
         const bool kept = valid;
+        const uint32_t sema_reports = reader->output->report_count;
         uint32_t musttail = BUSTER_CHECK_NONE;
         valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, after, &musttail);
         if (valid && before == PARSE_ROLE_ELSE && parser->tree.parents[first - 1] < count)
@@ -1160,11 +1161,12 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         // clang's Sema processes a statement's attributes once it has the statement (ProcessStmtAttributes), so their
         // errors follow the statement's own, an inner statement's before those of one ending with it, and drops one it
         // gives an error for, keeping the statement: the unit's later statements are read on, their attributes' errors
-        // too (#1844: a second `nomerge(1)`). A statement read as a failed declaration recovers by its own rule (#2332).
+        // too (#1844: a second `nomerge(1)`). The errors of reading them, the parser's and their arguments', keep their
+        // places before the statement (#2332), and a statement read as a failed declaration recovers by its own rule.
         if (kept && reader->output->report_count > statement_reports && !reader->output->resource)
         {
             const uint32_t end = after < count ? check_input_loop_statement_end(reader, after) : after;
-            for (uint32_t r = statement_reports; r < reader->output->report_count; r += 1)
+            for (uint32_t r = sema_reports; r < reader->output->report_count; r += 1)
             {
                 CheckInputReport* report = reader->output->reports + r;
                 report->completion = report->completion < end ? end : report->completion;
