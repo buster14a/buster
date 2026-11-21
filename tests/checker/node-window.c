@@ -23,4 +23,5 @@ void for_initializers(int i, int n)
 {
     for (i = 24; i < n; ++i) { }
     for (i = n; i > 0; --i) { }
+    for ((void)7; n > 0; --n) { }
 }
