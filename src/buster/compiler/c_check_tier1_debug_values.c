@@ -97,6 +97,7 @@ struct CheckTier1DebugValues
     uint32_t* region_first;
     CheckTier1DebugSpan* regions;
     uint64_t* region_events;
+    uint32_t* region_previous;
     uint32_t region_event_count;
     uint32_t* record_blocks;
     uint32_t* fresh_first;
@@ -123,7 +124,7 @@ struct CheckTier1DebugValues
     uint32_t instance_event_count;
     uint32_t* kill_first;
     uint32_t* kills;
-    // Reused by the count and fill passes, which are sequential.
+    // Working storage for the machine-location proof and range publication.
     uint32_t* state;
     uint32_t* winner;
     uint32_t* active;
@@ -707,7 +708,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
             }
         }
     }
-    valid = valid && check_tier1_debug_value_regions(&proof, emitted, places, record_order, cuts, scratch);
+    valid = valid && check_tier1_debug_value_regions(&proof, emitted, places, record_order, cuts, next, scratch);
     for (uint32_t local = 0; valid && local < locals; local += 1)
     {
         uint32_t limit = count;
@@ -920,14 +921,23 @@ static uint32_t check_tier1_debug_value_priority(uint32_t carrier)
     return carrier < 16 && ((BUSTER_CHECK_TIER1_DEBUG_PRESERVED >> carrier) & 1) != 0 ? 0 : carrier >= 32 ? 1 : 2;
 }
 
-static void check_tier1_debug_value_range(const CheckTier1DebugValues* proof, uint32_t local, uint32_t selected, uint32_t begin, uint32_t end, EmittedLocalRange* output)
+// Local ranges are the last output allocation. The first range is aligned like ir_allocate's arrays, and each
+// subsequent row immediately follows its predecessor, including any frame, parameter and constant ranges.
+static bool check_tier1_debug_append_value_range(const CheckTier1DebugValues* proof, uint32_t local, uint32_t selected, uint32_t begin, uint32_t end, Arena* output, CheckTier1Debug* result)
 {
-    if (output != NULL)
+    EmittedLocalRange* row = result->local_range_count < UINT32_MAX ? arena_push(output, sizeof(*row), result->local_ranges != NULL ? _Alignof(EmittedLocalRange) : 64) : NULL;
+    if (row != NULL)
     {
+        if (result->local_ranges == NULL)
+        {
+            result->local_ranges = row;
+        }
+        result->local_range_count += 1;
+        memset(row, 0, sizeof(*row));
         if (selected < proof->carrier_count)
         {
             const Tier0Home home = selected < 32 ? (Tier0Home){ .reg = (uint8_t)(selected & 15), .is_register = true } : proof->homes[selected - 32].home;
-            *output = (EmittedLocalRange){ .home = home, .local = local, .begin = begin, .end = end };
+            *row = (EmittedLocalRange){ .home = home, .local = local, .begin = begin, .end = end };
         }
         else
         {
@@ -935,9 +945,10 @@ static void check_tier1_debug_value_range(const CheckTier1DebugValues* proof, ui
             const uint32_t index = selected - proof->carrier_count;
             const uint64_t value = index < debug->binding_count ? debug->bindings[index].literal : debug->regions[index - debug->binding_count].literal;
             const uint8_t bytes = index < debug->binding_count ? debug->bindings[index].bytes : debug->regions[index - debug->binding_count].bytes;
-            *output = (EmittedLocalRange){ .value = value, .local = local, .begin = begin, .end = end, .value_bytes = bytes };
+            *row = (EmittedLocalRange){ .value = value, .local = local, .begin = begin, .end = end, .value_bytes = bytes };
         }
     }
+    return row != NULL;
 }
 
 static void check_tier1_debug_value_changed(CheckTier1DebugValueLive* live, uint32_t value)
@@ -955,6 +966,28 @@ static void check_tier1_debug_local_changed(CheckTier1DebugValueLive* live, uint
     {
         live->local_queued[local] = 1;
         live->changed_locals[live->local_count++] = local;
+    }
+}
+
+// Queue the locals whose region boundaries lie between the two cursors. Every local's first event in the
+// interval has its previous event below first. Later occurrences in the interval would queue it again.
+static void check_tier1_debug_region_changes(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t from, uint32_t to)
+{
+    const uint32_t first = from < to ? from : to;
+    const uint32_t end = from < to ? to : from;
+    const __m512i limit = _mm512_set1_epi32((int)first);
+    for (uint32_t at = first; at < end;)
+    {
+        const uint32_t count = end - at < 16 ? end - at : 16;
+        const __mmask16 active = (__mmask16)((1u << count) - 1);
+        const __m512i previous = _mm512_maskz_loadu_epi32(active, proof->region_previous + at);
+        uint32_t distinct = (uint32_t)_mm512_mask_cmple_epu32_mask(active, previous, limit);
+        for (; distinct != 0; distinct &= distinct - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(distinct);
+            check_tier1_debug_local_changed(live, (uint32_t)proof->region_events[at + lane]);
+        }
+        at += count;
     }
 }
 
@@ -1234,8 +1267,8 @@ static uint32_t check_tier1_debug_instance_origin(const CheckTier1DebugValues* p
     return owner != BUSTER_IR_NONE && k == owner ? at : BUSTER_IR_NONE;
 }
 
-static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proof, const uint32_t* entries, const uint8_t* safe,
-                                             uint32_t body, uint32_t epilogue, EmittedLocalRange* output)
+static bool check_tier1_debug_value_ranges(const CheckTier1DebugValues* proof, const uint32_t* entries, const uint8_t* safe,
+                                             uint32_t body, uint32_t epilogue, Arena* output, CheckTier1Debug* result)
 {
     const IrDebugInfo* debug = proof->ir->debug;
     const uint32_t locals = proof->local_count;
@@ -1243,7 +1276,7 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
     const uint32_t values = proof->value_count;
     CheckTier1DebugValueLive live;
     check_tier1_debug_value_start(proof, &live);
-    uint64_t ranges = 0;
+    bool valid = true;
     memset(proof->winner, 0xff, ((uint64_t)values + 1) * 4);
     memset(proof->active, 0xff, ((uint64_t)locals + 1) * 4);
     memset(proof->selected, 0xff, ((uint64_t)locals + 1) * 4);
@@ -1267,7 +1300,7 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
     uint32_t instance_cursor = 0;
     uint32_t instance_region_cursor = 0;
     uint32_t instance_assigning = BUSTER_IR_NONE;
-    for (uint32_t block = 0; block < proof->block_count; block += 1)
+    for (uint32_t block = 0; valid && block < proof->block_count; block += 1)
     {
         while (live.known_count != 0)
         {
@@ -1279,7 +1312,7 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
         {
             check_tier1_debug_value_change(proof, &live, incoming.facts[f].place, incoming.facts[f].value);
         }
-        for (uint32_t r = proof->first[block]; r < proof->first[block + 1]; r += 1)
+        for (uint32_t r = proof->first[block]; valid && r < proof->first[block + 1]; r += 1)
         {
             if (reached)
             {
@@ -1303,13 +1336,7 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
                 assigning = own;
                 cursor = next;
                 const uint32_t next_region = check_tier1_debug_value_region_cursor(proof, entry, source);
-                const uint32_t region_begin = region_cursor < next_region ? region_cursor : next_region;
-                const uint32_t region_end = region_cursor < next_region ? next_region : region_cursor;
-                for (uint32_t at = region_begin; at < region_end; at += 1)
-                {
-                    const uint32_t region = (uint32_t)proof->region_events[at];
-                    check_tier1_debug_local_changed(&live, proof->local_index[debug->regions[region].local]);
-                }
+                check_tier1_debug_region_changes(proof, &live, region_cursor, next_region);
                 region_cursor = next_region;
                 previous_entry = entry;
                 previous_source = source;
@@ -1338,11 +1365,7 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
                     {
                         check_tier1_debug_local_changed(&live, proof->local_index[debug->bindings[proof->instance_events[at]].local]);
                     }
-                    for (uint32_t at = instance_region_cursor < next_region ? instance_region_cursor : next_region;
-                         at < (instance_region_cursor < next_region ? next_region : instance_region_cursor); at += 1)
-                    {
-                        check_tier1_debug_local_changed(&live, proof->local_index[debug->regions[(uint32_t)proof->region_events[at]].local]);
-                    }
+                    check_tier1_debug_region_changes(proof, &live, instance_region_cursor, next_region);
                 }
                 const uint32_t own = instance != BUSTER_IR_NONE && next < proof->instance_event_count && debug->bindings[proof->instance_events[next]].entry == origin ?
                                      proof->local_index[debug->bindings[proof->instance_events[next]].local] : BUSTER_IR_NONE;
@@ -1376,7 +1399,7 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
                 }
             }
             check_tier1_debug_value_winners(proof, &live, call);
-            for (uint32_t at = 0; at < live.local_count; at += 1)
+            for (uint32_t at = 0; valid && at < live.local_count; at += 1)
             {
                 const uint32_t k = live.changed_locals[at];
                 const uint32_t local = proof->locals[k];
@@ -1443,8 +1466,7 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
                 {
                     if (proof->active[k] != BUSTER_IR_NONE)
                     {
-                        check_tier1_debug_value_range(proof, local, proof->active[k], proof->begins[k], r, output != NULL ? output + ranges : NULL);
-                        ranges += 1;
+                        valid = check_tier1_debug_append_value_range(proof, local, proof->active[k], proof->begins[k], r, output, result);
                     }
                     proof->active[k] = chosen;
                     proof->begins[k] = r;
@@ -1458,14 +1480,13 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
             }
         }
     }
-    for (uint32_t k = 0; k < locals; k += 1)
+    for (uint32_t k = 0; valid && k < locals; k += 1)
     {
         if (proof->active[k] != BUSTER_IR_NONE)
         {
-            check_tier1_debug_value_range(proof, proof->locals[k], proof->active[k], proof->begins[k], proof->first[proof->block_count], output != NULL ? output + ranges : NULL);
-            ranges += 1;
+            valid = check_tier1_debug_append_value_range(proof, proof->locals[k], proof->active[k], proof->begins[k], proof->first[proof->block_count], output, result);
         }
     }
-    return ranges;
+    return valid;
 }
 

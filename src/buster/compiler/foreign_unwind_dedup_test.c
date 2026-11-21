@@ -39,11 +39,14 @@ static bool foreign_unwind_dedup_test_build(ForeignUnwindDedupTest* test, Arena*
         test->code[i] = link_add_atom(&test->link, BUSTER_LINK_CLASS_TEXT, 0, sizeof(test->code_bytes[i]), test->code_bytes[i], i + 1);
         ForeignUnwindTestInput* raw = &test->raw[i];
         foreign_unwind_test_begin(raw);
-        uint32_t cie = foreign_unwind_test_cie(raw, personality, true);
+        const uint32_t cie = foreign_unwind_test_cie(raw, personality, true);
         foreign_unwind_test_fde(raw, cie, 1, personality, true, 1, test->code[i]);
         if (variant == 6 && i == 1)
         {
-            cie = foreign_unwind_test_cie(raw, personality, true);
+            foreign_unwind_test_fde(raw, cie, 1, personality, true, 1, test->code[i]);
+            const uint32_t second = foreign_unwind_test_cie(raw, personality, true);
+            foreign_unwind_test_fde(raw, second, 1, personality, true, 1, test->code[i]);
+            foreign_unwind_test_fde(raw, second, 1, personality, true, 1, test->code[i]);
             foreign_unwind_test_fde(raw, cie, 1, personality, true, 1, test->code[i]);
         }
         if (variant == 4 && i == 1)
@@ -213,7 +216,7 @@ static void foreign_unwind_dedup_test_cases(ForeignTestTally* tally, Arena* aren
                             fdes += executable_eh_frame_walk(&copied.converted.link, atom, 0, 0, 0);
                         }
                     }
-                    foreign_test_expect(tally, fdes == (variant == 6 ? 4 : 3), "writer finds every FDE after backlink rewrite", detail);
+                    foreign_test_expect(tally, fdes == (variant == 6 ? 7 : 3), "writer finds every FDE after backlink rewrite", detail);
                     foreign_test_expect(tally, copied.converted.link.symbols.count == test->link.symbols.count,
                                         "all SymbolIds survive terminal pooling", detail);
                     if (variant == 0 || variant == 6 || variant == 14 || variant == 15)
@@ -248,12 +251,13 @@ static void foreign_unwind_dedup_test_failures(ForeignTestTally* tally, Arena* a
 {
     const uint64_t saved = arena->length;
     ForeignUnwindDedupTest* test = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignUnwindDedupTest, 1);
-    const bool ready = test != 0 && foreign_unwind_dedup_test_build(test, arena, 0);
+    const bool ready = test != 0 && foreign_unwind_dedup_test_build(test, arena, 6);
     foreign_test_expect(tally, ready, "construct rollback input", 0);
     Arena output = arena_reserve(1ull << 20);
     for (uint32_t path = 0; ready && output.base != 0 && path < 2; path += 1)
     {
-        for (uint32_t failure = 0; failure < 3; failure += 1)
+        const uint64_t repeated = test->records[1][2].old_offset;
+        for (uint32_t failure = 0; failure < 4; failure += 1)
         {
             const uint64_t capacity = output.capacity;
             if (failure == 0)
@@ -264,9 +268,13 @@ static void foreign_unwind_dedup_test_failures(ForeignTestTally* tally, Arena* a
             {
                 test->records[1][1].cie_offset = 4;
             }
-            else
+            else if (failure == 2)
             {
                 test->records[1][0].atom = test->link.atoms.count;
+            }
+            else
+            {
+                test->raw[1].bytes[repeated + 4] -= 1;
             }
             ForeignUnwindDedup result;
             memset(&result, 0xa5, sizeof(result));
@@ -276,6 +284,12 @@ static void foreign_unwind_dedup_test_failures(ForeignTestTally* tally, Arena* a
                                                                          path == 0 ? FOREIGN_PATH_EXACT : FOREIGN_PATH_VECTOR, &output, &result);
             foreign_test_expect(tally, planned.error != FOREIGN_UNWIND_ERROR_NONE && output.length == length && memcmp(&result, &untouched, sizeof(result)) == 0,
                                 "allocation/malformed map failure leaves arena and result unchanged", 0);
+            if (failure == 3)
+            {
+                foreign_test_expect(tally, planned.error == FOREIGN_UNWIND_ERROR_MALFORMED && planned.offset == repeated && planned.relocation == 0,
+                                    "an FDE reusing its predecessor's CIE still checks its own encoded pointer", 0);
+                test->raw[1].bytes[repeated + 4] += 1;
+            }
             output.capacity = capacity;
             test->records[1][1].cie_offset = 0;
             test->records[1][0].atom = 0;

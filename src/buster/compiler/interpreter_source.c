@@ -157,6 +157,7 @@ static InterpreterResult interpreter_source_run(const IrSourceFile* files, uint3
                 materialized.symbol, materialized.atom, materialized.fixup);
         result.status = INTERPRETER_SYMBOL;
     }
+    const uintptr_t first_address = (uintptr_t)canonical;
     uint32_t function_count = 0;
     uint32_t native_count = 0;
     uint32_t binding_count = 0;
@@ -180,18 +181,16 @@ static InterpreterResult interpreter_source_run(const IrSourceFile* files, uint3
                 bindings[binding_count++] = (InterpreterBinding){ .symbol = offsets[u] + s };
             }
             const bool function = (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
-            uint32_t selected = UINT32_MAX;
-            for (uint32_t f = 0; function && f < body; f += 1)
-            {
-                selected = unit->addresses[s] == (uintptr_t)&canonical[f] ? f : selected;
-            }
-            if (selected != UINT32_MAX)
+            const uintptr_t address = unit->addresses[s];
+            const uintptr_t selected = function && address >= first_address ? (address - first_address) / sizeof(*canonical) : UINTPTR_MAX;
+            // The quotient rounds an interior address down to its containing element.
+            if (selected < body && address == (uintptr_t)&canonical[selected])
             {
                 const uint32_t f = function_count++;
                 functions[f] = canonical[selected];
                 symbols[f] = offsets[u] + s;
                 labels[f] = canonical_labels[selected];
-                addresses[f] = (uintptr_t)&canonical[selected];
+                addresses[f] = address;
                 symbol_offsets[f] = canonical_offsets[selected];
                 const NameId name = link->symbols.name[s];
                 if (name != 0 && link->names.length[name] == 4 && memcmp(link->names.bytes[name], "main", 4) == 0 &&
@@ -201,12 +200,12 @@ static InterpreterResult interpreter_source_run(const IrSourceFile* files, uint3
                     parameters = functions[f].parameter_count;
                 }
             }
-            else if (function && unit->addresses[s] != 0)
+            else if (function && address != 0)
             {
                 bool native = false;
                 for (uint32_t n = 0; !native && n < library_count; n += 1)
                 {
-                    if (unit->addresses[s] == (uintptr_t)libraries[n].address)
+                    if (address == (uintptr_t)libraries[n].address)
                     {
                         natives[native_count] = libraries[n];
                         natives[native_count++].symbol = offsets[u] + s;

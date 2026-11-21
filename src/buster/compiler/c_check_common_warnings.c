@@ -7591,10 +7591,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // The displaced roots (check_common_displaced_root) join the roots' order at their operands, ahead of the later roots
         // their own nodes follow; a root walk skips them where they stand.
         // -Wunsequenced's candidates and its walk's tables (c_check_unsequenced.c), where it can warn at all.
-        CheckUnseqStorage unsequenced = { .vector = vector };
+        CheckUnseqStorage unsequenced = { 0 };
         bool unsequenced_failed = false;
         uint8_t* unsequenced_marks = check_common_enabled(pp, input, CHECK_WARNING_ID_UNSEQUENCED, false) ?
-                                           check_unseq_marks(graph, parents, vector, scratch, &unsequenced_failed) : NULL;
+                                           check_unseq_marks(graph, parents, scratch, &unsequenced_failed) : NULL;
         // The brace initializers whose lists can warn, each list one full expression (check_unseq_plans), by their last
         // value's node, where the walk checks them.
         uint32_t unsequenced_plan_count = 0;
@@ -11194,9 +11194,9 @@ static inline __attribute__((always_inline)) uint32_t check_common_address_root(
 }
 
 // check_sparse_next, or `count` where the input left the column absent.
-static uint32_t check_common_next_entry(CheckSparseColumn column, uint32_t token, uint32_t count, bool vector)
+static uint32_t check_common_next_entry(CheckSparseColumn column, uint32_t token, uint32_t count)
 {
-    const uint32_t result = check_sparse_present(column) ? check_sparse_next(column, token, count, vector) : count;
+    const uint32_t result = check_sparse_present(column) ? check_sparse_next(column, token, count) : count;
     return result;
 }
 
@@ -11285,7 +11285,6 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
 {
     const uint32_t count = input->token_count;
     const CheckGraph* graph = &input->graph;
-    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     uint32_t* first_write = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
     uint8_t* addressed = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint8_t* written = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
@@ -11342,8 +11341,8 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         // no expression node, so its write is before every later read; a read inside it is still its own. The
         // initialized write counts only where the declaration itself is reached — a goto can skip it. The
         // declarations with an initializer's node, and then those with its range alone, are the columns' entries.
-        for (uint32_t declaration = check_common_next_entry(input->initializer_nodes, 0, count, vector); declaration < count;
-             declaration = check_common_next_entry(input->initializer_nodes, declaration + 1, count, vector))
+        for (uint32_t declaration = check_common_next_entry(input->initializer_nodes, 0, count); declaration < count;
+             declaration = check_common_next_entry(input->initializer_nodes, declaration + 1, count))
         {
             const uint32_t node = check_common_sparse_get(input->initializer_nodes, declaration);
             if (input->declaration_kinds[declaration] == C_BINDING_OBJECT && node < graph->count)
@@ -11355,8 +11354,8 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 }
             }
         }
-        for (uint32_t declaration = check_common_next_entry(input->initializer_begins, 0, count, vector); declaration < count;
-             declaration = check_common_next_entry(input->initializer_begins, declaration + 1, count, vector))
+        for (uint32_t declaration = check_common_next_entry(input->initializer_begins, 0, count); declaration < count;
+             declaration = check_common_next_entry(input->initializer_begins, declaration + 1, count))
         {
             if (input->declaration_kinds[declaration] == C_BINDING_OBJECT && check_common_sparse_get(input->initializer_nodes, declaration) >= graph->count &&
                 check_common_sparse_get(input->initializer_begins, declaration) != BUSTER_CHECK_NONE &&
@@ -11407,8 +11406,8 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 }
             }
         }
-        for (uint32_t opening = check_common_next_entry(input->body_declarations, 0, count, vector); opening < count;
-             opening = check_common_next_entry(input->body_declarations, opening + 1, count, vector))
+        for (uint32_t opening = check_common_next_entry(input->body_declarations, 0, count); opening < count;
+             opening = check_common_next_entry(input->body_declarations, opening + 1, count))
         {
             for (uint32_t parameter = check_common_sparse_get(input->body_declarations, opening) != BUSTER_CHECK_NONE ?
                                       check_common_sparse_get(input->parameters, opening) : BUSTER_CHECK_NONE;
@@ -11589,8 +11588,8 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
         // object has one too, but it is no variable, and clang's -Wuninitialized follows variables alone: the literal's
         // own value, at its closing `}`, would otherwise be a read inside its initializer's range, a self-use. The
         // variables its initializer reads keep their own warnings.
-        for (uint32_t declaration = check_common_next_entry(input->declaration_bodies, 0, count, vector); valid && declaration < count;
-             declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count, vector))
+        for (uint32_t declaration = check_common_next_entry(input->declaration_bodies, 0, count); valid && declaration < count;
+             declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count))
         {
             const bool local = input->declaration_kinds[declaration] == C_BINDING_OBJECT && check_common_sparse_get(input->declaration_bodies, declaration) < parser->tokens.count &&
                                !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) &&

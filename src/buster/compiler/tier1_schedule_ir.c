@@ -426,15 +426,11 @@ static bool tier1_schedule_ir_permute(IrFunction* f, uint32_t first, uint32_t en
     return ready;
 }
 
-// Schedules every block of `f` in place (see the file's comment), with scratch from `scratch`, popped before it
-// returns, and with `order` not null, stores the permutation there, order[new] = old, of instruction_count elements.
-// Returns IR_ERROR_MEMORY, f unchanged, when there's no room.
-static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f, Arena* scratch, uint32_t* order, Tier1ScheduleIrStats* stats)
+// A load's uses anywhere in the function decide whether a segment may glue it to its consumer.
+static bool tier1_schedule_ir_prepare(const IrFunction* f, Arena* scratch, Tier1ScheduleIrWork* w)
 {
-    const uint64_t mark = scratch->length;
     const uint32_t n = f->instruction_count;
-    *stats = (Tier1ScheduleIrStats){ 0 };
-    Tier1ScheduleIrWork w = {
+    *w = (Tier1ScheduleIrWork){
         .uses = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .glued_to = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .glued_from = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
@@ -446,41 +442,73 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
         .order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .place = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
     };
-    bool ready = w.uses != 0 && w.glued_to != 0 && w.glued_from != 0 && w.pending != 0 && w.height != 0 && w.successor_offsets != 0 && w.successors != 0 &&
-                 w.heap != 0 && w.order != 0 && w.place != 0;
+    const bool ready = w->uses != 0 && w->glued_to != 0 && w->glued_from != 0 && w->pending != 0 && w->height != 0 && w->successor_offsets != 0 &&
+                       w->successors != 0 && w->heap != 0 && w->order != 0 && w->place != 0;
     if (ready)
     {
-        memset(w.uses, 0, (uint64_t)n * sizeof(uint32_t));
+        memset(w->uses, 0, (uint64_t)n * sizeof(uint32_t));
         for (uint32_t i = 0; i < n; i += 1)
         {
             const uint64_t count = ir_operand_count(f, i);
             for (uint32_t p = 0; p < count; p += 1)
             {
-                w.uses[ir_operand(f, i, p, 0).value] += 1;
+                w->uses[ir_operand(f, i, p, 0).value] += 1;
             }
-            w.order[i] = i;
+            w->order[i] = i;
         }
-        for (uint32_t b = 0; b < f->block_count; b += 1)
+    }
+    return ready;
+}
+
+// Schedules every block of `f` in place (see the file's comment), with scratch from `scratch`, popped before it
+// returns, and with `order` not null, stores the permutation there, order[new] = old, of instruction_count elements.
+// Returns IR_ERROR_MEMORY, f unchanged, when there's no room.
+static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f, Arena* scratch, uint32_t* order, Tier1ScheduleIrStats* stats)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t n = f->instruction_count;
+    *stats = (Tier1ScheduleIrStats){ 0 };
+    Tier1ScheduleIrWork w;
+    bool ready = true;
+    for (uint32_t b = 0; ready && b < f->block_count; b += 1)
+    {
+        const uint32_t end = f->block_offsets[b + 1];
+        uint32_t first = f->block_offsets[b];
+        while (first < end)
         {
-            uint32_t first = f->block_offsets[b];
-            const uint32_t end = f->block_offsets[b + 1];
-            for (uint32_t i = first; i <= end; i += 1)
+            uint32_t limit = first;
+            while (limit < end && !tier1_schedule_ir_barrier(f, limit))
             {
-                const bool cut = i == end || tier1_schedule_ir_barrier(f, i);
-                if (cut && i - first >= 2)
-                {
-                    stats->segments += 1;
-                    stats->moved += tier1_schedule_ir_segment(f, &w, first, i, stats);
-                }
-                first = cut ? i + 1 : first;
+                limit += 1;
             }
+            if (limit - first >= 2)
+            {
+                if (stats->segments == 0 && !tier1_schedule_ir_prepare(f, scratch, &w))
+                {
+                    ready = false;
+                    break;
+                }
+                stats->segments += 1;
+                stats->moved += tier1_schedule_ir_segment(f, &w, first, limit, stats);
+            }
+            first = limit < end ? limit + 1 : end;
         }
     }
     // Each segment's operand edges are at most three an instruction, its memory edge one more: 4n bounds the lists.
     ready = ready && (stats->moved == 0 || tier1_schedule_ir_permute(f, 0, n, w.order, w.place, scratch));
-    if (ready && order != 0 && n != 0)
+    if (ready && order != NULL)
     {
-        memcpy(order, w.order, (uint64_t)n * sizeof(uint32_t));
+        if (stats->segments != 0)
+        {
+            memcpy(order, w.order, (uint64_t)n * sizeof(uint32_t));
+        }
+        else
+        {
+            for (uint32_t i = 0; i < n; i += 1)
+            {
+                order[i] = i;
+            }
+        }
     }
     arena_pop_to(scratch, mark);
     if (!ready)

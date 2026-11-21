@@ -1368,20 +1368,15 @@ static __attribute__((unused)) void check_input_set_attributes_at(CheckInput* in
 // The scans of the tokens with attributes (CheckInput.attributes, which a scan caches), in groups of 16 below `end`: the
 // first group from `first`, a multiple of 16, whose tokens may have attributes, or a token at or past `end`
 // (check_sparse_wide_next); and of a group's tokens, those that have attributes, a bit each (check_sparse_wide_group).
-// The vector path skips 256 tokens without attributes with a load; the scalar path, its twin, visits every group and
-// reads each token's attributes.
-static __attribute__((unused)) uint32_t check_input_attributed_next(CheckSparseWide attributes, uint32_t first, uint32_t end, bool scalar)
+// The first skips 256 tokens without attributes with a load.
+static __attribute__((unused)) uint32_t check_input_attributed_next(CheckSparseWide attributes, uint32_t first, uint32_t end)
 {
-    (void)scalar;
-
-    return check_sparse_wide_next(attributes, first, end, !BUSTER_SCALAR_PATH(scalar));
+    return check_sparse_wide_next(attributes, first, end);
 }
 
-static __attribute__((unused)) uint32_t check_input_attributed_group(CheckSparseWide attributes, uint32_t first, uint32_t end, bool scalar)
+static __attribute__((unused)) uint32_t check_input_attributed_group(CheckSparseWide attributes, uint32_t first, uint32_t end)
 {
-    (void)scalar;
-
-    return check_sparse_wide_group(attributes, first, end, !BUSTER_SCALAR_PATH(scalar));
+    return check_sparse_wide_group(attributes, first, end);
 }
 
 static uint32_t check_input_diagnostic_limit(const CheckInput* input, uint32_t token)
