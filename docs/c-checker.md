@@ -11413,10 +11413,11 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   token (`check_driver_initializer_last`), as clang's `AddInitializerToDecl`
   checks it before the declaration's own checks at its `,` or `;`, so the
   commas come first. The cost is a token in each collected diagnostic
-  record, a climb to its full expression's root for each published queued
-  warning of a body, and a pass over the records at publication only in a
-  unit that has such a comma in a body; a unit without diagnostics does no
-  new work. Left: the reader stops at the initializer's error, so a later
+  record, a climb to its full expression's root for each published warning
+  clang checks once its full expression is complete (at file scope too,
+  where nothing reads the result), and a pass over the records at
+  publication only in a unit that has such a comma in a body; a unit
+  without diagnostics does no new work. Left: the reader stops at the initializer's error, so a later
   comma of the unit is not given (the second of
   `sizeof(int[(6, 2)]) + sizeof(int[(7, 3)])`); and a warning the driver
   queues to a body's end outside the walks (a shift's without a shift's
