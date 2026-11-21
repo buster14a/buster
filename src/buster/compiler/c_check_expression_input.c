@@ -781,7 +781,7 @@ static uint32_t check_input_literal_plain(const CheckInputReader* reader, uint32
 {
     const Parser* parser = reader->parser;
     const Preprocessor* pp = reader->pp;
-    const uint32_t source = parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&parser->tokens, token);
     const uint8_t kind = pp->output.kinds[source];
     const uint32_t length = pp->output.values[source] - pp->output.locations[source];
     const bool unnamed = parser->tokens.names[token] == 0;
@@ -881,7 +881,7 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader, 
         const __m512i token = _mm512_maskz_loadu_epi32(lanes, found + at);
         const __mmask16 unnamed = _mm512_mask_testn_epi32_mask(lanes, _mm512_mask_i32gather_epi32(zero, lanes, token, parser->tokens.names, 4),
                                                               _mm512_set1_epi32(-1));
-        _mm512_mask_storeu_epi32(found + at, lanes, _mm512_mask_i32gather_epi32(zero, lanes, token, parser->tokens.sources, 4));
+        _mm512_mask_storeu_epi32(found + at, lanes, parse_source_gather(&parser->tokens, token, lanes));
         numbers[at / 16] = unnamed;
     }
     // The sources' kinds, locations and ends: the numbers and the ints.
@@ -2014,6 +2014,7 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
     if (admitted)
     {
         CheckInputWindowRow row;
+        // The ordinary folded return conversion owns its CONST at the return token.
         check_node_window_int_entry(&row, value, name ? tokens[first] : returned, name);
         CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
         if (name)

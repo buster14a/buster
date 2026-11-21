@@ -92,7 +92,7 @@ static void check_test_warning_graph(CheckTest* test)
                     ordered += event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER;
                     if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL && cases[c].column != 0)
                     {
-                        const uint32_t location = pp.output.locations[parser.tokens.sources[event->token]];
+                        const uint32_t location = pp.output.locations[parse_source_index(&parser.tokens, event->token)];
                         const uint32_t range = pp_find_range(&pp, location);
                         uint32_t column = 0;
                         if (range < pp.range_count)

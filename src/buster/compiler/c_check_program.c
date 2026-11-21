@@ -119,6 +119,12 @@ struct CheckControl
     CheckControlKind kind;
 };
 
+// Lifetime controls use node for their start/end bit. All other controls without an expression already carry NONE.
+static uint32_t check_control_expression_node(const CheckControl* control)
+{
+    return control->kind == CHECK_CONTROL_LIFETIME ? BUSTER_CHECK_NONE : control->node;
+}
+
 typedef struct CheckProgramBody CheckProgramBody;
 struct CheckProgramBody
 {
@@ -788,10 +794,10 @@ struct CheckControlWriter
     uint32_t* previous;
     const uint32_t* token_first;
     const uint32_t* node_next;
-    // Each initializer node's declaration token, where `initialized` has the node's bit (check_program_openings), and each
-    // statement's first initializer plan, where `planned` has its token's bit: no other entry is written (#877).
-    const uint32_t* initializers;
-    const uint64_t* initialized;
+    // Initialized on the first discarded INITIALIZE whose storage duration the control writer needs.
+    uint64_t* static_initializers;
+    bool static_initializers_ready;
+    // Each statement's first initializer plan, where planned has its token's bit.
     const uint32_t* plan_first;
     const uint64_t* planned;
     const uint32_t* plan_next;
@@ -1630,7 +1636,26 @@ static void check_program_bit_set(uint64_t* bits, uint32_t index)
     bits[index / 64] |= UINT64_C(1) << (index % 64);
 }
 
-static bool check_control_static(const CheckControlWriter* writer, uint32_t node)
+// Whether each initializer's last owning declaration has static storage duration. A declaration may share a node
+// with an earlier one, so a later automatic declaration clears the bit.
+static void check_program_static_initializers(const CheckInput* input, uint64_t* bits)
+{
+    const uint32_t count = input->graph.count;
+    memset(bits, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
+    for (uint32_t t = check_sparse_next(input->initializer_nodes, 0, input->token_count); t < input->token_count;
+         t = check_sparse_next(input->initializer_nodes, t + 1, input->token_count))
+    {
+        const uint32_t node = check_sparse_get(input->initializer_nodes, t);
+        if (node < count)
+        {
+            const uint64_t bit = UINT64_C(1) << (node % 64);
+            uint64_t* word = bits + node / 64;
+            *word = (*word & ~bit) | (check_input_bit(input->declaration_bits, t, BUSTER_CHECK_BITS_STATIC) ? bit : 0);
+        }
+    }
+}
+
+static bool check_control_static(CheckControlWriter* writer, uint32_t node)
 {
     const CheckInput* input = writer->program->input;
     const CheckGraph* graph = &input->graph;
@@ -1639,9 +1664,13 @@ static bool check_control_static(const CheckControlWriter* writer, uint32_t node
     {
         cursor = graph->operand0[cursor];
     }
-    const uint32_t declaration = cursor != BUSTER_CHECK_NONE && graph->ops[cursor] == CHECK_OP_INITIALIZE && check_program_bit(writer->initialized, cursor) ?
-                                 writer->initializers[cursor] : BUSTER_CHECK_NONE;
-    return declaration != BUSTER_CHECK_NONE && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
+    const bool initializer = cursor != BUSTER_CHECK_NONE && graph->ops[cursor] == CHECK_OP_INITIALIZE;
+    if (initializer && !writer->static_initializers_ready)
+    {
+        check_program_static_initializers(input, writer->static_initializers);
+        writer->static_initializers_ready = true;
+    }
+    return initializer && check_program_bit(writer->static_initializers, cursor);
 }
 
 // The STACK_RESTORE that a jump at `jump` needs before it, when it leaves blocks with variable-length arrays: of the
@@ -3472,7 +3501,7 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
         // Each entry's node pushed without a branch (#892): an entry without one marks the marks' last slot, which names no
         // node, and a node marked already is stored past the stack's top, which has room for one more. Tested an entry at a
         // time, the push was missed at most of the entries it took on the 9700X.
-        const uint32_t node = controls[i].node;
+        const uint32_t node = check_control_expression_node(controls + i);
         const uint32_t mark = node != BUSTER_CHECK_NONE ? node : graph->count;
         const bool fresh = (node != BUSTER_CHECK_NONE) & (nodes[mark] != epoch);
         nodes[mark] = epoch;
@@ -3920,53 +3949,39 @@ static void check_program_addressed(const Parser* parser, const CheckInput* inpu
 
 #define BUSTER_CHECK_PROGRAM_LANES 16u
 
-// The bodies to build and the initializers' declaration tokens by node, in one pass over the tokens (#530): each body's
-// opening brace (a token with a body declaration, unless deferred) into `openings` in token order, and each initializer
-// node's token into `initializers`, the last as a scan in token order leaves it, with the node's bit in `initialized`
-// (zeroed), which says which entries were written (#877). AVX-512 tests 16 tokens at a time, the rest and the `scalar`
-// path one at a time. Returns the number of bodies.
-static uint32_t check_program_openings(const CheckInput* input, uint32_t node_count, uint32_t* openings, uint32_t* initializers, uint64_t* initialized,
-                                       bool scalar)
+// The opening tokens of the bodies this program reads, in source order. The sparse column contains one entry per
+// definition. A deferred body belongs to its separate reading.
+static uint32_t check_program_openings(const CheckInput* input, uint32_t* openings, bool scalar)
 {
     (void)scalar;
-
-    const uint32_t count = input->token_count;
-    const __m512i none = _mm512_set1_epi32((int)BUSTER_CHECK_NONE);
-    const __m512i nodes = _mm512_set1_epi32((int)node_count);
-    uint32_t bodies = 0;
-    uint32_t token = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
+    uint32_t count = 0;
+    if (BUSTER_SCALAR_PATH(scalar))
     {
-        __mmask16 opened = _mm512_cmpneq_epi32_mask(check_sparse_vector(input->body_declarations, token), none);
-        if (input->deferred_tokens != 0)
+        for (uint32_t token = 0; token < input->token_count; token += 1)
         {
-            opened &= _mm_cmpeq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->deferred_tokens + token)), _mm_setzero_si128());
-        }
-        for (uint32_t lanes = opened; lanes != 0; lanes &= lanes - 1)
-        {
-            openings[bodies++] = token + (uint32_t)__builtin_ctz(lanes);
-        }
-        const __mmask16 initializing = _mm512_cmplt_epu32_mask(check_sparse_vector(input->initializer_nodes, token), nodes);
-        for (uint32_t lanes = initializing; lanes != 0; lanes &= lanes - 1)
-        {
-            const uint32_t at = token + (uint32_t)__builtin_ctz(lanes);
-            initializers[check_sparse_get(input->initializer_nodes, at)] = at;
-            check_program_bit_set(initialized, check_sparse_get(input->initializer_nodes, at));
+            if (check_sparse_get(input->body_declarations, token) != BUSTER_CHECK_NONE &&
+                (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0))
+            {
+                openings[count++] = token;
+            }
         }
     }
-    for (; token < count; token += 1)
+    else
     {
-        if (check_sparse_get(input->body_declarations, token) != BUSTER_CHECK_NONE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0))
+        count = check_sparse_entries(input->body_declarations, 0, input->token_count, openings);
+        if (input->deferred_tokens != NULL)
         {
-            openings[bodies++] = token;
-        }
-        if (check_sparse_get(input->initializer_nodes, token) < node_count)
-        {
-            initializers[check_sparse_get(input->initializer_nodes, token)] = token;
-            check_program_bit_set(initialized, check_sparse_get(input->initializer_nodes, token));
+            uint32_t kept = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t token = openings[i];
+                openings[kept] = token;
+                kept += input->deferred_tokens[token] == 0;
+            }
+            count = kept;
         }
     }
-    return bodies;
+    return count;
 }
 
 // A variable-length array's object, declared at `token`: into its statement's allocation list (by the statement's
@@ -5875,10 +5890,8 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     uint32_t* previous = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* token_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* node_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
-    // The initializers by node and the plans by statement, written at few entries, which their bits mark, rather than
-    // cleared at every one: 4 bytes a node and 4 a token, against a bit of each (#877).
-    uint32_t* initializers = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
-    uint64_t* initialized = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)node_count + 64) / 64) : 0;
+    // Discarded initializer roots ask for their declarations' storage duration only when no initializer plan covers them.
+    uint64_t* static_initializers = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)node_count + 64) / 64) : NULL;
     uint32_t* plan_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint64_t* planned = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)count + 64) / 64) : 0;
     uint32_t* plan_next = valid && options.initializers != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)options.initializers->count + 1) : 0;
@@ -5926,7 +5939,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     uint8_t* addressed = valid && input->label_address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControl, capacity) : 0;
     CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControlTask, capacity) : 0;
-    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && initialized != 0 && labels != 0 &&
+    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && static_initializers != NULL && labels != 0 &&
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 && planned != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
@@ -5968,7 +5981,6 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         check_program_cases(program, parser, case_first, case_next, case_map, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
         // The children lists, source labels, stops and repeats are each body's, which check_control_begin fills.
         memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(initialized, 0, ((uint64_t)node_count + 64) / 64 * sizeof(uint64_t));
         memset(planned, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
         if (variable)
         {
@@ -6023,7 +6035,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
                 region_first[body] = r;
             }
         }
-        body_count = check_program_openings(input, node_count, openings, initializers, initialized, BUSTER_SCALAR_PATH(options.scalar));
+        body_count = check_program_openings(input, openings, BUSTER_SCALAR_PATH(options.scalar));
         // A cpu_dispatch function's body, which clang ignores (#1447), is no body of the program's.
         uint32_t kept = 0;
         for (uint32_t b = 0; input->cpu_dispatch && b < body_count; b += 1)
@@ -6160,8 +6172,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .previous = previous,
         .token_first = token_first,
         .node_next = node_next,
-        .initializers = initializers,
-        .initialized = initialized,
+        .static_initializers = static_initializers,
         .plan_first = plan_first,
         .planned = planned,
         .plan_next = plan_next,

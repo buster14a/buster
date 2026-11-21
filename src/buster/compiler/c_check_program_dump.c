@@ -507,8 +507,8 @@ static uint32_t check_lower_dump_macro_root(const Preprocessor* pp, uint32_t ori
 // a function-like one by its invocation; empty for none.
 static String8 check_lower_dump_attribute_macro(const Parser* parser, const Preprocessor* pp, uint32_t t, uint32_t close)
 {
-    const uint32_t first = parser->tokens.sources[t];
-    const uint32_t last = parser->tokens.sources[close];
+    const uint32_t first = parse_source_index(&parser->tokens, t);
+    const uint32_t last = parse_source_index(&parser->tokens, close);
     const uint32_t root = check_lower_dump_macro_root(pp, pp_history_at(pp, first));
     const uint32_t range = root != 0 && first < pp->output.count ? pp_find_range(pp, pp->output.locations[first]) : BUSTER_PP_NONE;
     const bool builtin = range != BUSTER_PP_NONE && pp->files[pp->ranges[range].file].data == pp->predefines_data;

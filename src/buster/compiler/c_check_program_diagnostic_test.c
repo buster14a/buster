@@ -85,7 +85,7 @@ static uint32_t check_test_program_diagnostic(CheckTest* test, const char* sourc
             }
             const char* file = 0;
             uint32_t length = 0;
-            const uint32_t actual_line = reported < parser.tokens.count ? pp_presumed(&pp, pp.output.locations[parser.tokens.sources[reported]], &file, &length) : 0;
+            const uint32_t actual_line = reported < parser.tokens.count ? pp_presumed(&pp, pp.output.locations[parse_source_index(&parser.tokens, reported)], &file, &length) : 0;
             if (path == 0)
             {
                 line = actual_line;

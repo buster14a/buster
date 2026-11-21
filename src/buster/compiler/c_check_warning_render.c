@@ -101,7 +101,7 @@ static uint32_t check_driver_corrected_name(const Parser* parser, const CheckInp
 static String8 check_warning_string_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
 {
     String8 result = { 0 };
-    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : UINT32_MAX;
+    const uint32_t source = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : UINT32_MAX;
     const PPTokens* output = &pp->output;
     if (source < output->count)
     {
@@ -263,7 +263,7 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
                             }
                             else if (anonymous[tag].length == 0)
                             {
-                                const uint32_t source = parser->tokens.sources[i];
+                                const uint32_t source = parse_source_index(&parser->tokens, i);
                                 const uint32_t origin = history ? pp_history_at(pp, source) : 0;
                                 const uint32_t location = source < pp->output.count ? pp_expansion_location(pp, source, origin) : 0;
                                 const char* file = NULL;
@@ -329,8 +329,8 @@ static uint32_t check_driver_macro_root(const Preprocessor* pp, uint32_t origin)
 // empty for none. The caller has ensured the token histories.
 static String8 check_driver_attribute_macro(const Parser* parser, Preprocessor* pp, uint32_t t, uint32_t close)
 {
-    const uint32_t first = parser->tokens.sources[t];
-    const uint32_t last = parser->tokens.sources[close];
+    const uint32_t first = parse_source_index(&parser->tokens, t);
+    const uint32_t last = parse_source_index(&parser->tokens, close);
     const uint32_t root = check_driver_macro_root(pp, pp_history_at(pp, first));
     const uint32_t range = root != 0 && first < pp->output.count ? pp_find_range(pp, pp->output.locations[first]) : BUSTER_PP_NONE;
     const bool builtin = range != BUSTER_PP_NONE && pp->files[pp->ranges[range].file].data == pp->predefines_data;
@@ -1842,7 +1842,7 @@ static const char* check_warning_objc_macro(const Parser* parser, Preprocessor* 
     const bool strong = word != 0 && intern_length(pp->table, word) == 6 && memcmp(intern_bytes(pp->table, word), "strong", 6) == 0;
     const bool weak = word != 0 && intern_length(pp->table, word) == 4 && memcmp(intern_bytes(pp->table, word), "weak", 4) == 0;
     const char* macro = strong ? "__strong" : weak ? "__weak" : NULL;
-    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parse_source_index(&parser->tokens, event->token);
     const bool lifted = pp_output_macro_place(pp, source, event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? NULL : macro != NULL ? macro : "", location, origin);
     return lifted && event->kind != CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? macro : NULL;
 }
@@ -2928,7 +2928,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     valid = text != NULL;
                     if (valid)
                     {
-                        notes[n] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parser->tokens.sources[note->token], .message = text };
+                        notes[n] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parse_source_index(&parser->tokens, note->token), .message = text };
                     }
                 }
                 // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
@@ -2942,7 +2942,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                 if (valid)
                 {
                     const PPDiagnosticRecord* previous = pp->diagnostic_last;
-                    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+                    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parse_source_index(&parser->tokens, event->token);
                     // A retained scope closer may be at the repair's cut. Its following original token, rather than
                     // the view's synthetic outer closer, is where clang pops that scope (#2515).
                     const bool scope_pop = event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER &&

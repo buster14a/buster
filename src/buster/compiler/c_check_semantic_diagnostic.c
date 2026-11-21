@@ -139,7 +139,7 @@ static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* p
     if (text != NULL && unnamed)
     {
         const bool history = pp_history_ensure(pp);
-        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t source = parse_source_index(&parser->tokens, token);
         const uint32_t origin = history ? pp_history_at(pp, source) : 0;
         const uint32_t location = source < pp->output.count ? pp_expansion_location(pp, source, origin) : 0;
         const char* file = NULL;
@@ -248,7 +248,7 @@ static uint32_t check_semantic_tag_notes(const Parser* parser, Preprocessor* pp,
     {
         if (tokens[n] < count && texts[n] != NULL)
         {
-            notes[result] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[tokens[n]], .message = texts[n] };
+            notes[result] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, tokens[n]), .message = texts[n] };
             result += 1;
         }
     }
@@ -561,7 +561,7 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
 static String8 check_semantic_token(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
 {
     String8 result = { 0 };
-    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_CHECK_NONE;
+    const uint32_t source = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_CHECK_NONE;
     // The output's columns, which the backend may have given back (pp_release_output).
     pp_output_ensure(pp);
     if (source < pp->output.count && pp->output.kinds[source] != BUSTER_PP_KIND_EMBED)
@@ -1969,7 +1969,7 @@ static void check_semantic_add_note(const Parser* parser, PPOutputDiagnosticNote
 {
     if (*count < BUSTER_CHECK_SEMANTIC_NOTES && token < parser->tokens.count && message != NULL)
     {
-        notes[*count] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[token], .message = message };
+        notes[*count] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, token), .message = message };
         *count += 1;
     }
 }
@@ -2247,7 +2247,7 @@ static void check_semantic_parameter_note(const Parser* parser, Preprocessor* pp
     {
         const String8 spelled = name != BUSTER_CHECK_NONE ? check_semantic_name(parser, pp, name) : (String8){ "", 0 };
         *note = (PPOutputDiagnosticNote){
-            .token = parser->tokens.sources[name != BUSTER_CHECK_NONE ? name : end],
+            .token = parse_source_index(&parser->tokens, name != BUSTER_CHECK_NONE ? name : end),
             .message = spelled.length != 0 ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)spelled.length, spelled.pointer) :
                                              "passing argument to parameter here",
         };
@@ -2458,7 +2458,7 @@ static PPOutputDiagnosticNote check_semantic_forward_note(const Parser* parser, 
     if (named.length != 0)
     {
         result = (PPOutputDiagnosticNote){
-            .token = parser->tokens.sources[declared],
+            .token = parse_source_index(&parser->tokens, declared),
             .message = check_warning_text(scratch, "forward declaration of %.*s", (int)named.length, named.pointer),
         };
     }
@@ -2724,7 +2724,7 @@ static void check_semantic_counted_notes(const Parser* parser, Preprocessor* pp,
     if (keyword != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
     {
         note[(*note_count)++] = (PPOutputDiagnosticNote){
-            .token = parser->tokens.sources[keyword],
+            .token = parse_source_index(&parser->tokens, keyword),
             .message = check_warning_text(scratch, "consider providing a complete definition for %.*s", (int)incomplete.length, incomplete.pointer),
         };
     }
@@ -2747,7 +2747,7 @@ static void check_semantic_counted_notes(const Parser* parser, Preprocessor* pp,
     if (count != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
     {
         note[(*note_count)++] = (PPOutputDiagnosticNote){
-            .token = parser->tokens.sources[count],
+            .token = parse_source_index(&parser->tokens, count),
             .message = check_warning_text(scratch, "consider using '__%s' instead of '__%s'", kind == BUSTER_TYPE_COUNTED_BY ? "sized_by" : "sized_by_or_null", name),
         };
     }

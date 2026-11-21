@@ -816,10 +816,10 @@ static uint32_t check_diagnostic_input_report_source(const CheckInput* input, co
 {
     uint32_t source = check_input_report_source(parser, report);
     const uint32_t custom = report->pragma == 0 && report->token < parser->tokens.count ? check_diagnostic_custom_attribute_name(parser, report->token) : BUSTER_CHECK_NONE;
-    source = custom != BUSTER_CHECK_NONE ? parser->tokens.sources[custom] : source;
+    source = custom != BUSTER_CHECK_NONE ? parse_source_index(&parser->tokens, custom) : source;
     if (input->naked_diagnostic != NULL && report->pragma == 0 && report->token == input->naked_diagnostic->position)
     {
-        source = parser->tokens.sources[input->naked_diagnostic->token];
+        source = parse_source_index(&parser->tokens, input->naked_diagnostic->token);
     }
     if (input->loop_diagnostic != 0 && report->pragma == input->loop_diagnostic->pragma && report->token == input->loop_diagnostic->position)
     {

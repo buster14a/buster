@@ -588,7 +588,7 @@ static uint64_t check_debug_test_lines(CheckDebugTestTally* tally, CheckDebugTes
         bool presumed = true;
         for (uint32_t r = first; presumed && r < first + count; r += 1)
         {
-            const uint32_t output = parser->tokens.sources[rows->tokens[r]];
+            const uint32_t output = parse_source_index(&parser->tokens, rows->tokens[r]);
             const uint32_t location = check_lazy_expansion_location(pp, output, pp_history_at(pp, output));
             const char* name = 0;
             uint32_t length = 0;
