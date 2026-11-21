@@ -1385,11 +1385,12 @@ static inline __attribute__((always_inline)) uint64_t node_rows_extend(uint64_t 
 
 
 // The CONST row has no conversion or relocation: its payload is the sign-extended i32 the native tape uses.
-void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value)
+void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value, uint16_t read_offset)
 {
-    entry->kind = BUSTER_TYPED_CONST;
+    entry->kind = read_offset != 0 ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_CONST;
     entry->class = BUSTER_TYPED_CLASS_I32;
-    entry->value = node_rows_extend(value, entry->class);
+    entry->value = read_offset != 0 ? value : node_rows_extend(value, entry->class);
+    entry->read_offset = read_offset;
 }
 
 // A floating constant's CONST's value of class `class` (F32 or F64: C takes no other's, node_machine_constant_takes)

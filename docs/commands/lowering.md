@@ -2728,6 +2728,16 @@ native CONST entry. The lowering emits this entry in the ordinary body's tape.
 For example, `return 18 + 24;` replaces two literal nodes, the addition and the
 return conversion with one summary carrying 42.
 
+The reader also accepts `return x;` and `return +x;` for an unqualified,
+ordinary automatic int or int parameter. The LOCAL entry keeps the declared
+object. The lowering relocates it to the enclosing body's local number.
+The entry records the source identifier's token offset within the return.
+The uninitialized pass uses the summary node's reach and order together with
+that token, so that it still reports the first evaluated read of an
+uninitialized variable, including its source position and note. An
+unreachable read still counts as a syntactic use of a written parameter.
+Other storage classes, special registers and qualified types keep their graph.
+
 Admission requires the entire expression in the same coded chunk. Other types,
 operators and spellings, debug information, deferred parts, and units requiring
 musttail validation use the existing graph. The window checks the coded tokens

@@ -93,7 +93,7 @@ static void check_test_driver_operand_diagnostics(CheckTest* test, const char* c
         bool node_window;
     } files[] =
     {
-        { .name = "node_window_warnings", .option = "-Wall", .warnings = 5, .notes = 1, .node_window = true },
+        { .name = "node_window_warnings", .option = "-Wall", .warnings = 8, .notes = 3, .node_window = true },
         { .name = "unary", .errors = 9 },
         { .name = "binary", .errors = 12 },
         { .name = "conditional", .errors = 13 },

@@ -1800,13 +1800,13 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
 #endif
 }
 
-// --node-window's first complete expressions have one native CONST each and no references, events, calls or
-// relocations. Admit them from the chunk's coded postorder and the reader's int literals, before the walk numbers
-// any of their nodes. Their return type is already bound. For other spellings or a fault the walk sees the
+// --node-window's first complete expressions have one native CONST or LOCAL each. The chunk's coded postorder,
+// decoded int literals, bound names and return type establish admission before the walk numbers their nodes.
+// A LOCAL carries its read event and its object for relocation. For other spellings or a fault the walk sees the
 // original tokens, including the original literal cursor. The node machine's fold lives in the checker unit.
 bool check_node_window_prepare(void);
 bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result);
-void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value);
+void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value, uint16_t read_offset);
 
 static uint32_t check_input_window_code(const uint32_t* classes, uint32_t i)
 {
@@ -1823,14 +1823,17 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
     if (reader->return_types[token] == BUSTER_TYPE_INT && token < parser->tokens.count && parser->tokens.count - token >= 3 &&
         parser->tokens.kinds[token] == PARSE_KIND_RETURN)
     {
-        if (end - start >= 1 && tokens[end - 1] == token + 1 && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL &&
+        if (end - start >= 1 && tokens[end - 1] == token + 1 &&
+            (check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL || check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_IDENTIFIER) &&
             parser->tokens.kinds[token + 2] == PARSE_KIND_SEMI)
         {
             first = end - 1;
         }
         else if (end - start >= 2 && parser->tokens.count - token >= 4 && tokens[end - 2] == token + 2 && tokens[end - 1] == token + 1 &&
-                 check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_PREFIX &&
-                 parser->tokens.kinds[token + 1] == PARSE_KIND_MINUS && parser->tokens.kinds[token + 3] == PARSE_KIND_SEMI)
+                 check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_PREFIX &&
+                 ((check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL && parser->tokens.kinds[token + 1] == PARSE_KIND_MINUS) ||
+                  (check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_IDENTIFIER && parser->tokens.kinds[token + 1] == PARSE_KIND_PLUS)) &&
+                 parser->tokens.kinds[token + 3] == PARSE_KIND_SEMI)
         {
             first = end - 2;
         }
@@ -1870,16 +1873,37 @@ static CheckInputWindowEntry* check_input_window_entry(CheckInputReader* reader)
 }
 
 static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, uint32_t first, uint32_t end,
-                                    const CheckInputLiterals* literals, uint32_t* literal)
+                                    const CheckInputLiterals* literals, uint32_t* literal, const CheckInputIdentifiers* identifiers, uint32_t* identifier)
 {
     const uint32_t returned = tokens[end];
     const uint32_t operands = end - first;
     const bool binary = operands == 3;
-    const uint32_t left = literals->values[*literal];
-    const uint32_t right = binary ? literals->values[*literal + 1] : 0;
-    uint32_t value = left;
-    const CheckOp op = binary ? check_input_binary(reader->parser->tokens.kinds[tokens[end - 1]]) : CHECK_OP_NEGATIVE;
-    const bool admitted = left != BUSTER_CHECK_NONE && right != BUSTER_CHECK_NONE && (operands == 1 || check_node_window_fold_int(op, left, right, binary, &value));
+    const bool name = reader->parser->tokens.kinds[tokens[first]] == PARSE_KIND_IDENTIFIER;
+    uint32_t value = 0;
+    bool admitted;
+    if (name)
+    {
+        const uint32_t i = *identifier;
+        const uint32_t declared = identifiers->declarations[i];
+        const CheckInput* input = reader->output;
+        // Only an ordinary automatic int, with the reader's own lvalue classification, object and declaration.
+        // Static storage, thread-local storage, special registers, qualifiers and constexpr all keep their walk.
+        admitted = identifiers->status[i] == (BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) &&
+                   identifiers->types[i] == (BUSTER_TYPE_INT | ((uint64_t)CHECK_LVALUE << 32)) &&
+                   identifiers->flags[i] == (((uint64_t)CHECK_CONSTANT_ADDRESS << 32) | BUSTER_CHECK_NONNULL_ADDRESS) && declared < input->token_count &&
+                   identifiers->objects[i] == (uint64_t)declared + 1 && input->declaration_kinds[declared] == C_BINDING_OBJECT &&
+                   !check_input_bit(input->declaration_bits, declared, BUSTER_CHECK_BITS_THREAD_LOCAL) &&
+                   check_sparse_get(input->declaration_bodies, declared) < input->token_count;
+        value = (uint32_t)identifiers->objects[i];
+    }
+    else
+    {
+        const uint32_t left = literals->values[*literal];
+        const uint32_t right = binary ? literals->values[*literal + 1] : 0;
+        const CheckOp op = binary ? check_input_binary(reader->parser->tokens.kinds[tokens[end - 1]]) : CHECK_OP_NEGATIVE;
+        value = left;
+        admitted = left != BUSTER_CHECK_NONE && right != BUSTER_CHECK_NONE && (operands == 1 || check_node_window_fold_int(op, left, right, binary, &value));
+    }
     CheckInputWindowEntry* entry = admitted ? check_input_window_entry(reader) : NULL;
     bool published = false;
     if (entry != NULL)
@@ -1888,9 +1912,22 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
         const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, returned, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
         if (node != BUSTER_CHECK_NONE)
         {
-            const CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = value };
+            CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+            if (name)
+            {
+                // The direct lvalue-to-rvalue conversion retains its object even after losing its
+                // address-constant kind. Unary plus produces a new arithmetic value with no object.
+                summary.flags = operands == 1 ? BUSTER_CHECK_NONNULL_ADDRESS : 0;
+                summary.object = operands == 1 ? value : 0;
+            }
+            else
+            {
+                summary.flags = BUSTER_CHECK_ICE;
+                summary.constant_kind = CHECK_CONSTANT_INTEGER;
+                summary.integer = value;
+            }
             check_input_batch_set_leaf(reader, batch, node, &summary);
-            check_node_window_int_entry(entry, value);
+            check_node_window_int_entry(entry, value, name ? (uint16_t)(tokens[first] - returned) : 0);
             entry->node = node;
             CheckInput* input = reader->output;
             input->window_count += 1;
@@ -1899,7 +1936,8 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
             input->token_nodes[returned] = node;
             reader->query_types[returned] = BUSTER_TYPE_INT;
             reader->first_value[returned] = BUSTER_CHECK_NONE;
-            *literal += binary ? 2 : 1;
+            *literal += name ? 0 : binary ? 2 : 1;
+            *identifier += name ? 1 : 0;
             published = true;
         }
     }
@@ -1939,7 +1977,7 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
         {
             check_input_expression_coded(reader, batch, tokens[cursor], (uint8_t)classes[cursor], true, identifiers, &identifier, literals, &literal, visited);
         }
-        if (!reader->output->resource && first < end && check_input_window_take(reader, batch, tokens, first, end, literals, &literal))
+        if (!reader->output->resource && first < end && check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier))
         {
             cursor = end + 1;
         }
