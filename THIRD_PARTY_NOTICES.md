@@ -26,11 +26,19 @@ diagnostic oracle; no upstream implementation or test fixture is imported.
 
 The failed static assertion boolean-conversion recovery in
 `c_check_common_warnings.c` and `c_checker_driver.c`, its driver tests and the
-original `tests/driver/assert_bool_nested*.c` sources (#2409) use the project
+original `tests/driver/assert_bool_*.c` sources (#2409) use the project
 default terms. LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
 `clang/lib/Sema/SemaChecking.cpp` and `clang/lib/Sema/SemaExpr.cpp` were consulted
 for conversion and diagnostic ordering behavior. Clang 23.1.4 is an external
 diagnostic oracle; no upstream implementation or test fixture is imported.
+
+The remaining #2409 requirement formatting in `c_check_semantic_diagnostic.c`,
+extension-prefixed member recovery in `c_parser_impl.c`, retained-expression
+warning recovery in `c_check_common_warnings.c`, and their original runtime
+fixtures `tests/driver/assert_requirement_*.c`, `assert_member_extension*.c`
+and `assert_bool_detached*.c` also use the project default terms. Their
+behavior was compared with Clang 23.1.4 at the same pinned LLVM revision.
+No upstream implementation or fixture is imported by these changes.
 
 The malformed-block-item resume metadata in `c_parser_impl.c` (#2406), its
 semantic-driver checks and the original runtime fixtures under

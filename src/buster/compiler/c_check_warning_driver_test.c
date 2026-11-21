@@ -1502,6 +1502,11 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 1,
     },
     {
+        .name = "noreturn call when return-type warnings are disabled",
+        .source = "_Noreturn void g(void);_Noreturn void f(void){g();}\n",
+        .options = { "-Wno-return-type" },
+    },
+    {
         .name = "noreturn group disabled",
         .source = "_Noreturn void f(void){return;}\n",
         .options = { "-Wno-invalid-noreturn" },
@@ -3063,7 +3068,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                 check_test_expect(test, oracle_matches, description);
                 for (uint32_t lane = 0; oracle_ready && lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
                 {
-                    const char* alternate = fixture->compare_node_window ? "--node-window" : "--scalar";
+                    const char* alternate = fixture->compare_node_window ? "--node-window-assignments" : "--scalar";
                     for (uint32_t route = 0; route < 2; route += 1)
                     {
                         arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");

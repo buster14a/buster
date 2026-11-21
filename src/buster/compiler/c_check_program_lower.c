@@ -15664,6 +15664,42 @@ static bool check_lower_global_register_update(CheckLowerWriter* writer, uint32_
     return reg >= 0;
 }
 
+// Splice the prechecked expression's tape, map local objects in the current body and give each entry its
+// own source token. The next ordinary task resumes the source and failure context active at this splice.
+static __attribute__((noinline)) void check_lower_window(CheckLowerWriter* writer, uint32_t node, const CheckValue* value, const CheckInputWindowSummary* summary)
+{
+    const CheckProgram* program = writer->program;
+    const uint32_t before = writer->count;
+    const uint32_t source = writer->source;
+    const uint32_t outer = writer->token;
+    for (uint32_t i = 0; i < summary->count && writer->output->status == CHECK_PROGRAM_OK; i += 1)
+    {
+        const CheckInputWindowRow* row = program->input->window_rows + summary->first + i;
+        uint64_t native_value = row->value;
+        if ((row->flags & BUSTER_CHECK_WINDOW_LOCAL) != 0)
+        {
+            native_value = row->value < program->object_count ? check_lower_local_of(writer, (uint32_t)row->value) : BUSTER_CHECK_NONE;
+        }
+        if ((row->flags & BUSTER_CHECK_WINDOW_LOCAL) == 0 || native_value < writer->local_count)
+        {
+            writer->token = row->token;
+            check_lower_source(writer, row->token);
+            check_lower_emit(writer, row->kind, row->class, native_value);
+        }
+        else
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+    writer->token = outer;
+    check_lower_source(writer, source);
+    if (value->constant_kind == CHECK_CONSTANT_INTEGER && writer->count == before + 1)
+    {
+        writer->constant_end = writer->count;
+        writer->constant_node = node + 1;
+    }
+}
+
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
 // (CheckLowerWriter.bit_ints). `bit_int` is CheckLowerTask.bit_int.
 static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
@@ -15691,7 +15727,12 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     // An expression of a _BitInt goes to check_lower_bit_int_node first, out of line, which may push it again for what
     // follows (CheckLowerTask.bit_int).
-    if (__builtin_expect(writer->segments, 0) && check_lower_segment_access(writer, node, value, address))
+    const CheckInputWindowSummary* summary = op == CHECK_OP_VALUE ? check_input_window_summary(program->input, node) : NULL;
+    if (__builtin_expect(summary != NULL, 0))
+    {
+        check_lower_window(writer, node, value, summary);
+    }
+    else if (__builtin_expect(writer->segments, 0) && check_lower_segment_access(writer, node, value, address))
     {
         check_lower_segment_refused(writer, node, value, address, discard);
     }
@@ -15739,15 +15780,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         else if (!discard)
         {
             const uint32_t before = writer->count;
-            const CheckInputWindowEntry* row = check_input_window_row(program->input, node);
-            if (__builtin_expect(row != NULL, 0))
-            {
-                check_lower_emit(writer, row->kind, row->class, row->value);
-            }
-            else
-            {
-                check_lower_constant(writer, value);
-            }
+            check_lower_constant(writer, value);
             // An integer constant's one CONST, into which its own conversion folds (check_lower_fold_conversion).
             if (value->constant_kind == CHECK_CONSTANT_INTEGER && writer->count == before + 1)
             {
@@ -15758,21 +15791,8 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_VALUE)
     {
-        const CheckInputWindowEntry* row = check_input_window_row(program->input, node);
         const uint32_t object = value->object;
-        if (__builtin_expect(row != NULL, 0))
-        {
-            const uint32_t local = row->value < program->object_count ? check_lower_local_of(writer, (uint32_t)row->value) : BUSTER_CHECK_NONE;
-            if (row->kind == BUSTER_TYPED_LOCAL && local < writer->local_count)
-            {
-                check_lower_emit(writer, row->kind, row->class, local);
-            }
-            else
-            {
-                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
-            }
-        }
-        else if (value->type == BUSTER_TYPE_VOID)
+        if (value->type == BUSTER_TYPE_VOID)
         {
             // The final value of a statement region without an expression statement is void.
         }

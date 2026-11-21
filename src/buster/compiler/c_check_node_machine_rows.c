@@ -1384,13 +1384,31 @@ static inline __attribute__((always_inline)) uint64_t node_rows_extend(uint64_t 
 }
 
 
-// The CONST row has no conversion or relocation: its payload is the sign-extended i32 the native tape uses.
-void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value, uint16_t read_offset)
+// An integer CONST holds its sign-extended i32. A LOCAL carries its object until the writer knows the local number.
+void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uint32_t token, bool local)
 {
-    entry->kind = read_offset != 0 ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_CONST;
-    entry->class = BUSTER_TYPED_CLASS_I32;
-    entry->value = read_offset != 0 ? value : node_rows_extend(value, entry->class);
-    entry->read_offset = read_offset;
+    *entry = (CheckInputWindowRow){
+        .value = local ? value : node_rows_extend(value, BUSTER_TYPED_CLASS_I32),
+        .token = token,
+        .kind = local ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_CONST,
+        .class = BUSTER_TYPED_CLASS_I32,
+        .flags = local ? BUSTER_CHECK_WINDOW_LOCAL | BUSTER_CHECK_WINDOW_READ : 0,
+    };
+}
+
+// An explicit (void) cast discards the value at its closing parenthesis.
+void check_node_window_void_rows(CheckInputWindowRow* rows, uint32_t value, uint32_t literal, uint32_t cast)
+{
+    check_node_window_int_entry(rows, value, literal, false);
+    rows[1] = (CheckInputWindowRow){ .token = cast, .kind = BUSTER_TYPED_DISCARD, .class = BUSTER_TYPED_CLASS_I32 };
+}
+
+// A discarded plain int assignment: store the RHS (the preceding row), then discard the stored value.
+void check_node_window_store(CheckInputWindowRow* rows, uint32_t object, uint32_t token)
+{
+    rows[0] = (CheckInputWindowRow){ .value = object, .token = token, .kind = BUSTER_TYPED_STORE_LOCAL, .class = BUSTER_TYPED_CLASS_I32,
+                                     .flags = BUSTER_CHECK_WINDOW_LOCAL | BUSTER_CHECK_WINDOW_WRITE, .event_offset = -1 };
+    rows[1] = (CheckInputWindowRow){ .token = token + 2, .kind = BUSTER_TYPED_DISCARD, .class = BUSTER_TYPED_CLASS_I32 };
 }
 
 // A floating constant's CONST's value of class `class` (F32 or F64: C takes no other's, node_machine_constant_takes)

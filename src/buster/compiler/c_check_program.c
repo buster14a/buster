@@ -776,6 +776,8 @@ struct CheckControlWriter
 {
     CheckProgram* program;
     const Parser* parser;
+    // A resolved branch, asm or case edge enters the implicit END of the main body.
+    bool targets_end;
     // The index of the body the writer builds (check_control_build), which its regions record (CheckProgramRegion.body).
     uint32_t body;
     // The body's children lists, by token: each token's first and last child and its siblings, which check_control_begin
@@ -2894,6 +2896,8 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
             region->count = writer->count - writer->first_entry - region->first;
         }
     }
+    const uint32_t end = writer->entry_count - 1u;
+    writer->targets_end = false;
     for (uint32_t i = writer->first_entry; i < writer->count && writer->program->status == CHECK_PROGRAM_OK; i += 1)
     {
         CheckControl* entry = &writer->entries[i];
@@ -2906,6 +2910,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
             else
             {
                 entry->target = writer->labels[entry->target];
+                writer->targets_end |= entry->target == end;
             }
         }
         else if (entry->kind == CHECK_CONTROL_ASM)
@@ -2922,6 +2927,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
                 else
                 {
                     writer->program->asm_targets[writer->program->asm_offsets[entry->target] + l] = writer->labels[label];
+                    writer->targets_end |= writer->labels[label] == end;
                 }
             }
         }
@@ -2938,17 +2944,17 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
         else
         {
             item->target = writer->labels[label];
+            writer->targets_end |= item->target == end;
         }
     }
 }
 
 #include "c_check_return_flow.c"
 
-// Aggregate returns need an address even at a reachable implicit return. Reuse the completed writer's label and
-// task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
-// as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
-// conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, const uint8_t* return_facts, bool return_warnings,
+// Aggregate emission retains both conditional edges and removes unreachable transfers without renumbering labels.
+// The warning folds conditions. First assume every expression returns: if END is unreachable even then, no
+// expression contract can make it reachable. Only a body that can fall through needs its accurate return contracts.
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, CheckReturnFacts* return_facts, bool return_warnings,
                                       bool noreturn_warnings)
 {
     CheckProgram* program = writer->program;
@@ -2962,13 +2968,22 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
     if (program->status == CHECK_PROGRAM_OK && (aggregate || scalar || (noreturn_warnings && noreturn)) && body->count != 0 && body->count == body->entry_count)
     {
         CheckControl* entries = writer->entries + body->first;
+        // A scalar return needs no emission walk. END can only be reached by a resolved target or by falling
+        // through its preceding entry. An indirect jump can enter only a source LABEL.
+        if (scalar && !writer->targets_end && body->count >= 2 && entries[body->count - 1].kind == CHECK_CONTROL_END)
+        {
+            const uint32_t last = entries[body->count - 2].kind;
+            if (last == CHECK_CONTROL_RETURN || last == CHECK_CONTROL_JUMP || last == CHECK_CONTROL_JUMP_INDIRECT || last == CHECK_CONTROL_END)
+            {
+                return;
+            }
+        }
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
-        // The first walk is the aggregate return's alone: a scalar return's lowering reads neither its falls nor its
-        // entries' kinds, so that a scalar body takes the warning's walk only. The second walk is the warnings': -Wreturn-type's,
-        // and -Winvalid-noreturn's, which -Wno-return-type keeps.
-        for (uint32_t pass = aggregate ? 0u : 1u; pass < (return_warnings || (noreturn_warnings && noreturn) ? 2u : 1u); pass += 1)
+        enum { EMISSION, POSSIBLE_FALLTHROUGH, RETURN_WARNING };
+        const bool warnings = return_warnings || (noreturn_warnings && noreturn);
+        for (uint32_t pass = aggregate ? EMISSION : POSSIBLE_FALLTHROUGH; pass <= (warnings ? RETURN_WARNING : EMISSION); pass += 1)
         {
             bool warning_safe = true;
             memset(seen, 0, body->count);
@@ -2989,12 +3004,12 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 {
                     bool truth = false;
                     const bool jump = entry->kind == CHECK_CONTROL_JUMP;
-                    const bool known = pass != 0 && !jump && check_program_branch_truth(program, entry->node, entry->node, &truth);
+                    const bool known = pass != EMISSION && !jump && check_program_branch_truth(program, entry->node, entry->node, &truth);
                     const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
                     targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
                     next = !jump && (!known || !taken);
                 }
-                else if (pass != 0 && entry->kind == CHECK_CONTROL_SWITCH)
+                else if (pass != EMISSION && entry->kind == CHECK_CONTROL_SWITCH)
                 {
                     // Clang also recognizes exhaustive enum switches. Their enumerator set is not retained here;
                     // avoid a false fall-off warning until that coverage fact is available, as for noreturn calls.
@@ -3013,9 +3028,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 else if (entry->kind == CHECK_CONTROL_CASE)
                 {
                     const CheckProgramCase* item = program->cases + entry->target;
-                    const uint32_t condition = pass != 0 ? program->input->token_nodes[item->owner] : BUSTER_CHECK_NONE;
+                    const uint32_t condition = pass != EMISSION ? program->input->token_nodes[item->owner] : BUSTER_CHECK_NONE;
                     CheckProgramCase selected = { .type = item->type };
-                    const bool known = pass != 0 && check_program_case_value(program, condition, item->type, &selected.lower, &selected.wide_lower);
+                    const bool known = pass != EMISSION && check_program_case_value(program, condition, item->type, &selected.lower, &selected.wide_lower);
                     const bool taken = known && check_program_case_compare(program, &selected, false, item, false) >= 0 &&
                                        check_program_case_compare(program, &selected, false, item, true) <= 0;
                     targets[0] = !known || taken ? item->target : BUSTER_CHECK_NONE;
@@ -3051,16 +3066,16 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
                 }
-                if (pass != 0)
+                if (pass == RETURN_WARNING)
                 {
-                    uint8_t fact = entry->node < graph->count ? return_facts[entry->node] : 0;
+                    uint8_t fact = check_program_return_cached(program, return_facts, entry->node);
                     if (entry->kind == CHECK_CONTROL_INITIALIZE && program->initializers != NULL && entry->target < program->initializers->count)
                     {
                         const CheckInitializer* plan = program->initializers->plans + entry->target;
                         for (uint32_t part = 0; part < plan->count; part += 1)
                         {
                             const CheckInitPart* value = plan->parts + part;
-                            fact |= value->kind == CHECK_INIT_VALUE && value->node < graph->count ? return_facts[value->node] : 0;
+                            fact |= value->kind == CHECK_INIT_VALUE ? check_program_return_cached(program, return_facts, value->node) : 0;
                         }
                     }
                     // A guaranteed nonreturning expression ends only this CFG edge. Unknown contracts retain the
@@ -3090,7 +3105,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 }
             }
             const bool falls = body->count != 0 && seen[body->count - 1] != 0;
-            if (pass == 0)
+            if (pass == EMISSION)
             {
                 body->return_flow = aggregate;
                 body->falls = falls;
@@ -3101,16 +3116,14 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         entries[i].kind = CHECK_CONTROL_END;
                     }
                 }
-                // The warning walk only removes edges by folding conditions or recognizing terminal calls.
-                // If the conservative first walk cannot fall through, it cannot produce a fall-off warning.
-                if (!falls)
-                {
-                    break;
-                }
             }
-            else
+            if (!falls)
             {
-                body->return_warning = falls && warning_safe ? noreturn ? (noreturn_warnings ? 3 : 0) : returns ? 2 : 1 : 0;
+                break;
+            }
+            if (pass == RETURN_WARNING)
+            {
+                body->return_warning = warning_safe ? noreturn ? (noreturn_warnings ? 3 : 0) : returns ? 2 : 1 : 0;
             }
         }
     }
@@ -5762,7 +5775,7 @@ struct CheckProgramRun
     Arena controls;
     CheckControlWriter writer;
     CheckProgramTargetEvents target_events;
-    const uint8_t* return_facts;
+    CheckReturnFacts return_facts;
     uint32_t* openings;
     uint32_t* seen;
     uint32_t* nodes;
@@ -6188,11 +6201,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .fold_capacity = node_count + 1,
         .capacity = capacity,
     };
-    // Source warning contracts are a single postorder reduction, reused by every body's CFG walk. They neither
-    // alter emission reachability nor run on a rejected stream. Warning-disabled commands keep no extra facts.
-    const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
-                                    check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
-    valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
+    valid = valid && program->status == CHECK_PROGRAM_OK;
     // The labelled library declarations, which a computed call's test reads in the references' pass below.
     valid = valid && check_program_labelled_objects(program, output);
     // The candidates as the pass before the bodies' controls finds them (#2536's step 2.2, census_pass): the constant ifs'
@@ -6251,7 +6260,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .controls = controls,
         .writer = writer,
         .target_events = target_events,
-        .return_facts = return_facts,
+        .return_facts = { .work = options.return_flow_work },
         .openings = openings,
         .seen = seen,
         .nodes = nodes,
@@ -6287,7 +6296,6 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
     const CheckProgramOptions* options = &run->options;
     Arena* output = run->output;
     Arena* scratch = run->scratch;
-    const uint8_t* return_facts = run->return_facts;
     const uint32_t* openings = run->openings;
     uint32_t* seen = run->seen;
     uint32_t* nodes = run->nodes;
@@ -6324,7 +6332,7 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
         body->label_count = writer->label_position_count - label_first;
         body->cleanup_first = writer->cleanup_first;
         body->cleanup_count = writer->cleanup_count;
-        check_program_return_flow(writer, body, return_facts, options->return_warnings, options->noreturn_warnings);
+        check_program_return_flow(writer, body, &run->return_facts, options->return_warnings, options->noreturn_warnings);
         program->exit_count = writer->exit_count;
         if (writer->exit_count != exit_start && program->status == CHECK_PROGRAM_OK)
         {
@@ -6600,6 +6608,7 @@ static bool check_program_finish(CheckProgramRun* run)
     {
         arena_pop_to(scratch, temporary);
     }
+    arena_release(&run->return_facts.storage);
     arena_release(&controls);
     return valid;
 }

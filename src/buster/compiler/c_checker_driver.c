@@ -14199,6 +14199,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
     bool check_transitions = false;
     bool node_window = false;
+    bool node_window_assignments = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -14485,6 +14486,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (match.exact == C_OPTION_VERIFY)
         {
             verify = true;
+        }
+        else if (match.exact == C_OPTION_NODE_WINDOW_ASSIGNMENTS)
+        {
+            node_window = true;
+            node_window_assignments = true;
         }
         else if (match.exact == C_OPTION_NODE_WINDOW)
         {
@@ -14867,6 +14873,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     options.semantic_pragmas = true;
     options.timing = time_stages;
+    options.node_window_assignments = node_window_assignments;
     options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
     // The preprocessor's phases' ticks in pp_run, for the report.
@@ -14983,7 +14990,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c | -S] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }

@@ -2009,6 +2009,19 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
             snprintf(description, sizeof(description), "%s: the return facts' walk gives every node the definition's facts", name);
             check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
+            CheckReturnFacts cached = { 0 };
+            bool same = exact != NULL || input.graph.count == 0;
+            for (uint32_t node = 0; same && node < input.graph.count; node += 1)
+            {
+                same = check_program_return_cached(&program, &cached, node) == exact[node];
+            }
+            for (uint32_t end = input.graph.count; same && end != 0; end -= 1)
+            {
+                same = check_program_return_cached(&program, &cached, end - 1) == exact[end - 1];
+            }
+            snprintf(description, sizeof(description), "%s: incremental and cached return facts match every scalar node", name);
+            check_test_expect(test, same, description);
+            arena_release(&cached.storage);
             arena_pop_to(&scratch, facts_mark);
         }
         // A program that includes the system's headers lowers what its roots reach, as -c does: their other functions
@@ -3453,7 +3466,8 @@ static void check_test_program_return_marks(CheckTest* test)
             CheckControl entries[] = { { .kind = CHECK_CONTROL_EVALUATE, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, facts, true, true);
+            CheckReturnFacts cached = { .facts = facts, .computed = NODES };
+            check_program_return_flow(&writer, &body, &cached, true, true);
             bool same = body.return_flow && body.falls && body.return_warning == (contract == 0 ? 1 : 0);
             for (uint32_t node = 0; same && node <= NODES; node += 1)
             {

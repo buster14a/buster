@@ -6322,10 +6322,122 @@ static void check_common_failed_assert_bool(const Parser* parser, Preprocessor* 
     }
 }
 
-// Rejected assertions do not enter the ordinary warning walk. Visit their retained source tree with a bounded
-// frontier: conditional conditions warn as their expressions finish (source postorder), then the assertion and
-// logical operands warn in the completed expression's order. This is only boolean-conversion recovery; it neither
-// reconstructs erased selection/query operands nor publishes unrelated expression warning families.
+// A conditional's condition and a comma's discarded operand are checked while the source expression is built, even
+// inside an unselected _Generic or choose operand. Those retained subtrees have no operand edge from the assertion's
+// evaluated result, but their token-to-node entries remain. Find their tight graph interval from the assertion's own
+// token span, then visit it in graph postorder. This is diagnostic-only work; it neither retains another graph nor
+// changes evaluation. Expressions erased by a declaration/type query have no node here, just as in the ordinary walk.
+static bool check_common_failed_assert_source(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                              const TypeTable* types, CheckWarningSpelling* spell, uint32_t root, uint32_t completion, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t token_count = parser->tokens.count;
+    const uint32_t keyword = root < graph->count ? check_semantic_assertion_keyword(parser, graph->tokens[root]) : BUSTER_CHECK_NONE;
+    const uint32_t close = keyword < token_count && keyword + 1 < token_count ? parser->tree.parents[keyword + 1] : token_count;
+    const uint32_t first = keyword < token_count ? keyword + 2 : token_count;
+    const bool source = first < close && close < token_count && input->token_nodes != NULL && close < input->token_count;
+    const uint32_t end = source ? check_constant_punctuation(parser, first, close, PARSE_KIND_COMMA) : first;
+    uint32_t low = graph->count;
+    uint32_t high = 0;
+    bool nested = false;
+    bool commas = false;
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        // A GNU statement expression can contain another assertion. Its own report owns its warnings, so neither its
+        // candidates nor a nested candidate between the outer assertion's first and last nodes belongs to this scan.
+        if (parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT && token + 1 < end)
+        {
+            const uint32_t closing = parser->tree.parents[token + 1];
+            nested = true;
+            token = closing > token + 1 && closing < end ? closing : token;
+            continue;
+        }
+        if (parser->tree.roles[token] == PARSE_ROLE_CLOSE_TERNARY || parser->tokens.kinds[token] == PARSE_KIND_COMMA)
+        {
+            const uint32_t node = check_common_bool_expression(graph, input->token_nodes[token]);
+            if (node < graph->count && (graph->ops[node] == CHECK_OP_CONDITIONAL || graph->ops[node] == CHECK_OP_COMMA))
+            {
+                low = node < low ? node : low;
+                high = node >= high ? node + 1 : high;
+                commas |= graph->ops[node] == CHECK_OP_COMMA;
+            }
+        }
+    }
+    CheckCommonIgnored ignored = { 0 };
+    const bool ready = !commas || check_common_ignored_prepare(&ignored, parser, pp, input, types, scratch);
+    // The comma marker and its discarded-value helpers only read types. The shared emission also serves the ordinary
+    // conversion walk, which can derive types, but this cold source walk keeps the diagnostic driver's const view.
+    CheckCommonEmission emission = {
+        .parser = parser,
+        .pp = pp,
+        .input = input,
+        .stream = stream,
+        .types = (TypeTable*)types,
+        .spell = spell,
+        .ignored = &ignored,
+        .scratch = scratch,
+        .at_once = BUSTER_CHECK_NONE,
+    };
+    if (!ready)
+    {
+        check_common_exhausted(pp);
+    }
+    bool conditions = false;
+    for (uint32_t node = low; ready && node < high && !pp->fatal; node += 1)
+    {
+        const uint32_t token = graph->tokens[node];
+        if (token >= first && token < end && (!nested || check_semantic_assertion_keyword(parser, token) == keyword))
+        {
+            const uint32_t boundary = graph->source_positions != NULL && graph->source_positions[node] != 0 &&
+                                      graph->source_positions[node] <= token_count ? graph->source_positions[node] : completion;
+            // GNU's omitted-middle form converts its opaque saved value, not the written condition expression.
+            if (graph->ops[node] == CHECK_OP_CONDITIONAL && graph->operand0[node] != graph->operand1[node])
+            {
+                conditions = true;
+                check_common_failed_assert_bool(parser, pp, input, stream, types, spell, graph->operand0[node], boundary, scratch);
+            }
+            else if (commas && graph->ops[node] == CHECK_OP_COMMA)
+            {
+                // Static assertions build every arm in ConstantEvaluated context; only a query operand is unevaluated.
+                // A discarded scalar expression written in a macro body is quiet, while a substituted argument keeps
+                // its warning. Calls retain the ignored-result emitter's own attribute and macro policy.
+                uint32_t left = graph->operand0[node];
+                for (uint32_t steps = 0; left < graph->count && steps < graph->count &&
+                     (graph->ops[left] == CHECK_OP_SELECT || graph->ops[left] == CHECK_OP_CONVERT); steps += 1)
+                {
+                    left = graph->operand0[left];
+                }
+                const bool body = left < graph->count && check_common_ignored_macro(parser, pp, graph->tokens[left]);
+                const CheckCommonUnused unused = body ? check_common_unused_of(&emission, left) : (CheckCommonUnused){ 0 };
+                if (body && !unused.call)
+                {
+                    continue;
+                }
+                // Source warnings complete after both operands; a conditional in the right operand precedes the
+                // marker even when its highlighted token follows the discarded left's. A body's queued scalar warning
+                // keeps its later function-end publication, while source comparisons and calls complete here.
+                const PPDiagnosticRecord* previous = pp->diagnostic_last;
+                // The highlighted comma operand spans its macro argument's wrapper, including a bare substitution.
+                const bool spans = pp->diagnostic_spans;
+                pp->diagnostic_spans = true;
+                check_common_comma_marker(&emission, node);
+                pp->diagnostic_spans = spans;
+                const uint32_t publication = check_common_publication_source(parser, pp, boundary);
+                PPDiagnosticRecord* const emitted = pp->diagnostic_last != previous ? pp->diagnostic_last : NULL;
+                if (!pp->fatal && emitted != NULL && emitted->position / PP_DIAGNOSTIC_PHASE_COUNT <= publication)
+                {
+                    emitted->position = (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_DEFERRED;
+                }
+            }
+        }
+    }
+    return conditions;
+}
+
+// Rejected assertions do not enter the ordinary warning walk. Conditional conditions and discarded comma operands
+// warn in source postorder, including retained detached selection/query operands; the assertion and logical operands
+// then warn in the completed evaluated expression's order. The bounded frontier is also the conditional fallback for
+// a graph without source ownership. Other expression-warning families keep their existing owners.
 static void check_common_failed_assertion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                           const TypeTable* types, CheckWarningSpelling* spell, uint32_t root, uint32_t completion, Arena* scratch)
 {
@@ -6334,7 +6446,8 @@ static void check_common_failed_assertion(const Parser* parser, Preprocessor* pp
     uint64_t local[16];
     uint64_t* work = local;
     uint32_t capacity = BUSTER_ARRAY_LENGTH(local);
-    for (uint32_t phase = 0; phase < 2 && !pp->fatal; phase += 1)
+    const bool conditions = check_common_failed_assert_source(parser, pp, input, stream, types, spell, root, completion, scratch);
+    for (uint32_t phase = conditions ? 1u : 0u; phase < 2 && !pp->fatal; phase += 1)
     {
         uint32_t count = 1;
         work[0] = root;
@@ -11322,34 +11435,25 @@ static bool check_common_sizeof_operand(const uint8_t* roles, const uint32_t* pa
     return answer == 2;
 }
 
-// A full expression collapsed to a window summary still reads its local at the identifier's token.
-// The summary node supplies its order and reachability in the graph. Its tape's LOCAL holds the object
-// before the lowering maps that object to the body's register slot.
-typedef struct CheckCommonRead CheckCommonRead;
-struct CheckCommonRead
+// The source of the first matching access to this declaration inside a compressed expression. Rows
+// retain their evaluation order, including multiple reads of the same declaration. Other graph nodes supply their own token.
+static uint32_t check_common_window_event_token(const CheckInput* input, uint32_t node, uint32_t object, uint8_t event)
 {
-    uint32_t object;
-    uint32_t token;
-};
-
-static CheckCommonRead check_common_local_read(const CheckInput* input, const CheckStream* stream, uint32_t node)
-{
-    const CheckGraph* graph = &input->graph;
-    CheckCommonRead read = { .token = graph->tokens[node] };
-    if (graph->ops[node] == CHECK_OP_VALUE)
+    const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+    uint32_t token = input->graph.tokens[node];
+    if (summary != NULL)
     {
-        const CheckInputWindowEntry* row = check_input_window_row(input, node);
-        if (row != NULL && row->read_offset != 0)
+        token = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; i < summary->count && token == BUSTER_CHECK_NONE; i += 1)
         {
-            read.object = (uint32_t)row->value;
-            read.token += row->read_offset;
-        }
-        else if (check_stream_category(stream, node) == CHECK_LVALUE)
-        {
-            read.object = check_stream_object(stream, node);
+            const CheckInputWindowRow* row = input->window_rows + summary->first + i;
+            if ((row->flags & event) != 0 && row->value == object)
+            {
+                token = row->token + row->event_offset;
+            }
         }
     }
-    return read;
+    return token;
 }
 
 static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -11637,9 +11741,38 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             }
             if (op == CHECK_OP_VALUE)
             {
-                const CheckCommonRead read = check_common_local_read(input, stream, node);
-                const uint32_t declaration = read.object != 0 ? read.object - 1 : BUSTER_CHECK_NONE;
-                if (declaration < count)
+                const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+                if (summary != NULL)
+                {
+                    // A retained assignment has distinct read and written objects. The summary node is their
+                    // graph order; reachability gates the analysis while the syntactic accesses always count.
+                    for (uint32_t r = 0; r < summary->count; r += 1)
+                    {
+                        const CheckInputWindowRow* row = input->window_rows + summary->first + r;
+                        const uint32_t declaration = (uint32_t)row->value - 1;
+                        if ((row->flags & BUSTER_CHECK_WINDOW_READ) != 0 && declaration < count)
+                        {
+                            if (evaluated[node] != 0 && node < first_read[declaration])
+                            {
+                                first_read[declaration] = node;
+                            }
+                            first_use_read[declaration] = node < first_use_read[declaration] ? node : first_use_read[declaration];
+                        }
+                        if ((row->flags & BUSTER_CHECK_WINDOW_WRITE) != 0 && declaration < count)
+                        {
+                            written[declaration] = 1;
+                            statement_write[declaration] = 1;
+                            if (evaluated[node] != 0 && node < first_write[declaration])
+                            {
+                                first_write[declaration] = node;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                const uint32_t object = check_stream_object(stream, node);
+                const uint32_t declaration = object != 0 ? object - 1 : BUSTER_CHECK_NONE;
+                if (declaration < count && check_stream_category(stream, node) == CHECK_LVALUE)
                 {
                     if (evaluated[node] != 0 && nonread[node] == 0)
                     {
@@ -11676,7 +11809,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             const uint32_t name = parser->tokens.names[declaration];
             const uint32_t initializer_begin = check_common_sparse_get(input->initializer_begins, declaration);
             const uint32_t initializer_end = check_common_sparse_get(input->initializer_ends, declaration);
-            uint32_t read_token = first_read[declaration] != BUSTER_CHECK_NONE ? check_common_local_read(input, stream, first_read[declaration]).token : BUSTER_CHECK_NONE;
+            uint32_t read_token = first_read[declaration] != BUSTER_CHECK_NONE ? check_common_window_event_token(input, first_read[declaration], declaration + 1, BUSTER_CHECK_WINDOW_READ) : BUSTER_CHECK_NONE;
             // A lone identifier in a brace initializer (`int x = { x };`) is a self-read the graph's value column does
             // not retain; the declaration's own token range finds it. An expression initializer's reads are the
             // graph's, so only a braced range is scanned, and not through a sizeof operand.
@@ -11767,9 +11900,12 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     bool later = false;
                     for (uint32_t node = 0; !later && node < graph->count; node += 1)
                     {
-                        const CheckCommonRead read = check_common_local_read(input, stream, node);
-                        later = read.object == declaration + 1 && evaluated[node] != 0 && nonread[node] == 0 &&
-                                read.token < parser->tokens.count && (read.token < self_begin || read.token >= self_end);
+                        const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+                        const uint32_t object = graph->ops[node] == CHECK_OP_VALUE && check_stream_category(stream, node) == CHECK_LVALUE ?
+                                                check_stream_object(stream, node) : 0;
+                        const uint32_t token = summary != NULL ? check_common_window_event_token(input, node, declaration + 1, BUSTER_CHECK_WINDOW_READ) :
+                                               object == declaration + 1 ? graph->tokens[node] : BUSTER_CHECK_NONE;
+                        later = evaluated[node] != 0 && nonread[node] == 0 && token < parser->tokens.count && (token < self_begin || token >= self_end);
                     }
                     self_bare_alone = !later;
                 }
@@ -11784,6 +11920,10 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 braced_written = (graph->ops[node] == CHECK_OP_ASSIGN || check_common_write_op(graph->ops[node])) &&
                                  target < graph->count && check_stream_category(stream, target) == CHECK_LVALUE &&
                                  check_stream_object(stream, target) == declaration + 1;
+                if (!braced_written && check_input_window_summary(input, node) != NULL)
+                {
+                    braced_written = check_common_window_event_token(input, node, declaration + 1, BUSTER_CHECK_WINDOW_WRITE) < count;
+                }
             }
             // A body clang ends after the unit's first error gets no CFG analysis (check_common_flush), and so no
             // -Wuninitialized.
@@ -12020,6 +12160,12 @@ static bool check_common_loop_changes(const Parser* parser, const CheckInput* in
         result = type_kind_is_array(check_action_kind(types, check_stream_type(stream, node))) || op == CHECK_OP_ADDRESS ||
                  (target && (op == CHECK_OP_ASSIGN || op == CHECK_OP_MEMBER || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) ||
                              (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN)));
+        const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+        for (uint32_t i = 0; !result && summary != NULL && i < summary->count; i += 1)
+        {
+            const CheckInputWindowRow* row = input->window_rows + summary->first + i;
+            result = (row->flags & BUSTER_CHECK_WINDOW_WRITE) != 0 && row->token + row->event_offset == token;
+        }
         // (Only a change asks for the climb.)
         result = result && check_common_loop_reached(parser, input, parents, token, close);
     }
