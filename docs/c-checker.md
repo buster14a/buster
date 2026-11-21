@@ -4226,7 +4226,12 @@ What the lowering covers past scalars (#145's programs):
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
   `goto` that leaves the arrays' scope, restoring the outermost block it
-  leaves; a `return` needs none. The lowering keeps the saved position and each
+  leaves; a `return` needs none. Each array's object and each bound find their
+  statement, whose terminator lists them, by a walk up their parents that leaves
+  its answer at every token it passes, under the walk's body
+  (`check_program_statement`): a declarator's bounds (`a[n][n]...[n]`) and a
+  declaration's declarators (`a0[n], a1[n], ...`) walk the path they share
+  once, where each walked it whole (#2995). The lowering keeps the saved position and each
   array's address in locals of their own (Tier 0's `STACK_SAVE`, `ALLOCA` and
   `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
   set once where they were declared, times its constant dimensions and its
@@ -8661,6 +8666,48 @@ new token column and does not require the parser's optional size metadata. It
 uses strict region-boundary rules, including jumps out of nested regions and
 refusals when entering sibling regions.
 
+The control writer gives a GNU `break` or `continue` in a statement expression
+its nearest enclosing loop's or switch's label (`check_control_region_targets`):
+the nearest ancestor of the region's opening before it (or a `do` statement's)
+that has one, so that a loop's own controlling expression belongs to the loop
+around it. Since every subtree is a run of tokens, a token's answer is its
+parent's label, where the parent qualifies and has one, or else the parent's
+answer. Each token of the body keeps its answer once a walk passes it, and a
+region's walk stops at the first kept token: nested statement expressions, and
+many under one deep statement, walk each token once, where each region walked
+to the body (#2995). The regions are written in token order, outer ones first,
+and a region's statements set the labels of the loops inside it alone, which
+only a later region is inside, so a kept answer stays right.
+
+This walk and the variable-length arrays' (`check_program_statement`) stay
+scalar. Each is a chain of dependent loads up a token's parents, started only
+at a statement expression or at an array's object or bound, and with the
+answers kept it passes a token at most once a body (the arrays' walks, of their
+objects and then of their bounds, twice). A data-parallel form, pointer jumping
+over a body's parents, reads every token of the body in each of its passes to
+answer a few walks. The counts, which no host changes (`-c` of the 614 units in
+`tests/**/*.c` and c-testsuite that compile without flags, the two deep checker
+sources below apart, and of three generated shapes):
+
+| Units | Walks' starts | Their tokens | Parents passed | Without kept answers |
+| --- | ---: | ---: | ---: | ---: |
+| 16 with statement expressions | 45 regions | 37,281 | 244 | 267 |
+| 14 with variable-length arrays | 15 bounds | 4,318 | 74 | 74 |
+| 8,000 nested statement expressions | 8,000 regions | 40,039 | 24,002 | 96,028,000 |
+| an array of 8,000 bounds | 8,000 bounds | 24,017 | 16,004 | 64,024,002 |
+| a declaration of 8,000 arrays | 8,000 bounds | 40,013 | 48,000 | 64,055,998 |
+
+Kept answers cost three stores and a bit for each token a region's walk passes
+(its link on the way up, then its two labels), two stores and a bit for each an
+array's walk passes (its end and its key), and clearing a bit a token for each
+body with a statement expression and for each unit with a variable-length
+array. `CheckProgramOptions.region_target_work` and
+`statement_walk_work` tally the parents passed: test-checker bounds them by
+every program fixture's tokens and twice them, and its program fixtures
+compile and run the deep checker sources (`quadratic-statement-expressions.c`,
+`quadratic-vla-bounds.c`), whose walks pass 717 parents in 1,744 tokens and 856
+in 1,005 (22,673 and 21,099 without kept answers, which fail those bounds).
+
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump
 from switch statement to this case label", with the note "jump enters a
@@ -11236,15 +11283,20 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   undeclared name is clang's error, and the conditions decide at uses and
   calls, overloads and addresses; a shape the steps don't take (a
   `__builtin_object_size` of the parameter) is kept and decides nothing, as
-  a system header's is, where clang's warns at a call that overflows. Still
-  apart: clang disables an inherited `enable_if` that names a parameter at
-  every call of a redeclaration (its condition's parameters aren't the
-  redeclaration's), which this checker evaluates.
+  a system header's is, where clang's warns at a call that overflows.
 - **Lists.** Each function declaration where some condition holds has its
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's
-  redeclarations inherit attributes. A use reads the list of the declaration
-  its lookup found. The conditions and lists are data
+  redeclarations inherit attributes. Every diagnose_if is inherited, but an
+  enable_if only by a declaration without one of its own, and then only the
+  previous declaration's first (#2464): clang's attribute merge skips a kind
+  the declaration already has, one it has just inherited included. A list's
+  enable_ifs are therefore one declaration's, which also decides whether a
+  redeclaration's address can be taken (`enable_if(1, "a"),
+  enable_if(x > 0, "b")` leaves a bare redeclaration only `a`). A use reads
+  the list of the declaration its lookup found: a block-scope
+  redeclaration's in its block, a later declaration's or definition's after
+  it. The conditions and lists are data
   (`c_check_condition_eval.c`, `CheckConditionTable`), which the graph keeps
   (`CheckGraph.conditions`) for overload resolution.
 - **Uses.** A diagnose_if condition that names no parameter and holds is
@@ -11282,11 +11334,20 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   a conditional that doesn't read it skips. An unknown result, and an action
   that faults (an overflow, a division by zero, a shift past the width),
   leave a condition unknown, as clang's EvaluateWithSubstitution does: a diagnose_if is then not given, an enable_if doesn't admit the
-  call. The first enable_if that doesn't admit it, in the order clang checks
-  them (the latest declaration's first, each declaration's in source order),
-  is "no matching function for call to 'f'" at the callee, its note
-  "candidate disabled: M" at the declaration the call found; otherwise the
-  diagnose_if conditions that hold are given at the call's `)`.
+  call. An enable_if that the declaration the call found inherits names the
+  parameters of the declaration that wrote it, while clang binds the
+  arguments to the found declaration's, so each parameter it reads is
+  unknown (#2464, `check_condition_disabled`): one that reads a parameter
+  in a shape the steps take (`n < 100`, `n || 1`, `(n, 1)`, `p != 0` with
+  an object's address) disables every call through a later declaration, a
+  definition or a block-scope declaration, and one that reads none
+  (`1 || n`, `sizeof(n)`, `1`) decides as written. A kept shape (a
+  `__builtin_object_size` of the parameter) still decides nothing. A diagnose_if reads the arguments, inherited or
+  not, as clang binds them to the declaration that wrote it. The first
+  enable_if that doesn't admit the call, in source order, is "no matching
+  function for call to 'f'" at the callee, its note "candidate disabled: M"
+  at the declaration the call found; otherwise the diagnose_if conditions
+  that hold are given at the call's `)`.
 - **Overloadable functions** (`c_check_overload.c`). An overloadable
   function's conditions take part in its overload resolution, as clang's do:
   - *Viability.* After a candidate's argument count and conversions, its
@@ -11442,7 +11503,15 @@ among them in source order; and, as everywhere in this driver, the uses' errors 
 later expression checks, so a call after one such error isn't diagnosed. A
 grouped
 diagnose_if under `-Weverything` meets every other warning that option
-enables, which this checker doesn't all give.
+enables, which this checker doesn't all give. A call an enable_if disables
+gives none of its diagnose_ifs that need the arguments, where clang still
+gives those that hold at its `)`; one that names no parameter, at a
+disabled call's callee, comes after the call's error, where clang gives it
+first; a call in a typeof's operand isn't checked against its
+enable_ifs, where clang's is (a sizeof's is); and an inherited enable_if's
+`__builtin_object_size` of a parameter admits every call, where clang folds
+it to the unknown size, `(size_t)-1` for types 0 and 1 and 0 for 2 and 3,
+which can disable it (`<= 8`, `!= (size_t)-1`).
 
 ## Operand errors (#147)
 

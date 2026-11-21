@@ -60,10 +60,11 @@ static const CheckOverloadResult* check_condition_selected(const CheckStream* st
 }
 
 // The conditions of call `node`'s callee, where it names a function with a list: an enable_if that doesn't hold, the first
-// in the order clang checks them (the latest declaration's first), is "no matching function" at the callee's name; else
-// the diagnose_if conditions that need the arguments and hold are diagnosed at the call's `)`. An overload call's callee is
-// its selected candidate, whose enable_ifs overload resolution has checked (c_check_overload.c): its diagnose_ifs that
-// name no parameter are diagnosed here too, at the callee's name, as clang's use of the selected function gives them.
+// in source order, is "no matching function" at the callee's name, one the callee's declaration inherits reading its
+// parameters as unknown (#2464, check_condition_disabled); else the diagnose_if conditions that need the arguments and hold
+// are diagnosed at the call's `)`. An overload call's callee is its selected candidate, whose enable_ifs overload
+// resolution has checked (c_check_overload.c): its diagnose_ifs that name no parameter are diagnosed here too, at the
+// callee's name, as clang's use of the selected function gives them.
 static void check_input_condition_call(CheckInputReader* reader, const CheckStream* stream, TypeTable* types, uint32_t node)
 {
     const CheckInput* input = reader->output;

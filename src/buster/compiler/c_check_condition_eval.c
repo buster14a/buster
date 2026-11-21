@@ -153,7 +153,8 @@ static CheckValue check_condition_bind(TypeTable* types, CheckValue value, bool 
 }
 
 // Whether `condition` holds with the parameters' values `bound` (`count` of them, check_condition_bind's), `*known` false
-// where it can't be evaluated: a value it reads is unknown, or an action faults. Its steps run in order on `values`, the
+// where it can't be evaluated: a value it reads is unknown, or an action faults. A null `bound` makes every parameter an
+// unknown value of its type, which an operator that doesn't read it still skips. Its steps run in order on `values`, the
 // scratch room of a value for each; the actions are checked with the call's `extensions` at its `node`.
 static bool check_condition_run(TypeTable* types, const CheckCondition* condition, const CheckValue* bound, uint32_t count, uint32_t extensions, uint32_t node,
                                 CheckValue* values, bool* known)
@@ -175,7 +176,11 @@ static bool check_condition_run(TypeTable* types, const CheckCondition* conditio
         else if (step->op == BUSTER_CHECK_CONDITION_PARAMETER)
         {
             valid = step->index < count;
-            values[s] = valid ? bound[step->index] : (CheckValue){ 0 };
+            const CheckValue unknown = {
+                .type = step->type,
+                .category = CHECK_RVALUE,
+            };
+            values[s] = !valid ? (CheckValue){ 0 } : bound != NULL ? bound[step->index] : unknown;
         }
         else
         {
@@ -239,33 +244,25 @@ static uint32_t check_condition_steps_needed(const CheckConditionTable* table, c
     return steps;
 }
 
-// The first of `entry`'s enable_if conditions that doesn't admit a call whose parameters' values are `bound`, in the order
-// clang checks them (the latest declaration's first, each declaration's in source order): its index in the unit's
+// The first of `entry`'s enable_if conditions that doesn't admit a call whose parameters' values are `bound`, in source
+// order, as clang checks them (a list's enable_ifs are one declaration's, check_input_conditions): its index in the unit's
 // conditions, or UINT32_MAX where all admit it. An unknown condition doesn't admit it, as clang's
-// EvaluateWithSubstitution's failure doesn't; an opaque one (a system header's) does.
+// EvaluateWithSubstitution's failure doesn't; an opaque one (a system header's) does. One that `entry`'s declaration
+// inherits reads every parameter as unknown (#2464): clang binds the arguments to the called declaration's parameters,
+// and the condition names those of the declaration that wrote it.
 static uint32_t check_condition_disabled(TypeTable* types, const CheckConditionTable* table, const CheckConditionDeclaration* entry, const CheckValue* bound,
                                          uint32_t count, uint32_t extensions, uint32_t node, CheckValue* values)
 {
     const CheckCondition* conditions = table->conditions;
     uint32_t disabled = UINT32_MAX;
-    uint32_t group_end = entry->restricted ? entry->count : 0;
-    while (disabled == UINT32_MAX && group_end != 0)
+    for (uint32_t i = 0; disabled == UINT32_MAX && entry->restricted && i < entry->count; i += 1)
     {
-        const uint32_t group_declaration = conditions[entry->conditions[group_end - 1]].declaration;
-        uint32_t group_first = group_end - 1;
-        while (group_first > 0 && conditions[entry->conditions[group_first - 1]].declaration == group_declaration)
-        {
-            group_first -= 1;
-        }
-        for (uint32_t i = group_first; disabled == UINT32_MAX && i < group_end; i += 1)
-        {
-            const CheckCondition* condition = conditions + entry->conditions[i];
-            bool known = false;
-            const bool admits = condition->kind != CHECK_CONDITION_ENABLE || condition->state == CHECK_CONDITION_TRUE || condition->state == CHECK_CONDITION_OPAQUE ||
-                                (condition->state == CHECK_CONDITION_DEPENDENT && check_condition_run(types, condition, bound, count, extensions, node, values, &known));
-            disabled = admits ? UINT32_MAX : entry->conditions[i];
-        }
-        group_end = group_first;
+        const CheckCondition* condition = conditions + entry->conditions[i];
+        const CheckValue* parameters = condition->declaration == entry->declaration ? bound : NULL;
+        bool known = false;
+        const bool admits = condition->kind != CHECK_CONDITION_ENABLE || condition->state == CHECK_CONDITION_TRUE || condition->state == CHECK_CONDITION_OPAQUE ||
+                            (condition->state == CHECK_CONDITION_DEPENDENT && check_condition_run(types, condition, parameters, count, extensions, node, values, &known));
+        disabled = admits ? UINT32_MAX : entry->conditions[i];
     }
     return disabled;
 }

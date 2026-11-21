@@ -1307,6 +1307,8 @@ struct CheckInput
     uint32_t window_capacity;
     uint32_t window_count;
     uint32_t window_nodes;
+    uint32_t integer_window_count;
+    uint32_t integer_window_removed;
 };
 
 // The summary owned by this VALUE. The reciprocal link distinguishes the other uses of the members column.
@@ -1954,6 +1956,9 @@ struct CheckInputReader
     uint32_t warning_bound_open;
     Arena* warning_query_arena;
     CheckWarningQueries warning_queries;
+    // A first-declaration query for internal_linkage fills this ordinary name's entry on demand.
+    // Only the source-order reader owns it. A deferred lane uses its own previous handles.
+    uint32_t* internal_linkage_roots;
     CBindings bindings;
     TypeId* declared_types;
     // Operator targets, including the result type at each return keyword.
@@ -2273,6 +2278,7 @@ struct CheckInputReader
     const uint32_t* ends;
     const uint32_t* first_child;
     const uint32_t* next_child;
+    // An empty chain has a NONE head. A nonempty head publishes its tail and count together.
     uint32_t* first_value;
     uint32_t* last_value;
     // The length of each token's chain of values, from first_value to last_value, written with them: a parent adds its
@@ -11653,6 +11659,32 @@ static bool check_input_extra_semi(const CheckInputReader* reader, uint32_t firs
     return reader->function_body == BUSTER_CHECK_NONE && token == end && token > extensions;
 }
 
+// The first live declaration of the name must already carry internal_linkage. Its handle stays
+// the root as declarations shadow and restore one another until the root's own scope closes.
+// A closed handle has a finite end and can never be active again. The next query for the name
+// walks its new chain once (#1351). Deferred reads have different handle spaces and walk theirs.
+static bool check_input_first_internal_linkage(const CheckInputReader* reader, uint32_t name, uint32_t handle)
+{
+    const CBindings* bindings = &reader->bindings;
+    uint32_t first = reader->internal_linkage_roots != NULL ? reader->internal_linkage_roots[name] : 0;
+    if (first == 0 || bindings->end[first - 1] != BUSTER_C_BINDING_NONE)
+    {
+        first = handle;
+        while (bindings->previous[first - 1] != 0)
+        {
+            first = bindings->previous[first - 1];
+        }
+        if (reader->internal_linkage_roots != NULL)
+        {
+            reader->internal_linkage_roots[name] = first;
+        }
+    }
+    const uint32_t declaration = bindings->declaration[first - 1];
+    const CheckInputAttributes* attributes =
+        check_sparse_wide_present(reader->output->attributes) && declaration < reader->parser->tokens.count ? check_input_attributes_at(reader->output, declaration) : NULL;
+    return check_input_attribute_of(attributes, CHECK_ATTRIBUTE_INTERNAL_LINKAGE) != NULL;
+}
+
 static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -12283,23 +12315,6 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t previous_declaration = previous_handle != 0 ? reader->bindings.declaration[previous_handle - 1] : BUSTER_CHECK_NONE;
             const CheckInputAttributes* previous_attributes =
                 check_sparse_wide_present(reader->output->attributes) && previous_declaration < parser->tokens.count ? check_input_attributes_at(reader->output, previous_declaration) : 0;
-            // The first declaration's attributes, which internal_linkage's rule below reads (multiversioning's checks
-            // read the previous declaration's and its earlier ones', #2135).
-            // The stream's first column has the walk's answer where it's kept (#1351): the walk is O(redeclarations).
-            const bool first_kept = previous_handle != 0 && reader->bindings.first != 0;
-            uint32_t first_handle = first_kept ? reader->bindings.first[previous_handle - 1] : previous_handle;
-            while (!first_kept && first_handle != 0)
-            {
-                const uint32_t earlier = reader->bindings.previous[first_handle - 1];
-                if (earlier == 0)
-                {
-                    break;
-                }
-                first_handle = earlier;
-            }
-            const uint32_t first_declaration = first_handle != 0 ? reader->bindings.declaration[first_handle - 1] : BUSTER_CHECK_NONE;
-            const CheckInputAttributes* first_attributes =
-                check_sparse_wide_present(reader->output->attributes) && first_declaration < parser->tokens.count ? check_input_attributes_at(reader->output, first_declaration) : 0;
             const bool attributes_valid = valid;
             // The declaration's subjects as clang's attributes name them (#147, check_input_attribute_subjects): a typedef, a
             // function (inline or not), or a variable of global storage (a thread's or not, an external one's at file scope)
@@ -12393,7 +12408,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             // and MergeVarDecl's error, at its name, a note at the previous declaration).
             const CheckInputAttribute* internal = valid && !is_typedef ? check_input_attribute_of(attributes, CHECK_ATTRIBUTE_INTERNAL_LINKAGE) : NULL;
             if (internal != NULL && previous_declaration != BUSTER_CHECK_NONE && check_input_linkage(reader->declaration_bits, previous_declaration) != 0 &&
-                check_input_attribute_of(first_attributes, CHECK_ATTRIBUTE_INTERNAL_LINKAGE) == NULL)
+                !check_input_first_internal_linkage(reader, parser->tokens.names[name], previous_handle))
             {
                 const uint32_t before = reader->output->report_count;
                 check_input_report(reader, name, CHECK_INPUT_INTERNAL_LINKAGE_FIRST);
@@ -16554,16 +16569,17 @@ static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, con
 
 // The constant context a token opens, if any: a static object's initializer, a static assertion's condition or a case
 // label's value.
-static void check_input_constant_context(CheckInputReader* reader, uint32_t token)
+static void check_input_constant_context(CheckInputReader* reader, uint32_t token, uint32_t* assertion_end)
 {
     const Parser* parser = reader->parser;
     const CheckInput* input = reader->output;
     const uint32_t count = parser->tokens.count;
+    const uint8_t context = 1u | (token < *assertion_end ? BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT : 0u);
     const uint32_t begin = check_sparse_get(input->initializer_begins, token);
     const uint32_t end = check_sparse_get(input->initializer_ends, token);
     if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && begin < end && end <= count)
     {
-        memset(reader->constant_contexts + begin, 1, end - begin);
+        memset(reader->constant_contexts + begin, context, end - begin);
     }
     if (parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT && token + 1 < count)
     {
@@ -16571,7 +16587,14 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         if (close > token + 1 && close < count)
         {
             const uint32_t separator = check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA);
-            memset(reader->constant_contexts + token + 2, 1, separator - token - 2);
+            // A failed assertion describes its written operand graph, even for a comparison below a comma.
+            // Tell the window reader to leave that graph in place. Nested case and initializer contexts keep the mark.
+            if (reader->pp->options.node_window_constants && separator > *assertion_end)
+            {
+                *assertion_end = separator;
+            }
+            const uint8_t assertion = 1u | (token < *assertion_end ? BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT : 0u);
+            memset(reader->constant_contexts + token + 2, assertion, separator - token - 2);
             // Clang parses this whole condition as constant-evaluated, including static-selection arms that the
             // evaluated graph does not retain as operands. Their runtime shift-count diagnostics are not queued.
             check_input_warning_suppress(reader, token + 2, separator, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
@@ -16596,7 +16619,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         const uint32_t close = parser->tree.parents[token];
         if (close > token && close < count)
         {
-            memset(reader->constant_contexts + token + 1, 1, close - token - 1);
+            memset(reader->constant_contexts + token + 1, context, close - token - 1);
             check_input_warning_suppress(reader, token + 1, close, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
         }
     }
@@ -16608,6 +16631,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
 static void check_input_constant_contexts_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
+    uint32_t assertion_end = 0;
     for (uint32_t first = begin; first < end; first += 64)
     {
         uint64_t selected = check_input_scan_bit(reader->output->declaration_bits, first, end, BUSTER_CHECK_BITS_STATIC) |
@@ -16615,7 +16639,7 @@ static void check_input_constant_contexts_range(CheckInputReader* reader, uint32
                             check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_CASE);
         for (; selected != 0; selected &= selected - 1)
         {
-            check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected));
+            check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected), &assertion_end);
         }
     }
 }
@@ -16863,7 +16887,6 @@ static void check_input_output_none(CheckInput* input, CheckInputReader* reader,
     memset(reader->selected_tokens, 0xff, bytes);
     memset(reader->activate, 0xff, bytes);
     memset(reader->first_value, 0xff, bytes);
-    memset(reader->last_value, 0xff, bytes);
 }
 
 #include "c_check_comma_input.c"
@@ -17405,8 +17428,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(warning_suppressed, uint8_t)
 #define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
     const uint64_t binding_bytes = c_bindings_bytes(pp->table->count, count * 4 + 1);
+    const uint64_t linkage_bytes = deferred == NULL ? (uint64_t)pp->table->count * sizeof(uint32_t) + 63 : 0;
     const uint64_t mark_words = ((uint64_t)count + 64) / 64;
-    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + mark_words * sizeof(uint64_t) + 63 + binding_bytes +
+    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + mark_words * sizeof(uint64_t) + 63 + binding_bytes + linkage_bytes +
                                    BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
     const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES));
 #undef BUSTER_CHECK_SPARSE_BYTES
@@ -17418,12 +17442,19 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
     reader.sparse_marks = valid ? arena_push_array(&sparse, mark_words, sizeof(uint64_t), 64) : 0;
     valid &= reader.sparse_marks != 0;
-    // The binding table in the base pages too (#628): each of its nine event columns has room for four events a token, of
+    // The binding table in the base pages too (#628): each of its event columns has room for four events a token, of
     // which the walk writes a prefix (sqlite3.c's 167,456 of 2.86 million) and reads no further, so that in huge pages each
     // column's first touch cleared one or two 2 MB pages for a few hundred kilobytes, 11 of the arena's 34 huge pages.
     // (The arena is the reading's own, reserved above and pushed through no copy: its bytes past its length are zero where
     // nothing pushed there, and the heads need no clearing.)
     valid = valid && c_bindings_initialize_zeroed(&reader.bindings, &sparse, pp->table->count, count * 4 + 1, arena_untouched(&sparse));
+    // The sparse arena is new and belongs only to this reading. Each entry stays zero until its
+    // first internal_linkage query. Ordinary declarations and identifier uses touch no page of it.
+    if (valid && deferred == NULL)
+    {
+        reader.internal_linkage_roots = BUSTER_ARENA_PUSH_ARRAY(&sparse, uint32_t, pp->table->count);
+        valid = reader.internal_linkage_roots != NULL;
+    }
     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
 #undef BUSTER_CHECK_SPARSE_ARRAY
     // The huge pages' token columns, which a lane claims a region of before it writes there (check_input_rare_claim).

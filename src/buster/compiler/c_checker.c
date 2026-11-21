@@ -3282,10 +3282,37 @@ static inline __attribute__((always_inline)) void check_graph_discard(TypeTable*
     stream->statistics.scalar_nodes += 1;
 }
 
+// An unknown ordinary int rvalue gives its condition an unknown int with its inherited flags.
+// The three absent conversions, payload, status and constant fields already have their initial
+// zero values. Payload-bearing or qualified inputs and the floating-environment pass remain
+// on the ordinary action path.
+static bool check_graph_unknown_int_condition(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
+{
+    const uint32_t operand = graph->operand0[node];
+    const bool taken = stream->zero_columns && graph->overload_candidate_count == 0 &&
+                 ((graph->fp_environments != NULL ? graph->fp_environments[node] : graph->fp_contract_default) & BUSTER_CHECK_FP_ENV_ACCESS) == 0 &&
+                 operand < node && stream->dense_values == NULL && stream->value_types[operand] == BUSTER_TYPE_INT &&
+                 stream->value_categories[operand] == CHECK_RVALUE && stream->value_constants[operand] == CHECK_CONSTANT_NONE &&
+                 stream->payload_rows[operand] == 0 && (stream->value_flags[operand] & ~BUSTER_CHECK_INHERITED) == 0 &&
+                 type_is_valid(types, BUSTER_TYPE_INT);
+    if (taken)
+    {
+        stream->value_types[node] = BUSTER_TYPE_INT;
+        stream->value_flags[node] = stream->value_flags[operand];
+        stream->conversions[node].operands[0].type = BUSTER_TYPE_INT;
+        stream->statistics.scalar_nodes += 1;
+    }
+    return taken;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per impure node.
 static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch)
 {
     CheckValue discarded;
+    if (graph->ops[node] == CHECK_OP_CONDITION && check_graph_unknown_int_condition(types, graph, stream, node))
+    {
+        return;
+    }
     if (check_graph_discard_taken(types, graph, stream, node, &discarded))
     {
         check_graph_discard(types, stream, node, &discarded);

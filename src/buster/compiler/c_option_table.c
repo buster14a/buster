@@ -63,6 +63,7 @@
     ENTRY(NO_DEFERRED_BODIES, "--no-deferred-bodies") \
     ENTRY(NODE_WINDOW, "--node-window") \
     ENTRY(NODE_WINDOW_ASSIGNMENTS, "--node-window-assignments") \
+    ENTRY(NODE_WINDOW_CONSTANTS, "--node-window-constants") \
     ENTRY(POISON_ARENAS, "--poison-arenas") \
     ENTRY(PREDEFINES, "--predefines") \
     ENTRY(PROVISIONAL_SELECTION, "--provisional-selection") \

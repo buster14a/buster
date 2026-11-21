@@ -21,8 +21,9 @@
 // one of a constant, recursion through two-page frames, a realigned frame and 24 allocations in a straight line (Tier 1's
 // capacity for their probes, which its emission checks), printing clang -O0's line. A probed
 // frame's function starts with the loop of tier0_emit_probed_reservation's records (its touch and its backward jne), an
-// unprobed one with none; and the last of -fstack-clash-protection and -fno-stack-clash-protection wins: without the
-// option, with it then -fno-, the objects are byte for byte the same.
+// unprobed one with none, and Tier 0's without a frame pointer has its CFA in r11 through the loop (readelf -wF); and the
+// last of -fstack-clash-protection and -fno-stack-clash-protection wins: without the option, with it then -fno-, the
+// objects are byte for byte the same.
 
 static const char check_test_stack_clash_guard_source[] =
     "#define _GNU_SOURCE\n"
@@ -659,6 +660,17 @@ static void check_test_driver_stack_clash(CheckTest* test, const char* clang, co
                 bool found = false;
                 const bool probed = compiled && check_test_stack_clash_probed(object, "frame", &found);
                 check_test_expect(test, !compiled || (found && probed), "-fstack-clash-protection: a frame of pages starts with the probes' loop");
+                if (compiled && build == 0 && pointer == 0)
+                {
+                    // Tier 0's frame of pages without a frame pointer: while rsp moves through the pages, its unwind
+                    // table's CFA is r11's (emitted_tier0_probe_rows), which no fixed descriptor says (#2874).
+                    char* table_arguments[] = { (char*)"readelf", (char*)"-wF", object, NULL };
+                    char* table = NULL;
+                    const bool read = check_test_driver_spawn_stream(table_arguments, &table, true) == 0 && table != NULL;
+                    check_test_expect(test, read && strstr(table, "r11+") != NULL,
+                                      "-fstack-clash-protection: Tier 0's frame of pages without a frame pointer has its CFA in r11 through the probes' loop");
+                    free(table);
+                }
                 // The signal handler's frame is under a page, keeps a frame pointer with -fno-omit-frame-pointer and
                 // moves no rsp: its next call's return address is the next touch, so it touches nothing (#1450).
                 bool handler_found = false;

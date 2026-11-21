@@ -2333,16 +2333,25 @@ each copy's GPR latency as `tier1_rematerialize`
 emits it, against the model's L1-hit load (`mov r64, [base]`), the cheapest any
 reload of a slot can be, so that a copy no costlier than it is no costlier than
 the reload it saves. With #181's rows the reload is 4 cycles (an L1 load's
-address chain), a `lea` from RIP or a frame base 1, a GOT slot's load 4, and a
-constant's move and a zeroing `xor` have no latency (they read nothing: the
-column is absent, so unknown); no copy costs more than its reload, and every
-candidate is still recomputed. Both consumers fill the columns, which follow
+address chain), a `lea` from RIP or a frame base 1, a frame base's register
+copy (below) an eighth of one (32 in the latency column: a move the core
+eliminates), a GOT slot's load 4, and a constant's move and a zeroing `xor`
+have no latency (they read nothing: the column is absent, so unknown); no copy
+costs more than its reload, and every candidate is still recomputed. A frame
+address's recipe holds its object's index until the layout gives its
+displacement, so the consumers price an object's copy by that index, from rsp:
+object 0's as the register copy, any other's as a `lea`; either way it stays a
+candidate (`test-tier1-allocation`'s frame copies, #3149). Both consumers fill the columns, which follow
 the model's rows.
 
 `tier1_rematerialize` emits one baseline x86 record. Zero uses `xor r32,r32`
 only when the caller reports no live flags; otherwise it uses `mov r32,0`.
 Other constants use a u32 move, sign-extended imm32 move, or imm64 move as
-needed. Stack addresses use LEA from the final stable base. Each symbolic copy
+needed. Stack addresses use LEA from the final stable base, but at a zero
+displacement from rsp, rbp, r12 or r13, whose LEA needs a SIB byte or a zero
+disp8 (4 bytes), the base's register copy, `mov r64, base` (3 bytes, #3149);
+from any other base the LEA is 3 bytes too, and stays, so that code is byte for
+byte what it was. Neither writes the flags. Each symbolic copy
 (a LEA from rip, or a GOT slot's load) has its own encoder fixup mark plus
 returned symbol and addend; the consumer must publish a PC32 fixup for a LEA,
 and a LOAD_GOT one for a GOT slot's load (`Tier1Rematerialized.got`), for every
@@ -2369,7 +2378,8 @@ change:
   access column reaches it so;
 - a frame object's address, a lea from the frame's base at the offset the
   frame's layout gives the object, which `tier1_emit_cfg_frame` fills in after
-  the layout: the base is rsp where nothing moves rsp between the prologue and
+  the layout (at offset 0 from rsp, rsp's register copy: `tier1_rematerialize`,
+  #3149): the base is rsp where nothing moves rsp between the prologue and
   the epilogues, and rbp (or a realigned frame's r15) where the dynamic stack
   moves it (#141: an `alloca`'s `sub rsp`, a call's outgoing area taken from rsp
   around it), so the address never depends on where rsp is;
@@ -2595,15 +2605,31 @@ definitions left out only with it. In each object's code, decoded by
 fixpoint over `x86_semantics.c`'s effects, following the decoded branches),
 every instruction that addresses from rip must have a relocation of its own
 at its displacement (a PC32 for a lea, a GOT one for a load), and the loop
-must recompute addresses with rematerialization and none without.
+must recompute addresses with rematerialization and none without (a lea from
+rip or rsp, a GOT slot's load, or rsp's register copy).
+
+Its frame fixture (#3149, `check_test_tier1_frame_source`) has four functions
+keep seven pointers to consecutive elements of a local array across fourteen
+calls, each in its own order, one more than the callee-saved registers hold,
+so that the first element's address, at rsp itself, is recomputed after a call.
+Compiled by `--tier1 --verify` with and without rematerialization, each
+executable and each `-c` object linked by `cc` must print clang's build's
+output, and every function's code must be certified. With rematerialization
+each function must recompute the address by rsp's 3-byte register copy and
+have no more `lea r64, [rsp]`s than without (its definitions' own); without
+it, none has a register copy of rsp. On main `b86eadcb`, whose copy was
+`lea r64, [rsp]`, the fixture's functions are a byte shorter each.
 
 Original native straight-line reductions execute the assigned register/spill
 plans through the existing encoder with rematerialization enabled and disabled,
 using both allocation paths. Results must match an independent integer sum.
 They exercise actual spill stores, memory reads, repeated register-required
 reload/resplit and recomputed constants. Additional native fixtures cover the
-constant encoding boundaries, live flags, stable stack addresses and a resolved
-PC-relative symbol copy. Repeated reload/resplit also has a location-state simulation.
+constant encoding boundaries, live flags, stable stack addresses (rsp's
+register copy at 0 among them, #3149) and a resolved PC-relative symbol copy.
+Every frame base's copy at 0, 8, -32 and 128 into each register is checked
+against the encoder: the register copy, 3 bytes, exactly where the LEA would
+take 4, and the LEA's record and bytes everywhere else. Repeated reload/resplit also has a location-state simulation.
 These bounded tests are not the #142 C-program differential corpus.
 
 `benchmark-tier1-allocation [--only vector|scalar] [--after-scalar MS]` times

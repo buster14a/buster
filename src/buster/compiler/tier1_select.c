@@ -257,6 +257,19 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_CONVERT_LOAD,
     // The second multiplicand or the addend is in memory. The two register operands precede the base and index.
     TIER1_RULE_FLOAT_FMA_LOAD,
+    // A select of floating values (#2842), F32 or F64 of `width` 4 or 8, without a branch: values[0] its condition, an I1
+    // whose register holds its 0 or 1, and values[1] and values[2] the values where it holds and where it doesn't. Where
+    // the CFG consumer gives it an opmask register (Tier1SelectHoles.opmask: AVX512VL's, in a function with no mask
+    // values), the condition into it by kmovw and the values blended under it by vpblendmq, whose two sources leave the
+    // destination free; anywhere else, the condition's lane mask in xmm15, -c through the scratch general register and
+    // movq, and the values blended by pxor, pand and pxor (tier1_select_float_blend). Only the CFG consumer takes it, as
+    // every floating rule.
+    TIER1_RULE_FLOAT_BLEND,
+    // A select of floating values of a floating comparison of their width that only it reads, through C's truth values
+    // (#2842): cmpss or cmpsd of values[0] and values[1] into xmm15 by `condition`, its predicate's immediate
+    // (tier1_select_float_lanes), the lane mask the blend of values[2] and values[3] takes, at every target. Its lanes are
+    // all ones or zeros by C's NaN rules: false for unordered operands but for !=.
+    TIER1_RULE_FLOAT_BLEND_COMPARE,
     // A packed fused multiply-add (#2806): values[0] * values[1] + values[2], lanes in `source_width`. vfmadd213
     // after the destination holds values[1].
     TIER1_RULE_VECTOR_FMA,
@@ -818,6 +831,10 @@ struct Tier1SelectHoles
     bool avx2;
     // Bits 0 and 1 allow the target's unsigned qword register conversion to float and double.
     uint8_t unsigned_i64_float_forms;
+    // The opmask register a floating select's blend may write (TIER1_RULE_FLOAT_BLEND, #2842), k1, or 0 for none: the CFG
+    // consumer's where the target has AVX512VL and the function has no mask values, so that no opmask register holds a
+    // value between nodes (Tier1EmitPrepared.mask_columns).
+    uint8_t opmask;
 };
 
 static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
@@ -2230,6 +2247,77 @@ static void tier1_select_segment(Tier1SelectRecords* records, uint32_t segment)
     }
 }
 
+// A floating select's blend (#2842, TIER1_RULE_FLOAT_BLEND and _COMPARE): the destination t where the condition holds,
+// else f, at `width` 4 or 8, every record of a form whose Zen 5 row is measured. A value's bits past its width are
+// anything (as every rule reads them), so either width's blend may be a quadword's.
+// - Under an opmask register (Tier1SelectHoles.opmask, an integer condition's): kmovw of the condition's 0 or 1 into it,
+//   its bit 0 the condition, then vpblendmq of f in vvvv and t in rm, t's low quadword where the bit is set: three
+//   registers, so the destination needs no copy of either.
+// - Else the lane mask in xmm15, all ones or zeros in the value's lane: an integer condition's -c (c - 1 for its
+//   negation) through the scratch general register and movq; a comparison's cmpss or cmpsd of its operands copied into
+//   xmm15, by its predicate's immediate (the other one of its pair, four apart, for its negation). Then
+//   f ^ ((t ^ f) & mask): t copied into the destination, xored with f, anded with the mask and xored with f again, bitwise
+//   operations that raise no floating exception and keep a NaN's bits. Where the destination holds f, the blend is the
+//   condition's negation's, of f and t, so that it holds the value it keeps: no copy where it holds either. The comparison
+//   reads its operands before any record writes the destination. One value in both (t and f in one register) is its copy
+//   alone, after a comparison's cmps, whose signaling predicates still raise C's invalid exception for a NaN.
+static void tier1_select_float_blend(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination, uint32_t width)
+{
+    const bool compare = holes->rule == TIER1_RULE_FLOAT_BLEND_COMPARE;
+    const uint8_t x = destination & 15;
+    const uint8_t t = (compare ? holes->third : holes->right) & 15;
+    const uint8_t f = (compare ? holes->fourth : holes->third) & 15;
+    const uint8_t mask = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    if (!compare && holes->opmask != 0)
+    {
+        const X86Instruction blend = {
+            .form = X86_FORM_VPBLENDMQ_X_X_XM128,
+            .reg = x,
+            .vvvv = f,
+            .rm = t,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .decorations = (uint8_t)(holes->opmask & BUSTER_X86_DECORATION_MASK),
+        };
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_K_R32, holes->opmask, holes->left));
+        tier1_select_append(result, blend);
+    }
+    else
+    {
+        const bool blended = t != f;
+        const bool inverted = blended && x == f;
+        const uint8_t kept = inverted ? f : t;
+        const uint8_t other = inverted ? t : f;
+        if (compare)
+        {
+            X86Instruction lanes = tier1_select_register_record(width == 8 ? X86_FORM_CMPSD_X_XM64_IMM8 : X86_FORM_CMPSS_X_XM32_IMM8, mask, holes->right & 15);
+            lanes.immediate = (int32_t)(holes->condition ^ (inverted ? 4u : 0u));
+            tier1_select_append(result, tier1_select_float_move(mask, holes->left & 15));
+            tier1_select_append(result, lanes);
+        }
+        else if (blended)
+        {
+            const X86Instruction sign = {
+                .form = inverted ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_NEG_RM64,
+                .rm = BUSTER_TIER1_SELECT_SCRATCH,
+                .immediate = inverted ? -1 : 0,
+            };
+            tier1_select_append(result, tier1_select_register_record(X86_FORM_MOV_R32_RM32, BUSTER_TIER1_SELECT_SCRATCH, holes->left));
+            tier1_select_append(result, sign);
+            tier1_select_append(result, tier1_select_register_record(X86_FORM_MOVQ_X_RM64, mask, BUSTER_TIER1_SELECT_SCRATCH));
+        }
+        if (x != kept)
+        {
+            tier1_select_append(result, tier1_select_float_move(x, kept));
+        }
+        if (blended)
+        {
+            tier1_select_append(result, tier1_select_register_record(X86_FORM_PXOR_X_XM128, x, other));
+            tier1_select_append(result, tier1_select_register_record(X86_FORM_PAND_X_XM128, x, mask));
+            tier1_select_append(result, tier1_select_register_record(X86_FORM_PXOR_X_XM128, x, other));
+        }
+    }
+}
+
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 {
     Tier1SelectRecords result = {0};
@@ -3242,6 +3330,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         break;
     }
+    case TIER1_RULE_FLOAT_BLEND:
+    case TIER1_RULE_FLOAT_BLEND_COMPARE:
+        tier1_select_float_blend(&result, holes, destination, width);
+        break;
     case TIER1_RULE_FLOAT_CONVERT:
     {
         const uint32_t source_width = holes->source_width;
@@ -5497,6 +5589,40 @@ static bool tier1_select_float_comparison(const Tier1SelectForest* forest, uint3
     return result;
 }
 
+// The comparison `tested`, an FCMP of floating values of `width` bytes, a select's (#2842), that only `root`'s pattern
+// uses, as cmpss's or cmpsd's lane mask (TIER1_RULE_FLOAT_BLEND_COMPARE): its operands, swapped for > and >=, and the
+// immediate of the predicate whose lanes are C's truth, false for unordered operands but !='s: EQ_OQ (0) for ==, LT_OS (1)
+// for < and >, LE_OS (2) for <= and >=, and NEQ_UQ (4) for !=; with `negated`, the other one of the pair four apart
+// (NEQ_UQ, NLT_US, NLE_US and EQ_OQ), true for unordered operands as !(a == b), !(a < b) and !(a <= b) are. The relational
+// predicates are IEC 60559's signaling ones, which C's <, <=, > and >= are, raising invalid for a quiet NaN too, and the
+// equalities its quiet ones (C23 F.3).
+static bool tier1_select_float_lanes(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, uint32_t width, Tier1SelectPattern* pattern)
+{
+    static const uint8_t predicates[IR_GE + 1] = {
+        [IR_EQ] = 0,
+        [IR_NE] = 4,
+        [IR_LT] = 1,
+        [IR_LE] = 2,
+        [IR_GT] = 1,
+        [IR_GE] = 2,
+    };
+    const IrFunction* function = forest->function;
+    const uint32_t left = function->a[tested];
+    const uint32_t predicate = function->c[tested];
+    const bool result = function->op[tested] == IR_FCMP && predicate <= IR_GE && tier1_select_tree_child(forest, root, tested) &&
+                        tier1_select_float_width(function->type[left]) == width;
+    if (result)
+    {
+        const bool swapped = predicate == IR_GT || predicate == IR_GE;
+        pattern->values[0] = swapped ? function->b[tested] : left;
+        pattern->values[1] = swapped ? left : function->b[tested];
+        pattern->source_width = (uint8_t)width;
+        pattern->condition = (uint8_t)(predicates[predicate] ^ (negated ? 4u : 0u));
+        tier1_select_fold(forest, root, tested, pattern);
+    }
+    return result;
+}
+
 // A frame object's address the selector takes: a lea from the frame's base (TIER1_RULE_STACK_ADDRESS), or folded into
 // a user's memory operand (tier1_select_address), both filled at emission from the frame's layout. The frame's offsets
 // are 32-bit, and an over-aligned object realigns it. A variadic definition's register save area (#789) is one: the
@@ -6659,6 +6785,28 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[0] = a;
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    // A select of floating values (#2842): their blend by its condition, and by the lane mask of a floating comparison of
+    // their width that only it reads, through C's truth values (tier1_select_float_lanes).
+    else if (float_width != 0 && op == IR_SELECT)
+    {
+        base.rule = TIER1_RULE_FLOAT_BLEND;
+        base.width = (uint8_t)float_width;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.values[2] = c;
+        base.intrinsic_cost = 4;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+        Tier1SelectPattern folded = base;
+        bool negated = false;
+        const uint32_t tested = tier1_select_truth(forest, node, a, &folded, &negated);
+        if (tier1_select_float_lanes(forest, node, tested, negated, float_width, &folded))
+        {
+            folded.rule = TIER1_RULE_FLOAT_BLEND_COMPARE;
+            folded.values[2] = b;
+            folded.values[3] = c;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (forest->vectors && (op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE))
     {
@@ -8489,8 +8637,13 @@ static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1S
     // An address from a register (#2592): `lea d(%r),%r` costs what a lea into another register does, and an incremented
     // pointer, Lua's `pc + 1` in OP_LFALSESKIP, keeps the register its dispatch takes it in.
     const bool address = rule == TIER1_RULE_ADDRESS && !pattern->rip && pattern->stack_object == BUSTER_IR_NONE;
-    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : fused ? pattern->values[3] : equality ? pattern->values[2] : BUSTER_IR_NONE;
-    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : fused ? pattern->values[2] : equality ? pattern->values[3] : BUSTER_IR_NONE;
+    // A floating select's blend (#2842) keeps either value's register: it inverts its mask to keep the false one.
+    const bool blend = rule == TIER1_RULE_FLOAT_BLEND;
+    const bool blend_compare = rule == TIER1_RULE_FLOAT_BLEND_COMPARE;
+    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : fused ? pattern->values[3] : equality ? pattern->values[2] : blend ? pattern->values[1] :
+             blend_compare ? pattern->values[2] : BUSTER_IR_NONE;
+    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : fused ? pattern->values[2] : equality ? pattern->values[3] : blend ? pattern->values[2] :
+              blend_compare ? pattern->values[3] : BUSTER_IR_NONE;
 }
 
 // Marks each node whose value a return reads in `returned` (one byte per node, cleared here). Such a value takes no tie

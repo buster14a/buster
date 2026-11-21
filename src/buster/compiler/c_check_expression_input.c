@@ -1606,7 +1606,7 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
                     {
                         id += made[token];
                         chain = reader->first_value[token];
-                        chained = reader->value_counts[token];
+                        chained = chain != BUSTER_CHECK_NONE ? reader->value_counts[token] : 0;
                     }
                     else if (code == CHECK_INPUT_CODE_TERMINATOR)
                     {
@@ -2196,6 +2196,8 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
     return cursor;
 }
 
+#include "c_check_integer_window_input.c"
+
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
 // reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
@@ -2290,7 +2292,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     const bool timed = coded && reader->pp->options.expression_timing;
     // Deferred parts publish their graphs separately; they do not own a unit's tape. A musttail check needs the
     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
-    const bool window = reader->pp->options.node_window && coded && begin == 0 && stop == count && !timed && front == NULL &&
+    const bool window = (reader->pp->options.node_window || reader->pp->options.node_window_constants) && coded && begin == 0 && stop == count && !timed && front == NULL &&
                         reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
     const bool profile = !reader->pp->options.skip_expression_profile;
     uint64_t* visit_ticks = profile ? &visited : NULL;
@@ -2318,7 +2320,9 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         uint32_t i = 0;
         if (window)
         {
-            i = check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, visit_ticks);
+            i = reader->pp->options.node_window_constants ?
+                check_integer_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, visit_ticks) :
+                check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, visit_ticks);
         }
         else if (!timed)
         {
