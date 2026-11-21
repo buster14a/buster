@@ -517,8 +517,42 @@ t.c:3:2: warning: hi [-W#warnings]
   ours indents by none.
 - **The caret.** Under the column that holds the place's byte (clang's
   `byteToContainingColumn`).
-- **None again.** A diagnostic at the last one's place shows no line, unless
-  the last was a note and this one isn't (clang's `LastLoc` rule;
+- **Highlighted ranges.** A diagnostic's ranges (`PPDiagnosticRange`, at most
+  `BUSTER_PP_DIAGNOSTIC_RANGES`), which its producer adds just before it and
+  clears just after it (`pp_diagnostic_range_tokens` for output tokens, clang's
+  token range; `pp_diagnostic_range_characters` and
+  `pp_diagnostic_range_offsets` for characters, clang's character range; as
+  `diagnostic_spans` is set), are copied into its collected record and marked
+  with `~` under its columns, but the spaces and tabs at their ends, the caret
+  over them (`highlightRange`). Each is first mapped into the expansion the
+  caret's line is in, as clang's `mapDiagnosticRanges` does on the expansion
+  history (`pp_diagnostic_map_range`): an argument's substitution is clang's
+  macro argument expansion, an expansion's invocation its expansion range; a
+  range inside one macro's argument keeps its own spelling, one across a
+  macro's body maps to its invocation, from its name to its `)`. The primary's
+  maps into its file, each "expanded from macro" note's into that macro's
+  expansion, as spellings in its body. The walks are iterative and bounded.
+  A range's lines widen the snippet around the caret's, as clang's
+  `maybeAddRange` does, to at most the line limit; the gutter then numbers
+  them from the presumed line of the first range's start where it is earlier.
+  A diagnostic with ranges shows its lines at the last one's place too.
+- **Which diagnostics have them** (clang's, diagnostic by diagnostic): a name
+  that names nothing and its corrections (the name); a header not found (its
+  name, quotes or brackets and all); an unknown or nonstandard escape (its
+  backslash and character); an indirection of a non-pointer (its operand); a
+  shift count past the width or negative (the count); a division or remainder
+  by zero (the divisor); an assignment to what isn't assignable, an array or a
+  const (the expression assigned to; not yet the "declared const here" note's
+  declaration); a register variable's address (its operand, without its
+  parentheses); and an incompatible conversion's initializing, assigning,
+  passing or returning (its source expression); an unknown attribute (its
+  name, from its scope); a member of no such member, of a pointer or of no
+  record (the base, and for no record the member's name too); and an
+  assignment as a condition (the assignment). An expression's range is its
+  subtree's tokens, with the parentheses around it unless the diagnostic looks
+  through them (`check_semantic_range`).
+- **None again.** A diagnostic without ranges at the last one's place shows no
+  line, unless the last was a note and this one isn't (clang's `LastLoc` rule;
   `Preprocessor.diagnostic_caret_location`). A diagnostic counts once its notes
   are printed, an "expanded from" note once it is; the published diagnostics'
   owners pass the state on, as they do the include stack's.
@@ -530,10 +564,12 @@ t.c:3:2: warning: hi [-W#warnings]
   (no gutter); `-fcaret-diagnostics-max-lines=N`, clang's unsigned grammar
   (decimal, `0x`, `0b`, `0o`, leading-zero octal) on its last occurrence, a
   malformed value an error.
-- **Not yet** (#2376's later pieces): highlighted ranges (`^~~~`), fix-it
-  lines, the lines of scratch space (a pasted token's, `_Pragma`'s), and with
-  them the extra lines a range shows; `-fmessage-length`, `-ftabstop` and
-  colors. The assembler's diagnostics (`assembler_driver.c`) print none.
+- **Not yet** (#2376's later pieces): the other diagnostics' ranges, fix-it
+  lines, the lines of scratch space (a pasted token's, `_Pragma`'s) and a
+  pasted token's range in its macro's note; `-fmessage-length`, `-ftabstop`
+  and colors. The assembler's diagnostics (`assembler_driver.c`) print none.
+  `test-checker-driver --carets` measures what is left over the oracle suite
+  ([the checker guide](checker.md)).
 
 `./build/compiler test-carets [--clang PATH] [--fixtures DIRECTORY]` checks it
 against clang, whole output (`c_caret_test.c`). Its cases are runtime data,
@@ -549,9 +585,11 @@ middle and end, under `-fsyntax-only`, `-E` and `-c`; tabs; wide, combining,
 control, zero-width, malformed and draft characters; the same place twice;
 gutters from 4 digits to 10 and every option and value; an include stack; a
 last line without a newline; CR LF and lone CR line ends; NUL bytes; and the
-4,096-byte limits. Every case is a diagnostic clang shows with a caret alone.
-The other oracle suites still compare with `-fno-caret-diagnostics` on both
-sides.
+4,096-byte limits; and ranges: names through macros' bodies and arguments,
+operands, counts and divisors with their parentheses, through a macro, over
+lines and cut to the line limit, escapes in literals and header names not
+found. The other oracle suites still compare with `-fno-caret-diagnostics` on
+both sides.
 
 ## Preprocessor benchmark
 

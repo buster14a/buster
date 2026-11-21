@@ -1500,6 +1500,33 @@ struct PPDiagnosticSourceNote
     const char* message;
 };
 
+// A diagnostic's highlighted range (#2376), clang's token range: its first token's place and history, and its last
+// token's, which it ends `end_length` bytes after (that token's spelling's bytes in the source). A range of characters
+// has its first character's place as both, and its length. A pending range (Preprocessor.diagnostic_ranges) can name
+// output tokens instead (`pending`): PP_RANGE_TOKENS, `begin` and `end` the first and last; PP_RANGE_OFFSETS, `begin`
+// the token, `end` the offset in its spelling and `end_length` the characters. pp_diagnostic_resolve_ranges makes them
+// places once a diagnostic is accepted, so that a range of one that isn't asks for no history.
+typedef enum PPRangePending
+{
+    PP_RANGE_PLACES,
+    PP_RANGE_TOKENS,
+    PP_RANGE_OFFSETS,
+} PPRangePending;
+
+typedef struct PPDiagnosticRange PPDiagnosticRange;
+struct PPDiagnosticRange
+{
+    uint32_t begin;
+    uint32_t begin_origin;
+    uint32_t end;
+    uint32_t end_origin;
+    uint32_t end_length;
+    uint32_t pending;
+};
+
+// The highlighted ranges a diagnostic keeps at most (clang's diagnostics give one to three).
+#define BUSTER_PP_DIAGNOSTIC_RANGES 4
+
 struct PPDiagnosticRecord
 {
     PPDiagnosticRecord* next;
@@ -1521,6 +1548,9 @@ struct PPDiagnosticRecord
     bool spans;
     // Whether its macro notes show the argument it came from (Preprocessor.diagnostic_arguments).
     bool arguments;
+    // Its highlighted ranges (Preprocessor.diagnostic_ranges).
+    PPDiagnosticRange ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
+    uint32_t range_count;
 };
 
 struct Preprocessor
@@ -1664,6 +1694,13 @@ struct Preprocessor
     // LastLevel): a diagnostic at the same place shows no source line again (pp_diagnostic_snippet, #2376). Zero is no place.
     uint32_t diagnostic_caret_location;
     bool diagnostic_caret_note;
+    // The highlighted ranges of the next diagnostic, which a caller sets around it (pp_diagnostic_range_tokens and
+    // pp_diagnostic_ranges_clear, as diagnostic_spans), and its collected record or its own rendering takes; and those of
+    // the diagnostic pp_render_diagnostic renders, which its primary's source lines mark (#2376).
+    PPDiagnosticRange diagnostic_ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
+    uint32_t diagnostic_range_count;
+    const PPDiagnosticRange* render_ranges;
+    uint32_t render_range_count;
     uint32_t origin_peak[3];
     // The invocations in pp_finish_simple's invocation's arguments that it expands in place, as pp_argument_in_place
     // planned them, in the order pp_expand_argument_in_place takes them (nested_taken).
@@ -1891,6 +1928,12 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preproc
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_file_columns(Preprocessor* pp, bool poison);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_release_output(Preprocessor* pp, bool poison);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_output_ensure(Preprocessor* pp);
+// A diagnostic's highlighted ranges (#2376): output tokens [first, last], or characters at a file location, added before
+// the diagnostic and cleared after it (c_preprocessor_history_impl.c).
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_tokens(Preprocessor* pp, uint32_t first, uint32_t last);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_characters(Preprocessor* pp, uint32_t location, uint32_t length);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_range_offsets(Preprocessor* pp, uint32_t token, uint32_t offset, uint32_t length);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_ranges_clear(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(const Preprocessor* pp, uint32_t location);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_empty_unit(Preprocessor* pp);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_eval_method_use(Preprocessor* pp, uint32_t use, uint32_t position, uint32_t pragma_source);
