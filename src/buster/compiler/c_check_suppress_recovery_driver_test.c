@@ -75,17 +75,17 @@ static void check_test_driver_suppress_recovery(CheckTest* test, const char* cla
                     expected_lines[0] = 0;
                     const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
                     check_test_expect(test, lines && oracle == (accepted ? 0 : 1), "suppress recovery oracle status and diagnostic lines");
-                    for (uint32_t mode = 0; lines && mode < 6; mode += 1)
+                    // Mode 0 checks the unit, 2 compiles it, 4 and 5 read its bodies apart on one lane and on three. 1 and 3
+                    // were 0 and 2 under --scalar, which new tests no longer run (#2924).
+                    static const uint8_t modes[] = { 0, 2, 4, 5 };
+                    for (uint32_t m = 0; lines && m < sizeof(modes); m += 1)
                     {
+                        const uint32_t mode = modes[m];
                         const bool compile = mode >= 2;
                         const bool absent = compile && mode == 2 && !accepted;
                         arguments[0] = (char*)executable;
                         arguments[2] = compile ? "-c" : "-fsyntax-only";
                         uint32_t at = 8;
-                        if (mode == 1 || mode == 3)
-                        {
-                            arguments[at++] = "--scalar";
-                        }
                         if (mode >= 4)
                         {
                             arguments[at++] = "--deferred-bodies";

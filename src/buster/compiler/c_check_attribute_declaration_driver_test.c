@@ -70,9 +70,9 @@ static void check_test_attribute_declaration_boundaries(CheckTest* test, uint32_
     const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .macros = macros, .macro_count = 1 };
     const bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && pp_run(&pp, "tests/driver/attribute_declarations.c");
     check_test_expect(test, ready, "mixed-delimiter attributed declaration fixture initializes");
-    for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+    if (ready)
     {
-        const ParseOptions parse_options = { .scalar = scalar != 0 };
+        const ParseOptions parse_options = { 0 };
         const bool initialized = parse_initialize(&parser, &parse_options, options.language);
         const bool parsed = initialized && parse_translation_unit(&parser, &pp);
         bool refused = false;
