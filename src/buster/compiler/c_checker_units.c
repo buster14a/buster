@@ -358,7 +358,7 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             const uint32_t object = program->symbol_objects[s];
             const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
             const bool undefined = link->symbols.atom[symbol] == 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
-            kept->system[symbol] = undefined && declaration < parser->tokens.count && check_lazy_system(pp, parser->tokens.sources[declaration]);
+            kept->system[symbol] = undefined && declaration < parser->tokens.count && check_lazy_system(pp, parse_source_index(&parser->tokens, declaration));
         }
     }
     kept->debug = (ObjectDebug){ 0 };
@@ -2255,6 +2255,7 @@ static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane*
         .tier1_no_lifetimes = command->tier1_no_lifetimes,
         .tier1_no_inline = command->tier1_no_inline,
         .tier1_no_hold = command->tier1_no_hold,
+        .assembly = command->assembly,
         .tier0_no_inline = command->tier0_no_inline,
         .tier0_no_hold = command->tier0_no_hold,
         .tier0_inline_shapes = command->tier0_inline_shapes,
@@ -2514,9 +2515,9 @@ static void check_units_lane(void* argument)
     }
 }
 
-// The units' objects' names, -c's (check_driver_object_name's), into `units`; false, after saying why, if two units'
-// are the same, which would write one file twice, or without room for them.
-static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, Arena* arena)
+// The units' objects' names, -c's (check_driver_object_name's, with `extension`: -S's are ".s"), into `units`; false,
+// after saying why, if two units' are the same, which would write one file twice, or without room for them.
+static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, const char* extension, Arena* arena)
 {
     uint64_t slots = 16;
     while (slots < 2 * (uint64_t)count)
@@ -2536,7 +2537,7 @@ static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, Arena* ar
         {
             continue;
         }
-        units[u].object = check_driver_object_name(arena, units[u].path);
+        units[u].object = check_driver_object_name(arena, units[u].path, extension);
         reserved = units[u].object != NULL;
         const uint64_t length = reserved ? strlen(units[u].object) : 0;
         uint64_t slot = reserved ? link_hash((const uint8_t*)units[u].object, length) & (slots - 1) : 0;
@@ -2674,7 +2675,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             order[i] = (uint32_t)sorted[i];
         }
-        const bool named = !command->emit_object || command->output != NULL || check_units_objects(units, count, &arena);
+        const bool named = !command->emit_object || command->output != NULL || check_units_objects(units, count, command->assembly ? ".s" : ".o", &arena);
         // The tables every unit's code reads, which the first to need them would build: built here, before the lanes,
         // which then only read them. The parser's are the front end's home's (main.c), which parse_initialize builds.
         // The parser starts zeroed: a refusal of the units' objects' names skips its initialization, and its release

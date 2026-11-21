@@ -779,8 +779,6 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "declaration_bits", CHECK_ATTESTED_FIELD_OWN },
     { "attributes", CHECK_ATTESTED_FIELD_OWN },
     { "typedef_result_contracts", CHECK_ATTESTED_FIELD_CONSEQUENCE },
-    { "ignored_asm_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
-    { "asm_warnings_prepared", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "sparse_pool", CHECK_ATTESTED_FIELD_AMBIENT },
     { "initializer_nodes", CHECK_ATTESTED_FIELD_OWN },
     { "initializer_begins", CHECK_ATTESTED_FIELD_OWN },
@@ -892,6 +890,13 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "sugar_nodes", CHECK_ATTESTED_FIELD_TYPES },
     { "sugar_mask", CHECK_ATTESTED_FIELD_TYPES },
     { "sugar_entries", CHECK_ATTESTED_FIELD_TYPES },
+    { "window_summaries", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_rows", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_row_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_row_capacity", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_capacity", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_nodes", CHECK_ATTESTED_FIELD_MEASURE },
 };
 
 static const CheckAttestedField check_attested_reader_fields[] =
@@ -963,7 +968,6 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "function_name_ids", CHECK_ATTESTED_FIELD_AMBIENT },
     { "file_function_name_ids", CHECK_ATTESTED_FIELD_AMBIENT },
     { "function_name_body", CHECK_ATTESTED_FIELD_TRANSIENT },
-    { "return_types", CHECK_ATTESTED_FIELD_OWN },
     { "declaration_kinds", CHECK_ATTESTED_FIELD_OWN },
     { "declaration_bits", CHECK_ATTESTED_FIELD_OWN },
     { "definition_origins", CHECK_ATTESTED_FIELD_OWN },

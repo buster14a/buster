@@ -21,6 +21,8 @@
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_TYPE_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_TYPE_INCLUDED
 
+#include <pthread.h>
+
 // The builtin types a row's operand may be: a code below this.
 #define BUSTER_NODE_MACHINE_KINDS 24u
 
@@ -319,6 +321,20 @@ static bool node_machine_tables_initialize(void)
         node_machine_tables_ready = valid;
     }
     return valid;
+}
+
+// Baked compilers start with the rows. In PIE builds (including TSan, MSan and fuzzing) the
+// first enabled reader makes the same rows once, before any lane uses them. The image baker
+// calls the initializer directly while checking its writes to the image's table section.
+static void node_machine_tables_runtime(void)
+{
+    (void)node_machine_tables_initialize();
+}
+
+bool check_node_window_prepare(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    return pthread_once(&once, node_machine_tables_runtime) == 0 && node_machine_tables_ready;
 }
 
 // The first source position at which check_context_source_complete takes `type` as complete, with `graph`'s tag history:
@@ -2216,9 +2232,18 @@ static __attribute__((cold, noinline)) NodeMachineRefusal node_machine_type_acti
     return refusal;
 }
 
+// Whether operand `k` of comparison `r` supplies an address with a symbolic base. Loading a pointer object
+// consumes its designator's address; array and function decay preserve the base.
+static bool node_machine_symbolic_operand(const NodeMachine* machine, uint32_t r, uint32_t k, uint32_t operand)
+{
+    const NodeMachineColumns* columns = machine->columns;
+    return operand < r && node_machine_record_constant_kind(machine, operand) == CHECK_CONSTANT_ADDRESS && columns->objects[operand] != 0 &&
+           (columns->conversion_flags[2 * r + k] & BUSTER_CHECK_CONVERT_LVALUE) == 0;
+}
+
 // T: every record's value and its operands' conversions, up the postorder, for the expression of `count` records, graph
 // nodes `first` to first + count - 2 and `root`. A refusal stops it, at machine->stopped.
-static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count)
+static NodeMachineRefusal node_machine_type_in_context(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count, bool constant_evaluated)
 {
     NodeMachineColumns* columns = machine->columns;
     const CheckGraph* graph = machine->graph;
@@ -2306,6 +2331,15 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             {
                 refusal = node_machine_type_action(machine, r, op, call);
             }
+            // The ordinary checker can fold symbolic pointer equality only under required constant evaluation.
+            // T's comparison rules and scalar action run with the runtime context. Leave that proof to the checker.
+            if (__builtin_expect(constant_evaluated && (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL), 0) &&
+                refusal == NODE_MACHINE_TAKEN && node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_NONE &&
+                check_action_kind(machine->types, columns->converted[2 * r]) == BUSTER_TYPE_KIND_POINTER &&
+                (node_machine_symbolic_operand(machine, r, 0, a) || node_machine_symbolic_operand(machine, r, 1, b)))
+            {
+                refusal = NODE_MACHINE_REFUSED_CONTEXT;
+            }
             word = node_machine_word(machine, columns->value_types[r]);
         }
         const uint8_t facts = (uint8_t)(word >> 8);
@@ -2321,6 +2355,13 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
         machine->stopped = refusal == NODE_MACHINE_TAKEN ? r - 1 : r;
     }
     return refusal;
+}
+
+static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count)
+{
+    const CheckStream* stream = machine->program != NULL ? machine->program->stream : NULL;
+    const bool required = stream != NULL && stream->constant_evaluated != NULL && root < machine->graph->count && stream->constant_evaluated[root] != 0;
+    return node_machine_type_in_context(machine, first, root, count, required);
 }
 
 #endif

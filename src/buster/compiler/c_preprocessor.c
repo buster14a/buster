@@ -386,10 +386,16 @@ struct PPOptions
     // the coded walk's classes reach. Off in every compile; benchmark-checker-bindings sets it for runs of its own,
     // apart from its samples.
     bool expression_timing;
+    // The command driver sets this on an unmeasured compile. Direct checker tests and benchmarks collect the walk's counters.
+    bool skip_expression_profile;
     // After the coded walk, number its tokens again as the graph by passes would (CheckInput.expression_numbering_*,
     // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
     // expression_timing.
     bool expression_numbering;
+    // --node-window takes eligible full expressions before the coded walk.
+    bool node_window;
+    // --node-window-assignments also considers discarded local assignments.
+    bool node_window_assignments;
     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
@@ -416,6 +422,8 @@ struct PPOptions
     bool quiet;
     // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
     bool system_header_warnings;
+    // An artifact command consumes binding-derived unused declarations only through their diagnostic policy.
+    bool published_unused_only;
     // Ordered semantic warning options; a valued option's operand is never captured as diagnostic policy. The
     // arena owns the pointer slice; argument strings have the same borrowed lifetime as -D/-I option strings.
     const char* const* semantic_warning_options;
@@ -429,7 +437,17 @@ struct PPOptions
     bool suppress_warnings;
     // The default-on negative-to-unsigned #if warning has no individual Clang warning group.
     bool negative_conversion_error;
+    // -fno-caret-diagnostics: no "N warnings generated." line, which clang prints with carets alone.
     bool no_diagnostic_summary;
+    // Clang's caret display (#2376, pp_diagnostic_snippet): under each located diagnostic, its source line with a gutter
+    // of line numbers (unless no_line_numbers: -fno-diagnostics-show-line-numbers) and a caret under its column.
+    // pp_parse_options turns it on, as clang's driver has it, and -fno-caret-diagnostics off; zero, the API's default
+    // that tests and benchmarks take, leaves it off. caret_lines is -fcaret-diagnostics-max-lines=N's N where
+    // caret_lines_given, else clang's 16: the gutter's width allows for that many lines after the first.
+    bool carets;
+    bool no_line_numbers;
+    bool caret_lines_given;
+    uint32_t caret_lines;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
     // -H (#1380): each header the unit enters, as clang prints it (pp_show_include). It records the history as the
@@ -1641,6 +1659,10 @@ struct Preprocessor
     // The include location of the last diagnostic's file (pp_presumed_include), whose include stack a diagnostic prints
     // only when its own differs.
     uint32_t diagnostic_include_range;
+    // The last diagnostic's place and whether it was a note, as clang's DiagnosticRenderer keeps them (LastLoc and
+    // LastLevel): a diagnostic at the same place shows no source line again (pp_diagnostic_snippet, #2376). Zero is no place.
+    uint32_t diagnostic_caret_location;
+    bool diagnostic_caret_note;
     uint32_t origin_peak[3];
     // The invocations in pp_finish_simple's invocation's arguments that it expands in place, as pp_argument_in_place
     // planned them, in the order pp_expand_argument_in_place takes them (nested_taken).
@@ -6898,9 +6920,8 @@ static bool pp_own_option_with_value(const char* argument)
 
 // Clang's unsigned integral option grammar accepts decimal, leading-zero octal and 0x/0b/0o prefixes, but no sign.
 // Only the final command-line occurrence is passed here, including when an earlier value was malformed.
-static bool pp_parse_error_limit(const char* argument, uint32_t* output)
+static bool pp_parse_unsigned_value(const char* value, uint32_t* output)
 {
-    const char* value = argument + 14;
     const char* first = value;
     uint32_t base = *first == '0' ? 8 : 10;
     if (first[0] == '0' && (first[1] == 'x' || first[1] == 'X' || first[1] == 'b' || first[1] == 'B' || first[1] == 'o' || first[1] == 'O'))
@@ -6917,11 +6938,30 @@ static bool pp_parse_error_limit(const char* argument, uint32_t* output)
         valid = digit < base && limit <= (UINT32_MAX - digit) / base;
         limit = valid ? limit * base + digit : limit;
     }
+    *output = limit;
+    return valid;
+}
+
+static bool pp_parse_error_limit(const char* argument, uint32_t* output)
+{
+    const char* value = argument + 14;
+    const bool valid = pp_parse_unsigned_value(value, output);
     if (!valid)
     {
         fprintf(stderr, "error: invalid integral value '%s' in '-ferror-limit %s'\n", value, value);
     }
-    *output = limit;
+    return valid;
+}
+
+// -fcaret-diagnostics-max-lines=N's N, in the grammar above, which clang names its whole spelling's.
+static bool pp_parse_caret_lines(const char* argument, uint32_t* output)
+{
+    const char* value = argument + 30;
+    const bool valid = pp_parse_unsigned_value(value, output);
+    if (!valid)
+    {
+        fprintf(stderr, "error: invalid integral value '%s' in '%s'\n", value, argument);
+    }
     return valid;
 }
 
@@ -6939,7 +6979,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
     const char** includes = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     const char** embeds = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     const char** warnings = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
-    *options = (PPOptions){ .language = { .standard = 2017, .gnu = true }, .error_limit = BUSTER_PP_DEFAULT_ERROR_LIMIT };
+    *options = (PPOptions){ .language = { .standard = 2017, .gnu = true }, .error_limit = BUSTER_PP_DEFAULT_ERROR_LIMIT, .carets = true };
     *input = 0;
     *output = 0;
     *markers = true;
@@ -6961,6 +7001,8 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
     const char* error_limit = 0;
+    // The last -fcaret-diagnostics-max-lines=, the only one clang reads.
+    const char* caret_lines = 0;
     // The -f options that change clang's keywords, lexing or -E output (pp_settle_families reads them after the loop).
     PPFamilies families = { .charsets = { 0, 0 } };
     memset(families.last, -1, sizeof(families.last));
@@ -7096,6 +7138,15 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
         else if (match.exact == C_OPTION_FNO_CARET_DIAGNOSTICS || match.exact == C_OPTION_FCARET_DIAGNOSTICS)
         {
             options->no_diagnostic_summary = match.exact == C_OPTION_FNO_CARET_DIAGNOSTICS;
+            options->carets = match.exact == C_OPTION_FCARET_DIAGNOSTICS;
+        }
+        else if (match.exact == C_OPTION_FDIAGNOSTICS_SHOW_LINE_NUMBERS || match.exact == C_OPTION_FNO_DIAGNOSTICS_SHOW_LINE_NUMBERS)
+        {
+            options->no_line_numbers = match.exact == C_OPTION_FNO_DIAGNOSTICS_SHOW_LINE_NUMBERS;
+        }
+        else if (match.joined == C_OPTION_FCARET_DIAGNOSTICS_MAX_LINES_EQ)
+        {
+            caret_lines = argument;
         }
         else if (match.exact == C_OPTION_P)
         {
@@ -7355,6 +7406,8 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
     options->negative_conversion_error = warning_errors;
     result = result && pp_warning_options_supported(options);
     result = result && (error_limit == 0 || pp_parse_error_limit(error_limit, &options->error_limit));
+    options->caret_lines_given = caret_lines != 0;
+    result = result && (caret_lines == 0 || pp_parse_caret_lines(caret_lines, &options->caret_lines));
     // -ansi is -std=c89 in C.
     const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;
     if (result && mode != 0 && !pp_parse_standard(mode, &options->language))

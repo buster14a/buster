@@ -532,6 +532,10 @@ static uint32_t check_wide_count(uint32_t width);
 static uint64_t* check_wide_allocate(uint32_t count);
 static void check_wide_publish(CheckValue* value, const uint64_t* limbs);
 static const uint64_t* check_wide_limbs(const CheckValue* value, uint32_t count);
+// Complex integer constants of elements past 64 bits (#2219, c_check_complex.c): their parts' limbs.
+static bool check_complex_wide_element(const TypeTable* table, TypeId element, uint32_t* width, bool* sign);
+static bool check_complex_wide_truth(const CheckValue* value, uint32_t width, bool* truth);
+static void check_complex_wide_publish(CheckValue* value, uint64_t* const parts[2]);
 
 static bool check_action_is_integer(const TypeTable* table, TypeId type)
 {
@@ -609,11 +613,22 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
     else if (value->constant_kind == CHECK_CONSTANT_COMPLEX)
     {
         const TypeId element = type_element(table, type_strip_aligned(table, value->type));
-        // A _Complex __float128's parts are its bits (check_quad_complex_set): true where either is no zero.
+        // A _Complex __float128's parts are its bits (check_quad_complex_set): true where either is no zero. An integer
+        // element past 64 bits's are limbs (#2219).
         const bool quad = type_unqualified(type_strip_aligned(table, element)) == BUSTER_TYPE_FLOAT128;
-        *truth = check_action_is_integer(table, element) ? value->integer != 0 :
-                 quad ? ((value->integer | check_quad_complex_imaginary(value)) & ~BUSTER_CHECK_QUAD_SIGN) != 0 :
-                        value->floating != 0 || value->imaginary != 0;
+        uint32_t width = 0;
+        bool sign = false;
+        const bool integer = check_action_is_integer(table, element);
+        if (__builtin_expect(integer && check_complex_wide_element(table, element, &width, &sign), 0))
+        {
+            known &= check_complex_wide_truth(value, width, truth);
+        }
+        else
+        {
+            *truth = integer ? value->integer != 0 :
+                     quad ? ((value->integer | check_quad_complex_imaginary(value)) & ~BUSTER_CHECK_QUAD_SIGN) != 0 :
+                            value->floating != 0 || value->imaginary != 0;
+        }
     }
     else if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {

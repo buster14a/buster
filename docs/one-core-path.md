@@ -2584,7 +2584,7 @@ the program knows a truth its value has not. No compile takes any of it. [The no
 page](node-machine.md#a-summary-nodes-side-facts-on-the-window) has it whole: the survey, the rules, the builds,
 what a generator of programs found after the code was frozen, and the faults. [Its
 specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7053609091) had six gates. It is exact
-on what it makes and its faults are caught; a `switch`'s selector's type is not made; its work a record is over its
+on what it makes and its faults are caught. This measurement predates the switch selector side fact. Its work a record is over its
 gate and under what refutes it; and by the chunk it is past what refutes its gate on musl.
 
 ### What it measured
@@ -2623,7 +2623,8 @@ switch (`--no-window-summaries`), and on again, in one executable:
 - **F1, exact: met for what the piece makes.** Every kept expression's references and return fact are the program's
   own walks' on the three corpora and the compiler's own source (49,842, 10,246, 40,441 and 41,890 expressions), a
   kept branch's truth is its value's and a kept constant folds; 7,957 one-statement programs agree. A `switch`'s
-  selector's type is not made, and the control changes what reader time kept, not the program's answers.
+  selector's type was excluded from that comparison. After #3209 the shadow also checks the selector's
+  type before promotion against the warning pass. The control changes the type saved by the reader.
 - **F2, how much: met.** The turns' listing leaves out 3, 2, 3 and 0 expressions the piece before took (5 a corpus
   asked); the cast's term lists none.
 - **F3, work a record: met for the tests' sweep, over for the rows'.** A chunk's second run of the rows' sweeps

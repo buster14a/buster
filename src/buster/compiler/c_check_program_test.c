@@ -254,7 +254,7 @@ static void check_test_program_plan_cache(CheckTest* test)
 
 // #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
 // they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
-// initializers' tokens, with their bitset; the initializer plans' statements (check_test_program_plans, #877); the
+// initializers' storage durations; the initializer plans' statements (check_test_program_plans, #877); the
 // variable-length arrays' declarations; the reached builtins; the static objects' declarations,
 // needs and naked functions, with room for their column and without (whose symbols #442's kernels number:
 // check_test_program_declaring); and at 64 and 128 tokens, the cases' marks, against a test of each token.
@@ -372,6 +372,7 @@ static void check_test_program_scans(CheckTest* test)
         for (uint32_t variant = 0; variant < 2; variant += 1)
         {
             const CheckInput input = {
+                .graph = { .count = node_count },
                 .token_count = count,
                 .deferred_tokens = variant == 0 ? deferred : NULL,
                 .declarations = declarations,
@@ -385,24 +386,13 @@ static void check_test_program_scans(CheckTest* test)
                 .attributes = check_input_attributes_from(&sparse, attributes, count),
             };
             uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            // The bitsets as check_program allocates them, a word per 64 nodes and one past the last, each ending at a
-            // PROT_NONE page (#877).
             const uint32_t words = (node_count + 64) / 64;
-            uint64_t* initialized[2] = {
-                (uint64_t*)(mappings[16] + page - (uint64_t)words * sizeof(uint64_t)),
-                (uint64_t*)(mappings[17] + page - (uint64_t)words * sizeof(uint64_t)),
-            };
-            uint32_t bodies[2];
-            for (uint32_t path = 0; path < 2; path += 1)
-            {
-                memset(initializers[path], 0xff, sizeof(initializers[path]));
-                memset(initialized[path], 0, (uint64_t)words * sizeof(uint64_t));
-                bodies[path] = check_program_openings(&input, node_count, openings[path], initializers[path], initialized[path], path == 0);
-            }
-            // A node's bit, read from its word, says that some token's initializer it is, and its entry is then the last such
-            // token's (#877).
-            bool marked = memcmp(initialized[0], initialized[1], (uint64_t)words * sizeof(uint64_t)) == 0;
+            uint64_t* statics = (uint64_t*)(mappings[16] + page - (uint64_t)words * sizeof(uint64_t));
+            const uint32_t scalar_openings = check_program_openings(&input, openings[0], true);
+            const uint32_t vector_openings = check_program_openings(&input, openings[1], false);
+            memset(statics, 0xa5, (uint64_t)words * sizeof(uint64_t));
+            check_program_static_initializers(&input, statics);
+            bool marked = true;
             for (uint32_t node = 0; node < words * 64; node += 1)
             {
                 uint32_t last = BUSTER_CHECK_NONE;
@@ -410,12 +400,10 @@ static void check_test_program_scans(CheckTest* test)
                 {
                     last = initializer_nodes[token] == node && node < node_count ? token : last;
                 }
-                const bool bit = ((initialized[0][node / 64] >> (node % 64)) & 1) != 0;
-                marked &= bit == (last != BUSTER_CHECK_NONE) && (last == BUSTER_CHECK_NONE || initializers[0][node] == last);
+                marked &= check_program_bit(statics, node) == (last != BUSTER_CHECK_NONE && check_input_bit(declaration_bits, last, BUSTER_CHECK_BITS_STATIC));
             }
-            check_test_expect(test, bodies[0] == bodies[1] && memcmp(openings[0], openings[1], bodies[0] * sizeof(uint32_t)) == 0 &&
-                                   memcmp(initializers[0], initializers[1], sizeof(initializers[0])) == 0 && marked,
-                              "check_program's openings, initializers and their bits agree with their scalar twin at every guarded tail");
+            check_test_expect(test, scalar_openings == vector_openings && memcmp(openings[0], openings[1], scalar_openings * sizeof(uint32_t)) == 0 && marked,
+                              "the openings agree at every guarded tail and each initializer has its last declaration's static bit");
             Parser parser = { 0 };
             parser.tree.roles = roles;
             parser.tree.parents = parents;
@@ -626,6 +614,7 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
             .previous = body_columns + slots * 3,
             .case_map = case_map,
             .source_labels = body_columns + slots * 4,
+            .all_loop_targets = true,
             .stops = body_columns + slots * 5,
             .repeats = body_columns + slots * 6,
             .labels = body_columns + slots * 7,
@@ -638,6 +627,9 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
             if (roles[opening] == PARSE_ROLE_OPEN_BODY && closing < count && closing > opening)
             {
                 writer.label_count = 0;
+                writer.opening = opening;
+                writer.closing = closing;
+                writer.scalar_children = (bodies & 1) != 0;
                 check_control_children(&writer, opening, closing);
                 bodies += 1;
                 uint32_t label = 0;
@@ -664,7 +656,9 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
                     }
                     const bool labeled = token != opening && token != closing && (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE);
                     const uint32_t expected_label = labeled ? label : BUSTER_CHECK_NONE;
-                    equal = equal && writer.source_labels[token] == expected_label && writer.stops[token] == BUSTER_CHECK_NONE &&
+                    equal = equal && (labeled ? writer.source_labels[token] == expected_label : writer.source_labels[token] == UINT32_C(0xa5a5a5a5)) &&
+                            check_control_named_target(&writer, token) == (roles[token] == PARSE_ROLE_LABEL ? expected_label : BUSTER_CHECK_NONE) &&
+                            writer.stops[token] == BUSTER_CHECK_NONE &&
                             writer.repeats[token] == BUSTER_CHECK_NONE;
                     if (labeled && roles[token] == PARSE_ROLE_CLOSE_CASE)
                     {
@@ -677,6 +671,26 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
                 }
                 equal = equal && writer.label_count == label && writer.case_start == case_start && writer.case_end == case_end &&
                         program.status == CHECK_PROGRAM_OK;
+                // Exercise the other label scan with the same body. No consumer requested loop targets, so keep
+                // their poisoned entries. The relative numbers of every source label and case stay the same.
+                writer.scalar_children = !writer.scalar_children;
+                writer.all_loop_targets = false;
+                writer.stops[opening] = UINT32_C(0xa5a5a5a5);
+                writer.repeats[opening] = UINT32_C(0x5a5a5a5a);
+                writer.label_count = 0;
+                check_control_children(&writer, opening, closing);
+                uint32_t again = 0;
+                for (uint32_t token = opening + 1; token < closing; token += 1)
+                {
+                    if (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE)
+                    {
+                        equal = equal && writer.source_labels[token] == again;
+                        again += 1;
+                    }
+                }
+                equal = equal && again == label && writer.label_count == label && writer.case_start == case_start && writer.case_end == case_end &&
+                        writer.stops[opening] == UINT32_C(0xa5a5a5a5) && writer.repeats[opening] == UINT32_C(0x5a5a5a5a);
+                writer.all_loop_targets = true;
                 labels_seen += label;
             }
         }
@@ -2009,6 +2023,19 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
             snprintf(description, sizeof(description), "%s: the return facts' walk gives every node the definition's facts", name);
             check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
+            CheckReturnFacts cached = { 0 };
+            bool same = exact != NULL || input.graph.count == 0;
+            for (uint32_t node = 0; same && node < input.graph.count; node += 1)
+            {
+                same = check_program_return_cached(&program, &cached, node) == exact[node];
+            }
+            for (uint32_t end = input.graph.count; same && end != 0; end -= 1)
+            {
+                same = check_program_return_cached(&program, &cached, end - 1) == exact[end - 1];
+            }
+            snprintf(description, sizeof(description), "%s: incremental and cached return facts match every scalar node", name);
+            check_test_expect(test, same, description);
+            arena_release(&cached.storage);
             arena_pop_to(&scratch, facts_mark);
         }
         // A program that includes the system's headers lowers what its roots reach, as -c does: their other functions
@@ -3453,7 +3480,8 @@ static void check_test_program_return_marks(CheckTest* test)
             CheckControl entries[] = { { .kind = CHECK_CONTROL_EVALUATE, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-            check_program_return_flow(&writer, &body, facts, true, true);
+            CheckReturnFacts cached = { .facts = facts, .computed = NODES };
+            check_program_return_flow(&writer, &body, &cached, true, true);
             bool same = body.return_flow && body.falls && body.return_warning == (contract == 0 ? 1 : 0);
             for (uint32_t node = 0; same && node <= NODES; node += 1)
             {

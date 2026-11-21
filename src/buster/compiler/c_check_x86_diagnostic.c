@@ -131,11 +131,7 @@ static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t 
     const CheckProgram* program = walk->program;
     const CheckInput* input = program->input;
     const CheckControl* entry = program->controls + walk->body->first + index;
-    // A LIFETIME's `node` is whether it starts or ends its block's objects' lifetimes (#177), no expression's.
-    if (entry->kind != CHECK_CONTROL_LIFETIME)
-    {
-        check_x86_diagnostic_push(walk, entry->node, false);
-    }
+    check_x86_diagnostic_push(walk, check_control_expression_node(entry), false);
     if (entry->kind == CHECK_CONTROL_CLEANUP && walk->cleanup_tags != NULL)
     {
         check_x86_diagnostic_cleanup(walk, index);

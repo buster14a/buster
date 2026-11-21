@@ -6790,9 +6790,39 @@ static void check_lower_complex_constant(CheckLowerWriter* writer, const CheckVa
     // A _Complex __float128's parts are their bits (#1250, check_quad_complex_set), four words a store each; a real one's
     // imaginary part +0.
     const bool quad = element == BUSTER_TYPE_FLOAT128;
-    if (value->constant_kind != CHECK_CONSTANT_COMPLEX && value->constant_kind != real)
+    // An integer element past 64 bits' parts are limbs (#2219, c_check_complex.c): their object representation's words, a
+    // store each, the bits past the width extended as the ABI keeps them, as a part read from memory is extended from it.
+    uint32_t width = 0;
+    bool sign = false;
+    const bool wide = integer && check_complex_wide_element(types, element, &width, &sign);
+    if ((value->constant_kind != CHECK_CONSTANT_COMPLEX && value->constant_kind != real) || (wide && value->constant_kind != CHECK_CONSTANT_COMPLEX))
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (wide)
+    {
+        const uint32_t count = check_wide_count(width);
+        const uint64_t* parts[2] = { check_complex_wide_limbs(value, false, count), check_complex_wide_limbs(value, true, count) };
+        const uint32_t result = parts[0] != NULL && parts[1] != NULL && size % 8 == 0 && size >= (uint64_t)count * 8 ?
+                                check_lower_object(writer, 2 * size, type_alignment_log2(types, element)) : BUSTER_CHECK_NONE;
+        if (result == BUSTER_CHECK_NONE)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+        for (uint32_t part = 0; part < 2 && result != BUSTER_CHECK_NONE && writer->output->status == CHECK_PROGRAM_OK; part += 1)
+        {
+            const bool negative = check_wide_negative(parts[part], width, sign);
+            for (uint64_t word = 0; word < size / 8 && writer->output->status == CHECK_PROGRAM_OK; word += 1)
+            {
+                check_lower_complex_place(writer, result, (uint32_t)(part * (size / 8) + word), 8);
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, check_complex_wide_word(parts[part], count, width, negative, word));
+                check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+            }
+        }
+        if (result != BUSTER_CHECK_NONE)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
+        }
     }
     else if (quad)
     {
@@ -10480,6 +10510,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
             {
                 call->padding = plan->entries;
                 call->padding_count = plan->count;
+                call->padding_words = plan->words;
                 call->padding_elements = plan->elements;
                 call->padding_stride = plan->stride;
                 padding_pool = plan->pool;
@@ -15633,6 +15664,42 @@ static bool check_lower_global_register_update(CheckLowerWriter* writer, uint32_
     return reg >= 0;
 }
 
+// Splice the prechecked expression's tape, map local objects in the current body and give each entry its
+// own source token. The next ordinary task resumes the source and failure context active at this splice.
+static __attribute__((noinline)) void check_lower_window(CheckLowerWriter* writer, uint32_t node, const CheckValue* value, const CheckInputWindowSummary* summary)
+{
+    const CheckProgram* program = writer->program;
+    const uint32_t before = writer->count;
+    const uint32_t source = writer->source;
+    const uint32_t outer = writer->token;
+    for (uint32_t i = 0; i < summary->count && writer->output->status == CHECK_PROGRAM_OK; i += 1)
+    {
+        const CheckInputWindowRow* row = program->input->window_rows + summary->first + i;
+        uint64_t native_value = row->value;
+        if ((row->flags & BUSTER_CHECK_WINDOW_LOCAL) != 0)
+        {
+            native_value = row->value < program->object_count ? check_lower_local_of(writer, (uint32_t)row->value) : BUSTER_CHECK_NONE;
+        }
+        if ((row->flags & BUSTER_CHECK_WINDOW_LOCAL) == 0 || native_value < writer->local_count)
+        {
+            writer->token = row->token;
+            check_lower_source(writer, row->token);
+            check_lower_emit(writer, row->kind, row->class, native_value);
+        }
+        else
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+    writer->token = outer;
+    check_lower_source(writer, source);
+    if (value->constant_kind == CHECK_CONSTANT_INTEGER && writer->count == before + 1)
+    {
+        writer->constant_end = writer->count;
+        writer->constant_node = node + 1;
+    }
+}
+
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
 // (CheckLowerWriter.bit_ints). `bit_int` is CheckLowerTask.bit_int.
 static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
@@ -15660,7 +15727,12 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     // An expression of a _BitInt goes to check_lower_bit_int_node first, out of line, which may push it again for what
     // follows (CheckLowerTask.bit_int).
-    if (__builtin_expect(writer->segments, 0) && check_lower_segment_access(writer, node, value, address))
+    const CheckInputWindowSummary* summary = op == CHECK_OP_VALUE ? check_input_window_summary(program->input, node) : NULL;
+    if (__builtin_expect(summary != NULL, 0))
+    {
+        check_lower_window(writer, node, value, summary);
+    }
+    else if (__builtin_expect(writer->segments, 0) && check_lower_segment_access(writer, node, value, address))
     {
         check_lower_segment_refused(writer, node, value, address, discard);
     }

@@ -31,6 +31,9 @@ struct AssemblyTest
     Arena output;
     Arena scratch;
     const char* directory;
+    // --option's arguments, which every -S and -c command of --c-testsuite and --compare takes after its own.
+    char* options[16];
+    uint32_t option_count;
     uint64_t checks;
     uint64_t failures;
     bool cross_check;
@@ -364,6 +367,30 @@ static bool assembly_test_unlist_got(ObjectView* view, uint8_t* object)
     return found;
 }
 
+// Our object (`ours`, `ours_size` bytes) against GNU as's (`theirs`, which this changes): the same but for the
+// normalizations above. False, with the first difference, if they differ.
+static bool assembly_test_same_objects(AssemblyTest* test, const uint8_t* ours_bytes, uint64_t ours_size, String8 theirs, char* error, uint64_t error_size)
+{
+    const uint64_t mark = test->scratch.length;
+    uint8_t* ours = arena_push(&test->scratch, ours_size, 64);
+    ObjectView ours_view;
+    ObjectView theirs_view;
+    if (ours != 0)
+    {
+        memcpy(ours, ours_bytes, ours_size);
+    }
+    bool passed = ours != 0 && theirs.pointer != 0 && object_view_open(&ours_view, ours, ours_size, false, error, error_size) &&
+                  asm_test_gnu_object(&theirs_view, theirs, &test->scratch, error, error_size);
+    if (passed)
+    {
+        assembly_test_resolve(&ours_view, ours);
+        assembly_test_unlist_got(&theirs_view, (uint8_t*)theirs.pointer);
+        passed = object_test_same_as(&ours_view, &theirs_view, error, error_size);
+    }
+    arena_pop_to(&test->scratch, mark);
+    return passed;
+}
+
 // GNU as's object of `text` (written to the test's directory as `name`.s) against `object`, ours: the same but for
 // the normalizations above. False, with the first difference, if they differ.
 static bool assembly_test_against_as(AssemblyTest* test, const char* name, const uint8_t* text, uint64_t length, const Object* object, char* error, uint64_t error_size)
@@ -385,22 +412,8 @@ static bool assembly_test_against_as(AssemblyTest* test, const char* name, const
         snprintf(error, error_size, "GNU as didn't assemble %s (see %s)", source_path, errors_path);
     }
     const uint64_t mark = test->scratch.length;
-    uint8_t* ours = passed ? arena_push(&test->scratch, object->size, 64) : 0;
-    const String8 theirs_bytes = passed ? object_test_read_file(&test->scratch, object_path) : (String8){ 0 };
-    ObjectView ours_view;
-    ObjectView theirs_view;
-    if (ours != 0)
-    {
-        memcpy(ours, object->bytes, object->size);
-    }
-    passed = passed && ours != 0 && theirs_bytes.pointer != 0 && object_view_open(&ours_view, ours, object->size, false, error, error_size) &&
-             asm_test_gnu_object(&theirs_view, theirs_bytes, &test->scratch, error, error_size);
-    if (passed)
-    {
-        assembly_test_resolve(&ours_view, ours);
-        assembly_test_unlist_got(&theirs_view, (uint8_t*)theirs_bytes.pointer);
-        passed = object_test_same_as(&ours_view, &theirs_view, error, error_size);
-    }
+    const String8 theirs = passed ? object_test_read_file(&test->scratch, object_path) : (String8){ 0 };
+    passed = passed && assembly_test_same_objects(test, object->bytes, object->size, theirs, error, error_size);
     arena_pop_to(&test->scratch, mark);
     if (passed && !test->keep)
     {
@@ -883,6 +896,238 @@ static void assembly_test_forms(AssemblyTest* test, uint32_t variants)
     arena_pop_to(&test->arena, mark);
 }
 
+// A compile's arguments: `compiler`, --tier1 with `tier1`, the test's --option arguments, `mode` (-S or -c), -o `output`
+// and `source`, null-terminated, into `arguments` (room for 24).
+static void assembly_test_compile_arguments(const AssemblyTest* test, char** arguments, const char* compiler, bool tier1, const char* mode, const char* output,
+                                            const char* source)
+{
+    uint32_t count = 0;
+    arguments[count++] = (char*)compiler;
+    if (tier1)
+    {
+        arguments[count++] = "--tier1";
+    }
+    for (uint32_t i = 0; i < test->option_count; i += 1)
+    {
+        arguments[count++] = test->options[i];
+    }
+    arguments[count++] = (char*)mode;
+    arguments[count++] = "-o";
+    arguments[count++] = (char*)output;
+    arguments[count++] = (char*)source;
+    arguments[count] = 0;
+}
+
+// Runs a program (`arguments`, its path first) in `directory`, its standard output and errors into the files at
+// `output_path` and `error_path`, for up to BUSTER_OBJECT_TEST_RUN_SECONDS, as object_test_run does: its exit status, or
+// -1 if it couldn't start, was killed by a signal or ran out of time. A program that writes files (c-testsuite's
+// 00187.c writes fred.txt) writes them there.
+static int assembly_test_run_in(char* const* arguments, const char* directory, const char* output_path, const char* error_path)
+{
+    int result = -1;
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) == 0)
+    {
+        pid_t child = 0;
+        const bool ready = posix_spawn_file_actions_addopen(&actions, 1, output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644) == 0 &&
+                           posix_spawn_file_actions_addopen(&actions, 2, error_path, O_WRONLY | O_CREAT | O_TRUNC, 0644) == 0 &&
+                           posix_spawn_file_actions_addchdir_np(&actions, directory) == 0;
+        if (ready && posix_spawn(&child, arguments[0], &actions, 0, arguments, environ) == 0)
+        {
+            int status = 0;
+            pid_t waited = 0;
+            const struct timespec pause = {
+                .tv_sec = 0,
+                .tv_nsec = 1000000,
+            };
+            for (uint64_t milliseconds = 0; waited == 0 && milliseconds < 1000ull * BUSTER_OBJECT_TEST_RUN_SECONDS; milliseconds += 1)
+            {
+                waited = waitpid(child, &status, WNOHANG);
+                if (waited == 0)
+                {
+                    nanosleep(&pause, 0);
+                }
+            }
+            if (waited == 0)
+            {
+                kill(child, SIGKILL);
+                waitpid(child, &status, 0);
+            }
+            else if (waited == child && WIFEXITED(status))
+            {
+                result = WEXITSTATUS(status);
+            }
+        }
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    return result;
+}
+
+// Whether a file's bytes are `expected`'s (a file too), both read whole.
+static bool assembly_test_same_file(AssemblyTest* test, const char* path, const char* expected_path)
+{
+    const uint64_t mark = test->scratch.length;
+    const String8 actual = object_test_read_file(&test->scratch, path);
+    const String8 expected = object_test_read_file(&test->scratch, expected_path);
+    const bool same = actual.pointer != 0 && expected.pointer != 0 && actual.length == expected.length && memcmp(actual.pointer, expected.pointer, actual.length) == 0;
+    arena_pop_to(&test->scratch, mark);
+    return same;
+}
+
+// -S of one c-testsuite program (#1362's stage 2 acceptance), by this executable (`compiler`) with `tier1` or not: its
+// text must assemble with GNU as into -c's object, but for the form contract's normalizations
+// (assembly_test_same_objects), and the program linked from GNU as's object must print the expected output and exit 0.
+// Returns whether it passed, with the first failure in `error`.
+static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, const char* source, const char* expected, const char* name, bool tier1, char* error,
+                                    uint64_t error_size)
+{
+    char text_path[PATH_MAX];
+    char object_path[PATH_MAX];
+    char reassembled_path[PATH_MAX];
+    char program_path[PATH_MAX];
+    char output_path[PATH_MAX];
+    char errors_path[PATH_MAX];
+    snprintf(text_path, sizeof(text_path), "%s/%s.s", test->directory, name);
+    snprintf(object_path, sizeof(object_path), "%s/%s.o", test->directory, name);
+    snprintf(reassembled_path, sizeof(reassembled_path), "%s/%s.as.o", test->directory, name);
+    snprintf(program_path, sizeof(program_path), "%s/%s.exe", test->directory, name);
+    snprintf(output_path, sizeof(output_path), "%s/%s.out", test->directory, name);
+    snprintf(errors_path, sizeof(errors_path), "%s/%s.err", test->directory, name);
+    char* assembly[24];
+    char* object[24];
+    assembly_test_compile_arguments(test, assembly, compiler, tier1, "-S", text_path, source);
+    assembly_test_compile_arguments(test, object, compiler, tier1, "-c", object_path, source);
+    char* assembler[] = { "as", "--64", "-o", reassembled_path, text_path, 0 };
+    // (Some of the programs call libm's functions, which the direct path's C link brings and an object's link names.)
+    char* link[] = { (char*)compiler, "-o", program_path, reassembled_path, "-lm", 0 };
+    char* program[] = { program_path, 0 };
+    unlink(reassembled_path);
+    bool passed = object_test_run(assembly, output_path, errors_path) == 0;
+    snprintf(error, error_size, "-S failed (see %s)", errors_path);
+    passed = passed && object_test_run(object, output_path, errors_path) == 0;
+    snprintf(error, error_size, passed ? "GNU as didn't assemble %s (see %s)" : "-c failed (see %s)", passed ? text_path : errors_path, errors_path);
+    passed = passed && oracle_epoch_file(text_path) && asm_test_tool(assembler, reassembled_path, output_path, errors_path) == 0;
+    if (passed)
+    {
+        const uint64_t mark = test->scratch.length;
+        const String8 ours = object_test_read_file(&test->scratch, object_path);
+        const String8 theirs = object_test_read_file(&test->scratch, reassembled_path);
+        passed = ours.pointer != 0 && assembly_test_same_objects(test, (const uint8_t*)ours.pointer, ours.length, theirs, error, error_size);
+        arena_pop_to(&test->scratch, mark);
+    }
+    if (passed)
+    {
+        passed = object_test_run(link, output_path, errors_path) == 0;
+        snprintf(error, error_size, "the reassembled object didn't link (see %s)", errors_path);
+    }
+    if (passed)
+    {
+        passed = assembly_test_run_in(program, test->directory, output_path, errors_path) == 0 && assembly_test_same_file(test, output_path, expected);
+        snprintf(error, error_size, "the program linked from GNU as's object didn't print %s and exit 0 (see %s)", expected, output_path);
+    }
+    if (passed && !test->keep)
+    {
+        unlink(text_path);
+        unlink(object_path);
+        unlink(reassembled_path);
+        unlink(program_path);
+        unlink(output_path);
+        unlink(errors_path);
+    }
+    return passed;
+}
+
+// --compare SOURCE: -S of a C source by this executable (`compiler`), with `tier1` or not, assembled by GNU as into -c's
+// object, but for the form contract's normalizations; no link. For sources larger than the c-testsuite's programs.
+static bool assembly_test_compare(AssemblyTest* test, const char* compiler, const char* source, const char* name, bool tier1, char* error, uint64_t error_size)
+{
+    char text_path[PATH_MAX];
+    char object_path[PATH_MAX];
+    char reassembled_path[PATH_MAX];
+    char output_path[PATH_MAX];
+    char errors_path[PATH_MAX];
+    snprintf(text_path, sizeof(text_path), "%s/%s.s", test->directory, name);
+    snprintf(object_path, sizeof(object_path), "%s/%s.o", test->directory, name);
+    snprintf(reassembled_path, sizeof(reassembled_path), "%s/%s.as.o", test->directory, name);
+    snprintf(output_path, sizeof(output_path), "%s/%s.out", test->directory, name);
+    snprintf(errors_path, sizeof(errors_path), "%s/%s.err", test->directory, name);
+    char* assembly[24];
+    char* object[24];
+    assembly_test_compile_arguments(test, assembly, compiler, tier1, "-S", text_path, source);
+    assembly_test_compile_arguments(test, object, compiler, tier1, "-c", object_path, source);
+    char* assembler[] = { "as", "--64", "-o", reassembled_path, text_path, 0 };
+    unlink(reassembled_path);
+    bool passed = object_test_run(assembly, output_path, errors_path) == 0;
+    snprintf(error, error_size, "-S failed (see %s)", errors_path);
+    passed = passed && object_test_run(object, output_path, errors_path) == 0;
+    snprintf(error, error_size, passed ? "GNU as didn't assemble %s (see %s)" : "-c failed (see %s)", passed ? text_path : errors_path, errors_path);
+    passed = passed && oracle_epoch_file(text_path) && asm_test_tool(assembler, reassembled_path, output_path, errors_path) == 0;
+    if (passed)
+    {
+        const uint64_t mark = test->scratch.length;
+        const String8 ours = object_test_read_file(&test->scratch, object_path);
+        const String8 theirs = object_test_read_file(&test->scratch, reassembled_path);
+        passed = ours.pointer != 0 && assembly_test_same_objects(test, (const uint8_t*)ours.pointer, ours.length, theirs, error, error_size);
+        arena_pop_to(&test->scratch, mark);
+    }
+    if (passed && !test->keep)
+    {
+        unlink(text_path);
+        unlink(object_path);
+        unlink(reassembled_path);
+        unlink(output_path);
+        unlink(errors_path);
+    }
+    return passed;
+}
+
+// --c-testsuite DIRECTORY --subset FILE: assembly_test_c_program for each program the subset lists (its lines of digits
+// alone, as test-c-testsuite reads it), at Tier 0 and with --tier1.
+static void assembly_test_c_testsuite(AssemblyTest* test, const char* directory, const char* subset)
+{
+    char compiler[PATH_MAX];
+    const ssize_t length = readlink("/proc/self/exe", compiler, sizeof(compiler) - 1);
+    compiler[length > 0 ? length : 0] = 0;
+    FILE* list = fopen(subset, "r");
+    assembly_test_check(test, length > 0 && list != 0, "--c-testsuite's executable and subset list", subset);
+    char line[256];
+    uint32_t programs = 0;
+    uint32_t passed = 0;
+    while (list != 0 && fgets(line, sizeof(line), list) != 0)
+    {
+        uint64_t digits = 0;
+        while (line[digits] >= '0' && line[digits] <= '9')
+        {
+            digits += 1;
+        }
+        if (digits != 0 && (line[digits] == '\n' || line[digits] == 0))
+        {
+            line[digits] = 0;
+            char source[PATH_MAX];
+            char expected[PATH_MAX];
+            snprintf(source, sizeof(source), "%s/tests/single-exec/%s.c", directory, line);
+            snprintf(expected, sizeof(expected), "%s.expected", source);
+            for (uint32_t tier = 0; tier < 2; tier += 1)
+            {
+                char name[64];
+                snprintf(name, sizeof(name), "%s-tier%u", line, tier);
+                char error[512] = { 0 };
+                const bool ok = assembly_test_c_program(test, compiler, source, expected, name, tier == 1, error, sizeof(error));
+                char detail[640];
+                snprintf(detail, sizeof(detail), "%s.c at Tier %u: %s", line, tier, error);
+                assembly_test_check(test, ok, "c-testsuite", detail);
+                programs += 1;
+                passed += ok;
+            }
+        }
+    }
+    if (list != 0)
+    {
+        fclose(list);
+    }
+    printf("assembly output: c-testsuite: %u of %u -S compiles (Tier 0 and --tier1) reassembled by GNU as into -c's object and ran\n", passed, programs);
+}
+
 static int run_assembly_output_tests(int count, char** arguments)
 {
     AssemblyTest test = {
@@ -891,6 +1136,10 @@ static int run_assembly_output_tests(int count, char** arguments)
         .scratch = arena_reserve(1ull << 30),
     };
     bool valid = oracle_epoch_begin();
+    const char* c_testsuite = 0;
+    const char* subset = 0;
+    const char* compared[64];
+    uint32_t compared_count = 0;
     for (int i = 0; i < count; i += 1)
     {
         if (strcmp(arguments[i], "--cross-check") == 0)
@@ -901,11 +1150,31 @@ static int run_assembly_output_tests(int count, char** arguments)
         {
             test.keep = true;
         }
+        else if (strcmp(arguments[i], "--c-testsuite") == 0 && i + 1 < count)
+        {
+            c_testsuite = arguments[++i];
+        }
+        else if (strcmp(arguments[i], "--subset") == 0 && i + 1 < count)
+        {
+            subset = arguments[++i];
+        }
+        else if (strcmp(arguments[i], "--compare") == 0 && i + 1 < count && compared_count < BUSTER_ARRAY_LENGTH(compared))
+        {
+            compared[compared_count++] = arguments[++i];
+        }
+        else if (strcmp(arguments[i], "--option") == 0 && i + 1 < count && test.option_count < BUSTER_ARRAY_LENGTH(test.options))
+        {
+            test.options[test.option_count++] = arguments[++i];
+        }
         else
         {
-            fprintf(stderr, "usage: compiler test-assembly-output [--cross-check] [--keep]\n");
             valid = false;
         }
+    }
+    if (!valid || (c_testsuite != 0) != (subset != 0))
+    {
+        fprintf(stderr, "usage: compiler test-assembly-output [--cross-check] [--keep] [--c-testsuite DIRECTORY --subset FILE] [--compare SOURCE]... [--option ARGUMENT]...\n");
+        valid = false;
     }
     char directory[] = "/tmp/buster-assembly-output-XXXXXX";
     valid = valid && x86_encoder_initialize() && x86_semantics_initialize() && mkdtemp(directory) != 0;
@@ -926,7 +1195,7 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_refusal(&test, ASSEMBLY_TEST_TLS, ASSEMBLY_UNSUPPORTED, "thread-local storage");
         assembly_test_refusal(&test, ASSEMBLY_TEST_GROUP, ASSEMBLY_UNSUPPORTED, "section groups");
         assembly_test_refusal(&test, ASSEMBLY_TEST_COMMON, ASSEMBLY_UNSUPPORTED, "common symbols");
-        assembly_test_refusal(&test, ASSEMBLY_TEST_UNCODED, ASSEMBLY_UNSUPPORTED, "code without instruction records");
+        assembly_test_refusal(&test, ASSEMBLY_TEST_UNCODED, ASSEMBLY_UNSUPPORTED, "without instruction records");
         assembly_test_refusal(&test, ASSEMBLY_TEST_DUPLICATE, ASSEMBLY_UNSUPPORTED, "two symbols of the same name");
         assembly_test_refusal(&test, ASSEMBLY_TEST_PREFIX, ASSEMBLY_UNSUPPORTED, BUSTER_ASSEMBLY_PREFIX);
         assembly_test_refusal(&test, ASSEMBLY_TEST_RECORDS, ASSEMBLY_INVALID, "don't encode to their function's bytes");
@@ -937,6 +1206,27 @@ static int run_assembly_output_tests(int count, char** arguments)
         if (test.cross_check)
         {
             assembly_test_forms(&test, 2);
+        }
+        if (c_testsuite != 0)
+        {
+            assembly_test_c_testsuite(&test, c_testsuite, subset);
+        }
+        char compiler[PATH_MAX];
+        const ssize_t length = compared_count != 0 ? readlink("/proc/self/exe", compiler, sizeof(compiler) - 1) : 0;
+        compiler[length > 0 ? length : 0] = 0;
+        for (uint32_t i = 0; i < compared_count; i += 1)
+        {
+            for (uint32_t tier = 0; tier < 2; tier += 1)
+            {
+                char name[64];
+                snprintf(name, sizeof(name), "compare-%u-tier%u", i, tier);
+                char error[512] = { 0 };
+                const bool same = length > 0 && assembly_test_compare(&test, compiler, compared[i], name, tier == 1, error, sizeof(error));
+                char detail[PATH_MAX + 640];
+                snprintf(detail, sizeof(detail), "%s at Tier %u: %s", compared[i], tier, error);
+                assembly_test_check(&test, same, "--compare", detail);
+                printf("assembly output: %s at Tier %u: %s\n", compared[i], tier, same ? "-S reassembled by GNU as into -c's object" : "failed");
+            }
         }
     }
     if (valid && !test.keep)

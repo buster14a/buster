@@ -177,12 +177,14 @@ static CheckValue check_test_float(TypeId type, long double value)
 
 static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
 {
-    // A _BitInt past 128 bits' constant points to its limbs from the floating payload: the same number from two paths
-    // has two pointers (c_check_wide.c).
+    // A _BitInt past 128 bits' constant points to its limbs from the floating payload, and a complex integer one of an
+    // element past 64 bits to its parts' from both payloads: the same number from two paths has two pointers
+    // (c_check_wide.c, c_check_complex.c).
     const int32_t wide = check_wide_same(a, b);
-    const bool floating = wide >= 0 ? wide == 1 : (isnan(a->floating) && isnan(b->floating)) ||
+    const int32_t complex = check_complex_wide_same(a, b);
+    const bool floating = complex >= 0 ? complex == 1 : wide >= 0 ? wide == 1 : (isnan(a->floating) && isnan(b->floating)) ||
                           (a->floating == b->floating && signbit(a->floating) == signbit(b->floating));
-    const bool imaginary = (isnan(a->imaginary) && isnan(b->imaginary)) ||
+    const bool imaginary = complex >= 0 ? complex == 1 : (isnan(a->imaginary) && isnan(b->imaginary)) ||
                            (a->imaginary == b->imaginary && signbit(a->imaginary) == signbit(b->imaginary));
     return a->type == b->type && a->category == b->category && a->flags == b->flags &&
            a->constant_kind == b->constant_kind && a->integer == b->integer && floating && imaginary && a->object == b->object && a->overload_head == b->overload_head &&
@@ -1349,8 +1351,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     check_test_expect(test, hexadecimal.valid && hexadecimal.type == BUSTER_TYPE_INT && hexadecimal.integer == 0x1f16, "a hexadecimal integer ending in f16 is an integer");
     // Bit-precise constants (#768): C23's wb and WB, alone or with u or U before or after them, in each radix and with
     // digit separators, as the widths and values clang 23 gives them (each checked there by _Generic), a width past 128
-    // bits and a value past them (UINT32_MAX), which the reader refuses by name; and the spellings C23 doesn't have,
-    // with the imaginary one, which clang takes as a _Complex _BitInt it doesn't let a program spell and GCC refuses.
+    // bits and a value past them (UINT32_MAX), which the reader refuses by name; and the spellings C23 doesn't have. The
+    // imaginary ones are below (#2219).
     const struct
     {
         const char* spelling;
@@ -1404,8 +1406,16 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
         "5llwb",
         "5wbll",
         "5wbwb",
-        "5wbi",
-        "5iwb",
+        "5iwbi",
+        "5wbwbi",
+        "5iwbwb",
+        "5wbif16",
+        "5wbf16i",
+        "5.0wbi",
+        "5wBi",
+        "5iwB",
+        "5wbli",
+        "5uwbui",
         "5w",
         "5b",
         "5uw",
@@ -1420,6 +1430,68 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
         char description[128];
         snprintf(description, sizeof(description), "%s is no constant C23 has, as clang has it", invalid_bit_precise[i]);
         check_test_expect(test, !literal.valid && !literal.resource && scratch->length == mark, description);
+    }
+    // Imaginary bit-precise constants (#2219), clang's _Complex _BitInt(N): the imaginary suffix before or after wb and u,
+    // in either case and as j, with the real constant's width and value, its type the reader's to make; and their values,
+    // the imaginary part's in `integer`'s high half to 64 bits, past them both parts' limbs (c_check_complex.c), the real
+    // part's zeros, a wide constant's imaginary part its own limbs.
+    const struct
+    {
+        const char* spelling;
+        uint32_t width;
+        bool is_unsigned;
+        uint64_t high;
+        uint64_t low;
+    } imaginary_bit_precise[] =
+    {
+        { "5wbi", 4, false, 0, 5 },
+        { "5iwb", 4, false, 0, 5 },
+        { "5WBJ", 4, false, 0, 5 },
+        { "5Iwb", 4, false, 0, 5 },
+        { "0wbi", 2, false, 0, 0 },
+        { "5uwbi", 3, true, 0, 5 },
+        { "5wbui", 3, true, 0, 5 },
+        { "5iuwb", 3, true, 0, 5 },
+        { "5uiwb", 3, true, 0, 5 },
+        { "5wbiu", 3, true, 0, 5 },
+        { "0x7fff'ffff'ffff'ffffwbi", 64, false, 0, INT64_MAX },
+        { "0xffffffffffffffffuwbi", 64, true, 0, UINT64_MAX },
+        { "0x8000000000000000wbi", 65, false, 0, UINT64_C(0x8000000000000000) },
+        { "0x1'0000'0000'0000'0000iuwb", 65, true, 1, 0 },
+        { "0x7fffffffffffffffffffffffffffffffwbi", 128, false, INT64_MAX, UINT64_MAX },
+        { "0xffffffffffffffffffffffffffffffffwbi", 129, false, UINT64_MAX, UINT64_MAX },
+        { "0x8000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0001iwb", 257, false, 0, 1 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(imaginary_bit_precise); i += 1)
+    {
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)imaginary_bit_precise[i].spelling, (uint32_t)strlen(imaginary_bit_precise[i].spelling), scratch, &literal);
+        const uint32_t width = imaginary_bit_precise[i].width;
+        const unsigned __int128 expected = (unsigned __int128)imaginary_bit_precise[i].high << 64 | imaginary_bit_precise[i].low;
+        const bool read = literal.valid && literal.type == 0 && literal.bit_width == width && literal.bit_unsigned == imaginary_bit_precise[i].is_unsigned &&
+                          ((unsigned __int128)literal.high << 64 | literal.integer) == expected && literal.imaginary && scratch->length == mark;
+        const CheckValue value = check_literal_value(literal);
+        bool parts = value.constant_kind == CHECK_CONSTANT_COMPLEX;
+        if (parts && width <= 64)
+        {
+            parts = value.integer == expected << 64;
+        }
+        else if (parts)
+        {
+            const uint32_t count = check_wide_count(width);
+            const uint64_t* real = check_complex_wide_limbs(&value, false, count);
+            const uint64_t* imaginary = check_complex_wide_limbs(&value, true, count);
+            parts = real != NULL && imaginary != NULL && check_wide_is_zero(real, count) && value.integer == 0 && imaginary[0] == imaginary_bit_precise[i].low &&
+                    imaginary[1] == imaginary_bit_precise[i].high;
+            for (uint32_t limb = 2; parts && limb < count; limb += 1)
+            {
+                parts = imaginary[limb] == (width == 257 && limb == 3 ? UINT64_C(0x8000000000000000) : 0);
+            }
+        }
+        char description[192];
+        snprintf(description, sizeof(description), "%s is an imaginary bit-precise constant of %u bits with clang's value, its parts the complex constant's",
+                 imaginary_bit_precise[i].spelling, width);
+        check_test_expect(test, read && parts, description);
     }
 }
 
@@ -2837,7 +2909,7 @@ static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, u
     uint32_t line = 0;
     if (token < parser->tokens.count)
     {
-        const uint32_t location = pp->output.locations[parser->tokens.sources[token]];
+        const uint32_t location = pp->output.locations[parse_source_index(&parser->tokens, token)];
         const char* name = 0;
         uint32_t length = 0;
         line = pp_presumed(pp, location, &name, &length);
@@ -3171,7 +3243,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                 if (checked[p] && streams[p].report_count != 0)
                 {
                     const uint32_t token = streams[p].reports[0].token;
-                    const uint32_t source = token < parsers[p].tokens.count ? parsers[p].tokens.sources[token] : BUSTER_CHECK_NONE;
+                    const uint32_t source = token < parsers[p].tokens.count ? parse_source_index(&parsers[p].tokens, token) : BUSTER_CHECK_NONE;
                     first = source < first ? source : first;
                 }
                 if (checked[p] && streams[p].report_count == 0)
@@ -3185,7 +3257,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     if (!initialized)
                     {
                         const uint32_t token = initializers.token;
-                        const uint32_t source = token < parsers[p].tokens.count ? parsers[p].tokens.sources[token] : BUSTER_CHECK_NONE;
+                        const uint32_t source = token < parsers[p].tokens.count ? parse_source_index(&parsers[p].tokens, token) : BUSTER_CHECK_NONE;
                         first = source < first ? source : first;
                     }
                     // The musttail returns' errors (#147, c_check_musttail.c), as the driver reports them after the expressions'.
@@ -3197,7 +3269,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     {
                         const CheckMusttailDiagnostic* diagnostic = musttails.diagnostics + m;
                         unsupported[p] |= diagnostic->error == CHECK_MUSTTAIL_BUILTIN;
-                        const uint32_t source = diagnostic->token < parsers[p].tokens.count ? parsers[p].tokens.sources[diagnostic->token] : BUSTER_CHECK_NONE;
+                        const uint32_t source = diagnostic->token < parsers[p].tokens.count ? parse_source_index(&parsers[p].tokens, diagnostic->token) : BUSTER_CHECK_NONE;
                         first = source < first ? source : first;
                     }
                 }

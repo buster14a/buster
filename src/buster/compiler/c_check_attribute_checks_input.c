@@ -383,9 +383,9 @@ static uint32_t check_input_external_source_parse(CheckInputReader* reader, Chec
 // with its index in the preprocessor's output).
 static bool check_input_double_colon(const Parser* parser, uint32_t token)
 {
-    const bool before = token > 0 && parser->tokens.kinds[token - 1] == PARSE_KIND_COLON && parser->tokens.sources[token - 1] == parser->tokens.sources[token];
+    const bool before = token > 0 && parser->tokens.kinds[token - 1] == PARSE_KIND_COLON && parse_source_index(&parser->tokens, token - 1) == parse_source_index(&parser->tokens, token);
     const bool after = token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON &&
-                       parser->tokens.sources[token + 1] == parser->tokens.sources[token];
+                       parse_source_index(&parser->tokens, token + 1) == parse_source_index(&parser->tokens, token);
     return parser->tokens.kinds[token] == PARSE_KIND_COLON && (before || after);
 }
 

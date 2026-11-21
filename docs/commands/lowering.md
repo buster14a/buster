@@ -2315,6 +2315,30 @@ each template's shape with the mark of those whose rows are not made here,
 the order's permutation, void's word, which the reads don't read, and the
 values' two tables' bytes by a record's own shape.
 
+### Hardware counters for the window's sweeps (#3196)
+
+`./build/compiler measure-node-machine --shadow --window-rows --passes 0 --window-counter rows cycles file.c`
+
+Select one family and one hardware event per invocation. The families are
+`tests` (bytes and the tests loop with its cast-result asks), `contexts`
+(loop, targets and expressions), and `rows` (reads, shapes, update/branch
+lists, write, values, expressions and summaries). The events are `cycles`,
+`instructions`, `branches`, `branch-misses`, `frontend-stalls`,
+`l1d-misses` and `l1i-misses`. An unavailable or unschedulable counter
+makes the command fail. Pin the Release executable to the benchmark CPU.
+
+Each `node-window-counter` line gives the user-mode hardware event total
+for the first or second execution over the same chunks across all input
+files. Both runs use the ordinary shadow's sweeps. Selecting `tests` also
+repeats its byte and mask construction over the first run's memoized
+declarations. The lists interval includes the test for a chunk with no
+updates or branches. With `--no-window-summaries` there is no summaries
+reading. `raw` is the unadjusted total. Both rates subtract one median
+empty interval per chunk and divide by all chunks or all swept records.
+A small adjusted reading may be negative. Use the ordinary command
+without profiling for the existing TSC comparisons.
+
+
 ### An operator's value and a comma on the window (#2850)
 
 The same commands, `measure-node-machine --shadow --window-contexts` and
@@ -2440,27 +2464,20 @@ survey of those passes, what it measured and its gates.
 - **A condition's truth and a constant's fold** are a summary node's
   value's to answer, with nothing in the side record.
   `check_program_branch_truth` knows a branch's condition's truth where the
-  condition's value has none in two cases, and the window lists both.
-  - **By one operand of an `&&` or an `||`:** the turns list an `&&` or an
-    `||` whose second operand's truth is known (`node_rows_window_decided`:
-    a constant's, but an object's lvalue's), whether it is evaluated as
-    branches or as a value (reason `branches`).
-  - **Through a cast:** the walk gives a cast its operand's truth (#3204),
-    so a cast that is no constant itself, over an operand whose truth may
-    be known, passes a truth its own value has not (`(char)(long)&x`: an
-    address is not null, and its low byte is no constant). C's loop lists
-    its expression (`node_contexts_window_loop`'s `passes_truth`, reason
-    `operator`) where its consumer may ask its truth: a CONDITION, a `!`,
-    an `&&` or an `||`, or another wrapper. A cast that is a constant with
-    an effect's flag is listed too, and a cast to void never. A `!` and a
-    CONDITION are a constant wherever their operand's truth is known
-    (`check_action_logic`), and ask for no term.
+  condition's value has none when one operand decides a logical operator,
+  including under a cast or `!`. The turns list an `&&` or an `||` whose
+  second operand has a known truth (`node_rows_window_decided`, reason
+  `branches`). A cast with no known value can pass an inferred logical
+  result of 0 or 1. It cannot inherit the truth of an address before
+  truncation. The branch walk retains its handling of numeric conversions
+  under `FENV_ACCESS`. The type machine already lists that context. The
+  window needs no separate cast refusal (#3204).
 
   The controls' fold (`check_control_fold_truth`) does not fold a comma
   whose left operand is no constant: C lists a folded comma.
-- **Not made: a `switch`'s selector's type.** `-Wswitch` reads the node at
-  the selector's first token (#3200), which only the walk makes: a
-  `switch`'s condition stays the walk's.
+- **A switch's selector type.** The operand of its promotion in the window
+  supplies the type that `-Wswitch` reads. Each taken switch keeps this one
+  word after its references. Other expressions store their references alone.
 
 `--no-window-summaries` is the cost's switch: the same run with no lines'
 column, no calls' mask and no sweep, and with nothing kept or compared. The
@@ -2478,8 +2495,6 @@ The report adds:
   sweep lists for a reference, in any expression, the calls it asks and the
   expressions the reduction runs on; the chunks whose second run made other
   facts; and the operators the turns list.
-- `node-shadow: window contexts casts-listed-for-a-truth-their-value-has-not=N`,
-  with `--window-contexts` too: the casts C's loop lists.
 - `node-shadow: window summaries compared=N (not kept: N) the program's
   references=N reference-differences=N fact-differences=N (the program's:
   a stop=N an unknown=N); folds asked=N fold-differences=N (of the
@@ -2492,6 +2507,11 @@ The report adds:
   branch's condition, whether `check_program_branch_truth` knows its truth
   exactly where its value says it. The four differences, `not kept` and the
   second runs that differ must be 0: the command exits 1 otherwise.
+- `node-shadow: window summaries switch selectors=N enums=N type-differences=N`
+  counts the kept switches, how many have an enum selector before promotion,
+  and how many types disagree with `check_common_switch_selector_type`.
+  A difference makes the command exit 1. The summary fault control changes
+  the type of every kept selector.
 - `node-shadow: window summaries ticks=N (T a record swept, T a chunk); a
   second run over the same chunk, not counted: ticks=N (T a record swept,
   T a chunk)`: the sweep's TSC ticks.
@@ -2694,3 +2714,61 @@ search of lists of every length to 20, and
 `node_objects_test_comparisons` the shadow's own comparisons, a row a
 case: an object's facts against the program's, the objects a rename
 pragma labelled, and a name's line by its number or its words.
+
+
+### Compiling with the window (#2850)
+
+`./build/compiler --node-window -c file.c -o file.o` enables the first production
+use of the window. For a complete `return` of an unqualified `int`, the reader
+can accept a plain integer literal, its unary minus, or two such literals with
+`+`, `-` or `*`. The literal values come from the normal chunk decoder. The
+operator uses the window kernel's checked integer fold, which refuses overflow.
+A successful return gets one checked value at its return token and one retained
+native CONST entry. The lowering emits this entry in the ordinary body's tape.
+For example, `return 18 + 24;` replaces two literal nodes, the addition and the
+return conversion with one summary carrying 42.
+
+The reader also accepts `return x;` and `return +x;` for an unqualified,
+ordinary automatic int or int parameter. The LOCAL entry keeps the declared
+object. The lowering relocates it to the enclosing body's local number.
+The entry records the source identifier's token offset within the return.
+The uninitialized pass uses the summary node's reach and order together with
+that token, so that it still reports the first evaluated read of an
+uninitialized variable, including its source position and note. An
+unreachable read still counts as a syntactic use of a written parameter.
+Local reads use the ordinary graph with debug information enabled, preserving
+the identifier source positions. Other storage classes, special registers and
+qualified types also keep their graph.
+
+`--node-window-assignments` enables the same returns and also scans for complete
+discarded assignments such as `x = 24;` and `x = y;`, with distinct ordinary
+automatic or parameter `int` objects. An admitted assignment retains three
+entries for its right operand, local store and discard, each with its own
+source token. The read and write events feed the existing warning passes.
+The base `--node-window` mode skips assignment discovery.
+
+A block statement such as `((void)7);` can also use the window. The cast
+must discard a plain integer literal from the chunk decoder. Grouping
+parentheses around the cast or the literal are accepted. The native CONST
+keeps the literal's token and the DISCARD keeps the cast's token. The checker
+still handles operands with side effects, loop clauses and the final value of
+a GNU statement expression.
+
+Admission requires the entire expression in the same coded chunk. Other types,
+operators and spellings, deferred parts, and units requiring
+musttail validation use the existing graph. The window checks the coded tokens
+before any of their graph actions run. A refusal consumes no tokens. No ordinary
+graph or shadow run supplies a successful fold.
+
+With debug information enabled, the CONST row keeps the return token. The
+ordinary lowering uses this same token for the folded return conversion,
+including when its operands occur on different lines or come from macros.
+The node-machine fixture compares every native entry and its source token
+between the two lowerings.
+
+`--time-stages` reports the expressions taken, the ordinary nodes they replace,
+the summaries and the resulting graph size per unit. The
+`test-checker` node-machine tests compare checked root values and native tapes
+with the ordinary compile, then change a retained row to exercise the splice.
+The checker driver also checks warning policy, diagnostic order and object bytes
+for a unit containing both taken and refused expressions.
