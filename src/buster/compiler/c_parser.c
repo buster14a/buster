@@ -1238,6 +1238,10 @@ struct ParseScalar
     // it read as an expression's, at the argument's first token (BUSTER_PARSE_NONE if none), and its message.
     uint32_t error_follow_token;
     uint8_t error_follow_message;
+    // Before it, where the type name's argument goes on (`counted_by(T n)`): clang's "expected ')'" at that token, its note
+    // at the group's `(`, as ParseBoundsAttribute's (#1842); BUSTER_PARSE_NONE for none, and the `(`.
+    uint32_t error_follow_paren;
+    uint32_t error_follow_open;
     uint8_t error_message;
     uint8_t error_place;
     // Whether the error is a missing `;` that clang's recovery reads past (ParseDiagnostic.resumed).

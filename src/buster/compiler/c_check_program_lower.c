@@ -10480,6 +10480,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
             {
                 call->padding = plan->entries;
                 call->padding_count = plan->count;
+                call->padding_words = plan->words;
                 call->padding_elements = plan->elements;
                 call->padding_stride = plan->stride;
                 padding_pool = plan->pool;
