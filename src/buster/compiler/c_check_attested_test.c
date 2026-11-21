@@ -889,6 +889,10 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "sugar_nodes", CHECK_ATTESTED_FIELD_TYPES },
     { "sugar_mask", CHECK_ATTESTED_FIELD_TYPES },
     { "sugar_entries", CHECK_ATTESTED_FIELD_TYPES },
+    { "window_entries", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_capacity", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "window_nodes", CHECK_ATTESTED_FIELD_MEASURE },
 };
 
 static const CheckAttestedField check_attested_reader_fields[] =
