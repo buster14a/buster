@@ -6231,9 +6231,73 @@ static void node_window_test_compile(CheckTest* test)
     lower_source_close(&plain);
 }
 
+static void node_window_test_conditions(CheckTest* test)
+{
+    char file[PATH_MAX];
+    snprintf(file, sizeof(file), "%s/checker/node-window-conditions.c", check_test_fixture_root);
+    char* options[] = { "-nostdinc", "-Wall", "-Wextra" };
+    static LowerSource regular;
+    static LowerSource candidate;
+    const bool baseline = lower_source_open(&regular, file, options, BUSTER_ARRAY_LENGTH(options), true);
+    const bool opened = lower_source_open(&candidate, file, options, BUSTER_ARRAY_LENGTH(options), BUSTER_LOWER_SOURCE_WINDOW_CONDITIONS);
+    const bool prepared = baseline && opened && regular.prepared && candidate.prepared;
+    check_test_expect(test, prepared, "node-window prepares plain comparisons alongside ordinary conditions");
+    if (prepared)
+    {
+        const CheckInput* reference = &regular.path.input;
+        const CheckInput* input = &candidate.path.input;
+        bool same = input->window_condition_count == 6 && reference->graph.count == input->graph.count + 2 * input->window_condition_count;
+        uint32_t seen = 0;
+        uint32_t kinds = 0;
+        for (uint32_t n = 0; same && n < input->graph.count; n += 1)
+        {
+            if (input->graph.ops[n] == CHECK_OP_CONDITION)
+            {
+                const uint32_t operand = input->graph.operand0[n];
+                const CheckInputWindowSummary* summary = check_input_window_summary(input, operand);
+                if (summary != NULL)
+                {
+                    const CheckInputWindowRow* rows = input->window_rows + summary->first;
+                    const uint32_t token = input->graph.tokens[operand];
+                    const uint32_t regular_operand = reference->token_nodes[token];
+                    if (regular_operand >= reference->graph.count || reference->graph.ops[regular_operand] < CHECK_OP_LESS || reference->graph.ops[regular_operand] > CHECK_OP_NOT_EQUAL)
+                    {
+                        same = false;
+                        break;
+                    }
+                    const CheckValue made = check_stream_value(&candidate.path.stream, operand);
+                    const CheckValue wanted = check_stream_value(&regular.path.stream, regular_operand);
+                    const uint32_t kind = summary->count == 3 ? rows[2].kind : BUSTER_TYPED_NONE;
+                    same = input->graph.ops[operand] == CHECK_OP_VALUE &&
+                           check_test_value_equal(&made, &wanted) &&
+                           kind == check_lower_binary(reference->graph.ops[regular_operand]) && rows[2].token == token &&
+                           ((rows[0].flags | rows[1].flags) & BUSTER_CHECK_WINDOW_READ) != 0;
+                    kinds |= 1u << (uint32_t)(reference->graph.ops[regular_operand] - CHECK_OP_LESS);
+                    seen += 1;
+                }
+            }
+        }
+        check_test_expect(test, same && seen == 6 && kinds == 63, "node-window seals six integer comparison values and keeps their ordinary condition wrappers");
+        CheckProgramLowered first = { 0 };
+        CheckProgramLowered second = { 0 };
+        bool lowered = check_program_lower_sources(&first, &regular.selected.program, true, &regular.path.output_arena, &regular.path.scratch) &&
+                       check_program_lower_sources(&second, &candidate.selected.program, true, &candidate.path.output_arena, &candidate.path.scratch) && first.count == second.count;
+        for (uint32_t i = 0; lowered && i < first.count; i += 1)
+        {
+            const uint32_t count = first.functions[i].count;
+            lowered = check_test_program_function(first.functions + i, second.functions + i) &&
+                      (count == 0 || memcmp(first.entry_tokens[i], second.entry_tokens[i], (size_t)count * sizeof(uint32_t)) == 0);
+        }
+        check_test_expect(test, lowered, "node-window comparisons lower to the ordinary value rows, source tokens, branches and targets");
+    }
+    lower_source_close(&candidate);
+    lower_source_close(&regular);
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
     node_window_test_compile(test);
+    node_window_test_conditions(test);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready, "node-census fixtures' directory is made");

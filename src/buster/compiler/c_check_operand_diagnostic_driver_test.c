@@ -90,10 +90,11 @@ static void check_test_driver_operand_diagnostics(CheckTest* test, const char* c
         uint32_t errors;
         uint32_t warnings;
         uint32_t notes;
-        bool node_window;
+        const char* alternate;
     } files[] =
     {
-        { .name = "node_window_warnings", .option = "-Wall", .warnings = 10, .notes = 4, .node_window = true },
+        { .name = "node_window_warnings", .option = "-Wall", .warnings = 10, .notes = 4, .alternate = "--node-window" },
+        { .name = "node_window_conditions", .option = "-Wall", .warnings = 3, .notes = 3, .alternate = "--node-window-conditions" },
         { .name = "unary", .errors = 9 },
         { .name = "binary", .errors = 12 },
         { .name = "conditional", .errors = 13 },
@@ -128,7 +129,7 @@ static void check_test_driver_operand_diagnostics(CheckTest* test, const char* c
                 .errors = files[i].errors,
                 .warnings = files[i].warnings,
                 .notes = files[i].notes,
-                .compare_node_window = files[i].node_window,
+                .alternate = files[i].alternate,
             };
             for (uint32_t language = 0; language < 2; language += 1)
             {

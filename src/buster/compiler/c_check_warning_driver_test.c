@@ -15,7 +15,7 @@ struct CheckDriverDefaultWarningFixture
     uint32_t notes;
     bool c23;
     bool compare_warning_text;
-    bool compare_node_window;
+    const char* alternate;
     bool syntax_only;
 };
 
@@ -3063,7 +3063,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                 check_test_expect(test, oracle_matches, description);
                 for (uint32_t lane = 0; oracle_ready && lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
                 {
-                    const char* alternate = fixture->compare_node_window ? "--node-window" : "--scalar";
+                    const char* alternate = fixture->alternate != NULL ? fixture->alternate : "--scalar";
                     for (uint32_t route = 0; route < 2; route += 1)
                     {
                         arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");

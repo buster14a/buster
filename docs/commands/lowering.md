@@ -2718,6 +2718,17 @@ uninitialized variable, including its source position and note. An
 unreachable read still counts as a syntactic use of a written parameter.
 Other storage classes, special registers and qualified types keep their graph.
 
+With `--node-window-conditions`, the reader also tests the condition of an
+`if` or `while`. The window front builds its operator and operand distances
+from the compacted actions. For a comparison between two plain `int`
+operands, at least one an automatic object or parameter, the typing table
+checks both conversions and the result. The summary keeps the two native
+operand rows, their read positions, and the comparison row. For example,
+`if (limit > 7)` retains LOCAL, CONST and GT at their original source tokens.
+The ordinary condition node still owns the branch and its target.
+`--time-stages` reports the control candidates, the subtrees fitting the
+32-token limit in a single chunk, the comparisons taken and their native rows.
+
 Admission requires the entire expression in the same coded chunk. Other types,
 operators and spellings, debug information, deferred parts, and units requiring
 musttail validation use the existing graph. The window checks the coded tokens

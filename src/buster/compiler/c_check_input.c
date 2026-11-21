@@ -1310,6 +1310,9 @@ struct CheckInput
     uint32_t window_capacity;
     uint32_t window_count;
     uint32_t window_nodes;
+    uint32_t window_condition_candidates;
+    uint32_t window_condition_bounded;
+    uint32_t window_condition_count;
 };
 
 // The summary owned by this VALUE. The reciprocal link distinguishes the other uses of the members column.
