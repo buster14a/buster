@@ -488,7 +488,7 @@ static bool check_test_program_atomic_lowered(CheckTest* test, const char* sourc
         Arena output = arena_reserve(UINT64_C(1) << 24);
         Arena scratch = arena_reserve(UINT64_C(1) << 24);
         const ParseOptions parse_options = { .scalar = path == 0 };
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
                      parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
         CheckInput input = { 0 };

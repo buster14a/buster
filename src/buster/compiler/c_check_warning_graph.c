@@ -622,7 +622,6 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     const CheckGraph* graph = &input->graph;
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = parser->options.scalar;
     Arena* scratch = reader->scratch;
     const uint64_t mark = scratch->length;
     const uint32_t report_begin = input->report_count;
@@ -635,10 +634,10 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
         memset(interrupts, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(saving, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         const CheckSparseWide all = input->attributes;
-        for (uint32_t first = check_sparse_wide_present(all) ? check_input_attributed_next(all, 0, count, scalar) : count; first < count;
-             first = check_input_attributed_next(all, first + 16, count, scalar))
+        for (uint32_t first = check_sparse_wide_present(all) ? check_input_attributed_next(all, 0, count) : count; first < count;
+             first = check_input_attributed_next(all, first + 16, count))
         {
-            const uint32_t lanes = check_input_attributed_group(all, first, count, scalar);
+            const uint32_t lanes = check_input_attributed_group(all, first, count);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -704,8 +703,8 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     // The bodies of the functions they mark, in token order.
     const bool bodied = valid && check_sparse_present(input->body_declarations);
     uint32_t body_count = 0;
-    for (uint32_t opening = bodied ? check_sparse_next(input->body_declarations, 0, count, !BUSTER_SCALAR_PATH(scalar)) : count; opening < count;
-         opening = check_sparse_next(input->body_declarations, opening + 1, count, !BUSTER_SCALAR_PATH(scalar)))
+    for (uint32_t opening = bodied ? check_sparse_next(input->body_declarations, 0, count) : count; opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count))
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         const uint32_t object = declaration < count ? input->objects[declaration] : 0;
@@ -715,8 +714,8 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     CheckInterruptBody* bodies = valid && body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInterruptBody, body_count) : NULL;
     valid = valid && (body_count == 0 || bodies != NULL);
     uint32_t filled = 0;
-    for (uint32_t opening = bodied && bodies != NULL ? check_sparse_next(input->body_declarations, 0, count, !BUSTER_SCALAR_PATH(scalar)) : count; opening < count;
-         opening = check_sparse_next(input->body_declarations, opening + 1, count, !BUSTER_SCALAR_PATH(scalar)))
+    for (uint32_t opening = bodied && bodies != NULL ? check_sparse_next(input->body_declarations, 0, count) : count; opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count))
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         const uint32_t object = declaration < count ? input->objects[declaration] : 0;
