@@ -229,27 +229,27 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
     return fact;
 }
 
-// check_program_return_facts' walk: only a source, a node whose own contract may be a stop or unknown (a call, a
+// Walk [first, end) in topological order. Only a source, a node whose own contract may be a stop or unknown (a call, a
 // miscellaneous or x86 builtin, a query), or a node one of whose operands' or arguments' facts isn't zero can have facts,
 // so that each node's test reads its operands' facts, a byte each (an absent one the sink's, `facts[count]`, zero), and
 // only those nodes take check_program_return_node. A node's operands precede it, so their facts are made; one that doesn't
 // precede it has none yet, which check_program_return_node reads as none too. The sources are 16 operators at a time,
 // whose bits each block's nodes then take. Every other node's facts are zero, as check_program_return_node would make
 // them.
-static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, const uint32_t* unknowns, const uint8_t* names, uint64_t* work)
+static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, uint32_t first, uint32_t end,
+                                        const uint32_t* unknowns, const uint8_t* names, uint64_t* work)
 {
     const CheckGraph* graph = &program->input->graph;
     const uint32_t count = graph->count;
     const bool arguments = graph->argument_offsets != NULL && graph->argument_counts != NULL;
-    memset(facts, 0, (uint64_t)count + 1);
     const __m512i call = _mm512_set1_epi32(CHECK_OP_CALL);
     const __m512i query = _mm512_set1_epi32(CHECK_OP_BUILTIN_QUERY);
     const __m512i misc = _mm512_set1_epi32(CHECK_OP_BUILTIN_MISC);
     const __m512i x86 = _mm512_set1_epi32(CHECK_OP_BUILTIN_X86);
     const __m512i limit = _mm512_set1_epi32((int)count);
-    for (uint32_t first = 0; first < count; first += 16)
+    while (first < end)
     {
-        const __mmask16 live = count - first >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << (count - first)) - 1);
+        const __mmask16 live = end - first >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << (end - first)) - 1);
         const __m512i ops = _mm512_maskz_loadu_epi32(live, graph->ops + first);
         const uint32_t sources = _mm512_mask_cmpeq_epi32_mask(live, ops, call) | _mm512_mask_cmpeq_epi32_mask(live, ops, query) |
                                  _mm512_mask_cmpeq_epi32_mask(live, ops, misc) | _mm512_mask_cmpeq_epi32_mask(live, ops, x86);
@@ -258,7 +258,7 @@ static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, c
         _mm512_store_si512(operands[0], _mm512_min_epu32(_mm512_maskz_loadu_epi32(live, graph->operand0 + first), limit));
         _mm512_store_si512(operands[1], _mm512_min_epu32(_mm512_maskz_loadu_epi32(live, graph->operand1 + first), limit));
         _mm512_store_si512(operands[2], _mm512_min_epu32(_mm512_maskz_loadu_epi32(live, graph->operand2 + first), limit));
-        const uint32_t lanes = count - first < 16 ? count - first : 16;
+        const uint32_t lanes = end - first < 16 ? end - first : 16;
         for (uint32_t lane = 0; lane < lanes; lane += 1)
         {
             const uint32_t node = first + lane;
@@ -281,33 +281,76 @@ static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, c
                 }
             }
         }
+        first += lanes;
     }
 }
 
-// One postorder reduction gives each node a guaranteed stop and a possible unknown control contract
-// (check_program_return_node), visiting only the nodes that can have facts (check_program_return_sparse). Their
-// `count` + 1 entries end with a sink, zero. `scalar` is only the attributes' scan's (check_program_return_unknowns).
-static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch, uint64_t* work, bool scalar)
+typedef struct CheckReturnFacts CheckReturnFacts;
+struct CheckReturnFacts
 {
-    const CheckGraph* graph = &program->input->graph;
-    const uint32_t count = graph->count;
-    uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
-    uint32_t* unknowns = NULL;
-    const bool ready = (count == 0 || facts != NULL) && check_program_return_unknowns(program, scratch, &unknowns);
-    if (!ready)
+    Arena storage;
+    uint8_t* facts;
+    uint32_t* unknowns;
+    const uint8_t* names;
+    uint64_t* work;
+    uint32_t computed;
+};
+
+static bool check_program_return_prepare(CheckProgram* program, CheckReturnFacts* cache, Arena* scratch)
+{
+    const uint64_t bytes = (uint64_t)program->input->graph.count + 1;
+    cache->facts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, bytes);
+    if (cache->facts == NULL || !check_program_return_unknowns(program, scratch, &cache->unknowns))
     {
         check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
-        facts = NULL;
+        return false;
     }
-    // The names' answers are an optimisation only: without them every call searches the catalogue, as before.
-    const uint8_t* names = ready && count != 0 ? check_program_return_library_names(program->identifiers, scratch) : NULL;
-    if (ready && count != 0)
+    // This includes a zero sink for absent operands, and zeroes for forward references the checked walk may read.
+    memset(cache->facts, 0, bytes);
+    cache->names = check_program_return_library_names(program->identifiers, scratch);
+    return true;
+}
+
+// The complete postorder reduction for the diagnostic census and the checker's independent comparison.
+static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch, uint64_t* work, bool scalar)
+{
+    const uint32_t count = program->input->graph.count;
+    CheckReturnFacts cache = { 0 };
+    if (count == 0 || !check_program_return_prepare(program, &cache, scratch))
     {
-        check_program_return_sparse(program, facts, unknowns, names, work);
+        return NULL;
     }
-    if (ready && count != 0)
+    check_program_return_sparse(program, cache.facts, 0, count, cache.unknowns, cache.names, work);
+    return cache.facts;
+}
+
+// The source warning asks only about controls in a body that can fall through. A node's operands precede it:
+// retain completed vector blocks across bodies, extending the prefix only as far as a demanded root requires.
+static uint8_t check_program_return_cached(CheckProgram* program, CheckReturnFacts* cache, uint32_t root)
+{
+    const uint32_t count = program->input->graph.count;
+    if (root >= count || program->status != CHECK_PROGRAM_OK)
     {
-        facts[count] = 0;
+        return 0;
     }
-    return facts;
+    if (root >= cache->computed)
+    {
+        if (cache->facts == NULL)
+        {
+            // Body windows reuse their scratch, so this cache owns its storage until check_program_finish.
+            const uint64_t names = program->identifiers != NULL ? program->identifiers->count : 0;
+            const uint64_t tokens = (uint64_t)program->input->token_count + 1;
+            const uint64_t bytes = (uint64_t)count + 1 + tokens * sizeof(uint32_t) + names + _Alignof(uint32_t);
+            cache->storage = arena_reserve(bytes);
+            if (!check_program_return_prepare(program, cache, &cache->storage))
+            {
+                return 0;
+            }
+        }
+        const uint32_t block = root & ~15u;
+        const uint32_t end = count - block <= 16 ? count : block + 16;
+        check_program_return_sparse(program, cache->facts, cache->computed, end, cache->unknowns, cache->names, cache->work);
+        cache->computed = end;
+    }
+    return cache->facts[root];
 }
