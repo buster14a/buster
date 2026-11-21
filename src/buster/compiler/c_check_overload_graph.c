@@ -93,11 +93,16 @@ static CheckDiagnostic check_graph_overload_operands(TypeTable* types, const Che
     {
         if (action->operands[i].overload_head != 0)
         {
-            const TypeId target = i == 0 && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT) ? action->type :
+            // An operator's operand and a cast to void have no expected type: clang's placeholder (#2935).
+            const bool discarded = i == 0 && action->op == CHECK_OP_CAST && check_action_kind(types, action->type) == BUSTER_TYPE_KIND_VOID;
+            const TypeId target = discarded ? 0 :
+                                  i == 0 && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_INITIALIZE || action->op == CHECK_OP_CONVERT) ? action->type :
                                   i == 1 && action->op == CHECK_OP_ASSIGN ? action->operands[0].type : 0;
+            CheckOverloadContext operand_context = context;
+            operand_context.placeholder = target == 0;
             CheckValue value = { 0 };
             const CheckOverloadResult selected = check_overload_argument(types, action->operands + i, target, graph->overload_candidates,
-                                                                         graph->overload_candidate_count, &context, scratch, &value);
+                                                                         graph->overload_candidate_count, &operand_context, scratch, &value);
             if (selected.status != CHECK_OVERLOAD_OK)
             {
                 diagnostic = selected.status == CHECK_OVERLOAD_FULL ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE;
