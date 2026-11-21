@@ -18,16 +18,16 @@ static bool check_target_feature_intrinsic_noreturn(const CheckProgram* program,
 // needed; no type-based guess can distinguish qualified function pointers yet. Only a token with attributes can have
 // either, so the walk visits the attributes column's tokens in order (check_input_attributed_next: the vector path skips
 // 256 tokens without attributes a load, the scalar path, its twin, visits every group).
-static bool check_program_return_unknowns(const CheckProgram* program, Arena* scratch, uint32_t** first, bool scalar)
+static bool check_program_return_unknowns(const CheckProgram* program, Arena* scratch, uint32_t** first)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     bool ready = true;
     *first = NULL;
-    for (uint32_t group = program->identifiers != NULL && check_sparse_wide_present(input->attributes) ? check_input_attributed_next(input->attributes, 0, count, scalar) : count; ready && group < count;
-         group = check_input_attributed_next(input->attributes, group + 16, count, scalar))
+    for (uint32_t group = program->identifiers != NULL && check_sparse_wide_present(input->attributes) ? check_input_attributed_next(input->attributes, 0, count) : count; ready && group < count;
+         group = check_input_attributed_next(input->attributes, group + 16, count))
     {
-        for (uint32_t lanes = check_input_attributed_group(input->attributes, group, count, scalar); ready && lanes != 0; lanes &= lanes - 1)
+        for (uint32_t lanes = check_input_attributed_group(input->attributes, group, count); ready && lanes != 0; lanes &= lanes - 1)
         {
             const uint32_t token = group + (uint32_t)__builtin_ctz(lanes);
             const CheckInputAttributes* attributes = input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_input_attributes_at(input, token) : NULL;
@@ -293,7 +293,7 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
     const uint32_t count = graph->count;
     uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     uint32_t* unknowns = NULL;
-    const bool ready = (count == 0 || facts != NULL) && check_program_return_unknowns(program, scratch, &unknowns, scalar);
+    const bool ready = (count == 0 || facts != NULL) && check_program_return_unknowns(program, scratch, &unknowns);
     if (!ready)
     {
         check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);

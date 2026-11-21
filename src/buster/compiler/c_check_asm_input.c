@@ -840,15 +840,13 @@ static bool check_input_asm_label_use(const CheckInputReader* reader, uint32_t t
     return evaluated;
 }
 
-// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877, #1167): the
-// vector path skips 256 tokens without attributes with a load of their directory entries and tests 16 tokens' values 8
-// at a time (check_sparse_wide_entries); the scalar path, its twin, tests each token's. The asm labels' passes read them
-// rather than the column, which a unit's few attributed tokens left them sweeping three times.
-static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint32_t limit, uint32_t* tokens, bool scalar)
+// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877, #1167): it
+// skips 256 tokens without attributes with a load of their directory entries and tests 16 tokens' values 8 at a time
+// (check_sparse_wide_entries). The asm labels' passes read them rather than the column, which a unit's few attributed
+// tokens left them sweeping three times.
+static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint32_t limit, uint32_t* tokens)
 {
-    (void)scalar;
-
-    return check_sparse_wide_entries(input->attributes, limit, !BUSTER_SCALAR_PATH(scalar), tokens);
+    return check_sparse_wide_entries(input->attributes, limit, tokens);
 }
 
 // Whether bit `index` of `bits` is set: words of 32 bits, as the kernels below gather them.
@@ -923,7 +921,6 @@ static void check_input_asm_labels(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
     input->asm_warnings_prepared = true;
-    const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
     const uint64_t mark = reader->scratch->length;
     const uint64_t slots = (uint64_t)input->token_count + 1;
     const uint64_t words = (slots + 31) / 32;
@@ -931,7 +928,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
     // A label needs an asm keyword: without one, no token has a label to check.
     uint32_t* attributed = input->asm_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)limit + 1) : NULL;
     input->resource |= input->asm_capacity != 0 && attributed == NULL;
-    const uint32_t attributed_count = attributed != NULL ? check_input_asm_attributed_tokens(input, limit, attributed, scalar) : 0;
+    const uint32_t attributed_count = attributed != NULL ? check_input_asm_attributed_tokens(input, limit, attributed) : 0;
     bool present = false;
     for (uint32_t a = 0; !present && a < attributed_count; a += 1)
     {

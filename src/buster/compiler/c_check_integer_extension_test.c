@@ -217,7 +217,7 @@ static void check_test_integer_source_warnings(CheckTest* test, const char* clan
                          pp_run_source(&pp, "integer-warning-source.c", (const uint8_t*)source, strlen(source)) && parse_translation_unit(&parser, &pp);
             CheckInput input = { 0 };
             CheckStream stream = { 0 };
-            const CheckOptions check_options = { .scalar = path == 0 };
+            const CheckOptions check_options = { 0 };
             ready = ready && parser.errors == 0 && check_input(&input, &parser, &pp, &types.table, &storage, &scratch) &&
                     check_graph_run(&types.table, &input.graph, &output, &scratch, &check_options, &stream) && stream.report_count == 0;
             uint32_t all = 0;

@@ -281,15 +281,15 @@ static __attribute__((noinline)) void check_test_builtin_vector_graph(CheckTest*
     }
     if (ready)
     {
-        const CheckOptions options = { .scalar = true };
-        CheckStream scalar;
-        const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &scalar);
-        check_test_expect(test, checked && scalar.report_count == 0 && scalar.vector_count == BUSTER_ARRAY_LENGTH(fixtures),
+        const CheckOptions options = { 0 };
+        CheckStream reference;
+        const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &reference);
+        check_test_expect(test, checked && reference.report_count == 0 && reference.vector_count == BUSTER_ARRAY_LENGTH(fixtures),
                           "all vector builtin actions publish one compact descriptor in source order");
         for (uint32_t i = 0; checked && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
         {
-            const CheckBuiltinVectorEffect* effect = scalar.vectors + i;
-            const CheckValue node_value = check_stream_value(&scalar, nodes[i]);
+            const CheckBuiltinVectorEffect* effect = reference.vectors + i;
+            const CheckValue node_value = check_stream_value(&reference, nodes[i]);
             const CheckValue* value = &node_value;
             check_test_expect(test, effect->node == nodes[i] && value->type == fixtures[i].expected &&
                                    value->constant_kind == CHECK_CONSTANT_NONE && value->fault == CHECK_FAULT_NONE &&
@@ -298,19 +298,20 @@ static __attribute__((noinline)) void check_test_builtin_vector_graph(CheckTest*
         }
         if (checked)
         {
-            check_test_expect(test, scalar.vectors[4].reads_fp_environment && scalar.vectors[4].may_raise_fp_exceptions &&
-                                   scalar.vectors[19].reads_fp_environment && scalar.vectors[19].may_raise_fp_exceptions &&
-                                   scalar.vectors[20].nondeterministic && (check_stream_flags(&scalar, nodes[20]) & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
-                                   scalar.vectors[21].reads_memory && scalar.vectors[22].writes_memory &&
-                                   scalar.vectors[22].memory_type == BUSTER_TYPE_INT,
+            check_test_expect(test, reference.vectors[4].reads_fp_environment && reference.vectors[4].may_raise_fp_exceptions &&
+                                   reference.vectors[19].reads_fp_environment && reference.vectors[19].may_raise_fp_exceptions &&
+                                   reference.vectors[20].nondeterministic && (check_stream_flags(&reference, nodes[20]) & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+                                   reference.vectors[21].reads_memory && reference.vectors[22].writes_memory &&
+                                   reference.vectors[22].memory_type == BUSTER_TYPE_INT,
                               "floating conversion, nondeterminism and nontemporal memory effects remain explicit");
             const uint64_t mark = output.length;
+            check_test_expect(test, check_test_stream_recorded(&reference, &graph, graph.argument_count, "vector-builtin-graphs"), "vector-builtin-graphs: the reference stream is its recorded digest");
             for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 CheckStream actual;
                 const CheckOptions partition = { .batch_size = batch, .regions = batch != 0 };
                 check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &partition, &actual) &&
-                                       check_test_stream_equal(&scalar, &actual, graph.argument_count),
+                                       check_test_stream_equal(&reference, &actual, graph.argument_count),
                                   "all vector graph partitions preserve complete builtin descriptors");
                 arena_pop_to(&output, mark);
             }

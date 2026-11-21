@@ -494,13 +494,12 @@ static void check_input_fp_types(CheckInputReader* reader)
     const bool active = !reader->lane && requested != BUSTER_PREDEFINES_EVAL_DEFAULT && input->fp_environments != NULL;
     const uint64_t temporary = reader->scratch->length;
     const uint32_t count = reader->parser->tokens.count;
-    const bool scalar = reader->parser->options.scalar;
     uint8_t* marked = NULL;
     const bool attributed = active && check_sparse_wide_present(input->attributes);
-    for (uint32_t first = attributed ? check_input_attributed_next(input->attributes, 0, count, scalar) : count;
-         first < count && !input->resource; first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
+    for (uint32_t first = attributed ? check_input_attributed_next(input->attributes, 0, count) : count;
+         first < count && !input->resource; first = check_input_attributed_next(input->attributes, first + 16, count))
     {
-        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count, scalar);
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
         for (uint32_t selected = lanes; selected != 0 && !input->resource; selected &= selected - 1)
         {
             const uint32_t declaration = first + (uint32_t)__builtin_ctz(selected);

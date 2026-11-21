@@ -387,6 +387,36 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     tier1_schedule_test_expect(test, tier1_schedule_block(input, 0, 0, 0, &stats) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, 0), "empty input permits null slices");
 }
 
+static void tier1_schedule_test_depth(Tier1ScheduleTest* test, Tier1ScheduleGraph* graph)
+{
+    X86Instruction records[BUSTER_TIER1_SCHEDULE_MAX_RECORDS];
+    Tier1ScheduleInput input = {
+        .instructions = records,
+        .count = BUSTER_TIER1_SCHEDULE_MAX_RECORDS,
+    };
+    for (uint32_t i = 0; i < input.count; i += 1)
+    {
+        records[i] = tier1_schedule_test_instruction(X86_FORM_IMUL_R64_RM64, X86_REGISTER_R8, X86_REGISTER_R9);
+    }
+    tier1_schedule_test_check(test, input, graph);
+    tier1_schedule_test_expect(test, graph->levels[0] == input.count && graph->heights[0] == input.count * graph->latencies[0], "the full-depth multiply chain keeps its level and 32-bit height");
+
+    // The deepest root can come after the first record.
+    records[0] = (X86Instruction){ .form = X86_FORM_NOP };
+    tier1_schedule_test_check(test, input, graph);
+    tier1_schedule_test_expect(test, graph->levels[0] == 1 && graph->levels[1] == input.count - 1, "a disconnected leaf precedes the deepest root");
+
+    for (uint32_t i = 1; i < input.count; i += 1)
+    {
+        records[i] = records[0];
+    }
+    tier1_schedule_test_check(test, input, graph);
+    uint8_t pins[BUSTER_TIER1_SCHEDULE_MAX_RECORDS] = { [63] = 1 };
+    input.pinned = pins;
+    tier1_schedule_test_check(test, input, graph);
+    tier1_schedule_test_expect(test, graph->levels[0] == 3 && graph->levels[63] == 2 && graph->levels[64] == 1 && graph->heights[63] == 0, "a pin orders independent records across a word boundary");
+}
+
 static void tier1_schedule_test_guards(Tier1ScheduleTest* test, Tier1ScheduleGraph* graph)
 {
     const long page = sysconf(_SC_PAGESIZE);
@@ -474,6 +504,7 @@ static int run_tier1_schedule_tests(int argc, char** argv)
     if (ready)
     {
         tier1_schedule_test_examples(&test, graph);
+        tier1_schedule_test_depth(&test, graph);
         tier1_schedule_test_guards(&test, graph);
         tier1_schedule_test_execution(&test, graph);
         X86Instruction records[BUSTER_TIER1_SCHEDULE_MAX_RECORDS];
