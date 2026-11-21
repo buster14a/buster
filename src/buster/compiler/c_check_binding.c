@@ -73,7 +73,7 @@ static bool check_input_type_const(const TypeTable* types, TypeId type)
 // Whether a declaration is written in the main file, where Clang gives file-scope unused variables' warnings.
 static bool check_input_in_main_file(const CheckInputReader* reader, uint32_t token)
 {
-    const uint32_t source = token < reader->parser->tokens.count ? reader->parser->tokens.sources[token] : BUSTER_CHECK_NONE;
+    const uint32_t source = token < reader->parser->tokens.count ? parse_source_index(&reader->parser->tokens, token) : BUSTER_CHECK_NONE;
     const uint32_t location = source < reader->pp->output.count && reader->pp->output.locations != NULL ? reader->pp->output.locations[source] : 0;
     const bool result = source < reader->pp->output.count && pp_location_in_main_file(reader->pp, location);
     return result;

@@ -6897,7 +6897,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                              warnings[token].flags : 0;
             const uint32_t pointer_flags = flags & (CHECK_WARNING_POINTER_SIGN | CHECK_WARNING_DISCARDED_QUALIFIERS);
             if (pointer_flags != 0 && check_driver_pointer_arguments(parser, pp, input, stream, types, &spell, token, pointer_flags,
-                warnings[token].enabled, parser->tokens.sources[token], PP_DIAGNOSTIC_SEMANTIC, scratch))
+                warnings[token].enabled, parse_source_index(&parser->tokens, token), PP_DIAGNOSTIC_SEMANTIC, scratch))
             {
                 flags &= ~pointer_flags;
             }
@@ -6925,7 +6925,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                                           check_diagnostic_message(warning);
                     if (suffix != NULL)
                     {
-                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[located], "%s%s", message, suffix);
+                        pp_diagnose_output(pp, pp_severity, parse_source_index(&parser->tokens, located), "%s%s", message, suffix);
                     }
                 }
                 flags &= flags - 1;
@@ -6968,8 +6968,8 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 }
                 else if (offset != 0 && location < count)
                 {
-                    const uint32_t at = parser->tokens.sources[location];
-                    pp_diagnose_output_location_at(pp, PP_SEVERITY_ERROR, at, pp->output.locations[at] + offset, parser->tokens.sources[token], PP_DIAGNOSTIC_SEMANTIC, "%s", message);
+                    const uint32_t at = parse_source_index(&parser->tokens, location);
+                    pp_diagnose_output_location_at(pp, PP_SEVERITY_ERROR, at, pp->output.locations[at] + offset, parse_source_index(&parser->tokens, token), PP_DIAGNOSTIC_SEMANTIC, "%s", message);
                 }
                 else
                 {

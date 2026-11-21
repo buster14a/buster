@@ -731,7 +731,7 @@ struct CheckInputReport
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
 {
     return report->pragma != 0 ? (report->pragma <= parser->tokens.pragma_count ? parser->tokens.pragma_sources[report->pragma - 1] + 1 : BUSTER_CHECK_NONE) :
-           report->token < parser->tokens.count ? parser->tokens.sources[report->token] : BUSTER_CHECK_NONE;
+           report->token < parser->tokens.count ? parse_source_index(&parser->tokens, report->token) : BUSTER_CHECK_NONE;
 }
 
 // Sparse source diagnostics, including calls checked only by sizeof/typeof rather than a retained graph.
@@ -3557,7 +3557,7 @@ static void check_input_target_versions_calls(CheckInputReader* reader);
 // A retained malformed callee's index, or NONE. Original sources survive reparses, synthetic punctuation and macros.
 static uint32_t check_input_invalid_call_index(const Parser* parser, uint32_t token)
 {
-    const uint32_t source = parser->invalid_call_count != 0 ? parser->tokens.sources[token] : 0;
+    const uint32_t source = parser->invalid_call_count != 0 ? parse_source_index(&parser->tokens, token) : 0;
     uint32_t low = 0;
     uint32_t high = parser->invalid_call_count;
     while (low < high)
@@ -5750,7 +5750,7 @@ static void check_typo_parameter(CheckInputReader* reader, uint32_t token, uint3
 static void check_input_parameter_typo(CheckInputReader* reader, uint32_t token)
 {
     const PPTokens* output = reader->pp != NULL ? &reader->pp->output : NULL;
-    const uint32_t source = reader->parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&reader->parser->tokens, token);
     const bool spelled = output != NULL && source < output->count && output->kinds[source] == C_TOKEN_RAW_IDENTIFIER;
     const uint32_t name = spelled ? output->values[source] : 0;
     if (spelled && !reader->lane && reader->deferred == NULL && !reader->output->resource)
@@ -6471,7 +6471,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
 // Always inlined (#880), as profile-guided builds do; hot caller: check_input_literal, once per literal.
 static inline __attribute__((always_inline)) bool check_input_spelling(CheckInputReader* reader, uint32_t token, const uint8_t** bytes, uint32_t* length)
 {
-    const uint32_t source = reader->parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&reader->parser->tokens, token);
     PPTokens* output = &reader->pp->output;
     const uint8_t kind = output->kinds[source];
     // A compact resource has no single-token spelling. A speculative literal-table proof must fall back to the
@@ -16425,10 +16425,9 @@ static bool check_diagnostic_default_error_relaxed_at(const CheckInput* input, u
 static void check_input_relaxed_tokens(CheckInputReader* reader, Preprocessor* pp, uint8_t* tokens, uint32_t count, bool all)
 {
     const CheckInput* input = reader->output;
-    const uint32_t* sources = reader->parser->tokens.sources;
     for (uint32_t token = 0; token < count; token += 1)
     {
-        const bool relaxed = all || check_diagnostic_default_error_relaxed_at(input, token, sources[token]);
+        const bool relaxed = all || check_diagnostic_default_error_relaxed_at(input, token, parse_source_index(&reader->parser->tokens, token));
         tokens[token] |= relaxed ? BUSTER_CHECK_RELAXED_TOKEN : 0;
     }
     (void)pp;
@@ -16495,11 +16494,20 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         }
         // A token without a source in the output reads the entry past them all, a user file's, rather than a branch's:
         // as a branch, every token jumped (#1175).
-        const uint32_t* sources = parser->tokens.sources;
         const uint32_t limit = pp->output.count;
         levels[limit] = BUSTER_PP_USER_FILE;
         memset(levels + limit + 1, 0, 3);
-        check_input_system_token_map(tokens, sources, count, levels, limit);
+        if (parser->tokens.identity_sources)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                tokens[i] = levels[i] == BUSTER_PP_SYSTEM_FILE || levels[i] == BUSTER_PP_EXTERN_C_FILE;
+            }
+        }
+        else
+        {
+            check_input_system_token_map(tokens, parser->tokens.sources, count, levels, limit);
+        }
         memset(tokens + count, 0, 4);
     }
     if (tokens != NULL && (levels != NULL || mapped != NULL || relaxed))

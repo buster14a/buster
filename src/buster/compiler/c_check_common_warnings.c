@@ -105,8 +105,8 @@ static uint32_t check_common_publication_source(const Parser* parser, const Prep
     // (A token a reading adds publishes as the reading's sources put it.)
     const bool own = view->complete == NULL || at < view->end || (at == BUSTER_CHECK_NONE && publication < parser->tokens.count);
     const bool synthetic = !own && at > view->closed;
-    const uint32_t result = own ? (publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count) :
-                            !synthetic && at < view->original->tokens.count ? view->original->tokens.sources[at] : pp->output.count;
+    const uint32_t result = own ? (publication < parser->tokens.count ? parse_source_index(&parser->tokens, publication) : pp->output.count) :
+                            !synthetic && at < view->original->tokens.count ? parse_source_index(&view->original->tokens, at) : pp->output.count;
     return result;
 }
 
@@ -133,9 +133,9 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
         check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, mapped);
     severity = command.quiet && severity < CHECK_WARNING_ERROR ? CHECK_WARNING_IGNORE : severity;
     bool system = check_graph_system_token(&input->graph, token);
-    if (!system && pp->output.locations != NULL && parser != NULL && token < parser->tokens.count && parser->tokens.sources[token] < pp->output.count)
+    if (!system && pp->output.locations != NULL && parser != NULL && token < parser->tokens.count && parse_source_index(&parser->tokens, token) < pp->output.count)
     {
-        system = pp_system_level_at(pp, pp->output.locations[parser->tokens.sources[token]]) != BUSTER_PP_USER_FILE;
+        system = pp_system_level_at(pp, pp->output.locations[parse_source_index(&parser->tokens, token)]) != BUSTER_PP_USER_FILE;
     }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers && system)
     {
@@ -199,13 +199,13 @@ static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_
     {
         attached[i] = (PPOutputDiagnosticNote)
         {
-            .token = notes[i].token < parser->tokens.count ? parser->tokens.sources[notes[i].token] : parser->tokens.sources[token],
+            .token = notes[i].token < parser->tokens.count ? parse_source_index(&parser->tokens, notes[i].token) : parse_source_index(&parser->tokens, token),
             .message = notes[i].message,
         };
     }
     if (suffix != NULL)
     {
-        pp_diagnose_output_notes_phase(pp, disposition, parser->tokens.sources[token], publication_source, phase,
+        pp_diagnose_output_notes_phase(pp, disposition, parse_source_index(&parser->tokens, token), publication_source, phase,
                                        used != 0 ? attached : NULL, used, "%s%s", message, suffix);
     }
 }
@@ -2828,7 +2828,7 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
 static bool check_common_from_macro(const Parser* parser, const Preprocessor* pp, uint32_t token)
 {
     const uint32_t source = parser != NULL && parser->tokens.sources != NULL && token < parser->tokens.count ?
-                               parser->tokens.sources[token] : BUSTER_PP_NONE;
+                               parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
     const bool result = pp != NULL && pp->output.flags != NULL && source < pp->output.count &&
                         (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
     return result;
@@ -3003,7 +3003,7 @@ static uint32_t check_common_enum_cast_spelling(const Parser* parser, const Chec
 // generated one).
 static uint64_t check_common_argument_occurrence(const Parser* parser, Preprocessor* pp, uint32_t token)
 {
-    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const uint32_t source = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
     const bool macro = source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
     uint32_t origin = macro && pp_history_ensure(pp) ? pp_history_at(pp, source) : 0;
     uint64_t result = 0;
@@ -5569,7 +5569,7 @@ static uint32_t check_common_spelling_line(const Parser* parser, Preprocessor* p
     uint32_t result = 0;
     if (pp->output.locations != NULL && token < parser->tokens.count)
     {
-        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t source = parse_source_index(&parser->tokens, token);
         if (source < pp->output.count && pp->output.locations[source] != 0)
         {
             const uint32_t location = pp->output.locations[source];
@@ -5587,7 +5587,7 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
     uint32_t result = 0;
     if (pp->output.locations != NULL && token < parser->tokens.count)
     {
-        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t source = parse_source_index(&parser->tokens, token);
         if (source < pp->output.count && pp->output.locations[source] != 0)
         {
             uint32_t location = pp->output.locations[source];
@@ -8189,7 +8189,7 @@ static uint32_t check_common_argument_start(const Parser* parser, uint32_t token
 static void check_common_format_report_offset(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
                                               uint64_t offset, uint32_t* order, uint32_t id, const char* message, Arena* scratch)
 {
-    const uint32_t source = parser->tokens.sources[format_token];
+    const uint32_t source = parse_source_index(&parser->tokens, format_token);
     if (source >= pp->output.count || pp->output.locations == NULL || pp->output.locations[source] == 0)
     {
         return;
@@ -8220,7 +8220,7 @@ static void check_common_format_report_offset(const Parser* parser, Preprocessor
 static void check_common_format_report_offset_ordered(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
                                                       uint64_t offset, uint32_t position_token, uint32_t* order, uint32_t id, const char* message, Arena* scratch)
 {
-    const uint32_t source = parser->tokens.sources[format_token];
+    const uint32_t source = parse_source_index(&parser->tokens, format_token);
     if (source >= pp->output.count || pp->output.locations == NULL || pp->output.locations[source] == 0)
     {
         return;
@@ -8235,7 +8235,7 @@ static void check_common_format_report_offset_ordered(const Parser* parser, Prep
                                        error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
         if (suffix != NULL)
         {
-            const uint32_t natural = position_token < parser->tokens.count ? parser->tokens.sources[position_token] : source;
+            const uint32_t natural = position_token < parser->tokens.count ? parse_source_index(&parser->tokens, position_token) : source;
             *order = natural > *order ? natural : *order;
             pp_diagnose_output_location_at(pp, disposition, source, pp->output.locations[source] + 1 + (uint32_t)offset,
                                            *order, PP_DIAGNOSTIC_SEMANTIC, "%s%s", message, suffix);
@@ -8344,7 +8344,7 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
         {
             // The literal's scan emits a conversion's diagnostics together: an argument report carries the order
             // forward so a later conversion's in-string report keeps sorting behind it.
-            const uint32_t natural = at_token < parser->tokens.count ? parser->tokens.sources[at_token] : *order;
+            const uint32_t natural = at_token < parser->tokens.count ? parse_source_index(&parser->tokens, at_token) : *order;
             *order = natural > *order ? natural : *order;
             check_common_report_published(parser, pp, input, at_token, *order, CHECK_WARNING_ID_FORMAT, false, message, NULL, 0, scratch);
         }
@@ -8370,7 +8370,7 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
         if (message != NULL)
         {
             const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
-            const uint32_t natural = at_token < parser->tokens.count ? parser->tokens.sources[at_token] : *order;
+            const uint32_t natural = at_token < parser->tokens.count ? parse_source_index(&parser->tokens, at_token) : *order;
             *order = natural > *order ? natural : *order;
             check_common_format_report_offset(parser, pp, input, format_token, literal_offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
         }
@@ -8519,7 +8519,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             }
             // Clang checks the format as it builds the call, once its arguments are: after the diagnostics they gave as they
             // were built, a statement expression's own or a nested call's (#1941), so published from the call's `)` on.
-            uint32_t order = graph->tokens[node] < parser->tokens.count ? parser->tokens.sources[graph->tokens[node]] : 0;
+            uint32_t order = graph->tokens[node] < parser->tokens.count ? parse_source_index(&parser->tokens, graph->tokens[node]) : 0;
             uint32_t max_uncovered = BUSTER_CHECK_NONE;
             bool all_covered = false;
             bool nonliteral_leaf = false;
@@ -8565,7 +8565,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 // sorting behind it.
                 if (order == 0)
                 {
-                    order = parser->tokens.sources[format_token];
+                    order = parse_source_index(&parser->tokens, format_token);
                 }
                 bool insufficient = false;
                 bool positional_seen = false;
@@ -9054,7 +9054,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         const uint32_t argument_token = argument_node < graph->count ? graph->tokens[argument_node] : format_token;
                         const char* decimal_name = decimal_bits == 32 ? "_Decimal32" : decimal_bits == 64 ? "_Decimal64" : "_Decimal128";
                         const char* message = check_warning_text(scratch, "format specifies type '%s' which is not supported yet", decimal_name);
-                        const uint32_t natural = argument_token < parser->tokens.count ? parser->tokens.sources[argument_token] : order;
+                        const uint32_t natural = argument_token < parser->tokens.count ? parse_source_index(&parser->tokens, argument_token) : order;
                         order = natural > order ? natural : order;
                         check_common_report_published(parser, pp, input, argument_token, order, CHECK_WARNING_ID_FORMAT, false, message, NULL, 0, scratch);
                     }
@@ -9109,7 +9109,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             const int printed_length = specifier_length > INT_MAX ? INT_MAX : (int)specifier_length;
                             const char* message = check_warning_text(scratch, "using '%.*s' format specifier, but argument has boolean value",
                                                                      printed_length, bytes + percent);
-                            const uint32_t natural = at_token < parser->tokens.count ? parser->tokens.sources[at_token] : order;
+                            const uint32_t natural = at_token < parser->tokens.count ? parse_source_index(&parser->tokens, at_token) : order;
                             order = natural > order ? natural : order;
                             if (message != NULL)
                             {
@@ -9164,7 +9164,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 // styles share the scan.
                 const uint32_t extra_node = graph->argument_nodes[offset + first_argument + max_uncovered];
                 const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : graph->tokens[format_node];
-                const uint32_t natural = extra_token < parser->tokens.count ? parser->tokens.sources[extra_token] : order;
+                const uint32_t natural = extra_token < parser->tokens.count ? parse_source_index(&parser->tokens, extra_token) : order;
                 order = natural > order ? natural : order;
                 check_common_report_published(parser, pp, input, extra_token, order, CHECK_WARNING_ID_FORMAT_EXTRA_ARGS, false,
                                               "data argument not used by format string", NULL, 0, scratch);

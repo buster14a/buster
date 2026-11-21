@@ -1808,7 +1808,7 @@ static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uin
     const uint32_t end = token + 12 < parser->tokens.count ? token + 12 : parser->tokens.count;
     for (uint32_t i = begin; i < end && length < sizeof(text) - 64; i += 1)
     {
-        const uint32_t start = pp->output.locations[parser->tokens.sources[i]];
+        const uint32_t start = pp->output.locations[parse_source_index(&parser->tokens, i)];
         const uint32_t stop = parse_token_end(parser, pp, i);
         const uint8_t* bytes = pp_location_bytes(pp, start);
         const uint32_t size = bytes != 0 && stop > start ? (stop - start < 40 ? stop - start : 40) : 0;
@@ -2456,7 +2456,7 @@ static uint32_t parse_test_compare_tokens(const ParseTokens* a, const ParseToken
     uint32_t result = a->count != b->count || a->pragma_count != b->pragma_count ? 0 : BUSTER_PARSE_NONE;
     for (uint32_t i = 0; i < a->count && result == BUSTER_PARSE_NONE; i += 1)
     {
-        const bool same = a->kinds[i] == b->kinds[i] && a->names[i] == b->names[i] && a->sources[i] == b->sources[i] && a->flags[i] == b->flags[i];
+        const bool same = a->kinds[i] == b->kinds[i] && a->names[i] == b->names[i] && parse_source_index(a, i) == parse_source_index(b, i) && a->flags[i] == b->flags[i];
         result = same ? BUSTER_PARSE_NONE : i;
     }
     for (uint32_t i = 0; i < a->pragma_count && result == BUSTER_PARSE_NONE; i += 1)
@@ -2685,7 +2685,7 @@ static bool parse_test_handoff_same(const ParseTokens* got, const ParseTokens* e
         const int64_t before = -1 - (int64_t)p;
         const uint64_t after = (uint64_t)got->count + p;
         same = got->kinds[before] == PARSE_KIND_END && got->kinds[after] == PARSE_KIND_END && got->names[before] == 0 && got->names[after] == 0 &&
-               got->sources[before] == 0 && got->sources[after] == 0 && got->flags[before] == 0 && got->flags[after] == 0;
+               parse_source_index(got, before) == 0 && parse_source_index(got, after) == 0 && got->flags[before] == 0 && got->flags[after] == 0;
     }
     return same;
 }
@@ -2757,7 +2757,39 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
                 pp_resolve_keywords_range(&pp, 0, pp.output.count);
                 parse_tokens_from_output(&pp.output, &got);
                 const uint32_t kind = parse_test_first_byte(kinds, resolved, count);
-                if (kind != BUSTER_PARSE_NONE || !parse_test_handoff_same(&got, &expected))
+                bool straight = true;
+                for (uint32_t t = 0; t < count && straight; t += 1)
+                {
+                    straight = kinds[t] != C_TOKEN_HASH && kinds[t] != C_TOKEN_COLONCOLON && kinds[t] != BUSTER_PP_KIND_PRAGMA_END;
+                }
+                bool sources = straight == got.identity_sources;
+                if (got.identity_sources)
+                {
+                    // The handoff must leave the initialized backing poison intact for every implicit row.
+                    for (uint32_t t = 0; t < got.count && sources; t += 1)
+                    {
+                        sources = got.sources[t] == UINT32_C(0x5a5a5a5a) && expected.sources[t] == t;
+                    }
+                    for (uint32_t t = 0; t < got.count + 16 && sources; t += 16)
+                    {
+                        const __mmask16 lanes = 0xc56b;
+                        int32_t offsets[16];
+                        uint32_t gathered[16];
+                        uint32_t vector[16];
+                        for (uint32_t l = 0; l < 16; l += 1)
+                        {
+                            offsets[l] = (int32_t)t + (int32_t)l - 1;
+                            const bool live = ((lanes >> l) & 1u) != 0;
+                            gathered[l] = live && (uint32_t)offsets[l] < got.count ? expected.sources[offsets[l]] : 0;
+                            vector[l] = live && t + l < got.count ? expected.sources[t + l] : 0;
+                        }
+                        const __m512i got_gather = parse_source_gather(&got, _mm512_loadu_si512(offsets), lanes);
+                        const __m512i got_vector = parse_source_vector(&got, t, lanes);
+                        sources = _mm512_cmpeq_epi32_mask(got_gather, _mm512_loadu_si512(gathered)) == UINT16_MAX &&
+                                  _mm512_cmpeq_epi32_mask(got_vector, _mm512_loadu_si512(vector)) == UINT16_MAX;
+                    }
+                }
+                if (kind != BUSTER_PARSE_NONE || !sources || !parse_test_handoff_same(&got, &expected))
                 {
                     parse_test_report("handoff: the keyword pass and the conversion differ from the oracle on %u tokens (special %u at %u), first resolved kind at %u\n", count,
                                       special, edges[e], kind);
@@ -2992,7 +3024,7 @@ static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOp
                     if (kernels.flags[i] != 0 && k3_reports < 12)
                     {
                         k3_reports += 1;
-                        const uint32_t start = pp.output.locations[parser.tokens.sources[i]];
+                        const uint32_t start = pp.output.locations[parse_source_index(&parser.tokens, i)];
                         const uint32_t stop = parse_token_end(&parser, &pp, i);
                         const uint8_t* bytes = pp_location_bytes(&pp, start);
                         printf("K3 flags token %u, %.*s (first typedef declarator at %u)\n", i, (int)(stop - start < 40 ? stop - start : 40), (const char*)bytes,
@@ -3037,7 +3069,7 @@ static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOp
                             uint32_t length = 0;
                             for (uint32_t t = at > 10 ? at - 10 : 0; t < at + 6 && t < count && length < sizeof(text) - 64; t += 1)
                             {
-                                const uint32_t start = pp.output.locations[parser.tokens.sources[t]];
+                                const uint32_t start = pp.output.locations[parse_source_index(&parser.tokens, t)];
                                 const uint32_t stop = parse_token_end(&parser, &pp, t);
                                 const uint8_t* bytes = pp_location_bytes(&pp, start);
                                 const uint32_t size = bytes != 0 && stop > start ? (stop - start < 30 ? stop - start : 30) : 0;
@@ -3113,7 +3145,7 @@ static uint32_t parse_test_print_tree(const char* path, const PPOptions* options
         printf("%u errors%s\n", parser.errors, parser.statistics.whole ? " (the whole unit went to the scalar parser)" : "");
         for (uint32_t t = 0; t < parser.tokens.count; t += 1)
         {
-            const uint32_t location = pp.output.locations[parser.tokens.sources[t]];
+            const uint32_t location = pp.output.locations[parse_source_index(&parser.tokens, t)];
             const char* name;
             uint32_t name_length;
             const uint32_t line = pp_presumed(&pp, location, &name, &name_length);
@@ -3600,7 +3632,7 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
                          (a->postorder == 0) != (b->postorder == 0) ? "whether a postorder was made" : 0;
     for (uint32_t t = 0; result == 0 && t < count; t += 1)
     {
-        result = a->tokens.kinds[t] != b->tokens.kinds[t] || a->tokens.names[t] != b->tokens.names[t] || a->tokens.sources[t] != b->tokens.sources[t] ||
+        result = a->tokens.kinds[t] != b->tokens.kinds[t] || a->tokens.names[t] != b->tokens.names[t] || parse_source_index(&a->tokens, t) != parse_source_index(&b->tokens, t) ||
                  a->tokens.flags[t] != b->tokens.flags[t] ? "tokens" :
                  a->tree.roles != 0 && (a->tree.roles[t] != b->tree.roles[t] || a->tree.depths[t] != b->tree.depths[t] || a->tree.parents[t] != b->tree.parents[t]) ? "tree" :
                  a->postorder != 0 && (a->postorder[t] != b->postorder[t] || (a->sizes != 0) != (b->sizes != 0) || (a->sizes != 0 && a->sizes[t] != b->sizes[t])) ? "postorder" :

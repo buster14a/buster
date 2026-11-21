@@ -616,7 +616,7 @@ static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled,
             {
                 if (!check_input_loop_follows(parser, token))
                 {
-                    at.source = token < count ? parser->tokens.sources[token] : reader->pp->output.count;
+                    at.source = token < count ? parse_source_index(&parser->tokens, token) : reader->pp->output.count;
                     at.message = CHECK_INPUT_LOOP_PLACEMENT;
                     snprintf(at.text, sizeof(at.text), "expected a for, while, or do-while loop to follow '#pragma %s'", placement_name);
                     check_input_loop_first(delayed, &at);

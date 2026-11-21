@@ -594,7 +594,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
     // closer's original source. Parse the attributes' arguments, but no statement exists to check their subjects.
     const Parser* parser = reader->parser;
     const bool missing = empty && statement + 1 < parser->tokens.count && parser->tokens.kinds[statement + 1] == PARSE_KIND_R_BRACE &&
-                         parser->tokens.sources[statement] == parser->tokens.sources[statement + 1];
+                         parse_source_index(&parser->tokens, statement) == parse_source_index(&parser->tokens, statement + 1);
     *musttail = BUSTER_CHECK_NONE;
     uint32_t aligned = BUSTER_CHECK_NONE;
     // The first clang::likely or clang::unlikely, which excludes the other (#2291).
@@ -1912,7 +1912,7 @@ static uint32_t check_input_fallthrough_spelling(const CheckInputReader* reader,
     const Parser* parser = reader->parser;
     Preprocessor* pp = reader->pp;
     const uint32_t name = token < parser->tokens.count ? parser->tokens.names[token] : 0;
-    const uint32_t source = pp != NULL && token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const uint32_t source = pp != NULL && token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
     const bool spelled = pp != NULL && source < pp->output.count;
     const uint8_t kind = spelled ? pp->output.kinds[source] : 0;
     const uint64_t needed = spelled && kind != BUSTER_PP_KIND_EMBED ?

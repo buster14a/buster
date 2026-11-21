@@ -1747,7 +1747,6 @@ static __attribute__((noinline)) bool check_attested_lists(CheckAttested* census
 static __attribute__((noinline)) void check_attested_literals(CheckAttested* census, const Parser* parser, Preprocessor* pp, bool scalar)
 {
     const uint8_t* const kinds = parser->tokens.kinds;
-    const uint32_t* const sources = parser->tokens.sources;
     const uint32_t* const firsts = census->firsts;
     const uint32_t* const lasts = census->lasts;
     CheckAttestedHash* const owns = census->owns;
@@ -1797,7 +1796,7 @@ static __attribute__((noinline)) void check_attested_literals(CheckAttested* cen
             }
             if ((flags[at] & BUSTER_ATTESTED_DEFINITION) == 0)
             {
-                check_attested_literal_word(census, pp, sources[token], token - firsts[at], &ranges, owns + at);
+                check_attested_literal_word(census, pp, parse_source_index(&parser->tokens, token), token - firsts[at], &ranges, owns + at);
                 census->literal_count += 1;
             }
             literals &= literals - 1;
@@ -2011,7 +2010,7 @@ static void check_attested_string_names(CheckAttested* census, const Parser* par
     }
     for (uint32_t s = low; s < census->string_count && census->string_declarations[s] == d; s += 1)
     {
-        const uint32_t source = parser->tokens.sources[census->string_tokens[s]];
+        const uint32_t source = parse_source_index(&parser->tokens, census->string_tokens[s]);
         const uint64_t capacity = (uint64_t)output->values[source] - output->locations[source] + 1;
         const uint8_t* spelling = census->spelling;
         const uint32_t length = capacity <= census->spelling_capacity ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], census->spelling, &spelling) : 0;
@@ -2311,21 +2310,20 @@ static void check_attested_levels(CheckAttested* census, const Parser* parser, P
         census->levels[limit] = BUSTER_PP_USER_FILE;
         memset(census->levels + limit + 1, 0, 3);
         const uint32_t count = parser->tokens.count;
-        const uint32_t* const sources = parser->tokens.sources;
-        uint32_t t = 0;
+            uint32_t t = 0;
         // The vector path 16 tokens at a time, as the reader's system tokens map them (check_input_system_token_map): their
         // sources, clamped to the user file's entry past the last, gather four bytes each, of which the low one is the
         // level (`levels` has three bytes past that entry); the loop after it, the scalar path, is its twin and takes the
         // last tokens.
         for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && count - t >= 16; t += 16)
         {
-            const __m512i source = _mm512_min_epu32(_mm512_loadu_si512(sources + t), _mm512_set1_epi32((int32_t)limit));
+            const __m512i source = _mm512_min_epu32(parse_source_vector(&parser->tokens, t, UINT16_MAX), _mm512_set1_epi32((int32_t)limit));
             const __m512i level = _mm512_i32gather_epi32(source, census->levels, 1);
             _mm_storeu_si128((__m128i*)(census->token_levels + t), _mm512_cvtepi32_epi8(level));
         }
         for (; t < count; t += 1)
         {
-            const uint32_t source = sources[t];
+            const uint32_t source = parse_source_index(&parser->tokens, t);
             census->token_levels[t] = census->levels[source < limit ? source : limit];
         }
         census->levels_ready = true;
@@ -2526,7 +2524,7 @@ static bool check_attested_input(CheckAttested* census, CheckInput* input, const
         // Each declaration's place, for --list and the tests' records alone.
         for (uint32_t d = 0; (census->list != 0 || census->records != NULL) && d < census->declaration_count; d += 1)
         {
-            const uint32_t source = parser->tokens.sources[census->firsts[d]];
+            const uint32_t source = parse_source_index(&parser->tokens, census->firsts[d]);
             census->locations[d] = source < pp->output.count && pp->output.locations != NULL ? pp->output.locations[source] : 0;
         }
         census->unit_ready = listed;
@@ -3040,7 +3038,7 @@ static void check_attested_view_run(Parser* view, const Parser* parser, uint8_t*
         _mm_mask_storeu_epi8(view->tokens.flags + v, lanes, _mm_maskz_loadu_epi8(lanes, parser->tokens.flags + t));
         _mm_mask_storeu_epi8(view->tree.roles + v, lanes, _mm_maskz_loadu_epi8(lanes, parser->tree.roles + t));
         _mm512_mask_storeu_epi32(view->tokens.names + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tokens.names + t));
-        _mm512_mask_storeu_epi32(view->tokens.sources + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tokens.sources + t));
+        _mm512_mask_storeu_epi32(view->tokens.sources + v, lanes, parse_source_vector(&parser->tokens, t, lanes));
         _mm512_mask_storeu_epi32(view->tree.depths + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tree.depths + t));
         const __m512i parent = _mm512_maskz_loadu_epi32(lanes, parser->tree.parents + t);
         const __mmask16 inner = _mm512_mask_cmpneq_epi32_mask(lanes, parent, root);
@@ -3059,7 +3057,7 @@ static void check_attested_view_run(Parser* view, const Parser* parser, uint8_t*
         view->tokens.flags[v] = parser->tokens.flags[t];
         view->tree.roles[v] = parser->tree.roles[t];
         view->tokens.names[v] = parser->tokens.names[t];
-        view->tokens.sources[v] = parser->tokens.sources[t];
+        view->tokens.sources[v] = parse_source_index(&parser->tokens, t);
         view->tree.depths[v] = parser->tree.depths[t];
         view->tree.parents[v] = parser->tree.parents[t] != BUSTER_PARSE_ROOT ? parser->tree.parents[t] - shift : BUSTER_PARSE_ROOT;
         origins[v] = t;
@@ -3098,6 +3096,7 @@ static bool check_attested_view(CheckAttested* census, const Parser* parser)
     view->tokens.capacity = read;
     view->tokens.kinds = check_attested_view_column(arena, parser->tokens.kinds, count, read, sizeof(uint8_t));
     view->tokens.names = check_attested_view_column(arena, parser->tokens.names, count, read, sizeof(uint32_t));
+    view->tokens.identity_sources = false;
     view->tokens.sources = check_attested_view_column(arena, parser->tokens.sources, count, read, sizeof(uint32_t));
     view->tokens.flags = check_attested_view_column(arena, parser->tokens.flags, count, read, sizeof(uint8_t));
     view->tree.roles = check_attested_view_column(arena, parser->tree.roles, count, read, sizeof(uint8_t));
@@ -3634,16 +3633,15 @@ static uint32_t check_attested_declaration_of(const CheckAttested* census, uint3
 static uint32_t check_attested_token_at(const Parser* parser, uint32_t position)
 {
     const uint32_t count = parser->tokens.count;
-    const uint32_t* const sources = parser->tokens.sources;
     uint32_t low = 0;
     uint32_t high = count;
     while (low < high)
     {
         const uint32_t middle = low + (high - low) / 2;
-        low = sources[middle] <= position ? middle + 1 : low;
-        high = sources[middle] <= position ? high : middle;
+        low = parse_source_index(&parser->tokens, middle) <= position ? middle + 1 : low;
+        high = parse_source_index(&parser->tokens, middle) <= position ? high : middle;
     }
-    const bool past = low == count && (count == 0 || position > sources[count - 1]);
+    const bool past = low == count && (count == 0 || position > parse_source_index(&parser->tokens, count - 1));
     return low == 0 || past ? count : low - 1;
 }
 
@@ -3652,12 +3650,11 @@ static uint32_t check_attested_token_at(const Parser* parser, uint32_t position)
 static uint32_t check_attested_located(const CheckAttested* census, const Parser* parser, const Preprocessor* pp, uint32_t location)
 {
     const uint32_t count = parser->tokens.count;
-    const uint32_t* const sources = parser->tokens.sources;
     const uint32_t* const locations = pp->output.locations;
     uint32_t token = count;
     for (uint32_t t = 0; locations != NULL && token == count && t < count; t += 1)
     {
-        token = sources[t] < pp->output.count && locations[sources[t]] == location ? t : count;
+        token = parse_source_index(&parser->tokens, t) < pp->output.count && locations[parse_source_index(&parser->tokens, t)] == location ? t : count;
     }
     return token < count ? check_attested_declaration_of(census, token) : census->declaration_count;
 }
@@ -3790,7 +3787,7 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
         // A hit whose reading here wasn't what the memo attests: an input of the reading the hash doesn't cover.
         if (hit && !error && !eligible)
         {
-            const uint32_t source = first < count ? parser->tokens.sources[first] : UINT32_MAX;
+            const uint32_t source = first < count ? parse_source_index(&parser->tokens, first) : UINT32_MAX;
             census->contradicted = census->unit_contradictions == 0 && source < pp->output.count && pp->output.locations != NULL ? pp->output.locations[source] :
                                    census->contradicted;
             census->unit_contradictions += 1;
