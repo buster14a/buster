@@ -10,5 +10,6 @@ int window_constants(int n, int *v)
     int ordinary = n + (3 + 4);
     v[(8 - 1) & 3] = consume(MASK) + ordinary;
     if (n && (1 << 3)) ordinary += 5;
+    ordinary += (3 - 3) / (n | 1);
     return ordinary + (10 - 2);
 }
