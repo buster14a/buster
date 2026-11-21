@@ -4836,15 +4836,15 @@ static bool node_rows_test_fixture(const char* directory, const char* name, cons
                       counts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0 && shadow.own_values_wrong == 0;
     // And each tape's expression's side facts are the program's own walks' (node_shadow_summaries).
     const bool summarized = shadow.summary_compared == expected->taken && shadow.summary_reference_differences == 0 && shadow.summary_fact_differences == 0 &&
-                            shadow.summary_truth_differences == 0 && shadow.summary_fold_differences == 0 && shadow.summary_unkept == 0 &&
+                            shadow.summary_truth_differences == 0 && shadow.summary_fold_differences == 0 && shadow.summary_selector_differences == 0 && shadow.summary_unkept == 0 &&
                             counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] == 0;
     if (!summarized)
     {
         fprintf(stderr, "test-checker: node-rows %s: the side facts of %" PRIu64 " of the %u expressions whose tape is made were compared with the program's walks: references differ for %"
-                PRIu64 ", return facts for %" PRIu64 ", truths for %" PRIu64 ", folds for %" PRIu64 "; %" PRIu64 " were not kept, and %" PRIu64
+                PRIu64 ", return facts for %" PRIu64 ", truths for %" PRIu64 ", folds for %" PRIu64 ", selector types for %" PRIu64 "; %" PRIu64 " were not kept, and %" PRIu64
                 " chunks' second run made other facts\n",
                 name, shadow.summary_compared, expected->taken, shadow.summary_reference_differences, shadow.summary_fact_differences, shadow.summary_truth_differences,
-                shadow.summary_fold_differences, shadow.summary_unkept, counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES]);
+                shadow.summary_fold_differences, shadow.summary_selector_differences, shadow.summary_unkept, counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES]);
     }
     if (!valid || !same)
     {
@@ -4936,6 +4936,26 @@ struct NodeSummaryExpected
     uint32_t passed;
 };
 
+// Six of the fixture's nine selectors are enums, from two different definitions. An explicit cast to int,
+// unary promotion and an integer by itself account for the other three. Every one must reach the oracle.
+static bool node_summary_test_selectors(char** options, uint32_t option_count, bool fault)
+{
+    const uint8_t front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN;
+    const uint16_t reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
+                            BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS | (fault ? BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT : 0);
+    NodeShadow shadow = { .verify = true, .front = front, .reader = reader, .passes = 1, .repeat = 1 };
+    NodeCensus census = { .shadow = &shadow };
+    const bool read = node_census_file(&census, "tests/node-machine/switch-selectors.c", options, option_count) && census.files == 1 && census.failures == 0;
+    const bool valid = read && shadow.summary_selectors == 9 && shadow.summary_enum_selectors == 6 && shadow.summary_selector_differences == (fault ? 9u : 0u);
+    if (!valid)
+    {
+        fprintf(stderr, "test-checker: switch selectors%s: %" PRIu64 " compared, %" PRIu64 " enums, %" PRIu64 " differences (expected 9, 6, %u)\n",
+                fault ? " with changed types" : "", shadow.summary_selectors, shadow.summary_enum_selectors, shadow.summary_selector_differences, fault ? 9u : 0u);
+    }
+    NodeShadow selector_only = { .summary_selector_differences = shadow.summary_selector_differences };
+    return valid && node_shadow_differs(&selector_only) == fault;
+}
+
 // A summary's side facts on fixture `text` (written to `directory` as `name`, read with `options`): each kept
 // expression's references and return fact are the program's own walks', a kept condition's truth is its value's and a
 // kept constant folds, and the counts are `expected`'s. With the shadow's switch nothing is kept and X's tapes are the
@@ -4957,7 +4977,7 @@ static bool node_summary_test_fixture(const char* directory, const char* name, c
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     const uint64_t* counts = shadow.reader_facts;
     const bool exact = shadow.summary_reference_differences == 0 && shadow.summary_fact_differences == 0 && shadow.summary_truth_differences == 0 &&
-                       shadow.summary_fold_differences == 0 && shadow.summary_unkept == 0 && counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] == 0 &&
+                       shadow.summary_fold_differences == 0 && shadow.summary_selector_differences == 0 && shadow.summary_unkept == 0 && counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] == 0 &&
                        counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] == 0 &&
                        counts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0;
     const bool same = counts[NODE_FACTS_COUNT_ROWS_TAKEN] == expected->taken && counts[NODE_FACTS_COUNT_SUMMARY_EXPRESSIONS] == expected->taken &&
@@ -6716,6 +6736,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-rows: X's rows on the window make each entry's value as X does on T's columns: a line's field, a stride, a fixed number or its number in its expression");
     // A summary's side facts on the window: its own fixture's, and a unit's with a function the return flow leaves
     // unknown from a declaration on.
+    check_test_expect(test, node_summary_test_selectors(quiet, BUSTER_ARRAY_LENGTH(quiet), false) && node_summary_test_selectors(loud, BUSTER_ARRAY_LENGTH(loud), true),
+                      "node-summary: a switch retains its selector type before promotion and the comparison catches every changed type");
     static const NodeSummaryExpected summary_expected = {
         .taken = 371,
         .references = 800,

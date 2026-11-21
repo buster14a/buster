@@ -5012,7 +5012,10 @@ struct NodeShadow
     // says it, and those whose root's constant the controls' fold would not fold as a leaf of that value folds; of the
     // compared, those with a stop and with an unknown for the program's fact, the conditions whose truth the program
     // knows and the roots whose constant the controls fold; and the expressions the references' store had no room
-    // for. The four differences must be none.
+    // for. The switch selector type before promotion is compared with the warning pass; every difference must be zero.
+    uint64_t summary_selectors;
+    uint64_t summary_enum_selectors;
+    uint64_t summary_selector_differences;
     uint64_t summary_compared;
     uint64_t summary_references;
     uint64_t summary_reference_differences;
@@ -5615,6 +5618,7 @@ static void node_shadow_tested(NodeShadow* shadow, const NodeCensusScratch* s, c
 //   warnings' reach ask it of those), which a summary node's value has to say: check_program_branch_truth, which
 //   reads a condition's operands, knows a truth for the root exactly where check_program_runtime_truth, which reads
 //   the root's value alone, does, and the same one.
+// - A switch's selector type before promotion, as read by -Wswitch (check_common_switch_selector_type).
 // - Its fold, the same: check_control_fold_truth, which walks below a root whose value is an integer's constant,
 //   folds it wherever that value alone would (a leaf's: an integer's constant with no effect and a truth).
 // With the control (BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT) reader time kept each expression's facts with one of
@@ -5670,12 +5674,13 @@ static void node_shadow_summaries(NodeShadow* shadow, const NodeCensusScratch* s
         const bool asked = kept || (control && typed->counts[root] != 0);
         bool referenced = true;
         bool returned = true;
+        bool selector_same = true;
         uint32_t found = 0;
         if (kept)
         {
             // The program's references of the root, and reader time's as a set.
             const CheckControl evaluated = { .kind = CHECK_CONTROL_EVALUATE, .node = root, .target = BUSTER_CHECK_NONE };
-            const uint32_t* objects_kept = typed->summary_objects + typed->summary_firsts[root];
+            const uint32_t* objects_kept = typed->summary_words + typed->summary_firsts[root];
             uint32_t distinct = 0;
             epoch += 1;
             found = check_program_references(program, &evaluated, 1, epoch, seen, marks, stack, references, needed);
@@ -5693,6 +5698,19 @@ static void node_shadow_summaries(NodeShadow* shadow, const NodeCensusScratch* s
             for (uint32_t r = 0; r < found; r += 1)
             {
                 referenced = referenced && ours[(uint32_t)(references[r] >> 32)] == epoch;
+            }
+            // Use the parser's condition and the warning pass's walk as the oracle. Its diagnostic is located at
+            // the selector's first token, which can have a different type from the value being switched on (#3200).
+            const uint32_t closer = graph->tokens[root];
+            if (graph->ops[root] == CHECK_OP_POSITIVE && closer < program->parser->tokens.count && program->parser->tree.roles[closer] == PARSE_ROLE_CLOSE_CONDITION)
+            {
+                const TypeId selector = check_common_switch_selector_type(program->input, program->stream, closer);
+                const uint64_t at = (uint64_t)typed->summary_firsts[root] + typed->summary_counts[root];
+                selector_same = selector != 0 && at < typed->summary_count && typed->summary_words[at] == selector;
+                shadow->summary_selectors += 1;
+                shadow->summary_enum_selectors += selector != 0 &&
+                                                  type_kind(program->types, type_unqualified(type_strip_aligned(program->types, selector))) == BUSTER_TYPE_KIND_ENUM;
+                shadow->summary_selector_differences += !selector_same;
             }
             returned = typed->summary_facts[root] == facts[root];
             shadow->summary_compared += 1;
@@ -5737,13 +5755,13 @@ static void node_shadow_summaries(NodeShadow* shadow, const NodeCensusScratch* s
             shadow->summary_truths += kept && branched;
             shadow->summary_folds += kept && folded;
         }
-        if ((!referenced || !returned || !truthful || !folding) && shadow->summary_listed < node_census_list)
+        if ((!referenced || !returned || !truthful || !folding || !selector_same) && shadow->summary_listed < node_census_list)
         {
             shadow->summary_listed += 1;
-            printf("node-shadow: window summaries difference file=%s line=%u token=%u %s: references=%s (the program's %u, reader time's %u) fact=%u (reader %u) truth=%s fold=%s\n",
+            printf("node-shadow: window summaries difference file=%s line=%u token=%u %s: references=%s (the program's %u, reader time's %u) fact=%u (reader %u) truth=%s fold=%s selector=%s\n",
                    s->file, node_census_line(s->pp, program->parser, graph->tokens[root]), graph->tokens[root], kept ? "kept" : "not kept", referenced ? "same" : "DIFFERENT", found,
                    kept ? typed->summary_counts[root] : 0u, (uint32_t)facts[root], kept ? (uint32_t)typed->summary_facts[root] : 0u, truthful ? "same" : "DIFFERENT",
-                   folding ? "same" : "DIFFERENT");
+                   folding ? "same" : "DIFFERENT", selector_same ? "same" : "DIFFERENT");
         }
     }
     arena_pop_to(scratch, mark);
@@ -6935,6 +6953,8 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
                    shadow->summary_compared, shadow->summary_unkept, shadow->summary_references, shadow->summary_reference_differences, shadow->summary_fact_differences,
                    shadow->summary_stops, shadow->summary_unknowns, shadow->summary_asked, shadow->summary_fold_differences, shadow->summary_folds,
                    shadow->summary_conditions, shadow->summary_truth_differences, shadow->summary_truths);
+            printf("node-shadow: window summaries switch selectors=%" PRIu64 " enums=%" PRIu64 " type-differences=%" PRIu64 "\n",
+                   shadow->summary_selectors, shadow->summary_enum_selectors, shadow->summary_selector_differences);
             printf("node-shadow: window summaries ticks=%" PRIu64 " (%.2f a record swept, %.0f a chunk); a second run over the same chunk, not counted: ticks=%" PRIu64
                    " (%.2f a record swept, %.0f a chunk)\n",
                    summary_ticks, (double)summary_ticks * per, chunks != 0 ? (double)summary_ticks / (double)chunks : 0.0, later_summary_ticks,
@@ -7866,7 +7886,7 @@ static bool node_shadow_differs(const NodeShadow* shadow)
            shadow->reader_facts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] != 0 || shadow->reader_facts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] != 0 ||
            shadow->reader_facts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] != 0 || shadow->summary_reference_differences != 0 ||
            shadow->summary_fact_differences != 0 || shadow->summary_truth_differences != 0 || shadow->summary_fold_differences != 0 ||
-           shadow->summary_unkept != 0 || shadow->front_window_name_differences != 0 || shadow->front_window_arguments_most > BUSTER_NODE_FRONT_RECORDS;
+           shadow->summary_selector_differences != 0 || shadow->summary_unkept != 0 || shadow->front_window_name_differences != 0 || shadow->front_window_arguments_most > BUSTER_NODE_FRONT_RECORDS;
 }
 
 static int run_node_census(int count, char** arguments)
