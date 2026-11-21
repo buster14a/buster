@@ -6232,10 +6232,70 @@ static void node_window_test_compile(CheckTest* test, bool assignments)
     lower_source_close(&plain);
 }
 
+// An explicit cast to void still has two native entries, even when the backend emits no code for either.
+static void node_window_test_void(CheckTest* test)
+{
+    char file[PATH_MAX];
+    snprintf(file, sizeof(file), "%s/checker/node-window-discard.c", check_test_fixture_root);
+    char* options[] = { "-nostdinc" };
+    static LowerSource plain;
+    static LowerSource window;
+    const bool prepared = lower_source_open(&plain, file, options, BUSTER_ARRAY_LENGTH(options), false) && plain.prepared &&
+                          lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), true) && window.prepared;
+    const CheckInput* input = &window.path.input;
+    const bool admitted = prepared && input->window_count == 4 && input->window_nodes == 12 && input->window_row_count == 8 &&
+                          input->graph.count + 8 == plain.path.input.graph.count;
+    check_test_expect(test, admitted, "node-window checks four complete literal casts to void and keeps other expressions on the graph");
+    bool values = admitted;
+    for (uint32_t i = 0; values && i < input->window_count; i += 1)
+    {
+        const uint32_t node = input->window_summaries[i].node;
+        const uint32_t token = input->graph.tokens[node];
+        const CheckGraph* graph = &plain.path.input.graph;
+        uint32_t other = 0;
+        while (other < graph->count && (graph->tokens[other] != token || graph->ops[other] != CHECK_OP_CAST))
+        {
+            other += 1;
+        }
+        if (other < graph->count)
+        {
+            const CheckValue regular = check_stream_value(&plain.path.stream, other);
+            const CheckValue summary = check_stream_value(&window.path.stream, node);
+            values = check_test_value_equal(&regular, &summary);
+        }
+        else
+        {
+            values = false;
+        }
+    }
+    check_test_expect(test, values, "node-window keeps every field of the discarded literal's ordinary checked value");
+    CheckProgramLowered reference = { 0 };
+    CheckProgramLowered taken = { 0 };
+    bool same = admitted && check_program_lower_sources(&reference, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+                check_program_lower_sources(&taken, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) &&
+                reference.count == 1 && taken.count == 1 && check_test_program_function(reference.functions, taken.functions);
+    if (same)
+    {
+        for (uint32_t e = 0; same && e < taken.functions[0].count; e += 1)
+        {
+            same = reference.entry_tokens[0][e] == taken.entry_tokens[0][e];
+            if (!same)
+            {
+                fprintf(stderr, "test-checker: void-discard entry %u kind %u: source token %u, ordinary token %u\n", e, taken.functions[0].kinds[e],
+                        taken.entry_tokens[0][e], reference.entry_tokens[0][e]);
+            }
+        }
+    }
+    check_test_expect(test, same, "node-window emits the ordinary cast's CONST and DISCARD entries at their exact source tokens");
+    lower_source_close(&window);
+    lower_source_close(&plain);
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
     node_window_test_compile(test, false);
     node_window_test_compile(test, true);
+    node_window_test_void(test);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready, "node-census fixtures' directory is made");
