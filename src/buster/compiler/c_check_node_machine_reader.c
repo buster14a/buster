@@ -567,7 +567,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                 else if (root < types->node_capacity && inner <= root && size != 0 && size <= inner + 1)
                 {
                     const uint32_t first = inner + 1 - size;
-                    const NodeMachineRefusal refusal = node_machine_type(machine, first, root, records);
+                    // T types an initializer's value without its INITIALIZE record, which carries the required
+                    // constant context for a static initializer.
+                    const bool required = initialization && (typer->graph.contexts[front->nodes[record]] & BUSTER_CHECK_CONTEXT_VALUE) != 0;
+                    const NodeMachineRefusal refusal = node_machine_type_in_context(machine, first, root, records, required);
                     if (pass != 0)
                     {
                         types->digests[root] = node_machine_digest(machine, refusal);
