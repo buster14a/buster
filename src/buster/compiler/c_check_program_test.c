@@ -2568,6 +2568,25 @@ static bool check_test_program_locals(const CheckProgram* program, const CheckLo
     return same;
 }
 
+// Selection keeps source order and emits target clones immediately after their original.
+static void check_test_lower_opening_owner(CheckTest* test)
+{
+    CheckProgramBody bodies[] = { { .opening = 0 }, { .opening = 11 }, { .opening = 11 }, { .opening = 32 } };
+    CheckProgram program = { .bodies = bodies, .body_count = BUSTER_ARRAY_LENGTH(bodies) };
+    const uint32_t openings[] = { 32, 7, 11, 11, 0, 32, 33, 1 };
+    const uint32_t expected[] = { 3, BUSTER_CHECK_NONE, 1, 1, 0, 3, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+    CheckProgramBodyCursor cursor = { 0 };
+    bool same = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(openings); i += 1)
+    {
+        same &= check_lower_opening_owner(&program, openings[i], &cursor) == expected[i];
+    }
+    program.body_count = 0;
+    cursor = (CheckProgramBodyCursor){ 0 };
+    check_test_expect(test, same && check_lower_opening_owner(&program, 0, &cursor) == BUSTER_CHECK_NONE,
+                      "local ownership finds the original selected body and skips omitted openings");
+}
+
 // The branches' targets (check_lower_resolve_labels): by 64 kinds at a time as by its scalar twin, the same targets
 // and the same first failure, for counts across the masks' tails, the kinds at a page's end, the four branch kinds among
 // the kinds beside them, and every label with an entry, or some out of range or without one.
@@ -4127,6 +4146,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "for(int i=0,j=2;i<3;i++,j++){int u=i,v=j;r+=u+v;}"
             "int s=({int i=n+3,j=i+2;i+j;}),t=s+1;return r+s+t+a+b+c;}",
             "multi-declarator-plan-scopes", clang);
+        check_test_lower_opening_owner(test);
         check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
         // C89's implicit int in the runtime program harness (#1121): the declarations' types and qualifiers decide what
