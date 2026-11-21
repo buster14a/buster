@@ -82,7 +82,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
-  --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
+  --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
@@ -235,7 +235,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   `tests/driver/fp_contract.c` for float/double result bits, expression
   boundaries, option ordering, scoped pragmas and dynamic rounding. It covers
   both readers, object/direct output and strict Tier 1 without fallback,
-  with transition verification enabled). The Tier 1 asm-body suite initializes
+  with transition verification enabled). `--imaginary-bit-int-only` runs
+  `c_check_imaginary_bit_int_driver_test.c` (#2219):
+  `tests/driver/imaginary-bit-int/`'s diagnostics sources (constants in every
+  spelling and constant context, refused suffixes, the complex `_BitInt` types
+  in errors and failed static assertions' printing) in the standards
+  `cases.txt` names, by the shared default-warning harness, and its program
+  (arithmetic, comparisons, parts, casts, static and automatic initializers,
+  calls, returns and `va_arg` of complex `_BitInt`s of 3 to 256 bits and
+  `_Complex __int128`), whose output at Tier 0 and strict Tier 1, by both
+  readers, as an object and directly, must be Clang -O0's build's. The Tier 1
+  asm-body suite initializes
   and checks its object decoder before inspecting instructions (#2737,
   `check_test_driver_tier1_asm`). An initialization failure is reported directly
   and skips decoding, so partitioned runs do not depend on another suite's setup.

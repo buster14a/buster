@@ -6837,9 +6837,11 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
     if (result->valid && result->bit_width != 0)
     {
         // A bit-precise constant (#768): its _BitInt, of up to BITINT_MAXWIDTH bits, past 128 with its limbs
-        // (c_check_wide.c, #1447); a wider one is refused by name (check_input_literal_report).
+        // (c_check_wide.c, #1447); a wider one is refused by name (check_input_literal_report). An imaginary one's is the
+        // complex _BitInt (#2219), a type C can't spell.
         const bool supported = result->bit_width <= BUSTER_CHECK_WIDE_MAX_WIDTH;
-        result->type = supported ? check_input_type_result(reader, type_bit_int(reader->types, result->bit_width, result->bit_unsigned)) : 0;
+        const TypeId bit_int = supported ? check_input_type_result(reader, type_bit_int(reader->types, result->bit_width, result->bit_unsigned)) : 0;
+        result->type = bit_int != 0 && result->imaginary ? check_input_type_result(reader, type_complex(reader->types, bit_int)) : bit_int;
         result->valid = result->type != 0;
         if (reader->parser->language.standard < 2023)
         {

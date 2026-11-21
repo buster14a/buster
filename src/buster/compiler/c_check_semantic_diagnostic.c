@@ -934,8 +934,9 @@ static const char* check_semantic_escape(uint32_t unit)
 
 // A token's replacement as clang's StmtPrinter prints its node (#1447): an integer literal's value in decimal with its
 // type's suffix, a floating one's APFloat digits with a `.` where they have none and its type's suffix, a character
-// one's prefix and its value, escaped; a sizeof's or an alignof's keyword. NULL keeps the token as written (true, false,
-// an imaginary literal).
+// one's prefix and its value, escaped; a sizeof's or an alignof's keyword; an imaginary literal's imaginary part printed
+// so, then `i` (#2219: 5iwb is 5wbi, 0x10i is 16i), as ImaginaryLiteral prints its subexpression. NULL keeps the token as
+// written (true, false, a literal past 128 bits).
 static const char* check_semantic_literal_spelling(const Parser* parser, Preprocessor* pp, const TypeTable* types, const CheckGraph* graph,
                                                    const CheckStream* stream, uint32_t node, Arena* scratch)
 {
@@ -943,7 +944,10 @@ static const char* check_semantic_literal_spelling(const Parser* parser, Preproc
     const uint8_t kind = parser->tokens.kinds[token];
     const CheckOp op = graph->ops[node];
     const bool query = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF;
-    const CheckValue value = check_stream_value(stream, node);
+    const CheckValue literal = check_stream_value(stream, node);
+    const bool imaginary = kind == PARSE_KIND_NUMBER && literal.constant_kind == CHECK_CONSTANT_COMPLEX && type_is_valid(types, literal.type);
+    const CheckValue value = imaginary ? check_complex_component(types, &literal, true) : literal;
+    const char* unit = imaginary ? "i" : "";
     const TypeId type = value.type != 0 ? type_unqualified(type_strip_aligned(types, value.type)) : 0;
     uint32_t width = 0;
     bool is_signed = false;
@@ -971,7 +975,7 @@ static const char* check_semantic_literal_spelling(const Parser* parser, Preproc
         if (suffix != NULL && width <= 128)
         {
             check_common_number(text, sizeof(text), negative ? (__int128)(bits | ~mask) : (__int128)bits);
-            result = check_warning_text(scratch, "%s%s", text, suffix);
+            result = check_warning_text(scratch, "%s%s%s", text, suffix, unit);
         }
     }
     else if (kind == PARSE_KIND_NUMBER && check_semantic_floating_text(text, sizeof(text), type, &value))
@@ -979,7 +983,7 @@ static const char* check_semantic_literal_spelling(const Parser* parser, Preproc
         const char* suffix = type == BUSTER_TYPE_FLOAT ? "F" : type == BUSTER_TYPE_LONG_DOUBLE ? "L" : type == BUSTER_TYPE_FLOAT128 ? "Q" :
                              type == BUSTER_TYPE_FLOAT16 ? "F16" : "";
         const bool digits = strspn(text, "-0123456789") == strlen(text);
-        result = check_warning_text(scratch, "%s%s%s", text, digits ? "." : "", suffix);
+        result = check_warning_text(scratch, "%s%s%s%s", text, digits ? "." : "", suffix, unit);
     }
     else if (kind == PARSE_KIND_CHARACTER && integer)
     {
