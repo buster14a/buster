@@ -379,7 +379,7 @@ static uint32_t check_input_enum_value_spelling(const CheckConstantInput* job)
     uint32_t root = check_constant_range_root(job, job->first, job->end);
     for (uint32_t steps = 0; root >= job->first && root < job->end && steps < job->end - job->first; steps += 1)
     {
-        const uint32_t chosen = reader->selected_tokens != NULL ? reader->selected_tokens[root] : BUSTER_CHECK_NONE;
+        const uint32_t chosen = check_input_selected_token(reader, root);
         const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
         if (chosen != BUSTER_CHECK_NONE && selected >= job->first && selected < job->end && selected != root)
         {

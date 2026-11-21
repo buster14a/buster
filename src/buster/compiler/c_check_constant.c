@@ -227,7 +227,7 @@ static uint32_t check_constant_overload_token(const CheckConstantInput* input, u
             result = root + 1;
             break;
         }
-        const uint32_t chosen = reader->selected_tokens != NULL ? reader->selected_tokens[root] : BUSTER_CHECK_NONE;
+        const uint32_t chosen = check_input_selected_token(reader, root);
         const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
         if (chosen != BUSTER_CHECK_NONE && selected >= input->first && selected < input->end && selected != root)
         {

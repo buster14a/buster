@@ -401,7 +401,7 @@ static bool check_deferred_expression_parallel(const CheckInputReader* reader, u
         }
         if (valid && code == CHECK_INPUT_CODE_SCALAR && !reader->ignored[token])
         {
-            valid = builtin != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < parser->tokens.count ||
+            valid = builtin != 0 || reader->constant_present[token] != 0 || check_input_selected_token(reader, token) < parser->tokens.count ||
                     reader->initializers[token] != 0 || role == PARSE_ROLE_CLOSE_INITIALIZER || role == PARSE_ROLE_CLOSE_COMPOUND_BODY ||
                     role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_RANGE || role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_CLOSE_KEYWORD ||
                     ((reader->syntax[token] & BUSTER_CHECK_SYNTAX_STRING) != 0 && role == PARSE_ROLE_OPERAND);

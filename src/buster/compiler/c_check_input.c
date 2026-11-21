@@ -2060,7 +2060,7 @@ struct CheckInputReader
     uint8_t* designator_valid;
     uint32_t* designator_tokens;
     uint32_t* designator_ranges;
-    uint32_t* selected_tokens; // NONE, a runtime operand token, or SOURCE_SELECTION | a proof-only operand token.
+    uint32_t* selected_tokens; // Absent without selection spellings. NONE, a runtime operand token, or SOURCE_SELECTION | a proof-only operand token.
     uint32_t* selection_type_ends;
     TypeId* selection_types;
     CheckValue* cached_constants;
@@ -2502,12 +2502,17 @@ typedef enum CheckConstantNames
     CHECK_CONSTANT_NAMES_RECOVER,
 } CheckConstantNames;
 
+static uint32_t check_input_selected_token(const CheckInputReader* reader, uint32_t token)
+{
+    return reader->selected_tokens != NULL ? reader->selected_tokens[token] : BUSTER_CHECK_NONE;
+}
+
 // Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
 // group, a cached constant, a runtime selection, a va_arg call, a designator, a variable array's bound or an asm statement.
 static bool check_input_expression_sparse(const CheckInputReader* reader, uint32_t token)
 {
     const CheckInput* input = reader->output;
-    return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < reader->parser->tokens.count ||
+    return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || check_input_selected_token(reader, token) < reader->parser->tokens.count ||
            reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
 }
 
@@ -15471,7 +15476,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             check_graph_set_leaf(graph, node, &reader->cached_constants[reader->constant_present[token] - 1]);
         }
     }
-    else if (sparse && reader->selected_tokens[token] < parser->tokens.count)
+    else if (sparse && check_input_selected_token(reader, token) < parser->tokens.count)
     {
         const uint32_t selected = reader->output->token_nodes[reader->selected_tokens[token]];
         supported = selected != BUSTER_CHECK_NONE;
@@ -16884,7 +16889,10 @@ static void check_input_output_none(CheckInput* input, CheckInputReader* reader,
     memset(input->token_nodes, 0xff, bytes);
     memset(reader->initializer_declarations, 0xff, bytes);
     memset(reader->initializer_finish_heads, 0xff, bytes);
-    memset(reader->selected_tokens, 0xff, bytes);
+    if (reader->selected_tokens != NULL)
+    {
+        memset(reader->selected_tokens, 0xff, bytes);
+    }
     memset(reader->activate, 0xff, bytes);
     memset(reader->first_value, 0xff, bytes);
 }
@@ -17333,7 +17341,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(initializer_finish_heads, uint32_t);
     reader.string_ids = input->string_ids;
 
-    BUSTER_CHECK_INPUT_ARRAY(selected_tokens, uint32_t);
+    const bool selections = counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0;
+    if (selections)
+    {
+        BUSTER_CHECK_INPUT_ARRAY(selected_tokens, uint32_t);
+    }
     BUSTER_CHECK_INPUT_ARRAY(expression_commas, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(conditions, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(constant_contexts, uint8_t);
@@ -17824,7 +17836,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             {
                 // Without a _Generic or __builtin_choose_expr token there is nothing to select: the scalar reader
                 // walks every token for them, the twin of this count.
-                if (counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
+                if (selections)
                 {
                     check_input_selections(&reader);
                 }
@@ -17904,7 +17916,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         input->expression_usage_failed = !read;
                     }
                 }
-                if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
+                if (!input->resource && input->graph.x86_count != 0 && selections)
                 {
                     check_input_x86_contexts(&reader);
                 }

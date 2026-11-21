@@ -229,7 +229,7 @@ static bool check_input_selected_arm(const CheckInputReader* reader, uint32_t ke
     const uint32_t* arms = reader->selection_arms;
     const uint32_t at = close - reader->selection_arm_base;
     const bool recorded = arms != NULL && close >= reader->selection_arm_base && close < reader->selection_arm_end && arms[2 * at + 1] != 0;
-    const uint32_t chosen = !recorded && selected && reader->selected_tokens != NULL ? reader->selected_tokens[close] : BUSTER_CHECK_NONE;
+    const uint32_t chosen = !recorded && selected ? check_input_selected_token(reader, close) : BUSTER_CHECK_NONE;
     const uint32_t root = chosen != BUSTER_CHECK_NONE ? chosen & ~CHECK_INPUT_SOURCE_SELECTION : BUSTER_CHECK_NONE;
     bool result = recorded;
     *arm_first = recorded ? arms[2 * at] : 0;
