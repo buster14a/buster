@@ -185,6 +185,8 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
     const __m512i lanes = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
     uint32_t written = 0;
     tokens->pragma_count = 0;
+    bool identity = true;
+    tokens->identity_sources = false;
     uint32_t i = 0;
     while (i < output->count)
     {
@@ -212,16 +214,30 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
             const __mmask16 in_run = (__mmask16)(stored >> (16 * group));
             const __m512i names = _mm512_maskz_loadu_epi32((__mmask16)(identifiers >> (16 * group)), output->values + i + 16 * group);
             _mm512_mask_storeu_epi32(tokens->names + written + 16 * group, in_run, names);
-            _mm512_mask_storeu_epi32(tokens->sources + written + 16 * group, in_run, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)(i + 16 * group))));
+            if (!identity)
+            {
+                _mm512_mask_storeu_epi32(tokens->sources + written + 16 * group, in_run, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)(i + 16 * group))));
+            }
         }
         written += run;
         i += run;
         if (special != 0)
         {
+            if (identity)
+            {
+                // The first special token may shift the following grammar positions. Publish the preceding
+                // identity run once, then let the ordinary explicit map cover every subsequent token.
+                for (uint32_t t = 0; t < written; t += 1)
+                {
+                    tokens->sources[t] = t;
+                }
+                identity = false;
+            }
             i = parse_convert_token(output, i, tokens, &written);
         }
     }
     tokens->count = written;
+    tokens->identity_sources = identity;
     parse_tokens_pad(tokens);
 }
 
@@ -2603,6 +2619,30 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
     {
         // A static assertion after attribute lists at file scope: clang's error at the first of them.
         parse_scalar_error(parser, parse_scalar_leading_list(parser, i), PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
+    }
+    else if (kind == PARSE_KIND_STATIC_ASSERT && frame->role == PARSE_ROLE_OPEN_STRUCT &&
+             (frame->flags & (BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_TYPE_SEEN)) == 0 && i > 0 && parser->kinds[i - 1] == PARSE_KIND_EXTENSION)
+    {
+        // A member's leading __extension__ starts declaration specifiers, so its following assertion is not read as
+        // an assertion. Clang diagnoses the missing type and member before the missing semicolon (#2409). Retain the
+        // rejected-record recovery boundary: removing just this member would make an invalid record appear valid.
+        uint32_t begin = i;
+        while (begin > frame->opener + 1 && parser->kinds[begin - 1] == PARSE_KIND_EXTENSION)
+        {
+            begin -= 1;
+        }
+        const bool leading = begin == frame->opener + 1 || (begin > 0 && parser->kinds[begin - 1] == PARSE_KIND_SEMI);
+        if (leading)
+        {
+            parse_scalar_note(parser, i, PARSE_MESSAGE_TYPE_NAME_REQUIRES_SPECIFIER, BUSTER_PARSE_NONE, true);
+            parse_scalar_note(parser, i, PARSE_MESSAGE_EXPECTED_MEMBER_NAME, BUSTER_PARSE_NONE, true);
+            parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST, BUSTER_PARSE_AFTER_PREVIOUS);
+        }
+        else
+        {
+            // Attributes before the run have a separate recovery boundary.
+            parse_scalar_end_specifiers(parser, i, frame, step);
+        }
     }
     else if ((kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF) && (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) &&
              parse_scalar_storage_class(parser, i) && parser->names[i] != C_NAME_REGISTER)
@@ -5754,13 +5794,23 @@ static void parse_kernels_init_tables(void)
 // ---------------------------------------------------------------------------------------------------------------------
 // K3, type names
 
+// K1's block already carries the signed prefix depth before each live token. Only a scalar block with
+// an unmatched closer can clamp a negative depth to zero before the end of the block.
+BUSTER_INLINE uint32_t parse_bracket_depth(const ParseKernels* kernels, uint32_t token)
+{
+    const ParseBracketBlock* block = &kernels->bracket_blocks[token / 64];
+    const uint32_t lane = token % 64;
+    const uint32_t clamped = block->clamps != 0 ? (uint32_t)__builtin_popcountll(_bzhi_u64(block->clamps, lane)) : 0;
+    return block->base_depth + (uint32_t)(int32_t)block->relative_depths[lane] + clamped;
+}
+
 // The token after the group `opener` opens (or after `opener` if it isn't an opener): the first token after it whose
 // depth is the opener's again. The typedef pass is the only user, over typedef declarations alone.
 static uint32_t parse_after_group(const ParseKernels* kernels, const uint8_t* kinds, uint32_t opener)
 {
     const bool group = kinds[opener] == PARSE_KIND_L_PAREN || kinds[opener] == PARSE_KIND_L_SQUARE || kinds[opener] == PARSE_KIND_L_BRACE;
     uint32_t result = opener + 1;
-    while (group && kernels->depths[result] > kernels->depths[opener])
+    while (group && kinds[result] != PARSE_KIND_END && parse_bracket_depth(kernels, result) > parse_bracket_depth(kernels, opener))
     {
         result += 1;
     }
@@ -5802,7 +5852,7 @@ static void parse_typedefs(ParseKernels* kernels, const uint8_t* kinds, const ui
             keywords &= keywords - 1;
             if (t >= next)
             {
-                const uint32_t depth = kernels->depths[t];
+                const uint32_t depth = parse_bracket_depth(kernels, t);
                 const uint8_t scope = depth == 0 ? BUSTER_PARSE_TYPEDEF_FILE : BUSTER_PARSE_TYPEDEF_SCOPED;
                 const uint32_t opener = kernels->enclosing[t];
                 const bool block_scope = opener != BUSTER_PARSE_NONE && kinds[opener] == PARSE_KIND_L_BRACE;
@@ -5905,7 +5955,7 @@ static void parse_typedefs(ParseKernels* kernels, const uint8_t* kinds, const ui
                     {
                         i = name + 1;
                     }
-                    while (i < count && !(kernels->depths[i] == depth && (kinds[i] == PARSE_KIND_COMMA || kinds[i] == PARSE_KIND_SEMI)))
+                    while (i < count && !(parse_bracket_depth(kernels, i) == depth && (kinds[i] == PARSE_KIND_COMMA || kinds[i] == PARSE_KIND_SEMI)))
                     {
                         i = parse_after_group(kernels, kinds, i);
                     }
@@ -7757,7 +7807,6 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
     uint32_t* parents = tree == 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots) : tree->parents != 0 ? tree->parents - BUSTER_PARSE_TOKEN_PADDING : 0;
     *kernels = (ParseKernels){
         .vkinds = vkinds != 0 ? vkinds + BUSTER_PARSE_TOKEN_PADDING : 0,
-        .depths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .node_depths = node_depths != 0 ? node_depths + BUSTER_PARSE_TOKEN_PADDING : 0,
         .enclosing = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .bracket_blocks = BUSTER_ARENA_PUSH_ARRAY(arena, ParseBracketBlock, slots / 64 + 1),
@@ -7789,7 +7838,7 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
         .check_classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
         .check_groups = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
     };
-    const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->node_depths != 0 && kernels->enclosing != 0 && kernels->bracket_blocks != 0 &&
+    const bool result = kernels->vkinds != 0 && kernels->node_depths != 0 && kernels->enclosing != 0 && kernels->bracket_blocks != 0 &&
                         kernels->role_statics != 0 && kernels->roles != 0 &&
                         kernels->parents != 0 && kernels->flags != 0 && kernels->stack != 0 && kernels->stack_keys != 0 && kernels->waiting != 0 &&
                         kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->left_key_values != 0 && kernels->typedef_names != 0 &&
@@ -7966,14 +8015,13 @@ BUSTER_INLINE __m512i parse_prefix_sum8(__m512i x)
 
 // One block of K1 a token at a time, for a block whose enclosing openers reach further back than the vector path's 16 depths. Out
 // of line, so that this rare path leaves the block loop's code alone. Returns false if a closer has no opener.
-__attribute__((noinline)) static bool parse_brackets_block_scalar(const uint8_t* codes, const int8_t* deltas, uint32_t begin, uint32_t end, uint32_t* depths, uint32_t* enclosing,
+__attribute__((noinline)) static bool parse_brackets_block_scalar(const uint8_t* codes, const int8_t* deltas, uint32_t begin, uint32_t end, uint64_t* clamps, uint32_t* enclosing,
                                         uint32_t* open_stack, int64_t* depth)
 {
     bool balanced = true;
     for (uint32_t i = begin; i < end; i += 1)
     {
         const int8_t delta = deltas[codes[i]];
-        depths[i] = (uint32_t)*depth;
         enclosing[i] = *depth > 0 ? open_stack[*depth - 1] : BUSTER_PARSE_NONE;
         if (delta > 0)
         {
@@ -7981,6 +8029,7 @@ __attribute__((noinline)) static bool parse_brackets_block_scalar(const uint8_t*
         }
         *depth += delta;
         balanced &= *depth >= 0;
+        *clamps |= (uint64_t)(*depth < 0) << (i - begin);
         *depth = *depth < 0 ? 0 : *depth;
     }
     return balanced;
@@ -7992,7 +8041,7 @@ __attribute__((noinline)) static bool parse_brackets_block_scalar(const uint8_t*
 // vpermd away. `open_stack` needs an entry per depth the input reaches, and 16 of BUSTER_PARSE_NONE below depth 0. Each
 // block's view goes to `blocks` (ParseBracketBlock), for K2. Returns false if a closer has no opener or a group is still
 // open at the end.
-static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* depths, uint32_t* enclosing, uint32_t* open_stack,
+static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* enclosing, uint32_t* open_stack,
                                   ParseBracketBlock* blocks)
 {
     const __m512i delta_low = _mm512_loadu_si512(deltas);
@@ -8027,19 +8076,20 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
         _mm512_store_si512(view->opener_lanes, _mm512_mask_mov_epi8(_mm512_set1_epi8((char)0xFF), found & live_mask, p));
         _mm512_store_si512(view->relative_depths, _mm512_maskz_mov_epi8(live_mask, before));
         view->open = open;
+        view->base_depth = (uint32_t)base;
+        view->clamps = 0;
         // Tokens whose opener is before the block are at or below its starting depth; at most 15 depths below it the
         // vector path handles them.
         const __mmask64 deep = _mm512_mask_cmplt_epi8_mask(~found & live_mask, before, _mm512_set1_epi8(-15));
         if (deep != 0)
         {
-            balanced &= parse_brackets_block_scalar(codes, deltas, block, block + live, depths, enclosing, open_stack, &base);
+            balanced &= parse_brackets_block_scalar(codes, deltas, block, block + live, &view->clamps, enclosing, open_stack, &base);
         }
         else
         {
             // The open openers at the 16 depths below the block's start (open_stack has BUSTER_PARSE_DEPTH_PADDING entries
             // of no opener below depth 0).
             const __m512i below_vector = _mm512_loadu_si512(open_stack + base - 16);
-            const __m512i base_vector = _mm512_set1_epi32((int)base);
             const __m512i block_vector = _mm512_set1_epi32((int)block);
             for (uint32_t q = 0; q < 4; q += 1)
             {
@@ -8052,7 +8102,6 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
                 const __m512i outside = _mm512_permutexvar_epi32(_mm512_add_epi32(relative, _mm512_set1_epi32(15)), below_vector);
                 const __mmask16 found_quarter = (__mmask16)(found >> (16 * q));
                 _mm512_storeu_si512(enclosing + block + 16 * q, _mm512_mask_blend_epi32(found_quarter, outside, inside));
-                _mm512_storeu_si512(depths + block + 16 * q, _mm512_add_epi32(base_vector, relative));
             }
             (void)none;
             // The openers still open at the block's end, onto open_stack, each at its depth before it (#892). A delta is
@@ -8083,6 +8132,7 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
             base = base < 0 ? 0 : base;
         }
     }
+    blocks[(count + 63) / 64].base_depth = 0;
     return balanced && base == 0;
 }
 
@@ -8603,7 +8653,7 @@ BUSTER_INLINE uint32_t parse_roles_block_avx512(ParseKernels* kernels, uint32_t 
     const __m512i vk = _mm512_loadu_si512(vkinds + block);
     const __m512i vk_previous = _mm512_loadu_si512(vkinds + block - 1);
     const __m512i vk_next = _mm512_loadu_si512(vkinds + block + 1);
-    const uint32_t depth_base = kernels->depths[block];
+    const uint32_t depth_base = kernels->bracket_blocks[block / 64].base_depth;
     // The enclosing opener: a lane of the block, or an open group before it, whose role comes from carry->group_roles;
     // the window index of the group stacks for each token's depth before it, (depth - 1) - (base - 64); and the block's
     // openers still open at its end, the only ones a later block reads from the group stacks. K1 found them all.
@@ -8797,7 +8847,7 @@ BUSTER_INLINE uint32_t parse_roles_block_avx512(ParseKernels* kernels, uint32_t 
         // The next block's windows, for its starting depth: lane i holds depth depth_next - 64 + i, which an opener still open
         // at this block's end holds from the first one's depth up, and below that this block's windows, and below those the
         // stacks' 64 depths below them.
-        const uint32_t depth_next = kernels->depths[block + 64];
+        const uint32_t depth_next = kernels->bracket_blocks[block / 64 + 1].base_depth;
         const uint32_t first_open = open != 0 ? depth_base + (uint32_t)(int32_t)view->relative_depths[__builtin_ctzll(open)] : depth_next;
         const __m512i open_roles = _mm512_maskz_compress_epi8(open, roles);
         const __m512i open_keywords = _mm512_maskz_compress_epi8(open, vk_previous);
@@ -8832,7 +8882,7 @@ static ParseStatementContext parse_statement_context_avx512(const ParseKernels* 
     const __m512i enclosing_lane = _mm512_load_si512(view->opener_lanes);
     const __mmask64 inside = _mm512_cmplt_epu8_mask(enclosing_lane, _mm512_set1_epi8(64));
     const __m512i window_index = _mm512_add_epi8(_mm512_load_si512(view->relative_depths), _mm512_set1_epi8(63));
-    const int64_t depth_base = (int32_t)kernels->depths[block];
+    const int64_t depth_base = (int32_t)kernels->bracket_blocks[block / 64].base_depth;
     const __m512i roles = _mm512_loadu_si512(kernels->roles + block);
     const __m512i vk = _mm512_loadu_si512(kernels->vkinds + block);
     const __m512i vk_previous = _mm512_loadu_si512(kernels->vkinds + block - 1);
@@ -8884,9 +8934,9 @@ __attribute__((noinline)) static uint64_t parse_roles_twin_block(ParseKernels* k
     {
         const uint32_t i = block + (uint32_t)__builtin_ctzll(openers);
         openers &= openers - 1;
-        carry->group_roles[(int32_t)kernels->depths[i]] = kernels->roles[i];
-        carry->group_typed[(int32_t)kernels->depths[i]] = i >= 2 ? typed[i - 2] : 0;
-        carry->group_keywords[(int32_t)kernels->depths[i]] = kernels->vkinds[(int64_t)i - 1];
+        carry->group_roles[(int32_t)parse_bracket_depth(kernels, i)] = kernels->roles[i];
+        carry->group_typed[(int32_t)parse_bracket_depth(kernels, i)] = i >= 2 ? typed[i - 2] : 0;
+        carry->group_keywords[(int32_t)parse_bracket_depth(kernels, i)] = kernels->vkinds[(int64_t)i - 1];
     }
     carry->previous_feature = parse_role_features(kernels->roles[block + live - 1], kernels->vkinds[block + live - 1]);
     carry->before_feature = live >= 2 ? parse_role_features(kernels->roles[block + live - 2], kernels->vkinds[block + live - 2]) : carry->previous_feature;
@@ -9015,7 +9065,7 @@ static void parse_roles_starting_avx512(ParseKernels* kernels, uint32_t count, u
                 typed_mask = parse_roles_twin_block(kernels, block, live, typed, &carry, &context);
                 contexts[block / 64] = context;
                 carry.typed = live == 64 ? typed_mask : typed_mask << (64 - live);
-                windows = parse_group_windows_load(&carry, block + 64 < count ? kernels->depths[block + 64] : 0);
+                windows = parse_group_windows_load(&carry, block + 64 < count ? kernels->bracket_blocks[block / 64 + 1].base_depth : 0);
             }
             rounds[taken] += 1;
             block += 64;
@@ -9058,6 +9108,7 @@ static void parse_classify_mask_avx512(ParseKernels* kernels, const uint8_t* kin
 // the twin's stack), and the depth of their groups is a prefix sum of their deltas, added to each token's depth.
 static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32_t* secondary)
 {
+    kernels->depth_work = NULL;
     uint32_t open = 0;
     for (uint32_t block = 0; block < count; block += 64)
     {
@@ -9076,14 +9127,14 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
             }
             else
             {
-                const uint32_t depth = kernels->depths[i];
-                while (open != 0 && kernels->depths[secondary[open - 1]] > depth)
+                const uint32_t depth = parse_bracket_depth(kernels, i);
+                while (open != 0 && parse_bracket_depth(kernels, secondary[open - 1]) > depth)
                 {
                     kernels->flags[secondary[open - 1]] = 1;
                     kernels->unbalanced = true;
                     open -= 1;
                 }
-                if (open != 0 && kernels->depths[secondary[open - 1]] == depth)
+                if (open != 0 && parse_bracket_depth(kernels, secondary[open - 1]) == depth)
                 {
                     const uint32_t opener = secondary[open - 1];
                     open -= 1;
@@ -9121,6 +9172,7 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
     const __m512i closer_low = _mm512_loadu_si512(closers);
     const __m512i closer_high = _mm512_loadu_si512(closers + 64);
     uint32_t inner = 0;
+    __m512i depth_bits = _mm512_setzero_si512();
     for (uint32_t block = 0; block < count; block += 64)
     {
         const __m512i role = _mm512_loadu_si512(kernels->roles + block);
@@ -9128,20 +9180,46 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
         const __m512i after = parse_prefix_sum8(delta);
         // The secondary depth before each token, less one at a closer.
         const __m512i before = _mm512_sub_epi8(_mm512_sub_epi8(after, delta), _mm512_permutex2var_epi8(closer_low, role, closer_high));
-        const __m512i base = _mm512_set1_epi32((int)inner);
+        const ParseBracketBlock* brackets = &kernels->bracket_blocks[block / 64];
+        __m512i bracket_depths = _mm512_load_si512(brackets->relative_depths);
+        if (brackets->clamps != 0)
+        {
+            const __m512i adjusted = _mm512_maskz_set1_epi8(brackets->clamps << 1, 1);
+            bracket_depths = _mm512_add_epi8(bracket_depths, parse_prefix_sum8(adjusted));
+        }
+        const __m512i base = _mm512_set1_epi32((int)(inner + brackets->base_depth));
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        __m512i block_bits = _mm512_setzero_si512();
         for (uint32_t q = 0; q < 4; q += 1)
         {
             const __m128i quarter = q == 0 ? _mm512_extracti32x4_epi32(before, 0) : q == 1 ? _mm512_extracti32x4_epi32(before, 1) :
                                     q == 2 ? _mm512_extracti32x4_epi32(before, 2) : _mm512_extracti32x4_epi32(before, 3);
-            const uint32_t* depths = kernels->depths + block + 16 * q;
-            _mm512_storeu_si512(kernels->node_depths + block + 16 * q, _mm512_add_epi32(_mm512_loadu_si512(depths), _mm512_add_epi32(base, _mm512_cvtepi8_epi32(quarter))));
+            const __m128i bracket = q == 0 ? _mm512_extracti32x4_epi32(bracket_depths, 0) : q == 1 ? _mm512_extracti32x4_epi32(bracket_depths, 1) :
+                                    q == 2 ? _mm512_extracti32x4_epi32(bracket_depths, 2) : _mm512_extracti32x4_epi32(bracket_depths, 3);
+            const __m512i depth = _mm512_add_epi32(base, _mm512_add_epi32(_mm512_cvtepi8_epi32(bracket), _mm512_cvtepi8_epi32(quarter)));
+            _mm512_storeu_si512(kernels->node_depths + block + 16 * q, depth);
+            block_bits = _mm512_or_si512(block_bits, depth);
+        }
+        if (live == 64)
+        {
+            depth_bits = _mm512_or_si512(depth_bits, block_bits);
+        }
+        else
+        {
+            for (uint32_t q = 0; q < live; q += 16)
+            {
+                const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT16_MAX, live - q);
+                depth_bits = _mm512_or_si512(depth_bits, _mm512_maskz_loadu_epi32(lanes, kernels->node_depths + block + q));
+            }
         }
         // The last live lane from the register: a byte reloaded from a store of `after` met that store before its data
         // was ready, in some builds once a block (about 0.1 cycles a token on sqlite3.c, 0.15 on the libc corpus).
-        const uint32_t live = count - block < 64 ? count - block : 64;
         const __m512i last = _mm512_permutexvar_epi8(_mm512_set1_epi8((char)(live - 1)), after);
         inner += (uint32_t)(int32_t)(int8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(last));
     }
+    // K4 only needs to know whether any depth exceeds its eleven-bit key. The OR retains every high bit.
+    _Static_assert((BUSTER_PARSE_MAX_VECTOR_DEPTH & (BUSTER_PARSE_MAX_VECTOR_DEPTH + 1u)) == 0, "K4's depth bound consists of consecutive low bits");
+    kernels->deep_node_depths = _mm512_test_epi32_mask(depth_bits, _mm512_set1_epi32(~BUSTER_PARSE_MAX_VECTOR_DEPTH)) != 0;
 }
 
 // The roles that depend on whether a `:` before them ends a case label or a label (a statement starts) or a ternary's
@@ -10493,27 +10571,26 @@ static bool parse_check_block_avx512(ParseKernels* kernels, const uint32_t* name
 {
     const ParseCheckVectorTables* v = &parse_check_vector;
     const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
-    // The levels: the node depths less the block's least, plus one.
-    __m512i depths[4];
-    __m512i lowest = _mm512_set1_epi32(-1);
-    __m512i highest = _mm512_setzero_si512();
-    for (uint32_t q = 0; q < 4; q += 1)
+    // A narrow K4 key is (node depth - base) * 32 + precedence. Its high three bits already give K6 the
+    // relative depth. Wider blocks and units the scalar K4 handled use the full depth column.
+    const ParseBlockWork* work = kernels->depth_work != NULL ? &kernels->depth_work[block >> 6] : NULL;
+    uint32_t lo = work != NULL ? work->base : BUSTER_PARSE_NONE;
+    __m512i relative;
+    bool result = true;
+    if (lo != BUSTER_PARSE_NONE)
     {
-        const __mmask16 quarter = (__mmask16)(live_mask >> (16 * q));
-        depths[q] = _mm512_maskz_loadu_epi32(quarter, kernels->node_depths + block + 16 * q);
-        lowest = _mm512_mask_min_epu32(lowest, quarter, lowest, depths[q]);
-        highest = _mm512_mask_max_epu32(highest, quarter, highest, depths[q]);
+        const __m512i keys = _mm512_load_si512(work->keys);
+        relative = _mm512_and_si512(_mm512_srli_epi16(keys, 5), _mm512_set1_epi8(7));
     }
-    const uint32_t lo = _mm512_reduce_min_epu32(lowest);
-    const uint32_t hi = _mm512_reduce_max_epu32(highest);
-    bool result = hi - lo <= 63;
+    else
+    {
+        uint32_t hi;
+        relative = parse_relative_depths8(kernels->node_depths, block, live_mask, &lo, &hi);
+        result = hi - lo <= 63;
+    }
     if (result)
     {
-        const __m512i base = _mm512_set1_epi32((int)lo - 1);
-        __m512i level = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[0], base)));
-        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[1], base)), 1);
-        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[2], base)), 2);
-        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[3], base)), 3);
+        __m512i level = _mm512_add_epi8(relative, _mm512_set1_epi8(1));
         // Lanes past the block's end at the last lane's level.
         level = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)(kernels->node_depths[block + live - 1] - lo + 1)), live_mask, level);
         const uint32_t previous_depth = carry->previous_depth;
@@ -10949,7 +11026,7 @@ static bool parse_vector_postorder_reserve(ParseVectorBuffers* buffers, Arena* a
 }
 
 // The deepest node depth, which decides whether K4's 16-bit keys can hold it.
-static uint32_t parse_deepest(const ParseKernels* kernels, uint32_t count)
+static __attribute__((unused)) uint32_t parse_deepest(const ParseKernels* kernels, uint32_t count)
 {
     __m512i deepest = _mm512_setzero_si512();
     for (uint32_t block = 0; block < count; block += 16)
@@ -10964,13 +11041,15 @@ static uint32_t parse_deepest(const ParseKernels* kernels, uint32_t count)
 // 16-bit keys, which the twin takes.
 static void parse_parents_vector(ParseKernels* kernels, uint32_t count, ParseVectorBuffers* buffers)
 {
-    if (parse_deepest(kernels, count) <= BUSTER_PARSE_MAX_VECTOR_DEPTH)
+    if (!kernels->deep_node_depths)
     {
+        kernels->depth_work = buffers->works;
         parse_top_parents8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, buffers->works, kernels->parents, &buffers->slots,
                                   &buffers->wide_blocks);
     }
     else
     {
+        kernels->depth_work = NULL;
         parse_parents_scalar(kernels, count);
     }
 }
@@ -11036,7 +11115,7 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
     kernels->unsupported = false;
     parse_kernels_predeclared(kernels, predeclared, true);
     // K1, on ( [ {.
-    kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->depths, kernels->enclosing, buffers->open_stack, kernels->bracket_blocks);
+    kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->enclosing, buffers->open_stack, kernels->bracket_blocks);
     // K3.
     if (!kernels->unbalanced)
     {
@@ -11216,7 +11295,7 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             const uint32_t t = first + (uint32_t)__builtin_ctzll(places);
             history = asked ? history : pp_history_ensure(pp);
             asked = true;
-            const uint32_t origin = history ? pp_history_at(pp, tokens->sources[t]) : 0;
+            const uint32_t origin = history ? pp_history_at(pp, parse_source_index(tokens, t)) : 0;
             const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
             bool expanded = origin != 0 && (origin & ~BUSTER_PP_ORIGIN_INDEX) == 0 && index < pp->history_count &&
                             pp->history[index].name == clang && pp->history[index].parent == 0;
@@ -11468,23 +11547,47 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
         char text[256];
         parse_diagnostic_message(parser, pp, diagnostic, text, sizeof(text));
         const uint32_t token = diagnostic->token;
-        const uint32_t previous = diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS && token > 0 && token < parser->tokens.count ?
-                                      parse_expansion_context(pp, parser->tokens.sources[token - 1]) : 0;
-        const bool inside = previous != 0 && previous == parse_expansion_context(pp, parser->tokens.sources[token]);
         // Inside one expansion, an after-previous diagnostic is already located at the next token
         // (parse_diagnostic_location). Keep that token's macro-note chain instead of reducing it to a byte location.
-        if ((diagnostic->place == BUSTER_PARSE_AT_TOKEN || inside) && token < parser->tokens.count)
+        const uint32_t previous = diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS && token > 0 && token < parser->tokens.count ?
+                                      parse_expansion_context(pp, parse_source_index(&parser->tokens, token - 1)) : 0;
+        const bool inside = previous != 0 && previous == parse_expansion_context(pp, parse_source_index(&parser->tokens, token));
+        const bool member_assertion = token > 0 && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT &&
+                                      parser->tokens.kinds[token - 1] == PARSE_KIND_EXTENSION;
+        const bool member_type = diagnostic->message == PARSE_MESSAGE_TYPE_NAME_REQUIRES_SPECIFIER;
+        const bool member_semi = diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST;
+        if (member_assertion && (member_type || member_semi))
+        {
+            // This missing semicolon follows the member's type/name errors, despite pointing before them. Inside one
+            // macro expansion it uses the assertion's spelling and notes; between expansions it points just after
+            // the previous invocation. The type and semicolon diagnostics name a caller-spelled argument directly;
+            // the member-name diagnostic below spans the declaration and keeps its argument-expansion note.
+            const uint32_t source = parse_source_index(&parser->tokens, token);
+            const uint32_t member_previous = member_semi ? parse_expansion_context(pp, parse_source_index(&parser->tokens, token - 1)) : 0;
+            const bool member_inside = member_previous != 0 && member_previous == parse_expansion_context(pp, source);
+            const bool spelled = member_type || member_inside;
+            const uint32_t location = spelled ? pp->output.locations[source] : parse_diagnostic_location(parser, pp, diagnostic);
+            uint32_t origin = spelled ? pp_history_at(pp, source) : 0;
+            const uint32_t count = pp->substitution_count;
+            for (uint32_t step = 0; (origin & ~BUSTER_PP_ORIGIN_INDEX) == BUSTER_PP_ORIGIN_ARGUMENT && step < count; step += 1)
+            {
+                const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+                origin = index < count ? pp->substitutions[index].source : 0;
+            }
+            pp_diagnose_placed_sources_phase(pp, PP_SEVERITY_ERROR, location, origin, source, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, "%s", text);
+        }
+        else if ((diagnostic->place == BUSTER_PARSE_AT_TOKEN || inside) && token < parser->tokens.count)
         {
             // An expected closer's note at its opener (#147): "to match this '('".
             const uint32_t opener = diagnostic->note;
             const uint8_t opener_kind = opener < parser->tokens.count ? parser->tokens.kinds[opener] : PARSE_KIND_END;
             const PPOutputDiagnosticNote note = {
-                .token = opener < parser->tokens.count ? parser->tokens.sources[opener] : 0,
+                .token = opener < parser->tokens.count ? parse_source_index(&parser->tokens, opener) : 0,
                 .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
             };
-            const uint32_t source = parser->tokens.sources[diagnostic->token];
+            const uint32_t source = parse_source_index(&parser->tokens, diagnostic->token);
             // Published where the parser knew it (ParseDiagnostic.publication), after an earlier error of its token's.
-            const uint32_t known = diagnostic->publication != 0 && diagnostic->publication < parser->tokens.count ? parser->tokens.sources[diagnostic->publication] : source;
+            const uint32_t known = diagnostic->publication != 0 && diagnostic->publication < parser->tokens.count ? parse_source_index(&parser->tokens, diagnostic->publication) : source;
             if (diagnostic->declaration_type || (diagnostic->attribute_prefix && diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME))
             {
                 // An attributed block's missing or unknown type precedes its attribute and redeclaration checks.
@@ -11493,7 +11596,11 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             }
             else
             {
+                // A rejected extension-prefixed member spans the declaration specifiers and the unexpected token.
+                const bool spans = pp->diagnostic_spans;
+                pp->diagnostic_spans |= member_assertion && diagnostic->message == PARSE_MESSAGE_EXPECTED_MEMBER_NAME;
                 pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
+                pp->diagnostic_spans = spans;
             }
         }
         else
@@ -11501,14 +11608,14 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             // A parser diagnostic's location can be before the next token or at the unit's end. Its publication
             // boundary is where the parser knew it: at the token it read next, so a preprocessing diagnostic between
             // the previous token and that one sorts first, as clang's interleaved parse does.
-            uint32_t position = diagnostic->token < parser->tokens.count ? parser->tokens.sources[diagnostic->token] : pp->output.count;
+            uint32_t position = diagnostic->token < parser->tokens.count ? parse_source_index(&parser->tokens, diagnostic->token) : pp->output.count;
             const uint32_t saved = pp->diagnostic_position;
             pp->diagnostic_position = position;
             // An expected closer's note at its opener (#147), where the error is at the unit's end.
             const uint32_t opener = diagnostic->note;
             const uint8_t opener_kind = opener < parser->tokens.count ? parser->tokens.kinds[opener] : PARSE_KIND_END;
             const PPDiagnosticNote note = {
-                .location = opener < parser->tokens.count ? parse_primary_location(pp, parser->tokens.sources[opener]) : 0,
+                .location = opener < parser->tokens.count ? parse_primary_location(pp, parse_source_index(&parser->tokens, opener)) : 0,
                 .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
             };
             pp_diagnose_note(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic),

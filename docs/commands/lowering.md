@@ -2736,13 +2736,35 @@ The uninitialized pass uses the summary node's reach and order together with
 that token, so that it still reports the first evaluated read of an
 uninitialized variable, including its source position and note. An
 unreachable read still counts as a syntactic use of a written parameter.
-Other storage classes, special registers and qualified types keep their graph.
+Local reads use the ordinary graph with debug information enabled, preserving
+the identifier source positions. Other storage classes, special registers and
+qualified types also keep their graph.
+
+`--node-window-assignments` enables the same returns and also scans for complete
+discarded assignments such as `x = 24;` and `x = y;`, with distinct ordinary
+automatic or parameter `int` objects. An admitted assignment retains three
+entries for its right operand, local store and discard, each with its own
+source token. The read and write events feed the existing warning passes.
+The base `--node-window` mode skips assignment discovery.
+
+A block statement such as `((void)7);` can also use the window. The cast
+must discard a plain integer literal from the chunk decoder. Grouping
+parentheses around the cast or the literal are accepted. The native CONST
+keeps the literal's token and the DISCARD keeps the cast's token. The checker
+still handles operands with side effects, loop clauses and the final value of
+a GNU statement expression.
 
 Admission requires the entire expression in the same coded chunk. Other types,
-operators and spellings, debug information, deferred parts, and units requiring
+operators and spellings, deferred parts, and units requiring
 musttail validation use the existing graph. The window checks the coded tokens
 before any of their graph actions run. A refusal consumes no tokens. No ordinary
 graph or shadow run supplies a successful fold.
+
+With debug information enabled, the CONST row keeps the return token. The
+ordinary lowering uses this same token for the folded return conversion,
+including when its operands occur on different lines or come from macros.
+The node-machine fixture compares every native entry and its source token
+between the two lowerings.
 
 `--time-stages` reports the expressions taken, the ordinary nodes they replace,
 the summaries and the resulting graph size per unit. The

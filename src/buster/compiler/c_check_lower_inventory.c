@@ -621,9 +621,11 @@ static uint8_t lower_source_node_front;
 // PPOptions.node_reader for them (measure-node-machine --shadow --front-tests); 0 for none.
 static uint16_t lower_source_node_reader;
 
+#define BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS 4u
+
 // Opens `file`, read with `options`, into `source`, with the backend's tables built: whether its options could be read
 // (source->prepared says whether it reached its selected program).
-static bool lower_source_open(LowerSource* source, const char* file, char** options, uint32_t option_count, bool window)
+static bool lower_source_open(LowerSource* source, const char* file, char** options, uint32_t option_count, uint32_t window)
 {
     source->option_arena = arena_reserve(UINT64_C(1) << 24);
     char** own = BUSTER_ARENA_PUSH_ARRAY(&source->option_arena, char*, (uint64_t)option_count + 2);
@@ -642,7 +644,8 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
     }
     valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &source->option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
     pp_options.semantic_pragmas = true;
-    pp_options.node_window = window;
+    pp_options.node_window = window != 0;
+    pp_options.node_window_assignments = (window & BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS) != 0;
     pp_options.node_front = lower_source_node_front;
     pp_options.node_reader = lower_source_node_reader;
     source->path = (CheckCorpusPath){ 0 };

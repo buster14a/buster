@@ -435,7 +435,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                 }
                 pragma += 1;
             }
-            check_input_fp_eval_uses(reader, &eval_use, token < parser->tokens.count ? parser->tokens.sources[token] : reader->pp->output.count, pragma, token,
+            check_input_fp_eval_uses(reader, &eval_use, token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : reader->pp->output.count, pragma, token,
                                      state.eval_pragma_source);
             input->fp_environments[token] = check_input_fp_environment(state);
             input->cx_limited_ranges[token] = state.values[CHECK_FP_PRAGMA_CX_LIMITED_RANGE];

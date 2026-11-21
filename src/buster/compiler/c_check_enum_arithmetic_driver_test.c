@@ -268,6 +268,25 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtu
         .errors = 2,
     },
     {
+        .name = "opposite mappings for unnamed and typedef-named macro enums",
+        .source = "#define ENUM(name) enum { name }\n"
+                  "enum Named { N };\n"
+                  "ENUM(U) untyped;\n"
+                  "typedef ENUM(T) Alias;\n"
+                  "int f(void) {\n"
+                  "#pragma clang diagnostic push\n"
+                  "#pragma clang diagnostic ignored \"-Wanon-enum-enum-conversion\"\n"
+                  "#pragma clang diagnostic warning \"-Wenum-compare\"\n"
+                  "    int result = (N == U) + (N == T);\n"
+                  "#pragma clang diagnostic ignored \"-Wenum-compare\"\n"
+                  "#pragma clang diagnostic warning \"-Wanon-enum-enum-conversion\"\n"
+                  "    result += (N == U) + (N == T);\n"
+                  "#pragma clang diagnostic pop\n"
+                  "    return result;\n"
+                  "}\n",
+        .warnings = 2,
+    },
+    {
         .name = "pragmas map the enumeration warnings at their operators",
         .source = "enum E { A, B }; enum F { C, D };\n"
                   "int f(enum E e, enum F g) {\n"

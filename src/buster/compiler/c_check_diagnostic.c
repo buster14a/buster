@@ -228,6 +228,36 @@ static bool check_diagnostic_option(String8 option, const char* expected)
 
 #include "c_check_warning_policy.c"
 
+// Whether command-line policy or any source pragma can enable this group anywhere in the unit.
+static bool check_diagnostic_may_report(const PPOptions* options, const CheckInputDiagnosticPragmas* history, uint32_t id, bool default_ignored, bool default_error)
+{
+    const CheckWarningCommandLine command = check_warning_command_line(options, id, default_ignored, default_error);
+    bool enabled = default_error ? command.mapped != CHECK_WARNING_IGNORE : !command.quiet && command.severity != CHECK_WARNING_IGNORE;
+    for (uint32_t i = 0; (!command.quiet || id == CHECK_WARNING_ID_ATOMIC_ACCESS) && !enabled && history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputDiagnosticPragma* record = history->records + i;
+        enabled = record->operation != CHECK_DIAGNOSTIC_IGNORED && check_warning_option(id, record->option);
+    }
+    return enabled;
+}
+
+static bool check_input_unused_may_report(const Preprocessor* pp, const CheckInput* input)
+{
+    static const uint32_t groups[] = {
+        CHECK_WARNING_ID_UNUSED_FUNCTION, CHECK_WARNING_ID_UNUSED_LOCAL_TYPEDEF, CHECK_WARNING_ID_UNUSED_VARIABLE,
+        CHECK_WARNING_ID_UNUSED_CONST_VARIABLE, CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE, CHECK_WARNING_ID_UNUSED_PARAMETER,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(groups); i += 1)
+    {
+        if (check_diagnostic_may_report(&pp->options, input->diagnostic_pragmas, groups[i], true, false))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+
 // A floating-point pragma's warning of policy `id` at output token `source`: its command-line severity, and in *quiet
 // whether -w or a system header without -Wsystem-headers hides it (-Wignored-pragmas' empty stack, and #1970's
 // -Wunknown-pragmas: an STDC pragma's state that is no ON, OFF or DEFAULT).
@@ -786,10 +816,10 @@ static uint32_t check_diagnostic_input_report_source(const CheckInput* input, co
 {
     uint32_t source = check_input_report_source(parser, report);
     const uint32_t custom = report->pragma == 0 && report->token < parser->tokens.count ? check_diagnostic_custom_attribute_name(parser, report->token) : BUSTER_CHECK_NONE;
-    source = custom != BUSTER_CHECK_NONE ? parser->tokens.sources[custom] : source;
+    source = custom != BUSTER_CHECK_NONE ? parse_source_index(&parser->tokens, custom) : source;
     if (input->naked_diagnostic != NULL && report->pragma == 0 && report->token == input->naked_diagnostic->position)
     {
-        source = parser->tokens.sources[input->naked_diagnostic->token];
+        source = parse_source_index(&parser->tokens, input->naked_diagnostic->token);
     }
     if (input->loop_diagnostic != 0 && report->pragma == input->loop_diagnostic->pragma && report->token == input->loop_diagnostic->position)
     {

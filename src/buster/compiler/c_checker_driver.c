@@ -942,7 +942,7 @@ static void check_driver_diagnose(const Parser* parser, Preprocessor* pp, uint32
 {
     if (token < parser->tokens.count)
     {
-        pp_diagnose_output(pp, PP_SEVERITY_ERROR, parser->tokens.sources[token], "%s", message);
+        pp_diagnose_output(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, token), "%s", message);
     }
     else
     {
@@ -1037,7 +1037,7 @@ static uint64_t check_driver_warning_key(uint32_t token, uint32_t flags, uint32_
 
 static uint32_t check_driver_publication_position(const Parser* parser, const Preprocessor* pp, uint32_t boundary, uint32_t publication_end)
 {
-    return boundary < parser->tokens.count ? parser->tokens.sources[boundary] :
+    return boundary < parser->tokens.count ? parse_source_index(&parser->tokens, boundary) :
            boundary == parser->tokens.count ? publication_end : pp->output.count + 1u;
 }
 
@@ -1301,7 +1301,7 @@ static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp,
 static void check_driver_escape(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, String8 spelling, const CheckEscapeDiagnostic* diagnostic,
                                 uint32_t publication)
 {
-    const uint32_t source = parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&parser->tokens, token);
     const uint32_t offset = diagnostic->offset;
     const char character = (char)diagnostic->character;
     // A macro argument's literal: its escape's diagnostics show the argument (#1447, Preprocessor.diagnostic_arguments).
@@ -1439,7 +1439,7 @@ static void check_driver_unevaluated_prefixes(const Parser* parser, Preprocessor
         if (severity != CHECK_WARNING_IGNORE)
         {
             pp->diagnostic_arguments = true;
-            pp_diagnose_output_offset_at(pp, disposition, parser->tokens.sources[token], 0, publication,
+            pp_diagnose_output_offset_at(pp, disposition, parse_source_index(&parser->tokens, token), 0, publication,
                                          "encoding prefix '%s' on an unevaluated string literal has no effect [%s-Winvalid-unevaluated-string]", written,
                                          error ? "-Werror," : "");
             pp->diagnostic_arguments = false;
@@ -1494,11 +1494,11 @@ static void check_driver_unevaluated_escapes(const Parser* parser, Preprocessor*
         const char* written = (const char*)intern_bytes(pp->table, name);
         if ((report->value >> 32) != 0)
         {
-            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[open], publication, "attribute '%.*s' cannot have an argument list", length, written);
+            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, open), publication, "attribute '%.*s' cannot have an argument list", length, written);
         }
         else
         {
-            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[open], publication,
+            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, open), publication,
                                   "parentheses must be omitted if '%.*s' attribute's argument list is empty", length, written);
         }
     }
@@ -1509,7 +1509,7 @@ static void check_driver_unevaluated_escapes(const Parser* parser, Preprocessor*
 static void check_driver_bit_int_suffix(Preprocessor* pp, const Parser* parser, uint32_t token, Arena* scratch)
 {
     static const CheckInput none = { 0 };
-    const uint32_t source = parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&parser->tokens, token);
     PPTokens* output = &pp->output;
     if (parser->language.standard < 2023 && source < output->count && output->kinds[source] != BUSTER_PP_KIND_EMBED && output->kinds[source] != BUSTER_PP_KIND_INTEGER)
     {
@@ -1563,7 +1563,7 @@ static void check_driver_unparsed_literals(const Parser* parser, Preprocessor* p
         }
         else
         {
-            if (kind == PARSE_KIND_NUMBER && !check_driver_literal(pp, parser, t, parser->tokens.sources[t], parser->tokens.sources[t], scratch))
+            if (kind == PARSE_KIND_NUMBER && !check_driver_literal(pp, parser, t, parse_source_index(&parser->tokens, t), parse_source_index(&parser->tokens, t), scratch))
             {
                 check_driver_bit_int_suffix(pp, parser, t, scratch);
             }
@@ -1623,11 +1623,11 @@ static bool check_driver_unparsed_escapes(const Parser* parser, Preprocessor* pp
     }
     if (refused != end)
     {
-        check_driver_escapes(parser, pp, input, refused, end, parser->tokens.sources[refused], scratch);
+        check_driver_escapes(parser, pp, input, refused, end, parse_source_index(&parser->tokens, refused), scratch);
     }
     else if (strings)
     {
-        check_driver_unevaluated_prefixes(parser, pp, input, first, end, parser->tokens.sources[first], scratch);
+        check_driver_unevaluated_prefixes(parser, pp, input, first, end, parse_source_index(&parser->tokens, first), scratch);
     }
     return refused != end;
 }
@@ -1731,7 +1731,7 @@ static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp
         const bool evaluated = !gnu && !standard && !assertion && (kind == PARSE_KIND_STRING || kind == PARSE_KIND_CHARACTER);
         if (evaluated)
         {
-            check_driver_literal_escapes(parser, pp, &none, t, parser->tokens.sources[t], scratch);
+            check_driver_literal_escapes(parser, pp, &none, t, parse_source_index(&parser->tokens, t), scratch);
             k = t + 1;
             while (kind == PARSE_KIND_STRING && k < end && kinds[k] == PARSE_KIND_STRING)
             {
@@ -1869,7 +1869,7 @@ static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp,
     }
     if (refusal != 0)
     {
-        pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[token], publication, "%s",
+        pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, token), publication, "%s",
                               refusal == 1 ? "character too large for enclosing character literal type" :
                               refusal == 2 ? "wide character literals may not contain multiple characters" :
                                              "Unicode character literals may not contain multiple characters");
@@ -1889,7 +1889,7 @@ static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp,
             const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
             if (severity != CHECK_WARNING_IGNORE)
             {
-                pp_diagnose_output_at(pp, disposition, parser->tokens.sources[token], publication, "multi-character character constant [%s-W%s]", error ? "-Werror," : "",
+                pp_diagnose_output_at(pp, disposition, parse_source_index(&parser->tokens, token), publication, "multi-character character constant [%s-W%s]", error ? "-Werror," : "",
                                       four ? "four-char-constants" : "multichar");
             }
         }
@@ -1989,7 +1989,7 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                     const char* message = string ? "initializer-string for char array is too long" :
                                           object != 0 ? check_warning_text(scratch, "excess elements in %s initializer", subject) :
                                           check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS);
-                    pp_diagnose_output_at(pp, disposition, parser->tokens.sources[event->token], publication, "%s [-W%sexcess-initializers]",
+                    pp_diagnose_output_at(pp, disposition, parse_source_index(&parser->tokens, event->token), publication, "%s [-W%sexcess-initializers]",
                                           message, severity >= CHECK_WARNING_ERROR ? "error," : "");
                     valid = !pp->diagnostic_collection_failed;
                 }
@@ -2009,9 +2009,9 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                 valid = message != NULL && text != NULL;
                 if (valid)
                 {
-                    const PPOutputDiagnosticNote noted = { .token = parser->tokens.sources[note->token], .message = text };
+                    const PPOutputDiagnosticNote noted = { .token = parse_source_index(&parser->tokens, note->token), .message = text };
                     const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
-                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[event->token], publication, &noted, 1, "%s", message);
+                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, event->token), publication, &noted, 1, "%s", message);
                     valid = !pp->diagnostic_collection_failed;
                 }
                 arena_pop_to(scratch, mark);
@@ -2105,7 +2105,7 @@ static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, c
     {
         const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                        severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[member->token],
+        pp_diagnose_output(pp, pp_severity, parse_source_index(&parser->tokens, member->token),
                            "taking address of packed member '%.*s' of class or structure '%.*s' may result in an unaligned pointer value",
                            (int)member->member_name.length, member->member_name.pointer,
                            (int)member->record_name.length, member->record_name.pointer);
@@ -2175,7 +2175,7 @@ static uint64_t check_driver_first_error(const Parser* original, const Preproces
         const ParseDiagnostic* diagnostic = original->diagnostics + i;
         if (diagnostic->error)
         {
-            const uint32_t source = diagnostic->token < original->tokens.count ? original->tokens.sources[diagnostic->token] : pp->output.count;
+            const uint32_t source = diagnostic->token < original->tokens.count ? parse_source_index(&original->tokens, diagnostic->token) : pp->output.count;
             const uint64_t position = (uint64_t)source * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_SEMANTIC;
             first_error = position < first_error ? position : first_error;
         }
@@ -2271,13 +2271,13 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                 if (body->return_warning == 3)
                 {
-                    pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN,
+                    pp_diagnose_output_phase(pp, pp_severity, parse_source_index(&parser->tokens, token), publication, PP_DIAGNOSTIC_RETURN,
                                              "function declared 'noreturn' should not return [%s-Winvalid-noreturn]",
                                              check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
                 }
                 else
                 {
-                    pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN,
+                    pp_diagnose_output_phase(pp, pp_severity, parse_source_index(&parser->tokens, token), publication, PP_DIAGNOSTIC_RETURN,
                                              "non-void function does not return a value%s [%s-Wreturn-type]",
                                              body->return_warning == 2 ? " in all control paths" : "",
                                              check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
@@ -2330,7 +2330,7 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
             // A failed/incomplete program cannot prove deadness. Report any still-deferred event conservatively.
             if (event->disposition != CHECK_BUILTIN_X86_SUPPRESSED && severity != CHECK_WARNING_IGNORE && token < parser->tokens.count)
             {
-                uint32_t publication = parser->tokens.sources[token];
+                uint32_t publication = parse_source_index(&parser->tokens, token);
                 PPDiagnosticPhase phase = PP_DIAGNOSTIC_SEMANTIC;
                 const uint32_t original_end = check_diagnostic_parse_end(original);
                 for (uint32_t parent = token, steps = 0; parent < original->tokens.count && steps < original->tokens.count; steps += 1)
@@ -2369,7 +2369,7 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
                         (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                 // Clang's warn_argument_invalid_range is an error by default, so its printer never adds `-Werror,`: the
                 // option alone, whether it is a warning, an error or a fatal error (#1079).
-                pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase,
+                pp_diagnose_output_phase(pp, pp_severity, parse_source_index(&parser->tokens, token), publication, phase,
                                    "argument value %s is outside the valid range [%u, %u] [-Wargument-outside-range]", text, event->low, event->high);
             }
         }
@@ -2388,13 +2388,13 @@ static void check_driver_kr_report_at(const Parser* parser, Preprocessor* pp, co
         {
             const uint32_t name = parser->tokens.names[token];
             // These warnings have no flag of their own: -Werror's error says only that (#1994).
-            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[place], "%s to '%.*s'%s",
+            pp_diagnose_output(pp, pp_severity, parse_source_index(&parser->tokens, place), "%s to '%.*s'%s",
                                check_diagnostic_message(warning), (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
                                severity == CHECK_WARNING_ERROR ? " [-Werror]" : "");
         }
         else
         {
-            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[place], "%s [%s-Wdeprecated-non-prototype]", check_diagnostic_message(warning),
+            pp_diagnose_output(pp, pp_severity, parse_source_index(&parser->tokens, place), "%s [%s-Wdeprecated-non-prototype]", check_diagnostic_message(warning),
                                check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
         }
     }
@@ -2419,7 +2419,7 @@ static void check_driver_kr_call_at(const Parser* parser, Preprocessor* pp, cons
         const bool direct = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && declaration < input->token_count && input->declaration_kinds != NULL &&
                             input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
         const uint32_t name = direct ? parser->tokens.names[token] : 0;
-        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[place],
+        pp_diagnose_output(pp, pp_severity, parse_source_index(&parser->tokens, place),
                            "passing arguments to %s%.*s%s without a prototype is deprecated in all versions of C and is not supported in C23 [%s-Wdeprecated-non-prototype]",
                            direct ? "'" : "a function", direct ? (int)intern_length(pp->table, name) : 0, direct ? (const char*)intern_bytes(pp->table, name) : "", direct ? "'" : "",
                            check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
@@ -2461,7 +2461,7 @@ static void check_driver_kr_definition(const Parser* parser, const Parser* origi
         }
         const uint32_t publication = check_driver_publication_position(publication_parser, pp, boundary,
                                                                        publication_parser == parser ? publication_end : pp->output.count);
-        pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_LEXICAL,
+        pp_diagnose_output_phase(pp, pp_severity, parse_source_index(&parser->tokens, token), publication, PP_DIAGNOSTIC_LEXICAL,
                                  "%s [%s-Wdeprecated-non-prototype]", check_diagnostic_message(diagnostic->warning),
                                  check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
     }
@@ -2928,7 +2928,7 @@ static uint32_t check_driver_unit_end_class(const Parser* parser, const Preproce
     const bool unit_end = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
     const bool unused = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) && unit_end;
     const bool typedefs = event->kind == CHECK_WARNING_EVENT_UNUSED_LOCAL_TYPEDEF;
-    const uint32_t source = typedefs && event->token < parser->tokens.count ? parser->tokens.sources[event->token] : BUSTER_PP_NONE;
+    const uint32_t source = typedefs && event->token < parser->tokens.count ? parse_source_index(&parser->tokens, event->token) : BUSTER_PP_NONE;
     const bool macro = source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
     const bool tentative = event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY || (event->kind == CHECK_WARNING_EVENT_DEFAULT_CONST_INIT && unit_end);
     return tentative ? 1u : unused ? 2u : typedefs ? (macro ? 4u : 3u) : 0u;
@@ -3215,7 +3215,7 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
                 const uint32_t warning = checked.warnings & flags & (CHECK_WARNING_POINTER_SIGN | CHECK_WARNING_DISCARDED_QUALIFIERS);
                 if (checked.diagnostic == CHECK_DIAG_RESOURCE)
                 {
-                    pp_diagnose_output(pp, PP_SEVERITY_FATAL, parser->tokens.sources[token], "%s", check_driver_action_message(checked.diagnostic));
+                    pp_diagnose_output(pp, PP_SEVERITY_FATAL, parse_source_index(&parser->tokens, token), "%s", check_driver_action_message(checked.diagnostic));
                 }
                 if (warning != 0)
                 {
@@ -3247,22 +3247,22 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
                         }
                         const PPOutputDiagnosticNote notes[1] =
                         {
-                            { .token = note_token < input->token_count ? parser->tokens.sources[note_token] : 0, .message = note },
+                            { .token = note_token < input->token_count ? parse_source_index(&parser->tokens, note_token) : 0, .message = note },
                         };
                         const uint32_t index = check_diagnostic_warning_index(warning);
                         if (source.length != 0 && target.length != 0 && (note_token == BUSTER_CHECK_NONE || note != NULL))
                         {
                             const PPDiagnosticRecord* previous = pp->diagnostic_last;
-                            pp_diagnose_output_notes_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, notes, note != NULL,
+                            pp_diagnose_output_notes_phase(pp, pp_severity, parse_source_index(&parser->tokens, located), publication, phase, notes, note != NULL,
                                 "passing %.*s to parameter of type %.*s %s [%s%s]", (int)source.length, source.pointer, (int)target.length, target.pointer,
                                 check_driver_pointer_wording(types, warning, nested, conversion.type, value.type),
                                 severity >= CHECK_WARNING_ERROR ? "-Werror," : "", check_warning_descriptions[index].option);
                             // In argument order among the call's failed conversions' errors, which complete with it (#2481).
-                            pp_diagnostic_suborder(pp, previous, (uint64_t)parser->tokens.sources[located] + 1u);
+                            pp_diagnostic_suborder(pp, previous, (uint64_t)parse_source_index(&parser->tokens, located) + 1u);
                         }
                         else
                         {
-                            pp_diagnose_output(pp, PP_SEVERITY_FATAL, parser->tokens.sources[located], "%s", check_driver_action_message(CHECK_DIAG_RESOURCE));
+                            pp_diagnose_output(pp, PP_SEVERITY_FATAL, parse_source_index(&parser->tokens, located), "%s", check_driver_action_message(CHECK_DIAG_RESOURCE));
                         }
                     }
                 }
@@ -3954,7 +3954,7 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
 {
     const uint32_t count = parser->tokens.count;
     const uint32_t token = report->token < count ? report->token : BUSTER_CHECK_NONE;
-    const CheckWarningSeverity severity = token < count ? check_driver_default_error_severity(pp, input, token, parser->tokens.sources[token], id) : CHECK_WARNING_IGNORE;
+    const CheckWarningSeverity severity = token < count ? check_driver_default_error_severity(pp, input, token, parse_source_index(&parser->tokens, token), id) : CHECK_WARNING_IGNORE;
     if (severity != CHECK_WARNING_IGNORE)
     {
         uint32_t located = token;
@@ -3981,7 +3981,7 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
         }
         else if (note != NULL && note_token < count)
         {
-            notes[0] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[note_token], .message = note };
+            notes[0] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, note_token), .message = note };
             note_count = 1;
         }
         const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
@@ -3991,12 +3991,12 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
             const PPDiagnosticRecord* previous = pp->diagnostic_last;
             if (offset != 0)
             {
-                const uint32_t source = parser->tokens.sources[located];
+                const uint32_t source = parse_source_index(&parser->tokens, located);
                 pp_diagnose_output_location_at(pp, pp_severity, source, pp->output.locations[source] + offset, publication, PP_DIAGNOSTIC_SEMANTIC, "%s", message);
             }
             else
             {
-                pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[located], publication, notes, note_count, "%s", message);
+                pp_diagnose_output_notes_at(pp, pp_severity, parse_source_index(&parser->tokens, located), publication, notes, note_count, "%s", message);
             }
             if (suborder != 0)
             {
@@ -4050,7 +4050,7 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                     }
                     if (function && pointer == 0)
                     {
-                        pp_diagnose_output(pp, PP_SEVERITY_FATAL, parser->tokens.sources[token], "%s", check_driver_action_message(CHECK_DIAG_RESOURCE));
+                        pp_diagnose_output(pp, PP_SEVERITY_FATAL, parse_source_index(&parser->tokens, token), "%s", check_driver_action_message(CHECK_DIAG_RESOURCE));
                     }
                     CheckAction action = { .node = node, .context = check_graph_context(graph, node, false) };
                     action.context.extensions &= ~BUSTER_CHECK_EXTENSION_SYSTEM_HEADER;
@@ -4072,8 +4072,8 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                         const CheckReport report = { .node = node, .token = at, .message = CHECK_MESSAGE_ACTION, .diagnostic = CHECK_DIAG_INCOMPATIBLE };
                         // A call's argument's takes its place among the call's conversion warnings, as its error does (#2481).
                         const uint32_t first = listed ? check_semantic_argument_begin(parser, graph, node, i) : BUSTER_CHECK_NONE;
-                        const uint64_t suborder = first < count ? (uint64_t)parser->tokens.sources[first] + 1u : 0;
-                        check_driver_default_error_report(parser, pp, input, stream, types, &spell, &report, id, parser->tokens.sources[token < count ? token : at],
+                        const uint64_t suborder = first < count ? (uint64_t)parse_source_index(&parser->tokens, first) + 1u : 0;
+                        check_driver_default_error_report(parser, pp, input, stream, types, &spell, &report, id, parse_source_index(&parser->tokens, token < count ? token : at),
                                                           suborder, scratch);
                     }
                 }
@@ -4108,7 +4108,7 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                                         kind == CHECK_DRIVER_CONVERSION_FUNCTION_POINTERS ? CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES : CHECK_WARNING_ID_COUNT;
                     const uint32_t at = part->token < count ? part->token : token;
                     const CheckWarningSeverity severity = id != CHECK_WARNING_ID_COUNT && at < count ?
-                                                          check_driver_default_error_severity(pp, input, at, parser->tokens.sources[at], id) : CHECK_WARNING_IGNORE;
+                                                          check_driver_default_error_severity(pp, input, at, parse_source_index(&parser->tokens, at), id) : CHECK_WARNING_IGNORE;
                     uint32_t located = at;
                     const char* message = severity != CHECK_WARNING_IGNORE ?
                                           check_driver_initializer_conversion(parser, pp, input, stream, types, part->conversion.type, part->node, 0, declaration,
@@ -4117,7 +4117,7 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                     {
                         const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                        severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[located], parser->tokens.sources[at], "%s", message);
+                        pp_diagnose_output_at(pp, pp_severity, parse_source_index(&parser->tokens, located), parse_source_index(&parser->tokens, at), "%s", message);
                     }
                 }
             }
@@ -4134,13 +4134,13 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                                 check_action_kind(types, type_return(types, type)) != BUSTER_TYPE_KIND_VOID;
             const String8 name = valued ? check_semantic_name(parser, pp, function) : (String8){ 0 };
             const CheckWarningSeverity severity = name.length != 0 ?
-                                                  check_driver_default_error_severity(pp, input, token, parser->tokens.sources[token], CHECK_WARNING_ID_RETURN_MISMATCH) :
+                                                  check_driver_default_error_severity(pp, input, token, parse_source_index(&parser->tokens, token), CHECK_WARNING_ID_RETURN_MISMATCH) :
                                                   CHECK_WARNING_IGNORE;
             if (severity != CHECK_WARNING_IGNORE)
             {
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], parser->tokens.sources[token],
+                pp_diagnose_output_at(pp, pp_severity, parse_source_index(&parser->tokens, token), parse_source_index(&parser->tokens, token),
                                       "non-void function '%.*s' should return a value [-Wreturn-mismatch]", (int)name.length, name.pointer);
             }
         }
@@ -5241,7 +5241,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 memcpy(owned, text, length + 1u);
                                 shifts->records[shifts->count++] = (CheckCommonShiftWarning){
                                     .token = token,
-                                    .source = parser->tokens.sources[located],
+                                    .source = parse_source_index(&parser->tokens, located),
                                     .publication = publication,
                                     .severity = (uint8_t)pp_severity,
                                     .phase = (uint8_t)phase,
@@ -5256,7 +5256,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         else if (!dropped)
                         {
                             const PPDiagnosticRecord* previous = pp->diagnostic_last;
-                            pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
+                            pp_diagnose_output_phase(pp, pp_severity, parse_source_index(&parser->tokens, located), publication, phase, "%s%s", message, suffix);
                             // A file-scope declarator's queue keeps the order clang builds its expressions in, the shift
                             // before a comma that holds it (#1943, check_common_report_comma_left): by its node's end.
                             if (phase == PP_DIAGNOSTIC_RUNTIME && node < input->graph.count && input->graph.source_positions != NULL)
@@ -5321,7 +5321,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         // Clang declares the builtin as its name is resolved, before the expression around it is built: where
                         // the name completes with that expression (a value's `int *q = malloc;`, #2348), its error comes first.
                         const PPDiagnosticRecord* previous = pp->diagnostic_last;
-                        check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
+                        check_driver_implicit_library(pp, types, input, pp_severity, parse_source_index(&parser->tokens, token), publication, intern_bytes(pp->table, name),
                                                       intern_length(pp->table, name), input->implicit_function_c99, promoted, scratch);
                         pp_diagnostic_suborder(pp, previous, 1);
                     }
@@ -5340,17 +5340,17 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)intern_length(pp->table, other), intern_bytes(pp->table, other));
                         const PPOutputDiagnosticNote notes[2] =
                         {
-                            { .token = parser->tokens.sources[token], .message = suggestion },
-                            { .token = corrected ? parser->tokens.sources[meant] : 0, .message = declared },
+                            { .token = parse_source_index(&parser->tokens, token), .message = suggestion },
+                            { .token = corrected ? parse_source_index(&parser->tokens, meant) : 0, .message = declared },
                         };
-                        pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[token], publication, notes, corrected ? 2u : 0u,
+                        pp_diagnose_output_notes_at(pp, pp_severity, parse_source_index(&parser->tokens, token), publication, notes, corrected ? 2u : 0u,
                             builtin ? "use of unknown builtin '%.*s' [-Wimplicit-function-declaration]" :
                             "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
                             (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                     }
                     else
                     {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [%s-Wimplicit-function-declaration]",
+                        pp_diagnose_output_at(pp, pp_severity, parse_source_index(&parser->tokens, token), publication, "implicit declaration of function '%.*s' [%s-Wimplicit-function-declaration]",
                                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name), promoted);
                     }
                 }
@@ -5363,7 +5363,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     const uint32_t located = phase == 2 ? extra[index].token : phase == 1 ? stream->reports[index].token : input->reports[index].token;
                     const uint32_t requested = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                     const CheckInputFpPragma* fp_error = phase == 0 ? check_input_fp_report(input, input->reports + index) : NULL;
-                    const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
+                    const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parse_source_index(&parser->tokens, located) : BUSTER_CHECK_NONE;
                     const uint32_t node = phase == 1 ? stream->reports[index].node :
                                           phase == 2 && located < input->token_count && input->token_nodes != NULL ? input->token_nodes[located] : BUSTER_CHECK_NONE;
                     const uint32_t completion = phase == 0 ? input->reports[index].completion :
@@ -5557,7 +5557,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                  kind == CHECK_INPUT_ATTRIBUTE_SUBJECT ? subjects :
                                                  refusal != NULL ? refusal : "cannot be applied to a label";
                             const PPOutputDiagnosticNote conflicting = {
-                                .token = other < count ? parser->tokens.sources[other] : 0,
+                                .token = other < count ? parse_source_index(&parser->tokens, other) : 0,
                                 .message = "conflicting attribute is here",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &conflicting, other < count ? 1u : 0u, "'%.*s%s%.*s' %s%s",
@@ -5604,7 +5604,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                          message.length != 0 ? message.pointer : "<no message provided>");
                             }
                             const PPOutputDiagnosticNote note = {
-                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .token = report->note_token < count ? parse_source_index(&parser->tokens, report->note_token) : 0,
                                 .message = noted,
                             };
                             const uint32_t notes = report->note_token < count && kind != CHECK_INPUT_ENABLE_IF_ADDRESS ? 1u : 0u;
@@ -5650,7 +5650,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             char noted[256];
                             snprintf(noted, sizeof(noted), "%s%.*s%s has been explicitly marked unavailable here", note_quote, (int)declared_text.length, declared_text.pointer, note_quote);
                             const PPOutputDiagnosticNote note = {
-                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .token = report->note_token < count ? parse_source_index(&parser->tokens, report->note_token) : 0,
                                 .message = noted,
                             };
                             // Once more for each of a tag's declarators after the first (report->value).
@@ -5713,7 +5713,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             }
                             else
                             {
-                                const uint32_t at = parser->tokens.sources[token];
+                                const uint32_t at = parse_source_index(&parser->tokens, token);
                                 const uint64_t spelling_mark = scratch->length;
                                 uint8_t* buffer = arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1);
                                 const uint8_t* bytes = NULL;
@@ -5729,7 +5729,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         else if (phase == 0 && kind == CHECK_INPUT_AVAILABILITY_WILDCARD && token < count)
                         {
                             // Just past the last version, where clang's fix-it inserts ", *".
-                            const uint32_t at = parser->tokens.sources[token];
+                            const uint32_t at = parse_source_index(&parser->tokens, token);
                             const uint64_t spelling_mark = scratch->length;
                             uint8_t* buffer = arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1);
                             const uint8_t* bytes = NULL;
@@ -5776,7 +5776,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             char noted[192];
                             snprintf(noted, sizeof(noted), kind == CHECK_INPUT_COUNTED_PAREN ? "to match this '('" : "field '%.*s' declared here", name_length, name_bytes);
                             const PPOutputDiagnosticNote note = {
-                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .token = report->note_token < count ? parse_source_index(&parser->tokens, report->note_token) : 0,
                                 .message = noted,
                             };
                             const uint32_t notes = report->note_token < count && report->note_kind != CHECK_INPUT_NOTE_NONE ? 1u : 0u;
@@ -5946,7 +5946,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             char note_text[192];
                             snprintf(note_text, sizeof(note_text), "forward declaration of %.*s", (int)tag.length, tag.pointer);
                             const PPOutputDiagnosticNote note = {
-                                .token = forward ? parser->tokens.sources[report->note_token] : 0,
+                                .token = forward ? parse_source_index(&parser->tokens, report->note_token) : 0,
                                 .message = note_text,
                             };
                             // The declarator's errors (#1447) name its name, from the report's value, as clang's do.
@@ -6019,11 +6019,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool asm_goto = kind == CHECK_INPUT_JUMP_ASM;
                             const PPOutputDiagnosticNote notes[2] = {
                                 {
-                                    .token = parser->tokens.sources[input->reports[index].subject - 1],
+                                    .token = parse_source_index(&parser->tokens, input->reports[index].subject - 1),
                                     .message = asm_goto ? "possible target of asm goto statement" : "possible target of indirect goto statement",
                                 },
                                 {
-                                    .token = parser->tokens.sources[input->reports[index].note_token],
+                                    .token = parse_source_index(&parser->tokens, input->reports[index].note_token),
                                     .message = detail == 3 ? "jump bypasses initialization of VLA typedef" :
                                                detail == 2 ? "jump bypasses initialization of variable with __attribute__((cleanup))" :
                                                              "jump bypasses initialization of variable length array",
@@ -6045,7 +6045,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             };
                             const uint32_t detail = input->reports[index].detail;
                             const PPOutputDiagnosticNote note = {
-                                .token = parser->tokens.sources[input->reports[index].note_token],
+                                .token = parse_source_index(&parser->tokens, input->reports[index].note_token),
                                 .message = bypassed[detail < 4 ? detail : 0],
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s",
@@ -6057,7 +6057,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             const uint32_t previous = input->reports[index].note_token;
                             const PPOutputDiagnosticNote note = {
-                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .token = previous < count ? parse_source_index(&parser->tokens, previous) : 0,
                                 .message = "previous definition is here",
                             };
                             const uint32_t name = parser->tokens.names[token];
@@ -6074,7 +6074,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             snprintf(previous_text, sizeof(previous_text), explicit_first ? "'%s'" : "without calling convention",
                                      check_input_convention_name(report->detail >> 8 & 0xffu));
                             const PPOutputDiagnosticNote note = {
-                                .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
+                                .token = report->note_token < count ? parse_source_index(&parser->tokens, report->note_token) : 0,
                                 .message = "previous declaration is here",
                             };
                             if ((report->detail & BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED) != 0)
@@ -6138,7 +6138,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const uint32_t other = parser->tokens.names[meant];
                             char declared[512];
                             snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)intern_length(pp->table, other), intern_bytes(pp->table, other));
-                            const PPOutputDiagnosticNote note = { .token = parser->tokens.sources[meant], .message = declared };
+                            const PPOutputDiagnosticNote note = { .token = parse_source_index(&parser->tokens, meant), .message = declared };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "use of undeclared identifier '%.*s'; did you mean '%.*s'?",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)intern_length(pp->table, other),
                                                         intern_bytes(pp->table, other));
@@ -6163,16 +6163,16 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                             BUSTER_CHECK_NONE;
                             PPOutputDiagnosticNote notes[4];
                             uint32_t note_count = 0;
-                            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[input->reports[index].note_token], .message = candidate };
+                            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, input->reports[index].note_token), .message = candidate };
                             if (first_between != BUSTER_CHECK_NONE)
                             {
-                                notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[first_between], .message = candidate };
+                                notes[note_count++] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, first_between), .message = candidate };
                             }
                             if (second_between != BUSTER_CHECK_NONE)
                             {
-                                notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[second_between], .message = candidate };
+                                notes[note_count++] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, second_between), .message = candidate };
                             }
-                            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[input->reports[index].attribute], .message = candidate };
+                            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, input->reports[index].attribute), .message = candidate };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, note_count, "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
@@ -6195,7 +6195,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const int other_length = meant < count ? (int)intern_length(pp->table, parser->tokens.names[meant]) : (int)strlen(other);
                             char declared[512];
                             snprintf(declared, sizeof(declared), "'%.*s' declared here", other_length, other);
-                            const uint32_t note_source = meant < count ? parser->tokens.sources[meant] : BUSTER_CHECK_NONE;
+                            const uint32_t note_source = meant < count ? parse_source_index(&parser->tokens, meant) : BUSTER_CHECK_NONE;
                             pp_history_ensure(pp);
                             const PPDiagnosticSourceNote note = {
                                 .location = note_source < pp->output.count ? pp->output.locations[note_source] : 0,
@@ -6259,7 +6259,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             {
                                 const String8 attribute = check_driver_attribute_spelling(parser, pp, report->attribute, true);
                                 const PPOutputDiagnosticNote note = {
-                                    .token = report->note_token < count ? parser->tokens.sources[report->note_token] : source,
+                                    .token = report->note_token < count ? parse_source_index(&parser->tokens, report->note_token) : source,
                                     .message = "conflicting attribute is here",
                                 };
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1,
@@ -6269,7 +6269,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             {
                                 const String8 earlier = check_driver_attribute_spelling(parser, pp, report->note_token, true);
                                 const PPOutputDiagnosticNote note = {
-                                    .token = report->note_token < count ? parser->tokens.sources[report->note_token] : source,
+                                    .token = report->note_token < count ? parse_source_index(&parser->tokens, report->note_token) : source,
                                     .message = "conflicting attribute is here",
                                 };
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1,
@@ -6283,7 +6283,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 if (report->note_kind == CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED)
                                 {
                                     const PPOutputDiagnosticNote note = {
-                                        .token = report->note_token < count ? parser->tokens.sources[report->note_token] : source,
+                                        .token = report->note_token < count ? parse_source_index(&parser->tokens, report->note_token) : source,
                                         .message = "function multiversioning caused by this declaration",
                                     };
                                     pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1,
@@ -6306,7 +6306,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const CheckInputReport* conflict = input->reports + index;
                             const uint32_t previous = conflict->note_token;
                             const PPOutputDiagnosticNote note = {
-                                .token = previous < count ? parser->tokens.sources[previous] : source,
+                                .token = previous < count ? parse_source_index(&parser->tokens, previous) : source,
                                 .message = conflict->note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION ?
                                            "previous definition is here" : "previous declaration is here",
                             };
@@ -6327,7 +6327,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const uint32_t cpu = report->attribute < count ? parser->tokens.names[report->attribute] : 0;
                             const bool noted = report->note_kind != CHECK_INPUT_NOTE_NONE && report->note_token < count;
                             const PPOutputDiagnosticNote note = {
-                                .token = noted ? parser->tokens.sources[report->note_token] : 0,
+                                .token = noted ? parse_source_index(&parser->tokens, report->note_token) : 0,
                                 .message = report->note_kind == CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED ? "function multiversioning caused by this declaration" :
                                                                                                          "previous declaration is here",
                             };
@@ -6411,7 +6411,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const uint32_t name = parser->tokens.names[token];
                             const uint32_t previous = input->reports[index].note_token;
                             const PPOutputDiagnosticNote note = {
-                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .token = previous < count ? parse_source_index(&parser->tokens, previous) : 0,
                                 .message = "previous definition is here",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
@@ -6430,7 +6430,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             PPOutputDiagnosticNote notes[16];
                             for (uint32_t c = 0; c < candidate_count; c += 1)
                             {
-                                notes[c] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[candidates[c]], .message = candidate };
+                                notes[c] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, candidates[c]), .message = candidate };
                             }
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, candidate_count, "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
@@ -6444,7 +6444,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const CheckInputMessage label = input->reports[index].message;
                             const uint32_t previous = input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION ? input->reports[index].note_token : count;
                             const PPOutputDiagnosticNote note = {
-                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .token = previous < count ? parse_source_index(&parser->tokens, previous) : 0,
                                 .message = "previous definition is here",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
@@ -6502,7 +6502,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             // (A TCB's string, after the other attribute's name in the value, and a duplicate aspect's.)
                             const uint32_t string_token = (report->detail & 0xffu) == CHECK_ARGUMENT_TCB_CONFLICT ? (uint32_t)(report->value >> 32) :
                                                           (report->detail & 0xffu) == CHECK_ARGUMENT_DUPLICATE_ASPECT ? (uint32_t)report->value : count;
-                            const uint32_t at = captured ? parser->tokens.sources[report->value] : 0;
+                            const uint32_t at = captured ? parse_source_index(&parser->tokens, report->value) : 0;
                             uint8_t* spelling_buffer = captured ? arena_push(scratch, pp->output.kinds[at] == BUSTER_PP_KIND_INTEGER ? 24 :
                                                                                  (uint64_t)pp->output.values[at] - pp->output.locations[at] + 1, 1) : NULL;
                             const uint8_t* spelling_bytes = NULL;
@@ -6548,7 +6548,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                   report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE || forward || function || constant) &&
                                                  report->note_token < count;
                             const PPOutputDiagnosticNote note = {
-                                .token = matched ? parser->tokens.sources[report->note_token] : 0,
+                                .token = matched ? parse_source_index(&parser->tokens, report->note_token) : 0,
                                 .message = forward || function ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE ? "conflicting attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ? "division by zero" :
@@ -6569,7 +6569,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 // to it would put the expansion note at the invocation too. Materialize history before
                                 // choosing between a token still inside an expansion and a completed invocation's end.
                                 pp_history_ensure(pp);
-                                const uint32_t previous = located > 0 && located <= count ? parse_expansion_context(pp, parser->tokens.sources[located - 1]) : 0;
+                                const uint32_t previous = located > 0 && located <= count ? parse_expansion_context(pp, parse_source_index(&parser->tokens, located - 1)) : 0;
                                 const bool inside = previous != 0 && located < count && previous == parse_expansion_context(pp, source);
                                 if (inside)
                                 {
@@ -6600,7 +6600,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             if ((report->detail & 0xffu) == CHECK_ARGUMENT_STRING && token < count &&
                                 check_input_attribute_equal(check_warning_attribute_normalized(check_driver_attribute_spelling(parser, pp, name, false)), "pcs"))
                             {
-                                const uint32_t at = parser->tokens.sources[named];
+                                const uint32_t at = parse_source_index(&parser->tokens, named);
                                 if (check_input_attribute_equal(check_driver_attribute_spelling(parser, pp, token, false), "aapcs"))
                                 {
                                     const CheckWarningSeverity severity = check_common_severity(pp, parser, input, named, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, false);
@@ -6641,7 +6641,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const CheckInputReport* report = input->reports + index;
                             const uint32_t previous = report->note_kind != CHECK_INPUT_NOTE_NONE ? report->note_token : count;
                             const PPOutputDiagnosticNote note = {
-                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .token = previous < count ? parse_source_index(&parser->tokens, previous) : 0,
                                 .message = "previous declaration is here",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u, "conflicting asm label");
@@ -6657,7 +6657,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const CheckInputMessage message = report->message;
                             const uint32_t previous = report->note_kind != CHECK_INPUT_NOTE_NONE ? report->note_token : count;
                             const PPOutputDiagnosticNote note = {
-                                .token = previous < count ? parser->tokens.sources[previous] : 0,
+                                .token = previous < count ? parse_source_index(&parser->tokens, previous) : 0,
                                 .message = message == CHECK_INPUT_LOADER_REDECLARATION ? "previous definition is here" : "previous declaration is here",
                             };
                             if (message == CHECK_INPUT_LOADER_EXTERN)
@@ -6692,8 +6692,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool object = kind == CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS;
                             const char* candidate = object ? check_warning_text(scratch, "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name),
                                                                                 intern_bytes(pp->table, name)) : "candidate function";
-                            const uint32_t second = object && report->value < count ? parser->tokens.sources[report->value] : (uint32_t)report->value;
-                            const uint32_t first = object && report->detail != 0 ? report->detail - 1 : previous < count ? parser->tokens.sources[previous] : 0;
+                            const uint32_t second = object && report->value < count ? parse_source_index(&parser->tokens, report->value) : (uint32_t)report->value;
+                            const uint32_t first = object && report->detail != 0 ? report->detail - 1 : previous < count ? parse_source_index(&parser->tokens, previous) : 0;
                             const PPOutputDiagnosticNote notes[2] = {
                                 { .token = first, .message = kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? candidate : "previous definition is here" },
                                 { .token = second, .message = candidate },
@@ -6793,19 +6793,19 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (x86_message != NULL && x86_location < count && conversion_note != NULL && conversion_note_token < count)
                         {
-                            const PPOutputDiagnosticNote note = { .token = parser->tokens.sources[conversion_note_token], .message = conversion_note };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, &note, 1, "%s", x86_message);
+                            const PPOutputDiagnosticNote note = { .token = parse_source_index(&parser->tokens, conversion_note_token), .message = conversion_note };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, x86_location), publication, &note, 1, "%s", x86_message);
                         }
                         else if (x86_message != NULL && x86_location < count)
                         {
                             if (semantic_offset != 0)
                             {
-                                const uint32_t at = parser->tokens.sources[x86_location];
+                                const uint32_t at = parse_source_index(&parser->tokens, x86_location);
                                 pp_diagnose_output_location_at(pp, PP_SEVERITY_ERROR, at, pp->output.locations[at] + semantic_offset, publication, PP_DIAGNOSTIC_SEMANTIC, "%s", x86_message);
                             }
                             else
                             {
-                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, x86_note,
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, x86_location), publication, x86_note,
                                                             check_semantic_note_count(x86_note), "%s", x86_message);
                             }
                             // A set operand clang read as a call, which goes on to the node's next (#2935): its set too, at the
@@ -6818,7 +6818,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                                                      &unresolved_recovers);
                                 if (again != NULL && at < count)
                                 {
-                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[at], publication, more, check_semantic_note_count(more), "%s",
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, at), publication, more, check_semantic_note_count(more), "%s",
                                                                 again);
                                 }
                                 unresolved_recovers &= again != NULL;
@@ -6827,7 +6827,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             // adds its own error after the conversion's (#2460).
                             if (builtin_converted && stream->graph->members[stream->reports[index].node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING)
                             {
-                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, "CFString literal is not a string constant");
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, x86_location), publication, "CFString literal is not a string constant");
                             }
                         }
                         else if (phase == 0 && input->reports[index].note_kind == CHECK_INPUT_NOTE_ATTRIBUTE_HERE &&
@@ -6835,7 +6835,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             // A naked function's error has clang's note at its attribute.
                             const PPOutputDiagnosticNote note = {
-                                .token = parser->tokens.sources[input->reports[index].note_token],
+                                .token = parse_source_index(&parser->tokens, input->reports[index].note_token),
                                 .message = "attribute is here",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s", message);
@@ -6853,7 +6853,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (phase == 2 && extra[index].note != NULL && extra[index].note_token < count)
                         {
-                            const PPOutputDiagnosticNote note = { .token = parser->tokens.sources[extra[index].note_token], .message = extra[index].note };
+                            const PPOutputDiagnosticNote note = { .token = parse_source_index(&parser->tokens, extra[index].note_token), .message = extra[index].note };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s", message);
                         }
                         else
@@ -6866,7 +6866,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp->diagnostic_arguments = arguments;
                         }
                         pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder :
-                                                             argument_first < count ? (uint64_t)parser->tokens.sources[argument_first] + 1u : 0);
+                                                             argument_first < count ? (uint64_t)parse_source_index(&parser->tokens, argument_first) + 1u : 0);
                     }
                     else
                     {
@@ -7007,6 +7007,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         view->tokens.capacity = total;
         view->tokens.kinds = check_prefix_column(output, total, 1);
         view->tokens.names = check_prefix_column(output, total, sizeof(uint32_t));
+        view->tokens.identity_sources = false;
         view->tokens.sources = check_prefix_column(output, total, sizeof(uint32_t));
         view->tokens.flags = check_prefix_column(output, total, 1);
         view->tree.roles = check_prefix_column(output, total, 1);
@@ -7058,7 +7059,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
                 {
                     view->tokens.kinds[written] = kinds[!block][b];
                     view->tokens.names[written] = names[!block][b];
-                    view->tokens.sources[written] = original->tokens.sources[last];
+                    view->tokens.sources[written] = parse_source_index(&original->tokens, last);
                     view->tokens.flags[written] = 0;
                     result->to_original[written] = BUSTER_CHECK_NONE;
                     written += 1;
@@ -7069,7 +7070,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
             {
                 view->tokens.kinds[written] = PARSE_KIND_SEMI;
                 view->tokens.names[written] = 0;
-                view->tokens.sources[written] = original->tokens.sources[token];
+                view->tokens.sources[written] = parse_source_index(&original->tokens, token);
                 view->tokens.flags[written] = 0;
                 result->to_original[written] = BUSTER_CHECK_NONE;
                 written += 1;
@@ -7087,7 +7088,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
                 {
                     view->tokens.kinds[written] = prefix[b];
                     view->tokens.names[written] = prefix_names[b];
-                    view->tokens.sources[written] = original->tokens.sources[token];
+                    view->tokens.sources[written] = parse_source_index(&original->tokens, token);
                     view->tokens.flags[written] = 0;
                     result->to_original[written] = BUSTER_CHECK_NONE;
                     written += 1;
@@ -7095,7 +7096,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
                 result->to_view[token] = written;
                 view->tokens.kinds[written] = original->tokens.kinds[token];
                 view->tokens.names[written] = original->tokens.names[token];
-                view->tokens.sources[written] = original->tokens.sources[token];
+                view->tokens.sources[written] = parse_source_index(&original->tokens, token);
                 view->tokens.flags[written] = original->tokens.flags[token];
                 result->to_original[written] = token;
                 written += 1;
@@ -7103,7 +7104,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
                 {
                     view->tokens.kinds[written] = PARSE_KIND_R_PAREN;
                     view->tokens.names[written] = 0;
-                    view->tokens.sources[written] = original->tokens.sources[token];
+                    view->tokens.sources[written] = parse_source_index(&original->tokens, token);
                     view->tokens.flags[written] = 0;
                     result->to_original[written] = BUSTER_CHECK_NONE;
                     written += 1;
@@ -7120,7 +7121,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
                 {
                     view->tokens.kinds[written] = open_kinds[b];
                     view->tokens.names[written] = open_names[b];
-                    view->tokens.sources[written] = original->tokens.sources[token];
+                    view->tokens.sources[written] = parse_source_index(&original->tokens, token);
                     view->tokens.flags[written] = 0;
                     result->to_original[written] = BUSTER_CHECK_NONE;
                     written += 1;
@@ -7128,7 +7129,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
                 result->to_view[token] = written;
                 view->tokens.kinds[written] = original->tokens.kinds[token];
                 view->tokens.names[written] = original->tokens.names[token];
-                view->tokens.sources[written] = original->tokens.sources[token];
+                view->tokens.sources[written] = parse_source_index(&original->tokens, token);
                 view->tokens.flags[written] = original->tokens.flags[token];
                 result->to_original[written] = token;
                 written += 1;
@@ -7136,7 +7137,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
                 {
                     view->tokens.kinds[written] = close_kinds[b];
                     view->tokens.names[written] = 0;
-                    view->tokens.sources[written] = original->tokens.sources[token];
+                    view->tokens.sources[written] = parse_source_index(&original->tokens, token);
                     view->tokens.flags[written] = 0;
                     result->to_original[written] = BUSTER_CHECK_NONE;
                     written += 1;
@@ -7146,7 +7147,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
             {
                 view->tokens.kinds[written] = PARSE_KIND_R_BRACE;
                 view->tokens.names[written] = 0;
-                view->tokens.sources[written] = original->tokens.sources[token];
+                view->tokens.sources[written] = parse_source_index(&original->tokens, token);
                 view->tokens.flags[written] = 0;
                 result->to_original[written] = BUSTER_CHECK_NONE;
                 written += 1;
@@ -9190,7 +9191,7 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
         }
         else if (location < parser->tokens.count)
         {
-            pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, parser->tokens.sources[location], publication, PP_DIAGNOSTIC_DEFERRED, "%s", message);
+            pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, location), publication, PP_DIAGNOSTIC_DEFERRED, "%s", message);
         }
         else
         {
@@ -9342,10 +9343,10 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
     {
         const String8 name = program->label_conflict_name;
         const PPOutputDiagnosticNote note = {
-            .token = parser->tokens.sources[program->label_previous < parser->tokens.count ? program->label_previous : conflict],
+            .token = parse_source_index(&parser->tokens, program->label_previous < parser->tokens.count ? program->label_previous : conflict),
             .message = "previous definition is here",
         };
-        pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[conflict], pp->output.count + 1u, &note, 1,
+        pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, conflict), pp->output.count + 1u, &note, 1,
                                     "definition with same mangled name '%.*s' as another definition", (int)name.length, name.pointer);
     }
     uint64_t* keys = program->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)program->alias_count * 2) : 0;
@@ -9417,7 +9418,7 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
         if (valid && (undefined || error == CHECK_PROGRAM_ALIAS_TO_VARIABLE || error == CHECK_PROGRAM_ALIAS_TO_FUNCTION))
         {
             notes[note_count++] = (PPOutputDiagnosticNote){
-                .token = parser->tokens.sources[undefined ? at : aliasee],
+                .token = parse_source_index(&parser->tokens, undefined ? at : aliasee),
                 .message = undefined ? (ifunc ? "the function specified in an ifunc must refer to its mangled name" :
                                                 "the function or variable specified in an alias must refer to its mangled name") :
                                        "aliasee is declared here",
@@ -9438,7 +9439,7 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
                 if (valid)
                 {
                     snprintf(text, name.length + 64, "function by that name is mangled as \"%.*s\"", (int)name.length, name.pointer);
-                    notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[at], .message = text };
+                    notes[note_count++] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, at), .message = text };
                 }
             }
         }
@@ -9447,11 +9448,11 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
         if (valid && unselected)
         {
             snprintf(unselected_text, named.length + 64, "function by that name is mangled as \"%.*s\"", (int)named.length, named.pointer);
-            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[at], .message = unselected_text };
+            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parse_source_index(&parser->tokens, at), .message = unselected_text };
         }
         if (valid)
         {
-            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[at], pp->output.count + 1u, notes, note_count, "%s", message);
+            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, at), pp->output.count + 1u, notes, note_count, "%s", message);
         }
     }
     if (!valid)
@@ -9573,36 +9574,28 @@ static bool check_driver_code_temporary(const Link* link, uint32_t s)
            link->names.bytes[name][1] == 'L';
 }
 
-// The object of a unit's emitted code (`code`, its static data published and its sections placed: `sections`, one per
-// atom, or null), as -c writes it: its link checked, its temporaries (the jump tables' symbols and their labels', the
-// unit's own) left out, as clang's .L labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error
-// is OBJECT_ERROR_FULL where the link isn't valid or memory ran out before the build. check_driver_object writes it;
-// #1057's parity tests build their preparation's so, to compare it with -c's file byte for byte.
-static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch)
+// The symbols -c's object leaves out of a unit's emitted code (`code`), indexed by SymbolId, on `scratch`, or null for a
+// unit without them: its temporaries, the jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base),
+// which are the lowering's, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
+// relocations name their sections' symbols instead (ObjectOptions.temporary_symbols). So are the patchable function
+// entries' labels (#1447, CheckProgramCode.patchable_symbol_base), as clang's .Ltmp ones. And every local `.L` label in
+// code (#1845): the labels of asm templates assembled by their own statements and of naked functions and the
+// address-taken labels' `.Lbuster_label_N` (clang's `.Ltmp`), all places in a function's code, which an assembler never
+// keeps. False where the scratch arena can't hold them.
+static bool check_driver_temporaries(const CheckProgramCode* code, Arena* scratch, uint8_t** temporaries)
 {
-    ObjectUnits units = { 0 };
-    ObjectSymbols symbols = { 0 };
-    bool valid = link_check(&code->link) == LINK_ERROR_NONE && object_prepare(&units, &code->link, 1, scratch) && object_map_symbols(&symbols, &code->link, scratch);
-    // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
-    // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
-    // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols). So are the patchable function
-    // entries' labels (#1447, CheckProgramCode.patchable_symbol_base), as clang's .Ltmp ones.
-    // And every local `.L` label in code (#1845): the labels of asm templates assembled by their own statements and of
-    // naked functions and the address-taken labels' `.Lbuster_label_N` (clang's `.Ltmp`), all places in a function's
-    // code, which an assembler never keeps.
     const uint32_t switch_symbols = code->lowered.table_count + code->lowered.case_symbol_count;
     const Link* link = &code->link;
     bool coded = false;
-    for (uint32_t s = 1; valid && !coded && s < link->symbols.count; s += 1)
+    for (uint32_t s = 1; !coded && s < link->symbols.count; s += 1)
     {
         coded = check_driver_code_temporary(link, s) || check_driver_placeholder(link, s);
     }
-    const bool temporaries = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0 || coded;
-    uint8_t* temporary = valid && temporaries ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
-    valid = valid && (!temporaries || temporary != 0);
+    const bool temporaries_kept = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0 || coded;
+    uint8_t* temporary = temporaries_kept ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, link->symbols.count) : 0;
     if (temporary != 0)
     {
-        memset(temporary, 0, code->link.symbols.count);
+        memset(temporary, 0, link->symbols.count);
         memset(temporary + code->lowered.case_symbol_base, 1, switch_symbols);
         memset(temporary + code->patchable_symbol_base, 1, code->patchable_count);
         for (uint32_t s = 0; s < code->unit_temporary_count; s += 1)
@@ -9614,6 +9607,22 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
             temporary[s] |= check_driver_code_temporary(link, s) || check_driver_placeholder(link, s);
         }
     }
+    *temporaries = temporary;
+    return !temporaries_kept || temporary != 0;
+}
+
+// The object of a unit's emitted code (`code`, its static data published and its sections placed: `sections`, one per
+// atom, or null), as -c writes it: its link checked, its temporaries (check_driver_temporaries) left out, as clang's .L
+// labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error is OBJECT_ERROR_FULL where the link
+// isn't valid or memory ran out before the build. check_driver_object writes it; #1057's parity tests build their
+// preparation's so, to compare it with -c's file byte for byte.
+static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch)
+{
+    ObjectUnits units = { 0 };
+    ObjectSymbols symbols = { 0 };
+    uint8_t* temporary = 0;
+    const bool valid = link_check(&code->link) == LINK_ERROR_NONE && object_prepare(&units, &code->link, 1, scratch) && object_map_symbols(&symbols, &code->link, scratch) &&
+                       check_driver_temporaries(code, scratch, &temporary);
     Object result = { .error = OBJECT_ERROR_FULL };
     if (valid)
     {
@@ -9629,6 +9638,81 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
         result = object_build(&code->link, &units, &symbols, 0, options, source, scratch);
     }
     return result;
+}
+
+// The first named symbol of `atom` at its start, or 0: what a diagnostic about the atom names.
+static SymbolId check_driver_atom_symbol(const Link* link, AtomId atom)
+{
+    SymbolId result = 0;
+    for (SymbolId s = 1; atom != 0 && result == 0 && s < link->symbols.count; s += 1)
+    {
+        result = link->symbols.atom[s] == atom && link->symbols.value[s] == 0 && link->symbols.name[s] != 0 ? s : 0;
+    }
+    return result;
+}
+
+// -S's text of a unit's emitted code (#1362): the assembly sink's (assembly_output.c) over what -c's object is made of
+// (check_driver_object_build: the link, checked, its `sections` and its temporaries), pushed on `text`, named after
+// `source_path` and written to `output_path` ("-" for standard output), as -c writes its object. A unit with what the
+// sink doesn't print yet is an error that names it, and writes nothing.
+static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgram* program, ObjectAtomSection* sections, const char* source_path, const char* output_path,
+                                       Arena* text, Arena* scratch, FILE* errors)
+{
+    const CheckProgramAsms* asms = &code->lowered.asms;
+    const bool inline_assembly = asms->plan_count != 0 || asms->naked != 0 || asms->file_assembled || code->asm_atom_count != 0 || code->unit_atom_count != 0;
+    const bool multiversioned = program->cpu_group_count != 0 || program->target_group_count != 0;
+    const char* refusal = inline_assembly ? "inline assembly" : code->patchable_count != 0 ? "patchable function entries" :
+                          multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
+    uint8_t* temporary = 0;
+    const bool linked = refusal == 0 && link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
+    AssemblyResult printed = { .error = ASSEMBLY_FULL };
+    if (linked)
+    {
+        const AssemblyView view = {
+            .link = &code->link,
+            .code = code->assembly_code,
+            .code_count = code->assembly_code_count,
+            .sections = sections,
+            .section_count = sections != 0 ? code->link.atoms.count : 0,
+            .temporary = temporary,
+            .temporary_count = temporary != 0 ? code->link.symbols.count : 0,
+            .source_name = { .pointer = (char*)source_path, .length = strlen(source_path) },
+            .unit = 0,
+        };
+        printed = assembly_print(&view, text, scratch);
+    }
+    bool valid = printed.error == ASSEMBLY_OK;
+    if (refusal != 0)
+    {
+        fprintf(errors, "%s: error: -S doesn't print %s yet\n", source_path, refusal);
+    }
+    else if (printed.error == ASSEMBLY_UNSUPPORTED || printed.error == ASSEMBLY_INVALID)
+    {
+        // The sink's reason, with the function or object it stopped at.
+        const SymbolId symbol = printed.symbol != 0 ? printed.symbol : check_driver_atom_symbol(&code->link, printed.atom);
+        const NameId name = symbol != 0 ? code->link.symbols.name[symbol] : 0;
+        const bool invalid = printed.error == ASSEMBLY_INVALID;
+        fprintf(errors, "%s: %s: -S %s %s%s%s%.*s%s\n", source_path, invalid ? "internal compiler error" : "error", invalid ? "found" : "doesn't print", printed.reason,
+                invalid ? "" : " yet", name != 0 ? " (in '" : "", name != 0 ? (int)code->link.names.length[name] : 0,
+                name != 0 ? (const char*)code->link.names.bytes[name] : "", name != 0 ? "')" : "");
+    }
+    else if (!valid)
+    {
+        fprintf(errors, "fatal error: can't print the unit's assembly: %s\n", linked ? "no memory" : "its link isn't valid");
+    }
+    if (valid && strcmp(output_path, "-") == 0)
+    {
+        valid = fwrite(printed.bytes, 1, printed.length, stdout) == printed.length && fflush(stdout) == 0;
+    }
+    else if (valid)
+    {
+        valid = object_write_file(output_path, printed.bytes, printed.length) == OBJECT_ERROR_NONE;
+    }
+    if (!valid && printed.error == ASSEMBLY_OK)
+    {
+        fprintf(errors, "error: could not write assembly file %s\n", output_path);
+    }
+    return valid;
 }
 
 // One census's verdict for --selection-census (check_driver_selection_census): "same-references" where every body's
@@ -10359,6 +10443,12 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
             *fatal = true;
         }
     }
+    else if (valid && lanes != NULL && lanes->assembly)
+    {
+        // -S (#1362): the unit's assembly where -c writes its object, its text on the emission's output arena.
+        valid = check_driver_assembly_text(&code, program, sections, source_path, output_path, &state->output, scratch, errors);
+        check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
+    }
     else if (valid)
     {
         const Object object = check_driver_object_build(&code, sections, debug ? &dwarf.object : NULL, source_path, scratch);
@@ -10531,7 +10621,7 @@ static bool check_driver_system_declared(const CheckProgram* program, const Pars
         const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
         if (link->symbols.name[s + 1] == name && declaration < parser->tokens.count)
         {
-            system = check_lazy_system(pp, parser->tokens.sources[declaration]);
+            system = check_lazy_system(pp, parse_source_index(&parser->tokens, declaration));
         }
     }
     return system;
@@ -11276,7 +11366,9 @@ static uint32_t check_driver_address_lanes(uint32_t cpus)
     return result;
 }
 
-static const char* check_driver_object_name(Arena* arena, const char* source)
+// The output -c (".o") or -S (".s") names for a source without -o: its base name with `extension` for its suffix, in the
+// current directory, as clang names it.
+static const char* check_driver_object_name(Arena* arena, const char* source, const char* extension)
 {
     const char* slash = strrchr(source, '/');
     const char* name = slash != 0 ? slash + 1 : source;
@@ -11286,7 +11378,7 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
     if (result != 0)
     {
         memcpy(result, name, length);
-        memcpy(result + length, ".o", 3);
+        memcpy(result + length, extension, 3);
     }
     return result;
 }
@@ -11421,6 +11513,8 @@ struct CheckDriverCommand
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
+    // -S (#1362): emit_object's compile, which writes each unit's assembly (assembly_output.c) where -c writes its object.
+    bool assembly;
     RuntimeKind runtime_kind;
     // -g's source rows, with -c or a link, and the functions' unwind tables.
     bool source_rows;
@@ -11712,17 +11806,17 @@ struct CheckDriverTypoEdits
 static uint32_t check_driver_original_token(const Parser* original, const Parser* view, uint32_t token)
 {
     const uint32_t count = original->tokens.count;
-    const uint32_t source = token < view->tokens.count ? view->tokens.sources[token] : UINT32_MAX;
+    const uint32_t source = token < view->tokens.count ? parse_source_index(&view->tokens, token) : UINT32_MAX;
     uint32_t low = 0;
     uint32_t high = count;
     while (low < high)
     {
         const uint32_t middle = low + (high - low) / 2;
-        const bool before = original->tokens.sources[middle] < source;
+        const bool before = parse_source_index(&original->tokens, middle) < source;
         low = before ? middle + 1 : low;
         high = before ? high : middle;
     }
-    return low < count && original->tokens.sources[low] == source ? low : BUSTER_CHECK_NONE;
+    return low < count && parse_source_index(&original->tokens, low) == source ? low : BUSTER_CHECK_NONE;
 }
 
 // The view's token whose source the original's `token` has (the first, past a `;` a view put before it), or
@@ -11730,17 +11824,17 @@ static uint32_t check_driver_original_token(const Parser* original, const Parser
 static uint32_t check_driver_view_token(const Parser* view, const Parser* original, uint32_t token)
 {
     const uint32_t count = view->tokens.count;
-    const uint32_t source = token < original->tokens.count ? original->tokens.sources[token] : UINT32_MAX;
+    const uint32_t source = token < original->tokens.count ? parse_source_index(&original->tokens, token) : UINT32_MAX;
     uint32_t low = 0;
     uint32_t high = count;
     while (low < high)
     {
         const uint32_t middle = low + (high - low) / 2;
-        const bool before = view->tokens.sources[middle] < source;
+        const bool before = parse_source_index(&view->tokens, middle) < source;
         low = before ? middle + 1 : low;
         high = before ? high : middle;
     }
-    return low < count && view->tokens.sources[low] == source ? low : BUSTER_CHECK_NONE;
+    return low < count && parse_source_index(&view->tokens, low) == source ? low : BUSTER_CHECK_NONE;
 }
 
 // Inserts an edit in token order, unless one is at its token or overlaps it. Whether it was added.
@@ -11903,7 +11997,7 @@ static void check_driver_suppress_argument(const Parser* view, ParseDiagnostic* 
     bool refused = false;
     for (uint32_t token = name + 2; candidate && !refused && token < end; token += 1)
     {
-        const uint32_t source = view->tokens.sources[token];
+        const uint32_t source = parse_source_index(&view->tokens, token);
         if (view->tokens.kinds[token] == PARSE_KIND_STRING && source < pp->output.count)
         {
             const uint64_t mark = scratch->length;
@@ -12218,7 +12312,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         const CheckPrefixEdit* edit = edits->edits + e;
         if (edit->end == 0 && edit->name != 0 && edit->token < count)
         {
-            edits->sources[edits->source_count++] = original->tokens.sources[edit->token];
+            edits->sources[edits->source_count++] = parse_source_index(&original->tokens, edit->token);
         }
     }
     return added;
@@ -12285,8 +12379,8 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
             }
             else
             {
-                const uint32_t source = original->tokens.sources[edit->token];
-                const uint32_t note_source = noted && !predefined ? original->tokens.sources[type] : BUSTER_CHECK_NONE;
+                const uint32_t source = parse_source_index(&original->tokens, edit->token);
+                const uint32_t note_source = noted && !predefined ? parse_source_index(&original->tokens, type) : BUSTER_CHECK_NONE;
                 pp_history_ensure(pp);
                 const PPDiagnosticSourceNote printed = {
                     .location = note_source < pp->output.count ? pp->output.locations[note_source] : 0,
@@ -12544,7 +12638,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         uint32_t tokens = checking->tokens.count;
         // A complete declaration prefix ends before the original parser's lookahead, not at the whole PP EOF.
         // Repairs retain their synthetic/end boundary; completed original bodies are handled independently.
-        uint32_t publication_end = !repairing && tokens < recovered->tokens.count ? recovered->tokens.sources[tokens] : pp->output.count;
+        uint32_t publication_end = !repairing && tokens < recovered->tokens.count ? parse_source_index(&recovered->tokens, tokens) : pp->output.count;
         const TypeCapacity capacity = {
             .types = tokens <= (1u << 27) ? tokens * 4 + 64 : 0,
             .parameters = tokens,
@@ -12710,7 +12804,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     original_pragmas_ready = check_diagnostic_original_pragmas(&original_pragmas, recovered, pp, check_diagnostic_parse_end(recovered), arena,
                                                                                scratch);
                     tokens = checking->tokens.count;
-                    publication_end = !repairing && tokens < recovered->tokens.count ? recovered->tokens.sources[tokens] : pp->output.count;
+                    publication_end = !repairing && tokens < recovered->tokens.count ? parse_source_index(&recovered->tokens, tokens) : pp->output.count;
                     const TypeCapacity again = {
                         .types = tokens <= (1u << 27) ? tokens * 4 + 64 : 0,
                         .parameters = tokens,
@@ -13628,7 +13722,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                         if (selection && result == 0)
                         {
-                            const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
+                            const char* object_path = output != 0 ? output : check_driver_object_name(arena, path, command->assembly ? ".s" : ".o");
                             if (served)
                             {
                                 windowed = object_path == 0;
@@ -14134,9 +14228,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
     bool check_transitions = false;
     bool node_window = false;
+    bool node_window_assignments = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
+    bool emit_assembly = false;
     RuntimeKind runtime_kind = RUNTIME_KIND_DYNAMIC;
     // The link kind's options (#1503), which decide runtime_kind after the loop as clang's driver decides it (its
     // getStaticPIE, getStatic and getPIE): -static-pie over -static, either over -pie and -no-pie whatever their order,
@@ -14420,6 +14516,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             verify = true;
         }
+        else if (match.exact == C_OPTION_NODE_WINDOW_ASSIGNMENTS)
+        {
+            node_window = true;
+            node_window_assignments = true;
+        }
         else if (match.exact == C_OPTION_NODE_WINDOW)
         {
             node_window = true;
@@ -14636,6 +14737,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             emit_object = true;
         }
+        else if (match.exact == C_OPTION_S)
+        {
+            emit_assembly = true;
+        }
         else if (match.exact == C_OPTION_FSYNTAX_ONLY)
         {
             syntax_only = true;
@@ -14670,8 +14775,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
         }
     }
-    // Syntax-only takes precedence over -c, whichever came first.
-    emit_object = emit_object && !syntax_only;
+    // Syntax-only takes precedence over -S, and -S over -c, whichever came first, as clang's phases do: the earliest stops.
+    emit_assembly = emit_assembly && !syntax_only;
+    emit_object = (emit_object || emit_assembly) && !syntax_only;
+    lanes->assembly = emit_assembly;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     // Non-linking actions consume the transport but do not invoke a linker, as -c and -E do in a system driver.
@@ -14793,9 +14900,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         parsed = driver_cache_streams(&arena, inputs, input_kinds, input_count, &options);
     }
+    options.skip_expression_profile = !time_stages;
     options.semantic_pragmas = true;
     options.timing = time_stages;
-    options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
+    options.node_window_assignments = node_window_assignments && !options.predefines.debug && !options.predefines.debug_modules;
+    options.node_window = node_window;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
     // The preprocessor's phases' ticks in pp_run, for the report.
     uint64_t pp_ticks[PP_PHASE_COUNT] = { 0 };
@@ -14819,6 +14928,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler's build can't be identified\n");
     }
+    options.published_unused_only = (emit_object || link) && !dump && !dump_static && attested_memo == NULL && attested != CHECK_ATTESTED_MODE_VERIFY;
     const CheckDriverCommand command = {
         .options = options,
         .scalar = scalar,
@@ -14847,6 +14957,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .units_memory = units_memory,
         .emit_object = emit_object,
         .link = link,
+        .assembly = emit_assembly,
         .runtime_kind = runtime_kind,
         .source_rows = source_rows,
         .unwind_tables = unwind_tables,
@@ -14910,8 +15021,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c | -S] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
@@ -14930,6 +15041,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             arena_report_failure(stderr, "named-library arguments", (uint64_t)(count + 1) * sizeof(String8));
         }
+    }
+    else if (emit_assembly && (source_rows || mixed_inputs))
+    {
+        // What -S doesn't print yet (#1362's later stages), before any source is read.
+        fprintf(stderr, "error: -S %s\n", source_rows ? "doesn't print debug information yet (-g)" : "takes C sources alone, without assembly or linker inputs");
     }
     else if (invalid_tier1)
     {

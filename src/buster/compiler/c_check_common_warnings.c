@@ -105,8 +105,8 @@ static uint32_t check_common_publication_source(const Parser* parser, const Prep
     // (A token a reading adds publishes as the reading's sources put it.)
     const bool own = view->complete == NULL || at < view->end || (at == BUSTER_CHECK_NONE && publication < parser->tokens.count);
     const bool synthetic = !own && at > view->closed;
-    const uint32_t result = own ? (publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count) :
-                            !synthetic && at < view->original->tokens.count ? view->original->tokens.sources[at] : pp->output.count;
+    const uint32_t result = own ? (publication < parser->tokens.count ? parse_source_index(&parser->tokens, publication) : pp->output.count) :
+                            !synthetic && at < view->original->tokens.count ? parse_source_index(&view->original->tokens, at) : pp->output.count;
     return result;
 }
 
@@ -133,9 +133,9 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
         check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, mapped);
     severity = command.quiet && severity < CHECK_WARNING_ERROR ? CHECK_WARNING_IGNORE : severity;
     bool system = check_graph_system_token(&input->graph, token);
-    if (!system && pp->output.locations != NULL && parser != NULL && token < parser->tokens.count && parser->tokens.sources[token] < pp->output.count)
+    if (!system && pp->output.locations != NULL && parser != NULL && token < parser->tokens.count && parse_source_index(&parser->tokens, token) < pp->output.count)
     {
-        system = pp_system_level_at(pp, pp->output.locations[parser->tokens.sources[token]]) != BUSTER_PP_USER_FILE;
+        system = pp_system_level_at(pp, pp->output.locations[parse_source_index(&parser->tokens, token)]) != BUSTER_PP_USER_FILE;
     }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers && system)
     {
@@ -153,16 +153,7 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
 // Clang skips an analysis whose diagnostics are all ignored.
 static bool check_common_enabled(const Preprocessor* pp, const CheckInput* input, uint32_t id, bool default_ignored)
 {
-    const bool default_error = check_common_default_error(id);
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, default_error);
-    bool enabled = default_error ? command.mapped != CHECK_WARNING_IGNORE : !command.quiet && command.severity != CHECK_WARNING_IGNORE;
-    const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
-    for (uint32_t i = 0; (!command.quiet || id == CHECK_WARNING_ID_ATOMIC_ACCESS) && !enabled && history != NULL && i < history->count; i += 1)
-    {
-        const CheckInputDiagnosticPragma* record = history->records + i;
-        enabled = record->operation != CHECK_DIAGNOSTIC_IGNORED && check_warning_option(id, record->option);
-    }
-    return enabled;
+    return check_diagnostic_may_report(&pp->options, input->diagnostic_pragmas, id, default_ignored, check_common_default_error(id));
 }
 
 static void check_common_report_published(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication_source,
@@ -208,13 +199,13 @@ static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_
     {
         attached[i] = (PPOutputDiagnosticNote)
         {
-            .token = notes[i].token < parser->tokens.count ? parser->tokens.sources[notes[i].token] : parser->tokens.sources[token],
+            .token = notes[i].token < parser->tokens.count ? parse_source_index(&parser->tokens, notes[i].token) : parse_source_index(&parser->tokens, token),
             .message = notes[i].message,
         };
     }
     if (suffix != NULL)
     {
-        pp_diagnose_output_notes_phase(pp, disposition, parser->tokens.sources[token], publication_source, phase,
+        pp_diagnose_output_notes_phase(pp, disposition, parse_source_index(&parser->tokens, token), publication_source, phase,
                                        used != 0 ? attached : NULL, used, "%s%s", message, suffix);
     }
 }
@@ -2870,7 +2861,7 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
 static bool check_common_from_macro(const Parser* parser, const Preprocessor* pp, uint32_t token)
 {
     const uint32_t source = parser != NULL && parser->tokens.sources != NULL && token < parser->tokens.count ?
-                               parser->tokens.sources[token] : BUSTER_PP_NONE;
+                               parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
     const bool result = pp != NULL && pp->output.flags != NULL && source < pp->output.count &&
                         (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
     return result;
@@ -3045,7 +3036,7 @@ static uint32_t check_common_enum_cast_spelling(const Parser* parser, const Chec
 // generated one).
 static uint64_t check_common_argument_occurrence(const Parser* parser, Preprocessor* pp, uint32_t token)
 {
-    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const uint32_t source = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
     const bool macro = source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
     uint32_t origin = macro && pp_history_ensure(pp) ? pp_history_at(pp, source) : 0;
     uint64_t result = 0;
@@ -5483,6 +5474,17 @@ static uint32_t check_common_enum_question(const Parser* parser, uint32_t colon,
     return question;
 }
 
+// A bare enum the canonical printer will call "(unnamed ...)" or "(unnamed)". A tag with a name or
+// an unqualified naming typedef is never one. The location text of an anonymous member and any non-enum
+// outer type retain the printer's complete classification.
+static bool check_common_unnamed_enum(const TypeTable* types, const CheckWarningSpelling* spell, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    const uint32_t tag = types->types.index[index];
+    return types->types.kind[index] == BUSTER_TYPE_KIND_ENUM && tag < spell->anonymous_count && types->tags.name[tag] == 0 &&
+           spell->anonymous[tag].length == 0 && (!spell->tag_places[tag].available || !spell->tag_places[tag].member);
+}
+
 // One operator's enumeration mix (clang's checkEnumArithmeticConversions), reported at `question` (a conditional's `?`):
 // `kind` its message's (0 arithmetic, 1 bitwise, 2 comparison, 3 conditional, 4 compound assignment), `omitted` a GNU
 // `a ?: b`'s, whose omitted middle operand is its condition promoted (clang's UsualUnaryConversions): an enumeration's is
@@ -5509,6 +5511,25 @@ static void check_common_enum_mix(const Parser* parser, Preprocessor* pp, const 
                        type_unqualified(type_strip_aligned(types, left_type)) != type_unqualified(type_strip_aligned(types, right_type));
     if (floating || mixed)
     {
+        if (pp->fatal || question >= parser->tokens.count)
+        {
+            return;
+        }
+        const uint32_t named_id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL :
+                                  kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE : CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+        const bool named_ignored = check_common_severity(pp, parser, input, question, named_id, named_id != CHECK_WARNING_ID_ENUM_COMPARE) == CHECK_WARNING_IGNORE;
+        const bool unnamed_ignored = !mixed || check_common_severity(pp, parser, input, question, CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION, true) == CHECK_WARNING_IGNORE;
+        if (named_ignored && unnamed_ignored)
+        {
+            return;
+        }
+        // A comparison can be enabled for named enums and ignored for an unnamed operand. Its group can then
+        // be decided from the declarators without building names or replaying preprocessing for source locations.
+        if (mixed && unnamed_ignored && !spell->built && check_driver_spelling_tags(parser, pp, input, types, spell, scratch) &&
+            (check_common_unnamed_enum(types, spell, left_type) || check_common_unnamed_enum(types, spell, right_type)))
+        {
+            return;
+        }
         const TypeId left_alias = left_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[left_spelling] : 0;
         const TypeId right_alias = right_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[right_spelling] : 0;
         left_spelling = rvalue_left && left_alias != 0 && type_qualifiers(left_alias) != 0 ? 0 : left_spelling;
@@ -5519,9 +5540,7 @@ static void check_common_enum_mix(const Parser* parser, Preprocessor* pp, const 
         const String8 right_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, 0) : (String8){ 0 };
         const bool anonymous = mixed && (memmem(left_plain.pointer, left_plain.length, "(unnamed", 8) != NULL ||
                                          memmem(right_plain.pointer, right_plain.length, "(unnamed", 8) != NULL);
-        const uint32_t id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION :
-                            kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL : kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE :
-                            CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+        const uint32_t id = anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION : named_id;
         const char* message = floating ?
             check_warning_text(scratch, "%s %s type %.*s %s %s type %.*s", kinds[kind], left_enum ? "enumeration" : "floating-point",
                                (int)left_name.length, left_name.pointer, kind == 2 ? "with" : kind == 4 ? "from" : "and",
@@ -5614,7 +5633,7 @@ static uint32_t check_common_spelling_line(const Parser* parser, Preprocessor* p
     uint32_t result = 0;
     if (pp->output.locations != NULL && token < parser->tokens.count)
     {
-        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t source = parse_source_index(&parser->tokens, token);
         if (source < pp->output.count && pp->output.locations[source] != 0)
         {
             const uint32_t location = pp->output.locations[source];
@@ -5632,7 +5651,7 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
     uint32_t result = 0;
     if (pp->output.locations != NULL && token < parser->tokens.count)
     {
-        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t source = parse_source_index(&parser->tokens, token);
         if (source < pp->output.count && pp->output.locations[source] != 0)
         {
             uint32_t location = pp->output.locations[source];
@@ -6358,10 +6377,122 @@ static void check_common_failed_assert_bool(const Parser* parser, Preprocessor* 
     }
 }
 
-// Rejected assertions do not enter the ordinary warning walk. Visit their retained source tree with a bounded
-// frontier: conditional conditions warn as their expressions finish (source postorder), then the assertion and
-// logical operands warn in the completed expression's order. This is only boolean-conversion recovery; it neither
-// reconstructs erased selection/query operands nor publishes unrelated expression warning families.
+// A conditional's condition and a comma's discarded operand are checked while the source expression is built, even
+// inside an unselected _Generic or choose operand. Those retained subtrees have no operand edge from the assertion's
+// evaluated result, but their token-to-node entries remain. Find their tight graph interval from the assertion's own
+// token span, then visit it in graph postorder. This is diagnostic-only work; it neither retains another graph nor
+// changes evaluation. Expressions erased by a declaration/type query have no node here, just as in the ordinary walk.
+static bool check_common_failed_assert_source(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                              const TypeTable* types, CheckWarningSpelling* spell, uint32_t root, uint32_t completion, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t token_count = parser->tokens.count;
+    const uint32_t keyword = root < graph->count ? check_semantic_assertion_keyword(parser, graph->tokens[root]) : BUSTER_CHECK_NONE;
+    const uint32_t close = keyword < token_count && keyword + 1 < token_count ? parser->tree.parents[keyword + 1] : token_count;
+    const uint32_t first = keyword < token_count ? keyword + 2 : token_count;
+    const bool source = first < close && close < token_count && input->token_nodes != NULL && close < input->token_count;
+    const uint32_t end = source ? check_constant_punctuation(parser, first, close, PARSE_KIND_COMMA) : first;
+    uint32_t low = graph->count;
+    uint32_t high = 0;
+    bool nested = false;
+    bool commas = false;
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        // A GNU statement expression can contain another assertion. Its own report owns its warnings, so neither its
+        // candidates nor a nested candidate between the outer assertion's first and last nodes belongs to this scan.
+        if (parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT && token + 1 < end)
+        {
+            const uint32_t closing = parser->tree.parents[token + 1];
+            nested = true;
+            token = closing > token + 1 && closing < end ? closing : token;
+            continue;
+        }
+        if (parser->tree.roles[token] == PARSE_ROLE_CLOSE_TERNARY || parser->tokens.kinds[token] == PARSE_KIND_COMMA)
+        {
+            const uint32_t node = check_common_bool_expression(graph, input->token_nodes[token]);
+            if (node < graph->count && (graph->ops[node] == CHECK_OP_CONDITIONAL || graph->ops[node] == CHECK_OP_COMMA))
+            {
+                low = node < low ? node : low;
+                high = node >= high ? node + 1 : high;
+                commas |= graph->ops[node] == CHECK_OP_COMMA;
+            }
+        }
+    }
+    CheckCommonIgnored ignored = { 0 };
+    const bool ready = !commas || check_common_ignored_prepare(&ignored, parser, pp, input, types, scratch);
+    // The comma marker and its discarded-value helpers only read types. The shared emission also serves the ordinary
+    // conversion walk, which can derive types, but this cold source walk keeps the diagnostic driver's const view.
+    CheckCommonEmission emission = {
+        .parser = parser,
+        .pp = pp,
+        .input = input,
+        .stream = stream,
+        .types = (TypeTable*)types,
+        .spell = spell,
+        .ignored = &ignored,
+        .scratch = scratch,
+        .at_once = BUSTER_CHECK_NONE,
+    };
+    if (!ready)
+    {
+        check_common_exhausted(pp);
+    }
+    bool conditions = false;
+    for (uint32_t node = low; ready && node < high && !pp->fatal; node += 1)
+    {
+        const uint32_t token = graph->tokens[node];
+        if (token >= first && token < end && (!nested || check_semantic_assertion_keyword(parser, token) == keyword))
+        {
+            const uint32_t boundary = graph->source_positions != NULL && graph->source_positions[node] != 0 &&
+                                      graph->source_positions[node] <= token_count ? graph->source_positions[node] : completion;
+            // GNU's omitted-middle form converts its opaque saved value, not the written condition expression.
+            if (graph->ops[node] == CHECK_OP_CONDITIONAL && graph->operand0[node] != graph->operand1[node])
+            {
+                conditions = true;
+                check_common_failed_assert_bool(parser, pp, input, stream, types, spell, graph->operand0[node], boundary, scratch);
+            }
+            else if (commas && graph->ops[node] == CHECK_OP_COMMA)
+            {
+                // Static assertions build every arm in ConstantEvaluated context; only a query operand is unevaluated.
+                // A discarded scalar expression written in a macro body is quiet, while a substituted argument keeps
+                // its warning. Calls retain the ignored-result emitter's own attribute and macro policy.
+                uint32_t left = graph->operand0[node];
+                for (uint32_t steps = 0; left < graph->count && steps < graph->count &&
+                     (graph->ops[left] == CHECK_OP_SELECT || graph->ops[left] == CHECK_OP_CONVERT); steps += 1)
+                {
+                    left = graph->operand0[left];
+                }
+                const bool body = left < graph->count && check_common_ignored_macro(parser, pp, graph->tokens[left]);
+                const CheckCommonUnused unused = body ? check_common_unused_of(&emission, left) : (CheckCommonUnused){ 0 };
+                if (body && !unused.call)
+                {
+                    continue;
+                }
+                // Source warnings complete after both operands; a conditional in the right operand precedes the
+                // marker even when its highlighted token follows the discarded left's. A body's queued scalar warning
+                // keeps its later function-end publication, while source comparisons and calls complete here.
+                const PPDiagnosticRecord* previous = pp->diagnostic_last;
+                // The highlighted comma operand spans its macro argument's wrapper, including a bare substitution.
+                const bool spans = pp->diagnostic_spans;
+                pp->diagnostic_spans = true;
+                check_common_comma_marker(&emission, node);
+                pp->diagnostic_spans = spans;
+                const uint32_t publication = check_common_publication_source(parser, pp, boundary);
+                PPDiagnosticRecord* const emitted = pp->diagnostic_last != previous ? pp->diagnostic_last : NULL;
+                if (!pp->fatal && emitted != NULL && emitted->position / PP_DIAGNOSTIC_PHASE_COUNT <= publication)
+                {
+                    emitted->position = (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_DEFERRED;
+                }
+            }
+        }
+    }
+    return conditions;
+}
+
+// Rejected assertions do not enter the ordinary warning walk. Conditional conditions and discarded comma operands
+// warn in source postorder, including retained detached selection/query operands; the assertion and logical operands
+// then warn in the completed evaluated expression's order. The bounded frontier is also the conditional fallback for
+// a graph without source ownership. Other expression-warning families keep their existing owners.
 static void check_common_failed_assertion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                           const TypeTable* types, CheckWarningSpelling* spell, uint32_t root, uint32_t completion, Arena* scratch)
 {
@@ -6370,7 +6501,8 @@ static void check_common_failed_assertion(const Parser* parser, Preprocessor* pp
     uint64_t local[16];
     uint64_t* work = local;
     uint32_t capacity = BUSTER_ARRAY_LENGTH(local);
-    for (uint32_t phase = 0; phase < 2 && !pp->fatal; phase += 1)
+    const bool conditions = check_common_failed_assert_source(parser, pp, input, stream, types, spell, root, completion, scratch);
+    for (uint32_t phase = conditions ? 1u : 0u; phase < 2 && !pp->fatal; phase += 1)
     {
         uint32_t count = 1;
         work[0] = root;
@@ -8121,7 +8253,7 @@ static uint32_t check_common_argument_start(const Parser* parser, uint32_t token
 static void check_common_format_report_offset(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
                                               uint64_t offset, uint32_t* order, uint32_t id, const char* message, Arena* scratch)
 {
-    const uint32_t source = parser->tokens.sources[format_token];
+    const uint32_t source = parse_source_index(&parser->tokens, format_token);
     if (source >= pp->output.count || pp->output.locations == NULL || pp->output.locations[source] == 0)
     {
         return;
@@ -8152,7 +8284,7 @@ static void check_common_format_report_offset(const Parser* parser, Preprocessor
 static void check_common_format_report_offset_ordered(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t format_token,
                                                       uint64_t offset, uint32_t position_token, uint32_t* order, uint32_t id, const char* message, Arena* scratch)
 {
-    const uint32_t source = parser->tokens.sources[format_token];
+    const uint32_t source = parse_source_index(&parser->tokens, format_token);
     if (source >= pp->output.count || pp->output.locations == NULL || pp->output.locations[source] == 0)
     {
         return;
@@ -8167,7 +8299,7 @@ static void check_common_format_report_offset_ordered(const Parser* parser, Prep
                                        error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
         if (suffix != NULL)
         {
-            const uint32_t natural = position_token < parser->tokens.count ? parser->tokens.sources[position_token] : source;
+            const uint32_t natural = position_token < parser->tokens.count ? parse_source_index(&parser->tokens, position_token) : source;
             *order = natural > *order ? natural : *order;
             pp_diagnose_output_location_at(pp, disposition, source, pp->output.locations[source] + 1 + (uint32_t)offset,
                                            *order, PP_DIAGNOSTIC_SEMANTIC, "%s%s", message, suffix);
@@ -8276,7 +8408,7 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
         {
             // The literal's scan emits a conversion's diagnostics together: an argument report carries the order
             // forward so a later conversion's in-string report keeps sorting behind it.
-            const uint32_t natural = at_token < parser->tokens.count ? parser->tokens.sources[at_token] : *order;
+            const uint32_t natural = at_token < parser->tokens.count ? parse_source_index(&parser->tokens, at_token) : *order;
             *order = natural > *order ? natural : *order;
             check_common_report_published(parser, pp, input, at_token, *order, CHECK_WARNING_ID_FORMAT, false, message, NULL, 0, scratch);
         }
@@ -8302,7 +8434,7 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
         if (message != NULL)
         {
             const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
-            const uint32_t natural = at_token < parser->tokens.count ? parser->tokens.sources[at_token] : *order;
+            const uint32_t natural = at_token < parser->tokens.count ? parse_source_index(&parser->tokens, at_token) : *order;
             *order = natural > *order ? natural : *order;
             check_common_format_report_offset(parser, pp, input, format_token, literal_offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
         }
@@ -8451,7 +8583,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             }
             // Clang checks the format as it builds the call, once its arguments are: after the diagnostics they gave as they
             // were built, a statement expression's own or a nested call's (#1941), so published from the call's `)` on.
-            uint32_t order = graph->tokens[node] < parser->tokens.count ? parser->tokens.sources[graph->tokens[node]] : 0;
+            uint32_t order = graph->tokens[node] < parser->tokens.count ? parse_source_index(&parser->tokens, graph->tokens[node]) : 0;
             uint32_t max_uncovered = BUSTER_CHECK_NONE;
             bool all_covered = false;
             bool nonliteral_leaf = false;
@@ -8497,7 +8629,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 // sorting behind it.
                 if (order == 0)
                 {
-                    order = parser->tokens.sources[format_token];
+                    order = parse_source_index(&parser->tokens, format_token);
                 }
                 bool insufficient = false;
                 bool positional_seen = false;
@@ -8986,7 +9118,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                         const uint32_t argument_token = argument_node < graph->count ? graph->tokens[argument_node] : format_token;
                         const char* decimal_name = decimal_bits == 32 ? "_Decimal32" : decimal_bits == 64 ? "_Decimal64" : "_Decimal128";
                         const char* message = check_warning_text(scratch, "format specifies type '%s' which is not supported yet", decimal_name);
-                        const uint32_t natural = argument_token < parser->tokens.count ? parser->tokens.sources[argument_token] : order;
+                        const uint32_t natural = argument_token < parser->tokens.count ? parse_source_index(&parser->tokens, argument_token) : order;
                         order = natural > order ? natural : order;
                         check_common_report_published(parser, pp, input, argument_token, order, CHECK_WARNING_ID_FORMAT, false, message, NULL, 0, scratch);
                     }
@@ -9041,7 +9173,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                             const int printed_length = specifier_length > INT_MAX ? INT_MAX : (int)specifier_length;
                             const char* message = check_warning_text(scratch, "using '%.*s' format specifier, but argument has boolean value",
                                                                      printed_length, bytes + percent);
-                            const uint32_t natural = at_token < parser->tokens.count ? parser->tokens.sources[at_token] : order;
+                            const uint32_t natural = at_token < parser->tokens.count ? parse_source_index(&parser->tokens, at_token) : order;
                             order = natural > order ? natural : order;
                             if (message != NULL)
                             {
@@ -9096,7 +9228,7 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                 // styles share the scan.
                 const uint32_t extra_node = graph->argument_nodes[offset + first_argument + max_uncovered];
                 const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : graph->tokens[format_node];
-                const uint32_t natural = extra_token < parser->tokens.count ? parser->tokens.sources[extra_token] : order;
+                const uint32_t natural = extra_token < parser->tokens.count ? parse_source_index(&parser->tokens, extra_token) : order;
                 order = natural > order ? natural : order;
                 check_common_report_published(parser, pp, input, extra_token, order, CHECK_WARNING_ID_FORMAT_EXTRA_ARGS, false,
                                               "data argument not used by format string", NULL, 0, scratch);
@@ -9505,8 +9637,11 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
             bound_los[j] = sorted_lo;
             bound_his[j] = sorted_hi;
         }
-        const String8 type_name = enum_count != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, enum_type, 0) : (String8){ 0 };
-        for (uint32_t i = 0; values_known && type_name.length != 0 && i < interval_count; i += 1)
+        // Only an endpoint outside the enumeration prints its type. Spelling a named type builds the unit's
+        // diagnostic name tables; a fully covered switch (and a missing-enumerator list) needs none of them.
+        String8 type_name = { 0 };
+        bool spelled = false;
+        for (uint32_t i = 0; values_known && enum_count != 0 && i < interval_count; i += 1)
         {
             const CheckProgramCase* item = item_table + intervals[i];
             for (uint32_t bound = 0; bound < (item->range ? 2u : 1u); bound += 1)
@@ -9517,7 +9652,12 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                 {
                     in_enum = all_case_keys[e] == bound_key;
                 }
-                if (!in_enum)
+                if (!in_enum && !spelled)
+                {
+                    type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, enum_type, 0);
+                    spelled = true;
+                }
+                if (!in_enum && type_name.length != 0)
                 {
                     const uint32_t bound_token = bound != 0 ? bound_his[i] : bound_los[i];
                     check_common_report_at(parser, pp, input, bound_token, body_end, CHECK_WARNING_ID_SWITCH, false,
@@ -11358,34 +11498,25 @@ static bool check_common_sizeof_operand(const uint8_t* roles, const uint32_t* pa
     return answer == 2;
 }
 
-// A full expression collapsed to a window summary still reads its local at the identifier's token.
-// The summary node supplies its order and reachability in the graph. Its tape's LOCAL holds the object
-// before the lowering maps that object to the body's register slot.
-typedef struct CheckCommonRead CheckCommonRead;
-struct CheckCommonRead
+// The source of the first matching access to this declaration inside a compressed expression. Rows
+// retain their evaluation order, including multiple reads of the same declaration. Other graph nodes supply their own token.
+static uint32_t check_common_window_event_token(const CheckInput* input, uint32_t node, uint32_t object, uint8_t event)
 {
-    uint32_t object;
-    uint32_t token;
-};
-
-static CheckCommonRead check_common_local_read(const CheckInput* input, const CheckStream* stream, uint32_t node)
-{
-    const CheckGraph* graph = &input->graph;
-    CheckCommonRead read = { .token = graph->tokens[node] };
-    if (graph->ops[node] == CHECK_OP_VALUE)
+    const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+    uint32_t token = input->graph.tokens[node];
+    if (summary != NULL)
     {
-        const CheckInputWindowEntry* row = check_input_window_row(input, node);
-        if (row != NULL && row->read_offset != 0)
+        token = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; i < summary->count && token == BUSTER_CHECK_NONE; i += 1)
         {
-            read.object = (uint32_t)row->value;
-            read.token += row->read_offset;
-        }
-        else if (check_stream_category(stream, node) == CHECK_LVALUE)
-        {
-            read.object = check_stream_object(stream, node);
+            const CheckInputWindowRow* row = input->window_rows + summary->first + i;
+            if ((row->flags & event) != 0 && row->value == object)
+            {
+                token = row->token + row->event_offset;
+            }
         }
     }
-    return read;
+    return token;
 }
 
 static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -11673,9 +11804,38 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             }
             if (op == CHECK_OP_VALUE)
             {
-                const CheckCommonRead read = check_common_local_read(input, stream, node);
-                const uint32_t declaration = read.object != 0 ? read.object - 1 : BUSTER_CHECK_NONE;
-                if (declaration < count)
+                const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+                if (summary != NULL)
+                {
+                    // A retained assignment has distinct read and written objects. The summary node is their
+                    // graph order; reachability gates the analysis while the syntactic accesses always count.
+                    for (uint32_t r = 0; r < summary->count; r += 1)
+                    {
+                        const CheckInputWindowRow* row = input->window_rows + summary->first + r;
+                        const uint32_t declaration = (uint32_t)row->value - 1;
+                        if ((row->flags & BUSTER_CHECK_WINDOW_READ) != 0 && declaration < count)
+                        {
+                            if (evaluated[node] != 0 && node < first_read[declaration])
+                            {
+                                first_read[declaration] = node;
+                            }
+                            first_use_read[declaration] = node < first_use_read[declaration] ? node : first_use_read[declaration];
+                        }
+                        if ((row->flags & BUSTER_CHECK_WINDOW_WRITE) != 0 && declaration < count)
+                        {
+                            written[declaration] = 1;
+                            statement_write[declaration] = 1;
+                            if (evaluated[node] != 0 && node < first_write[declaration])
+                            {
+                                first_write[declaration] = node;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                const uint32_t object = check_stream_object(stream, node);
+                const uint32_t declaration = object != 0 ? object - 1 : BUSTER_CHECK_NONE;
+                if (declaration < count && check_stream_category(stream, node) == CHECK_LVALUE)
                 {
                     if (evaluated[node] != 0 && nonread[node] == 0)
                     {
@@ -11712,7 +11872,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
             const uint32_t name = parser->tokens.names[declaration];
             const uint32_t initializer_begin = check_common_sparse_get(input->initializer_begins, declaration);
             const uint32_t initializer_end = check_common_sparse_get(input->initializer_ends, declaration);
-            uint32_t read_token = first_read[declaration] != BUSTER_CHECK_NONE ? check_common_local_read(input, stream, first_read[declaration]).token : BUSTER_CHECK_NONE;
+            uint32_t read_token = first_read[declaration] != BUSTER_CHECK_NONE ? check_common_window_event_token(input, first_read[declaration], declaration + 1, BUSTER_CHECK_WINDOW_READ) : BUSTER_CHECK_NONE;
             // A lone identifier in a brace initializer (`int x = { x };`) is a self-read the graph's value column does
             // not retain; the declaration's own token range finds it. An expression initializer's reads are the
             // graph's, so only a braced range is scanned, and not through a sizeof operand.
@@ -11803,9 +11963,12 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     bool later = false;
                     for (uint32_t node = 0; !later && node < graph->count; node += 1)
                     {
-                        const CheckCommonRead read = check_common_local_read(input, stream, node);
-                        later = read.object == declaration + 1 && evaluated[node] != 0 && nonread[node] == 0 &&
-                                read.token < parser->tokens.count && (read.token < self_begin || read.token >= self_end);
+                        const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+                        const uint32_t object = graph->ops[node] == CHECK_OP_VALUE && check_stream_category(stream, node) == CHECK_LVALUE ?
+                                                check_stream_object(stream, node) : 0;
+                        const uint32_t token = summary != NULL ? check_common_window_event_token(input, node, declaration + 1, BUSTER_CHECK_WINDOW_READ) :
+                                               object == declaration + 1 ? graph->tokens[node] : BUSTER_CHECK_NONE;
+                        later = evaluated[node] != 0 && nonread[node] == 0 && token < parser->tokens.count && (token < self_begin || token >= self_end);
                     }
                     self_bare_alone = !later;
                 }
@@ -11820,6 +11983,10 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 braced_written = (graph->ops[node] == CHECK_OP_ASSIGN || check_common_write_op(graph->ops[node])) &&
                                  target < graph->count && check_stream_category(stream, target) == CHECK_LVALUE &&
                                  check_stream_object(stream, target) == declaration + 1;
+                if (!braced_written && check_input_window_summary(input, node) != NULL)
+                {
+                    braced_written = check_common_window_event_token(input, node, declaration + 1, BUSTER_CHECK_WINDOW_WRITE) < count;
+                }
             }
             // A body clang ends after the unit's first error gets no CFG analysis (check_common_flush), and so no
             // -Wuninitialized.
@@ -12056,6 +12223,12 @@ static bool check_common_loop_changes(const Parser* parser, const CheckInput* in
         result = type_kind_is_array(check_action_kind(types, check_stream_type(stream, node))) || op == CHECK_OP_ADDRESS ||
                  (target && (op == CHECK_OP_ASSIGN || op == CHECK_OP_MEMBER || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) ||
                              (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN)));
+        const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+        for (uint32_t i = 0; !result && summary != NULL && i < summary->count; i += 1)
+        {
+            const CheckInputWindowRow* row = input->window_rows + summary->first + i;
+            result = (row->flags & BUSTER_CHECK_WINDOW_WRITE) != 0 && row->token + row->event_offset == token;
+        }
         // (Only a change asks for the climb.)
         result = result && check_common_loop_reached(parser, input, parents, token, close);
     }

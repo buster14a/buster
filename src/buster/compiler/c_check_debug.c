@@ -472,7 +472,7 @@ static void check_debug_line_scalar(const CheckDebugSource* source, uint32_t tok
 {
     Preprocessor* pp = source->pp;
     const Parser* parser = source->parser;
-    const uint32_t output = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const uint32_t output = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
     const uint32_t location = output < pp->output.count ? check_lazy_expansion_location(pp, output, pp_history_at(pp, output)) : 0;
     const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     *key = BUSTER_CHECK_DEBUG_NO_FILE;
@@ -525,8 +525,8 @@ static bool check_debug_span(const CheckDebugSource* source, uint32_t declaratio
     Preprocessor* pp = source->pp;
     const Parser* parser = source->parser;
     bool valid = declaration < parser->tokens.count && closing < parser->tokens.count;
-    const uint32_t first = valid ? parser->tokens.sources[declaration] : 0;
-    const uint32_t last = valid ? parser->tokens.sources[closing] : 0;
+    const uint32_t first = valid ? parse_source_index(&parser->tokens, declaration) : 0;
+    const uint32_t last = valid ? parse_source_index(&parser->tokens, closing) : 0;
     valid = valid && first <= last && last < pp->output.count;
     const uint32_t begin = valid ? check_lazy_expansion_location(pp, first, pp_history_at(pp, first)) : 0;
     const uint32_t end = valid ? check_lazy_expansion_location(pp, last, pp_history_at(pp, last)) : 0;
@@ -587,7 +587,7 @@ static void check_debug_lines(const CheckDebugSource* source, uint32_t declarati
             const __mmask16 valid = (__mmask16)_bzhi_u32(0xffff, take);
             const __m512i token = _mm512_maskz_loadu_epi32(valid, tokens + i);
             const __mmask16 known = _mm512_mask_cmplt_epu32_mask(valid, token, _mm512_set1_epi32((int)parser->tokens.count));
-            const __m512i output = _mm512_mask_i32gather_epi32(zero, known, token, parser->tokens.sources, 4);
+            const __m512i output = parse_source_gather(&parser->tokens, token, known);
             __mmask16 inside = _mm512_mask_cmpge_epu32_mask(known, output, _mm512_set1_epi32((int)span.first_output)) &
                                _mm512_cmple_epu32_mask(output, _mm512_set1_epi32((int)span.last_output));
             // The history run: the runs at or before the output token, within the function's.

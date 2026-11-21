@@ -817,7 +817,7 @@ static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* pars
             {
                 continue;
             }
-            const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+            const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parse_source_index(&parser->tokens, event->token);
             // The first warning as the diagnostic stream publishes it, not the earliest token: a translation-unit-final
             // warning (its primary on an earlier line) completes after an ordinary one on a later line, and the driver
             // orders by publication. Ties keep the earlier view's, as the driver's insertion order does.
@@ -1151,7 +1151,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             const ParseDiagnostic* diagnostic = printed.diagnostics + report;
             if (diagnostic->error)
             {
-                const uint32_t source = diagnostic->token < parser->tokens.count ? parser->tokens.sources[diagnostic->token] : pp->output.count;
+                const uint32_t source = diagnostic->token < parser->tokens.count ? parse_source_index(&parser->tokens, diagnostic->token) : pp->output.count;
                 if (source <= semantic_source)
                 {
                     const ParseTestOutcome outcome = parse_test_outcome(&printed, pp);
@@ -2117,7 +2117,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                                                  left_parser->first_children[token] == right_parser->first_children[token] &&
                                                  left_parser->next_siblings[token] == right_parser->next_siblings[token])) &&
                 left_parser->tokens.kinds[token] == right_parser->tokens.kinds[token] && left_parser->tokens.names[token] == right_parser->tokens.names[token] &&
-                left_parser->tokens.sources[token] == right_parser->tokens.sources[token] && left_parser->tokens.flags[token] == right_parser->tokens.flags[token];
+                parse_source_index(&left_parser->tokens, token) == parse_source_index(&right_parser->tokens, token) && left_parser->tokens.flags[token] == right_parser->tokens.flags[token];
     }
     for (uint32_t pragma = 0; equal && pragma < x->tokens.pragma_count; pragma += 1)
     {

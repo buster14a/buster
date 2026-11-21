@@ -386,12 +386,16 @@ struct PPOptions
     // the coded walk's classes reach. Off in every compile; benchmark-checker-bindings sets it for runs of its own,
     // apart from its samples.
     bool expression_timing;
+    // The command driver sets this on an unmeasured compile. Direct checker tests and benchmarks collect the walk's counters.
+    bool skip_expression_profile;
     // After the coded walk, number its tokens again as the graph by passes would (CheckInput.expression_numbering_*,
     // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
     // expression_timing.
     bool expression_numbering;
     // --node-window takes eligible full expressions before the coded walk.
     bool node_window;
+    // --node-window-assignments also considers discarded local assignments.
+    bool node_window_assignments;
     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
@@ -418,6 +422,8 @@ struct PPOptions
     bool quiet;
     // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
     bool system_header_warnings;
+    // An artifact command consumes binding-derived unused declarations only through their diagnostic policy.
+    bool published_unused_only;
     // Ordered semantic warning options; a valued option's operand is never captured as diagnostic policy. The
     // arena owns the pointer slice; argument strings have the same borrowed lifetime as -D/-I option strings.
     const char* const* semantic_warning_options;

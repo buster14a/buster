@@ -513,7 +513,7 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
 // warning (SourceManager's isMacroBodyExpansion, isInSystemMacro): a macro's token that no argument substituted.
 static bool check_common_ignored_macro(const Parser* parser, Preprocessor* pp, uint32_t token)
 {
-    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const uint32_t source = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
     bool result = false;
     if (source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0)
     {

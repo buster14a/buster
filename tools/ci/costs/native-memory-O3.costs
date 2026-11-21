@@ -32,6 +32,7 @@
 #: cpu 1 0.65 Intel(R) Xeon(R) 6973P-C
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
+#: unmeasured Test -S of c-testsuite's programs against -c and GNU as
 #: unmeasured Test the caret display against clang
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
@@ -220,6 +221,7 @@
 207.8 Test mixed-tier single- and multi-file determinism [8 CPUs]
 149.7 Test c-testsuite's programs end to end [4 CPUs]
 516.3 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+35.6 Test -S of c-testsuite's programs against -c and GNU as
 43.7 Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 280.4 Promote and run random C programs of structured and unstructured control flow [4 CPUs]
 102.3 Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]

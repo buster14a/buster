@@ -12,7 +12,8 @@ requirements. [Command index](README.md).
   options] file.c` preprocesses, parses and checks the file and prints the
   diagnostics as clang does, with exit status 0 for a unit without errors and
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
-  Tier 0 ([the checker guide](../../docs/c-checker.md)); and with neither option it
+  Tier 0 ([the checker guide](../../docs/c-checker.md)), and `-S [-o file.s]` its
+  assembly in its place ([-S](#-s-1362)); and with none of them it
   links an executable (`-o`, `a.out` by default), for pure-C inputs by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
@@ -496,12 +497,64 @@ shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
 `.S`, positional languages, stdin, compile-only output and failure preservation.
 
 
+## -S (#1362)
+
+`-S` writes each C source's assembly where `-c` writes its object: GNU as's
+AT&T syntax, which assembles into the object `-c` writes (the assembly sink's
+form contract, below), compiled by Tier 0 or with `--tier1` as `-c` compiles it.
+Its output is `-o FILE`, standard output with `-o -`, and otherwise each
+source's base name with `.s` in the current directory, as clang names it (`-o`
+with several sources is refused, as with `-c`). `-fsyntax-only` takes precedence
+over `-S`, and `-S` over `-c`, whichever comes first, as clang's phases do. It
+runs the compile `-c` runs, its diagnostics and their promotions alike, and
+writes its file only after the unit's code and data are made: a unit with an
+error, or one the sink refuses, writes nothing and leaves an existing file as it
+was.
+
+The emission keeps each function's records for it (`CheckProgramLanes.assembly`,
+`CheckProgramCode.assembly_code`: copies of the records and branch columns in
+the emission's output arena, after branch sizing) and runs the bodies in one
+window (`--emit-window` is 0 under `-S`), whose records it keeps whole; nothing
+else changes, and a command without `-S` copies nothing.
+
+What it doesn't print yet it refuses by name, before the source is read where
+the options say so, and otherwise naming the source and the symbol:
+
+- debug information (`-g`) and inline assembly (asm statements, naked
+  functions, file-scope assembly): the design's stages 3 and 4;
+- thread-local storage, section groups, common symbols, patchable function
+  entries, multiversioned functions' resolvers, and the other refusals of the
+  sink below;
+- assembly and linker inputs beside the C sources.
+
+The unwind tables are the `.eh_frame` section's bytes with their symbolic
+relocations (`.long function-.`), as `-c`'s object has them, not CFI
+directives, which are stage 4's. `-save-temps` is still an unknown argument.
+
+The acceptance (`test-assembly-output --c-testsuite DIRECTORY --subset FILE`,
+the inventory's row): each program of `tests/c-testsuite/subset.txt`, at Tier 0
+and with `--tier1`, by this executable's `-S` and `-c`; GNU as's object of the
+text must be `-c`'s by the form contract's comparison (below), and the program
+linked from GNU as's object (`-lm` for the programs that call libm) must print
+the expected output and exit 0. All 440 compiles pass, with `--option
+-march=native` too. `--compare SOURCE` compares a source without a link (the
+repository's standalone tools, up to 4,300 lines, pass at both tiers, with
+`-march=native -O2` too), and `--option ARGUMENT` adds an argument to every
+compile.
+
+```sh
+./build/compiler -S -o main.s main.c
+./build/compiler --tier1 -S main.c -o - | less
+./build/compiler test-assembly-output --c-testsuite build/c-testsuite --subset tests/c-testsuite/subset.txt
+./build/compiler test-assembly-output --option -march=native --compare tools/ci/costs.c
+```
+
 ## The assembly sink (#1362)
 
 `src/buster/compiler/assembly_output.c` prints a unit of the link
-representation as GNU as's AT&T assembly: the text `-S` is to write (stage 2 of
-[the design](https://github.com/buster14a/buster/issues/1362#issuecomment-6721142506)),
-which describes the object `-c` writes. It prints from the symbolic emission
+representation as GNU as's AT&T assembly: the text `-S` writes ([the
+design](https://github.com/buster14a/buster/issues/1362#issuecomment-6721142506)'s
+stages 1 and 2), which describes the object `-c` writes. It prints from the symbolic emission
 view (`AssemblyView`), never from the object: the link's atoms, symbols and
 fixups, which hold every relocation's target and addend, and each `TEXT` atom's
 instruction records as the emission sized and encoded them, with their branch
