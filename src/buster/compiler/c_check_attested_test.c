@@ -897,6 +897,8 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "window_capacity", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "window_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "window_nodes", CHECK_ATTESTED_FIELD_MEASURE },
+    { "integer_window_count", CHECK_ATTESTED_FIELD_MEASURE },
+    { "integer_window_removed", CHECK_ATTESTED_FIELD_MEASURE },
 };
 
 static const CheckAttestedField check_attested_reader_fields[] =
