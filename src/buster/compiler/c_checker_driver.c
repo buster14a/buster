@@ -10238,8 +10238,7 @@ static void check_driver_object_code(CheckDriverCode* state, const CheckProgram*
                                             NULL, kept != NULL && !foreign, debug ? &state->rows : NULL, unwind, verify, lanes, stage_clock);
 }
 
-// The emission's arenas and lanes given back, for code that check_driver_object_finish won't take (#2536's step 2.2c.4,
-// part 2).
+// Release a finished or abandoned object's arenas and lanes. A units' lane keeps its writer's columns for the next unit.
 static void check_driver_object_release(CheckDriverCode* state, CheckProgramLanes* lanes, Arena* scratch)
 {
     arena_pop_to(scratch, state->mark);
@@ -10262,9 +10261,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
                                        bool scalar, bool dump_static, bool debug, CheckProgramLanes* lanes, Arena* scratch,
                                        CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
 {
-    Arena output = state->output;
-    Arena bytes = state->bytes;
-    const uint64_t mark = state->mark;
+    // The link adds pragma alias names through &state->output. DWARF and section descriptors must advance the same arena.
     CheckProgramCode code = state->code;
     CheckProgramRows rows = state->rows;
     bool valid = state->valid;
@@ -10278,7 +10275,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     if (valid)
     {
         valid = check_data_publish(data, types, program->stream, program->object_symbols, program->object_count,
-                                   &code.link, 0, &bytes, scratch, &emission);
+                                   &code.link, 0, &state->bytes, scratch, &emission);
         if (!valid)
         {
             check_driver_diagnose(parser, pp, emission.failed_token, "checked static data could not be emitted");
@@ -10286,7 +10283,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     }
     // The definitions' named sections and the file-scope assembly's (#619), each atom's section in the object.
     ObjectAtomSection* sections = 0;
-    if (valid && !check_program_sections(&code, program, &bytes, &output, &sections))
+    if (valid && !check_program_sections(&code, program, &state->bytes, &state->output, &sections))
     {
         check_driver_emission_failed(parser, pp, &code);
         valid = false;
@@ -10294,7 +10291,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
     if (valid && debug)
     {
-        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
+        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &state->output, scratch);
         if (!valid)
         {
             fprintf(errors, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
@@ -10356,19 +10353,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
         check_program_print_tier1_sizes(lanes->tier1_function_sizes, &code);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
-    arena_pop_to(scratch, mark);
-    // A units' lane keeps lane 0's writer's columns for its next unit (check_program_lanes_settle, #442); a command of one
-    // file is done with them.
-    if (lanes != NULL && lanes->units_lane != NULL)
-    {
-        check_program_lanes_settle(lanes);
-    }
-    else
-    {
-        check_program_lanes_release(lanes);
-    }
-    arena_release(&bytes);
-    arena_release(&output);
+    check_driver_object_release(state, lanes, scratch);
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     return valid;
 }
