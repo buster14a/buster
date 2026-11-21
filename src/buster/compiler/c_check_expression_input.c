@@ -58,14 +58,6 @@ static uint32_t check_input_expression_compact(const CheckInputReader* reader, u
     return result;
 }
 
-typedef struct CheckInputValues CheckInputValues;
-struct CheckInputValues
-{
-    uint32_t first;
-    uint32_t last;
-    uint32_t count;
-};
-
 // The values of `token`'s children, chained as the walk's action chains them: each child's chain after the one before
 // it, through value_next, and their counts added (CheckInputReader.value_counts).
 // Its branches stay: a branch-free splice (each child's last value and count taken by selects, the link stored into a
@@ -77,9 +69,11 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
     CheckInputValues values = { .first = BUSTER_CHECK_NONE, .last = BUSTER_CHECK_NONE, .count = 0 };
     for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
     {
-        const uint32_t begin = reader->first_value[child];
-        if (begin != BUSTER_CHECK_NONE)
+        const uint32_t entry = reader->first_value[child];
+        if (entry != BUSTER_CHECK_NONE)
         {
+            const CheckInputValues child_values = check_input_chain_read(reader, child, entry);
+            const uint32_t begin = child_values.first;
             if (values.last != BUSTER_CHECK_NONE)
             {
                 reader->value_next[values.last] = begin;
@@ -88,8 +82,8 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
             {
                 values.first = begin;
             }
-            values.last = reader->last_value[child];
-            values.count += reader->value_counts[child];
+            values.last = child_values.last;
+            values.count += child_values.count;
         }
     }
     return values;
@@ -493,9 +487,7 @@ static void check_input_expression_value(CheckInputReader* reader, uint32_t toke
     if (node != BUSTER_CHECK_NONE)
     {
         reader->output->token_nodes[token] = node;
-        reader->first_value[token] = node;
-        reader->last_value[token] = node;
-        reader->value_counts[token] = 1;
+        check_input_chain_single(reader, token, node);
     }
 }
 
@@ -503,9 +495,7 @@ static void check_input_expression_value(CheckInputReader* reader, uint32_t toke
 static void check_input_expression_list(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
     reader->output->token_nodes[token] = values.count == 1 ? values.first : BUSTER_CHECK_NONE;
-    reader->first_value[token] = values.first;
-    reader->last_value[token] = values.last;
-    reader->value_counts[token] = values.count;
+    check_input_chain_list(reader, token, values);
     if (BUSTER_CHECK_RARE(reader, static_initializers, token))
     {
         // A braced static initializer's elements are constant expressions, which initializer planning diagnoses:
@@ -1603,8 +1593,10 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
                     if (barrier)
                     {
                         id += made[token];
-                        chain = reader->first_value[token];
-                        chained = reader->value_counts[token];
+                        const uint32_t entry = reader->first_value[token];
+                        const CheckInputValues values = check_input_chain_read(reader, token, entry);
+                        chain = values.first;
+                        chained = values.count;
                     }
                     else if (code == CHECK_INPUT_CODE_TERMINATOR)
                     {

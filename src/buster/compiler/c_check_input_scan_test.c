@@ -171,6 +171,34 @@ static void check_test_output_none_columns(uint32_t* const* columns, uint32_t co
     };
 }
 
+// A parent may still refer to earlier list entries after the packed pool grows. Reuse one token for
+// singletons, empty chains and lists, then read every retained list after crossing two growth points.
+static void check_test_expression_chains(CheckTest* test)
+{
+    Arena scratch = arena_reserve(UINT64_C(1) << 17);
+    CheckInput input = { 0 };
+    uint32_t heads[601];
+    CheckInputReader reader = { .output = &input, .scratch = &scratch, .first_value = heads };
+    bool exact = scratch.base != NULL;
+    for (uint32_t i = 0; exact && i < BUSTER_ARRAY_LENGTH(heads); ++i)
+    {
+        check_input_chain_single(&reader, i, i + 3);
+        const CheckInputValues single = check_input_chain_read(&reader, i, heads[i]);
+        check_input_chain_list(&reader, i, (CheckInputValues){ BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0 });
+        const CheckInputValues empty = check_input_chain_read(&reader, i, heads[i]);
+        check_input_chain_list(&reader, i, (CheckInputValues){ i, i + 5, 6 });
+        exact = !input.resource && single.first == i + 3 && single.last == i + 3 && single.count == 1 &&
+                empty.first == BUSTER_CHECK_NONE && empty.last == BUSTER_CHECK_NONE && empty.count == 0;
+    }
+    for (uint32_t i = 0; exact && i < BUSTER_ARRAY_LENGTH(heads); ++i)
+    {
+        const CheckInputValues list = check_input_chain_read(&reader, i, heads[i]);
+        exact = list.first == i && list.last == i + 5 && list.count == 6;
+    }
+    check_test_expect(test, exact, "packed value chains preserve singletons, empty chains and retained lists across pool growth");
+    arena_release(&scratch);
+}
+
 static void check_test_output_none(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -765,6 +793,7 @@ static __attribute__((noinline)) void check_test_sparse_next(CheckTest* test)
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
+    check_test_expression_chains(test);
     check_test_sparse_columns(test);
     check_test_sparse_next(test);
     check_test_sparse_wide(test);
