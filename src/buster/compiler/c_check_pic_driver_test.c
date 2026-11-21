@@ -19,6 +19,15 @@ typedef enum CheckPicAction
     BUSTER_CHECK_PIC_ACTION_COUNT,
 } CheckPicAction;
 
+// A link's PIC and PIE options, at most two in order, and its executable's exit status, __PIC__ * 10 + __PIE__.
+typedef struct CheckPicLevel CheckPicLevel;
+struct CheckPicLevel
+{
+    const char* first;
+    const char* second;
+    int status;
+};
+
 static int check_test_driver_pic_command(const char* executable, const char* source, const char* output, bool scalar,
                                          CheckPicAction action, const char* const* options, uint32_t option_count, char** text)
 {
@@ -547,29 +556,92 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
         "#ifdef __PIC__\n#define PIC_LEVEL __PIC__\n#else\n#define PIC_LEVEL 0\n#endif\n"
         "#ifdef __PIE__\n#define PIE_LEVEL __PIE__\n#else\n#define PIE_LEVEL 0\n#endif\n"
         "int main(void) { return PIC_LEVEL * 10 + PIE_LEVEL; }\n";
-    static const struct
-    {
-        const char* options[2];
-        uint32_t count;
-        int status;
-    } levels[] = {
-        { { NULL, NULL }, 0, 22 },
-        { { "-fPIC", NULL }, 1, 20 },
-        { { "-fpic", NULL }, 1, 10 },
-        { { "-fPIC", "-fPIE" }, 2, 22 },
-        { { "-fPIE", "-fPIC" }, 2, 20 },
-        { { "-fpic", "-fPIE" }, 2, 22 },
-        { { "-fPIE", "-fpic" }, 2, 10 },
-        { { "-fPIC", "-fpie" }, 2, 11 },
-        { { "-fpie", "-fPIC" }, 2, 20 },
-        { { "-fPIC", "-fpic" }, 2, 10 },
-        { { "-fpic", "-fPIC" }, 2, 20 },
-        { { "-fPIC", "-fno-PIC" }, 2, 0 },
-        { { "-fno-PIC", "-fPIC" }, 2, 20 },
-        { { "-fpic", "-fno-pic" }, 2, 0 },
-        { { "-fno-pic", "-fpic" }, 2, 10 },
-        { { "-fPIC", "-fno-pie" }, 2, 0 },
-        { { "-fno-pie", "-fPIC" }, 2, 20 },
+    static const CheckPicLevel levels[] = {
+        {
+            .first = NULL,
+            .second = NULL,
+            .status = 22,
+        },
+        {
+            .first = "-fPIC",
+            .second = NULL,
+            .status = 20,
+        },
+        {
+            .first = "-fpic",
+            .second = NULL,
+            .status = 10,
+        },
+        {
+            .first = "-fPIC",
+            .second = "-fPIE",
+            .status = 22,
+        },
+        {
+            .first = "-fPIE",
+            .second = "-fPIC",
+            .status = 20,
+        },
+        {
+            .first = "-fpic",
+            .second = "-fPIE",
+            .status = 22,
+        },
+        {
+            .first = "-fPIE",
+            .second = "-fpic",
+            .status = 10,
+        },
+        {
+            .first = "-fPIC",
+            .second = "-fpie",
+            .status = 11,
+        },
+        {
+            .first = "-fpie",
+            .second = "-fPIC",
+            .status = 20,
+        },
+        {
+            .first = "-fPIC",
+            .second = "-fpic",
+            .status = 10,
+        },
+        {
+            .first = "-fpic",
+            .second = "-fPIC",
+            .status = 20,
+        },
+        {
+            .first = "-fPIC",
+            .second = "-fno-PIC",
+            .status = 0,
+        },
+        {
+            .first = "-fno-PIC",
+            .second = "-fPIC",
+            .status = 20,
+        },
+        {
+            .first = "-fpic",
+            .second = "-fno-pic",
+            .status = 0,
+        },
+        {
+            .first = "-fno-pic",
+            .second = "-fpic",
+            .status = 10,
+        },
+        {
+            .first = "-fPIC",
+            .second = "-fno-pie",
+            .status = 0,
+        },
+        {
+            .first = "-fno-pie",
+            .second = "-fPIC",
+            .status = 20,
+        },
     };
     const bool levels_written = parse_test_write(source, level_program, sizeof(level_program) - 1);
     check_test_expect(test, levels_written, "PIC link level fixture is written");
@@ -577,13 +649,14 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
     {
         char* text = NULL;
         unlink(output);
-        const int status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_LINK, levels[i].options, levels[i].count, &text);
+        const char* options[] = { levels[i].first, levels[i].second };
+        const uint32_t count = levels[i].second != NULL ? 2u : levels[i].first != NULL ? 1u : 0u;
+        const int status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_LINK, options, count, &text);
         char* run[] = { output, NULL };
         char* run_text = NULL;
         const int ran = status == 0 ? check_test_driver_spawn(run, &run_text) : -1;
         free(run_text);
-        snprintf(label, sizeof(label), "PIC link levels %s %s: status %d", levels[i].count > 0 ? levels[i].options[0] : "(none)",
-                 levels[i].count > 1 ? levels[i].options[1] : "", levels[i].status);
+        snprintf(label, sizeof(label), "PIC link levels %s %s: status %d", count > 0 ? levels[i].first : "(none)", count > 1 ? levels[i].second : "", levels[i].status);
         check_test_expect(test, status == 0 && ran == levels[i].status, label);
         free(text);
     }

@@ -96,7 +96,7 @@ in the preparation is timed. The clients time what follows it: the emission,
 its lanes, the lowering ways and the IR's passes.
 `benchmark-checker-source` and `benchmark-checker-deferred`, which only check,
 read their options through `check_request_read` and `check_request_parse`
-with `emits` false, as the driver's `-fsyntax-only` reads them.
+with `CHECK_REQUEST_CODE_NONE`, as the driver's `-fsyntax-only` reads them.
 
 ### Explicit overrides
 
