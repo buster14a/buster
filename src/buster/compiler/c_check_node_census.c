@@ -4821,6 +4821,13 @@ struct NodeShadow
     // reports summed (NodeFrontShadow's flat_ fields): its pass's and its compaction's ticks, the tokens it visited, its
     // records, the children hopped over, the tokens with a child past the ring's reach and those left; and its
     // comparison with the lean front: the records both made, those that differ, and those only one made.
+    uint64_t flat_window_roots;
+    uint64_t flat_window_records;
+    uint64_t flat_window_cross;
+    uint64_t flat_window_far;
+    uint64_t flat_window_other;
+    uint64_t flat_window_ticks;
+    uint64_t flat_window_kernel_ticks;
     uint64_t flat_ticks;
     uint64_t flat_compact_ticks;
     uint64_t flat_stage_ticks[8];
@@ -7048,6 +7055,11 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
         printf("node-shadow: flat front against the lean front: compared=%" PRIu64 " differences=%" PRIu64 " only-the-flat-front's=%" PRIu64 " only-the-lean-front's=%" PRIu64
                " past-the-records'-ring=%" PRIu64 " distances-past-a-byte-by-empty-places=%" PRIu64 "\n",
                shadow->flat_compared, shadow->flat_differences, shadow->flat_only, shadow->flat_lean_only, shadow->flat_unread, shadow->flat_far);
+        if ((shadow->reader & BUSTER_NODE_READER_FLAT_WINDOW) != 0)
+        {
+            printf("node-shadow: flat window expressions=%" PRIu64 " records=%" PRIu64 " cross-chunk=%" PRIu64 " far=%" PRIu64 " unmapped=%" PRIu64 " ticks=%" PRIu64 " admitted-kernel-ticks=%" PRIu64 "\n",
+                   shadow->flat_window_roots, shadow->flat_window_records, shadow->flat_window_cross, shadow->flat_window_far, shadow->flat_window_other, shadow->flat_window_ticks, shadow->flat_window_kernel_ticks);
+        }
         printf("node-shadow: flat front ticks=%" PRIu64 " compact-ticks=%" PRIu64 "\n", shadow->flat_ticks, shadow->flat_compact_ticks);
         printf("node-shadow: flat front stage ticks classify=%" PRIu64 " leaves=%" PRIu64 " places=%" PRIu64 " records=%" PRIu64 " empties=%" PRIu64 "\n",
                shadow->flat_stage_ticks[BUSTER_NODE_FLAT_STAGE_CLASSIFY], shadow->flat_stage_ticks[BUSTER_NODE_FLAT_STAGE_LEAVES],
@@ -7529,6 +7541,13 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                         shadow->front_left[code] += front->left[code];
                     }
                     shadow->front_left_queries += front->left_queries;
+                    shadow->flat_window_roots += front->flat_window_roots;
+                    shadow->flat_window_records += front->flat_window_records;
+                    shadow->flat_window_cross += front->flat_window_cross;
+                    shadow->flat_window_far += front->flat_window_far;
+                    shadow->flat_window_other += front->flat_window_other;
+                    shadow->flat_window_ticks += front->flat_window_ticks;
+                    shadow->flat_window_kernel_ticks += front->flat_window_kernel_ticks;
                     shadow->flat_ticks += front->flat_ticks;
                     shadow->flat_compact_ticks += front->flat_compact_ticks;
                     shadow->flat_tokens += front->flat_tokens;
@@ -7546,7 +7565,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->flat_only += front->flat_only;
                     shadow->flat_lean_only += front->flat_lean_only;
                     shadow->flat_unread += front->flat_unread;
-                    static const char* const flat_fields[] = { "compaction", "operator", "count", "distance", "root", "consumer", "leaf", "arguments", "operand", "classes" };
+                    static const char* const flat_fields[] = { "compaction", "operator", "count", "distance", "root", "consumer", "leaf", "arguments", "operand", "classes", "window" };
                     for (uint32_t d = 0; d < front->flat_differences && d < BUSTER_NODE_FRONT_LISTED && shadow->flat_listed < node_census_list; d += 1)
                     {
                         const uint32_t token = front->flat_difference_tokens[d];
@@ -7987,7 +8006,7 @@ static int run_node_census(int count, char** arguments)
             shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
                              BUSTER_NODE_READER_WINDOW_CONTEXTS;
         }
-        else if (strcmp(arguments[i], "--window-rows") == 0)
+        else if (strcmp(arguments[i], "--window-rows") == 0 || strcmp(arguments[i], "--front-flat-window") == 0)
         {
             // X's rows on the same window (c_check_node_machine_rows.c), beside X's tape on T's columns at reader time,
             // their reference: --window-contexts' options with it, whose answers they are made from.
@@ -7995,6 +8014,11 @@ static int run_node_census(int count, char** arguments)
                                      ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
             shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
                              BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS;
+            if (strcmp(arguments[i], "--front-flat-window") == 0)
+            {
+                shadow.front |= BUSTER_NODE_FRONT_FLAT;
+                shadow.reader |= BUSTER_NODE_READER_FLAT_WINDOW;
+            }
         }
         else if (strcmp(arguments[i], "--no-window-summaries") == 0)
         {

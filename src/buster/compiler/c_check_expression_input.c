@@ -1746,6 +1746,14 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
     }
     node_front_compare(front, reader);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (front->flat != NULL && front->flat->window != NULL)
+    {
+        if ((fronted & BUSTER_NODE_FRONT_FLAT_FIRST) == 0)
+        {
+            node_front_chunk_flat(front->flat, reader, literals);
+        }
+        node_facts_flat_chunk(front, reader);
+    }
     if (front->typer != NULL)
     {
         // T at reader time, on the chunk's roots whose expressions the comparison has just given their nodes.
@@ -1755,7 +1763,7 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
     if (front->flat != NULL)
     {
         // The flat front, where it runs after the walk, and its records against the lean front's of the same chunk.
-        if ((fronted & BUSTER_NODE_FRONT_FLAT_FIRST) == 0)
+        if ((fronted & BUSTER_NODE_FRONT_FLAT_FIRST) == 0 && front->flat->window == NULL)
         {
             node_front_chunk_flat(front->flat, reader, literals);
         }
@@ -1786,6 +1794,7 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
             memset(front->flat, 0, sizeof(NodeFlat));
         }
         node_flat_begin(front->flat, front->shadow);
+        front->flat->window = NULL;
     }
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
@@ -1793,6 +1802,10 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
         front->typer = node_machine_reader_begin(reader, front->shadow, (fronted & BUSTER_NODE_FRONT_SWEEPS) != 0);
         // Whether the front writes the fact words' window (BUSTER_NODE_READER_WINDOW), where the kernel runs there.
         node_facts_window_begin(front, reader);
+        if (front->window && front->flat != NULL && (reader->pp->options.node_reader & BUSTER_NODE_READER_FLAT_WINDOW) != 0)
+        {
+            node_facts_flat_begin(front, reader);
+        }
     }
 #else
     (void)reader;

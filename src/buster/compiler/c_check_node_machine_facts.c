@@ -5887,6 +5887,8 @@ static void node_facts_window_expected_exchange(struct NodeFactsReader* state)
 #undef BUSTER_NODE_FACTS_EXCHANGE
 }
 
+#include "c_check_node_machine_flat_window.c"
+
 // An expression of the batch whose records the front has in a row, the front's from `start` (`size` of them, its
 // operand's subtree) and its root `record` (but an initialization's), the batch's `count` from `base`: each of its
 // records is one the kernel's run in place makes (`place_taken`), with T's record of it at the front's place; and the
@@ -5898,6 +5900,10 @@ static void node_facts_window_expression(struct NodeFactsReader* state, const No
     NodeFacts* facts = &state->facts;
     NodeFrontTypes* types = state->types;
     const uint32_t distance = record - (start + size - 1);
+    if (front->flat != NULL && front->flat->window != NULL)
+    {
+        node_facts_flat_expression(front->flat->window, record, start, size, count);
+    }
     for (uint32_t twin = 0; twin < (copied ? 2u : 1u); twin += 1)
     {
         if (twin != 0)
@@ -6058,6 +6064,22 @@ static void node_facts_window_run(struct NodeFactsReader* state, const NodeFront
                 node_rows_window_chunk(state, front);
             }
         }
+    }
+    if (front->flat != NULL && front->flat->window != NULL)
+    {
+        // The same kernel cost for the two producers' common input set. The regular runs above also exercised each
+        // fallback expression. A flush can cover only part of the chunk: keep its own mask of taken records.
+        for (uint32_t x = 0; x < count; x += 1)
+        {
+            if (!front->flat->window->taken[x])
+            {
+                facts->kinds[x] = BUSTER_NODE_FACTS_GIVEN;
+            }
+        }
+        node_facts_given(facts, 0, BUSTER_NODE_FACTS_POISON_NONE);
+        const uint64_t start = __rdtsc();
+        node_facts_window(facts, 0, mode, false);
+        front->shadow->flat_window_kernel_ticks += __rdtsc() - start;
     }
     facts->windows = windows;
     facts->window_count = window_count;

@@ -129,6 +129,10 @@
 // comparison; the turns list what they list with them. One executable then reads the other sweeps with the facts and
 // without.
 #define BUSTER_NODE_READER_WINDOW_SUMMARY_OFF 4096u
+// The flat records supply complete in-chunk expressions to the window kernel.
+#define BUSTER_NODE_READER_FLAT_WINDOW 32768u
+// test-checker changes only the flat producer's source positions.
+#define BUSTER_NODE_READER_FLAT_WINDOW_FAULT 16384u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u
 // What the reference did with an expression (NodeFactsReader.c_ran, which the reader gives the kernel's state at each
@@ -643,6 +647,13 @@ struct NodeFrontShadow
     // own compaction's, and each stage's (BUSTER_NODE_FLAT_STAGE_*); the tokens it visited, the records it made and
     // the places it left empty, the children its tokens hopped over, the tokens with a child past the rings' reach, and
     // the tokens it left.
+    uint64_t flat_window_roots;
+    uint64_t flat_window_records;
+    uint64_t flat_window_cross;
+    uint64_t flat_window_far;
+    uint64_t flat_window_other;
+    uint64_t flat_window_ticks;
+    uint64_t flat_window_kernel_ticks;
     uint64_t flat_ticks;
     uint64_t flat_compact_ticks;
     uint64_t flat_stage_ticks[8];
@@ -899,6 +910,8 @@ static inline __attribute__((always_inline)) void node_facts_window_call(NodeFro
                                                                          const uint32_t* values, uint32_t count);
 static void node_facts_window_begin(NodeFront* front, CheckInputReader* reader);
 static void node_facts_window_names(NodeFront* front);
+static void node_facts_flat_begin(NodeFront* front, CheckInputReader* reader);
+static void node_facts_flat_chunk(NodeFront* front, CheckInputReader* reader);
 static inline void node_facts_window_kept(NodeFront* front, uint32_t to, uint32_t from, uint32_t* arguments);
 #endif
 

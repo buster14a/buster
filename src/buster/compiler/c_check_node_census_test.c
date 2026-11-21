@@ -5968,6 +5968,34 @@ static bool node_facts_test_reader_lines(const char* directory, uint8_t reader, 
     return held;
 }
 
+// A full window supplied by the flat records, and a fault in that producer alone. The kernel checks each answer as
+// usual. The source-position comparison also sees every admitted field fault, including ones T would never inspect.
+static bool node_flat_test_window(const char* directory, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/flat-window.c", directory);
+    const char source[] = "struct S { int value; }; int f(int); int g(int x, struct S* p) {"
+                          " int y = f(x) + p->value; if (y) f(x ? y : 3); return (int)(x + y); }";
+    bool valid = parse_test_write(path, source, sizeof(source) - 1);
+    for (uint32_t fault = 0; valid && fault < 2; fault += 1)
+    {
+        NodeShadow shadow = {
+            .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_FLAT,
+            .reader = BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_WINDOW_TESTS |
+                      BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS | BUSTER_NODE_READER_FLAT_WINDOW |
+                      (fault != 0 ? BUSTER_NODE_READER_FLAT_WINDOW_FAULT : 0),
+            .passes = 1,
+            .repeat = 1,
+        };
+        NodeCensus census = { .shadow = &shadow };
+        valid = node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 && shadow.flat_window_roots >= 4 &&
+                shadow.flat_window_records == shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_RECORDS] && shadow.flat_window_cross == 0 && shadow.flat_window_far == 0 &&
+                shadow.flat_window_other == 0 && shadow.flat_differences == (fault != 0 ? shadow.flat_window_records : 0) && node_shadow_differs(&shadow) == (fault != 0);
+    }
+    unlink(path);
+    return valid;
+}
+
 // The flat front past its rings' reach, and its empty records, on generated text read with `options`:
 //   - a statement that is one value the front leaves, the unit's first: an unknown value is no place, however few
 //     records the unit has;
@@ -6882,6 +6910,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-flat before the walk: a value whose consumer is in the next chunk is found there");
     check_test_expect(test, ready && node_front_test_limits(directory, false, flat, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat: where the lean front's stack is full the flat front makes the records it lost");
+    check_test_expect(test, ready && node_flat_test_window(directory, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "flat window: complete expressions reach the kernel and each corrupted source position is detected");
     check_test_expect(test, ready && node_flat_test_reach(directory, false, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat: a value past the rings' reach leaves its consumer, and the left values' consumers keep their places empty");
     check_test_expect(test, ready && node_flat_test_reach(directory, true, loud, BUSTER_ARRAY_LENGTH(loud)),

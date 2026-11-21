@@ -99,6 +99,7 @@
 #define BUSTER_NODE_FLAT_FIELD_ARGUMENTS 23u
 #define BUSTER_NODE_FLAT_FIELD_OPERAND 24u
 #define BUSTER_NODE_FLAT_FIELD_CLASSES 25u
+#define BUSTER_NODE_FLAT_FIELD_WINDOW 26u
 
 // A record: 16 bytes. `count` is the operand count (a call's callee and arguments; 255 for that or more), `distances`
 // each of its first three operands' distance back in the unit's records (0 for none, BUSTER_NODE_FRONT_FAR for that or
@@ -123,6 +124,7 @@ typedef struct NodeFlat NodeFlat;
 struct NodeFlat
 {
     NodeFrontShadow* shadow;
+    struct NodeFlatWindow* window;
     // The next chunk's first postorder position, the last chunk's, the records made in the unit so far, and the first
     // of the last chunk's.
     uint32_t position;
