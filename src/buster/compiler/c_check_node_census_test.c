@@ -6115,7 +6115,7 @@ static bool node_front_test_builtins(const char* directory, uint8_t front, uint6
 
 // Compile the source independently both ways. Change the retained first row after checking and lower it again:
 // only a lowering that actually splices the reader's tape can emit the changed value.
-static void node_window_test_compile(CheckTest* test)
+static void node_window_test_compile(CheckTest* test, bool assignments)
 {
     char file[PATH_MAX];
     snprintf(file, sizeof(file), "%s/checker/node-window.c", check_test_fixture_root);
@@ -6123,17 +6123,17 @@ static void node_window_test_compile(CheckTest* test)
     static LowerSource plain;
     static LowerSource window;
     const bool opened_plain = lower_source_open(&plain, file, options, BUSTER_ARRAY_LENGTH(options), false);
-    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), true);
+    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), assignments ? BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS : 1u);
     const bool prepared = opened_plain && opened_window && plain.prepared && window.prepared;
     check_test_expect(test, prepared, "node-window prepares its mixed ordinary and taken returns");
     if (prepared)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        check_test_expect(test, reference->window_count == 0 && input->window_count == 13 && input->window_nodes == 40,
-                          "node-window admits 13 complete expressions on baked and runtime-initialized transition tables");
+        check_test_expect(test, reference->window_count == 0 && input->window_count == (assignments ? 13u : 11u) && input->window_nodes == (assignments ? 40u : 32u),
+                          "node-window takes two additional complete assignments only with assignment discovery enabled");
         check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
-                          "node-window replaces 40 ordinary nodes by 13 checked expression roots");
+                          "node-window replaces complete expressions by single checked roots");
         bool same = true;
         uint32_t reads = 0;
         uint32_t writes = 0;
@@ -6183,7 +6183,8 @@ static void node_window_test_compile(CheckTest* test)
                         regular.flags, value.flags, summary->count, rows[0].kind, rows[0].value);
             }
         }
-        check_test_expect(test, same && reads == 5 && writes == 2, "node-window publishes the complete ordinary checked values, exact native rows, five local reads and two local writes");
+        check_test_expect(test, same && reads == (assignments ? 5u : 4u) && writes == (assignments ? 2u : 0u),
+                          "node-window publishes the complete ordinary checked values, exact native rows and ordered reads and writes");
         CheckProgramLowered original = { 0 };
         CheckProgramLowered first = { 0 };
         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
@@ -6233,7 +6234,8 @@ static void node_window_test_compile(CheckTest* test)
 
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
-    node_window_test_compile(test);
+    node_window_test_compile(test, false);
+    node_window_test_compile(test, true);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready, "node-census fixtures' directory is made");

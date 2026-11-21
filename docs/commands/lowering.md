@@ -2718,6 +2718,13 @@ uninitialized variable, including its source position and note. An
 unreachable read still counts as a syntactic use of a written parameter.
 Other storage classes, special registers and qualified types keep their graph.
 
+`--node-window-assignments` enables the same returns and also scans for complete
+discarded assignments such as `x = 24;` and `x = y;`, with distinct ordinary
+automatic or parameter `int` objects. An admitted assignment retains three
+entries for its right operand, local store and discard, each with its own
+source token. The read and write events feed the existing warning passes.
+The base `--node-window` mode skips assignment discovery.
+
 Admission requires the entire expression in the same coded chunk. Other types,
 operators and spellings, debug information, deferred parts, and units requiring
 musttail validation use the existing graph. The window checks the coded tokens

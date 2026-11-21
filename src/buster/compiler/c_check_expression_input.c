@@ -2032,13 +2032,9 @@ static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch*
     return node != BUSTER_CHECK_NONE;
 }
 
-// List complete returns and potentially assignable statements 16 actions at a time. The ordinary action loop runs unchanged between admitted spans, including a
-// return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
-static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
-                                                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
-                                                                     uint64_t* visited)
+// Collect candidate ends in one pass over the action classes. Each caller selects its scan once per chunk.
+static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments)
 {
-    uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
     uint32_t candidates = 0;
     __m512i previous = _mm512_setzero_si512();
     for (uint32_t i = 0; i < acting; i += 16)
@@ -2047,17 +2043,32 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, run);
         const __m512i bytes = _mm512_maskz_loadu_epi32(lanes, classes + i);
         const __m512i codes = _mm512_and_si512(bytes, _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
-        const __m512i before = _mm512_alignr_epi32(codes, previous, 15);
-        const __mmask16 terminated = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
-        const __mmask16 assignments = _mm512_mask_cmpeq_epi32_mask(terminated, before, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
-        const __mmask16 found = assignments | _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
-        previous = codes;
+        __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+        if (assignments)
+        {
+            const __m512i before = _mm512_alignr_epi32(codes, previous, 15);
+            const __mmask16 terminated = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            found |= _mm512_mask_cmpeq_epi32_mask(terminated, before, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            previous = codes;
+        }
         for (uint32_t bits = found; bits != 0; bits &= bits - 1)
         {
             ends[candidates++] = i + (uint32_t)__builtin_ctz(bits);
         }
     }
     ends[candidates] = acting;
+    return candidates;
+}
+
+// List complete returns and potentially assignable statements 16 actions at a time. The ordinary action loop runs unchanged between admitted spans, including a
+// return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
+static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
+                                                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
+                                                                     uint64_t* visited)
+{
+    uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
+    const uint32_t candidates = reader->pp->options.node_window_assignments ? check_input_window_ends(ends, classes, acting, true) :
+                                check_input_window_ends(ends, classes, acting, false);
     uint32_t identifier = 0;
     uint32_t literal = 0;
     uint32_t cursor = 0;

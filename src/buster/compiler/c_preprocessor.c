@@ -392,6 +392,8 @@ struct PPOptions
     bool expression_numbering;
     // --node-window takes eligible full expressions before the coded walk.
     bool node_window;
+    // --node-window-assignments also considers discarded local assignments.
+    bool node_window_assignments;
     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
