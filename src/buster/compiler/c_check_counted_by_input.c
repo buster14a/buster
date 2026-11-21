@@ -340,6 +340,24 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
                                      check_input_counted_argument_type(reader, frames, depth, members, member_count, attribute, first, attribute->argument_end,
                                                                        &undeclared, &expression_error) : 0;
         const bool integer_argument = expression_error ? false : argument_type != 0 ? check_input_counted_integer(types, argument_type) : literal_integer;
+        // A second argument's `,` (CheckInputAttribute.counted_paren, #1842): clang's parser expects the `)` there, after the
+        // argument's own errors and before the attribute's, but not where a name in the argument names nothing, whose
+        // error ends the attribute.
+        uint32_t paren_report = BUSTER_CHECK_NONE;
+        if (kind != BUSTER_TYPE_COUNT_NONE && attribute->counted_paren != 0 && !(named != BUSTER_CHECK_NONE && count == BUSTER_CHECK_NONE && handle == 0) &&
+            undeclared == BUSTER_CHECK_NONE)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, attribute->counted_paren, CHECK_INPUT_COUNTED_PAREN);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].note_token = first - 1;
+                reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
+                reader->output->reports[before].attribute = attribute->first;
+                reader->output->reports[before].repeated = true;
+                paren_report = before;
+            }
+        }
         if (kind == BUSTER_TYPE_COUNT_NONE)
         {
         }
@@ -433,6 +451,10 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
             CheckInputReport* report = reader->output->reports + r;
             const bool parsed = report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT || report->message == CHECK_INPUT_UNDECLARED;
             report->completion = !parsed && report->completion < completion ? completion : report->completion;
+            // The attribute's errors after the `)` it expected, though at its argument's earlier tokens.
+            const bool after = paren_report != BUSTER_CHECK_NONE && r > paren_report && report->token < attribute->counted_paren;
+            report->sort = after ? attribute->counted_paren : report->sort;
+            report->repeated |= after;
         }
     }
     return valid;

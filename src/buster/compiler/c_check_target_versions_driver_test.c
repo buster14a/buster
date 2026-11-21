@@ -384,6 +384,16 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "__attribute__((target(\"avx2\"))) int u(void) { return 2; }\n"
         "__attribute__((target(\"avx2\"))) int u(void) { return 3; }\n"
         "__attribute__((target(\"avx2\"), used)) int u(void);\n",
+        // Inline assembly's operand sizes (#2247), which Sema checks against the first version's features, of the
+        // definition's target_clones or of the declaration that made the function multiversioned: 32 bytes pass after
+        // "avx2" and fail after "default"; and a list without "default", dropped, leaves the unit's.
+        "typedef int v8 __attribute__((vector_size(32)));\n"
+        "__attribute__((target_clones(\"avx2\", \"default\"))) int f(int x) { v8 a = { x }; v8 r; __asm__(\"vpaddd %1, %1, %0\" : \"=x\"(r) : \"x\"(a)); return r[0]; }\n"
+        "__attribute__((target_clones(\"default\", \"avx2\"))) int g(int x) { v8 a = { x }; v8 r; __asm__(\"vpaddd %1, %1, %0\" : \"=x\"(r) : \"x\"(a)); return r[0]; }\n"
+        "__attribute__((target_clones(\"avx2\", \"default\"))) int h(int x);\n"
+        "int h(int x) { v8 a = { x }; v8 r; __asm__(\"vpaddd %1, %1, %0\" : \"=x\"(r) : \"x\"(a)); return r[0]; }\n",
+        "typedef int v8 __attribute__((vector_size(32)));\n"
+        "__attribute__((target_clones(\"avx2\"))) int f(int x) { v8 a = { x }; v8 r; __asm__(\"vpaddd %1, %1, %0\" : \"=x\"(r) : \"x\"(a)); return r[0]; }\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {
@@ -968,9 +978,235 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
     unlink(clones_object);
 }
 
+// The line of the first diagnostic line of `lines` (check_test_diagnostic_lines's, "path:line:column: ..."), or 0.
+static uint32_t check_test_target_versions_first_line(const char* lines)
+{
+    const char* colon = strchr(lines, ':');
+    return colon != NULL ? (uint32_t)strtoul(colon + 1, NULL, 10) : 0;
+}
+
+// Inline assembly in target_clones copies (#2247), each copy's statements planned for its own instruction set, as
+// clang's clones assemble each template again:
+//
+// - A program of a body of asm statements (general, XMM, memory, constant and matching operands, clobbers, an AVX2
+//   template on registers it names, an asm goto) and of a naked function whose versions another declaration gives,
+//   built by clang and at Tier 0 and Tier 1 (--tier1): each executable must print what clang's does, calling the
+//   functions through their IFUNCs and at each copy's symbol, and naming the copy whose code ran by an address its own
+//   template reads; and Tier 0's -c object's symbols must be clang's and its functions' places of code as many as
+//   clang's (a copy per version).
+// - Each copy's instruction set is its version's CPU's and its own, without the command line's features
+//   (predefines_clone_target): units of vector and opmask operands some copies can't place, under several command
+//   lines, must have clang's -fsyntax-only output (Sema checks an operand's size against the first version's features,
+//   check_input_asm_vector_bits), and compile (-c) at both tiers where clang does, or fail where clang's code generation
+//   does, at the line of its first error (a copy's refusal is at the statement clang's error names).
+static void check_test_target_versions_asm(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] =
+        "int printf(const char*, ...);\n"
+        "typedef int v4 __attribute__((vector_size(16)));\n"
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) long p(int x, const void** here)\n"
+        "{\n"
+        "    v4 a = { x, x + 1, x + 2, x + 3 };\n"
+        "    v4 r;\n"
+        "    __asm__(\"movdqa %1, %0\\n\\tpaddd %0, %0\" : \"=&x\"(r) : \"x\"(a));\n"
+        "    int s = r[0] + r[1] + r[2] + r[3];\n"
+        "    int y = 7;\n"
+        "    __asm__(\"addl %1, %0\\n\\taddl %2, %0\" : \"+r\"(y) : \"m\"(s), \"i\"(5) : \"cc\");\n"
+        "    int t;\n"
+        "    __asm__(\"addl %2, %0\" : \"=r\"(t) : \"0\"(s), \"r\"(x) : \"cc\");\n"
+        "    int z;\n"
+        "    __asm__(\"vmovd %1, %%xmm2\\n\\tvpbroadcastd %%xmm2, %%ymm2\\n\\tvpaddd %%ymm2, %%ymm2, %%ymm2\\n\\tvmovd %%xmm2, %0\\n\\tvzeroupper\" "
+        ": \"=r\"(z) : \"r\"(y) : \"xmm2\");\n"
+        "    __asm__(\"leaq (%%rip), %0\" : \"=r\"(*here));\n"
+        "    __asm__ goto(\"testl %0, %0\\n\\tjs %l[negative]\" : : \"r\"(x) : \"cc\" : negative);\n"
+        "    return (long)z * 1000 + y * 10 + t;\n"
+        "negative:\n"
+        "    return -(long)z - t;\n"
+        "}\n"
+        "const void* naked_here;\n"
+        "long scale = 10;\n"
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) long n(long x);\n"
+        "__attribute__((naked)) long n(long x)\n"
+        "{\n"
+        "    __asm__(\"leaq (%%rip), %%rcx\\n\\tmovq %%rcx, naked_here(%%rip)\\n\\tmovq %0, %%rax\\n\\taddq %1, %%rax\\n\\ttestq %%rdi, %%rdi\\n\\tjns 1f\\n\\t"
+        "negq %%rdi\\n1:\\n\\taddq %%rdi, %%rax\\n\\tjmp .Ldone%=\\n\\tud2\\n.Ldone%=:\" : : \"m\"(scale), \"i\"(3));\n"
+        "    __asm__(\"ret\");\n"
+        "}\n"
+        "long p0(int, const void**) __asm__(\"p.avx2.0\");\nlong p1(int, const void**) __asm__(\"p.sse4.2.1\");\n"
+        "long p2(int, const void**) __asm__(\"p.default.2\");\n"
+        "long n0(long) __asm__(\"n.avx2.0\");\nlong n1(long) __asm__(\"n.sse4.2.1\");\nlong n2(long) __asm__(\"n.default.2\");\n"
+        "static int copy_of(const void* at, const void* const* starts)\n"
+        "{\n"
+        "    int best = -1;\n"
+        "    for (int i = 0; i < 3; i += 1) { best = starts[i] <= at && (best < 0 || starts[i] > starts[best]) ? i : best; }\n"
+        "    return best;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    long (*ps[4])(int, const void**) = { p, p0, p1, p2 };\n"
+        "    long (*ns[4])(long) = { n, n0, n1, n2 };\n"
+        "    const void* p_starts[3] = { (const void*)p0, (const void*)p1, (const void*)p2 };\n"
+        "    const void* n_starts[3] = { (const void*)n0, (const void*)n1, (const void*)n2 };\n"
+        "    for (int c = 0; c < 4; c += 1)\n"
+        "    {\n"
+        "        for (int x = -2; x < 3; x += 1)\n"
+        "        {\n"
+        "            const void* at = 0;\n"
+        "            const long value = ps[c](x, &at);\n"
+        "            const long naked = ns[c](x);\n"
+        "            printf(\" %ld@%d,%ld@%d\", value, copy_of(at, p_starts), naked, copy_of(naked_here, n_starts));\n"
+        "        }\n"
+        "        printf(\"\\n\");\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n";
+    // Units whose copies place vector or opmask operands that some versions can't, and the command lines they compile under.
+    static const char* const units[] = {
+        "typedef int v8 __attribute__((vector_size(32)));\n"
+        "__attribute__((target_clones(\"avx2\", \"default\"))) int f(int x) { v8 a = { x }; v8 r;\n"
+        "    __asm__(\"vpaddd %1, %1, %0\" : \"=x\"(r) : \"x\"(a)); return r[0]; }\n",
+        "typedef int v8 __attribute__((vector_size(32)));\n"
+        "__attribute__((target_clones(\"sse4.2\", \"default\"))) int f(int x) { v8 a = { x }; v8 r;\n"
+        "    __asm__(\"vpaddd %1, %1, %0\" : \"=x\"(r) : \"x\"(a)); return r[0]; }\n",
+        "typedef int v16 __attribute__((vector_size(64)));\n"
+        "__attribute__((target_clones(\"avx512f\", \"avx2\", \"default\"))) int f(int x) { v16 a = { x }; v16 r;\n"
+        "    __asm__(\"vpaddd %1, %1, %0\" : \"=v\"(r) : \"v\"(a)); return r[0]; }\n",
+        // The versions on a declaration before the definition, whose body has them all the same.
+        "typedef int v8 __attribute__((vector_size(32)));\n"
+        "__attribute__((target_clones(\"avx2\", \"default\"))) int f(int x);\n"
+        "int f(int x) { v8 a = { x }; v8 r;\n"
+        "    __asm__(\"vpaddd %1, %1, %0\" : \"=x\"(r) : \"x\"(a)); return r[0]; }\n",
+        "__attribute__((target_clones(\"avx512bw\", \"avx512f\", \"default\"))) int f(int x) { unsigned long long q = x;\n"
+        "    __asm__(\"kaddq %0, %0, %0\" : \"+k\"(q)); return (int)q; }\n",
+        "__attribute__((target_clones(\"avx512f\", \"default\"))) int f(int x) { unsigned short m = x;\n"
+        "    __asm__(\"kaddw %0, %0, %0\" : \"+k\"(m)); return m; }\n",
+    };
+    static const char* const lines[][2] = {
+        { NULL, NULL },
+        { "-mavx2", NULL },
+        { "-march=haswell", "-mno-avx" },
+        { "-march=x86-64-v4", NULL },
+        { "-mavx512bw", NULL },
+    };
+    enum { CAPTURED = 4096, LINES = 8192 };
+    char source[PATH_MAX];
+    char built[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/target-asm.c", directory);
+    snprintf(built, sizeof(built), "%s/target-asm", directory);
+    snprintf(object, sizeof(object), "%s/target-asm.o", directory);
+    char* captured[2] = { malloc(CAPTURED), malloc(CAPTURED) };
+    char* symbols[2] = { malloc(LINES), malloc(LINES) };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    const bool room = captured[0] != NULL && captured[1] != NULL && symbols[0] != NULL && symbols[1] != NULL && expected_lines != NULL && actual_lines != NULL;
+    const bool written = room && parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "target versions' asm: the program is written");
+    // clang's executable and object, then each tier's.
+    int64_t places = -1;
+    for (uint32_t tier = 0; written && tier < 3; tier += 1)
+    {
+        const char* compiler = tier == 0 ? clang : executable;
+        char* tiered = tier == 2 ? "--tier1" : NULL;
+        char* executable_arguments[] = { (char*)compiler, "-std=gnu17", "-O0", "-w", source, "-o", built, tiered, NULL };
+        char* object_arguments[] = { (char*)compiler, "-std=gnu17", "-O0", "-w", "-c", source, "-o", object, tiered, NULL };
+        char* text = NULL;
+        unlink(built);
+        const bool linked = check_test_driver_spawn(executable_arguments, &text) == 0;
+        free(text);
+        text = NULL;
+        const bool ran = linked && check_test_driver_capture(built, captured[tier != 0], CAPTURED);
+        // Tier 0's object alone: Tier 1's inlines the static function and keeps the asm helpers as functions of their own.
+        unlink(object);
+        text = NULL;
+        const bool compiled = tier < 2 && check_test_driver_spawn(object_arguments, &text) == 0;
+        free(text);
+        const bool read = compiled && check_test_target_versions_symbols(object, symbols[tier != 0], LINES);
+        const int64_t own = compiled ? check_test_target_versions_places(object) : -2;
+        places = tier == 0 ? own : places;
+        char description[CAPTURED * 2 + LINES * 2 + 256];
+        if (tier == 0)
+        {
+            snprintf(description, sizeof(description), "target versions' asm: clang's program runs and its object is read: \"%s\"", ran ? captured[0] : "");
+            check_test_expect(test, ran && read && places >= 0, description);
+        }
+        else
+        {
+            snprintf(description, sizeof(description), "target versions' asm: Tier %u's program runs as clang's: \"%s\" (clang \"%s\")", tier - 1, ran ? captured[1] : "",
+                     captured[0]);
+            check_test_expect(test, ran && strcmp(captured[1], captured[0]) == 0, description);
+        }
+        if (tier == 1)
+        {
+            snprintf(description, sizeof(description), "target versions' asm: Tier 0's object has clang's symbols:\n%s(clang\n%s)", read ? symbols[1] : "", symbols[0]);
+            check_test_expect(test, read && check_test_target_versions_same_lines(symbols[0], symbols[1]), description);
+            snprintf(description, sizeof(description), "target versions' asm: Tier 0's object's functions have clang's %lld places of code: %lld", (long long)places,
+                     (long long)own);
+            check_test_expect(test, places >= 0 && own == places, description);
+        }
+    }
+    unlink(built);
+    unlink(object);
+    unlink(source);
+    // The units, each under each command line: -fsyntax-only's whole output, then -c's outcome at both tiers.
+    for (uint32_t u = 0; room && u < BUSTER_ARRAY_LENGTH(units); u += 1)
+    {
+        const bool unit_written = parse_test_write(source, units[u], strlen(units[u]));
+        check_test_expect(test, unit_written, "target versions' asm: a unit is written");
+        for (uint32_t l = 0; unit_written && l < BUSTER_ARRAY_LENGTH(lines); l += 1)
+        {
+            char* checked[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", source, (char*)lines[l][0], (char*)lines[l][1], NULL };
+            char* expected = NULL;
+            const int oracle = check_test_driver_spawn(checked, &expected);
+            const bool expected_read = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+            checked[0] = (char*)executable;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(checked, &actual);
+            const bool same = expected_read && actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            char description[LINES * 2 + 512];
+            snprintf(description, sizeof(description), "target versions' asm: unit %u (%s %s), -fsyntax-only: status %d (clang %d), lines\n%s(clang\n%s)", u,
+                     lines[l][0] != NULL ? lines[l][0] : "", lines[l][1] != NULL ? lines[l][1] : "", status, oracle, actual_lines, expected_read ? expected_lines : "");
+            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            free(expected);
+            free(actual);
+            // -c: clang's outcome, then each tier's, failing at the line of clang's first error.
+            char* compiled[] = { (char*)clang, "-std=gnu17", "-O0", "-w", "-c", "-fno-caret-diagnostics", source, "-o", object, (char*)lines[l][0], (char*)lines[l][1], NULL, NULL };
+            expected = NULL;
+            const int code = check_test_driver_spawn(compiled, &expected);
+            const bool code_read = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+            const uint32_t line = code_read ? check_test_target_versions_first_line(expected_lines) : 0;
+            free(expected);
+            for (uint32_t tier = 0; code_read && tier < 2; tier += 1)
+            {
+                compiled[0] = (char*)executable;
+                compiled[lines[l][0] == NULL ? 9 : lines[l][1] == NULL ? 10 : 11] = tier == 1 ? "--tier1" : NULL;
+                actual = NULL;
+                const int built_status = check_test_driver_spawn(compiled, &actual);
+                const bool actual_read = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES);
+                const uint32_t actual_line = actual_read ? check_test_target_versions_first_line(actual_lines) : 0;
+                snprintf(description, sizeof(description), "target versions' asm: unit %u (%s %s), -c at Tier %u: status %d at line %u (clang %d at line %u), lines\n%s",
+                         u, lines[l][0] != NULL ? lines[l][0] : "", lines[l][1] != NULL ? lines[l][1] : "", tier, built_status, actual_line, code, line,
+                         actual_read ? actual_lines : "");
+                check_test_expect(test, actual_read && (built_status != 0) == (code != 0) && actual_line == line, description);
+                free(actual);
+            }
+            unlink(object);
+        }
+        unlink(source);
+    }
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        free(captured[i]);
+        free(symbols[i]);
+    }
+    free(expected_lines);
+    free(actual_lines);
+}
+
 static void check_test_driver_target_versions(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_target_versions_diagnostics(test, clang, executable, directory);
     check_test_target_versions_objects(test, clang, executable, directory);
     check_test_target_versions_models(test, clang, executable, directory);
+    check_test_target_versions_asm(test, clang, executable, directory);
 }

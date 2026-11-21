@@ -18,9 +18,8 @@
 //   version, as clang compiles it, each copy with that version's instruction set at its version's name (f.avx2.0: the
 //   version, arch_CPU for arch=, and its place among the versions that aren't "default", which takes their count): the
 //   body itself at the first version's (a synthetic object's symbol at the attribute's name) and copies at symbols after
-//   the program's (check_program_target_copies, check_program_target_number). A body whose copies the lowering can't
-//   make yet (check_program_target_copy_refused) is compiled once, with the unit's features, valid for every version,
-//   and the other versions' names are symbols at its code.
+//   the program's (check_program_target_copies, check_program_target_number). Each version's instruction set is its
+//   CPU's features and its own, without the command line's (predefines_clone_target), as clang's clones have them.
 // - The resolver calls __cpu_indicator_init and returns the first version whose condition libgcc's CPU model meets, the
 //   versions sorted as clang's llvm::stable_sort sorts them, by their priorities (getFMVPriority: the highest of their
 //   features' priorities, doubled, and an arch='s key feature's, doubled plus one), the highest first, in their
@@ -796,21 +795,11 @@ static CheckProgramTargetOption* check_program_target_options(const CheckProgram
     return options;
 }
 
-// Whether target_clones' body `b` is one the copies leave as it was, compiled once (#1838): a naked function's, whose
-// templates are its whole code, planned once per body (check_program_asm_plan_naked). (A switch's jump tables are each
-// copy's own, check_lower_switch_tables, and so are its labels' symbols, check_program_target_number, and its asm
-// statements' plans, made for the copy's instruction set, check_program_asm_plan_of, #2247.)
-static bool check_program_target_copy_refused(const CheckProgram* program, uint32_t b)
-{
-    const CheckProgramBody* body = program->bodies + b;
-    return program->parser == NULL || (program->object_naked != 0 && body->object < program->object_count && program->object_naked[body->object] <= body->declaration);
-}
-
 // target_clones' body copies (#1838), as clang compiles its body once per version, with that version's instruction set:
-// for each group whose body the program has (CheckProgramTargetGroup.copies, unless check_program_target_copy_refused),
-// each option's instruction set (CheckProgram.clone_targets: 0 for "default", the unit's; otherwise a target of the
-// version's string, arch= its CPU's, made as check_program_targets makes a target attribute's) and the body's own, its
-// first option's (CheckProgram.body_targets). Called at the end of check_program_targets, for a unit with a group.
+// for each group whose body the program has (CheckProgramTargetGroup.copies), each option's instruction set
+// (CheckProgram.clone_targets: a target of the version's string, arch= its CPU's, and of "default" its CPU's alone,
+// without the command line's features, as clang's clones take them, predefines_clone_target, #2247) and the body's own,
+// its first option's (CheckProgram.body_targets). Called at the end of check_program_targets, for a unit with a group.
 // Returns false where there was no room.
 static bool check_program_target_copies(CheckProgram* program, const PredefinesOptions* predefines, Arena* output)
 {
@@ -857,24 +846,28 @@ static bool check_program_target_copies(CheckProgram* program, const PredefinesO
         {
             body = program->bodies[b].object == group->clones ? b : body;
         }
-        group->copies = body < program->body_count && group->option_count > 1 && !check_program_target_copy_refused(program, body);
+        // Every body has its copies (#2247): a switch's jump tables are each copy's own (check_lower_switch_tables), and so
+        // are its labels' symbols (check_program_target_number), its asm statements' plans, made for the copy's
+        // instruction set (check_program_asm_plan_of), and a naked function's code (check_program_asm_plan_naked, by
+        // body). A program without a parser, which the lowering's own tests make, has none.
+        group->copies = body < program->body_count && group->option_count > 1 && program->parser != NULL;
         const CheckProgramTargetOption* options = group->copies ? check_program_target_options(program, group, output) : NULL;
         valid = !group->copies || options != NULL;
         for (uint32_t o = 0; valid && options != NULL && o < group->option_count; o += 1)
         {
             const CheckProgramTargetOption* option = options + o;
             program->clone_copied[group->clone_first + o] = o != 0 && !option->repeated;
-            // The version's string: arch=CPU, or its feature.
-            char text[128];
+            // The version's string: arch=CPU, or its feature; "default" has none, its CPU's features alone.
+            char text[128] = { 0 };
             const int length = option->is_default ? 0 :
                                option->arch.length != 0 ? snprintf(text, sizeof(text), "arch=%.*s", (int)option->arch.length, option->arch.pointer) :
                                                           snprintf(text, sizeof(text), "%.*s", (int)option->features[0].length, option->features[0].pointer);
             int32_t cpu = -1;
-            const bool version = length > 0 && length < (int)sizeof(text) &&
-                                 predefines_target_attribute(text, (uint32_t)length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+            const bool version = option->is_default || (length > 0 && length < (int)sizeof(text) &&
+                                                        predefines_target_attribute(text, (uint32_t)length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION);
             if (version)
             {
-                program->targets[program->target_count] = predefines_function_target(predefines, &program->host, program->target, text, (uint32_t)length, cpu);
+                program->targets[program->target_count] = predefines_clone_target(predefines, &program->host, program->target, text, (uint32_t)length, cpu);
                 program->target_count += 1;
                 program->clone_targets[group->clone_first + o] = program->target_count;
             }

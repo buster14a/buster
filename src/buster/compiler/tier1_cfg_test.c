@@ -94,6 +94,10 @@ struct Tier1CfgTestTally
     uint64_t carried_mutants;
     uint64_t carried_killed;
     uint64_t carried_refused;
+    // #2611: CFGs whose anchors and chosen predecessors were compared with those read from a given dominator tree, as is
+    // and with an entry added before it, and their blocks with a latch among their predecessors.
+    uint64_t given_trees;
+    uint64_t given_latches;
     // #2767: general ranges that avoid a fixed sequence's registers, and ranges of a sequence's reader across it, which
     // don't avoid that sequence's.
     uint64_t avoiding_ranges;
@@ -2190,6 +2194,135 @@ static void tier1_cfg_test_anchors(Tier1CfgTestTally* tally, const Tier1CfgInput
     arena_pop_to(scratch, scratch_mark);
 }
 
+// #2611: tier1_cfg_anchors reads a given dominator tree as it reads its own analysis. The input's CFG's tree, given with no
+// shift, and that tree given to the CFG with an entry added before it (shift 1, as the CFG consumer's machine CFG is the
+// IR's with an added entry), each give the anchors and chosen predecessors the analysis of that CFG gives.
+static void tier1_cfg_test_given_tree(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const uint32_t blocks = input->block_count;
+    const uint32_t edges = input->edge_count;
+    const DominatorCfg graph = {
+        .block_count = blocks,
+        .edge_count = edges,
+        .entry = 0,
+        .successor_offsets = input->successor_offsets,
+        .successors = input->successors,
+        .predecessor_offsets = input->predecessor_offsets,
+        .predecessors = input->predecessors,
+    };
+    DominatorOptions options = dominators_options();
+    options.outputs = 0;
+    Dominators tree = { 0 };
+    bool same = dominators_analyze(output, scratch, &graph, options, &tree) == DOMINATOR_OK;
+    // The CFG with an added entry, block 0, whose one successor is the input's entry.
+    uint32_t* successor_offsets = arena_push_array(output, (uint64_t)blocks + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* successors = arena_push_array(output, (uint64_t)edges + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* predecessor_offsets = arena_push_array(output, (uint64_t)blocks + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* predecessors = arena_push_array(output, (uint64_t)edges + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* anchors = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* chosen = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* given_anchors = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* given_chosen = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    same = same && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && anchors != 0 && chosen != 0 && given_anchors != 0 && given_chosen != 0;
+    if (same)
+    {
+        successor_offsets[0] = 0;
+        successors[0] = 1;
+        predecessor_offsets[0] = 0;
+        predecessor_offsets[1] = 0;
+        predecessors[0] = 0;
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            successor_offsets[b + 1] = input->successor_offsets[b] + 1;
+            predecessor_offsets[b + 2] = input->predecessor_offsets[b + 1] + 1;
+        }
+        successor_offsets[blocks + 1] = edges + 1;
+        for (uint32_t e = 0; e < edges; e += 1)
+        {
+            successors[e + 1] = input->successors[e] + 1;
+            predecessors[e + 1] = input->predecessors[e] + 1;
+        }
+    }
+    for (uint32_t shift = 0; same && shift < 2; shift += 1)
+    {
+        Tier1CfgInput plain = *input;
+        plain.dominators = 0;
+        plain.dominator_shift = 0;
+        if (shift != 0)
+        {
+            plain.block_count = blocks + 1;
+            plain.edge_count = edges + 1;
+            plain.successor_offsets = successor_offsets;
+            plain.successors = successors;
+            plain.predecessor_offsets = predecessor_offsets;
+            plain.predecessors = predecessors;
+        }
+        Tier1CfgInput given = plain;
+        given.dominators = &tree;
+        given.dominator_shift = shift;
+        same = tier1_cfg_anchors(&plain, output, scratch, anchors, chosen) && tier1_cfg_anchors(&given, output, scratch, given_anchors, given_chosen);
+        for (uint32_t b = 0; same && b < plain.block_count; b += 1)
+        {
+            same = anchors[b] == given_anchors[b] && chosen[b] == given_chosen[b];
+            // A chosen predecessor laid out before its block that the block dominates: a latch, which the tree's dominance
+            // test chose.
+            const uint32_t j = chosen[b];
+            const uint32_t p = j != BUSTER_TIER1_CFG_NONE ? plain.predecessors[plain.predecessor_offsets[b] + j] : BUSTER_TIER1_CFG_NONE;
+            tally->given_latches += shift == 0 && p != BUSTER_TIER1_CFG_NONE && p < b && dominators_dominates(&tree, b, p) ? 1 : 0;
+        }
+    }
+    tally->given_trees += same ? 1 : 0;
+    tier1_cfg_test_expect(tally, same, "anchors and chosen predecessors read from a given dominator tree, with and without an added entry, are the analysis's (#2611)");
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+}
+
+// #2611: the given tree is the one tier1_cfg_anchors reads. The join's CFG (0 -> 1, 0 -> 2, 1 -> 2) given the tree of a
+// chain 0 -> 1 -> 2, in which 1 dominates 2, anchors 2 at 1, its nearest predecessor; given the tree of a longer chain
+// 0 -> 1 -> 2 -> 3, of another size, the anchors are the analysis's, 2 anchored at its dominator 0.
+static void tier1_cfg_test_tree_read(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    // The chain's views, and the longer chain's.
+    static const uint32_t chain_successor_offsets[2][5] = { { 0, 1, 2, 2, 0 }, { 0, 1, 2, 3, 3 } };
+    static const uint32_t chain_successors[] = { 1, 2, 3 };
+    static const uint32_t chain_predecessor_offsets[2][5] = { { 0, 0, 1, 2, 0 }, { 0, 0, 1, 2, 3 } };
+    static const uint32_t chain_predecessors[] = { 0, 1, 2 };
+    DominatorOptions options = dominators_options();
+    options.outputs = 0;
+    Dominators trees[2] = { { 0 } };
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        // The chain, and the longer one (another size).
+        const DominatorCfg chain = {
+            .block_count = 3 + t,
+            .edge_count = 2 + t,
+            .entry = 0,
+            .successor_offsets = chain_successor_offsets[t],
+            .successors = chain_successors,
+            .predecessor_offsets = chain_predecessor_offsets[t],
+            .predecessors = chain_predecessors,
+        };
+        const bool analyzed = dominators_analyze(output, scratch, &chain, options, &trees[t]) == DOMINATOR_OK;
+        tier1_cfg_test_expect(tally, analyzed, "the chain's dominator tree");
+    }
+    uint32_t anchors[3] = { 0 };
+    uint32_t chosen[3] = { 0 };
+    Tier1CfgInput given = *input;
+    given.dominators = &trees[0];
+    given.dominator_shift = 0;
+    const bool read = given.block_count == 3 && tier1_cfg_anchors(&given, output, scratch, anchors, chosen) && anchors[2] == 1 && anchors[1] == 0;
+    tier1_cfg_test_expect(tally, read, "the anchors read the given tree (#2611)");
+    given.dominators = &trees[1];
+    const bool other = given.block_count == 3 && tier1_cfg_anchors(&given, output, scratch, anchors, chosen) && anchors[2] == 0 && anchors[1] == 0;
+    tier1_cfg_test_expect(tally, other, "a given tree of another size leaves the anchors to the analysis (#2611)");
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+}
+
 static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     static Tier1CfgTestBuilder builders[3];
@@ -2297,6 +2430,11 @@ static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Ar
         if (built)
         {
             tier1_cfg_test_anchors(tally, &input, output, scratch, anchors_expected[f], chosen_expected[f], names[f]);
+            tier1_cfg_test_given_tree(tally, &input, output, scratch);
+        }
+        if (built && f == 0)
+        {
+            tier1_cfg_test_tree_read(tally, &input, output, scratch);
         }
         if (built && f < 2)
         {
@@ -3109,6 +3247,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
                     tally.oracle = sample % oracle_every == 0;
                     tally.oracle_mutants = sample % (oracle_every * 4) == 0;
                     tier1_cfg_test_case(&tally, &input, &output, &scratch, "generated case", sample % 8 == 0, 0, 0, false);
+                    tier1_cfg_test_given_tree(&tally, &input, &output, &scratch);
                 }
                 arena_pop_to(&output, output_saved);
                 arena_pop_to(&work, work_saved);
@@ -3144,6 +3283,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
         printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
+        printf("test-tier1-cfg: given dominator trees (#2611): %" PRIu64 " CFGs' anchors the same with and without an added entry, %" PRIu64 " blocks anchored at a latch\n", tally.given_trees, tally.given_latches);
+        tier1_cfg_test_expect(&tally, tally.given_latches != 0, "some given tree's block takes a latch laid out before it (#2611)");
         printf("test-tier1-cfg: fixed sequences (#2767): %" PRIu64 " ranges avoid their registers, %" PRIu64 " readers' ranges across their own\n", tally.avoiding_ranges, tally.reading_ranges);
         printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column; %" PRIu64 " values' column sets probed, at most %u in one problem\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed, tally.column_values, tally.column_widest);
         result = tally.failures == 0 ? 0 : 1;

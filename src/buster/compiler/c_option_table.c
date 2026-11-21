@@ -61,6 +61,8 @@
     ENTRY(LOCATION_LIMIT, "--location-limit") \
     ENTRY(LOWER_ALL, "--lower-all") \
     ENTRY(NO_DEFERRED_BODIES, "--no-deferred-bodies") \
+    ENTRY(NODE_WINDOW, "--node-window") \
+    ENTRY(NODE_WINDOW_ASSIGNMENTS, "--node-window-assignments") \
     ENTRY(POISON_ARENAS, "--poison-arenas") \
     ENTRY(PREDEFINES, "--predefines") \
     ENTRY(PROVISIONAL_SELECTION, "--provisional-selection") \
@@ -108,6 +110,7 @@
     ENTRY(MT, "-MT") \
     ENTRY(O0, "-O0") \
     ENTRY(P, "-P") \
+    ENTRY(S, "-S") \
     ENTRY(U, "-U") \
     ENTRY(WALL, "-Wall") \
     ENTRY(WERROR, "-Werror") \
@@ -158,6 +161,7 @@
     ENTRY(FBORLAND_EXTENSIONS, "-fborland-extensions") \
     ENTRY(FBUILTIN, "-fbuiltin") \
     ENTRY(FCARET_DIAGNOSTICS, "-fcaret-diagnostics") \
+    ENTRY(FCARET_DIAGNOSTICS_MAX_LINES_EQ, "-fcaret-diagnostics-max-lines=") \
     ENTRY(FCF_PROTECTION, "-fcf-protection") \
     ENTRY(FCF_PROTECTION_EQ, "-fcf-protection=") \
     ENTRY(FCF_PROTECTION_EQ_NONE, "-fcf-protection=none") \
@@ -175,6 +179,7 @@
     ENTRY(FDIAGNOSTICS_COLOR_EQ_ALWAYS, "-fdiagnostics-color=always") \
     ENTRY(FDIAGNOSTICS_COLOR_EQ_AUTO, "-fdiagnostics-color=auto") \
     ENTRY(FDIAGNOSTICS_COLOR_EQ_NEVER, "-fdiagnostics-color=never") \
+    ENTRY(FDIAGNOSTICS_SHOW_LINE_NUMBERS, "-fdiagnostics-show-line-numbers") \
     ENTRY(FDIGRAPHS, "-fdigraphs") \
     ENTRY(FDIRECTIVES_ONLY, "-fdirectives-only") \
     ENTRY(FDOLLARS_IN_IDENTIFIERS, "-fdollars-in-identifiers") \
@@ -240,6 +245,7 @@
     ENTRY(FNO_DEFER_TS, "-fno-defer-ts") \
     ENTRY(FNO_DEFINE_TARGET_OS_MACROS, "-fno-define-target-os-macros") \
     ENTRY(FNO_DIAGNOSTICS_COLOR, "-fno-diagnostics-color") \
+    ENTRY(FNO_DIAGNOSTICS_SHOW_LINE_NUMBERS, "-fno-diagnostics-show-line-numbers") \
     ENTRY(FNO_DIGRAPHS, "-fno-digraphs") \
     ENTRY(FNO_DIRECTIVES_ONLY, "-fno-directives-only") \
     ENTRY(FNO_DOLLARS_IN_IDENTIFIERS, "-fno-dollars-in-identifiers") \

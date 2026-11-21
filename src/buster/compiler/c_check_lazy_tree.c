@@ -331,7 +331,7 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
                 if (valid)
                 {
                     uint32_t flags = check_lazy_tree_header(parser, pp, first, begin);
-                    const bool system = check_lazy_system(pp, parser->tokens.sources[declaration]) && check_lazy_system(pp, parser->tokens.sources[begin]);
+                    const bool system = check_lazy_system(pp, parse_source_index(&parser->tokens, declaration)) && check_lazy_system(pp, parse_source_index(&parser->tokens, begin));
                     flags |= system ? BUSTER_CHECK_LAZY_SYSTEM : 0;
                     flags |= (flags & BUSTER_CHECK_LAZY_STATIC) == 0 && ((flags & BUSTER_CHECK_LAZY_INLINE) == 0 || (flags & BUSTER_CHECK_LAZY_EXTERN) != 0) ?
                              BUSTER_CHECK_LAZY_RETAIN : 0;

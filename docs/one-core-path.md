@@ -2584,7 +2584,7 @@ the program knows a truth its value has not. No compile takes any of it. [The no
 page](node-machine.md#a-summary-nodes-side-facts-on-the-window) has it whole: the survey, the rules, the builds,
 what a generator of programs found after the code was frozen, and the faults. [Its
 specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7053609091) had six gates. It is exact
-on what it makes and its faults are caught; a `switch`'s selector's type is not made; its work a record is over its
+on what it makes and its faults are caught. This measurement predates the switch selector side fact. Its work a record is over its
 gate and under what refutes it; and by the chunk it is past what refutes its gate on musl.
 
 ### What it measured
@@ -2623,7 +2623,8 @@ switch (`--no-window-summaries`), and on again, in one executable:
 - **F1, exact: met for what the piece makes.** Every kept expression's references and return fact are the program's
   own walks' on the three corpora and the compiler's own source (49,842, 10,246, 40,441 and 41,890 expressions), a
   kept branch's truth is its value's and a kept constant folds; 7,957 one-statement programs agree. A `switch`'s
-  selector's type is not made, and the control changes what reader time kept, not the program's answers.
+  selector's type was excluded from that comparison. After #3209 the shadow also checks the selector's
+  type before promotion against the warning pass. The control changes the type saved by the reader.
 - **F2, how much: met.** The turns' listing leaves out 3, 2, 3 and 0 expressions the piece before took (5 a corpus
   asked); the cast's term lists none.
 - **F3, work a record: met for the tests' sweep, over for the rows'.** A chunk's second run of the rows' sweeps
@@ -2660,6 +2661,54 @@ or a `?:` (none in the three corpora, 18 in the compiler's own source).
   a cleanup ([#3202](https://github.com/buster14a/buster/issues/3202)) and a multiversioned function's object
   ([#3203](https://github.com/buster14a/buster/issues/3203)). Those three are next, before the first compile that
   takes expressions.
+
+## What the compiler's own tests had and no corpus
+
+[The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tests-holes-2850-2026-11-21).
+`measure-node-machine --shadow --window-rows` ([the
+guide](commands/lowering.md#the-tests-holes-and-the-objects-side-2850);
+[the design's
+section](node-machine.md#what-the-compilers-own-tests-had-and-no-corpus)).
+
+The pieces before were gated on four corpora, their fixtures and their one-statement programs: code that warns of
+nothing. Every C string literal of the compiler's test files that is a program
+(13,866) and every file under `tests/` (1,229), each through the
+shadow under three warning sets, found 150 programs whose reader-time answers were not
+the pipeline's, in fifteen kinds ([#3201](https://github.com/buster14a/buster/issues/3201),
+[#3202](https://github.com/buster14a/buster/issues/3202), [#3203](https://github.com/buster14a/buster/issues/3203),
+[#3205](https://github.com/buster14a/buster/issues/3205), [#3206](https://github.com/buster14a/buster/issues/3206),
+[#3207](https://github.com/buster14a/buster/issues/3207)): four of them expressions taken with a warning, one a
+tape that lost a segment's override. This piece closes them. No compile takes any of it.
+
+### What it is
+
+- **The tests:** a pointer's ordered comparison with an integer has a test of its own, and what converts to a
+  pointer (an array, a function) is tested as one; a declaration that inherits a list of conditions is a callee to
+  ask; a unit with x86's `interrupt` or `noderef` is refused whole; an initializer's tokens begin after its object's
+  name at reader time too; a `return` under a cleanup has another control's root there; a value in a segment's
+  address space is of a type the machine has no kind for. A test's verdict stays one piece of code at both times,
+  and the window's loop only lists for it: what it gained is one mask, which leaves out an ordered comparison of two
+  pointers, a loop's `p < end`.
+- **The objects' side:** what the reader settles after the bodies is asked in a form both times have before them
+  (whether the unit has an overload's candidates; an asm label the asm pass will ignore), or refused (a library
+  builtin's call in a unit with a rename pragma). A weak name is the name's from a token on: the reader's list is in
+  its output, searched eight records a step by the reader and by the kernel, and only a declaration whose name the
+  unit notes has its line made again at every use.
+
+### What it measured
+
+**Its cost was not read** on the 9700X before the work was handed off (the design's section has what the code adds).
+
+### What it means
+
+- **Nothing a corpus took is lost, and nothing more is taken** (49,842, 10,246, 40,441 and 41,890 tapes whole, as before): the
+  holes were in what the corpora do not have.
+- **The inputs that say "exact" are five now:** the corpora, the fixtures, the one-statement programs, the
+  generator's, and the compiler's own tests' programs with a trigger a warning. In the shadow the last is a
+  campaign's sweep; with the first compile behind its option the tests' own drivers run through the machine.
+- **Next:** the walk's truth through a cast ([#3204](https://github.com/buster14a/buster/issues/3204)), then the
+  first compile that takes expressions, behind an option.
 
 ## Step 4's first piece: a census of Tier 0's row
 

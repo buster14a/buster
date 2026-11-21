@@ -12,11 +12,12 @@ requirements. [Command index](README.md).
   options] file.c` preprocesses, parses and checks the file and prints the
   diagnostics as clang does, with exit status 0 for a unit without errors and
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
-  Tier 0 ([the checker guide](../../docs/c-checker.md)); and with neither option it
+  Tier 0 ([the checker guide](../../docs/c-checker.md)), and `-S [-o file.s]` its
+  assembly in its place ([-S](#-s-1362)); and with none of them it
   links an executable (`-o`, `a.out` by default), for pure-C inputs by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`, `--check-transitions`
+  checking every function's records with `x86_validate`, `--node-window` consuming the first [reader-time native rows](lowering.md#compiling-with-the-window-2850), `--check-transitions`
   checking the expressions by #1050's memoized transitions (opt-in, each hit's
   action run too with `--verify`), `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
@@ -302,8 +303,7 @@ discarded: unknown names and unsupported spellings of known groups still warn.
 Option operands and filenames after `--` are not warning options.
 
 Recognizing a warning name does not implement its consumer or its parameter
-semantics; known but unimplemented warnings remain #1365's work. `-Wa,`,
-`-Wp,` and `-Wl,` are classified as driver transports and do not become warning
+semantics. `-Wa,`, `-Wp,` and `-Wl,` are classified as driver transports and do not become warning
 names. This change adds no assembler or preprocessor forwarding. Optional
 spelling suggestions are omitted because the existing catalog does not record
 which Clang groups have diagnostics, which its suggestion search requires.
@@ -322,6 +322,46 @@ errors. The behavioral references are LLVM revision
 [`Options.td`](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/include/clang/Options/Options.td)
 and `CompilerInvocation.cpp`'s `addDiagnosticArgs`; no upstream implementation
 or fixture is imported.
+
+## Warning capabilities (#1365)
+
+The explicit capability inventory in `c_preprocessor_warning_options.c` refuses
+effective positive requests for these families until their consumers are complete:
+
+| Warning options | Capability |
+| --- | --- |
+| `-Wconversion` | Partial: implemented constant/enum diagnostics do not cover the requested narrowing, sign and floating conversions. |
+| `-Wshadow`, `-Wsign-conversion`, `-Wunused-macros` | Recognized; the requested warning analysis is unavailable. |
+| `-Wmissing-prototypes`, `-Wmissing-variable-declarations`, `-Wstrict-prototypes`, `-Wnested-externs`, `-Wredundant-decls` | Recognized; the requested warning analysis is unavailable. |
+| `-Wundef`, `-Wcast-qual`, `-Wpointer-arith`, `-Wswitch-enum`, `-Wvla`, `-Wimplicit-fallthrough`, `-Wcomma`, `-Wfloat-equal` | Recognized; the requested warning analysis is unavailable. |
+
+For example, `-Wshadow` and `-Werror=shadow` fail with an error naming the
+original option and missing family. This is a Buster capability refusal,
+independent of source contents, warning promotion, error limits and `-w`.
+It applies before source processing in preprocessing/dependency-only,
+syntax-only and object commands, preserving existing outputs and dependencies.
+A source diagnostic pragma cannot satisfy a missing command-line capability.
+
+Disabling and demotion controls (`-Wno-shadow`, `-Wno-error=shadow`) remain
+accepted. Demotion does not cancel an enabling request. A later disable of the
+whole family or an ancestor cancels it: `-Wsign-conversion -Wno-conversion`
+succeeds, whereas `-Wconversion -Wno-sign-conversion` still requests the rest
+of the incomplete family and fails. `-Wno-everything` cancels preceding family
+requests; a subsequent explicit request enables them again.
+
+Broad positive groups retain Buster's documented delivered subset, including
+`-Wall`, `-Wextra` and `-Weverything`. `__has_warning` retains its existing
+recognition contract. This inventory covers the families named in #1365;
+recognition of other names or valued options is still separate from a promise
+of complete diagnostic coverage. Implemented subgroups such as
+`-Wconstant-conversion` and `-Wenum-conversion` remain available independently.
+
+`test-checker-driver` checks the refusal contract with independent family names,
+enables, disables, promotion/demotion and ancestor ordering on both kernels in
+`-E`, `-fsyntax-only` and `-c` modes. It also checks dependency-only commands,
+stdin, deferred multi-lane requests, option operands, post-`--` filenames,
+feature queries, source pragmas, preserved outputs and absence of new artifacts.
+These fixtures assert Buster's refusal rather than claiming Clang emits it.
 
 ## Numeric driver options
 
@@ -457,12 +497,64 @@ shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
 `.S`, positional languages, stdin, compile-only output and failure preservation.
 
 
+## -S (#1362)
+
+`-S` writes each C source's assembly where `-c` writes its object: GNU as's
+AT&T syntax, which assembles into the object `-c` writes (the assembly sink's
+form contract, below), compiled by Tier 0 or with `--tier1` as `-c` compiles it.
+Its output is `-o FILE`, standard output with `-o -`, and otherwise each
+source's base name with `.s` in the current directory, as clang names it (`-o`
+with several sources is refused, as with `-c`). `-fsyntax-only` takes precedence
+over `-S`, and `-S` over `-c`, whichever comes first, as clang's phases do. It
+runs the compile `-c` runs, its diagnostics and their promotions alike, and
+writes its file only after the unit's code and data are made: a unit with an
+error, or one the sink refuses, writes nothing and leaves an existing file as it
+was.
+
+The emission keeps each function's records for it (`CheckProgramLanes.assembly`,
+`CheckProgramCode.assembly_code`: copies of the records and branch columns in
+the emission's output arena, after branch sizing) and runs the bodies in one
+window (`--emit-window` is 0 under `-S`), whose records it keeps whole; nothing
+else changes, and a command without `-S` copies nothing.
+
+What it doesn't print yet it refuses by name, before the source is read where
+the options say so, and otherwise naming the source and the symbol:
+
+- debug information (`-g`) and inline assembly (asm statements, naked
+  functions, file-scope assembly): the design's stages 3 and 4;
+- thread-local storage, section groups, common symbols, patchable function
+  entries, multiversioned functions' resolvers, and the other refusals of the
+  sink below;
+- assembly and linker inputs beside the C sources.
+
+The unwind tables are the `.eh_frame` section's bytes with their symbolic
+relocations (`.long function-.`), as `-c`'s object has them, not CFI
+directives, which are stage 4's. `-save-temps` is still an unknown argument.
+
+The acceptance (`test-assembly-output --c-testsuite DIRECTORY --subset FILE`,
+the inventory's row): each program of `tests/c-testsuite/subset.txt`, at Tier 0
+and with `--tier1`, by this executable's `-S` and `-c`; GNU as's object of the
+text must be `-c`'s by the form contract's comparison (below), and the program
+linked from GNU as's object (`-lm` for the programs that call libm) must print
+the expected output and exit 0. All 440 compiles pass, with `--option
+-march=native` too. `--compare SOURCE` compares a source without a link (the
+repository's standalone tools, up to 4,300 lines, pass at both tiers, with
+`-march=native -O2` too), and `--option ARGUMENT` adds an argument to every
+compile.
+
+```sh
+./build/compiler -S -o main.s main.c
+./build/compiler --tier1 -S main.c -o - | less
+./build/compiler test-assembly-output --c-testsuite build/c-testsuite --subset tests/c-testsuite/subset.txt
+./build/compiler test-assembly-output --option -march=native --compare tools/ci/costs.c
+```
+
 ## The assembly sink (#1362)
 
 `src/buster/compiler/assembly_output.c` prints a unit of the link
-representation as GNU as's AT&T assembly: the text `-S` is to write (stage 2 of
-[the design](https://github.com/buster14a/buster/issues/1362#issuecomment-6721142506)),
-which describes the object `-c` writes. It prints from the symbolic emission
+representation as GNU as's AT&T assembly: the text `-S` writes ([the
+design](https://github.com/buster14a/buster/issues/1362#issuecomment-6721142506)'s
+stages 1 and 2), which describes the object `-c` writes. It prints from the symbolic emission
 view (`AssemblyView`), never from the object: the link's atoms, symbols and
 fixups, which hold every relocation's target and addend, and each `TEXT` atom's
 instruction records as the emission sized and encoded them, with their branch

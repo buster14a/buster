@@ -570,6 +570,21 @@ its definition's interval cost far more (28.5 M instructions on speedtest1,
 269 M on Lua). The dominator analysis costs about 0.6% of sqlite3.c's
 `--tier1 -c` cycles, the whole change 1.0%.
 
+That analysis repeated work the compile had done (#2611): the machine CFG is
+the IR's (`ir_build_cfg`), with an entry added before it where the IR's entry
+has predecessors, and the optimizer's verified analysis, which the driver's
+Tier 1 step keeps current for the planned revision, already holds the IR's
+tree. The driver passes it (`Tier1EmitOptions.dominators`), the CFG consumer
+gives it to the allocation with the added entry's shift
+(`Tier1CfgInput.dominators`, `dominator_shift`), and `tier1_cfg_anchors` reads
+block b's immediate dominator and dominance tests from node b - shift, the
+added entry the tree's entry's dominator. A caller without a tree, or with one
+of another size, keeps the analysis. `test-tier1-cfg` compares the anchors and
+chosen predecessors read from a given tree, with and without an added entry,
+with the analysis's on its fixtures and 2,000 random CFGs, and checks that a
+given tree is the one read. `sqlite3.c`'s and Lua's 34 units' `--tier1 -c`
+objects are the same bytes.
+
 ### The opmask class (#179)
 
 AVX-512's opmask registers are the third class, k0 to k7. Nothing moves a value

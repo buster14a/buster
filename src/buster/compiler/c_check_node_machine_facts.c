@@ -10,9 +10,9 @@
 //   type and that type's word, its flags and its object, its payload (an enumerator's value) and its standing. Made from
 //   the declaration's own columns as the reader had them at a use (CheckInput.declared_types at the use's token, where
 //   the reader copied the declaration's; declaration_kinds, declaration_bits, objects and enum_values at the
-//   declaration; its weak attribute and the unit's weak pragmas before the use), never from the use's leaf. A
-//   declaration whose line would differ from its last (a type completed since, a weak pragma since) gets a new line, as
-//   a compile would write its line again: counted.
+//   declaration; its name's weak attributes and the unit's weak pragmas before the use, CheckInput.weak_names), never
+//   from the use's leaf. A declaration whose line would differ from its last (a type completed since, a weak pragma or
+//   a weak declaration of its name since) gets a new line, as a compile would write its line again: counted.
 // - A type's row (NodeFactsRow, 64 bytes, by type index): its own word, where it is complete, its value type and its
 //   promotion; its element (a pointer's pointee, an array's element) with the element's word and completeness; an array's
 //   or a function's pointer type; a function's or a function pointer's return type, with its word, its completeness
@@ -60,7 +60,7 @@
 // they are written: a chunk's records are its window (node_facts_window_run). The two other makings of the same inputs
 // are its twins.
 //
-// No compile takes any of it.
+// The opt-in compile shares the integer fold with the window (check_node_window_fold_int).
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_FACTS_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_FACTS_INCLUDED
 
@@ -449,6 +449,10 @@ struct NodeFactsOperand
     uint8_t kind;
 };
 
+// In NodeFacts.numbers: the declaration's name is one the unit notes weak (CheckInput.weak_names), so its line can change
+// at another declaration's token and no use takes its last line unasked (#3206).
+#define BUSTER_NODE_FACTS_LINE_UNSETTLED UINT32_C(0x80000000)
+
 typedef struct NodeFacts NodeFacts;
 struct NodeFacts
 {
@@ -463,6 +467,8 @@ struct NodeFacts
     // The words.
     NodeFactsRow* rows;
     uint64_t* lines;
+    // A declaration's last line's number, 0 for none; with BUSTER_NODE_FACTS_LINE_UNSETTLED where the line is to be
+    // made again at every use (node_facts_front_line).
     uint32_t* numbers;
     NodeFactsMember* members;
     NodeFactsMember no_member;
@@ -573,6 +579,9 @@ struct NodeFacts
     uint64_t literal_lines;
     uint64_t member_fills;
     uint64_t line_versions;
+    // The uses that asked for their declaration's line the long way (node_facts_declaration): a declaration's first, and
+    // every one whose line is not settled.
+    uint64_t line_asks;
     uint64_t differences;
     // The kernel's TSC ticks in its two loops, summed over the windows it ran; and the words' making: the rows' and the
     // declarations' lines'.
@@ -991,6 +1000,7 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
     const uint64_t t0 = __rdtsc();
     const TypeId type = input->declared_types[use];
     const bool enumerator = input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+    facts->line_asks += 1;
     const uint32_t object = input->objects[declaration];
     // An enumerator's value: its row of the unit's enumerators, which are in source order; at reader time the reader's
     // own column's.
@@ -1012,10 +1022,14 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
     const bool valued = enumerator && (!listed || (low < input->enum_value_count && input->enum_values[low].token == declaration));
     const unsigned __int128 value = !valued ? 0 : listed ? input->enum_values[low].value : facts->enum_values[declaration];
     const bool wide = enumerator && (!valued || (uint64_t)(value >> 64) != 0 || object != 0);
-    // An address that may be null: the declaration's weak attribute, or a weak pragma of its name before the use
-    // (check_input_address_is_weak's, whose weak names the reader doesn't keep).
+    // An address that may be null: the reader's own rule (check_input_address_is_weak), a weak pragma of the name or a
+    // weak attribute on a declaration of the name, at or before the use. It is the name's, not the declaration's (#3206):
+    // a function declared weak and then defined, a weakref, a block's weak declaration of a name another declaration has.
+    // So a declaration whose name the unit notes weak anywhere can change its line from another declaration's token on,
+    // and its line is never settled (BUSTER_NODE_FACTS_LINE_UNSETTLED).
     const IdentId name = declaration < parser->tokens.count && parser->tokens.names != NULL ? parser->tokens.names[declaration] : 0;
-    const bool weak = check_input_attribute_of(check_input_attributes_at(input, declaration), CHECK_ATTRIBUTE_WEAK) != NULL || check_input_pragma_weak(input, name, use);
+    const bool noted = input->weak_name_count != 0 && check_input_weak_name(input, name, UINT32_MAX);
+    const bool weak = check_input_pragma_weak(input, name, use) || (noted && check_input_weak_name(input, name, use));
     const uint8_t bits = input->declaration_bits[declaration];
     const CheckCategory category = enumerator ? CHECK_RVALUE : type_kind(machine->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
     // The line: the leaf's record's first half, a NodeFactsRecord's first four quadwords.
@@ -1035,7 +1049,7 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
     };
     uint64_t line[4];
     memcpy(line, &made, sizeof(line));
-    uint32_t number = facts->numbers[declaration];
+    uint32_t number = facts->numbers[declaration] & ~BUSTER_NODE_FACTS_LINE_UNSETTLED;
     const bool same = number != 0 && memcmp(facts->lines + 4 * (uint64_t)number, line, sizeof(line)) == 0;
     if (!same)
     {
@@ -1045,7 +1059,7 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
         {
             facts->line_count = number;
             memcpy(facts->lines + 4 * (uint64_t)number, line, sizeof(line));
-            facts->numbers[declaration] = number;
+            facts->numbers[declaration] = number | (noted ? BUSTER_NODE_FACTS_LINE_UNSETTLED : 0);
         }
         facts->line_ticks += __rdtsc() - t0;
     }
@@ -2052,6 +2066,26 @@ static inline __attribute__((always_inline)) bool node_facts_fold(NodeFactsRecor
             node_facts_conversions(records, w, BUSTER_TYPE_BUILTIN(row->converted[0]), row->conversion_flags[0], unary ? 0 : BUSTER_TYPE_BUILTIN(row->converted[1]),
                                    unary ? 0 : row->conversion_flags[1], 0);
         }
+    }
+    return taken;
+}
+
+// The first production window admits only unqualified int operands. The fold above reads signedness and the
+// result's carried word from these type rows. Its result is immediately published as a leaf, so no next rule
+// reads its word. The reader prepares the shared transition table once before admitting any windows.
+bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result)
+{
+    static const NodeFactsRow rows[BUSTER_TYPE_CODE_INT + 1] = { [BUSTER_TYPE_CODE_INT] = { .flags = BUSTER_NODE_FACTS_SIGNED } };
+    const NodeFactsView view = { .rows = rows };
+    const uint8_t standing = BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER);
+    NodeFactsRecord records[3] = {
+        { .type = BUSTER_TYPE_INT, .payload = left, .standing = standing, .flags = BUSTER_CHECK_ICE },
+        { .type = BUSTER_TYPE_INT, .payload = right, .standing = standing, .flags = BUSTER_CHECK_ICE },
+    };
+    const bool taken = node_machine_tables_ready && node_facts_fold(records, &view, 2, 0, 1, binary, op);
+    if (taken)
+    {
+        *result = (uint32_t)records[2].payload;
     }
     return taken;
 }
@@ -3485,7 +3519,7 @@ static __attribute__((noinline)) void node_facts_slow(NodeFacts* facts, uint32_t
         case CHECK_OP_CAST:
         {
             taken = operators ? node_facts_cast(facts, records, &view, w, a, false) :
-                                node_facts_discard(records, &view, facts->machine->graph->overload_candidate_count == 0, w, a);
+                                node_facts_discard(records, &view, !facts->machine->overloads, w, a);
         } break;
         case CHECK_OP_CONDITION: case CHECK_OP_NOT:
         {
@@ -3964,7 +3998,7 @@ static __attribute__((noinline)) void node_facts_discards(NodeFacts* facts, uint
     uint32_t* const rare = facts->rare;
     uint32_t rare_count = 0;
     const uint16_t* const left = facts->left + first;
-    const bool plain = facts->machine->graph->overload_candidate_count == 0;
+    const bool plain = !facts->machine->overloads;
     const NodeFactsView view = node_facts_view(facts, first);
     for (uint32_t i = 0; i < batched; i += 1)
     {
@@ -5201,13 +5235,15 @@ static uint32_t node_facts_front_literal(NodeFacts* facts, const CheckValue* val
 }
 
 // The line of declaration `declaration` at the use `use`, its number: the declaration's last line where the use reads
-// the type the line has and the unit has no symbol pragma (a weak one changes a line from its token on), one load and
-// one test; and else node_facts_declaration's, which makes the line from the reader's columns and compares.
+// the type the line has, the unit has no symbol pragma (a weak one changes a line from its token on) and the
+// declaration's name is no weak name of the unit's (another declaration's weak attribute changes it from its token on:
+// its number has BUSTER_NODE_FACTS_LINE_UNSETTLED), one load and one test; and else node_facts_declaration's, which
+// makes the line from the reader's columns and compares.
 static inline uint32_t node_facts_front_line(NodeFacts* facts, uint32_t declaration, uint32_t use)
 {
     const CheckInput* input = facts->input;
     const uint32_t number = facts->numbers[declaration];
-    const bool settled = number != 0 && (TypeId)facts->lines[4 * (uint64_t)number] == input->declared_types[use] &&
+    const bool settled = number - 1 < BUSTER_NODE_FACTS_LINE_UNSETTLED - 1 && (TypeId)facts->lines[4 * (uint64_t)number] == input->declared_types[use] &&
                          (input->symbol_pragmas == NULL || input->symbol_pragmas->count == 0);
     return settled ? number : node_facts_declaration(facts, declaration, use);
 }
@@ -5256,7 +5292,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_front_integer(N
 //   floating literal's of its spelling decoded again; a string's of its type and its object.
 // - A member's name is the token's after the operator's; a cast's type its token's query's (CheckInputReader.query_types),
 //   a root's cast's void (a statement's discard), and a return's conversion's the function's
-//   (CheckInputReader.return_types).
+//   (CheckInputReader.query_types).
 // - A call's arguments are the records before it, the last first, each one's subtree before the next
 //   (NodeFront.sizes), and its callee the record before the first argument's subtree.
 // - A record's source position is its token's expression's end (check_input_expression_end).
@@ -5297,9 +5333,13 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
         uint16_t arguments = 0;
         // Each operand is within a byte's distance; and within the expression, which its subtree's size has said already
         // (the test keeps a wrong size from reading before the batch).
-        whole = a != BUSTER_NODE_FRONT_FAR && b != BUSTER_NODE_FRONT_FAR && c != BUSTER_NODE_FRONT_FAR && a <= r && b <= r && c <= r;
-        why = whole ? why : BUSTER_NODE_FACTS_WHY_REACH;
-        if (whole && op == CHECK_OP_VALUE)
+        const uint32_t limit = r < BUSTER_NODE_FRONT_FAR ? r : BUSTER_NODE_FRONT_FAR - 1;
+        if (a > limit || b > limit || c > limit)
+        {
+            why = BUSTER_NODE_FACTS_WHY_REACH;
+            break;
+        }
+        if (op == CHECK_OP_VALUE)
         {
             const uint8_t category = front->leaf_categories[x];
             const TypeId type = front->leaf_types[x];
@@ -5346,7 +5386,7 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
                 entry = number;
             }
         }
-        else if (whole)
+        else
         {
             kind = state->op_kinds[op];
             code = state->op_codes[op];
@@ -5365,7 +5405,7 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
             }
             else if (op == CHECK_OP_CONVERT)
             {
-                entry = reader->return_types[token];
+                entry = reader->query_types[token];
             }
             else if (op == CHECK_OP_CONDITIONAL)
             {
@@ -5748,7 +5788,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_window_names_by
         const uint64_t* lines = facts->lines;
         for (uint32_t k = 0; k < names; k += 1)
         {
-            __builtin_prefetch(lines + 4 * (uint64_t)numbers[entries[list[k]]]);
+            __builtin_prefetch(lines + 4 * (uint64_t)(numbers[entries[list[k]]] & ~BUSTER_NODE_FACTS_LINE_UNSETTLED));
         }
         for (uint32_t k = 0; k < names; k += 1)
         {
@@ -5771,11 +5811,23 @@ static __attribute__((noinline)) uint32_t node_facts_window_names_scalar(NodeFac
     return node_facts_window_names_by(facts, front, kinds, entries, list, first, count, true);
 }
 
+// Whether a leaf's kind and entry by the names' pass's second run (`twin_kind`, `twin`) are the pass's (`pass_kind`,
+// `pass`): the same kind, and a name's the same line, by its number or by its words in `lines`. The second run's uses
+// come after the chunk's last, so a declaration whose line changes in the chunk (a weak name's from another
+// declaration's token on, #3206) is given its earlier line again under a new number.
+static bool node_facts_window_name_same(const uint64_t* lines, uint8_t pass_kind, uint8_t twin_kind, uint32_t pass, uint32_t twin)
+{
+    const bool words = pass_kind == BUSTER_NODE_FACTS_IDENTIFIER && pass != 0 && twin != 0 &&
+                       memcmp(lines + 4 * (uint64_t)pass, lines + 4 * (uint64_t)twin, 4 * sizeof(uint64_t)) == 0;
+    return pass_kind == twin_kind && (pass == twin || words);
+}
+
 // The names' pass over the chunk the front has just made (its records from `made`): each name's leaf gets its
 // declaration's line, in the front's own columns. A line made here reads its declaration's type's word, which the
 // machine has had since it began: the reader made the declarations' types before the walk. The pass's ticks, the names
 // and the lines it made with theirs go to the front's report. Then the same by the scalar path, on a copy of the
-// chunk's kinds and entries as the front left them: a leaf whose kind or line is not the pass's is counted.
+// chunk's kinds and entries as the front left them: a leaf whose kind or line (its number, or its words) is not the
+// pass's is counted.
 static void node_facts_window_names(NodeFront* front)
 {
     struct NodeFactsReader* state = front->typer->facts;
@@ -5797,7 +5849,7 @@ static void node_facts_window_names(NodeFront* front)
     uint32_t differences = again != names;
     for (uint32_t r = 0; r < count; r += 1)
     {
-        differences += state->name_kinds[r] != front->window_kinds[first + r] || state->name_entries[r] != front->window_entries[first + r];
+        differences += !node_facts_window_name_same(facts->lines, front->window_kinds[first + r], state->name_kinds[r], front->window_entries[first + r], state->name_entries[r]);
     }
     shadow->window_name_differences += differences;
 }
@@ -6233,6 +6285,7 @@ static void node_facts_reader_flush(struct NodeFactsReader* state, const NodeFro
     counts[NODE_FACTS_COUNT_DECLARATION_LINES] = facts->line_count - facts->literal_capacity;
     counts[NODE_FACTS_COUNT_LINE_TICKS] = facts->line_ticks;
     counts[NODE_FACTS_COUNT_LINE_VERSIONS] = facts->line_versions;
+    counts[NODE_FACTS_COUNT_LINE_ASKS] = facts->line_asks;
     counts[NODE_FACTS_COUNT_MEMBER_SLOTS] = facts->member_count;
     counts[NODE_FACTS_COUNT_PAIR_SLOTS] = facts->pair_count;
     counts[NODE_FACTS_COUNT_ARGUMENT_ANSWERS] = facts->argument_answers;

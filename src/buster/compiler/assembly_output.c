@@ -1517,7 +1517,7 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
         const char* reason = !mine ? 0 : class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS ? "thread-local storage" :
                              grouped ? "section groups (COMDAT)" : linked ? "linked-order sections (patchable function entries' tables)" :
                              class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI ? "the C runtime's .init and .fini fragments" :
-                             uncoded ? "code without instruction records (inline assembly, or another producer -S doesn't print yet)" : 0;
+                             uncoded ? "code the emission made without instruction records" : 0;
         if (reason != 0)
         {
             result.error = ASSEMBLY_UNSUPPORTED;

@@ -142,6 +142,11 @@ struct CheckProgramCode
     // symbol in the high half and the one its fixups take in the low; null in a unit without them, the usual one.
     uint64_t* label_forwards;
     uint32_t label_forward_count;
+    // With CheckProgramLanes.assembly (-S, #1362): each TEXT atom's records as the emission encoded them, indexed by
+    // AtomId (assembly_code_count entries), in the emission's output arena; a TEXT atom no body made (an inline assembly
+    // unit's, a multiversioned function's resolver) has none. Null without -S.
+    AssemblyCode* assembly_code;
+    uint32_t assembly_code_count;
 };
 
 #include "c_check_program_cpu_dispatch.c"
@@ -1009,6 +1014,9 @@ struct CheckProgramLanes
     // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
     bool deferred_lowering;
     uint32_t deferred_call_room;
+    // -S (#1362): the emission keeps each TEXT atom's records, sized and encoded, with its branch columns, for the
+    // assembly sink (CheckProgramCode.assembly_code), and runs its bodies in one window, whose records it keeps whole.
+    bool assembly;
     // A caller's bodies' loop (#2536's step 2.2c.4, part 2): run by each part's lowering on one lane, before it lowers, and
     // whole before the lanes or a lowering that reads the controls' totals. None (no `run`) without --windowed-loop.
     CheckEmitLoop loop;
@@ -3729,6 +3737,39 @@ static bool check_program_emit_literals(CheckEmitLiterals* literals, const Emitt
     return valid;
 }
 
+// -S's copy of a body's records and branch columns (#1362), in `output`, which outlives the lanes' arenas the code is
+// in: what the assembly sink prints the body's atom from. Returns false if `output` can't hold them.
+static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, Arena* output)
+{
+    const uint32_t count = code->count;
+    const uint32_t branch_count = code->branch_count;
+    X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, count);
+    uint32_t* branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, branch_count);
+    uint32_t* targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, branch_count);
+    const bool valid = (count == 0 || records != NULL) && (branch_count == 0 || (branches != NULL && targets != NULL));
+    if (valid)
+    {
+        // (A code without records or branches may have null columns, which memcpy mustn't be given.)
+        if (count != 0)
+        {
+            memcpy(records, code->records, (uint64_t)count * sizeof(X86Instruction));
+        }
+        if (branch_count != 0)
+        {
+            memcpy(branches, code->branches, (uint64_t)branch_count * sizeof(uint32_t));
+            memcpy(targets, code->targets, (uint64_t)branch_count * sizeof(uint32_t));
+        }
+        *kept = (AssemblyCode){
+            .records = records,
+            .branches = branches,
+            .targets = targets,
+            .count = count,
+            .branch_count = branch_count,
+        };
+    }
+    return valid;
+}
+
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
 // #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND; without
 // it, only their branch columns are checked (branch_sizing_validate_branches), which sizing needs inside each
@@ -3878,7 +3919,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
     // The windows (#2536), where the bodies are compiled alone: the plain emission's, since --tier1's inlining and
     // --helper-report read the bodies' streams after every body's code.
-    run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting ? lanes->window_tokens : 0;
+    run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting && !lanes->assembly ? lanes->window_tokens : 0;
     run.poison_windows = lanes != NULL && lanes->poison_windows;
     run.squeeze_window = lanes != NULL ? lanes->squeeze_window : 0;
     if (run.tier1_outcomes != 0)
@@ -5380,6 +5421,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     uint32_t labels = 0;
     CheckEmitBody helper_body;
+    // -S's records (#1362), by atom: room for every atom the link can hold, each copied as its atom is added below.
+    const bool keep_records = valid && lanes != NULL && lanes->assembly;
+    result->assembly_code_count = keep_records ? result->link.atoms.capacity : 0;
+    result->assembly_code = keep_records ? BUSTER_ARENA_PUSH_ARRAY(output, AssemblyCode, result->assembly_code_count) : NULL;
+    if (keep_records && result->assembly_code == NULL)
+    {
+        result->status = CHECK_PROGRAM_RESOURCE;
+        valid = false;
+    }
+    else if (keep_records)
+    {
+        memset(result->assembly_code, 0, (uint64_t)result->assembly_code_count * sizeof(AssemblyCode));
+    }
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
@@ -5555,6 +5609,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             if (valid && source_body && body->sled != 0)
             {
                 valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
+            }
+            // -S's copy of the records the atom's bytes are (#1362): a template's code and a NOP sled's aren't records the
+            // sink prints, which it refuses by name.
+            if (valid && keep_records && !assembly && body->sled == 0 && !body->windowed && atom < result->assembly_code_count)
+            {
+                valid = check_program_emit_keep_records(&result->assembly_code[atom], code, output);
+                result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
             }
             // The labels its templates define, each at its record's offset (its lane's, for a naked function): the
             // program's definitions.

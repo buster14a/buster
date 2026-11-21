@@ -519,7 +519,8 @@ static void check_corpus_warning_diagnostics(CheckCorpusPath* path, const Parser
         {
             for (uint32_t token = 0; check_sparse_wide_present(path->input.attributes) && token < path->input.token_count; token += 1)
             {
-                first = check_corpus_repair_warning(path, repair, token, check_diagnostic_attribute_warnings(&path->input, token), 0, first);
+                const uint32_t label = check_diagnostic_ignored_label(&path->input, token);
+                first = label != BUSTER_CHECK_NONE ? check_corpus_repair_warning(path, repair, label, CHECK_WARNING_IGNORED_ATTRIBUTES, 0, first) : first;
             }
             for (uint32_t token = 0; path->input.constant_warnings != NULL && token < path->input.token_count; token += 1)
             {
@@ -814,7 +815,7 @@ static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* pars
             {
                 continue;
             }
-            const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+            const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parse_source_index(&parser->tokens, event->token);
             // The first warning as the diagnostic stream publishes it, not the earliest token: a translation-unit-final
             // warning (its primary on an earlier line) completes after an ordinary one on a later line, and the driver
             // orders by publication. Ties keep the earlier view's, as the driver's insertion order does.
@@ -1148,7 +1149,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             const ParseDiagnostic* diagnostic = printed.diagnostics + report;
             if (diagnostic->error)
             {
-                const uint32_t source = diagnostic->token < parser->tokens.count ? parser->tokens.sources[diagnostic->token] : pp->output.count;
+                const uint32_t source = diagnostic->token < parser->tokens.count ? parse_source_index(&parser->tokens, diagnostic->token) : pp->output.count;
                 if (source <= semantic_source)
                 {
                     const ParseTestOutcome outcome = parse_test_outcome(&printed, pp);
@@ -2086,7 +2087,10 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         const ParseDiagnostic* right = y->diagnostics + report;
         equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
                 left->place == right->place && left->error == right->error && left->note == right->note &&
-                left->resumed == right->resumed && left->parameter_type == right->parameter_type && left->resume_colon == right->resume_colon;
+                left->resumed == right->resumed && left->parameter_type == right->parameter_type && left->resume_colon == right->resume_colon &&
+                left->resume_at == right->resume_at && left->resume_closers == right->resume_closers &&
+                left->resume_follow == right->resume_follow && left->resume_attribute == right->resume_attribute &&
+                left->attribute_prefix == right->attribute_prefix;
     }
     if (equal && a->prefix != 0)
     {
@@ -2111,7 +2115,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                                                  left_parser->first_children[token] == right_parser->first_children[token] &&
                                                  left_parser->next_siblings[token] == right_parser->next_siblings[token])) &&
                 left_parser->tokens.kinds[token] == right_parser->tokens.kinds[token] && left_parser->tokens.names[token] == right_parser->tokens.names[token] &&
-                left_parser->tokens.sources[token] == right_parser->tokens.sources[token] && left_parser->tokens.flags[token] == right_parser->tokens.flags[token];
+                parse_source_index(&left_parser->tokens, token) == parse_source_index(&right_parser->tokens, token) && left_parser->tokens.flags[token] == right_parser->tokens.flags[token];
     }
     for (uint32_t pragma = 0; equal && pragma < x->tokens.pragma_count; pragma += 1)
     {
@@ -2405,7 +2409,9 @@ static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* 
             equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
                     left->place == right->place && left->error == right->error && left->note == right->note && left->resumed == right->resumed &&
                     left->resume_delete == right->resume_delete && left->resume_end == right->resume_end && left->resume_begin == right->resume_begin &&
-                    left->resume_colon == right->resume_colon;
+                    left->resume_colon == right->resume_colon && left->resume_at == right->resume_at && left->resume_closers == right->resume_closers &&
+                    left->resume_follow == right->resume_follow && left->resume_attribute == right->resume_attribute &&
+                    left->attribute_prefix == right->attribute_prefix;
         }
     }
     equal = equal && check_corpus_view_equal(a, b, x, y) && (a->repair == NULL) == (b->repair == NULL) &&
