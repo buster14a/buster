@@ -272,9 +272,6 @@ static void c_environment_types_scalar(const TypeTable* types, const uint32_t* c
 
 static void c_environment_types(const TypeTable* types, const uint32_t* completions, uint32_t tags, const TypeId* requested, const uint32_t* points, uint32_t count, uint8_t* results)
 {
-#if !BUSTER_HOST_VECTOR
-    c_environment_types_scalar(types, completions, tags, requested, points, count, results);
-#else
     for (uint64_t block = 0; block < count; block += BUSTER_C_ENVIRONMENT_LANES)
     {
         const uint32_t live = count - block < 16 ? (uint32_t)(count - block) : 16;
@@ -290,7 +287,6 @@ static void c_environment_types(const TypeTable* types, const uint32_t* completi
         const __mmask16 complete = _mm512_mask_cmple_epu32_mask(present, completion, use);
         _mm_mask_storeu_epi8(results + block, mask, _mm512_cvtepi32_epi8(_mm512_maskz_set1_epi32(complete, 1)));
     }
-#endif
 }
 
 // On success [begin,end) includes both braces. OPEN_BODY/CLOSE_BODY are function roles, unlike ordinary blocks,

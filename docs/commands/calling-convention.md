@@ -9,9 +9,12 @@ requirements. [Command index](README.md).
 - `src/buster/compiler/calling_convention.c` is the System V AMD64 calling
   convention (#137, contract 3 for #136): every `TypeId`'s classes as clang 23
   classifies them, a row of 16 offsets per type, records and arrays folded
-  four at a time in vectors with an exact twin; arguments' and results'
-  registers and stack slots as clang and LLVM's `CC_X86_64_C` give them, by
-  prefix sums 16 arguments at a time with an exact twin; and `va_arg`'s plan.
+  four at a time in vectors, with the scalar classification as the fallback
+  for a fold without scratch room; arguments' and results' registers and stack
+  slots as clang and LLVM's `CC_X86_64_C` give them, by prefix sums 16
+  arguments at a time, with a per-call fallback (`abi_assign_call`) for the
+  calls the sums can't place; and `va_arg`'s plan. The scalar twins went in
+  #2924; the fallbacks stay until they are vectorized.
   `calling_convention_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-calling-convention` runs them) and
   `calling_convention_benchmark.c` provides `benchmark-calling-convention`.
@@ -23,8 +26,8 @@ requirements. [Command index](README.md).
 [--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--buster PATH]
 [--keep]` (about 0.05 s on the 9700X, and 4.8 s with `--cross-check` before
 its compiled runs) checks
-`calling_convention.c`, by its vector paths and their twins at 16-, 32- and
-64-byte vectors:
+`calling_convention.c`, by its vector paths and their fallbacks, each on its
+own and never against the other, at 16-, 32- and 64-byte vectors:
 
 - merge: clang's merge and post-merge, written again as clang writes them,
   against the module's 64-entry merge table and post-merge, on every pair of
@@ -79,27 +82,38 @@ its compiled runs) checks
   hold a struct of 128 bytes by an array of none, which wait for what its
   alignment reads), the walk without scratch memory for its stack, after which
   every type must be classified and an `_Atomic` it aligns be right or
-  refused, and the walk over 64 unions of two members of the one before, 2^64
+  refused, a chain of 80 records against the table's order, by the levels
+  and by the scan they fall back to with 64 bytes of scratch, and the walk
+  over 64 unions of two members of the one before, 2^64
   paths, under an alarm;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
-  both paths into tables that must be identical, and every type at every
+  the vector path into one table and by the fallback, the scalar
+  classification as `abi_classify_all`'s scan drives it, into another, each
+  checked alone: every classifiable type classified, every type at every
   offset it can be at compared with an oracle of the test's own, clang's
-  `classify` transcribed with an explicit stack of frames; then classified
-  again by the twin, every type at once, into the same table (zero-length
-  arrays of large records among the types, which wait in the levels for the
-  types their alignment reads), which a world without `_Atomic`s of types of
-  no size checks, its levels ordered by the waits alone;
+  `classify` transcribed with an explicit stack of frames, and seed 1's
+  tables against digests frozen from main, where the vector path and the twin
+  #2924 removed agreed; then each table classified again, every type at once,
+  which must leave it as it was (zero-length arrays of large records among
+  the types, which wait in the levels for the types their alignment reads),
+  which a world without `_Atomic`s of types of no size checks, its levels
+  ordered by the waits alone;
 - GCC's bit-fields, whatever `--seed` says: the rule on fixed fields, then
   GCC's worlds (the record runs' and the compiled run's) from the fixed seeds
   1 to 16, which must hold no bit-field aligned below its type's, where GCC and
   clang lay one out apart, and clang's worlds from the same seeds, which must
   hold some;
-- assignment: random calls over a world's types, named and variadic, by both
-  paths, which must give the same locations and totals, also with the columns
-  ending at a `PROT_NONE` page; and calls of 65,542 `long`s and of 32,767 and
-  32,768 two-register arguments, around the most the vector path's 16-bit
-  register sums count (`BUSTER_ABI_COUNTED_ARGUMENTS`), past which it leaves a
-  call to its twin.
+- assignment: random calls over a world's types, named and variadic, by the
+  vector path and by its fallback (`abi_assign` with every scratch arena
+  exhausted, which assigns each call alone), each checked alone: seed 1's
+  locations and totals against frozen digests, every call within the
+  registers there are with its stack arguments in order, and a call assigned
+  again alone as in its batch; the vector path with its columns ending at a
+  `PROT_NONE` page, against the same calls in ordinary memory; and calls of
+  65,542 `long`s and of 32,767 and 32,768 two-register arguments, around the
+  most the vector path's 16-bit register sums count
+  (`BUSTER_ABI_COUNTED_ARGUMENTS`), past which it leaves a call to
+  `abi_assign_call`.
 
 With `--cross-check`, two fixtures first check #2113's SSE/SSEUP records of
 sizes no vector register has against clang in both directions, with Tier 0
@@ -113,10 +127,12 @@ aligned to 16, a 56-byte one aligned to 8, records of one alone), and checks
 arguments and results in ymm and zmm registers, byval copies once vector
 registers run out, a variadic call's named ones in their register's width on
 the stack, ones LLVM has no vector register left for after `_Atomic` doubles,
-and `va_arg`'s overflow copies; Tier 1 leaves its records' functions to Tier
-0 (#2798), without `--tier1-strict`. Register transport compares the payload clang
-defines (`<size / 8 x double>`); byval and overflow copies compare every C
-byte, and following scalars check the strides. Every target is compiled and
+`va_arg`'s overflow copies, and records that end before a `PROT_NONE` page,
+returned from their address and passed by value from it, so that a payload's
+load that reads past its record faults; with strict Tier 1 too since #2798.
+Register transport compares the payload clang defines (`<size / 8 x
+double>`); byval and overflow copies compare every C byte, and following
+scalars check the strides. Every target is compiled and
 linked; execution is skipped only when the host lacks its features. Run from
 the repository root so the fixture paths resolve.
 
@@ -205,34 +221,34 @@ runs it with `--cross-check`.
 ## Calling convention benchmark
 
 `./build/compiler benchmark-calling-convention [--seed N] [--count N]
-[--only classification|assignment] [--path vector|scalar] [--after-scalar
-MS]` (about 1 s on the 9700X) checks that each vector path of
-`calling_convention.c` agrees with its twin (the classification's rows, pass
-bits, stack bytes, alignments, storage, layouts and results; the
-assignment's locations and calls), then reports 21 interleaved-pass medians
-per item (time, cycles, instructions, IPC, branch mispredictions and the
-throttle, PMCx1A0's umask 0x08, #199):
+[--only classification|assignment]` (about 0.6 s on the 9700X) checks the
+vector paths of `calling_convention.c`, then reports 21 passes' medians per
+item (time, cycles, instructions, IPC, branch mispredictions and the
+throttle, PMCx1A0's umask 0x08, #199). At the default seed and count, the
+classification's tables (pass bits, rows, stack bytes, alignments, storage,
+layouts and results) and the assignment's locations and calls must match
+digests frozen from main at `bd197b2a6`, where the vector paths agreed with
+the twins #2924 removed; at any seed, the batches must classify as
+`abi_classify_all` does and each call assigned alone must get what its batch
+gave it:
 
 - classification: a table of `--count` types (32,768), records and unions of
   0 to 8 members mostly, with the pointers, arrays, vectors and aligned
   typedefs their members have, classified from nothing by `abi_classify_all`
-  and its twin at 16-, 32- and 64-byte vectors, per type and per record
-  member; then by `abi_classify` and its twin on the batches a front end
-  hands them: windows of the 1, 4 or 16 types made since its last call, a
-  call per dependency level;
+  at 16-, 32- and 64-byte vectors, per type and per record member; then by
+  `abi_classify` on the batches a front end hands it: windows of the 1, 4 or
+  16 types made since its last call, a call per dependency level;
 - assignment: `--count` calls over those types at 16 bytes, most of 0 to 6
   arguments, some of 4 to 14 and a few of 15 to 22, one in four variadic, by
-  `abi_assign` and its twin per argument, with the share of arguments the
-  vector path left to its twin and why (from a mirror of its rules,
+  `abi_assign` per argument, with the share of arguments the vector path left
+  to `abi_assign_call` and why (from a mirror of its rules,
   `abi_benchmark_deferred`, to keep in step with `abi_assign`); then the same
   shapes with integers, pointers and doubles alone (`assign-simple`).
 
 Each run takes the whole table or every call once. Below 16,384 types the
 branch predictor learns the table from run to run: with 4,096, the
 classification mispredicts 3 to 10 times less often and runs up to 2.3 times
-as fast. `--path` times one path alone, back to back, and `--after-scalar MS`
-runs the twin for MS ms before each sample of the vector path. Run it under
-the 9700X's lock with `taskset -c 2`; `docs/calling-convention.md` has the
+as fast. Run it under the 9700X's lock with `taskset -c 2`; `docs/calling-convention.md` has the
 numbers. The default 9700X job runs it after the tests, pinned to one allowed
 CPU; like the others, its measurements are
 informational.

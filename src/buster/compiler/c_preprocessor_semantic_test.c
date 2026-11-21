@@ -88,8 +88,10 @@ static bool pp_test_eval_method_uses(const char* directory, bool with_clang)
             }
             if (valid && mode != 0)
             {
+                char key[32];
+                snprintf(key, sizeof(key), "case %u", i);
                 valid = pp_same_streams(&runs[0], &runs[mode], "floating evaluation macro use timeline") &&
-                        (mode == 3 || pp_eval_method_uses_same(&runs[0], &runs[mode]));
+                        (mode == 3 || pp_eval_method_uses_same(&runs[0], &runs[mode])) && (mode != 1 || pp_kernel_digest_check(&runs[1], "eval-method", key));
             }
         }
         if (!valid)
@@ -194,8 +196,10 @@ static bool pp_test_semantic_pragmas(const char* directory, bool with_clang)
             };
             ran[mode] = pp_test_run(&runs[mode], &tables[mode], &options, path);
         }
+        char key[32];
+        snprintf(key, sizeof(key), "case %u", i);
         valid = valid && ran[0] && ran[1] && runs[0].errors == 0 && runs[1].errors == 0 &&
-                pp_same_streams(&runs[0], &runs[1], "expanded semantic pragma");
+                pp_same_streams(&runs[0], &runs[1], "expanded semantic pragma") && pp_kernel_digest_check(&runs[1], "semantic-pragma", key);
         // Every fixture expands at least one pragma operand. Equality alone would accept two streams that both
         // lost the capture's origins, leaving semantic warnings at macro definitions with no expansion note.
         bool origin = false;

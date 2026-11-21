@@ -84,11 +84,8 @@ compare short raw/quoted target rules against each compiler, using original C
 fixtures in a private temporary directory. The default tests need no external
 compiler execution.
 
-```sh
-clang -std=c17 -O2 -march=x86-64 -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o /tmp/buster-dependency-scalar && /tmp/buster-dependency-scalar --oracle
-```
-
-On an AVX-512F/BW host:
+On an AVX-512 host (the compiler's only host since #2924; the baseline
+`-march=x86-64` build of the scalar classifier went with the scalar host):
 
 ```sh
 clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o /tmp/buster-dependency-native && /tmp/buster-dependency-native --oracle

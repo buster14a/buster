@@ -113,7 +113,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
             CheckDataPrepared data = { 0 };
             CheckProgram full = { 0 };
             CheckProgramSelection selection = { 0 };
-            const CheckOptions checking = { .scalar = path == 0 };
+            const CheckOptions checking = { 0 };
             bool ready = retained.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
                          check_lazy_plan(&lazy, &parser, &pp, &retained, &scratch, path == 0);
             ready = ready && (mode == 0 ? check_input(&input, &parser, &pp, &types.table, &retained, &scratch) :

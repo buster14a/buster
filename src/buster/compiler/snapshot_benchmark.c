@@ -30,7 +30,6 @@
 
 #include "buster/compiler/test_paths.h"
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -78,6 +77,7 @@ static const char* const snapshot_benchmark_kind_options[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "static",
     [RUNTIME_KIND_STATIC_PIE] = "static-pie",
     [RUNTIME_KIND_SHARED] = "shared",
+    [RUNTIME_KIND_NO_PIE] = "no-pie",
 };
 
 static const char* const snapshot_benchmark_kind_names[RUNTIME_KINDS] = {
@@ -85,6 +85,7 @@ static const char* const snapshot_benchmark_kind_names[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "static",
     [RUNTIME_KIND_STATIC_PIE] = "static PIE",
     [RUNTIME_KIND_SHARED] = "shared library",
+    [RUNTIME_KIND_NO_PIE] = "position-dependent",
 };
 
 static const char* const snapshot_benchmark_imports[RUNTIME_KINDS] = {
@@ -92,6 +93,7 @@ static const char* const snapshot_benchmark_imports[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "runtime_import_static",
     [RUNTIME_KIND_STATIC_PIE] = "runtime_import_static_pie",
     [RUNTIME_KIND_SHARED] = "runtime_import_shared",
+    [RUNTIME_KIND_NO_PIE] = "runtime_import_kind (no PIE)",
 };
 
 static int snapshot_benchmark_compare(const void* a, const void* b)
@@ -304,18 +306,18 @@ static bool snapshot_benchmark_kind(RuntimeKind kind, const char* parent, uint64
     uint64_t* times = result ? calloc(runs * (SNAPSHOT_PHASES + 12), sizeof(uint64_t)) : 0;
     result = result && times != 0;
     uint64_t* import_times = times;
-    uint64_t* write_times = times + runs;
-    uint64_t* identity_times = times + 2 * runs;
-    uint64_t* open_times = times + 3 * runs;
-    uint64_t* release_times = times + 4 * runs;
-    uint64_t* pread_times = times + 5 * runs;
-    uint64_t* unhashed_times = times + 6 * runs;
-    uint64_t* whole_times = times + 7 * runs;
-    uint64_t* first_bind_times = times + 8 * runs;
-    uint64_t* bind_times = times + 9 * runs;
-    uint64_t* check_times = times + 10 * runs;
-    uint64_t* imported_bind_times = times + 11 * runs;
-    uint64_t* phase_times = times + 12 * runs;
+    uint64_t* write_times = times != NULL ? times + runs : NULL;
+    uint64_t* identity_times = times != NULL ? times + 2 * runs : NULL;
+    uint64_t* open_times = times != NULL ? times + 3 * runs : NULL;
+    uint64_t* release_times = times != NULL ? times + 4 * runs : NULL;
+    uint64_t* pread_times = times != NULL ? times + 5 * runs : NULL;
+    uint64_t* unhashed_times = times != NULL ? times + 6 * runs : NULL;
+    uint64_t* whole_times = times != NULL ? times + 7 * runs : NULL;
+    uint64_t* first_bind_times = times != NULL ? times + 8 * runs : NULL;
+    uint64_t* bind_times = times != NULL ? times + 9 * runs : NULL;
+    uint64_t* check_times = times != NULL ? times + 10 * runs : NULL;
+    uint64_t* imported_bind_times = times != NULL ? times + 11 * runs : NULL;
+    uint64_t* phase_times = times != NULL ? times + 12 * runs : NULL;
     // The import, as a link without a snapshot pays it.
     for (int64_t r = -1; result && r < (int64_t)runs; r += 1)
     {
@@ -539,11 +541,3 @@ int run_snapshot_benchmark(int argc, char** argv)
     return result ? 0 : 1;
 }
 
-#else
-int run_snapshot_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

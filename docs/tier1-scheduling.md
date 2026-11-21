@@ -34,7 +34,7 @@ an option of its own, as the generated code's instruction set is (#180).
 `--tier1-report` counts what the variant did, `schedule_blocks` and
 `schedule_moved`: the blocks (or segments) scheduled and the records (or IR
 instructions) that changed places. `--verify` checks every scheduled block
-against its scalar reference, which rebuilds the dependencies from the original
+against the independent verifier, which rebuilds the dependencies from the original
 code: a refusal is the compile's internal failure, never a Tier 0 fallback.
 
 - **post** (`c_check_tier1_schedule.c`): Tier 1's published code of each
@@ -137,15 +137,17 @@ absent path's included). The measurement below weighed the records by the model
 of 2026-10-22, before #181 measured every case Tier 1 emits; the variants
 remain to measure it with this one.
 
-The vector implementation obtains effects in eight-record batches and model
-latencies by the existing 32-ID in-register lookup. It compares each record's
+The scheduler, AVX-512 alone since #2924 (the 9700X's gate read the scalar twin
+1.29 times its time on sqlite3.c, Lua and musl), obtains effects in eight-record
+batches and model latencies by the existing 32-ID in-register lookup. It compares each record's
 resource masks against eight prior records together, producing dependency
-bitsets. Reverse ready frontiers assign dependency levels; contiguous masked
-height loads reduce the already completed successor levels. The scalar twin
-uses scalar effects and costs, pairwise hazards and a backwards height pass.
-The flags' liveness is one backward pass over the block, shared by both. Both
-select a ready instruction of greatest priority and resolve ties by its
-original position; this selection loop is shared and scalar.
+bitsets. Every edge points forward in the original order, so one reverse pass
+assigns levels and heights. In groups of 16 successors it takes the greatest
+level across all edges and the greatest height across register and flag RAW
+edges. The flags'
+liveness is one backward pass over the block. The scheduler selects a ready
+instruction of greatest priority and resolves ties by its original position;
+this selection loop is scalar, one dependency at a time.
 
 `tier1_schedule_verify(input, order)` independently reconstructs scalar
 effects from the original records. It first checks that the order is a complete
@@ -252,11 +254,12 @@ either variant under `--verify` (`test-c-testsuite --tier1 --compiler` with a
 wrapper adding the option), every function by Tier 1.
 
 `benchmark-tier1-schedule [--blocks N] [--records N] [--only
-encode|scalar|vector] [--after-scalar MS]` freezes generated machine-record
-blocks, verifies both schedules and encodings, and reports 11-pass median
+encode|schedule] [--after-scalar MS]` freezes generated machine-record
+blocks, verifies each schedule and its encoding, and reports 11-pass median
 nanoseconds and available core cycles per record: scheduling plus the record
 copy and encoding, beside encoding alone, and a synthetic generated loop in
-both orders. It is a stage boundary, not a compiler benchmark.
+both orders. `--after-scalar MS` runs MS of scalar integer work before each
+schedule sample. It is a stage boundary, not a compiler benchmark.
 
 ## The measurement on the 9700X
 
@@ -273,7 +276,7 @@ Lua 5.4.8 (`4f18ddae…`) running the `cc3387f` record's five scripts, each by
 `--tier1 -fno-asynchronous-unwind-tables` with and without each variant.
 
 **Correctness.** Compiled with `--verify`, every function of both programs is
-Tier 1's with each variant, every scheduled block passes its scalar reference
+Tier 1's with each variant, every scheduled block passes the independent verifier
 and every frame passes the emission's frame verifier. Every build gives
 speedtest1's verification hash `1248168 a7fa3957…`, every script prints clang
 -O0's output, and so do the 24 relinked Lua executables below.

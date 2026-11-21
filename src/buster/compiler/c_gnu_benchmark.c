@@ -3,14 +3,15 @@
 //
 // benchmark-gnu: original measurement helpers for the retained GNU syntax interface. The actual input is a
 // preprocessed translation unit. Collection includes candidate discovery and variable group decoding; build adds
-// exact sizing/allocation. The pipeline rows include token conversion, parsing, postorder and optional metadata.
-// Preprocessing is outside the timing. This is not semantic checking, generated-code or whole-compiler acceptance.
+// exact sizing/allocation, each timed after an untimed run, with its inputs in cache as after the parse. The pipeline
+// rows include token conversion, parsing, postorder and optional metadata. Preprocessing is outside the timing. This
+// is not semantic checking, generated-code or whole-compiler acceptance.
 
 #include <linux/perf_event.h>
 #include <sys/syscall.h>
 
 #define BUSTER_GNU_BENCHMARK_PASSES 21
-#define BUSTER_GNU_BENCHMARK_PATHS 6
+#define BUSTER_GNU_BENCHMARK_PATHS 4
 
 typedef struct GnuBenchmarkSample GnuBenchmarkSample;
 struct GnuBenchmarkSample
@@ -83,10 +84,8 @@ static bool gnu_benchmark_equal(const GnuSyntax* a, const GnuSyntax* b)
 static int run_gnu_benchmark(int argc, char** argv)
 {
     static const char* const names[BUSTER_GNU_BENCHMARK_PATHS] = {
-        "collect-scalar",
-        "collect-vector",
-        "build-scalar",
-        "build-vector",
+        "collect",
+        "build",
         "parser-only",
         "parser-with-gnu",
     };
@@ -145,7 +144,7 @@ static int run_gnu_benchmark(int argc, char** argv)
     if (valid)
     {
         arena = arena_reserve(reference.gnu_arena.length + 64);
-        valid = arena.base != 0 && gnu_syntax_build(&reference.tokens, &reference.tree, &arena, &collected, true) == GNU_SYNTAX_OK &&
+        valid = arena.base != 0 && gnu_syntax_build(&reference.tokens, &reference.tree, &arena, &collected) == GNU_SYNTAX_OK &&
                 gnu_benchmark_equal(&collected, &reference.gnu);
     }
     const uint32_t tokens = reference.tokens.count;
@@ -169,7 +168,7 @@ static int run_gnu_benchmark(int argc, char** argv)
             {
                 continue;
             }
-            if (after_scalar != 0 && (path == 1 || path == 3 || path == 5))
+            if (after_scalar != 0 && path != 2)
             {
                 const uint64_t until = gnu_benchmark_clock() + (uint64_t)after_scalar * 1000000;
                 uint64_t work = consumed + 1;
@@ -179,33 +178,45 @@ static int run_gnu_benchmark(int argc, char** argv)
                 } while (gnu_benchmark_clock() < until);
                 consumed += work;
             }
-            const uint32_t repetitions = path < 4 && tokens < 65536 ? 65536 / (tokens != 0 ? tokens : 1) : 1;
+            const uint32_t repetitions = path < 2 && tokens < 65536 ? 65536 / (tokens != 0 ? tokens : 1) : 1;
+            // The collection and the build find the tokens and the tree as the parse that made them leaves them, in
+            // cache: each runs once untimed first. In the rotation each follows the parser-with-gnu path, whose own
+            // parse leaves the reference's arrays cold.
+            if (valid && path == 0)
+            {
+                valid = gnu_syntax_collect(&reference.tokens, &reference.tree, &collected, false) == GNU_SYNTAX_OK;
+            }
+            else if (valid && path == 1)
+            {
+                arena_pop_to(&arena, 0);
+                valid = gnu_syntax_build(&reference.tokens, &reference.tree, &arena, &collected) == GNU_SYNTAX_OK;
+            }
             uint64_t before_cycles = 0;
             uint64_t after_cycles = 0;
             have_cycles = have_cycles && read(cycles, &before_cycles, sizeof(before_cycles)) == sizeof(before_cycles);
             const uint64_t before = gnu_benchmark_clock();
             for (uint32_t repeat = 0; valid && repeat < repetitions; repeat += 1)
             {
-                if (path < 2)
+                if (path == 0)
                 {
-                    valid = gnu_syntax_collect(&reference.tokens, &reference.tree, &collected, path == 0, false) == GNU_SYNTAX_OK;
+                    valid = gnu_syntax_collect(&reference.tokens, &reference.tree, &collected, false) == GNU_SYNTAX_OK;
                 }
-                else if (path < 4)
+                else if (path == 1)
                 {
                     arena_pop_to(&arena, 0);
-                    valid = gnu_syntax_build(&reference.tokens, &reference.tree, &arena, &collected, path == 2) == GNU_SYNTAX_OK;
+                    valid = gnu_syntax_build(&reference.tokens, &reference.tree, &arena, &collected) == GNU_SYNTAX_OK;
                 }
                 else
                 {
-                    valid = parse_translation_unit(&pipeline[path - 4], &pp);
+                    valid = parse_translation_unit(&pipeline[path - 2], &pp);
                 }
-                consumed += path < 4 ? collected.attribute_count + collected.asm_label_count : pipeline[path - 4].tokens.count;
+                consumed += path < 2 ? collected.attribute_count + collected.asm_label_count : pipeline[path - 2].tokens.count;
             }
             const uint64_t elapsed = gnu_benchmark_clock() - before;
             have_cycles = have_cycles && read(cycles, &after_cycles, sizeof(after_cycles)) == sizeof(after_cycles);
             if (valid)
             {
-                valid = path < 4 ? gnu_benchmark_equal(&collected, &reference.gnu) : path == 4 || gnu_benchmark_equal(&pipeline[1].gnu, &reference.gnu);
+                valid = path < 2 ? gnu_benchmark_equal(&collected, &reference.gnu) : path == 2 || gnu_benchmark_equal(&pipeline[1].gnu, &reference.gnu);
             }
             if (pass != 0)
             {
@@ -246,7 +257,7 @@ static int run_gnu_benchmark(int argc, char** argv)
     else
     {
         fprintf(stderr, "benchmark-gnu: invalid arguments, input, allocation failure or metadata mismatch\n");
-        fprintf(stderr, "usage: benchmark-gnu [--only collect-scalar|collect-vector|build-scalar|build-vector|parser-only|parser-with-gnu] [--after-scalar MS] [-E's options] file.c\n");
+        fprintf(stderr, "usage: benchmark-gnu [--only collect|build|parser-only|parser-with-gnu] [--after-scalar MS] [-E's options] file.c\n");
         if (reference.fatal != PARSE_MESSAGE_NONE || reference.errors != 0)
         {
             parse_print_diagnostics(&reference, &pp);

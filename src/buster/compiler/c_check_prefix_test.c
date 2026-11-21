@@ -275,7 +275,7 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
                 }
                 if (adapted || input.diagnostic_graph)
                 {
-                    const CheckOptions check_options = { .scalar = path_index == 0 };
+                    const CheckOptions check_options = { 0 };
                     CheckStream stream;
                     const bool checked = check_graph_run(&types.table, &input.graph, &values, &scratch, &check_options, &stream) &&
                                          check_input_packed_finalize(&input, view, &types.table, &stream, &scratch);

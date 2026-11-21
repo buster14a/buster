@@ -91,9 +91,9 @@ exhaustion and ID-space exhaustion return errors instead of truncating data.
 
 1. Classify promotion eligibility and discover addresses 64 entries at a time.
 2. Build a complete predecessor CSR, preserving duplicate edges, and run the
-   shared dominator analysis. Its vector solver uses aligned 512-bit
-   intersections and change masks, then supplies immediate dominators,
-   reachability, subtree intervals and dominance-frontier bitsets. Compact
+   shared dominator analysis. Its SEMI-NCA solver supplies immediate
+   dominators, reachability, subtree intervals and dominance-frontier bitsets
+   ([why it is scalar](dominators.md#why-it-is-scalar)). Compact
    unreachable-source edges out of the SSA predecessor result afterward.
 3. Collect each block's final writes and upward-exposed reads. Reuse
    `dataflow.c`'s AVX-512 liveness equations over dense promoted-local IDs.
@@ -113,12 +113,12 @@ placement and indexed loads above the 64-block register-table limit. Their
 costs need measurement on the 9700X before claiming that any particular
 placement or batch size is optimal.
 
-SSA reserves at most 16 MiB for the combined quadratic regions needed by the
-shared analysis: its frontier output span, temporary dominator matrix and one
-temporary reachable row. With `row_bytes` rounded to a 512-bit boundary, the
-vector path requires `(2 * blocks + 1) * row_bytes <= 16 MiB`. Above this bound,
-`ssa_build` uses predecessor reading and requests only the shared scalar
-dominator tree. Its bounded path can still vectorize access renaming; neither
+SSA reserves at most 16 MiB for the shared analysis' quadratic output, its
+frontier rows. With `row_bytes` rounded to a 512-bit boundary, the vector path
+requires `(2 * blocks + 1) * row_bytes <= 16 MiB`: the bound still counts the
+temporary dominator matrix and reachable row of the bit-matrix solver #2924
+deleted, so it is conservative by them. Above this bound, `ssa_build` uses
+predecessor reading and requests only the shared dominator tree. Its bounded path can still vectorize access renaming; neither
 predecessor-reading path requests frontier or loop matrices.
 This is a storage policy, **not a measured performance crossover**. The IR's
 promotion (`ssa_ir_promote`) adds one (#787): its vector path's phi placement,

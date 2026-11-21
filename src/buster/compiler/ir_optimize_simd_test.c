@@ -426,6 +426,333 @@ static void ir_optimize_test_simd_float_pairs(IrOptimizeTest* test)
     ir_optimize_test_expect(test, folds > 512 && refusals > 512, "random floating lane pairs both fold and refuse");
 }
 
+static float ir_optimize_test_bits_float(uint32_t bits)
+{
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static double ir_optimize_test_bits_double(uint64_t bits)
+{
+    double value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static uint64_t ir_optimize_test_float_bits(float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static uint64_t ir_optimize_test_double_bits(double value)
+{
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+// #2720's oracle: one scalar operation by its own instruction with MXCSR set to `control`, in one asm statement that
+// loads the control, runs the instruction, stores the status and restores the caller's MXCSR, so that no compiler can
+// move the operation out of the environment. Returns the result's bits and sets `flags` to the six exception flags
+// raised. A comparison's flags are its comis's; its truth is the operands' own, which matters only where no flag is
+// raised (no NaN). A conversion to an integer converts to 64 bits, and a value outside the narrower target raises
+// invalid, as the truncation the lowering emits would lose it.
+static __attribute__((noinline)) uint64_t ir_optimize_test_float_hardware(uint32_t control, uint32_t op, uint32_t from, uint32_t to, uint32_t predicate, uint64_t a, uint64_t b, uint32_t* flags)
+{
+    const uint32_t saved = _mm_getcsr();
+    uint32_t status = 0;
+    __m128i x = _mm_cvtsi64_si128((int64_t)a);
+    const __m128i y = _mm_cvtsi64_si128((int64_t)b);
+    const bool single = (op == IR_SITOFP || op == IR_UITOFP ? to : from) == 32;
+    const uint64_t sign_mask = UINT64_C(1) << (from - 1);
+    const uint64_t source_mask = UINT64_MAX >> (64 - from);
+    const int64_t signed_value = (int64_t)(((a & source_mask) ^ sign_mask) - sign_mask);
+    const uint64_t unsigned_value = a & source_mask;
+    uint64_t integer = 0;
+    uint64_t result = 0;
+    switch (op)
+    {
+        case IR_FADD:
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\taddss %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [y] "x"(y), [control] "m"(control), [saved] "m"(saved));
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\taddsd %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [y] "x"(y), [control] "m"(control), [saved] "m"(saved));
+            }
+            break;
+        case IR_FSUB:
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tsubss %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [y] "x"(y), [control] "m"(control), [saved] "m"(saved));
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tsubsd %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [y] "x"(y), [control] "m"(control), [saved] "m"(saved));
+            }
+            break;
+        case IR_FMUL:
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tmulss %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [y] "x"(y), [control] "m"(control), [saved] "m"(saved));
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tmulsd %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [y] "x"(y), [control] "m"(control), [saved] "m"(saved));
+            }
+            break;
+        case IR_FDIV:
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tdivss %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [y] "x"(y), [control] "m"(control), [saved] "m"(saved));
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tdivsd %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [y] "x"(y), [control] "m"(control), [saved] "m"(saved));
+            }
+            break;
+        case IR_FCMP:
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tcomiss %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [status] "=m"(status) : [x] "x"(x), [y] "x"(y), [control] "m"(control), [saved] "m"(saved) : "cc");
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tcomisd %[y], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [status] "=m"(status) : [x] "x"(x), [y] "x"(y), [control] "m"(control), [saved] "m"(saved) : "cc");
+            }
+            break;
+        case IR_SITOFP:
+            x = _mm_setzero_si128();
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tcvtsi2ssq %[v], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [v] "r"(signed_value), [control] "m"(control), [saved] "m"(saved));
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tcvtsi2sdq %[v], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [v] "r"(signed_value), [control] "m"(control), [saved] "m"(saved));
+            }
+            break;
+        case IR_UITOFP:
+            x = _mm_setzero_si128();
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tvcvtusi2ssq %[v], %[x], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [v] "r"(unsigned_value), [control] "m"(control), [saved] "m"(saved));
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tvcvtusi2sdq %[v], %[x], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [v] "r"(unsigned_value), [control] "m"(control), [saved] "m"(saved));
+            }
+            break;
+        case IR_FPTOSI:
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tcvttss2siq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tcvttsd2siq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
+            }
+            break;
+        case IR_FPTOUI:
+            if (single)
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tvcvttss2usiq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
+            }
+            else
+            {
+                __asm__ volatile("ldmxcsr %[control]\n\tvcvttsd2usiq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
+            }
+            break;
+        case IR_FEXT:
+            __asm__ volatile("ldmxcsr %[control]\n\tcvtss2sd %[x], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+            break;
+        default:
+            __asm__ volatile("ldmxcsr %[control]\n\tcvtsd2ss %[x], %[x]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [x] "+x"(x), [status] "=m"(status) : [control] "m"(control), [saved] "m"(saved));
+            break;
+    }
+    uint32_t raised = status & 0x3f;
+    if (op == IR_FCMP)
+    {
+        const double left = single ? (double)ir_optimize_test_bits_float((uint32_t)a) : ir_optimize_test_bits_double(a);
+        const double right = single ? (double)ir_optimize_test_bits_float((uint32_t)b) : ir_optimize_test_bits_double(b);
+        const bool truths[] = { left == right, left != right, left < right, left <= right, left > right, left >= right };
+        result = truths[predicate];
+    }
+    else if (op == IR_FPTOSI || op == IR_FPTOUI)
+    {
+        // A signed target holds [-2^(to-1), 2^(to-1)), an unsigned one [0, 2^to).
+        const int64_t value = (int64_t)integer;
+        const bool inside = op == IR_FPTOSI ? to == 64 || (value >= -(INT64_C(1) << (to - 1)) && value < (INT64_C(1) << (to - 1))) : to == 64 || integer < (UINT64_C(1) << to);
+        raised |= inside ? 0 : 1;
+        result = integer & (UINT64_MAX >> (64 - to));
+    }
+    else
+    {
+        const uint32_t bits = op == IR_FEXT ? 64 : op == IR_FTRUNC ? 32 : op == IR_SITOFP || op == IR_UITOFP ? to : from;
+        result = (uint64_t)_mm_cvtsi128_si64(x) & (UINT64_MAX >> (64 - bits));
+    }
+    *flags = raised;
+    return result;
+}
+
+// Whether the operation gives the same bits and raises no flag with each rounding and with FTZ and DAZ, and those bits.
+static bool ir_optimize_test_float_oracle(uint32_t op, uint32_t from, uint32_t to, uint32_t predicate, uint64_t a, uint64_t b, uint64_t* value)
+{
+    static const uint32_t controls[] = {
+        UINT32_C(0x1f80),
+        UINT32_C(0x3f80),
+        UINT32_C(0x5f80),
+        UINT32_C(0x7f80),
+        UINT32_C(0x9fc0),
+    };
+    bool result = true;
+    for (uint32_t control = 0; control < BUSTER_ARRAY_LENGTH(controls); control += 1)
+    {
+        uint32_t flags = 0;
+        const uint64_t bits = ir_optimize_test_float_hardware(controls[control], op, from, to, predicate, a, b, &flags);
+        result = result && flags == 0 && (control == 0 || bits == *value);
+        *value = control == 0 ? bits : *value;
+    }
+    return result;
+}
+
+static uint64_t ir_optimize_test_float_integer(IrOptimizeTest* test, uint32_t width)
+{
+    const uint64_t random = ir_optimize_test_random(test);
+    const uint64_t value = ir_optimize_test_random(test) >> (random % 64);
+    const uint64_t negated = (random & 64) != 0 ? ~value + 1 : value;
+    return negated & (UINT64_MAX >> (64 - width));
+}
+
+// #2720: SCCP's scalar floating operations and conversions on random operands against the hardware. Each must fold
+// exactly where the oracle finds the same bits and no flag in every environment and no operand is a NaN, to those bits;
+// and the interpreter must give the same before and after.
+static void ir_optimize_test_scalar_floats(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    static const uint8_t operations[] = {
+        IR_FADD,
+        IR_FSUB,
+        IR_FMUL,
+        IR_FDIV,
+        IR_FCMP,
+        IR_SITOFP,
+        IR_UITOFP,
+        IR_FPTOSI,
+        IR_FPTOUI,
+        IR_FEXT,
+        IR_FTRUNC,
+    };
+    static const uint8_t integers[] = {
+        IR_I8,
+        IR_I16,
+        IR_I32,
+        IR_I64,
+    };
+    uint32_t folds[BUSTER_ARRAY_LENGTH(operations)] = { 0 };
+    uint32_t refusals[BUSTER_ARRAY_LENGTH(operations)] = { 0 };
+    // A stream of its own, so that the fixtures the shared stream generates after this test, and their frozen digests,
+    // stay as they were.
+    const uint64_t shared = test->random;
+    test->random = UINT64_C(0x2720f10a7c0ffee5);
+    for (uint32_t trial = 0; trial < 22000; trial += 1)
+    {
+        const uint32_t kind = trial % BUSTER_ARRAY_LENGTH(operations);
+        const uint32_t op = operations[kind];
+        const uint64_t random = ir_optimize_test_random(test);
+        const uint32_t floating = (random & 1) != 0 ? IR_F64 : IR_F32;
+        const uint32_t integer = integers[(random >> 1) & 3];
+        const bool binary = kind <= 4;
+        const uint32_t source = op == IR_SITOFP || op == IR_UITOFP ? integer : op == IR_FEXT ? IR_F32 : op == IR_FTRUNC ? IR_F64 : floating;
+        const uint32_t target = op == IR_FCMP ? IR_I1 : op == IR_FPTOSI || op == IR_FPTOUI ? integer : op == IR_FEXT ? IR_F64 : op == IR_FTRUNC ? IR_F32 : floating;
+        const uint32_t from = ir_type_bits[source];
+        const uint32_t to = ir_type_bits[target];
+        const uint32_t predicate = (uint32_t)(random >> 3) % 6;
+        uint64_t a = source <= IR_I64 ? ir_optimize_test_float_integer(test, from) : ir_optimize_test_simd_float_operand(test, from);
+        if ((op == IR_FPTOSI || op == IR_FPTOUI) && (random & 32) != 0)
+        {
+            // An integral value about half the time, near and past the targets' bounds.
+            const double whole = (double)(int64_t)ir_optimize_test_float_integer(test, 64);
+            a = floating == IR_F64 ? ir_optimize_test_double_bits(whole) : ir_optimize_test_float_bits((float)whole);
+        }
+        if (op == IR_FTRUNC && (random & 32) != 0)
+        {
+            a = ir_optimize_test_double_bits((double)ir_optimize_test_bits_float((uint32_t)ir_optimize_test_simd_float_operand(test, 32)));
+        }
+        const uint64_t b = !binary ? 0 : (random & 64) != 0 ? a ^ (ir_optimize_test_random(test) & 3) : ir_optimize_test_simd_float_operand(test, from);
+        const uint64_t exponent = from == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+        const uint64_t magnitude = from == 32 ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff);
+        const bool nan = source >= IR_F32 && ((a & magnitude) > exponent || (binary && (b & magnitude) > exponent));
+        uint64_t expected_value = 0;
+        const bool expected = ir_optimize_test_float_oracle(op, from, to, predicate, a, b, &expected_value) && !nan;
+        const uint64_t mark = input->length;
+        const uint32_t count = binary ? 4 : 3;
+        const IrSizes sizes = {
+            .instruction_count = count,
+            .block_count = 1,
+            .constant_count = binary ? 2 : 1,
+        };
+        IrFunction f = { 0 };
+        const bool created = ir_create(input, &sizes, &f) == IR_OK;
+        ir_optimize_test_expect(test, created, "scalar floating fixture allocation");
+        if (created)
+        {
+            f.result_type = (uint8_t)target;
+            f.block_offsets[1] = count;
+            f.constants[0].low = a;
+            ir_optimize_test_instruction(&f, 0, IR_CONST, (uint8_t)source, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            if (binary)
+            {
+                f.constants[1].low = b;
+                ir_optimize_test_instruction(&f, 1, IR_CONST, (uint8_t)source, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 2, (uint8_t)op, (uint8_t)target, 0, 1, op == IR_FCMP ? predicate : BUSTER_IR_NONE);
+            }
+            else
+            {
+                ir_optimize_test_instruction(&f, 1, (uint8_t)op, (uint8_t)target, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            ir_optimize_test_instruction(&f, count - 1, IR_RET, IR_VOID, count - 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint64_t output_mark = output->length;
+            IrOptimizeOptions options = ir_optimize_options();
+            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
+            IrOptimizeResult optimized = { 0 };
+            const IrCheck check = ir_optimize(&f, output, scratch, options, &optimized);
+            bool kept = false;
+            uint32_t returned = BUSTER_IR_NONE;
+            for (uint32_t i = 0; check.error == IR_OK && i < optimized.function.instruction_count; i += 1)
+            {
+                kept = kept || optimized.function.op[i] == op;
+                returned = optimized.function.op[i] == IR_RET ? optimized.function.a[i] : returned;
+            }
+            const bool constant = returned < optimized.function.instruction_count && optimized.function.op[returned] == IR_CONST;
+            const IrConstant folded = constant ? optimized.function.constants[optimized.function.a[returned]] : (IrConstant){ 0 };
+            ir_optimize_test_expect(test, check.error == IR_OK && kept == !expected && (!expected || (constant && folded.low == expected_value && folded.high == 0)),
+                                    "scalar floating operations fold exactly where every environment gives their bits and no flag");
+            if (check.error == IR_OK)
+            {
+                const uint64_t scratch_mark = scratch->length;
+                const InterpreterResult before = ir_optimize_test_simd_run(&f, NULL, 0, scratch);
+                const InterpreterResult after = ir_optimize_test_simd_run(&optimized.function, NULL, 0, scratch);
+                ir_optimize_test_expect(test, before.status == after.status && (before.status != INTERPRETER_OK || (before.value.low == after.value.low && before.value.high == after.value.high)),
+                                        "scalar floating folds keep the interpreter's results");
+                arena_pop_to(scratch, scratch_mark);
+            }
+            folds[kind] += expected;
+            refusals[kind] += !expected;
+            arena_pop_to(output, output_mark);
+        }
+        arena_pop_to(input, mark);
+    }
+    test->random = shared;
+    for (uint32_t kind = 0; kind < BUSTER_ARRAY_LENGTH(operations); kind += 1)
+    {
+        ir_optimize_test_expect(test, folds[kind] > 16 && refusals[kind] > 16, "each scalar floating operation both folds and refuses");
+    }
+}
+
 static void ir_optimize_test_simd_flow(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
 {
     const uint64_t mark = input->length;
@@ -962,6 +1289,7 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
     {
         ir_optimize_test_simd_lanes(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_float_pairs(test);
+        ir_optimize_test_scalar_floats(test, &input, &vector, &scratch);
         ir_optimize_test_simd_flow(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_loop(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_splats(test, &input, &vector, &scalar, &scratch);

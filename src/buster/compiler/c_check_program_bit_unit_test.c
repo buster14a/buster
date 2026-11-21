@@ -209,7 +209,9 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                   "struct __attribute__((packed)) P{unsigned char k:4;unsigned long long x:44;};struct Q{unsigned a:8,b:8,c:8;};"
                                   "struct U3{unsigned char a:8,b:8,c:8;};union V{unsigned a:3;unsigned b:12;};"
                                   "struct A{char c;struct{unsigned x:4,y:12;};char d;};struct N{int i;struct B b;};struct C{unsigned a:8,b:8,c:16;};"
-                                  "struct C gc;struct F{unsigned a:24;char tail[];};struct E{};struct M{unsigned a:24;struct E e;};";
+                                  "struct C gc;struct F{unsigned a:24;char tail[];};struct E{};struct M{unsigned a:24;struct E e;};"
+                                  "struct __attribute__((packed)) W{char c;unsigned:3;long long f:63;};"
+                                  "struct __attribute__((packed)) X{char a:3;unsigned long long g:64;};";
     static const char functions[] = "unsigned issue(struct B*b){b->y+=b->x;b->z^=b->w;return b->x+b->y+b->z+b->w;}"
                                     "void guard(struct G*p,unsigned v){p->x=v;p->x++;}"
                                     "void clipped(struct T*p){p->a+=1;}"
@@ -222,7 +224,9 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                     "unsigned local(unsigned n){struct C s;s.a=n;s.b=n;s.c=n;return s.c+s.b;}"
                                     "void global(unsigned n){gc.c=n;_Generic(0,int:gc.b)=n;gc.a++;}"
                                     "void flexible(struct F*p){p->a+=1;}"
-                                    "void empty(struct M*p){p->a+=1;}";
+                                    "void empty(struct M*p){p->a+=1;}"
+                                    "long long wide(struct W*p){p->f=p->f*3;return p->f;}"
+                                    "void whole(struct X*p){p->g+=2;}";
     typedef struct CheckTestBitCase CheckTestBitCase;
     struct CheckTestBitCase
     {
@@ -236,7 +240,8 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
     // struct's fields an i16 at the struct's 4; N's b's an i32 at 4; C's an i32 at 0, through a local's and a global's
     // constant addresses and a _Generic selection; F's a [3 x i8] before its flexible array member, which clang stores
     // (its first element is in what would be an i32's last byte), and M's an i32 past its member of an empty struct,
-    // which clang doesn't.
+    // which clang doesn't. W's packed 63 bits from bit 11 and X's 64 from bit 3 lie in 9 bytes (#2999), an i72 that
+    // clang's -O0 code reads and writes as an i64 and an i8 after it.
     static const CheckTestBitCase cases[] = {
         { "issue", "r0:4 w0:4" },
         { "guard", "r0:1 w0:1" },
@@ -251,6 +256,8 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         { "global", "r0:4 w0:4" },
         { "flexible", "r0:2 r2:1 w0:2 w2:1" },
         { "empty", "r0:4 w0:4" },
+        { "wide", "r1:8 r9:1 w1:8 w9:1" },
+        { "whole", "r0:8 r8:1 w0:8 w8:1" },
     };
     const uint32_t count = BUSTER_ARRAY_LENGTH(cases);
     char source[sizeof(records) + sizeof(functions)];
@@ -273,7 +280,7 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         // (Tier0Function.symbol_access) is the emission's, in what it left of `scratch` (check_program_access).
         Arena work = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
@@ -323,14 +330,17 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                               "struct __attribute__((packed)) P{unsigned char k:4;unsigned long long x:44;};struct Q{unsigned a:8,b:8,c:8;};"
                               "struct U3{unsigned char a:8,b:8,c:8;};union V{unsigned a:3;unsigned b:12;};"
                               "struct A{char c;struct{unsigned x:4,y:12;};char d;};struct N{int i;struct B b;};struct C{unsigned a:8,b:8,c:16;};"
-                              "struct C gc;"
+                              "struct C gc;struct __attribute__((packed)) W{char c;unsigned:3;long long f:63;char d;};"
+                              "struct __attribute__((packed)) X{char a:3;unsigned long long g:64;char e;};"
                               "int tested(int n){struct B b={1,2,3,4};struct B*pb=&b;pb->y+=pb->x+n;pb->z^=pb->w*n;b.w=n;b.x--;"
                               "struct G g={5,'g'};g.x=n;g.x+=3;struct T t={0x123456,'t'};t.a+=n*1000;"
                               "struct P p={7,0x123456789ULL};p.x+=n;p.k^=n;struct Q q={1,2,3};q.b=q.a+q.c+n;q.c++;"
                               "struct U3 u={4,5,6};u.c=u.a+u.b+n;u.a=n;union V v;v.b=0xabc;v.a=n;"
                               "struct A a={'a',{.x=3,.y=n},'d'};a.y=a.x+n;a.x=n;struct N m={9,{1,2,3,4}};struct N*pm=&m;pm->b.z=pm->b.x+n;pm->b.w--;"
                               "struct C c;c.a=n;c.b=n*3;c.c=n*5;gc.c=n*7;_Generic(0,int:gc.b)=n;gc.a=gc.c+1;"
+                              "struct W w={'w',-5,'d'};struct W*pw=&w;pw->f=pw->f*n-3;w.f--;w.c^=n;"
+                              "struct X x={2,~0ULL,'e'};x.g+=n+1;x.a=x.a+n;int xg=x.g==(unsigned long long)n;"
                               "return b.x+b.y*3+b.z*5+b.w*7+g.x+g.guard+(int)(t.a%1009)+t.c+(int)(p.x%997)+p.k+q.a+q.b*3+q.c*5+u.a+u.b*3+u.c*5+v.b+"
-                              "a.c+a.x+a.y*3+a.d+m.i+m.b.x+m.b.y+m.b.z+m.b.w+c.a+c.b+c.c+gc.a+gc.b+gc.c;}",
+                              "a.c+a.x+a.y*3+a.d+m.i+m.b.x+m.b.y+m.b.z+m.b.w+c.a+c.b+c.c+gc.a+gc.b+gc.c+w.c+(int)(w.f%1013)+w.d+x.a+xg+x.e+(int)(x.g>>60);}",
                               "bit-field-units", clang);
 }

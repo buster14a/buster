@@ -174,7 +174,7 @@ static int run_c_bindings_benchmark(int argc, char** argv)
                 const uint64_t until = c_binding_benchmark_time() + (uint64_t)after_scalar * 1000000;
                 while (after_scalar != 0 && c_binding_benchmark_time() < until)
                 {
-                    valid = c_bindings_replay(&bindings, &replay, output);
+                    c_bindings_replay(&bindings, &replay, output);
                     // Keep every conditioning pass observable even if a future optimizer inlines the replay.
                     __asm__ volatile("" : : "r"(output) : "memory");
                 }

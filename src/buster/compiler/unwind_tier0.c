@@ -2,8 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Derive one bounded native CFI descriptor from Tier 0's fixed frame, without changing its producer. Include after
-// unwind.c, tier0.c and x86_semantics.c. unwind_tier0 uses batched resolved effects; unwind_tier0_scalar is its twin.
-// Both leave the descriptor untouched on failure and allocate nothing.
+// unwind.c, tier0.c and x86_semantics.c. unwind_tier0 uses batched resolved effects (#2924: its twin, which resolved
+// them one record at a time, went with the 9700X's gate, 1.11 to 2.54 times its ticks at every size). It leaves the
+// descriptor untouched on failure and allocates nothing.
 //
 // This is an opt-in consumer of successful, valid baseline Tier0Code, after successful branch sizing. The caller
 // supplies count final byte offsets and the sized function length, and freezes the records through encoding. Encoder
@@ -131,7 +132,7 @@ static bool unwind_tier0_store(const X86Instruction* record, const X86Effects* e
     return result;
 }
 
-static UnwindError unwind_tier0_build(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output, bool exact)
+static UnwindError unwind_tier0(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
 {
     UnwindError error = UNWIND_OK;
     UnwindFunction built = {
@@ -243,18 +244,7 @@ static UnwindError unwind_tier0_build(const Tier0Code* code, const uint32_t* fin
         const uint32_t count = epilogue - first < BUSTER_UNWIND_TIER0_BATCH ? epilogue - first : BUSTER_UNWIND_TIER0_BATCH;
         uint64_t reads[BUSTER_UNWIND_TIER0_BATCH];
         uint64_t writes[BUSTER_UNWIND_TIER0_BATCH];
-        if (exact)
-        {
-            #pragma clang loop vectorize(disable) interleave(disable)
-            for (uint32_t lane = 0; lane < count; lane += 1)
-            {
-                x86_instruction_effects_scalar(&code->records[first + lane], &reads[lane], &writes[lane]);
-            }
-        }
-        else
-        {
-            x86_instructions_effects(code->records + first, count, reads, writes);
-        }
+        x86_instructions_effects(code->records + first, count, reads, writes);
         for (uint32_t lane = 0; error == UNWIND_OK && lane < count; lane += 1)
         {
             const uint32_t i = first + lane;
@@ -305,16 +295,6 @@ static UnwindError unwind_tier0_build(const Tier0Code* code, const uint32_t* fin
     return error;
 }
 
-static UnwindError unwind_tier0_scalar(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output);
-
-static UnwindError unwind_tier0(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
-{
-#if !BUSTER_HOST_VECTOR
-    return unwind_tier0_scalar(code, final_offsets, size, output);
-#else
-    return unwind_tier0_build(code, final_offsets, size, output, false);
-#endif
-}
 
 // Whether a record is a push or a pop (`form`) of `reg`.
 static bool unwind_tier0_stack(const X86Instruction* record, uint32_t form, uint8_t reg)
@@ -708,7 +688,3 @@ static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* fin
     return unwind_tier0_frame_tails(code, final_offsets, size, output, 0);
 }
 
-static UnwindError unwind_tier0_scalar(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
-{
-    return unwind_tier0_build(code, final_offsets, size, output, true);
-}

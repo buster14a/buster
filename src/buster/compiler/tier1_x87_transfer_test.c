@@ -185,14 +185,14 @@ static void tier1_x87_transfer_emission(Tier1WideTest* test)
         bool ok = tier1_wide_test_parse(test, "canonical x87 transport", text, &function);
         IrDominance dominance = { 0 };
         ok = ok && tier1_wide_test_dominance(test, &function, &dominance);
-        for (uint32_t path = 0; ok && path < 2; path += 1)
+        if (ok)
         {
             const uint64_t path_mark = test->output.length;
             Tier1SelectPlan plan = { 0 };
             uint32_t failed = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path == 0, &plan, &failed);
+            const Tier1SelectError selected = tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &failed);
             ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "select the canonical-result transport fixture");
-            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = path == 0, .rematerialize = true, .certify = true };
+            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true, .certify = true };
             Tier1EmitResult emitted = { 0 };
             const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->baseline, &test->output, &test->scratch, &emitted, &failed) : TIER1_EMIT_INVALID;
             ok = ok && tier1_wide_test_expect(test, error == TIER1_EMIT_OK, "emit the canonical-result transport fixture");

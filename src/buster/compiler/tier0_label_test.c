@@ -194,11 +194,10 @@ static void tier0_test_labels(Tier0TestTally* tally)
     function.label_count = BUSTER_TIER0_TEST_LABEL_COUNT;
     Arena arena = arena_reserve(1ull << 26);
     uint8_t* image = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, 4 * BUSTER_TIER0_TEST_PAGE);
-    uint8_t* twin = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, 4 * BUSTER_TIER0_TEST_PAGE);
     const Tier0Check check = tier0_validate(&function);
     const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
     const Tier0Code vector = tier0_compile(&function, &arena);
-    bool ready = tier0_test_expect(tally, image != 0 && twin != 0 && check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
+    bool ready = tier0_test_expect(tally, image != 0 && check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
                                    "labels", "the function: rule \"%s\" at %u, errors %d and %d, or the paths differ", check.rule != 0 ? check.rule : "", check.node,
                                    scalar.error, vector.error);
     // Each label's record is its first entry's: the one the jump to the loop's start, and a branch to a label, would go to.
@@ -217,9 +216,8 @@ static void tier0_test_labels(Tier0TestTally* tally)
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "labels", "the branches can't be sized");
     const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
     const int64_t length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, image, room, 0, 0) : -1;
-    const int64_t twin_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode_scalar(scalar.records, scalar.count, twin, room, 0, 0) : -1;
-    ready = ready && tier0_test_expect(tally, length > 0 && length == twin_length && memcmp(image, twin, (size_t)length) == 0, "labels",
-                                       "the encoders differ, or fail (%" PRId64 ", %" PRId64 ")", length, twin_length);
+    ready = ready && tier0_test_expect(tally, length > 0, "labels",
+                                       "the encoder fails (%" PRId64 ")", length);
     Tier0TestLabelShared* shared = mmap(0, sizeof(Tier0TestLabelShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     ready = ready && tier0_test_expect(tally, shared != MAP_FAILED, "labels", "no shared memory");
     if (ready)

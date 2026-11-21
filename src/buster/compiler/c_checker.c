@@ -413,7 +413,7 @@ struct CheckStatistics
     uint32_t nodes;
     uint32_t levels;
     uint32_t batches;
-    // The nodes each path's action computed, and those the vector path completed without one: its leaves
+    // The nodes an action computed, and those the checker completed without one: its leaves
     // (check_graph_leaf) and its batches' vector-eligible arithmetic.
     uint32_t scalar_nodes;
     uint32_t vector_nodes;
@@ -422,7 +422,7 @@ struct CheckStatistics
     uint64_t query_replay_nodes;
     uint64_t output_bytes;
     uint64_t scratch_bytes;
-    // The vector path's memoized transitions (#1050, c_check_transitions.c): the nodes an earlier node's answer completed
+    // The memoized transitions (#1050, c_check_transitions.c): the nodes an earlier node's answer completed
     // (hits, of which those found after the batch their operands waited in ran: flushed hits), those probed and not found
     // (misses), those whose operator memoizes but an operand or argument of which has no class, a fault or an overload set
     // (folds), the entries inserted and the table's entries at the end, and with CheckOptions.verify_transitions, the hits
@@ -717,21 +717,20 @@ struct CheckStream
 typedef struct CheckOptions CheckOptions;
 struct CheckOptions
 {
-    bool scalar;
     // Validate reader-owned graphs too, and compare their retained purity/allocation facts with the oracle.
     bool verify;
     // With regions, 0 chooses BUSTER_CHECK_BATCH. Values 1..BUSTER_CHECK_BATCH permit differential partition testing.
     uint32_t batch_size;
-    // The vector path's mutation-free regions: each run of pure nodes checked as a region, in postorder batches whose
-    // integer folds take 8 lanes at a time (check_graph_region_postorder), rather than each node in node order, the vector
-    // path's default since on sqlite3.c's -c a region's machinery cost more than its batches saved (#1050; docs/c-checker.md,
+    // The mutation-free regions: each run of pure nodes checked as a region, in postorder batches whose
+    // integer folds take 8 lanes at a time (check_graph_region_postorder), rather than each node in node order, the
+    // default since on sqlite3.c's -c a region's machinery cost more than its batches saved (#1050; docs/c-checker.md,
     // "Node order or regions"). The typed stream is the same.
     bool regions;
     // The regions by dependency level (check_graph_region) rather than in postorder batches (check_graph_region_postorder),
     // their order since the benchmark measured the two on the same actions and postorder won (#133's open question;
     // docs/c-checker.md, "Level order or postorder"); it takes the regions. The typed stream is the same.
     bool level_order;
-    // The vector path by its memoized transitions (#1050, c_check_transitions.c) rather than in node order: opt in (the
+    // The memoized transitions (#1050, c_check_transitions.c) rather than node order: opt in (the
     // driver's --check-transitions), since they don't save a large fraction of check-expressions, and the benchmark compares
     // them (docs/c-checker.md, "Memoized transitions"). Level order takes none.
     bool transitions;
@@ -752,12 +751,12 @@ _Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, catego
                "check_stream_value_to writes a value as its first 64 bytes, its header and three payloads, and its last 32, from its object");
 
 // A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628), written to `destination` by
-// each case's own stores. On the vector path a value of columns is one 64-byte store of its header, the rest of those 64
+// each case's own stores. A value of columns is one 64-byte store of its header, the rest of those 64
 // bytes zero, and one 32-byte store of its object, the rest zero; a whole value is copied by the same two halves, so that
 // a load of a field, or of either half, lies within one store. Returned through a temporary instead, as check_stream_value
 // returns it, the columns' case was cleared by two overlapping 32-byte stores and copied into the action by a 32-byte load
 // across both, which no store can forward: the instruction most sampled in check-expressions of sqlite3.c's -c, at each
-// operand of each action (#1050). The scalar path is the same value by assignment.
+// operand of each action (#1050).
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_action, once per operand.
 static inline __attribute__((always_inline)) void check_stream_value_to(const CheckStream* stream, uint32_t node, CheckValue* destination)
 {
@@ -771,7 +770,6 @@ static inline __attribute__((always_inline)) void check_stream_value_to(const Ch
         const uint32_t row = stream->payload_rows[node];
         whole = row != 0 && row <= stream->payload_count ? stream->payloads + row - 1 : NULL;
     }
-#if BUSTER_HOST_VECTOR
     uint8_t* bytes = (uint8_t*)destination;
     if (whole != NULL)
     {
@@ -784,22 +782,6 @@ static inline __attribute__((always_inline)) void check_stream_value_to(const Ch
         _mm512_storeu_si512(bytes, _mm512_zextsi128_si512(header));
         _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)stream->value_objects[node])));
     }
-#else
-    if (whole != NULL)
-    {
-        *destination = *whole;
-    }
-    else
-    {
-        *destination = (CheckValue){
-            .type = stream->value_types[node],
-            .category = (CheckCategory)stream->value_categories[node],
-            .flags = stream->value_flags[node],
-            .constant_kind = (CheckConstantKind)stream->value_constants[node],
-            .object = stream->value_objects[node],
-        };
-    }
-#endif
 }
 
 // A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628), by assignment: its callers,
@@ -1355,7 +1337,7 @@ static bool check_graph_typed(CheckOp op)
 
 // Only regions known to use builtin arithmetic types can be reordered. An address, decay, composite, or another
 // action that can intern a type is a source-order barrier. This preserves identical TypeIds in fresh tables, not
-// merely in a table already populated by the scalar oracle. A non-builtin value conservatively ends a region.
+// merely in a table an earlier run populated. A non-builtin value conservatively ends a region.
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_record_nodes, once per node.
 static inline __attribute__((always_inline)) bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8_t* pure)
 {
@@ -1528,7 +1510,7 @@ static bool check_graph_validate_lists(const CheckGraph* graph)
 }
 
 // One node, every node before it valid: its operator, edges, columns and turn in each sideband list, then its purity and the
-// counters. The exact path: check_graph_validate runs it on every node, check_graph_validate_vector on the blocks it leaves.
+// counters. The exact path: check_graph_validate runs it on the blocks it leaves.
 static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, uint8_t* pure, CheckGraphValidation* state)
 {
     const CheckOp op = graph->ops[node];
@@ -1646,22 +1628,7 @@ static bool check_graph_validate_consumed(const CheckGraph* graph, const CheckGr
            state->leaves == graph->leaf_count;
 }
 
-// The scalar twin of check_graph_validate_vector: every node in order, up to the first invalid one, which `failed` names.
-static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, CheckGraphValidation* state, uint32_t* failed)
-{
-    *state = (CheckGraphValidation){ 0 };
-    *failed = BUSTER_CHECK_NONE;
-    bool result = check_graph_validate_lists(graph);
-    for (uint32_t node = 0; result && node < graph->count; node += 1)
-    {
-        result = check_graph_validate_node(graph, node, pure, state);
-        *failed = result ? BUSTER_CHECK_NONE : node;
-    }
-    result = result && check_graph_validate_consumed(graph, state);
-    return result;
-}
-
-// check_graph_validate_vector's classes of operators, a byte each, from the exact path's rules (check_graph_classes): the
+// check_graph_validate's classes of operators, a byte each, from the exact path's rules (check_graph_classes): the
 // arity (a query's that names no type), whether it takes an argument slice, whether a region may reorder it and with the
 // requested type, whether it is sizeof or _Alignof, and whether only the exact path checks it.
 #define BUSTER_CHECK_CLASS_ARITY 0x03u
@@ -1848,9 +1815,11 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
     return result;
 }
 
-// check_graph_validate's result, failed node and, for a valid graph, its purity and counters, sixteen nodes at a time
-// (check_graph_validate_block) where the optional columns the blocks read are present. `pure` has graph->count + 1 bytes.
-static bool check_graph_validate_vector(const CheckGraph* graph, uint8_t* pure, CheckGraphValidation* state, uint32_t* failed)
+// A graph's validation: its result, the first invalid node (`failed`) and, for a valid graph, its purity and counters,
+// sixteen nodes at a time (check_graph_validate_block) where the optional columns the blocks read are present, and a node
+// at a time by the exact path (check_graph_validate_node) where they aren't or a block leaves it. `pure` has
+// graph->count + 1 bytes.
+static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, CheckGraphValidation* state, uint32_t* failed)
 {
     *state = (CheckGraphValidation){ 0 };
     *failed = BUSTER_CHECK_NONE;
@@ -2081,7 +2050,7 @@ static inline __attribute__((always_inline)) void check_graph_store(CheckStream*
 #define BUSTER_CHECK_MARK_PURE 0x01u
 #define BUSTER_CHECK_MARK_DONE 0x02u
 
-// Whether the vector path completes `node` as a leaf (check_graph_leaf): a VALUE without an overload set, about 45% of
+// Whether the checker completes `node` as a leaf (check_graph_leaf): a VALUE without an overload set, about 45% of
 // sqlite3.c's body nodes. Without overload candidates no leaf has an overload set (check_graph_validate checks the leaves',
 // as check_graph_node_action relies on), and its record isn't read for it.
 static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
@@ -2090,16 +2059,13 @@ static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
 }
 
 // The end of the run of marked nodes from `node`, a region of check_graph_run's main loop: the first node from `node`
-// without a mark, or `count`. The vector path tests 64 marks at a time, masked to the graph's end, and takes the first
-// that is zero; the scalar path, and the vector path after it as a check that ends at once, take each node. Scanned a
-// node at a time, its exit, at a data-dependent length, was the main loop's most sampled branch on the 9700X (#1050).
-static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(const uint8_t* marks, uint32_t node, uint32_t count, bool scalar)
+// without a mark, or `count`. It tests 64 marks at a time, masked to the graph's end, and takes the first that is zero.
+// Scanned a node at a time, its exit, at a data-dependent length, was the main loop's most sampled branch on the 9700X
+// (#1050).
+static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(const uint8_t* marks, uint32_t node, uint32_t count)
 {
-    (void)scalar;
-
     uint32_t end = node;
-#if BUSTER_HOST_VECTOR
-    bool open = !BUSTER_SCALAR_PATH(scalar);
+    bool open = true;
     while (open && end < count)
     {
         const uint32_t live = count - end < 64 ? count - end : 64;
@@ -2109,18 +2075,13 @@ static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(con
         open = unmarked == 0;
         end += open ? live : (uint32_t)_tzcnt_u64(unmarked);
     }
-#endif
-    while (end < count && marks[end] != 0)
-    {
-        end += 1;
-    }
     return end;
 }
 
 // Such a leaf's record without its action: what check_graph_scalar_node gives it, which its own leaf decides alone, since a
 // VALUE action reads no operand and interns no type. That is the leaf with its type as operand 0's conversion, or for an
 // invalid type, that type's diagnostic and a zero value (check_action_compute skips the operator then); its diagnostic
-// operand is the run's zero. The vector path writes it in node order, beside its neighbours' records, whose cache lines a
+// operand is the run's zero. The checker writes it in node order, beside its neighbours' records, whose cache lines a
 // separate pass of leaves would write a second time (on sqlite3.c, a sixth of the graph's time).
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per leaf.
 static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
@@ -3135,14 +3096,13 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
 // A node's action, its result stored, with `guards` receiving what it read of its source position (CheckAction.guards),
 // or null. Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per impure node.
 static inline __attribute__((always_inline)) void check_graph_node_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments,
-                                                                          Arena* scratch, bool scalar, CheckActionGuards* guards)
+                                                                          Arena* scratch, CheckActionGuards* guards)
 {
-    (void)scalar;
-
     CheckAction action;
     CheckActionResult result;
     check_graph_action(graph, stream, node, arguments, &action);
-    action.scalar = scalar;
+    // (The actions' own one-at-a-time arms, CheckAction.scalar, are the constant conditions' evaluator's: #2924's phase D.)
+    action.scalar = false;
     action.guards = guards;
     // Without overload candidates every value's overload head is zero (check_graph_validate checks the leaves', and the
     // actions only preserve their operands'): no call is contextual, and no operand takes an overload (#530).
@@ -3175,7 +3135,7 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
         }
         else
         {
-            const CheckOverloadResult selected = check_graph_overload_call(types, graph, stream, &action, head, scratch, BUSTER_SCALAR_PATH(scalar), &result);
+            const CheckOverloadResult selected = check_graph_overload_call(types, graph, stream, &action, head, scratch, &result);
             if (overload)
             {
                 stream->overloads[stream->overload_count++] = (CheckOverloadEffect){ .node = node, .selected = selected };
@@ -3271,10 +3231,10 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
 }
 
 // check_graph_node_action out of line, for the memoized transitions (c_check_transitions.c).
-static void check_graph_guarded_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar,
+static void check_graph_guarded_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch,
                                      CheckActionGuards* guards)
 {
-    check_graph_node_action(types, graph, stream, node, arguments, scratch, scalar, guards);
+    check_graph_node_action(types, graph, stream, node, arguments, scratch, guards);
 }
 
 // Whether node `node` is a discard of an rvalue that check_graph_discard takes, with that rvalue in `value`: a cast to void,
@@ -3305,8 +3265,7 @@ static inline __attribute__((always_inline)) bool check_graph_discard_taken(cons
 // A discard's record (check_graph_discard_taken), without its action: what check_action_compute gives a cast to void of the
 // rvalue `value`, by the same steps, check_action_cast's conversion of it to void and its provenance, and the source flags.
 // On sqlite3.c's -c, a statement's discard is one node in eight, and its action's machinery (building the action, its
-// result's clearing and the dispatch) most of its time (#1050). The scalar path takes the action, the twin whose streams the
-// tests compare.
+// result's clearing and the dispatch) most of its time (#1050).
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per discard.
 static inline __attribute__((always_inline)) void check_graph_discard(TypeTable* types, CheckStream* stream, uint32_t node, CheckValue* value)
 {
@@ -3324,18 +3283,16 @@ static inline __attribute__((always_inline)) void check_graph_discard(TypeTable*
 }
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per impure node.
-static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
+static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch)
 {
-    (void)scalar;
-
     CheckValue discarded;
-    if (!BUSTER_SCALAR_PATH(scalar) && check_graph_discard_taken(types, graph, stream, node, &discarded))
+    if (check_graph_discard_taken(types, graph, stream, node, &discarded))
     {
         check_graph_discard(types, stream, node, &discarded);
     }
     else
     {
-        check_graph_node_action(types, graph, stream, node, arguments, scratch, scalar, NULL);
+        check_graph_node_action(types, graph, stream, node, arguments, scratch, NULL);
     }
 }
 
@@ -3407,7 +3364,7 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
             if (count == 1)
             {
                 // A singleton has no parallel work. Avoid batch packing and wide table lookups on chains.
-                check_graph_scalar_node(types, graph, stream, order[at], 0, 0, false);
+                check_graph_scalar_node(types, graph, stream, order[at], 0, 0);
             }
             else
             {
@@ -3433,7 +3390,7 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
     stream->statistics.levels += scheduled != 0 ? maximum + 1 : 0;
 }
 
-// A mutation-free region in postorder, the vector path's default, and its level order's alternative (check_graph_region,
+// A mutation-free region in postorder, the regions' default, and its level order's alternative (check_graph_region,
 // CheckOptions.level_order), which the benchmark measured slower on sqlite3.c's bodies: its leaves complete first, as
 // there; then, from the first node not yet done, a batch of up to `batch_size` consecutive nodes that read none of
 // each other (an operand in the region not done is the batch's, an earlier member's), checked as one of level order's
@@ -3479,7 +3436,7 @@ static void check_graph_region_postorder(TypeTable* types, const CheckGraph* gra
                 }
                 else if (open && !check_action_fold_operator(graph->ops[node]))
                 {
-                    check_graph_node_action(types, graph, stream, node, 0, 0, false, NULL);
+                    check_graph_node_action(types, graph, stream, node, 0, 0, NULL);
                     marks[node] |= BUSTER_CHECK_MARK_DONE;
                     node += 1;
                 }
@@ -3496,7 +3453,7 @@ static void check_graph_region_postorder(TypeTable* types, const CheckGraph* gra
         }
         if (count == 1)
         {
-            check_graph_scalar_node(types, graph, stream, members[0], 0, 0, false);
+            check_graph_scalar_node(types, graph, stream, members[0], 0, 0);
         }
         else if (count != 0)
         {
@@ -3615,16 +3572,15 @@ static bool check_graph_warning_needed(TypeTable* types, const CheckGraph* graph
     return stream->warnings[node] != 0 || check_graph_gnu_constant(types, context, &value);
 }
 
-static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states, bool scalar)
+static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states)
 {
-    (void)scalar;
     stream->warning_count = 0;
     stream->warnings_prepared = true;
     bool needed = false;
     uint32_t node = 0;
-    // The vector path reads only the warnings and the contexts, 16 at a time, and the values of the nodes whose GNU context
-    // may need them (#530); the scalar path tests every node.
-    for (; !BUSTER_SCALAR_PATH(scalar) && !needed && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    // It reads only the warnings and the contexts, 16 at a time, and the values of the nodes whose GNU context may need
+    // them (#530); the nodes past the last 16 one at a time.
+    for (; !needed && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
         __mmask16 candidates = _mm512_test_epi32_mask(_mm512_loadu_si512(stream->warnings + node), _mm512_set1_epi32(-1));
         if (graph->contexts != NULL)
@@ -3976,14 +3932,12 @@ static void check_graph_counted_uses(const TypeTable* types, const CheckGraph* g
     arena_pop_to(scratch, mark);
 }
 
-static void check_graph_reports(TypeTable* types, const CheckGraph* graph, CheckStream* stream, CheckReport* temporary, bool scalar)
+static void check_graph_reports(TypeTable* types, const CheckGraph* graph, CheckStream* stream, CheckReport* temporary)
 {
-    (void)scalar;
-
-    // Only a node with a diagnostic or a context reports: the vector path finds those 16 at a time and reads no other
-    // node's value (a sixth of the graph's bytes, #530); the scalar path takes every node.
+    // Only a node with a diagnostic or a context reports: it finds those 16 at a time and reads no other node's value (a
+    // sixth of the graph's bytes, #530), the nodes past the last 16 one at a time.
     uint32_t node = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    for (; graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
         __mmask16 reported = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_NONE));
         if (graph->contexts != 0)
@@ -4032,15 +3986,13 @@ static void check_graph_reports(TypeTable* types, const CheckGraph* graph, Check
 
 _Static_assert(sizeof(CheckDiagnostic) == sizeof(uint32_t), "the vector scans load diagnostics as 32-bit lanes");
 
-// The first node whose action ran out of room, or BUSTER_CHECK_NONE: AVX-512 compares 16 diagnostics at a time, the rest and
-// the scalar path one at a time.
-static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t count, bool scalar)
+// The first node whose action ran out of room, or BUSTER_CHECK_NONE: AVX-512 compares 16 diagnostics at a time, the rest one
+// at a time.
+static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t count)
 {
-    (void)scalar;
-
     uint32_t found = BUSTER_CHECK_NONE;
     uint32_t node = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && found == BUSTER_CHECK_NONE && count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    for (; found == BUSTER_CHECK_NONE && count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
         const __mmask16 exhausted = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_RESOURCE));
         found = exhausted != 0 ? node + (uint32_t)__builtin_ctz(exhausted) : BUSTER_CHECK_NONE;
@@ -4057,13 +4009,11 @@ static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t co
 
 // Valid graphs are in postorder: one reverse pass marks each required context and all of its dependencies.
 // This proof changes no graph column and is retained with the output rather than in the scheduler's scratch.
-// Only a context and the nodes it reaches mark anything: the vector path passes over each 64 nodes that hold neither a
-// context nor a mark from a later node, as one test of their two columns, since in postorder only a later node marks one
-// (#1050). The scalar path takes every node. `zero` says `marks` is zero already (a fresh output, CheckOptions.fresh_output).
-static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks, bool zero, bool scalar)
+// Only a context and the nodes it reaches mark anything: it passes over each 64 nodes that hold neither a context nor a mark
+// from a later node, as one test of their two columns, since in postorder only a later node marks one (#1050). `zero` says
+// `marks` is zero already (a fresh output, CheckOptions.fresh_output).
+static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks, bool zero)
 {
-    (void)scalar;
-
     const uint8_t required = BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE;
     if (!zero)
     {
@@ -4072,14 +4022,12 @@ static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* mark
     for (uint32_t node = graph->count; node > 0;)
     {
         bool skipped = false;
-#if BUSTER_HOST_VECTOR
-        if (!BUSTER_SCALAR_PATH(scalar) && graph->contexts != NULL && node >= BUSTER_CHECK_CONTEXT_LANES)
+        if (graph->contexts != NULL && node >= BUSTER_CHECK_CONTEXT_LANES)
         {
             const uint32_t first = node - BUSTER_CHECK_CONTEXT_LANES;
             const __m512i contexts = _mm512_and_si512(_mm512_loadu_si512(graph->contexts + first), _mm512_set1_epi8((char)required));
             skipped = _mm512_test_epi8_mask(_mm512_or_si512(contexts, _mm512_loadu_si512(marks + first)), _mm512_set1_epi8(-1)) == 0;
         }
-#endif
         if (skipped)
         {
             node -= BUSTER_CHECK_CONTEXT_LANES;
@@ -4116,11 +4064,6 @@ static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* mark
 
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
 {
-#if !BUSTER_HOST_VECTOR
-    CheckOptions host_options = *options;
-    host_options.scalar = true;
-    options = &host_options;
-#endif
     const uint64_t output_start = output->length;
     const uint64_t scratch_start = scratch->length;
     *stream = (CheckStream){
@@ -4130,7 +4073,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     const uint32_t batch_size = options->batch_size == 0 ? BUSTER_CHECK_BATCH : options->batch_size;
     bool result = output != scratch && count <= graph->capacity && count <= (1u << 30) && batch_size <= BUSTER_CHECK_BATCH;
     stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
-    // The scheduler's marks (BUSTER_CHECK_MARK_PURE and _DONE), with check_graph_validate_vector's absent operand after them.
+    // The scheduler's marks (BUSTER_CHECK_MARK_PURE and _DONE), with check_graph_validate's absent operand after them.
     uint8_t* pure = result && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint32_t* levels = result && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
     uint32_t* counts = result && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 2) : 0;
@@ -4156,8 +4099,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         else
         {
-            result = BUSTER_SCALAR_PATH(options->scalar) ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
-                                       check_graph_validate_vector(graph, pure, &validation, &stream->failed_node);
+            result = check_graph_validate(graph, pure, &validation, &stream->failed_node);
             if (result && recorded)
             {
                 result = check_graph_recorded_equal(graph, &validation, pure, &stream->failed_node);
@@ -4246,20 +4188,19 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             }
             if (constant_contexts)
             {
-                check_graph_constant_contexts(graph, stream->constant_evaluated, zero_output, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_constant_contexts(graph, stream->constant_evaluated, zero_output);
             }
         }
         if (stream->argument_conversions != 0 && !zero_output)
         {
             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
         }
-        // The vector path's memoized transitions (#1050, c_check_transitions.c) where the options ask for them, unless
-        // overload sets make operands contextual, a column its keys read is absent (as check_graph_validate_vector's blocks
-        // need theirs), or the scratch arena has no room for the table. Otherwise, in node order: the vector path's leaves
-        // without their actions and its other nodes one at a time, or with its regions (CheckOptions.regions, level_order)
-        // each run of pure nodes as a region; the scalar path's nodes one at a time.
+        // The memoized transitions (#1050, c_check_transitions.c) where the options ask for them, unless overload sets make
+        // operands contextual, a column its keys read is absent (as check_graph_validate's blocks need theirs), or the
+        // scratch arena has no room for the table. Otherwise, in node order: the leaves without their actions and the other
+        // nodes one at a time, or with its regions (CheckOptions.regions, level_order) each run of pure nodes as a region.
         const bool columns = graph->types != NULL && graph->members != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL;
-        const bool transitions = !BUSTER_SCALAR_PATH(options->scalar) && !options->level_order && options->transitions &&
+        const bool transitions = !options->level_order && options->transitions &&
                                  graph->overload_candidate_count == 0 && columns &&
                                  check_graph_transitions(types, graph, stream, pure, levels, order, arguments, scratch, batch_size, options->verify_transitions);
         // A verified run's hits each ran their actions too: a mismatch fails the run, as an invalid graph.
@@ -4272,23 +4213,23 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         // passes after it, which may write a node again, do.
         stream->zero_columns = zero_output;
         uint32_t node = transitions ? count : 0;
-        const bool regions = !BUSTER_SCALAR_PATH(options->scalar) && (options->regions || options->level_order);
+        const bool regions = options->regions || options->level_order;
         while (node < count)
         {
-            if (!BUSTER_SCALAR_PATH(options->scalar) && (!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
+            if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
             {
                 check_graph_leaf(types, graph, stream, node);
                 node += 1;
             }
             else if (!regions || pure[node] == 0)
             {
-                check_graph_scalar_node(types, graph, stream, node, arguments, scratch, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
                 node += 1;
             }
             else
             {
                 const uint32_t begin = node;
-                node = check_graph_marked_end(pure, node, count, BUSTER_SCALAR_PATH(options->scalar));
+                node = check_graph_marked_end(pure, node, count);
                 if (options->level_order)
                 {
                     check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
@@ -4302,7 +4243,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->zero_columns = false;
         for (uint32_t pass = 0; result && pass < 2; pass += 1)
         {
-            const uint32_t exhausted = check_graph_resource_node(stream, count, BUSTER_SCALAR_PATH(options->scalar));
+            const uint32_t exhausted = check_graph_resource_node(stream, count);
             if (exhausted != BUSTER_CHECK_NONE)
             {
                 result = false;
@@ -4311,7 +4252,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             }
             if (result && pass == 0)
             {
-                result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments, BUSTER_SCALAR_PATH(options->scalar),
+                result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments,
                                                    options->replay_queries);
             }
         }
@@ -4324,12 +4265,12 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             if (count != 0)
             {
-                check_graph_warning_contexts(types, graph, stream, pure, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_warning_contexts(types, graph, stream, pure);
             }
             result = check_graph_const_warnings(types, graph, stream, output);
             if (result)
             {
-                check_graph_reports(types, graph, stream, reports, BUSTER_SCALAR_PATH(options->scalar));
+                check_graph_reports(types, graph, stream, reports);
                 check_graph_counted_uses(types, graph, stream, scratch);
             }
         }

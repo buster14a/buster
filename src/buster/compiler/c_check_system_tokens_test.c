@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The system-header bitmap's scalar and vector kernels against independently stated level classes (#1610).
+// The system-header bitmap's kernels against independently stated level classes (#1610).
 // Protected ends cover every small tail, clamped sources and the gather's three readable padding bytes. A large
 // column also covers long conversions; the existing repository self-check is the original MSan
 // failing consumer, since a small test caller alone need not cross LLVM's callback-instrumentation threshold.
@@ -12,15 +12,14 @@ static __attribute__((noinline)) void check_test_system_tokens(CheckTest* test)
     {
         SOURCES,
         LEVELS,
-        VECTOR,
-        SCALAR,
+        TOKENS,
         COLUMNS,
         CAPACITY = (1u << 21) + 15,
     };
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t source_bytes = ((uint64_t)CAPACITY * sizeof(uint32_t) + page - 1) / page * page;
     const uint64_t token_bytes = ((uint64_t)CAPACITY + 2 + page - 1) / page * page;
-    const uint64_t bytes[COLUMNS] = { source_bytes, page, token_bytes, token_bytes };
+    const uint64_t bytes[COLUMNS] = { source_bytes, page, token_bytes };
     uint8_t* mappings[COLUMNS];
     bool ready = true;
     for (uint32_t i = 0; i < COLUMNS; i += 1)
@@ -63,26 +62,21 @@ static __attribute__((noinline)) void check_test_system_tokens(CheckTest* test)
         {
             const uint32_t count = round < 66 ? round : extra_counts[round - 66];
             uint32_t* sources = (uint32_t*)(mappings[SOURCES] + source_bytes - (uint64_t)count * sizeof(uint32_t));
-            uint8_t* vector = mappings[VECTOR] + token_bytes - count - 1;
-            uint8_t* scalar = mappings[SCALAR] + token_bytes - count - 1;
+            uint8_t* map = mappings[TOKENS] + token_bytes - count - 1;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 sources[i] = source_values[(i * 7 + i / 16) % BUSTER_ARRAY_LENGTH(source_values)];
             }
-            vector[-1] = 0x5a;
-            scalar[-1] = 0x5a;
-            vector[count] = 0xa5;
-            scalar[count] = 0xa5;
-            memset(vector, 0xcc, count);
-            memset(scalar, 0xcc, count);
-            check_input_system_token_map(vector, sources, count, levels, limit, false);
-            check_input_system_token_map(scalar, sources, count, levels, limit, true);
-            bool equal = vector[-1] == 0x5a && scalar[-1] == 0x5a && vector[count] == 0xa5 && scalar[count] == 0xa5;
+            map[-1] = 0x5a;
+            map[count] = 0xa5;
+            memset(map, 0xcc, count);
+            check_input_system_token_map(map, sources, count, levels, limit);
+            bool equal = map[-1] == 0x5a && map[count] == 0xa5;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 const uint32_t source = sources[i];
                 const uint8_t expected = source < limit && expected_levels[source % BUSTER_ARRAY_LENGTH(expected_levels)];
-                equal &= vector[i] == expected && scalar[i] == expected;
+                equal &= map[i] == expected;
             }
             differences += !equal;
             cases += 1;
