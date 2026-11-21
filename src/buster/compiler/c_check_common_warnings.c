@@ -9582,8 +9582,11 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
             bound_los[j] = sorted_lo;
             bound_his[j] = sorted_hi;
         }
-        const String8 type_name = enum_count != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, enum_type, 0) : (String8){ 0 };
-        for (uint32_t i = 0; values_known && type_name.length != 0 && i < interval_count; i += 1)
+        // Only an endpoint outside the enumeration prints its type. Spelling a named type builds the unit's
+        // diagnostic name tables; a fully covered switch (and a missing-enumerator list) needs none of them.
+        String8 type_name = { 0 };
+        bool spelled = false;
+        for (uint32_t i = 0; values_known && enum_count != 0 && i < interval_count; i += 1)
         {
             const CheckProgramCase* item = item_table + intervals[i];
             for (uint32_t bound = 0; bound < (item->range ? 2u : 1u); bound += 1)
@@ -9594,7 +9597,12 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
                 {
                     in_enum = all_case_keys[e] == bound_key;
                 }
-                if (!in_enum)
+                if (!in_enum && !spelled)
+                {
+                    type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, enum_type, 0);
+                    spelled = true;
+                }
+                if (!in_enum && type_name.length != 0)
                 {
                     const uint32_t bound_token = bound != 0 ? bound_his[i] : bound_los[i];
                     check_common_report_at(parser, pp, input, bound_token, body_end, CHECK_WARNING_ID_SWITCH, false,

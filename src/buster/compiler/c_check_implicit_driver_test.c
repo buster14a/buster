@@ -711,7 +711,8 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "void g(void) { printf(\"%lc\\n\", (wint_t)L'x'); }\n";
     static const char switch_alias[] =
         "enum E { A = 1, B = 1, C = 2 };\n"
-        "int f(enum E e) { switch (e) { case A: return 1; case C: return 2; } return 0; }\n";
+        "int f(enum E e) { switch (e) { case A: return 1; case C: return 2; } return 0; }\n"
+        "int g(enum E e) { switch (e) { case 3 ... 5: return 3; case 7: default: return 7; } }\n";
     static const char sign_zero[] =
         "int a(int i) { return i < 0u; }\n"
         "int b(int i) { return i >= 0u; }\n"
