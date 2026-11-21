@@ -371,6 +371,8 @@ struct ParseTokens
     // Each token's index in the preprocessor's output: its location and spelling are there. Both halves of a split
     // `::` have the `::`'s.
     uint32_t* sources;
+    // A contiguous PP stream is its own source map. The writable column remains reserved for a remapped stream.
+    bool identity_sources;
     // The output's flags (BUSTER_PP_START_OF_LINE, BUSTER_PP_SPACE): clang's recovery reads line breaks in places.
     uint8_t* flags;
     uint32_t count;
@@ -380,6 +382,61 @@ struct ParseTokens
     uint32_t* pragma_positions;
     uint32_t pragma_count;
 };
+
+// A grammar token's PP position, including the parser's zero sentinels before and after the unit.
+BUSTER_INLINE uint32_t parse_source_index(const ParseTokens* tokens, int64_t token)
+{
+    const uint32_t identity = (uint64_t)token < tokens->count ? (uint32_t)token : 0;
+    return tokens->identity_sources ? identity : tokens->sources[token];
+}
+
+BUSTER_INLINE __m512i parse_source_gather(const ParseTokens* tokens, __m512i indices, __mmask16 lanes)
+{
+    const __mmask16 live = _mm512_mask_cmplt_epu32_mask(lanes, indices, _mm512_set1_epi32((int32_t)tokens->count));
+    return tokens->identity_sources ? _mm512_maskz_mov_epi32(live, indices) : _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, indices, tokens->sources, 4);
+}
+
+BUSTER_INLINE __m512i parse_source_vector(const ParseTokens* tokens, uint32_t at, __mmask16 lanes)
+{
+    __m512i sources;
+    if (tokens->identity_sources)
+    {
+        const __m512i indices = _mm512_add_epi32(_mm512_set1_epi32((int32_t)at), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+        const __mmask16 live = _mm512_mask_cmplt_epu32_mask(lanes, indices, _mm512_set1_epi32((int32_t)tokens->count));
+        sources = _mm512_maskz_mov_epi32(live, indices);
+    }
+    else
+    {
+        sources = _mm512_maskz_loadu_epi32(lanes, tokens->sources + at);
+    }
+    return sources;
+}
+
+// A reduced or repaired view owns an explicit PP position for each live token it copies.
+static __attribute__((unused)) void parse_copy_sources(uint32_t* to, const ParseTokens* tokens, uint32_t at, uint32_t length)
+{
+    if (tokens->identity_sources)
+    {
+        for (uint32_t i = 0; i < length; i += 1)
+        {
+            to[i] = at + i;
+        }
+    }
+    else
+    {
+        memcpy(to, tokens->sources + at, (size_t)length * sizeof(*to));
+    }
+}
+
+static __attribute__((unused)) bool parse_sources_equal(const ParseTokens* a, const ParseTokens* b, uint32_t count)
+{
+    bool equal = true;
+    for (uint32_t i = 0; i < count && equal; i += 1)
+    {
+        equal = parse_source_index(a, i) == parse_source_index(b, i);
+    }
+    return equal;
+}
 
 // Whether the '#' at `hash` in the output, which starts a line, begins a pragma, and where the pragma's
 // BUSTER_PP_KIND_PRAGMA_END is: the preprocessor writes a pragma as '#' starting a line, the pragma's tokens (none of
@@ -2831,7 +2888,7 @@ static __attribute__((unused)) const uint8_t* parse_embed_bytes(const Parser* pa
     *length = 0;
     if (pp != NULL && pp->embed_count != 0 && token < parser->tokens.count && parser->tokens.sources != NULL)
     {
-        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t source = parse_source_index(&parser->tokens, token);
         if (source < pp->output.count && pp->output.kinds[source] == BUSTER_PP_KIND_EMBED && pp->output.values[source] < pp->embed_count)
         {
             const PPEmbed* embed = pp->embeds + pp->output.values[source];
@@ -2879,7 +2936,7 @@ static uint32_t parse_end_location(const Preprocessor* pp)
 // The location just after parser token `t`'s spelling.
 static uint32_t parse_token_end(const Parser* parser, const Preprocessor* pp, uint32_t t)
 {
-    const uint32_t s = parser->tokens.sources[t];
+    const uint32_t s = parse_source_index(&parser->tokens, t);
     const uint8_t kind = pp->output.kinds[s];
     const uint32_t location = pp->output.locations[s];
     uint32_t result = pp->output.values[s];
@@ -2895,7 +2952,7 @@ static uint32_t parse_token_end(const Parser* parser, const Preprocessor* pp, ui
     else if (kind == C_TOKEN_COLONCOLON)
     {
         // The first half of a split `::` ends at the second.
-        result = location + 1 + (t + 1 < parser->tokens.count && parser->tokens.sources[t + 1] == s ? 0 : 1);
+        result = location + 1 + (t + 1 < parser->tokens.count && parse_source_index(&parser->tokens, t + 1) == s ? 0 : 1);
     }
     return result;
 }
@@ -2966,7 +3023,7 @@ static uint32_t parse_expansion_context(const Preprocessor* pp, uint32_t source)
 
 static uint32_t parse_primary_end(const Parser* parser, const Preprocessor* pp, uint32_t token)
 {
-    const uint32_t source = parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&parser->tokens, token);
     uint32_t result = parse_token_end(parser, pp, token);
     uint32_t origin = pp_history_at(pp, source);
     uint32_t location = BUSTER_PP_NONE;
@@ -3009,13 +3066,13 @@ static uint32_t parse_diagnostic_location(const Parser* parser, const Preprocess
     uint32_t result;
     if (diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS && t > 0 && t - 1 < parser->tokens.count)
     {
-        const uint32_t previous = parse_expansion_context(pp, parser->tokens.sources[t - 1]);
-        const bool inside = previous != 0 && t < parser->tokens.count && previous == parse_expansion_context(pp, parser->tokens.sources[t]);
-        result = inside ? parse_primary_location(pp, parser->tokens.sources[t]) : parse_primary_end(parser, pp, t - 1);
+        const uint32_t previous = parse_expansion_context(pp, parse_source_index(&parser->tokens, t - 1));
+        const bool inside = previous != 0 && t < parser->tokens.count && previous == parse_expansion_context(pp, parse_source_index(&parser->tokens, t));
+        result = inside ? parse_primary_location(pp, parse_source_index(&parser->tokens, t)) : parse_primary_end(parser, pp, t - 1);
     }
     else if (t < parser->tokens.count)
     {
-        result = parse_primary_location(pp, parser->tokens.sources[t]);
+        result = parse_primary_location(pp, parse_source_index(&parser->tokens, t));
     }
     else
     {
@@ -3037,7 +3094,7 @@ static void parse_diagnostic_message(const Parser* parser, const Preprocessor* p
     else if (diagnostic->argument != BUSTER_PARSE_NONE && diagnostic->argument < parser->tokens.count)
     {
         const uint32_t a = diagnostic->argument;
-        const uint32_t start = pp->output.locations[parser->tokens.sources[a]];
+        const uint32_t start = pp->output.locations[parse_source_index(&parser->tokens, a)];
         const uint32_t end = parse_token_end(parser, pp, a);
         const uint8_t* bytes = pp_location_bytes(pp, start);
         const uint32_t length = bytes != 0 && end > start ? (end - start < sizeof(spelling) - 1 ? end - start : (uint32_t)sizeof(spelling) - 1) : 0;

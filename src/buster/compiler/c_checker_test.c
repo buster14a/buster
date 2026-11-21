@@ -2909,7 +2909,7 @@ static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, u
     uint32_t line = 0;
     if (token < parser->tokens.count)
     {
-        const uint32_t location = pp->output.locations[parser->tokens.sources[token]];
+        const uint32_t location = pp->output.locations[parse_source_index(&parser->tokens, token)];
         const char* name = 0;
         uint32_t length = 0;
         line = pp_presumed(pp, location, &name, &length);
@@ -3243,7 +3243,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                 if (checked[p] && streams[p].report_count != 0)
                 {
                     const uint32_t token = streams[p].reports[0].token;
-                    const uint32_t source = token < parsers[p].tokens.count ? parsers[p].tokens.sources[token] : BUSTER_CHECK_NONE;
+                    const uint32_t source = token < parsers[p].tokens.count ? parse_source_index(&parsers[p].tokens, token) : BUSTER_CHECK_NONE;
                     first = source < first ? source : first;
                 }
                 if (checked[p] && streams[p].report_count == 0)
@@ -3257,7 +3257,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     if (!initialized)
                     {
                         const uint32_t token = initializers.token;
-                        const uint32_t source = token < parsers[p].tokens.count ? parsers[p].tokens.sources[token] : BUSTER_CHECK_NONE;
+                        const uint32_t source = token < parsers[p].tokens.count ? parse_source_index(&parsers[p].tokens, token) : BUSTER_CHECK_NONE;
                         first = source < first ? source : first;
                     }
                     // The musttail returns' errors (#147, c_check_musttail.c), as the driver reports them after the expressions'.
@@ -3269,7 +3269,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     {
                         const CheckMusttailDiagnostic* diagnostic = musttails.diagnostics + m;
                         unsupported[p] |= diagnostic->error == CHECK_MUSTTAIL_BUILTIN;
-                        const uint32_t source = diagnostic->token < parsers[p].tokens.count ? parsers[p].tokens.sources[diagnostic->token] : BUSTER_CHECK_NONE;
+                        const uint32_t source = diagnostic->token < parsers[p].tokens.count ? parse_source_index(&parsers[p].tokens, diagnostic->token) : BUSTER_CHECK_NONE;
                         first = source < first ? source : first;
                     }
                 }

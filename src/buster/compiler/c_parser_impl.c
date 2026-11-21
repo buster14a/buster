@@ -185,6 +185,8 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
     const __m512i lanes = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
     uint32_t written = 0;
     tokens->pragma_count = 0;
+    bool identity = true;
+    tokens->identity_sources = false;
     uint32_t i = 0;
     while (i < output->count)
     {
@@ -212,16 +214,30 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
             const __mmask16 in_run = (__mmask16)(stored >> (16 * group));
             const __m512i names = _mm512_maskz_loadu_epi32((__mmask16)(identifiers >> (16 * group)), output->values + i + 16 * group);
             _mm512_mask_storeu_epi32(tokens->names + written + 16 * group, in_run, names);
-            _mm512_mask_storeu_epi32(tokens->sources + written + 16 * group, in_run, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)(i + 16 * group))));
+            if (!identity)
+            {
+                _mm512_mask_storeu_epi32(tokens->sources + written + 16 * group, in_run, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)(i + 16 * group))));
+            }
         }
         written += run;
         i += run;
         if (special != 0)
         {
+            if (identity)
+            {
+                // The first special token may shift the following grammar positions. Publish the preceding
+                // identity run once, then let the ordinary explicit map cover every subsequent token.
+                for (uint32_t t = 0; t < written; t += 1)
+                {
+                    tokens->sources[t] = t;
+                }
+                identity = false;
+            }
             i = parse_convert_token(output, i, tokens, &written);
         }
     }
     tokens->count = written;
+    tokens->identity_sources = identity;
     parse_tokens_pad(tokens);
 }
 
@@ -11261,7 +11277,7 @@ static bool parse_clang_scope_numbers(Parser* parser, Preprocessor* pp)
             const uint32_t t = first + (uint32_t)__builtin_ctzll(places);
             history = asked ? history : pp_history_ensure(pp);
             asked = true;
-            const uint32_t origin = history ? pp_history_at(pp, tokens->sources[t]) : 0;
+            const uint32_t origin = history ? pp_history_at(pp, parse_source_index(tokens, t)) : 0;
             const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
             bool expanded = origin != 0 && (origin & ~BUSTER_PP_ORIGIN_INDEX) == 0 && index < pp->history_count &&
                             pp->history[index].name == clang && pp->history[index].parent == 0;
@@ -11516,8 +11532,8 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
         // Inside one expansion, an after-previous diagnostic is already located at the next token
         // (parse_diagnostic_location). Keep that token's macro-note chain instead of reducing it to a byte location.
         const uint32_t previous = diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS && token > 0 && token < parser->tokens.count ?
-                                      parse_expansion_context(pp, parser->tokens.sources[token - 1]) : 0;
-        const bool inside = previous != 0 && previous == parse_expansion_context(pp, parser->tokens.sources[token]);
+                                      parse_expansion_context(pp, parse_source_index(&parser->tokens, token - 1)) : 0;
+        const bool inside = previous != 0 && previous == parse_expansion_context(pp, parse_source_index(&parser->tokens, token));
         const bool member_assertion = token > 0 && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT &&
                                       parser->tokens.kinds[token - 1] == PARSE_KIND_EXTENSION;
         const bool member_type = diagnostic->message == PARSE_MESSAGE_TYPE_NAME_REQUIRES_SPECIFIER;
@@ -11528,8 +11544,8 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             // macro expansion it uses the assertion's spelling and notes; between expansions it points just after
             // the previous invocation. The type and semicolon diagnostics name a caller-spelled argument directly;
             // the member-name diagnostic below spans the declaration and keeps its argument-expansion note.
-            const uint32_t source = parser->tokens.sources[token];
-            const uint32_t member_previous = member_semi ? parse_expansion_context(pp, parser->tokens.sources[token - 1]) : 0;
+            const uint32_t source = parse_source_index(&parser->tokens, token);
+            const uint32_t member_previous = member_semi ? parse_expansion_context(pp, parse_source_index(&parser->tokens, token - 1)) : 0;
             const bool member_inside = member_previous != 0 && member_previous == parse_expansion_context(pp, source);
             const bool spelled = member_type || member_inside;
             const uint32_t location = spelled ? pp->output.locations[source] : parse_diagnostic_location(parser, pp, diagnostic);
@@ -11548,12 +11564,12 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             const uint32_t opener = diagnostic->note;
             const uint8_t opener_kind = opener < parser->tokens.count ? parser->tokens.kinds[opener] : PARSE_KIND_END;
             const PPOutputDiagnosticNote note = {
-                .token = opener < parser->tokens.count ? parser->tokens.sources[opener] : 0,
+                .token = opener < parser->tokens.count ? parse_source_index(&parser->tokens, opener) : 0,
                 .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
             };
-            const uint32_t source = parser->tokens.sources[diagnostic->token];
+            const uint32_t source = parse_source_index(&parser->tokens, diagnostic->token);
             // Published where the parser knew it (ParseDiagnostic.publication), after an earlier error of its token's.
-            const uint32_t known = diagnostic->publication != 0 && diagnostic->publication < parser->tokens.count ? parser->tokens.sources[diagnostic->publication] : source;
+            const uint32_t known = diagnostic->publication != 0 && diagnostic->publication < parser->tokens.count ? parse_source_index(&parser->tokens, diagnostic->publication) : source;
             if (diagnostic->declaration_type || (diagnostic->attribute_prefix && diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME))
             {
                 // An attributed block's missing or unknown type precedes its attribute and redeclaration checks.
@@ -11574,14 +11590,14 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             // A parser diagnostic's location can be before the next token or at the unit's end. Its publication
             // boundary is where the parser knew it: at the token it read next, so a preprocessing diagnostic between
             // the previous token and that one sorts first, as clang's interleaved parse does.
-            uint32_t position = diagnostic->token < parser->tokens.count ? parser->tokens.sources[diagnostic->token] : pp->output.count;
+            uint32_t position = diagnostic->token < parser->tokens.count ? parse_source_index(&parser->tokens, diagnostic->token) : pp->output.count;
             const uint32_t saved = pp->diagnostic_position;
             pp->diagnostic_position = position;
             // An expected closer's note at its opener (#147), where the error is at the unit's end.
             const uint32_t opener = diagnostic->note;
             const uint8_t opener_kind = opener < parser->tokens.count ? parser->tokens.kinds[opener] : PARSE_KIND_END;
             const PPDiagnosticNote note = {
-                .location = opener < parser->tokens.count ? parse_primary_location(pp, parser->tokens.sources[opener]) : 0,
+                .location = opener < parser->tokens.count ? parse_primary_location(pp, parse_source_index(&parser->tokens, opener)) : 0,
                 .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
             };
             pp_diagnose_note(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic),

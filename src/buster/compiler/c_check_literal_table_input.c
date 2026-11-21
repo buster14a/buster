@@ -460,7 +460,6 @@ static CheckLiteralTableSource check_literal_table_span(CheckInputReader* reader
     Preprocessor* pp = reader->pp;
     const PPTokens* output = &pp->output;
     const uint8_t* kinds = reader->parser->tokens.kinds;
-    const uint32_t* sources = reader->parser->tokens.sources;
     CheckLiteralTableSource result = { 0 };
     uint32_t first = begin;
     uint32_t last = end;
@@ -472,8 +471,8 @@ static CheckLiteralTableSource check_literal_table_span(CheckInputReader* reader
     {
         last -= 1;
     }
-    const uint32_t location = first < last ? output->locations[sources[first]] : 0;
-    const uint32_t stop = first < last ? output->values[sources[last - 1]] : 0;
+    const uint32_t location = first < last ? output->locations[parse_source_index(&reader->parser->tokens, first)] : 0;
+    const uint32_t stop = first < last ? output->values[parse_source_index(&reader->parser->tokens, last - 1)] : 0;
     const uint32_t range = first < last ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     if (range != BUSTER_PP_NONE)
     {
@@ -508,7 +507,7 @@ static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTa
 {
     Preprocessor* pp = reader->pp;
     const PPTokens* output = &pp->output;
-    const uint32_t index = reader->parser->tokens.sources[token];
+    const uint32_t index = parse_source_index(&reader->parser->tokens, token);
     const uint32_t location = output->locations[index];
     const uint32_t end = output->values[index];
     const bool number = output->kinds[index] == C_TOKEN_NUMERIC_CONSTANT && end > location;
@@ -584,7 +583,6 @@ static bool check_literal_table_floating_integers(CheckInputReader* reader, Chec
                                                   uint32_t width, uint8_t* payload, uint64_t* converted)
 {
     const uint8_t* kinds = reader->parser->tokens.kinds;
-    const uint32_t* sources = reader->parser->tokens.sources;
     const PPTokens* output = &reader->pp->output;
     const uint32_t unit = width / 8;
     const uint32_t shortest = width == 32 ? 8 : 16;
@@ -592,7 +590,7 @@ static bool check_literal_table_floating_integers(CheckInputReader* reader, Chec
     bool valid = true;
     for (uint32_t token = begin; valid && token < end; token += 1)
     {
-        const uint32_t at = sources[token];
+        const uint32_t at = parse_source_index(&reader->parser->tokens, token);
         // A number shorter as written than the shortest integer that may round (check_literal_table_element) passes by
         // its length alone, without a call.
         const bool short_number = kinds[token] == PARSE_KIND_NUMBER && output->kinds[at] == C_TOKEN_NUMERIC_CONSTANT &&
@@ -722,7 +720,6 @@ static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begi
     CheckLiteralTableSource source = check_literal_table_span(reader, begin, end);
     bool valid = converted != NULL && check_literal_table_floating_integers(reader, &source, begin, end, element, width, payload, converted);
     const uint8_t* kinds = reader->parser->tokens.kinds;
-    const uint32_t* sources = reader->parser->tokens.sources;
     const PPTokens* output = &reader->pp->output;
     uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
@@ -734,7 +731,7 @@ static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begi
     {
         if (kinds[token] == PARSE_KIND_NUMBER)
         {
-            const uint32_t at = sources[token];
+            const uint32_t at = parse_source_index(&reader->parser->tokens, token);
             const uint32_t location = output->locations[at];
             const uint32_t stop = output->values[at];
             // In the clean span its bytes are its spelling (check_literal_table_element), without a call.

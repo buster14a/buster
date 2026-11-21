@@ -275,7 +275,7 @@ static bool gnu_test_slice_is(Preprocessor* pp, const ParseTokens* tokens, uint3
     uint32_t length = 0;
     for (uint32_t i = begin; result && i < end; i += 1)
     {
-        const uint32_t source = tokens->sources[i];
+        const uint32_t source = parse_source_index(tokens, i);
         uint8_t buffer[1024];
         const uint8_t* spelling;
         const uint32_t bytes = pp_spelling(pp, pp->output.kinds[source], pp->output.values[source], pp->output.locations[source], buffer, &spelling);

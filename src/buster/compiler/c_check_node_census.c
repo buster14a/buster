@@ -1331,9 +1331,9 @@ static bool node_census_system(const NodeCensusScratch* s, uint32_t token)
     const Parser* parser = program->parser;
     const Preprocessor* pp = s->pp;
     bool system = check_graph_system_token(&program->input->graph, token);
-    if (!system && pp->output.locations != NULL && token < parser->tokens.count && parser->tokens.sources[token] < pp->output.count)
+    if (!system && pp->output.locations != NULL && token < parser->tokens.count && parse_source_index(&parser->tokens, token) < pp->output.count)
     {
-        system = pp_system_level_at(pp, pp->output.locations[parser->tokens.sources[token]]) != BUSTER_PP_USER_FILE;
+        system = pp_system_level_at(pp, pp->output.locations[parse_source_index(&parser->tokens, token)]) != BUSTER_PP_USER_FILE;
     }
     return system;
 }
@@ -3127,11 +3127,11 @@ static uint32_t node_census_event_id(const NodeCensusScratch* s)
 static uint32_t node_census_line(Preprocessor* pp, const Parser* parser, uint32_t token)
 {
     uint32_t line = 0;
-    if (token < parser->tokens.count && parser->tokens.sources[token] < pp->output.count && pp->output.locations != NULL)
+    if (token < parser->tokens.count && parse_source_index(&parser->tokens, token) < pp->output.count && pp->output.locations != NULL)
     {
         const char* name = NULL;
         uint32_t length = 0;
-        line = pp_presumed(pp, pp->output.locations[parser->tokens.sources[token]], &name, &length);
+        line = pp_presumed(pp, pp->output.locations[parse_source_index(&parser->tokens, token)], &name, &length);
     }
     return line;
 }
@@ -6464,9 +6464,9 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
                     const char* name = s->file;
                     uint32_t length = (uint32_t)strlen(s->file);
                     uint32_t line = 0;
-                    if (token < parser->tokens.count && parser->tokens.sources[token] < s->pp->output.count && s->pp->output.locations != NULL)
+                    if (token < parser->tokens.count && parse_source_index(&parser->tokens, token) < s->pp->output.count && s->pp->output.locations != NULL)
                     {
-                        line = pp_presumed(s->pp, s->pp->output.locations[parser->tokens.sources[token]], &name, &length);
+                        line = pp_presumed(s->pp, s->pp->output.locations[parse_source_index(&parser->tokens, token)], &name, &length);
                     }
                     const uint32_t index = type_index(facts->expected_types[at]);
                     shadow->reads_listed += 1;

@@ -44,7 +44,7 @@ static void check_test_driver_prefix_meanings(CheckTest* test)
             for (uint32_t token = 0; own && token < prefix.end; token += 1)
             {
                 own = view.to_original[token] == token && view.to_view[token] == token &&
-                      view.parser.tokens.sources[token] == prefix.parser.tokens.sources[token];
+                      parse_source_index(&view.parser.tokens, token) == parse_source_index(&prefix.parser.tokens, token);
             }
             check_test_expect(test, own, "a rejected view owns its mutable meanings and preserves the original table and origin maps");
         }

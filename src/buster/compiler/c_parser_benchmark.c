@@ -497,7 +497,7 @@ static bool parse_benchmark_check_handoff(ParseBenchmark* bench)
             const ParseTokens* got = &bench->converted;
             same = memcmp(file->output.kinds, resolved, file->output.count) == 0 && got->count == tokens->count && got->pragma_count == tokens->pragma_count &&
                    memcmp(got->kinds, tokens->kinds, tokens->count) == 0 && memcmp(got->names, tokens->names, (uint64_t)tokens->count * 4) == 0 &&
-                   memcmp(got->sources, tokens->sources, (uint64_t)tokens->count * 4) == 0 && parse_benchmark_same_flags(got->flags, tokens->flags, tokens->count) &&
+                   parse_sources_equal(got, tokens, tokens->count) && parse_benchmark_same_flags(got->flags, tokens->flags, tokens->count) &&
                    memcmp(got->pragma_sources, tokens->pragma_sources, (uint64_t)tokens->pragma_count * 4) == 0 &&
                    memcmp(got->pragma_positions, tokens->pragma_positions, (uint64_t)tokens->pragma_count * 4) == 0;
             if (!same)

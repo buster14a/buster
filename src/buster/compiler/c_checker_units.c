@@ -358,7 +358,7 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             const uint32_t object = program->symbol_objects[s];
             const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
             const bool undefined = link->symbols.atom[symbol] == 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
-            kept->system[symbol] = undefined && declaration < parser->tokens.count && check_lazy_system(pp, parser->tokens.sources[declaration]);
+            kept->system[symbol] = undefined && declaration < parser->tokens.count && check_lazy_system(pp, parse_source_index(&parser->tokens, declaration));
         }
     }
     kept->debug = (ObjectDebug){ 0 };
