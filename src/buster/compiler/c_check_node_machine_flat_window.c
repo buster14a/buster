@@ -40,36 +40,39 @@ static void node_facts_flat_begin(NodeFront* front, CheckInputReader* reader)
     }
 }
 
-// Gather the operator byte of sixteen 16-byte records. A masked compress places the live ordinals together, in
-// postorder. Split at the ring end before a gather. The scalar path emits the same ordinal list.
+// Sixteen consecutive 16-byte records give four vectors. Two permutes collect their operator words, and a compress
+// writes the live ordinals in postorder. Stop at the end of the ring before each vector load. The scalar loop also
+// finishes the last partial group on a vector host.
 static uint32_t node_facts_flat_compact(const NodeFlat* flat, uint32_t* ordinals)
 {
     uint32_t count = 0;
-    if (BUSTER_SCALAR_PATH(false))
+    for (uint32_t i = flat->chunk_ordinal; i != flat->ordinal;)
     {
-        for (uint32_t i = flat->chunk_ordinal; i != flat->ordinal; i += 1)
+        const uint32_t slot = i & (BUSTER_NODE_FLAT_RECORDS - 1);
+        const uint32_t run = flat->ordinal - i < BUSTER_NODE_FLAT_RECORDS - slot ? flat->ordinal - i : BUSTER_NODE_FLAT_RECORDS - slot;
+        const uint32_t end = i + run;
+        if (!BUSTER_SCALAR_PATH(false))
+        {
+            const __m512i lanes = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+            const __m512i pick = _mm512_setr_epi32(1, 5, 9, 13, 17, 21, 25, 29, 1, 5, 9, 13, 17, 21, 25, 29);
+            for (; end - i >= 16; i += 16)
+            {
+                const NodeFlatRecord* records = flat->records + (i & (BUSTER_NODE_FLAT_RECORDS - 1));
+                const __m512i low = _mm512_permutex2var_epi32(_mm512_loadu_si512(records), pick, _mm512_loadu_si512(records + 4));
+                const __m512i high = _mm512_permutex2var_epi32(_mm512_loadu_si512(records + 8), pick, _mm512_loadu_si512(records + 12));
+                const __m512i words = _mm512_mask_blend_epi32(0xff00, low, high);
+                const __mmask16 live = _mm512_cmpneq_epi32_mask(_mm512_and_si512(words, _mm512_set1_epi32(255)), _mm512_set1_epi32(BUSTER_NODE_FLAT_EMPTY));
+                _mm512_storeu_si512(ordinals + count, _mm512_maskz_compress_epi32(live, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)i))));
+                count += (uint32_t)__builtin_popcount((uint32_t)live);
+            }
+        }
+        for (; i != end; i += 1)
         {
             if (flat->records[i & (BUSTER_NODE_FLAT_RECORDS - 1)].op != BUSTER_NODE_FLAT_EMPTY)
             {
-                ordinals[count++] = i;
+                ordinals[count] = i;
+                count += 1;
             }
-        }
-    }
-    else
-    {
-        const __m512i lanes = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        const __m512i indices = _mm512_slli_epi32(lanes, 2);
-        for (uint32_t i = flat->chunk_ordinal; i != flat->ordinal;)
-        {
-            const uint32_t slot = i & (BUSTER_NODE_FLAT_RECORDS - 1);
-            const uint32_t run = flat->ordinal - i < BUSTER_NODE_FLAT_RECORDS - slot ? flat->ordinal - i : BUSTER_NODE_FLAT_RECORDS - slot;
-            const uint32_t take = run < 16 ? run : 16;
-            const __mmask16 mask = (__mmask16)((1u << take) - 1);
-            const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), mask, indices, &flat->records[slot].op, 4);
-            const __mmask16 live = _mm512_mask_cmpneq_epi32_mask(mask, _mm512_and_si512(words, _mm512_set1_epi32(255)), _mm512_set1_epi32(BUSTER_NODE_FLAT_EMPTY));
-            _mm512_storeu_si512(ordinals + count, _mm512_maskz_compress_epi32(live, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)i))));
-            count += (uint32_t)__builtin_popcount((uint32_t)live);
-            i += take;
         }
     }
     return count;

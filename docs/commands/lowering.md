@@ -366,7 +366,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-flat-window] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -1089,6 +1089,8 @@ records and of values cut pinned:
   gone.
 
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.
+
+`--front-flat-window` also enables `--window-rows`. It compacts the flat front's live postorder records into the current chunk, writes the kernel's inputs and literal lines from those records, and compares them with the lean front's window. On a complete matching expression the regular T, tests, C and X shadow runs consume the independently written inputs. The report counts the expressions and records they receive, cross-chunk edges, saturated byte distances, and inputs whose slots cannot be matched. It times the writes and a kernel run restricted to the admitted set. `--front-flat-first` moves the flat structural passes before the reader's actions.
 
 ### The fact words (#2850's step 1)
 
