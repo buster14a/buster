@@ -177,7 +177,8 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
 // whether there was room. The program's columns T reads are made from the input's as the program makes them, into
 // `declarations` and `facts` (the caller's, an entry an object: the unit's token count and one): each static object's
 // last declaration (check_program_static_objects' visit, its returns_twice by check_program_static_object's test) and
-// the objects with an asm label (check_program_labelled_objects' test); and the names that return twice from
+// the objects with an asm label the asm pass will keep (check_program_labelled_objects' test of the labels
+// check_input_asm_labels leaves); and the names that return twice from
 // `identifiers` (check_lower_twice_names'). `symbols` (the caller's too) is what stands for the objects' symbols: each
 // object with a static declaration has itself there, the others 0.
 static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* input, const Parser* parser, TypeTable* types, const CheckGraph* graph,
@@ -193,6 +194,8 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
     };
     const uint32_t late = types->types.capacity - types->types.count < BUSTER_NODE_MACHINE_LATE_TYPES ? types->types.capacity - types->types.count : BUSTER_NODE_MACHINE_LATE_TYPES;
     const bool room = node_machine_setup(machine, types, graph, types->types.count + late, false, verify, arena);
+    machine->overloads = node_machine_overloads(input, graph);
+    machine->renames = node_machine_renames(input);
     machine->reader_declarations = declarations;
     machine->reader_facts = facts;
     if (room)
@@ -207,6 +210,7 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
             if (object != 0 && object <= count)
             {
                 const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+                machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_DECLARED;
                 if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
                 {
                     machine->reader_declarations[object] = token;
@@ -214,10 +218,16 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
                     const uint32_t bits = attributes != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_program_attribute_bits(attributes) : 0;
                     machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_TWICE : 0;
                 }
-                if (input->asm_capacity != 0 && attributes != NULL && check_input_attribute_of(attributes, CHECK_ATTRIBUTE_ASM_LABEL) != NULL)
+                // The asm pass, which runs after the bodies, ignores a label on a declaration of an object that a
+                // declaration before it defines, where none before it kept a label (check_input_asm_labels): the same of
+                // the declarations in their order (#3207). A label kept before stays the object's whatever this one's
+                // fate, and a register variable, whose label the pass never asks, has one declaration.
+                const bool kept = (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_DEFINED) == 0;
+                if (input->asm_capacity != 0 && attributes != NULL && check_input_attribute_of(attributes, CHECK_ATTRIBUTE_ASM_LABEL) != NULL && kept)
                 {
                     machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_LABELLED;
                 }
+                machine->reader_facts[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_NODE_MACHINE_OBJECT_DEFINED : 0;
             }
         }
         for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
@@ -364,7 +374,8 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     uint64_t* tests = tested ? arena_push_array(reader->arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
     uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
     TypeId* declared = tested ? arena_push_array(reader->arena, capacity, sizeof(TypeId), _Alignof(TypeId)) : NULL;
-    room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL));
+    uint32_t* root_declarations = tested ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL && root_declarations != NULL));
     // A summary's side facts by root node, and their references' store: no expression has more references than
     // leaves, so a node each is room for all.
     const bool summaries = (options & BUSTER_NODE_READER_WINDOW_ROWS) != 0;
@@ -425,6 +436,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
             types->tests = tests;
             types->kinds = kinds;
             types->declared = declared;
+            types->declarations = root_declarations;
             typer->tests = node_census_reader_begin(reader, &typer->machine, types, capacity);
             room = typer->tests != NULL;
         }
@@ -591,6 +603,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                             types->tests[root] = verdict;
                             types->kinds[root] = kind;
                             types->declared[root] = declared;
+                            types->declarations[root] = declaration;
                             types->tested += 1;
                             types->tested_refused += verdict != 0;
                             types->tested_first[verdict != 0 ? (uint32_t)__builtin_ctzll(verdict) : 63] += verdict != 0;
