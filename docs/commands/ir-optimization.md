@@ -63,7 +63,7 @@ operations of every lane width, fills, copies, sums with widening, a dot
 product, the four other integer reductions, an if-converted conditional sum
 with its unreachable stub, an `int` induction's clamp, byte arithmetic through
 32-bit lanes, population counts, a stencil whose exit test is `i + 1 < n`, an
-in-place `y[i] += k * x[i]`, an invariant start and index offset, a uniform load,
+in-place `y[i] += k * x[i]`, an `fma`, an `sitofp` of `i32` to `f32`, an invariant start and index offset, a uniform load,
 a sum of a uniform (no vector load or store), two loops and a nested one; and one fixture per refusal (a prefix sum, a
 histogram, a strided store, the induction as data, a call, a volatile load, a
 division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
