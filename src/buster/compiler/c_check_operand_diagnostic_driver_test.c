@@ -103,6 +103,7 @@ static void check_test_driver_operand_diagnostics(CheckTest* test, const char* c
         { .name = "enums_recovery", .errors = 6, .notes = 1 },
         { .name = "valid", .option = "-Wno-literal-conversion", .errors = 0 },
         { .name = "atomic_conditional", .errors = 0 },
+        { .name = "cast_conditions", .warnings = 11 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
     {

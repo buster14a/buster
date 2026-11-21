@@ -482,8 +482,6 @@ struct NodeContextsLoopCounts
     uint64_t valued;
     uint64_t sunk;
     uint64_t commas;
-    // The casts that list their expression for a truth their operand may have and their own value has not.
-    uint64_t passed;
 };
 
 // The loop over a chunk's `count` records, 64 a step, from its last block to its first: each record's template, its
@@ -509,7 +507,6 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     uint64_t valued_count = 0;
     uint64_t sunk_count = 0;
     uint64_t comma_count = 0;
-    uint64_t passed_count = 0;
     // The lowest record of a range that isn't evaluated and reaches below the block at hand (UINT32_MAX: none yet). A
     // range that ended in a block above reads as none too: its lowest record is at or above that block's first.
     uint32_t dead_low = UINT32_MAX;
@@ -812,19 +809,6 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         // (node_contexts_sinks), a conditional of one operand twice, and, in its expression's part, a root's.
         const __mmask64 is_conditional = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CONDITIONAL));
         const __mmask64 open_conditional = is_conditional & free & left_unknown;
-        // A cast that passes a truth its own value has not: its operand's truth may be known, and it is no constant
-        // itself (`(char)(long)&x`: an address is not null, and its low byte is no constant). The program's walk of a
-        // branch's condition reads a truth through a cast (check_program_branch_truth, which the return flow and the
-        // warnings' reach ask), so such a condition has a truth no value of its root's says, and a summary node, which
-        // has its root's value alone, could not answer for it: the cast lists its expression, where its consumer may
-        // ask its truth (a CONDITION, a `!`, an `&&` or an `||`, or a wrapper, whose consumer may). A constant with an
-        // effect's flag is listed too: a truth that reads the floating-point environment is not known by its value
-        // (check_program_runtime_truth). No other operator asks for the term: a `!` and a CONDITION are a constant
-        // wherever their operand's truth is known, and an `&&` and an `||` wherever their operands' decide them
-        // (check_action_logic), but for a second operand that decides alone, which the rows' turns list
-        // (c_check_node_machine_rows.c's node_rows_window_decided). A cast to void has no truth to pass.
-        const __mmask64 asks_truth = consumer_condition | consumer_not | consumer_wrap | consumer_logical;
-        const __mmask64 passes_truth = is_wrap & ~left_unknown & ~(constant & ~effects) & ~void_type & asks_truth;
         const __mmask64 made_conditional = open_conditional & (numeric | void_type) & left_tested;
         const __mmask64 made_valued = made_conditional | (valued_logical & ~left_not & left_tested & right_tested);
         // A comma (node_machine_classify's case): of a number's class, its second operand alone. One read for its
@@ -963,9 +947,8 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         // count and the step below leave out.)
         valued_count += (uint64_t)_mm_popcnt_u64(placed & made_valued);
         comma_count += (uint64_t)_mm_popcnt_u64(made_comma);
-        passed_count += (uint64_t)_mm_popcnt_u64(passes_truth);
         const __mmask64 listed = placed & (is_uncased | (is_wrap & union_type) | divisor | wide | odd_leaf | (is_call & ~converted_call) | (called & ~is_value) |
-                                           (update_asked & ~made_update) | unbranched | (is_conditional & ~open_conditional) | uncommaed | passes_truth);
+                                           (update_asked & ~made_update) | unbranched | (is_conditional & ~open_conditional) | uncommaed);
         // A template's number is four bits: each bit's records, one mask a bit. A comma's is a wrapper's.
         const __mmask64 passed = made_pass | made_comma;
         const __mmask64 bit0 = made_constant | made_global | made_dereference | made_unary | made_binary | made_store_local | made_store;
@@ -1058,7 +1041,6 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     counts->valued += valued_count;
     counts->sunk += sunk_count;
     counts->commas += comma_count;
-    counts->passed += passed_count;
 }
 
 // The targets of a chunk's `count` records, 16 a step: the type each evaluated record's source names. T's conversion of
@@ -1299,7 +1281,6 @@ static void node_contexts_window_chunk(struct NodeFactsReader* state, const Node
     counts[NODE_FACTS_COUNT_CONTEXTS_VALUED] += loop_counts.valued;
     counts[NODE_FACTS_COUNT_CONTEXTS_SUNK] += loop_counts.sunk;
     counts[NODE_FACTS_COUNT_CONTEXTS_COMMAS] += loop_counts.commas;
-    counts[NODE_FACTS_COUNT_CONTEXTS_PASSED] += loop_counts.passed;
     counts[NODE_FACTS_COUNT_CONTEXTS_LOOP_TICKS] += t1 - t0;
     counts[NODE_FACTS_COUNT_CONTEXTS_TARGET_TICKS] += t2 - t1;
     counts[NODE_FACTS_COUNT_CONTEXTS_PART_TICKS] += t3 - t2;

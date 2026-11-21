@@ -6874,7 +6874,7 @@ warnings:
 | --- | --- | --- |
 | `check_program_references`, every body | the static objects its leaves name, a set | **the side record: its references** |
 | the return flow (`check_program_return_facts`; `-Wreturn-type` is on by default) | each call's callee, joined up the tree | **the side record: its root's fact** |
-| `check_program_branch_truth` (the return flow, the warnings' reach) | a branch's condition's truth, through `!`, casts and the operands of `&&` and `\|\|` | its value's: the window lists what an operand or a cast alone decides |
+| `check_program_branch_truth` (the return flow, the warnings' reach) | a branch's condition's truth, through `!`, casts and the operands of `&&` and `\|\|` | its value's: the window lists a logical operator decided by its second operand |
 | the controls' fold (`check_control_fold_truth`) | the root's constant, and below it where it is one | its value's: a taken constant folds |
 | `-Wswitch` | the node at the selector's first token | none: a `switch`'s condition stays the walk's ([#3200](https://github.com/buster14a/buster/issues/3200)) |
 | the initializer planner (`check_initializers_run_events`) | the greatest node of the source's tokens' | the flip's: the summary node is its tokens' |
@@ -6968,8 +6968,8 @@ stop. On the window:
   plain call: each is asked, with its use's place.
 
 **A condition's truth and a constant's fold** need nothing in the side
-record. `check_program_branch_truth` knows a truth where a condition's value
-has none in two cases, and the window lists both:
+record. The original side-facts measurement listed two cases where the
+walk and the root's value could disagree:
 
 - **An `&&` or an `||` whose second operand's truth is known and decides**
   (`x && 0`, `x || 1`; one whose first operand's is known is C's to list
@@ -6977,18 +6977,21 @@ has none in two cases, and the window lists both:
   is known, as branches or as a value: its standing's constant's kind, but
   an object's lvalue's. That leaves out 3, 2, 3 and 0 expressions the piece
   before took.
-- **A cast that passes a truth its own value has not.** The walk gives a
+- **A cast in the original side-facts measurement.** The walk gave a
   cast its operand's truth where the cast's value has none. An address
   constant is not null; `(char)(long)&x` is no constant, and its low byte
   may be zero ([#3204](https://github.com/buster14a/buster/issues/3204):
-  clang keeps both edges, and the walk does not). C's loop lists the
+  clang keeps both edges, and the old walk did not). C's loop listed the
   expression of a cast that is no constant, over an operand whose truth may
   be known, where its consumer may ask its truth: a CONDITION, a `!`, an
   `&&` or an `||`, or another wrapper (`passes_truth`). A `!` and a
   CONDITION are a constant wherever their operand's truth is known
   (`check_action_logic`), so only a cast passes one. On the four inputs it
-  lists no expression: the specification did not have this case, and a
+  listed no expression: the specification did not have this case, and a
   one-statement program found it (below).
+  With #3204 a cast of unknown value can propagate a logical result of
+  zero or one, but cannot propagate the truth of a raw constant operand.
+  The window therefore no longer needs this cast exclusion.
 
 The controls' fold does not fold a comma whose left operand is no constant,
 and C lists a folded comma: every taken root with an integer constant folds
