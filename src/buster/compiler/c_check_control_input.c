@@ -3685,6 +3685,8 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
         memset(labels, 0, capacity * sizeof(uint32_t));
         uint32_t body = BUSTER_CHECK_NONE;
         uint32_t close = 0;
+        uint32_t case_from = BUSTER_CHECK_NONE;
+        uint32_t case_owner = count;
         CheckInputControlScan scan = { .after = begin };
         for (uint32_t token = begin; token < end; token += 1)
         {
@@ -3841,9 +3843,17 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
             else if (role == PARSE_ROLE_OPEN_CASE && (!prefix || token < limit))
             {
                 const uint32_t end = parser->tree.parents[token];
-                uint32_t owner = end < count ? parser->tree.parents[end] : count;
+                const uint32_t from = end < count ? parser->tree.parents[end] : count;
+                uint32_t owner = from;
                 while (owner < count)
                 {
+                    // The walk is a function of where it is: one that reaches the previous label's start ends where
+                    // that label's did, so a run of labels on one statement walks its parents once (#2995).
+                    if (owner == case_from)
+                    {
+                        owner = case_owner;
+                        break;
+                    }
                     const uint32_t keyword = reader->first_child[owner];
                     if (parser->tree.roles[owner] == PARSE_ROLE_CLOSE_CONDITION && keyword < count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH)
                     {
@@ -3851,6 +3861,8 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     }
                     owner = parser->tree.parents[owner];
                 }
+                case_from = from;
+                case_owner = owner;
                 const bool complete = !prefix || (owner < limit && end < limit);
                 if (owner >= count || end >= count)
                 {

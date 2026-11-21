@@ -7653,8 +7653,12 @@ twin computes the same candidate and empty masks. Equal-key candidates stay in
 insertion order through collisions and wraparound, so the first failing
 association and expression/warning handling keep their existing order. Up to
 eight associations use local storage; larger lists reserve a bounded,
-at-most-half-full table from the token span. Allocation and sizing failures
-propagate as resource failures, and each reader restores its scratch mark.
+at-most-half-full table from the list's associations, its top-level commas
+counted with nested groups skipped as the readers skip them. Sized from the
+token span, a chain of selections nested in each other's last association
+cleared a table as large as every selection inside it (#2995). Allocation and
+sizing failures propagate as resource failures, and each reader restores its
+scratch mark.
 The index records exact duplicate and control compatibility-query counts.
 
 For A distinct nominal tags, including pointers to forward-declared tags,
