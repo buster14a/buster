@@ -19172,13 +19172,10 @@ struct CheckLowerShared
     uint32_t* save_locals;
     // Each body's locals, its own objects' declarations, a slice of `local_tokens` in token order from local_start[b + 1] to
     // local_start[b + 2], and their objects in `local_objects` alike: arrays its walks read in order, where a list linked
-    // through every token cost each local a dependent load (#1048). `opening_bodies` and `local_bodies` are the
-    // preparation's maps of a body's opening token to its index and of a declaring token to its body's.
+    // through every token cost each local a dependent load (#1048).
     uint32_t* local_start;
     uint32_t* local_tokens;
     uint32_t* local_objects;
-    uint32_t* opening_bodies;
-    uint32_t* local_bodies;
     // Each body's own signature, its index in its part's batch, and whether the body starts its variadic list.
     uint32_t* signatures;
     uint8_t* incoming;
@@ -19656,6 +19653,14 @@ static __attribute__((noinline)) bool check_lower_prepare_tables(CheckLowerShare
     return valid;
 }
 
+// The first selected body at an opening owns its locals, including the locals of its target_clones copies.
+// The selected bodies retain source order. An omitted function has no equal opening in that list.
+static uint32_t check_lower_opening_owner(const CheckProgram* program, uint32_t opening, CheckProgramBodyCursor* cursor)
+{
+    const uint32_t body = opening == 0 ? 0 : check_program_opened_through(program, opening - 1, cursor);
+    return body < program->body_count && program->bodies[body].opening == opening ? body : BUSTER_CHECK_NONE;
+}
+
 // What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
 // A `deferred` one reads none of the controls' totals (CheckLowerShared.deferred). Returns false with `lowered`'s failure
@@ -19891,15 +19896,20 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     }
     shared->signatures = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1) : 0;
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
-    shared->opening_bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    shared->local_bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     shared->local_start = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 2) : 0;
     // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
     uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
+    const uint32_t declaring_count = declaring != NULL ? check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar)) : 0;
+    if (declaring != NULL)
+    {
+        // The vector writer may store a full last block. Its live prefix is now complete.
+        arena_pop_to(scratch, (uint64_t)((uint8_t*)(declaring + declaring_count) - scratch->base));
+    }
+    uint32_t* local_bodies = declaring != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, declaring_count) : NULL;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
     lowered->debug_bindings = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding*, program->body_count) : 0;
-    valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->opening_bodies != 0 && shared->local_bodies != 0 && shared->local_start != 0 && declaring != 0 &&
+    valid = valid && shared->signatures != 0 && shared->incoming != 0 && local_bodies != NULL && shared->local_start != 0 && declaring != 0 &&
             (program->body_count == 0 || lowered->functions != 0) && (!sources || program->body_count == 0 || (lowered->entry_tokens != 0 && lowered->debug_bindings != 0));
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
@@ -19935,7 +19945,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 }
             }
         }
-        const uint32_t declaring_count = check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
         shared->declared_runtimes[CHECK_LOWER_RUNTIME_ERRNO] = lowered->errno_symbol;
         uint64_t called[(CHECK_LOWER_RUNTIMES + 63) / 64] = { 0 };
         for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
@@ -19974,16 +19983,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         // over every token (check_lower_declared_runtimes) is its twin.
         const bool runtimes_merged = !BUSTER_SCALAR_PATH(scalar) && spelled != 0 && program->parser != NULL;
         const IdentId* token_names = runtimes_merged ? program->parser->tokens.names : NULL;
-        // Each body's index at its opening token, read back only where it is that body's (an opening of a body this program
-        // doesn't lower, which a local may name, holds whatever its word held, rather than every token's word cleared, #877).
-        // (The first of bodies of one opening, target_clones' body before its copies, #1838: its locals are theirs.)
-        for (uint32_t b = program->body_count; b-- > 0;)
-        {
-            shared->opening_bodies[program->bodies[b].opening] = b;
-        }
         memset(shared->local_start, 0, ((uint64_t)program->body_count + 2) * sizeof(uint32_t));
         // Each declaring token that declares a local (check_lower_local_declaration), tested once (#1048: its loads are a
-        // declaration's first touches), its body's index in `local_bodies` (none for every other token, and for a local
+        // declaration's first touches), its body's index beside the declaring list (none for other declarations and for a local
         // whose body isn't lowered) and counted in local_start[b + 1]. The objects whose local_map entries a body writes,
         // its parameters' and its locals' (check_lower_part sets them as the body starts and puts them back to none as it
         // ends), are each cleared and marked in `locals` before any body is lowered, after which the bodies' writers only
@@ -19991,6 +19993,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         // either way), and the parameters' of each body below. Every other object's entry, which nothing writes, reads as
         // none without being cleared.
         uint32_t local_count = 0;
+        CheckProgramBodyCursor cursor = { 0 };
         for (uint32_t d = 0; d < declaring_count; d += 1)
         {
             const uint32_t token = declaring[d];
@@ -19999,9 +20002,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                 check_lower_declared_runtime(program, token, token_names, identifiers, spelled_runtimes, spelled, shared->declared_runtimes);
             }
             const uint32_t opening = check_lower_local_declaration(program, token) ? check_sparse_get(input->declaration_bodies, token) : BUSTER_CHECK_NONE;
-            const uint32_t candidate = opening != BUSTER_CHECK_NONE ? shared->opening_bodies[opening] : BUSTER_CHECK_NONE;
-            const uint32_t b = candidate < program->body_count && program->bodies[candidate].opening == opening ? candidate : BUSTER_CHECK_NONE;
-            shared->local_bodies[token] = b;
+            const uint32_t b = opening != BUSTER_CHECK_NONE ? check_lower_opening_owner(program, opening, &cursor) : BUSTER_CHECK_NONE;
+            local_bodies[d] = b;
             if (b != BUSTER_CHECK_NONE)
             {
                 shared->local_start[b + 1] += 1;
@@ -20028,7 +20030,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             {
                 shared->initializer_declarations[check_sparse_get(input->initializer_nodes, token)] = token;
             }
-            const uint32_t b = shared->local_bodies[token];
+            const uint32_t b = local_bodies[d];
             if (b != BUSTER_CHECK_NONE)
             {
                 const uint32_t k = --shared->local_start[b + 1];
