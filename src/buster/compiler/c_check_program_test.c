@@ -4200,6 +4200,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test,
             "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
             "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);
+        // Statements with attributes (#1844): a loop's and a switch's, whose breaks, continues and cases are theirs, and
+        // jumps with attributes, which jump as without them; a switch's promoted condition of a signed char.
+        check_test_program_source(test,
+            "static int h(int x){return x*3;}"
+            "int tested(int n){int t=0;signed char c=(signed char)(n*200);for(int i=-3;i<12;i++){[[clang::likely]] switch(i){"
+            "case -2:t+=5;[[fallthrough]];case 1:t+=1;[[clang::likely]] break;case 4 ... 6:[[clang::unlikely]] continue;default:t+=i;}"
+            "__attribute__((nomerge)) switch(c){case -56:t+=1000;break;default:t-=1;}int k=i;"
+            "[[clang::likely]] while(k>0){k-=2;if(k==3)__attribute__((nomerge)) continue;if(k<0)[[clang::unlikely]] break;t+=h(k);}"
+            "[[clang::unlikely]] do{t^=k;if(t&1)[[clang::likely]] __attribute__((nomerge)) break;}while(0);"
+            "if(i==10)[[clang::likely]] goto out;}out:[[clang::unlikely]] return t;}", "attributed-statements", clang);
         check_test_program_source(test,
             "int tested(int n){int x=2;int y=(n>0&&++x);int z=(n<0||++x);int q=n?x++:++x;"
             "return x*1000+y*100+z*10+q;}", "short-circuit-updates", clang);

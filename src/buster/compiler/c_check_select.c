@@ -137,7 +137,7 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
     const uint64_t mark = reader->scratch->length;
     const TypeId control_type = check_constant_control_type(reader, control);
     CheckGenericSet seen;
-    bool valid = control_type != 0 && check_generic_initialize(reader, &seen, close - separator, control_type, close + 1);
+    bool valid = control_type != 0 && check_generic_initialize(reader, &seen, check_generic_associations(parser, separator + 1, close), control_type, close + 1);
     uint32_t chosen = BUSTER_CHECK_NONE;
     uint32_t fallback = BUSTER_CHECK_NONE;
     uint32_t association = separator + 1;

@@ -1929,6 +1929,11 @@ static bool check_common_truth_floating(const CheckGraph* graph, const CheckStre
     return result;
 }
 
+static bool check_common_division_op(CheckOp op)
+{
+    return op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || op == CHECK_OP_DIVIDE_ASSIGN || op == CHECK_OP_REMAINDER_ASSIGN;
+}
+
 static bool check_common_shift_op(CheckOp op)
 {
     const bool result = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT ||
@@ -2077,7 +2082,9 @@ static bool check_common_zero_divisor(const CheckGraph* graph, const CheckStream
     {
         if (check_common_integer_constant(stream, at))
         {
-            result = check_stream_value(stream, at).integer == 0;
+            const CheckValue value = check_stream_value(stream, at);
+            bool truth = false;
+            result = check_action_truth(types, &value, &truth) && !truth;
             going = false;
         }
         else if (graph->ops[at] == CHECK_OP_CAST || graph->ops[at] == CHECK_OP_CONVERT)
@@ -2181,16 +2188,15 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
                                          "indirection of non-volatile null pointer will be deleted, not trap", &note, 1, emission->scratch);
         }
     }
-    else if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
+    else if (check_common_division_op(op))
     {
         const uint32_t divisor = graph->operand1[node];
         const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
         const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
         if (!ice && check_common_zero_divisor(graph, emission->stream, emission->types, &emission->input->const_values, node, divisor))
         {
-            uint32_t width = 0;
-            bool sign = false;
-            if (check_common_integer(emission->types, check_stream_type(emission->stream, graph->operand0[node]), &width, &sign))
+            const TypeId left_type = check_stream_type(emission->stream, graph->operand0[node]);
+            if (check_action_is_integer(emission->types, type_conversion_operand(emission->types, left_type)))
             {
                 // In a file-scope initializer clang's DiagRuntimeBehavior queues it to the declarator's end, after the
                 // initializer's own errors (`const int d = 1 / 0;`'s "not a compile-time constant", #1447), as a comma's left
@@ -2202,8 +2208,8 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
                 const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
                 check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
                                               declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_DIVISION_BY_ZERO,
-                                              false, op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined", NULL, 0,
-                                              emission->scratch);
+                                              false, op == CHECK_OP_DIVIDE || op == CHECK_OP_DIVIDE_ASSIGN ? "division by zero is undefined" : "remainder by zero is undefined",
+                                              NULL, 0, emission->scratch);
                 if (declarator != BUSTER_CHECK_NONE && node < emission->input->graph.count && emission->input->graph.source_positions != NULL)
                 {
                     pp_diagnostic_suborder(emission->pp, previous, (uint64_t)emission->input->graph.source_positions[node] + 1);
@@ -3932,6 +3938,26 @@ static __attribute__((noinline)) void check_common_unused_unevaluated(CheckCommo
     }
 }
 
+// Clang's comparison correction tests the unconverted left operand's lvalue category, not modifiability: const
+// objects and arrays still get the note (#2906). Duplicate vector swizzles are lvalues with a separate flag here,
+// whereas Clang classifies them as rvalues. Only an already selected warning asks; no whole-graph pass is needed.
+static bool check_common_comparison_lvalue(const CheckInput* input, const CheckStream* stream, uint32_t token)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = graph->count;
+    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const bool comparison = node < count && (graph->ops[node] == CHECK_OP_EQUAL || graph->ops[node] == CHECK_OP_NOT_EQUAL);
+    uint32_t left = comparison ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; left < count && steps < count &&
+         (graph->ops[left] == CHECK_OP_SELECT || graph->ops[left] == CHECK_OP_CONVERT); steps += 1)
+    {
+        left = graph->operand0[left];
+    }
+    const bool result = stream != NULL && left < count && left < stream->count && check_stream_has_values(stream) &&
+                        check_stream_category(stream, left) == CHECK_LVALUE && (check_stream_flags(stream, left) & BUSTER_CHECK_VECTOR_DUPLICATE) == 0;
+    return result;
+}
+
 // The diagnostics for one evaluated comma: every left operand is evaluated for effect only — a discarded
 // comparison reports as a comparison when the operand's own root is the comparison, anything else as the
 // operand's own value (check_common_unused_of), a call's whose result warns included. A chain ending a
@@ -3996,8 +4022,9 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                                              "relational comparison result unused";
             const CheckCommonNote note = { report, parser->tokens.kinds[left] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[left] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
+            const bool suggest = equality && check_common_comparison_lvalue(input, stream, left);
             check_common_report_discarded(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
-                                          note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+                                          suggest ? &note : NULL, suggest ? 1u : 0u, scratch);
         }
         else if (report_role == PARSE_ROLE_CLOSE_CAST)
         {
@@ -5152,11 +5179,12 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                                             "relational comparison result unused";
             const CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
+            const bool suggest = equality && check_common_comparison_lvalue(input, stream, token);
             // (A statement expression's value is the walk's, as the statement expression's discarded value, #1447.)
             if (!check_common_statement_value(parser, parent))
             {
                 check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
-                                              note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+                                              suggest ? &note : NULL, suggest ? 1u : 0u, scratch);
             }
         }
     }
@@ -6974,10 +7002,9 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     const uint32_t divisor = graph->operand1[node];
     TypeId divisor_type = 0;
     // A null dereference shares the arithmetic scan with division and shifts.
-    const bool division = ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
-                           check_common_stream_integer(stream, divisor, &divisor_type) == 0) ||
-                          ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !check_common_integer_constant(stream, divisor) &&
-                           check_common_zero_divisor(graph, stream, types, enabled->const_values, node, divisor)) ||
+    const bool division = (check_common_division_op(op) && (check_common_integer_constant(stream, divisor) ?
+                           check_common_stream_integer(stream, divisor, &divisor_type) == 0 :
+                           check_common_zero_divisor(graph, stream, types, enabled->const_values, node, divisor))) ||
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, divisor);
     const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL &&
@@ -9181,7 +9208,12 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         const uint32_t closer = check_common_parent(parser, token);
         const uint32_t opener = check_common_opener(parser, closer);
         const uint32_t selector = opener != BUSTER_CHECK_NONE && opener + 1 < count ? opener + 1 : BUSTER_CHECK_NONE;
-        uint32_t selector_node = input->token_nodes != NULL && selector < input->token_count ? input->token_nodes[selector] : BUSTER_CHECK_NONE;
+        // The selector's value is the operand of the condition's promotion, the POSITIVE the reader records at the
+        // condition's `)` (check_input_expression_condition), not the node of its first token: that is the selector's
+        // only where its first token is its root's, and not for `s->kind`, `e[0]`, `get()` or `(e)` (#3200). The
+        // warning stays at the first token, where clang puts it.
+        const uint32_t condition = input->token_nodes != NULL && closer < input->token_count ? input->token_nodes[closer] : BUSTER_CHECK_NONE;
+        uint32_t selector_node = condition < stream->count && stream->graph->ops[condition] == CHECK_OP_POSITIVE ? stream->graph->operand0[condition] : BUSTER_CHECK_NONE;
         // Unary +, - and ~ apply the integer promotions, so their selector operand is never the
         // enum expression Clang analyzes: only an implicit enum-to-int conversion unwraps to it.
         for (uint32_t steps = 0; selector_node < stream->count && steps < stream->count; steps += 1)

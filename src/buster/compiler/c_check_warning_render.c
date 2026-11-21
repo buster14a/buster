@@ -1877,6 +1877,18 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                                               (int)spelled.length, spelled.pointer, payload->data != 0 ? "a member with an attribute" : "an attribute") : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION:
+        {
+            static const char* const endings[] = {
+                [CHECK_NON_PROTOTYPE_PREVIOUS] = "is treated as a zero-parameter prototype in C23, conflicting with a previous declaration",
+                [CHECK_NON_PROTOTYPE_SUBSEQUENT] = "is treated as a zero-parameter prototype in C23, conflicting with a subsequent declaration",
+                [CHECK_NON_PROTOTYPE_SUBSEQUENT_DEFINITION] = "is treated as a zero-parameter prototype in C23, conflicting with a subsequent definition",
+                [CHECK_NON_PROTOTYPE_HAS_PARAMETERS] = "is not supported in C23",
+            };
+            result = payload->data < BUSTER_ARRAY_LENGTH(endings) ?
+                check_warning_text(scratch, "a function declaration without a prototype is deprecated in all versions of C and %s", endings[payload->data]) : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;
@@ -2631,6 +2643,7 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             result = check_warning_text(scratch, "use 'static' to give inline function '%.*s' internal linkage", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
+        case CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE: result = "conflicting prototype is here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
         case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE: result = "previous attribute is here"; break;
@@ -2922,8 +2935,9 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
+                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION)
                     {
+                        // A prototype merge warning precedes a conflicting-types error at the same declarator's completion.
                         // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
                     }

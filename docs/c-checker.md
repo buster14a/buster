@@ -6868,6 +6868,17 @@ keyword, as a value of a conditional's arm or a comma's operand does, and so
 does a `_Generic`'s or `__builtin_choose_expr`'s chosen operand without an
 effect. `-Wunused-value` is in `-Wunused`, `-Wmost` and `-Wall`, with
 `-Wunused-comparison` and `-Wunused-result` under it.
+A discarded equality or inequality supplies its assignment suggestion only
+when its original left operand is an lvalue (#2906,
+`check_common_comparison_lvalue`). The comma and ordinary statement emitters
+share that check. Parentheses, static selections and implicit conversions
+preserve the operand's classification; explicit casts and other rvalues do
+not qualify. A repeated vector swizzle is excluded even though Buster stores
+it as an lvalue with a duplicate-component flag. This follows Clang's
+suggestion rule rather than full assignment validation: const objects and
+arrays still receive notes, and a floating or pointer lvalue can still receive
+the inequality's `|=` suggestion. The existing warning emitter retains its
+locations, macro handling, warning group and severity policy.
 A discarded `&&` or `||` (#1390) is quiet where either operand accepts the
 discard: an ordinary direct call, an assignment, an increment, a volatile read,
 or a nested logical operator, comma, conditional, selection or statement
@@ -6972,8 +6983,11 @@ and check that file-spelled candidates and suppressed warnings do not replay his
 `while` or `?:` condition; a write in that condition is a use of the parameter,
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
-another scope resolve correctly. The return-flow walk runs for non-aggregate
-functions only where `-Wreturn-type` is enabled, or for a `noreturn` function's
+another scope resolve correctly. The selector is the operand of the condition's
+promotion (the POSITIVE at the condition's `)`), not the node of its first
+token, so `s->kind`, `e[0]`, `get()` and `(e)` warn as in clang; the warning
+stays at the first token, where clang puts it (#3200). The return-flow walk
+runs for non-aggregate functions only where `-Wreturn-type` is enabled, or for a `noreturn` function's
 independent `-Winvalid-noreturn` fall-off warning, and for them takes only the
 warning's walk: the first walk is an aggregate return's alone, whose lowering
 reads its result (#1340). The walk's per-node facts, whether an expression
@@ -7653,8 +7667,12 @@ twin computes the same candidate and empty masks. Equal-key candidates stay in
 insertion order through collisions and wraparound, so the first failing
 association and expression/warning handling keep their existing order. Up to
 eight associations use local storage; larger lists reserve a bounded,
-at-most-half-full table from the token span. Allocation and sizing failures
-propagate as resource failures, and each reader restores its scratch mark.
+at-most-half-full table from the list's associations, its top-level commas
+counted with nested groups skipped as the readers skip them. Sized from the
+token span, a chain of selections nested in each other's last association
+cleared a table as large as every selection inside it (#2995). Allocation and
+sizing failures propagate as resource failures, and each reader restores its
+scratch mark.
 The index records exact duplicate and control compatibility-query counts.
 
 For A distinct nominal tags, including pointers to forward-declared tags,
@@ -8709,8 +8727,14 @@ qualifiers at the placeholder), and a declaration's later declarators, which
 must deduce the same type, by C23 `auto`'s deduction below
 (`check_input_c23_auto_deduce`; `BUSTER_CHECK_DECLARATION_GNU_AUTO` keeps
 `__auto_type`'s words in its errors). Declarators that deduce differently are
-clang's error at the declaration, in the checker's words ("'__auto_type'
-deduced types differ within one declaration"). A variably modified deduced
+clang's error at the `__auto_type` or `auto` keyword, in its words (#1844):
+"'__auto_type' deduced as 'int *' in declaration of 'c' and deduced as 'int'
+in declaration of 'd'", each deduction without the specifiers' qualifiers and
+spelled as its initializer spells it (`'T' (aka 'int')`), once a declaration,
+as clang's comparison of its declarators stops there
+(`CheckInputReader.declaration_deduced_first`). The later declarator is
+invalid, its uses quiet (`check_input_invalid_declare`), and the reader goes
+on past the error. A variably modified deduced
 type is the initializer's, whose sizes its own declaration evaluated, and the
 declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
 cast to a variably modified type in the initializer evaluates its bounds once,
@@ -9021,7 +9045,27 @@ change, it refused such a declaration by name.
   "conflicting attribute is here" at that declaration's first token;
   `nomerge` on a statement that evaluates no call, "'X' attribute is ignored
   because there exists no call expression inside the statement"; a `nomerge`
-  of arguments, clang's "'nomerge' attribute takes no arguments"; and
+  of arguments, clang's "'nomerge' attribute takes no arguments". Each
+  attribute's error drops that attribute alone, as clang's
+  `ProcessStmtAttributes` drops it (#1844): the statement's other attributes
+  are checked on (a valid `fallthrough` and `musttail` keep their effects), and
+  the errors are recovered (`check_input_recover_reports`), so the unit's later
+  statements are read on and their attributes' errors given too. They are
+  published once the statement is read (`CheckInputReport.completion` at
+  `check_input_loop_statement_end`), after the statement's own errors, and an
+  inner statement's before those of an outer one that ends with it. Clang's
+  analysis, which reports a misplaced `fallthrough`, runs for no function
+  that ends after such an error (`check_input_fallthrough_placements`'
+  `first_error`). Where clang's Sema drops the statement itself (a return of
+  an undeclared name, a parser error in the expression), it gives none of its
+  attributes' errors, which the checker still does. A statement's attribute
+  lists are its children in the parser's tree, before its keyword, each by
+  its closer: the walks find an attributed `while`'s, `for`'s and `switch`'s
+  keyword past them (`check_input_statement_keyword`), so that its breaks,
+  continues, cases and fallthroughs are its own and a switch's condition is
+  promoted, and the control writer finds an attributed `break`, `continue` or
+  `goto` under its specifiers as a musttail return's (`check_control_attributed`),
+  which on main compiled to nothing; and
   `suppress`'s arguments, string literals through parentheses
   (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`); a non-string
   inside them (`suppress((1))`, #2332) is the string error, then the parser's

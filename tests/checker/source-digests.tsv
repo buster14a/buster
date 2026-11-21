@@ -538,7 +538,7 @@ sources/generic: counted_by@c458a58d	0923b334047f1915
 sources/generic: cpu_supports of an unknown feature@f051459e	28cae5da06da64ee
 sources/generic: dump_struct@300d29fe	7df2b4abd7cd4a6b
 sources/generic: eh_return and constant strings@18583e03	c9383b7f62e28f58
-sources/generic: eh_return_data_regno's registers@e49736c6	45f10a5490927f41
+sources/generic: eh_return_data_regno's registers@e49736c6	98dd055661eb739f
 sources/generic: fence in constant contexts@77dee43d	236ef96b64b316e7
 sources/generic: fence of float vectors and complex values@1bee5145	d3a19d00c1f148e0
 sources/generic: function_start of a function's address@d6c0ff8a	82097b64dfe935c0
@@ -554,7 +554,7 @@ sources/generic: os_log@35124dfa	e055505ea60902cb
 sources/generic: preserve_access_index@2db354be	91986373d2b95246
 sources/generic: relocate of enums, arrays and vectors@fdca857f	1162ee0858ea1a36
 sources/generic: setjmp and longjmp@6a368146	4137cb0a7066e4d1
-sources/generic: the alloca variants', checks' and addresses' types@9c4c528a	4add3d044884ef1b
+sources/generic: the alloca variants', checks' and addresses' types@9c4c528a	0799a0f98d932d3b
 sources/generic: the leaves' prototypes@0f1cbc34	d03a5979afb73f13
 sources/generic: the unwinder's, the rounding mode's, the pointer's and the trap's leaves@b1d4f164	fbaf8a2bb56f0fce
 sources/generic: type traits' values and contexts@71df8703	e06d8ee906fd9c05

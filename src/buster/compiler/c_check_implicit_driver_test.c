@@ -1172,6 +1172,50 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int f(enum E e) { switch (e) { case EA: return 0; } return 0; }\n"
         "int g(enum E e) { switch (-e) { case 0: return 0; } return 0; }\n"
         "int h(enum E e) { switch (~e) { case 0: return 0; } return 0; }\n";
+    // A selector whose first token is not its root's (#3200): the switch reads the operand of its condition's promotion,
+    // not the node of the selector's first token; the warning stays at that token. A conditional, a promotion and a cast
+    // to an integer are no enumeration's values, as in clang.
+    static const char enum_selector_roots[] =
+        "enum E { A, B, C };\n"
+        "struct S { enum E kind; enum E bits : 2; int n; };\n"
+        "enum E table[4];\n"
+        "enum E get(void);\n"
+        "enum E (*getter)(void);\n"
+        "typedef enum E TE;\n"
+        "int f(struct S* s) { switch (s->kind) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int g(enum E e) { switch (e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int h(enum E e) { switch ((e)) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int i(enum E* e) { switch (*e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int j(enum E* e) { switch (e[0]) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int k(void) { switch (get()) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int l(enum E e, int c) { switch (c ? e : e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m1(struct S s) { switch (s.kind) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m2(struct S* s) { switch (s->bits) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m3(enum E e) { switch (e = A) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m4(enum E e) { switch (e++) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m5(int x) { switch ((enum E)x) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m6(enum E e) { switch ((0, e)) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m7(enum E e) { switch (({ e; })) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m8(enum E e) { switch (*&e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m9(int i) { switch (table[i]) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m10(void) { switch (getter()) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m11(enum E e) { switch (+e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m12(enum E e) { switch ((int)e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m13(enum E e) { switch (((e))) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m14(struct S* s) { switch (s->kind) { case A: return 1; case B: return 2; case C: return 3; } return 0; }\n"
+        "int m15(struct S* s) { switch (s->kind) { case A: return 1; case B: return 2; default: return 3; } }\n"
+        "int m16(int c, enum E e) { switch (c ? e : A) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m17(enum E e) { switch (_Generic(e, default: e)) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m18(enum E e) { switch (e += 1) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m19(enum E e) { switch (--e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m20(struct S* s) { switch ((s)->kind) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m21(enum E e) { switch (__extension__ e) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m22(TE* t) { switch (t[1]) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m23(volatile struct S* s) { switch (s->kind) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m24(struct S* s) { switch (s->n) { case A: return 1; case B: return 2; } return 0; }\n"
+        "int m25(struct S* s) { switch (s->kind) { case A: case B: case C: return 1; case 7: return 2; } return 0; }\n"
+        "int m26(struct S* s) { switch (s[0].kind) { case A ... C: return 1; case 5 ... 3: return 2; } return 0; }\n"
+        "int m27(enum E* p) { switch ((p[0])) { } return 0; }\n";
     static const char format_wide_pointer[] =
         "int printf(const char *, ...);\n"
         "void f(void) { printf(\"%ls\", 1); printf(\"%ls\", (int*)0); }\n";
@@ -1332,6 +1376,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { self_assign_members, { "-Wall", "-Wextra", NULL, NULL } },
         { format_nonliteral_call, { "-Wall", NULL, NULL, NULL } },
         { enum_unary_selectors, { "-Wall", NULL, NULL, NULL } },
+        { enum_selector_roots, { "-Wall", NULL, NULL, NULL } },
         { format_wide_pointer, { "-Wall", NULL, NULL, NULL } },
         { boundary_return_uninit, { "-Wall", "-Wextra", NULL, NULL } },
         { format_reserved_archetype, { "-Wall", "-Werror", NULL, NULL } },

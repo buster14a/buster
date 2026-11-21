@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -138,6 +138,16 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--unused-comparison-only` runs `c_check_unused_comparison_driver_test.c`
+  and the original `tests/driver/unused_comparison*.c` sources (#2906).
+  It compares complete Clang diagnostics for discarded comparisons, eligible
+  lvalue notes, successful assertions, macro operands and warning policy in
+  GNU17/C23 through both readers and one/three requested lanes. Ordinary
+  fixtures also check object output and its preservation after rejection;
+  the vector-swizzle category fixture checks syntax because its unrelated
+  object lowering remains unsupported. A failed-assertion fixture checks
+  rejection, retained assertion errors and absence of invalid notes without
+  pinning missing warnings: full discarded-comma recovery belongs to #2409.
   `--assert-bool-only` runs `c_check_assert_bool_driver_test.c` alone, including
   the original `tests/driver/assert_bool_*.c` sources for root and nested
   boolean-conversion warnings in failed static assertions (#2409). It compares
@@ -666,7 +676,7 @@ Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#c
 
 ## Runtime fixtures
 
-`test-checker`'s shared source fixtures (`check_test_sources`, 420 cases) are
+`test-checker`'s shared source fixtures (`check_test_sources`) are
 runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
 a case, which the test reads when it runs, so that editing a case's source or
 flags, or adding a case, compiles, links and bakes nothing. The catalog's first
@@ -717,7 +727,7 @@ no line passes, as above. A checker change that changes a recorded stream
 records again with `BUSTER_CHECK_RECORD_STREAM_DIGESTS=FILE`, every part and a
 whole run, a key with two digests `-`.
 
-Ten test files' own source tables, 596 cases, are runtime data in the same
+Ten test files' own source tables, 599 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`
 (`c_checker_test.c`) reads and runs. Each case is written to a file, clang
 `-fsyntax-only -std=gnu17` checks them all at once, and then each case's
@@ -731,7 +741,7 @@ as the tables' own loops did. There are no generated cases.
 | `cleanup` | 71 | `check_test_cleanup_sources` (`c_check_cleanup_test.c`) |
 | `const-alias` | 53 | `check_test_const_alias_sources` (`c_check_const_alias_test.c`) |
 | `float-constants` | 8 | `check_test_float_constant_sources` (`c_check_program_constants_test.c`) |
-| `generic-builtins` | 268 | `check_test_generic_builtin_sources` (`c_check_program_generic_builtins_test.c`) |
+| `generic-builtins` | 271 | `check_test_generic_builtin_sources` (`c_check_program_generic_builtins_test.c`) |
 | `library` | 21 | `check_test_library_sources` (`c_check_program_library_test.c`) |
 | `musttail` | 63 | `check_test_musttail_sources` (`c_check_musttail_test.c`) |
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
