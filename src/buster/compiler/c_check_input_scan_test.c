@@ -149,7 +149,7 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
 }
 
-// The output's two NONE columns and the reader's six, including the two heads that only deferred readers fill.
+// The eight columns under test include the value-chain tails and the two heads initialized for deferred readers.
 static void check_test_output_none_columns(uint32_t* const* columns, uint32_t count, CheckInput* input, CheckInputReader* reader)
 {
     *input = (CheckInput)
@@ -205,8 +205,9 @@ static void check_test_output_none(CheckTest* test)
             }
             for (uint32_t token = 0; token <= count; token += 1)
             {
-                const bool untouched = reader.deferred == NULL && (column == 3 || column == 5);
-                exact &= columns[column][token] == (untouched ? UINT32_C(0xa5a5a5a5) : UINT32_MAX);
+                const bool head = columns[column] == reader.initializer_finish_heads || columns[column] == reader.activate;
+                const bool untouched = columns[column] == reader.last_value || (reader.deferred == NULL && head);
+                exact &= columns[column][token] == (untouched ? UINT32_C(0xa5a5a5a5) : BUSTER_CHECK_NONE);
             }
         }
         char description[120];
@@ -248,7 +249,7 @@ static void check_test_output_none(CheckTest* test)
             {
                 for (uint32_t token = 0; token <= counts[at]; token += 1)
                 {
-                    const bool untouched = column == 3 || column == 5;
+                    const bool untouched = columns[column] == reader.last_value || columns[column] == reader.initializer_finish_heads || columns[column] == reader.activate;
                     exact &= columns[column][token] == (untouched ? UINT32_C(0x63636363) : BUSTER_CHECK_NONE);
                 }
             }

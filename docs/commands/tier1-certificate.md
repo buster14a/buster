@@ -64,10 +64,22 @@ requirements. [Command index](README.md).
   also requires zero repeat stores for a single earlier
   predecessor, while joins and backward-layout predecessors still store.
   Its aggregate-copy regression (#1816) runs the real emitter and decoder with
-  a rematerialized address and dead, live, owed, expired, spilled or relocated
+  a rematerialized address, 16 bytes from rsp and at rsp itself (rsp's
+  register copy, #3149), and dead, live, owed, expired, spilled or relocated
   rax ownership. The independent value-flow checker proves the live value
   survives or is repaid, and rejects missing or corrupted preservation and a
-  saved unknown register.
+  saved unknown register. Its frame-copy fixture (#3149,
+  `tier1_code_certificate_frame_copy`) decodes one record recomputing a frame
+  address into rbx, its recipe 0 or 16 bytes from the frame's base, rsp or
+  (under a frame pointer) rbp, and the checker must find the value in rbx: the
+  emitter's copy (`mov rbx, base` at 0, a lea at 16) is certified; `mov rbx,
+  base` for the recipe at 16, `lea rbx, [base]`, a lea at the other
+  displacement and the other register's copy are refused, and so is every
+  record of a value without a recipe. The check certifies that a record is
+  `tier1_rematerialize`'s copy, not what the copy computes;
+  `test-tier1-allocation`'s frame copies check that. `test-checker-driver
+  --executable`'s frame fixture runs C functions whose recomputed address is at
+  rsp itself through `--tier1 --verify`.
   The full driver's `tier1-shapes` fixture covers the original rematerialization
   failure through compilation, linking and execution.
   The debug-definition fixture (#1114) emits the real call program with source

@@ -861,6 +861,40 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
 
 // A declaration can bind before a constant job publishes its attributes. The later attribute consumers must still
 // distinguish a closed block's redeclaration from a block's first declaration of an otherwise invisible entity.
+// A first-declaration query after a scope closes must discard the root for the old entity,
+// including when a sibling scope uses the same ordinary name immediately afterward.
+static void check_test_binding_linkage_roots(CheckTest* test)
+{
+    Arena storage = arena_reserve(UINT64_C(1) << 16);
+    Parser parser = { .tokens = { .count = 8 } };
+    CheckInput input = { 0 };
+    uint32_t roots[2] = { 0 };
+    CheckInputReader reader = { .parser = &parser, .output = &input, .internal_linkage_roots = roots };
+    CBindings* bindings = &reader.bindings;
+    const bool ready = storage.base != NULL && c_bindings_initialize(bindings, &storage, BUSTER_ARRAY_LENGTH(roots), 8) &&
+                       check_sparse_reserve_wide(&storage, &input.sparse_pool, NULL, 0, &input.attributes, 1, parser.tokens.count, true, false);
+    check_test_expect(test, ready, "first internal_linkage declaration fixture");
+    if (ready)
+    {
+        CheckInputAttribute record = { .kind = CHECK_ATTRIBUTE_INTERNAL_LINKAGE };
+        CheckInputAttributes attributes = { .records = &record, .count = 1, .capacity = 1 };
+        check_input_set_attributes_at(&input, 0, &attributes);
+        const uint32_t first = c_bindings_declare(bindings, C_BINDING_ORDINARY, 1, C_BINDING_FUNCTION, 0, 0, 1);
+        const uint32_t nested = c_bindings_declare(bindings, C_BINDING_ORDINARY, 1, C_BINDING_FUNCTION, 1, 1, 2);
+        check_test_expect(test, nested != 0 && check_input_first_internal_linkage(&reader, 1, nested) && roots[1] == first,
+                          "redeclaration finds its attributed first declaration");
+        const bool restored = c_bindings_restore(bindings, 0, 2);
+        const uint32_t sibling = c_bindings_declare(bindings, C_BINDING_ORDINARY, 1, C_BINDING_FUNCTION, 3, 3, 1);
+        const uint32_t last = c_bindings_declare(bindings, C_BINDING_ORDINARY, 1, C_BINDING_FUNCTION, 4, 4, 2);
+        check_test_expect(test, restored && last != 0 && !check_input_first_internal_linkage(&reader, 1, last) && roots[1] == sibling,
+                          "new scope finds its unannotated root after the old root closes");
+        reader.internal_linkage_roots = NULL;
+        check_test_expect(test, last != 0 && !check_input_first_internal_linkage(&reader, 1, last),
+                          "a reader with remapped handles walks its own declaration chain");
+    }
+    arena_release(&storage);
+}
+
 static void check_test_binding_attribute_scope(CheckTest* test)
 {
     CheckTestTypes types = { 0 };
@@ -1352,6 +1386,7 @@ static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
     check_test_binding_column_failures(test);
     check_test_binding_compatibility_capacity(test);
     check_test_binding_attribute_scope(test);
+    check_test_binding_linkage_roots(test);
     check_test_binding_recovery_limits(test);
 }
 
