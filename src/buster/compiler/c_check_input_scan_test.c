@@ -149,7 +149,7 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
 }
 
-// The seven columns check_input_output_none fills and the reader's unwritten value-chain tails in the eighth.
+// The eight columns under test include the value-chain tails and the two heads initialized for deferred readers.
 static void check_test_output_none_columns(uint32_t* const* columns, uint32_t count, CheckInput* input, CheckInputReader* reader)
 {
     *input = (CheckInput)
@@ -192,6 +192,8 @@ static void check_test_output_none(CheckTest* test)
         CheckInput input;
         CheckInputReader reader;
         check_test_output_none_columns(columns, count, &input, &reader);
+        CheckDeferred deferred = { 0 };
+        reader.deferred = count % 2 != 0 ? &deferred : NULL;
         check_input_output_none(&input, &reader, count);
         bool exact = true;
         for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
@@ -203,7 +205,9 @@ static void check_test_output_none(CheckTest* test)
             }
             for (uint32_t token = 0; token <= count; token += 1)
             {
-                exact &= columns[column][token] == (columns[column] == reader.last_value ? UINT32_C(0xa5a5a5a5) : BUSTER_CHECK_NONE);
+                const bool head = columns[column] == reader.initializer_finish_heads || columns[column] == reader.activate;
+                const bool untouched = columns[column] == reader.last_value || (reader.deferred == NULL && head);
+                exact &= columns[column][token] == (untouched ? UINT32_C(0xa5a5a5a5) : BUSTER_CHECK_NONE);
             }
         }
         char description[120];
@@ -245,7 +249,8 @@ static void check_test_output_none(CheckTest* test)
             {
                 for (uint32_t token = 0; token <= counts[at]; token += 1)
                 {
-                    exact &= columns[column][token] == (columns[column] == reader.last_value ? UINT32_C(0x63636363) : BUSTER_CHECK_NONE);
+                    const bool untouched = columns[column] == reader.last_value || columns[column] == reader.initializer_finish_heads || columns[column] == reader.activate;
+                    exact &= columns[column][token] == (untouched ? UINT32_C(0x63636363) : BUSTER_CHECK_NONE);
                 }
             }
         }
