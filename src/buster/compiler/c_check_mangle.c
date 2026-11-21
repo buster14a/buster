@@ -26,7 +26,6 @@ struct CheckMangleSource
     const InternTable* identifiers;
     const TypeTable* types;
     Arena* output;
-    bool scalar;
     bool internal;
     bool object_size_compat;
     // Built only when a selected signature contains a named tag. Local/anonymous tags need lexical ABI names that
@@ -114,7 +113,7 @@ static void check_mangle_push(CheckMangle* writer, CheckMangleTaskKind kind, Typ
 }
 
 // The first completed occurrence of this canonical type. Exact ids are compared sixteen at a time; only aligned
-// typedef wrappers need structural comparison. The scalar path is the executable twin of the id scan.
+// typedef wrappers need structural comparison.
 static uint32_t check_mangle_substitution(CheckMangle* writer, TypeId type)
 {
     const TypeTable* types = writer->source->types;
@@ -123,20 +122,9 @@ static uint32_t check_mangle_substitution(CheckMangle* writer, TypeId type)
     for (uint32_t first = 0; found == BUSTER_CHECK_NONE && first < writer->substitution_count; first += 16)
     {
         const uint32_t count = writer->substitution_count - first < 16 ? writer->substitution_count - first : 16;
-        uint32_t matches = 0;
-        if (BUSTER_SCALAR_PATH(writer->source->scalar))
-        {
-            for (uint32_t lane = 0; lane < count; lane += 1)
-            {
-                matches |= (uint32_t)(previous[first + lane] == type) << lane;
-            }
-        }
-        else
-        {
-            const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, count);
-            const __m512i values = _mm512_maskz_loadu_epi32(active, previous + first);
-            matches = _mm512_mask_cmpeq_epi32_mask(active, values, _mm512_set1_epi32((int32_t)type));
-        }
+        const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, count);
+        const __m512i values = _mm512_maskz_loadu_epi32(active, previous + first);
+        const uint32_t matches = _mm512_mask_cmpeq_epi32_mask(active, values, _mm512_set1_epi32((int32_t)type));
         found = matches != 0 ? first + (uint32_t)__builtin_ctz(matches) : found;
     }
     const bool aligned = (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_ALIGNED_INSIDE) != 0;
@@ -171,8 +159,7 @@ static bool check_mangle_global_tags(CheckMangleSource* source)
             uint32_t body_end = 0;
             for (uint32_t first = 0; first < input->token_count; first += 64)
             {
-                const uint64_t lanes = BUSTER_SCALAR_PATH(source->scalar) ? check_input_scan_all(first, input->token_count) :
-                                       check_input_scan_equal(input->declaration_kinds, first, input->token_count, C_BINDING_TAG_KIND) |
+                const uint64_t lanes = check_input_scan_equal(input->declaration_kinds, first, input->token_count, C_BINDING_TAG_KIND) |
                                        check_input_scan_equal(parser->tree.roles, first, input->token_count, PARSE_ROLE_OPEN_BODY);
                 for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
                 {

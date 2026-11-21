@@ -8109,12 +8109,11 @@ static bool check_input_swift_cf_error(CheckInputReader* reader, TypeId record)
     const bool structure = record != 0 && type_kind(reader->types, record) == BUSTER_TYPE_KIND_STRUCT;
     bool found = reader->cf_error != 0 && type_unqualified(record) == reader->cf_error;
     const CheckSparseWide all = reader->output->attributes;
-    const bool scalar = parser->options.scalar;
     const uint32_t end = parser->tokens.count;
-    for (uint32_t first = structure && reader->cf_error == 0 ? check_input_attributed_next(all, 0, end, scalar) : end; !found && first < end;
-         first = check_input_attributed_next(all, first + 16, end, scalar))
+    for (uint32_t first = structure && reader->cf_error == 0 ? check_input_attributed_next(all, 0, end) : end; !found && first < end;
+         first = check_input_attributed_next(all, first + 16, end))
     {
-        for (uint32_t selected = check_input_attributed_group(all, first, end, scalar); !found && selected != 0; selected &= selected - 1)
+        for (uint32_t selected = check_input_attributed_group(all, first, end); !found && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
             const CheckInputAttributes* attributes = type_unqualified(reader->tag_types[token]) == type_unqualified(record) ?
@@ -9546,12 +9545,11 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
         const bool kept = !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
         const String8 name = kept ? check_input_attribute_name(reader, attribute->name) : (String8){ "", 0 };
         const bool listed = kept && check_input_attribute_excludable(reader, attribute);
-        const bool scalar = reader->parser->options.scalar;
         const CheckSparseWide all = reader->output->attributes;
-        for (uint32_t first = listed ? check_input_attributed_next(all, 0, token, scalar) : token; !reported && first < token;
-             first = check_input_attributed_next(all, first + 16, token, scalar))
+        for (uint32_t first = listed ? check_input_attributed_next(all, 0, token) : token; !reported && first < token;
+             first = check_input_attributed_next(all, first + 16, token))
         {
-            const uint32_t lanes = check_input_attributed_group(all, first, token, scalar);
+            const uint32_t lanes = check_input_attributed_group(all, first, token);
             for (uint32_t selected = lanes; !reported && selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -9625,11 +9623,10 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
         {
             memset(reader->late_attribute_masks, 0, (uint64_t)count + 1);
             memset(reader->late_attribute_kinds, 0, 2 * ((uint64_t)count + 1) * sizeof(uint64_t));
-            const bool scalar = reader->parser->options.scalar;
             const CheckSparseWide attributes = reader->output->attributes;
-            for (uint32_t first = check_input_attributed_next(attributes, 0, token, scalar); first < token; first = check_input_attributed_next(attributes, first + 16, token, scalar))
+            for (uint32_t first = check_input_attributed_next(attributes, 0, token); first < token; first = check_input_attributed_next(attributes, first + 16, token))
             {
-                const uint32_t lanes = check_input_attributed_group(attributes, first, token, scalar);
+                const uint32_t lanes = check_input_attributed_group(attributes, first, token);
                 for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
                 {
                     const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -11049,17 +11046,17 @@ static CheckInputDeprecatedBlock check_input_deprecated_block(const Parser* pars
 // in source order. A use reads those up to the declaration its lookup finds, which inherits from the ones before it,
 // as clang's redeclarations inherit their attributes: not a block's later one, which it doesn't see. A tag's use, which
 // finds its first declaration, reads those before it.
-// The scalar path walks every token (check_input_deprecated_use). A unit with such an attribute marks a few declarations
-// (glibc's headers mark a handful of functions), so the vector path visits only the tokens a use may be at and the
-// braces that open and close the scopes they read, with the brackets between them counted 64 tokens a mask (#1489):
-// sqlite3.c's 716,158 tokens took 25 M cycles of the 9700X's for the scalar walk.
+// A unit with such an attribute marks a few declarations (glibc's headers mark a handful of functions), so the scan
+// visits only the tokens a use may be at and the braces that open and close the scopes they read, with the brackets
+// between them counted 64 tokens a mask (#1489): sqlite3.c's 716,158 tokens took 25 M cycles of the 9700X's for a walk
+// of every token (check_input_deprecated_use), which a unit past the gathers' signed 32-bit lanes still takes.
 static void check_input_deprecated_uses(CheckInputReader* reader, bool errors)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const uint64_t mark = reader->scratch->length;
-    // The vector path's gathers index by signed 32-bit lanes.
-    const bool vector = BUSTER_VECTOR_PATH(!parser->options.scalar) && count <= INT32_MAX;
+    // The scan's gathers index by signed 32-bit lanes.
+    const bool vector = count <= INT32_MAX;
     // marks: a key's first marked declaration plus one; chain: a marked declaration's next of its key plus one; latest:
     // a key's last marked declaration plus one while the marks are found, then a tag key's latest declaration so far.
     uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
@@ -11130,15 +11127,14 @@ static void check_input_deprecated_uses(CheckInputReader* reader, bool errors)
             member_marks[marked_member->name < count ? marked_member->name : count] = bit;
         }
         reader->member_marks = member_marks;
-        const bool scalar = parser->options.scalar;
         const CheckSparseWide all = reader->output->attributes;
         // Whether an attribute marks what may be a tag (an enumerator's use reads its enum's marks, and a typedef's use
         // its struct's, union's or enum's): any mark but on a function, an object or an enumerator, or on a keyword.
         bool tags = false;
         // In source order, so that each key's chain runs first to last.
-        for (uint32_t first = check_input_attributed_next(all, 0, count, scalar); first < count; first = check_input_attributed_next(all, first + 16, count, scalar))
+        for (uint32_t first = check_input_attributed_next(all, 0, count); first < count; first = check_input_attributed_next(all, first + 16, count))
         {
-            const uint32_t lanes = check_input_attributed_group(all, first, count, scalar);
+            const uint32_t lanes = check_input_attributed_group(all, first, count);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -11161,9 +11157,9 @@ static void check_input_deprecated_uses(CheckInputReader* reader, bool errors)
         }
         // `latest` again all zeros, for the walk: the loop above wrote it only at its keys, which the same tokens give
         // again (#529), where a fill wrote every token's entry.
-        for (uint32_t first = check_input_attributed_next(all, 0, count, scalar); first < count; first = check_input_attributed_next(all, first + 16, count, scalar))
+        for (uint32_t first = check_input_attributed_next(all, 0, count); first < count; first = check_input_attributed_next(all, first + 16, count))
         {
-            for (uint32_t selected = check_input_attributed_group(all, first, count, scalar); selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(all, first, count); selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
                 const uint32_t key = check_input_deprecated_record(check_input_attributes_at(reader->output, d)) != NULL ? check_input_deprecated_key(reader, d) : count;

@@ -81,7 +81,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
 // What the reference's C did with the expression at hand, for C on the window (BUSTER_NODE_READER_WINDOW_CONTEXTS):
 // whether it ran (0: it didn't; 1: it took the expression; 2: it refused it for a template), its ticks, and the
 // root's target.
-static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target);
+static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target, bool sense);
 static void node_facts_reader_rows(struct NodeFactsReader* state, uint64_t ticks);
 static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
                                          uint32_t operand, bool taken);
@@ -365,6 +365,14 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
     TypeId* declared = tested ? arena_push_array(reader->arena, capacity, sizeof(TypeId), _Alignof(TypeId)) : NULL;
     room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL));
+    // A summary's side facts by root node, and their references' store: no expression has more references than
+    // leaves, so a node each is room for all.
+    const bool summaries = (options & BUSTER_NODE_READER_WINDOW_ROWS) != 0;
+    uint32_t* summary_firsts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    uint16_t* summary_counts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint16_t), _Alignof(uint16_t)) : NULL;
+    uint8_t* summary_facts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
+    uint32_t* summary_objects = summaries ? arena_push_array(reader->arena, (uint64_t)capacity + 1, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    room = room && (!summaries || (summary_firsts != NULL && summary_counts != NULL && summary_facts != NULL && summary_objects != NULL));
     if (room)
     {
         typer->graph = reader->output->graph;
@@ -403,6 +411,15 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         types->tape_values = tape_values;
         types->tape_capacity = tape_capacity;
         types->node_capacity = capacity;
+        if (summaries)
+        {
+            memset(summary_firsts, 0xff, (uint64_t)capacity * sizeof(uint32_t));
+            types->summary_firsts = summary_firsts;
+            types->summary_counts = summary_counts;
+            types->summary_facts = summary_facts;
+            types->summary_objects = summary_objects;
+            types->summary_capacity = capacity;
+        }
         if (tested)
         {
             types->tests = tests;
@@ -556,7 +573,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     NodeMachineRefusal swept = NODE_MACHINE_TAKEN;
                     if (typer->facts != NULL)
                     {
-                        node_facts_reader_contexts(typer->facts, BUSTER_NODE_CONTEXTS_RAN_NONE, 0, 0);
+                        node_facts_reader_contexts(typer->facts, BUSTER_NODE_CONTEXTS_RAN_NONE, 0, 0, false);
                     }
                     for (uint32_t step = 0; step < 2; step += 1)
                     {
@@ -596,7 +613,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         {
                             // The reference of C on the window: this run's answers, which the kernel's hook below keeps.
                             const uint8_t ran = swept == NODE_MACHINE_TAKEN ? BUSTER_NODE_CONTEXTS_RAN_TAKEN : BUSTER_NODE_CONTEXTS_RAN_REFUSED;
-                            node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target);
+                            node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target, (context & BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE) != 0);
                         }
                         const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
