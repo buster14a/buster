@@ -45,7 +45,7 @@ static __attribute__((noinline)) void check_test_corpus_symbol_reasons(CheckTest
         "if(n&2){static int slot[2]={3,4};return slot[n&1];}if(n&4){static int slot[2]={5,6};return slot[n&1];}"
         "{static int slot[2]={7,8};return slot[n&1];}}int dead_shadow_owner(int n){if(0)return shadow_owner(n);return n;}\n"
         "int retained_owner(int n){static int retained_local[2]={1,3};retained_local[n&1]=n;return retained_local[(n+1)&1];}\n"
-        // --symbols verifies emitted helper frames too: sqrt/floor reserve stack space, while copysign is frameless.
+        // --symbols also checks the emitted unwind rows for framed and frameless helpers.
         "double helper_sqrt(double x){return __builtin_sqrt(x);}float helper_sqrtf(float x){return __builtin_sqrtf(x);}\n"
         "double helper_floor(double x){return __builtin_floor(x);}float helper_floorf(float x){return __builtin_floorf(x);}\n"
         "double helper_copysign(double x,double y){return __builtin_copysign(x,y);}"

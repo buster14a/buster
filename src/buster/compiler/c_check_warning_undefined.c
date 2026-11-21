@@ -142,12 +142,10 @@ static void check_warning_undefined_use(CheckInputReader* reader, CheckWarningUn
 }
 
 // The tokens from `first` (of the next 64 below `count`) that may declare a function of internal linkage: those whose
-// declaration kind and linkage bytes say so (check_input_scan_*), or every token on the scalar path, its twin. The
-// callers test each one in full.
-static uint64_t check_warning_undefined_declaring(const CheckInput* input, uint32_t first, uint32_t count, bool scalar)
+// declaration kind and linkage bytes say so (check_input_scan_*). The callers test each one in full.
+static uint64_t check_warning_undefined_declaring(const CheckInput* input, uint32_t first, uint32_t count)
 {
-    return scalar ? check_input_scan_all(first, count) :
-                    check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_FUNCTION) & check_input_scan_internal(input->declaration_bits, first, count);
+    return check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_FUNCTION) & check_input_scan_internal(input->declaration_bits, first, count);
 }
 
 static bool check_warning_undefined_internal(CheckWarningBuffer* output, const CheckInput* input, const Parser* parser,
@@ -174,11 +172,10 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
         const uint8_t* declaration_kinds = input->declaration_kinds;
         const uint8_t* declaration_bits = input->declaration_bits;
         const uint32_t* objects = input->objects;
-        const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
         uint32_t room = 0;
         for (uint32_t first = 0; valid && first < count; first += 64)
         {
-            for (uint64_t bits = check_warning_undefined_declaring(input, first, count, scalar); bits != 0; bits &= bits - 1)
+            for (uint64_t bits = check_warning_undefined_declaring(input, first, count); bits != 0; bits &= bits - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);
                 room += declarations[token] == token && declaration_kinds[token] == C_BINDING_FUNCTION && check_input_linkage(declaration_bits, token) == 1 &&
@@ -192,7 +189,7 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
         uint32_t written = 0;
         for (uint32_t first = 0; valid && room != 0 && first < count; first += 64)
         {
-            for (uint64_t bits = check_warning_undefined_declaring(input, first, count, scalar); valid && bits != 0; bits &= bits - 1)
+            for (uint64_t bits = check_warning_undefined_declaring(input, first, count); valid && bits != 0; bits &= bits - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);
                 if (declarations[token] == token && declaration_kinds[token] == C_BINDING_FUNCTION && check_input_linkage(declaration_bits, token) == 1)
@@ -314,8 +311,7 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
         const uint8_t* roles = parser->tree.roles;
         for (uint32_t first = 0; valid && pending != 0 && first < count; first += 64)
         {
-            const uint64_t lanes = scalar ? check_input_scan_all(first, count) :
-                                   check_input_scan_equal(kinds, first, count, PARSE_KIND_IDENTIFIER) & check_input_scan_equal(roles, first, count, PARSE_ROLE_OPERAND);
+            const uint64_t lanes = check_input_scan_equal(kinds, first, count, PARSE_KIND_IDENTIFIER) & check_input_scan_equal(roles, first, count, PARSE_ROLE_OPERAND);
             for (uint64_t bits = lanes; valid && bits != 0; bits &= bits - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);

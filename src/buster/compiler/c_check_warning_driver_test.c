@@ -3203,6 +3203,10 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
 {
     check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, check_driver_default_warning_fixtures,
                                              BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures), true);
+    if (check_test_driver_takes())
+    {
+        check_test_driver_warning_catalog(test, clang, executable, directory, "checker/division-by-zero");
+    }
 }
 
 // -flazy-system-headers defers only system-header bodies. A unit with no deferred body must still publish its

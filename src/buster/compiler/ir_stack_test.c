@@ -409,27 +409,22 @@ static void ir_stack_test_calls(IrLowerTestTally* tally, Arena* input, Arena* ou
         functions[1].symbol_count = 3;
         const uint32_t symbols[2] = { 1, 2 };
         const uint8_t flags[2] = { BUSTER_IR_INLINE_INTERNAL, BUSTER_IR_INLINE_INTERNAL };
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        const IrInlineUnit unit = { .functions = functions, .symbols = symbols, .flags = flags, .count = 2, .symbol_count = 3 };
+        IrInlineResult inlined = { 0 };
+        uint32_t failed = BUSTER_IR_NONE;
+        const IrCheck check = ir_optimize_inline(&unit, output, scratch, ir_inline_options(), &inlined, &failed);
+        if (ir_lower_test_expect(tally, check.error == IR_OK && inlined.inlined_calls == 0 && inlined.call_count == 1 && inlined.decisions[0] == IR_INLINE_BODY, "inlining preserves callee dynamic lifetime boundary", 0, failed))
         {
-            const IrInlineUnit unit = { .functions = functions, .symbols = symbols, .flags = flags, .count = 2, .symbol_count = 3 };
-            IrInlineOptions options = ir_inline_options();
-            options.scalar = scalar != 0;
-            IrInlineResult inlined = { 0 };
-            uint32_t failed = BUSTER_IR_NONE;
-            const IrCheck check = ir_optimize_inline(&unit, output, scratch, options, &inlined, &failed);
-            if (ir_lower_test_expect(tally, check.error == IR_OK && inlined.inlined_calls == 0 && inlined.call_count == 1 && inlined.decisions[0] == IR_INLINE_BODY, "inlining preserves callee dynamic lifetime boundary", scalar, failed))
-            {
-                const IrInterpreterFunction code[2] = {
-                    { .symbol = 1, .function = &inlined.functions[0] },
-                    { .symbol = 2, .function = &inlined.functions[1] },
-                };
-                const IrInterpreterProgram program = { .functions = code, .function_count = 2 };
-                const InterpreterOptions limits = ir_stack_test_limits();
-                const InterpreterResult result = ir_interpret(&program, 1, 0, 0, &limits, execution);
-                ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 80 && execution->length == 0, "callee early return preserves caller dynamic objects", scalar, result.status);
-            }
-            arena_pop_to(output, output_mark);
+            const IrInterpreterFunction code[2] = {
+                { .symbol = 1, .function = &inlined.functions[0] },
+                { .symbol = 2, .function = &inlined.functions[1] },
+            };
+            const IrInterpreterProgram program = { .functions = code, .function_count = 2 };
+            const InterpreterOptions limits = ir_stack_test_limits();
+            const InterpreterResult result = ir_interpret(&program, 1, 0, 0, &limits, execution);
+            ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 80 && execution->length == 0, "callee early return preserves caller dynamic objects", 0, result.status);
         }
+        arena_pop_to(output, output_mark);
     }
     arena_pop_to(input, mark);
 }

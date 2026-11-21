@@ -61,9 +61,20 @@ struct CheckConstHash
     uint32_t child[2];
 };
 
+// Source object IDs are one-based token indices. These borrowed columns identify declared storage and give its
+// complete extent even when the object has no initializer receipt. A literal or label is not a declaration.
+typedef struct CheckObjectDeclarations CheckObjectDeclarations;
+struct CheckObjectDeclarations
+{
+    const uint32_t* objects;
+    const TypeId* types;
+    uint32_t count;
+};
+
 typedef struct CheckConstValues CheckConstValues;
 struct CheckConstValues
 {
+    CheckObjectDeclarations declarations;
     const CheckConstObject* objects;
     uint32_t count;
     const CheckConstPart* parts;
@@ -81,6 +92,7 @@ typedef struct CheckConstBuffer CheckConstBuffer;
 struct CheckConstBuffer
 {
     Arena* arena;
+    CheckObjectDeclarations declarations;
     CheckConstObject* objects;
     uint32_t count;
     uint32_t capacity;
@@ -102,6 +114,7 @@ struct CheckConstBuffer
 static CheckConstValues check_const_view(const CheckConstBuffer* buffer)
 {
     const CheckConstValues result = buffer != NULL ? (CheckConstValues){
+        .declarations = buffer->prefix != NULL ? buffer->prefix->declarations : buffer->declarations,
         .objects = buffer->objects,
         .count = buffer->count,
         .parts = buffer->parts,

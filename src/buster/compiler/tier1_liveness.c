@@ -169,12 +169,16 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         }
         else if (op == IR_CALL || op == IR_CALL_INDIRECT)
         {
-            // An indirect call's callee is its last effective use, after its arguments.
+            // An indirect call's callee is an effective use after its arguments, and a destination that is a pointer
+            // value (#2820) the last one.
             const IrCall call = function->calls[function->b[node]];
             const Tier1SelectPattern* pattern = &plan->patterns[node];
             const uint32_t indirect = op == IR_CALL_INDIRECT;
+            const uint32_t destination = tier1_select_call_destination(function, node);
+            const uint32_t pointer = destination != BUSTER_IR_NONE;
             if (plan->covered[node] || pattern->rule != TIER1_RULE_CALL || pattern->immediate != function->a[node] || pattern->width != (tier1_select_width(type) | tier1_select_float_width(type)) || pattern->fold_count != 0 ||
-                end - first != call.argument_count + indirect || (indirect && plan->effective_use_values[first + call.argument_count] != function->a[node]))
+                end - first != call.argument_count + indirect + pointer || (indirect && plan->effective_use_values[first + call.argument_count] != function->a[node]) ||
+                (pointer && plan->effective_use_values[first + call.argument_count + indirect] != destination))
             {
                 error = TIER1_LIVENESS_INVALID;
             }

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Graph contract regressions for #133: partial allocation rollback, protected call-argument tails, independently
-// expected type creation/diagnostic order, and single-LHS update conversions; and #530's vector validator against its exact
-// twin, on random and broken graphs and at page edges. Include after shared fixture helpers.
+// expected type creation/diagnostic order, and single-LHS update conversions; and #530's vector validator against its
+// definition, on random and broken graphs and at page edges. Include after shared fixture helpers.
 
 static bool check_test_graph_cleared(const CheckGraph* graph)
 {
@@ -72,11 +72,8 @@ static void check_test_graph_partial_allocations(CheckTest* test, TypeTable* tab
         const uint32_t one = check_test_leaf(&graph, 14, check_test_integer(BUSTER_TYPE_INT, 1));
         const uint32_t sum = check_graph_add(&graph, CHECK_OP_ADD, 15, first, one, BUSTER_CHECK_NONE);
         graph.contexts[sum] = BUSTER_CHECK_CONTEXT_ASSERT;
-        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const CheckOptions options = {
-                .scalar = path == 0,
-            };
+            const CheckOptions options = { 0 };
             Arena output = {
                 .base = output_bytes,
                 .length = 17,
@@ -234,11 +231,10 @@ static void check_test_graph_barriers(CheckTest* test, Arena* storage, Arena* ou
             const uint32_t sum = check_graph_add(&graph, CHECK_OP_ADD, 12, query, one, BUSTER_CHECK_NONE);
             CheckStream streams[2];
             const CheckOptions options[2] = {
-                {
-                    .scalar = true,
-                },
+                { 0 },
                 {
                     .batch_size = 3,
+                    .regions = true,
                 },
             };
             for (uint32_t path = 0; path < 2; path += 1)
@@ -260,6 +256,7 @@ static void check_test_graph_barriers(CheckTest* test, Arena* storage, Arena* ou
                     check_test_expect(test, check_stream_value(stream, query).integer == 6 && check_stream_value(stream, sum).integer == 7 && table->types.count == first_derived + 4, "builtin region after barriers reads completed dependencies without new types");
                 }
             }
+            check_test_expect(test, check_test_stream_recorded(&streams[0], &graph, 0, "graph-barriers"), "graph-barriers: the reference stream is its recorded digest");
             check_test_expect(test, check_test_stream_equal(&streams[0], &streams[1], 0), "fresh-table graph barriers preserve every typed result and conversion");
         }
     }
@@ -314,8 +311,8 @@ static void check_test_graph_report_order(CheckTest* test, TypeTable* table, Are
         for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
         {
             const CheckOptions options = {
-                .scalar = batch == 0,
                 .batch_size = batch,
+                .regions = batch != 0,
             };
             CheckStream stream;
             const bool valid = check_graph_run(table, &graph, output, scratch, &options, &stream);
@@ -413,7 +410,7 @@ static void check_test_graph_updates(CheckTest* test, TypeTable* table, Arena* s
     arena_pop_to(storage, storage_mark);
 }
 
-// The validators' generator (#530): a random graph of `count` nodes over every operator class check_graph_validate_vector
+// The validators' generator (#530): a random graph of `count` nodes over every operator class check_graph_validate
 // classifies, valid by construction: leaves of builtin, pointer and invalid types, edges within each operator's arity, casts
 // to builtin, void and pointer types, sizeof of a type and of an operand, calls' argument slices, and the byte columns'
 // bits. With `builtins`, also builtins' slices, statement values and variable-length arrays' bounds, which check_graph_run
@@ -599,23 +596,23 @@ static void check_test_graph_validation_world(CheckTest* test, CheckGraph* graph
     }
 }
 
-// check_graph_validate_vector and its exact twin on one graph: the same result and failed node, and for a valid graph the
+// check_graph_validate and its definition (check_test_graph_validate_definition) on one graph: the same result and failed node, and for a valid graph the
 // same purity and counters. With `blocks` other than BUSTER_CHECK_NONE, a valid graph's blocks the vector path must decide
-// itself: a check of its that refused a valid block would leave the results exact, and only send the block to the twin.
-static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph* graph, uint8_t* scalar_pure, uint8_t* vector_pure, uint32_t blocks, const char* description)
+// itself: a check of its that refused a valid block would leave the results exact, and only send the block to the exact path.
+static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph* graph, uint8_t* defined_pure, uint8_t* vector_pure, uint32_t blocks, const char* description)
 {
-    CheckGraphValidation scalar_state;
+    CheckGraphValidation defined_state;
     CheckGraphValidation vector_state;
-    uint32_t scalar_failed = 0;
+    uint32_t defined_failed = 0;
     uint32_t vector_failed = 0;
-    const bool scalar = check_graph_validate(graph, scalar_pure, &scalar_state, &scalar_failed);
-    const bool vector = check_graph_validate_vector(graph, vector_pure, &vector_state, &vector_failed);
-    bool equal = scalar == vector && scalar_failed == vector_failed && scalar_state.vector_blocks == 0;
-    if (equal && scalar)
+    const bool defined = check_test_graph_validate_definition(graph, defined_pure, &defined_state, &defined_failed);
+    const bool vector = check_graph_validate(graph, vector_pure, &vector_state, &vector_failed);
+    bool equal = defined == vector && defined_failed == vector_failed && defined_state.vector_blocks == 0;
+    if (equal && defined)
     {
         CheckGraphValidation counters = vector_state;
         counters.vector_blocks = 0;
-        equal = memcmp(scalar_pure, vector_pure, graph->count) == 0 && memcmp(&scalar_state, &counters, sizeof(scalar_state)) == 0 &&
+        equal = memcmp(defined_pure, vector_pure, graph->count) == 0 && memcmp(&defined_state, &counters, sizeof(defined_state)) == 0 &&
                 (blocks == BUSTER_CHECK_NONE || vector_state.vector_blocks == blocks);
         // Reuse the vector oracle's finished bytes for the producer's independent node-order recording. This
         // covers all generated operator/sideband classes, optional columns, and the guarded logical tails.
@@ -626,7 +623,7 @@ static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph*
         recorded.recorded_pure = vector_pure;
         check_graph_record_finish(&recorded);
         uint32_t failed = BUSTER_CHECK_NONE;
-        check_test_expect(test, check_graph_recorded_equal(&recorded, &scalar_state, scalar_pure, &failed),
+        check_test_expect(test, check_graph_recorded_equal(&recorded, &defined_state, defined_pure, &failed),
                           "recorded facts differ from independent validation on a generated or guarded graph");
     }
     check_test_expect(test, equal, description);
@@ -679,7 +676,7 @@ static void check_test_graph_break(CheckTest* test, CheckGraph* graph, uint32_t 
 
 #define BUSTER_CHECK_TEST_GRAPH_RULES 19u
 
-// #530: check_graph_validate_vector against check_graph_validate, its exact twin, on random graphs of every count to 70
+// #530: check_graph_validate against its definition (check_test_graph_validate_definition), on random graphs of every count to 70
 // and of 4,099 nodes, with and without the exact path's sideband nodes, the optional byte columns and tag history: each
 // graph whole, and once per rule broken at a random node.
 static void check_test_graph_validation(CheckTest* test, Arena* storage)
@@ -690,7 +687,7 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
     bool ready = check_graph_initialize(&graph, storage, capacity, capacity * 4);
     uint8_t* fp_environments = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity);
     uint8_t* suppressed = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity);
-    uint8_t* scalar_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity + 1);
+    uint8_t* defined_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity + 1);
     uint8_t* vector_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity + 1);
     CheckVarargsCall* varargs = BUSTER_ARENA_PUSH_ARRAY(storage, CheckVarargsCall, 64);
     CheckX86Call* x86 = BUSTER_ARENA_PUSH_ARRAY(storage, CheckX86Call, 64);
@@ -701,7 +698,7 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
         .previous = BUSTER_CHECK_NONE,
     };
     const uint32_t tags[1] = { 0 };
-    ready = ready && fp_environments != NULL && suppressed != NULL && scalar_pure != NULL && vector_pure != NULL && varargs != NULL && x86 != NULL &&
+    ready = ready && fp_environments != NULL && suppressed != NULL && defined_pure != NULL && vector_pure != NULL && varargs != NULL && x86 != NULL &&
             builtins != NULL && vectors != NULL && overloads != NULL;
     check_test_expect(test, ready, "validator comparison graph allocation");
     const TypeId pointer = BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_COUNT) + (3u << BUSTER_TYPE_INDEX_SHIFT);
@@ -733,7 +730,7 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
         check_test_graph_validation_world(test, &graph, count, pointer, true, sideband);
         // Without the exact path's sideband nodes, every block of a valid graph is the vector path's.
         const uint32_t blocks = sideband ? BUSTER_CHECK_NONE : count / BUSTER_CHECK_VALIDATE_LANES;
-        check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, blocks, "vector graph validation differs from its exact twin on a valid graph");
+        check_test_graph_validators_agree(test, &graph, defined_pure, vector_pure, blocks, "vector graph validation differs from its definition on a valid graph");
         for (uint32_t rule = 0; count != 0 && rule < BUSTER_CHECK_TEST_GRAPH_RULES; rule += 1)
         {
             const uint32_t node = check_test_random(test) % count;
@@ -755,14 +752,14 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
                 CheckValue* const saved_payloads = graph.leaf_payloads;
                 const uint32_t saved_payload_count = graph.leaf_payload_count;
                 check_test_graph_break(test, &graph, node, rule);
-                check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, BUSTER_CHECK_NONE, "vector graph validation differs from its exact twin on a broken rule");
+                check_test_graph_validators_agree(test, &graph, defined_pure, vector_pure, BUSTER_CHECK_NONE, "vector graph validation differs from its definition on a broken rule");
                 if (rule >= 17)
                 {
                     CheckGraphValidation state;
                     uint32_t failed = 0;
-                    const bool scalar = check_graph_validate(&graph, scalar_pure, &state, &failed);
-                    const bool vector = check_graph_validate_vector(&graph, vector_pure, &state, &failed);
-                    check_test_expect(test, !scalar && !vector, "a leaf's row past the graph's rows, or rows without their column, is an invalid graph");
+                    const bool defined = check_test_graph_validate_definition(&graph, defined_pure, &state, &failed);
+                    const bool vector = check_graph_validate(&graph, vector_pure, &state, &failed);
+                    check_test_expect(test, !defined && !vector, "a leaf's row past the graph's rows, or rows without their column, is an invalid graph");
                 }
                 // The leaves' rows first, as the leaf's own restoration below reads its value through them.
                 graph.leaf_payloads = saved_payloads;
@@ -800,7 +797,7 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
         // Without an optional column the blocks read, the vector path is the exact one throughout.
         uint32_t* members = graph.members;
         graph.members = NULL;
-        check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, 0, "vector graph validation without member column differs from its exact twin");
+        check_test_graph_validators_agree(test, &graph, defined_pure, vector_pure, 0, "vector graph validation without member column differs from its definition");
         graph.members = members;
     }
     arena_pop_to(storage, mark);
@@ -830,11 +827,11 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     CheckGraph graph;
     const bool ready = check_graph_initialize(&graph, storage, 70, 280);
-    uint8_t* scalar_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, 71);
+    uint8_t* defined_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, 71);
     uint8_t* vector_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, 71);
-    check_test_expect(test, ready && scalar_pure != NULL && vector_pure != NULL, "guarded validator graph allocation");
+    check_test_expect(test, ready && defined_pure != NULL && vector_pure != NULL, "guarded validator graph allocation");
     const TypeId pointer = type_pointer(table, BUSTER_TYPE_INT);
-    for (uint32_t count = 0; ready && scalar_pure != NULL && vector_pure != NULL && count <= 70; count += 1)
+    for (uint32_t count = 0; ready && defined_pure != NULL && vector_pure != NULL && count <= 70; count += 1)
     {
         check_test_graph_validation_world(test, &graph, count, pointer, false, false);
         CheckGraph guarded = graph;
@@ -860,7 +857,7 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
         check_test_expect(test, placed, "guarded validator columns");
         if (placed)
         {
-            check_test_graph_validators_agree(test, &guarded, scalar_pure, vector_pure, count / BUSTER_CHECK_VALIDATE_LANES, "vector graph validation differs from its exact twin at a page edge");
+            check_test_graph_validators_agree(test, &guarded, defined_pure, vector_pure, count / BUSTER_CHECK_VALIDATE_LANES, "vector graph validation differs from its definition at a page edge");
             check_test_compare_graph(test, table, &guarded, output, scratch, false);
             // The last leaf's record, which ends at the page, with a row past the graph's rows (#628): both refuse it.
             if (guarded.leaf_count != 0)
@@ -870,10 +867,10 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
                 last->row = guarded.leaf_payload_count + 1;
                 CheckGraphValidation state;
                 uint32_t failed = 0;
-                const bool scalar = check_graph_validate(&guarded, scalar_pure, &state, &failed);
-                const bool vector = check_graph_validate_vector(&guarded, vector_pure, &state, &failed);
-                check_test_expect(test, !scalar && !vector, "a leaf's row past the graph's rows at a page edge is an invalid graph");
-                check_test_graph_validators_agree(test, &guarded, scalar_pure, vector_pure, BUSTER_CHECK_NONE, "vector graph validation differs from its exact twin on a leaf's row at a page edge");
+                const bool defined = check_test_graph_validate_definition(&guarded, defined_pure, &state, &failed);
+                const bool vector = check_graph_validate(&guarded, vector_pure, &state, &failed);
+                check_test_expect(test, !defined && !vector, "a leaf's row past the graph's rows at a page edge is an invalid graph");
+                check_test_graph_validators_agree(test, &guarded, defined_pure, vector_pure, BUSTER_CHECK_NONE, "vector graph validation differs from its definition on a leaf's row at a page edge");
                 last->row = row;
             }
         }
@@ -1075,9 +1072,9 @@ static void check_test_leaf_rows_invalid(CheckTest* test, Arena* storage)
                 } break;
                 default: break;
             }
-            const bool scalar = check_graph_validate(&graph, pure, &state, &failed);
-            const bool vector = check_graph_validate_vector(&graph, pure, &state, &failed);
-            wrong += scalar != (step == 0) || vector != (step == 0);
+            const bool defined = check_test_graph_validate_definition(&graph, pure, &state, &failed);
+            const bool vector = check_graph_validate(&graph, pure, &state, &failed);
+            wrong += defined != (step == 0) || vector != (step == 0);
             cases += 1;
             graph.leaf_payloads = payloads;
             graph.leaf_payload_capacity = capacity;

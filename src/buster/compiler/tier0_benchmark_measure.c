@@ -175,7 +175,7 @@ static bool tier0_benchmark_reserve(Tier0BenchmarkCorpus* corpus, Arena* arena, 
            corpus->forms != 0;
 }
 
-// A request's record after the choice (tier0_apply_choice's), and its bytes (x86_measure_scalar's of the one record).
+// A request's record after the choice (tier0_apply_choice's), and its bytes (x86_measure's of the one record).
 static X86Instruction tier0_benchmark_chosen(X86Instruction record, uint32_t form, int64_t value)
 {
     X86Instruction chosen = record;
@@ -190,7 +190,7 @@ static X86Instruction tier0_benchmark_chosen(X86Instruction record, uint32_t for
 static uint64_t tier0_benchmark_record_bytes(const X86Instruction* record)
 {
     uint32_t offset = 0;
-    const int64_t length = x86_measure_scalar(record, 1, &offset);
+    const int64_t length = x86_measure(record, 1, &offset);
     return length > 0 ? (uint64_t)length : 0;
 }
 
