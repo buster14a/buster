@@ -772,6 +772,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     // rbp where it is the frame pointer, r15 where it is a realigned dynamic frame's base.
     // And values live across an asm body (#2144), which may take them to keep out of the registers it touches.
     emitted->callee_registers = prepared->call_count != 0 || prepared->asm_count != 0 ? BUSTER_TIER1_EMIT_CFG_CALLEE & ~prepared->reserved_registers : 0;
+    // A leaf's, where its caller-saved registers alone spill (#2819, tier1_emit_cfg_leaf).
+    emitted->leaf_registers = prepared->call_count == 0 && prepared->asm_count == 0 ? BUSTER_TIER1_EMIT_CFG_CALLEE & ~prepared->reserved_registers : 0;
     ok = error == TIER1_EMIT_OK;
     uint32_t* block_starts = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* successor_offsets = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
@@ -1068,6 +1070,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .sequence_operands = sequence_operands,
             .sequence_results = sequence_results,
             .sequence_count = sequence_count,
+            // The IR's tree, where the driver gives it (#2611): the machine CFG's blocks from `added` on are the IR's.
+            .dominators = options->dominators,
+            .dominator_shift = added,
             .block_count = blocks,
             .edge_count = edges,
             .value_count = value_count,
@@ -4942,6 +4947,56 @@ static Tier1EmitError tier1_emit_cfg_allocated(Tier1CfgError allocated, const Ti
     return error != TIER1_EMIT_OK || (cfg->split_count == 0 && (cfg->temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0) ? error : TIER1_EMIT_ALLOCATION;
 }
 
+// A leaf's callee-saved registers (#2819). A function with no call and no asm body prefers no register to another: every
+// value takes the caller-saved ones, which cost it nothing, and where more are live than they hold, some spill, inside a
+// loop on every iteration, while the callee-saved ones stay free. Where the allocation that stands (`cfg`, of `input`)
+// spills and the function has a loop, its general values may take the callee-saved registers the frame doesn't reserve
+// too, each range avoiding them (Tier1CfgInput.avoided_general): it takes one only where no caller-saved register is free.
+// That allocation replaces the plain one, as the callee-saved preference's does (tier1_cfg_taken), where it spills fewer
+// values by at least as many as the callee-saved registers it takes: a spilled value costs a store and a reload each
+// time its slot is written and read, a saved register a push and a pop each call. Without a loop the two cost about the
+// same, and the plain allocation keeps its red zone and its early returns free of saves. Both orders end with it, so that
+// --verify compares them as they are. `error` is the order's outcome; the result is the function's.
+static Tier1EmitError tier1_emit_cfg_leaf(const Tier1EmitOptions* options, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CfgInput* input, Tier1CfgAllocation* cfg, Tier1EmitError error)
+{
+    const uint32_t leaf = emitted->leaf_registers;
+    if (error == TIER1_EMIT_OK && leaf != 0 && cfg->allocation.spill_count != 0 && tier1_emit_cfg_cyclic(input))
+    {
+        const uint64_t output_mark = output->length;
+        const uint32_t caller = input->registers[BUSTER_TIER1_ALLOCATE_GPR];
+        bool ok = true;
+        uint32_t* allowed = ir_allocate(output, (uint64_t)input->value_count + 1, 4, &ok);
+        for (uint32_t v = 0; ok && v < input->value_count; v += 1)
+        {
+            // Every general value may take every caller-saved register (tier1_emit_cfg_problem), and now these too.
+            allowed[v] = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR ? caller | leaf : input->allowed_registers[v];
+        }
+        Tier1CfgInput problem = *input;
+        problem.allowed_registers = allowed;
+        problem.registers[BUSTER_TIER1_ALLOCATE_GPR] = caller | leaf;
+        problem.avoided_general = leaf;
+        Tier1CfgAllocation second = { 0 };
+        const Tier1CfgError preferred = ok ? tier1_cfg_allocate(&problem, output, scratch, &second) : TIER1_CFG_CAPACITY;
+        // As the callee-saved preference's: a constraint or an exhausted arena keeps the plain allocation.
+        if (tier1_emit_cfg_preference_fatal(preferred))
+        {
+            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, preferred);
+            error = TIER1_EMIT_INVALID;
+        }
+        const uint32_t saved = tier1_cfg_taken(preferred, &second) ? (uint32_t)__builtin_popcount(tier1_emit_cfg_callee_used(&second, leaf)) : UINT32_MAX;
+        if (error == TIER1_EMIT_OK && saved != UINT32_MAX && second.allocation.spill_count + saved <= cfg->allocation.spill_count && saved != 0)
+        {
+            *cfg = second;
+            *input = problem;
+        }
+        else
+        {
+            arena_pop_to(output, output_mark);
+        }
+    }
+    return error;
+}
+
 // The order the CFG consumer allocated in before #2538, kept as the one-call order's reference (--verify) and for a
 // problem with fixed ranges: the plain problem allocated whole, and again with every parameter free where a parameter
 // bound to its incoming register over its definition's interval leaves a use there no register; then the preference from
@@ -5002,7 +5057,7 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
             *crossing = moved;
         }
     }
-    return error;
+    return tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
 }
 
 // The CFG consumer's allocation (#2538): the intervals prepared once for both problems, which have the same ones without
@@ -5070,7 +5125,7 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
     {
         tier1_cfg_release(&order.prepared, scratch);
     }
-    return error;
+    return tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
 }
 
 // --verify's check of the one-call order (#2538): today's order, tier1_emit_cfg_two_calls, run after it on the problem as
@@ -5134,6 +5189,8 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     {
         error = tier1_emit_cfg_order_check(plan, options, emitted, &problem, output, scratch);
     }
+    // A leaf whose values took its callee-saved registers (tier1_emit_cfg_leaf) saves them as a function that calls does.
+    emitted->callee_registers |= error == TIER1_EMIT_OK && emitted->cfg_input.avoided_general != 0 ? emitted->leaf_registers : 0;
     emitted->callee_used = error == TIER1_EMIT_OK ? tier1_emit_cfg_callee_used(&emitted->cfg, emitted->callee_registers) : 0;
     if (error == TIER1_EMIT_OK && options->certify)
     {

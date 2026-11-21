@@ -1714,7 +1714,7 @@ struct CheckDeferredPass
     uint8_t* operation;
     uint8_t* kind;
     // The columns of TypeIds, and of ids into the tables some body appended to.
-    TypeId* types[7];
+    TypeId* types[6];
     CheckDeferredIds ids[9];
     uint32_t id_count;
     // Each lane's tokens with a constant's warning.
@@ -2329,7 +2329,6 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         .types = {
             input->declared_types,
             reader->query_types,
-            reader->return_types,
             reader->incomplete_array_types,
             reader->selection_types,
             reader->tag_types,
@@ -2441,7 +2440,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     {
         reader->file_function_name_ids[i] = reader->file_function_name_ids[i] != BUSTER_CHECK_NONE ? string_map[reader->file_function_name_ids[i]] : BUSTER_CHECK_NONE;
     }
-    CheckConstBuffer const_values = { .arena = reader->arena };
+    CheckConstBuffer const_values = { .arena = reader->arena, .declarations = reader->const_values.declarations };
     valid = valid && check_deferred_const_values(&const_values, &top_input.const_values, &parts[0], reader->scratch);
     for (uint32_t b = 0; valid && b < bodies; b += 1)
     {

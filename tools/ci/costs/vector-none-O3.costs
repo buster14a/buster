@@ -26,6 +26,8 @@
 #: cpu 8 0.80 AMD EPYC 9V74 80-Core Processor
 #: cpu 3 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
+#: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+#: unmeasured Test the caret display against clang
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
@@ -213,6 +215,7 @@
 19.5 Test mixed-tier single- and multi-file determinism [8 CPUs]
 33.1 Test c-testsuite's programs end to end [4 CPUs]
 40.4 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+8.6 Test -S of c-testsuite's programs against -c and GNU as
 21.9 Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 33.2 Promote and run random C programs of structured and unstructured control flow [4 CPUs]
 17.7 Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]
@@ -220,6 +223,7 @@
 206.8 Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
 0.7 Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
 11.0 Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
+8.6 Test the caret display against clang
 97.0 Test the preprocessor's cases against clang (part 1 of 4)
 84.0 Test the preprocessor's cases against clang (part 2 of 4)
 183.7 Test the preprocessor's cases against clang (part 3 of 4)

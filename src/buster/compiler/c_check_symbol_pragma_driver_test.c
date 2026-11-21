@@ -266,27 +266,28 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         "long a(int);\nint t(double d) { return d; }\n#pragma weak a = t\nint use(void) { return a(1); }\n",
     };
     char path[512];
-    char objects[3][512];
-    char programs[3][512];
-    char captured[3][256] = { { 0 } };
+    static const char* const modes[] = { "clang", "vector", "scalar", "debug" };
+    char objects[BUSTER_ARRAY_LENGTH(modes)][512];
+    char programs[BUSTER_ARRAY_LENGTH(modes)][512];
+    char captured[BUSTER_ARRAY_LENGTH(modes)][256] = { { 0 } };
     snprintf(path, sizeof(path), "%s/weak-aliases.c", directory);
     const bool written = parse_test_write(path, source, sizeof(source) - 1);
     check_test_expect(test, written, "the weak alias pragmas' fixture is written");
-    for (uint32_t p = 0; written && p < 3; p += 1)
+    for (uint32_t p = 0; written && p < BUSTER_ARRAY_LENGTH(modes); p += 1)
     {
         snprintf(objects[p], sizeof(objects[p]), "%s/weak-aliases-%u.o", directory, p);
         snprintf(programs[p], sizeof(programs[p]), "%s/weak-aliases-%u", directory, p);
         char* text = NULL;
-        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p], p == 2 ? "--scalar" : NULL, NULL };
+        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p], p == 2 ? "--scalar" : p == 3 ? "-g" : NULL, NULL };
         const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
         free(text);
-        check_test_expect(test, compiled, "weak alias pragmas compile through clang and both checker paths");
+        check_test_expect(test, compiled, "weak alias pragmas compile through clang and the checker");
         for (uint32_t n = 0; compiled && p != 0 && n < BUSTER_ARRAY_LENGTH(names); n += 1)
         {
             uint16_t ours = UINT16_MAX;
             uint16_t theirs = UINT16_MAX - 1;
             char description[160];
-            snprintf(description, sizeof(description), "a weak alias pragma leaves %s's binding clang's, by the %s path", names[n], p == 1 ? "vector" : "scalar");
+            snprintf(description, sizeof(description), "a weak alias pragma leaves %s's binding clang's, by the %s path", names[n], modes[p]);
             check_test_expect(test, check_test_visibility_symbol(objects[p], names[n], &ours) && check_test_visibility_symbol(objects[0], names[n], &theirs) &&
                                    ours == theirs, description);
         }
@@ -296,9 +297,9 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         check_test_expect(test, linked && check_test_driver_capture(programs[p], captured[p], sizeof(captured[p])), "weak alias pragmas' objects link and run");
     }
     check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[2]), "weak alias pragmas' scalar and vector objects match byte for byte");
-    check_test_expect(test, captured[0][0] != 0 && strcmp(captured[1], captured[0]) == 0 && strcmp(captured[2], captured[0]) == 0,
+    check_test_expect(test, captured[0][0] != 0 && strcmp(captured[1], captured[0]) == 0 && strcmp(captured[2], captured[0]) == 0 && strcmp(captured[3], captured[0]) == 0,
                       "weak alias pragmas' programs run as clang's");
-    for (uint32_t p = 0; p < 3; p += 1)
+    for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(modes); p += 1)
     {
         unlink(objects[p]);
         unlink(programs[p]);

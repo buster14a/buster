@@ -60,7 +60,11 @@ requirements. [Command index](README.md).
   boundary and compares both kernels with Clang and independent unsigned
   models (#1359).
   `test-checker --program-asm` runs the inline-assembly source fixtures alone;
-  the full `test-checker` command continues to include them.
+  the full `test-checker` command continues to include them. A `target_clones`
+  body's copies, a naked one's among them, each plan their statements for
+  their version's instruction set (#2247); `test-checker-driver
+  --target-versions-only` runs such bodies at both tiers against clang's build
+  and compares their operands' diagnostics under several command lines.
   `test-checker-driver` links and runs naked functions' labels and a template's
   call of `puts` by the direct path, and compares a template's `-c` symbols
   with clang's; it reads a placed statement's instructions from its function's

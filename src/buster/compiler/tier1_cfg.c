@@ -179,6 +179,14 @@ struct Tier1CfgInput
     const uint32_t* sequence_operands;
     const uint32_t* sequence_results;
     uint32_t sequence_count;
+    // Optional (#2819): general registers every general range avoids, as one avoids a sequence's above: a leaf function's
+    // callee-saved registers, which a range takes only where no caller-saved one is free.
+    uint32_t avoided_general;
+    // Optional (#2611): the dominator tree of this CFG but its first `dominator_shift` blocks (0, or 1 where an entry was
+    // added before the tree's entry, which then dominates every block), block b's node b - dominator_shift, with its idom,
+    // preorder and subtree_end; tier1_cfg_anchors reads it rather than analyzing the CFG. Null analyzes it.
+    const Dominators* dominators;
+    uint32_t dominator_shift;
     uint32_t block_count;
     uint32_t edge_count;
     uint32_t value_count;
@@ -1130,6 +1138,24 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
     pieces->splits += split;
 }
 
+// Block b's immediate dominator in a CFG whose blocks from `shift` on are `tree`'s, block b its node b - shift (#2611): an
+// added entry (shift 1) dominates the tree's entry, and its own is none. BUSTER_TIER1_CFG_NONE for an unreachable block.
+static uint32_t tier1_cfg_dominator(const Dominators* tree, uint32_t shift, uint32_t b)
+{
+    const uint32_t node = b - shift;
+    const uint32_t idom = b >= shift ? tree->idom[node] : BUSTER_DOMINATOR_NONE;
+    const bool entry = b >= shift && node == tree->entry && shift != 0;
+    return entry ? 0 : b < shift || idom == BUSTER_DOMINATOR_NONE || node == tree->entry ? BUSTER_TIER1_CFG_NONE : idom + shift;
+}
+
+// Whether block `dominator` dominates block `block` in tier1_cfg_dominator's CFG, for a dominator past the added entry (the
+// anchors ask whether a block dominates a predecessor laid out before it, so never of block 0): no such block dominates the
+// added entry.
+static bool tier1_cfg_dominates(const Dominators* tree, uint32_t shift, uint32_t dominator, uint32_t block)
+{
+    return dominator >= shift && block >= shift && dominators_dominates(tree, dominator - shift, block - shift);
+}
+
 // Each block's anchor and chosen predecessor (#2553), from dominators.c's tree, which `scratch` holds until they are read,
 // with its temporaries on `output`; both arenas end as they began, but for the caller's two columns. False where the
 // analysis fails.
@@ -1158,11 +1184,16 @@ static bool tier1_cfg_anchors(const Tier1CfgInput* input, Arena* output, Arena* 
     };
     DominatorOptions options = dominators_options();
     options.outputs = 0;
-    Dominators tree = { 0 };
-    const bool analyzed = dominators_analyze(scratch, output, &graph, options, &tree) == DOMINATOR_OK;
+    Dominators analysis = { 0 };
+    // The tree the input gives (#2611), where it covers the CFG but its added entry, or the CFG's own.
+    const Dominators* given = input->dominators;
+    const uint32_t shift = input->dominator_shift;
+    const bool reused = given != 0 && shift <= 1 && given->block_count + shift == input->block_count && given->idom != 0 && given->preorder != 0 && given->subtree_end != 0;
+    const bool analyzed = reused || dominators_analyze(scratch, output, &graph, options, &analysis) == DOMINATOR_OK;
+    const Dominators* tree = reused ? given : &analysis;
     for (uint32_t b = 0; analyzed && b < input->block_count; b += 1)
     {
-        const uint32_t dominator = b != 0 ? tree.idom[b] : BUSTER_TIER1_CFG_NONE;
+        const uint32_t dominator = b != 0 ? tier1_cfg_dominator(tree, reused ? shift : 0, b) : BUSTER_TIER1_CFG_NONE;
         anchors[b] = dominator < b ? dominator : BUSTER_TIER1_CFG_NONE;
         uint32_t latch = BUSTER_TIER1_CFG_NONE;
         uint32_t anchored = BUSTER_TIER1_CFG_NONE;
@@ -1172,7 +1203,7 @@ static bool tier1_cfg_anchors(const Tier1CfgInput* input, Arena* output, Arena* 
             const uint32_t p = input->predecessors[input->predecessor_offsets[b] + j];
             const bool earlier = p < b;
             const bool closer = nearest == BUSTER_TIER1_CFG_NONE || p > input->predecessors[input->predecessor_offsets[b] + nearest];
-            const bool back = earlier && dominators_dominates(&tree, b, p);
+            const bool back = earlier && tier1_cfg_dominates(tree, reused ? shift : 0, b, p);
             latch = back && (latch == BUSTER_TIER1_CFG_NONE || p > input->predecessors[input->predecessor_offsets[b] + latch]) ? j : latch;
             anchored = earlier && p == anchors[b] ? j : anchored;
             nearest = earlier && closer ? j : nearest;
@@ -2603,8 +2634,18 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         // A general value live across a fixed sequence avoids its registers in all its ranges, as does its phi web (#2767),
         // the same in every problem over these intervals. The ranges are whole now, a merged block's having grown past the
         // piece the builder started.
-        uint32_t* crossed = ready && input->sequence_count != 0 ? arena_push_array(output, (uint64_t)candidate.intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && (input->sequence_count == 0 || (crossed != 0 && tier1_cfg_crossed(input, pieces.starts, pieces.ends, pieces.values, pieces.classes, candidate.intervals.count, scratch, crossed)));
+        // And every general range avoids the problem's avoided_general registers (#2819).
+        const bool avoids = input->sequence_count != 0 || input->avoided_general != 0;
+        uint32_t* crossed = ready && avoids ? arena_push_array(output, (uint64_t)candidate.intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        if (crossed != 0 && input->sequence_count == 0)
+        {
+            memset(crossed, 0, ((uint64_t)candidate.intervals.count + 1) * sizeof(uint32_t));
+        }
+        ready = ready && (!avoids || (crossed != 0 && (input->sequence_count == 0 || tier1_cfg_crossed(input, pieces.starts, pieces.ends, pieces.values, pieces.classes, candidate.intervals.count, scratch, crossed))));
+        for (uint32_t i = 0; ready && input->avoided_general != 0 && i < candidate.intervals.count; i += 1)
+        {
+            crossed[i] |= pieces.classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? input->avoided_general : 0;
+        }
         candidate.intervals.avoided_registers = crossed;
         if (ready)
         {

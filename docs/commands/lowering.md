@@ -681,7 +681,10 @@ takes its entries.
     body: taken N, context N) declarations'-discards-not-run=N compared=N
     (records N) differences=0 (range 0, refusal 0)
     taken-expressions-the-front-left=N the-front's-not-run=N` and
-    `reader-time T objects=N differences=0 library-calls=N differences=0`.
+    `reader-time T objects=N differences=0 library-calls=N differences=0
+    the-program's-own-objects=N objects-a-pragma-labelled=N` (the last two
+    are counted apart and compared as [their
+    section](#the-tests-holes-and-the-objects-side-2850) says).
     `never-lowered` are the expressions it typed that the lowering never
     popped: in a body the lowering lowers (a constant's context, a condition
     the program folds) or in one the selection dropped.
@@ -917,7 +920,7 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's twelve fixtures run again with its tests at reader time
+The census's eighteen fixtures run again with its tests at reader time
 (`node_tests_test_fixture`: `--front-tests` with `--verify`, then the same
 with the lean front's window and `--window-tests`, the machine's own form
 beside the census's code, whose bits, root's kinds and spans must be its;
@@ -984,7 +987,16 @@ each place of a block; and, with `-Wtype-safety`, every call kept), the
 twelfth (two functions with clang's `no_builtin`, one naming `memset` and one
 naming nothing, between three without it: the unit's calls are made, and a
 plain library builtin is its declaration's call in the function whose
-attribute covers it and has its own semantics in the others), the seventh's
+attribute covers it and has its own semantics in the others), the
+thirteenth to the eighteenth ([what the compiler's own tests had and no
+corpus](#the-tests-holes-and-the-objects-side-2850): a pointer's ordered
+comparison with an integer and what converts to a pointer, a declaration
+that inherits a list of conditions, a declarator's warning in its
+initializer's tokens, an automatic object's asm label, a `return` under a
+cleanup, a sum of 72 operands; a value in a segment's address space; a
+unit with x86's `interrupt`; one that spells `noderef`; the pointer's
+comparisons under the sign comparison's warning; and with every warning
+off), the seventh's
 function `v` (the loop's rules of a pointer: its cast to void, as a
 statement's discard and written, to a pointer and to a pointer to void,
 left out; to a 64-bit integer, listed with nothing; to a 32-bit one, a bool
@@ -1705,6 +1717,11 @@ The report adds:
   the casts the loop left out for their own type, of every record it swept;
   with `--verify`, those of them in an expression the tests ran on, each
   checked;
+- `node-shadow: own tests pointers'-ordered-comparisons-left-out=N
+  checked=N of-them-with-a-test=0`: the ordered comparisons the loop left
+  out for two operands that are each a pointer once converted, of every
+  record it swept; with `--verify`, those of them in an expression the
+  tests ran on, each checked;
 - `node-shadow: own tests tree's-tests'-records-no-listed-operator-has
   checked=N of-them-with-a-test=0
   lists'-words-with-a-bit-past-their-expression=0`: with `--verify`, the
@@ -1717,13 +1734,13 @@ The report adds:
 
 `--list N` lists the first differences (`node-tests: window difference`),
 and a difference, an operator left out with a test, a call left out with a
-test or with a loud argument, a cast left out with a test, a value said that
-is not its payload's, a
+test or with a loud argument, a cast or a pointers' comparison left out
+with a test, a value said that is not its payload's, a
 record left to no listed operator with a tree's test, a list's bit past its
 expression, or an expression with nothing listed and another verdict fails
 the command.
 
-`test-checker` runs it on the census's twelve fixtures, as "The shadow" above
+`test-checker` runs it on the census's eighteen fixtures, as "The shadow" above
 has, and on the window's test of values without room at a chunk's end: the
 tests run on the 8,259 expressions the kernel makes in place there, and on
 none of the 64 that the ends cut. [The
@@ -1846,7 +1863,7 @@ The report adds:
 difference`, with the file, the line and the root's token), and a difference
 fails the command.
 
-`test-checker` runs it on the census's twelve fixtures in their window's
+`test-checker` runs it on the census's eighteen fixtures in their window's
 form, each with its count of decided and refused expressions pinned, and on a
 fixture of its own (`node_contexts_test_fixture`): two functions of 250
 expressions with each rule's cases on both sides, whose decided and refused
@@ -2298,6 +2315,30 @@ each template's shape with the mark of those whose rows are not made here,
 the order's permutation, void's word, which the reads don't read, and the
 values' two tables' bytes by a record's own shape.
 
+### Hardware counters for the window's sweeps (#3196)
+
+`./build/compiler measure-node-machine --shadow --window-rows --passes 0 --window-counter rows cycles file.c`
+
+Select one family and one hardware event per invocation. The families are
+`tests` (bytes and the tests loop with its cast-result asks), `contexts`
+(loop, targets and expressions), and `rows` (reads, shapes, update/branch
+lists, write, values, expressions and summaries). The events are `cycles`,
+`instructions`, `branches`, `branch-misses`, `frontend-stalls`,
+`l1d-misses` and `l1i-misses`. An unavailable or unschedulable counter
+makes the command fail. Pin the Release executable to the benchmark CPU.
+
+Each `node-window-counter` line gives the user-mode hardware event total
+for the first or second execution over the same chunks across all input
+files. Both runs use the ordinary shadow's sweeps. Selecting `tests` also
+repeats its byte and mask construction over the first run's memoized
+declarations. The lists interval includes the test for a chunk with no
+updates or branches. With `--no-window-summaries` there is no summaries
+reading. `raw` is the unadjusted total. Both rates subtract one median
+empty interval per chunk and divide by all chunks or all swept records.
+A small adjusted reading may be negative. Use the ordinary command
+without profiling for the existing TSC comparisons.
+
+
 ### An operator's value and a comma on the window (#2850)
 
 The same commands, `measure-node-machine --shadow --window-contexts` and
@@ -2423,27 +2464,20 @@ survey of those passes, what it measured and its gates.
 - **A condition's truth and a constant's fold** are a summary node's
   value's to answer, with nothing in the side record.
   `check_program_branch_truth` knows a branch's condition's truth where the
-  condition's value has none in two cases, and the window lists both.
-  - **By one operand of an `&&` or an `||`:** the turns list an `&&` or an
-    `||` whose second operand's truth is known (`node_rows_window_decided`:
-    a constant's, but an object's lvalue's), whether it is evaluated as
-    branches or as a value (reason `branches`).
-  - **Through a cast:** the walk gives a cast its operand's truth (#3204),
-    so a cast that is no constant itself, over an operand whose truth may
-    be known, passes a truth its own value has not (`(char)(long)&x`: an
-    address is not null, and its low byte is no constant). C's loop lists
-    its expression (`node_contexts_window_loop`'s `passes_truth`, reason
-    `operator`) where its consumer may ask its truth: a CONDITION, a `!`,
-    an `&&` or an `||`, or another wrapper. A cast that is a constant with
-    an effect's flag is listed too, and a cast to void never. A `!` and a
-    CONDITION are a constant wherever their operand's truth is known
-    (`check_action_logic`), and ask for no term.
+  condition's value has none when one operand decides a logical operator,
+  including under a cast or `!`. The turns list an `&&` or an `||` whose
+  second operand has a known truth (`node_rows_window_decided`, reason
+  `branches`). A cast with no known value can pass an inferred logical
+  result of 0 or 1. It cannot inherit the truth of an address before
+  truncation. The branch walk retains its handling of numeric conversions
+  under `FENV_ACCESS`. The type machine already lists that context. The
+  window needs no separate cast refusal (#3204).
 
   The controls' fold (`check_control_fold_truth`) does not fold a comma
   whose left operand is no constant: C lists a folded comma.
-- **Not made: a `switch`'s selector's type.** `-Wswitch` reads the node at
-  the selector's first token (#3200), which only the walk makes: a
-  `switch`'s condition stays the walk's.
+- **A switch's selector type.** The operand of its promotion in the window
+  supplies the type that `-Wswitch` reads. Each taken switch keeps this one
+  word after its references. Other expressions store their references alone.
 
 `--no-window-summaries` is the cost's switch: the same run with no lines'
 column, no calls' mask and no sweep, and with nothing kept or compared. The
@@ -2461,8 +2495,6 @@ The report adds:
   sweep lists for a reference, in any expression, the calls it asks and the
   expressions the reduction runs on; the chunks whose second run made other
   facts; and the operators the turns list.
-- `node-shadow: window contexts casts-listed-for-a-truth-their-value-has-not=N`,
-  with `--window-contexts` too: the casts C's loop lists.
 - `node-shadow: window summaries compared=N (not kept: N) the program's
   references=N reference-differences=N fact-differences=N (the program's:
   a stop=N an unknown=N); folds asked=N fold-differences=N (of the
@@ -2475,6 +2507,11 @@ The report adds:
   branch's condition, whether `check_program_branch_truth` knows its truth
   exactly where its value says it. The four differences, `not kept` and the
   second runs that differ must be 0: the command exits 1 otherwise.
+- `node-shadow: window summaries switch selectors=N enums=N type-differences=N`
+  counts the kept switches, how many have an enum selector before promotion,
+  and how many types disagree with `check_common_switch_selector_type`.
+  A difference makes the command exit 1. The summary fault control changes
+  the type of every kept selector.
 - `node-shadow: window summaries ticks=N (T a record swept, T a chunk); a
   second run over the same chunk, not counted: ticks=N (T a record swept,
   T a chunk)`: the sweep's TSC ticks.
@@ -2513,3 +2550,225 @@ constant, an operator that is no cast, a cast to void), with the count of
 the casts listed pinned (`NodeSummaryExpected.passed`), and two constants
 that are no address's whose record has an object (`(_Bool)&g`), whose
 entries' values must be the reference's.
+
+### The tests' holes and the objects' side (#2850)
+
+`./build/compiler measure-node-machine --shadow --window-rows [--passes 0] [--list N] [preprocessor options] file...`
+
+The corpora, the fixtures and the probes are code that warns of nothing. The
+compiler's own test tables are not: every C string literal of
+`src/buster/compiler/*_test.c` that is a program and every file under
+`tests/`, each through the shadow alone under three warning sets, differed
+in fifteen ways in the pieces before
+([#3201](https://github.com/buster14a/buster/issues/3201),
+[#3202](https://github.com/buster14a/buster/issues/3202),
+[#3203](https://github.com/buster14a/buster/issues/3203),
+[#3205](https://github.com/buster14a/buster/issues/3205),
+[#3206](https://github.com/buster14a/buster/issues/3206),
+[#3207](https://github.com/buster14a/buster/issues/3207)). This is what
+closed them; no compile takes any of it. [The
+design](../node-machine.md#what-the-compilers-own-tests-had-and-no-corpus)
+has what was found, what it measured and its gates, and [the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tests-holes-2850-2026-11-21)
+the sweep's scripts.
+
+**The tests.** A test's verdict is the census's code's at both times
+(`node_census_node`, `node_census_root_tests`); the machine's own form
+(`node_tests_operator`) and the window's loop
+(`node_tests_window_loop_by`) list the records sent to that code; and a
+type's byte (`node_census_type_bits_make`) is what all three read of a
+type.
+
+- **A pointer's ordered comparison with an integer** (clang's extension
+  warning, which no option of its own turns off; the compiler raises it
+  after the graph's run: `check_warning_ordered_event`) has a test of its
+  own
+  (`pointer-integer-order`, `node_census_ordered`): exactly one operand is
+  a pointer as the action converts it (an array's and a function's value
+  are), and the other an integer that is no null pointer constant. The own
+  form's table sends `<`, `<=`, `>` and `>=` for an operand that converts
+  to a pointer. The window's loop leaves out one whose two operands both
+  do, a loop's `p < end`, where nothing else sends it.
+- **What converts to a pointer** (`BUSTER_NODE_CENSUS_TYPE_CONVERTS`): a
+  function's type's byte has the pointer's bit and the void pointee's, as
+  `nullptr_t`'s has, so a cast of a function or of an array to an integer
+  narrower than a pointer, or to an enumeration, is sent to the cast's
+  test as a pointer's is. The void dereference's test asks the type's own
+  kind.
+- **A declaration with a list of conditions** (`node_census_conditioned`):
+  one that inherits an earlier redeclaration's `diagnose_if` or `enable_if`
+  list is a callee to ask, though no attribute of its own or of its
+  entity's first declaration says so. (A use that is no call is diagnosed
+  before the walk, and its event refuses its expression.)
+- **Two attributes whose warnings no test stands for** refuse their unit's
+  every expression: x86's `interrupt` and `no_caller_saved_registers` on
+  any declaration (every other call in such a function's body warns:
+  `-Wexcessive-regsave`), and `noderef` spelled anywhere (a dereference
+  warns by its operand's declaration's type's annotation, which no node's
+  type says).
+- **An initializer.** Its events' tokens begin after its object's name at
+  reader time too (`node_census_initializer_low`), so a declarator's
+  warning the reader has raised by then refuses it. Its braces are looked
+  for up to its first token (`CheckInput.initializer_begins`), not in its
+  value: `(enum { V })0` is no brace initializer. And an automatic object
+  with an asm label (`node_census_labelled`: in a body, with no linkage,
+  neither `static` nor `register`) refuses its initializer at both times,
+  as a brace's: the reader's warning that it ignores the label comes after
+  the body.
+- **A `return` under a cleanup** (`node_census_cleans`): the program
+  computes the value first, runs the cleanups and returns it, so the
+  value's root is no return's after the pipeline. Reader time says the
+  same by a search of the unit's cleanups, which keep the furthest end of
+  the scopes up to each (`CheckInputCleanup.reach`).
+- **A returned address** is followed through every operand
+  (`node_census_returns_address`): a list of 64 refused a sum of more.
+- **A value in a segment's address space** (256 to 258: `%gs`, `%fs`,
+  `%ss`) is of a type the machine has no kind for
+  (`node_census_special_type`): the lowering gives each load and store
+  there its segment's override, which the machine's rows have no entry for.
+  A pointer to one, and a value in another space, are taken.
+
+**The objects' side**: what T and the kernel read of an object that the
+reader settles after the bodies.
+
+- **Whether the unit has an overload's candidates**
+  (`node_machine_overloads`, `NodeMachine.overloads`): T refuses every call
+  of such a unit, and a candidate of a function multiversioned by target
+  strings is made after the last body. The answer is the candidates the
+  graph has before the bodies (an overloadable function's declarations) or
+  the unit declaring a function multiversioned so
+  (`CheckInput.target_multiversion`): the same at both times. A unit that
+  declares one and never calls it has its calls refused.
+- **The program's own objects.** For a multiversioned function (by target
+  strings, by `target_clones` or by `cpu_dispatch`) the program makes an
+  object no declaration declares, its versions' reference, numbered after
+  its attribute's name's token. The shadow compares the declared objects
+  (`BUSTER_NODE_MACHINE_OBJECT_DECLARED`), counts the program's own apart
+  and asks that reader time have nothing for one.
+- **An asm label**, which decides one answer of T's: whether a plain
+  library builtin's call is computed in place or called
+  (`node_machine_call_library`). The asm pass runs after the bodies and
+  ignores a label on a declaration of an object that a declaration before
+  it defines (`check_input_asm_labels`); the machine at reader time applies
+  the same rule to the declarations in their order where it makes the
+  objects' facts (`node_machine_begin_reader`,
+  `BUSTER_NODE_MACHINE_OBJECT_DEFINED`).
+- **A rename pragma** (`#pragma redefine_extname`) labels a declaration
+  once the reader is done. In a unit with one the reader took
+  (`node_machine_renames`), T refuses every call the reader marked for a
+  library builtin, at both times, and asks no label. The shadow leaves the
+  label of such an object out of its comparison and counts the object.
+  (In a unit with no `asm` token the program reads no label at all:
+  [#3208](https://github.com/buster14a/buster/issues/3208).)
+- **A weak name** is the name's from a token on, not a declaration's: the
+  reader notes it at a `weak`, `weakref` or `weak_import` attribute on any
+  declaration of the name (`CheckInput.weak_names`) and at a `#pragma
+  weak`, and a use at or after that token may be null. The reader and the
+  kernel ask the same search (`check_input_weak_name`, eight records a
+  step). A declaration whose name the unit notes anywhere can change its
+  line at another declaration's token, so its line is made again at every
+  use (`BUSTER_NODE_FACTS_LINE_UNSETTLED` in `NodeFacts.numbers`); every
+  other declaration's last line is still taken by one load and one test.
+  The names' pass's second run compares a line by its number or by its
+  words.
+
+The report adds `pointers'-ordered-comparisons-left-out=N checked=N
+of-them-with-a-test=0` to the own tests' lines,
+`the-program's-own-objects=N objects-a-pragma-labelled=N` to `reader-time T
+objects`, and to the words' line the uses that asked for a declaration's
+line the long way (`declarations'-lines=N (T ticks each; N made again; N
+uses asked the long way)`); `--list N` lists an object that differs
+(`reader-time object difference`). What decides the command's status is
+one function, `node_shadow_differs`.
+
+`test-checker` (part 5 of 8) has six fixtures more for the tests, run as
+the census's others are, after the pipeline and at reader time, in the
+census's form and on the window: `node_census_test_holes` (a line a case:
+an ordered comparison by each operator, of an integer with a pointer on
+either side, with an array and with a function, as a statement's
+condition, with a null constant, of two pointers and of two integers; a
+function's, an array's and a string's casts, to an integer narrower than a
+pointer, to an enumeration, to one as wide and to a pointer; a call of a
+function whose earlier redeclaration has a condition; an initializer whose
+declarator warns, at file scope too, one with a cast's braces, an
+automatic object's label, a register variable's and a static local's;
+returns under a cleanup of the function's scope, of a block's and of a
+`for` statement's, in a later function, of an aggregate, and before one; a
+dereference of a function that returns void; and a sum of 72 operands),
+`node_census_test_segments`, `node_census_test_interrupt`,
+`node_census_test_noderef`, `node_census_test_signs` (`-Wsign-compare`:
+every comparison is sent whatever its operands, and the loop leaves no
+pointers' comparison out) and `node_census_test_silent` (`-w`: nothing is
+refused, and nothing left out). And seven for
+the objects' side (`node_objects_test_fixture`: the whole shadow as the
+command runs it, nothing differing, with its counts pinned in
+`NodeObjectsCounted`), a unit each because each answer is a unit's: labels
+kept and ignored with a builtin of each; a rename pragma with a builtin's
+call before and after it; a weak pragma, which is no rename pragma; a
+function multiversioned by target strings, called and not called; an
+overloadable function, with a call through a pointer; and the weak names,
+by each way the reader notes one, with a declaration used before and after
+another declaration makes its name weak and a name the unit does not note,
+whose later uses ask nothing. `node_objects_test_weak_search` asks the
+search of lists of every length to 20, and
+`node_objects_test_comparisons` the shadow's own comparisons, a row a
+case: an object's facts against the program's, the objects a rename
+pragma labelled, and a name's line by its number or its words.
+
+
+### Compiling with the window (#2850)
+
+`./build/compiler --node-window -c file.c -o file.o` enables the first production
+use of the window. For a complete `return` of an unqualified `int`, the reader
+can accept a plain integer literal, its unary minus, or two such literals with
+`+`, `-` or `*`. The literal values come from the normal chunk decoder. The
+operator uses the window kernel's checked integer fold, which refuses overflow.
+A successful return gets one checked value at its return token and one retained
+native CONST entry. The lowering emits this entry in the ordinary body's tape.
+For example, `return 18 + 24;` replaces two literal nodes, the addition and the
+return conversion with one summary carrying 42.
+
+The reader also accepts `return x;` and `return +x;` for an unqualified,
+ordinary automatic int or int parameter. The LOCAL entry keeps the declared
+object. The lowering relocates it to the enclosing body's local number.
+The entry records the source identifier's token offset within the return.
+The uninitialized pass uses the summary node's reach and order together with
+that token, so that it still reports the first evaluated read of an
+uninitialized variable, including its source position and note. An
+unreachable read still counts as a syntactic use of a written parameter.
+Local reads use the ordinary graph with debug information enabled, preserving
+the identifier source positions. Other storage classes, special registers and
+qualified types also keep their graph.
+
+`--node-window-assignments` enables the same returns and also scans for complete
+discarded assignments such as `x = 24;` and `x = y;`, with distinct ordinary
+automatic or parameter `int` objects. An admitted assignment retains three
+entries for its right operand, local store and discard, each with its own
+source token. The read and write events feed the existing warning passes.
+The base `--node-window` mode skips assignment discovery.
+
+A block statement such as `((void)7);` can also use the window. The cast
+must discard a plain integer literal from the chunk decoder. Grouping
+parentheses around the cast or the literal are accepted. The native CONST
+keeps the literal's token and the DISCARD keeps the cast's token. The checker
+still handles operands with side effects, loop clauses and the final value of
+a GNU statement expression.
+
+Admission requires the entire expression in the same coded chunk. Other types,
+operators and spellings, deferred parts, and units requiring
+musttail validation use the existing graph. The window checks the coded tokens
+before any of their graph actions run. A refusal consumes no tokens. No ordinary
+graph or shadow run supplies a successful fold.
+
+With debug information enabled, the CONST row keeps the return token. The
+ordinary lowering uses this same token for the folded return conversion,
+including when its operands occur on different lines or come from macros.
+The node-machine fixture compares every native entry and its source token
+between the two lowerings.
+
+`--time-stages` reports the expressions taken, the ordinary nodes they replace,
+the summaries and the resulting graph size per unit. The
+`test-checker` node-machine tests compare checked root values and native tapes
+with the ordinary compile, then change a retained row to exercise the splice.
+The checker driver also checks warning policy, diagnostic order and object bytes
+for a unit containing both taken and refused expressions.

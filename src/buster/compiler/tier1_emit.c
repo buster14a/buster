@@ -119,6 +119,11 @@ struct Tier1EmitOptions
     // reaches every symbol directly.
     const uint8_t* symbol_access;
     uint32_t symbol_count;
+    // Optional (#2611): the plan's function's dominator tree, current for its revision, as the driver's Tier 1 step holds
+    // the IR's analysis of it (idom, preorder and subtree_end). The CFG consumer's machine CFG is the IR's with at most an
+    // entry added before it, and its anchors (tier1_cfg_anchors) read this tree rather than analyzing that CFG again; null
+    // analyzes it.
+    const Dominators* dominators;
     // #939: check each allocation before code is emitted from it, by the certificate checker of its kind: a CFG
     // allocation's published program (tier1_certificate_cfg_check), a straight-line allocation's fragments
     // (tier1_allocation_certificate_check). A refusal is TIER1_EMIT_CERTIFICATE and the checker's capacity
@@ -309,6 +314,9 @@ struct Tier1EmitResult
     // which the frame saves; and how many values live across a call it gave them.
     uint32_t callee_registers;
     uint32_t callee_used;
+    // In a function with no call and no asm body, the callee-saved registers its values may take where the caller-saved
+    // ones alone spill (#2819, tier1_emit_cfg_leaf), which callee_registers then holds.
+    uint32_t leaf_registers;
     uint32_t crossing_values;
     const uint8_t* symbol_access;
     uint32_t symbol_access_count;

@@ -117,6 +117,160 @@ static const char check_test_tier1_divide_main[] =
     "    return 0;\n"
     "}\n";
 
+// The leaf fixture (#2819): four functions that call nothing. tier1_leaf_sum8 carries eight sums, its index, its bound and
+// its array around a loop, more values than the caller-saved registers hold, so its values take callee-saved registers
+// where the caller-saved ones run out, and nothing spills; tier1_leaf_sum5's loop has one value more than they hold (five
+// sums, the three, and the index's next value at its test), and takes one callee-saved register, which its ranges' avoiding
+// them leaves it (taken in order, rbx and rbp come before rsi); tier1_leaf_sum2's values fit in the caller-saved
+// registers, and its frame saves nothing; tier1_leaf_branch keeps twelve loads live across a branch, with no loop, and the
+// CFG consumer spills them rather than save a register; tier1_leaf_triggers, sqlite3TriggerList's shape with
+// sqlite3StrICmp inlined: with rematerialization, which recomputes its table's address, it spills two values, where
+// taking callee-saved registers would take three of them, so it keeps its spills; without it, the address spills too,
+// and it takes them. Its main is a unit of its own (check_test_tier1_leaf_main).
+static const char check_test_tier1_leaf_source[] =
+    "long tier1_leaf_sum8(const long* a, long n)\n"
+    "{\n"
+    "    long s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0, s7 = 0;\n"
+    "    for (long i = 0; i + 8 <= n; i += 8)\n"
+    "    {\n"
+    "        s0 += a[i]; s1 += a[i + 1]; s2 += a[i + 2]; s3 += a[i + 3];\n"
+    "        s4 += a[i + 4]; s5 += a[i + 5]; s6 += a[i + 6]; s7 += a[i + 7];\n"
+    "    }\n"
+    "    return s0 ^ (s1 << 1) ^ (s2 << 2) ^ (s3 << 3) ^ (s4 << 4) ^ (s5 << 5) ^ (s6 << 6) ^ (s7 << 7);\n"
+    "}\n"
+    "long tier1_leaf_sum5(const long* a, long n)\n"
+    "{\n"
+    "    long s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0;\n"
+    "    for (long i = 0; i + 5 <= n; i += 5)\n"
+    "    {\n"
+    "        s0 += a[i]; s1 += a[i + 1]; s2 += a[i + 2]; s3 += a[i + 3]; s4 += a[i + 4];\n"
+    "    }\n"
+    "    return s0 ^ (s1 << 1) ^ (s2 << 2) ^ (s3 << 3) ^ (s4 << 4);\n"
+    "}\n"
+    "long tier1_leaf_sum2(const long* a, long n)\n"
+    "{\n"
+    "    long s0 = 0, s1 = 0;\n"
+    "    for (long i = 0; i + 2 <= n; i += 2)\n"
+    "    {\n"
+    "        s0 += a[i]; s1 += a[i + 1];\n"
+    "    }\n"
+    "    return s0 ^ (s1 << 1);\n"
+    "}\n"
+    "long tier1_leaf_branch(const long* a)\n"
+    "{\n"
+    "    long x0 = a[0], x1 = a[1], x2 = a[2], x3 = a[3], x4 = a[4], x5 = a[5], x6 = a[6], x7 = a[7], x8 = a[8], x9 = a[9], x10 = a[10], x11 = a[11];\n"
+    "    if (a[12] & 1)\n"
+    "    {\n"
+    "        x0 += a[13];\n"
+    "    }\n"
+    "    a += a[12] & 7;\n"
+    "    return (x0 + a[0]) * (x1 + a[1]) ^ (x2 + a[2]) * (x3 + a[3]) ^ (x4 + a[4]) * (x5 + a[5]) ^ (x6 + a[6]) * (x7 + a[7]) ^ (x8 + a[8]) * (x9 + a[9]) ^ (x10 + a[10]) * (x11 + a[11]);\n"
+    "}\n"
+    "typedef struct Elem Elem;\n"
+    "struct Elem { Elem* next; void* data; };\n"
+    "typedef struct Trig Trig;\n"
+    "struct Trig { const char* table; void* schema; unsigned char op; unsigned char returning; Trig* next; };\n"
+    "typedef struct Tab Tab;\n"
+    "struct Tab { const char* name; void* schema; Trig* triggers; };\n"
+    "static const unsigned char lower[256] = { ['A'] = 'a', ['B'] = 'b', ['a'] = 'a', ['b'] = 'b' };\n"
+    "static int icmp(const char* left, const char* right)\n"
+    "{\n"
+    "    const unsigned char* a = (const unsigned char*)left;\n"
+    "    const unsigned char* b = (const unsigned char*)right;\n"
+    "    int c;\n"
+    "    for (;;)\n"
+    "    {\n"
+    "        c = *a;\n"
+    "        int x = *b;\n"
+    "        if (c == x)\n"
+    "        {\n"
+    "            if (c == 0)\n"
+    "            {\n"
+    "                break;\n"
+    "            }\n"
+    "        }\n"
+    "        else\n"
+    "        {\n"
+    "            c = (int)lower[c] - (int)lower[x];\n"
+    "            if (c)\n"
+    "            {\n"
+    "                break;\n"
+    "            }\n"
+    "        }\n"
+    "        a++;\n"
+    "        b++;\n"
+    "    }\n"
+    "    return c;\n"
+    "}\n"
+    "Trig* tier1_leaf_triggers(Elem* p, void* temp, Tab* tab)\n"
+    "{\n"
+    "    Trig* list = tab->triggers;\n"
+    "    while (p)\n"
+    "    {\n"
+    "        Trig* t = (Trig*)p->data;\n"
+    "        if (t->schema == tab->schema && t->table && 0 == icmp(t->table, tab->name) && (t->schema != temp || t->returning))\n"
+    "        {\n"
+    "            t->next = list;\n"
+    "            list = t;\n"
+    "        }\n"
+    "        else if (t->op == 151)\n"
+    "        {\n"
+    "            t->table = tab->name;\n"
+    "            t->schema = tab->schema;\n"
+    "            t->next = list;\n"
+    "            list = t;\n"
+    "        }\n"
+    "        p = p->next;\n"
+    "    }\n"
+    "    return list;\n"
+    "}\n";
+
+// The leaf fixture's main, which prints each leaf's sums over a table of 256 values and over prefixes that end inside a
+// group of eight.
+static const char check_test_tier1_leaf_main[] =
+    "#include <stdio.h>\n"
+    "long tier1_leaf_sum8(const long* a, long n);\n"
+    "long tier1_leaf_sum5(const long* a, long n);\n"
+    "long tier1_leaf_sum2(const long* a, long n);\n"
+    "long tier1_leaf_branch(const long* a);\n"
+    "typedef struct Elem Elem;\n"
+    "struct Elem { Elem* next; void* data; };\n"
+    "typedef struct Trig Trig;\n"
+    "struct Trig { const char* table; void* schema; unsigned char op; unsigned char returning; Trig* next; };\n"
+    "typedef struct Tab Tab;\n"
+    "struct Tab { const char* name; void* schema; Trig* triggers; };\n"
+    "Trig* tier1_leaf_triggers(Elem* p, void* temp, Tab* tab);\n"
+    "static long table[256];\n"
+    "static int schemas[2];\n"
+    "static Trig triggers[6] = {\n"
+    "    { \"ab\", &schemas[0], 0, 0, 0 }, { \"AB\", &schemas[0], 0, 0, 0 }, { \"aB\", &schemas[1], 0, 1, 0 },\n"
+    "    { \"ba\", &schemas[0], 0, 0, 0 }, { 0, &schemas[1], 151, 0, 0 }, { \"Ab\", &schemas[1], 0, 0, 0 },\n"
+    "};\n"
+    "static Elem elems[6];\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (long i = 0; i < 256; i += 1)\n"
+    "    {\n"
+    "        table[i] = (i * 2654435761l) ^ (i << 17) ^ -i;\n"
+    "    }\n"
+    "    printf(\"%ld %ld %ld\\n\", tier1_leaf_sum8(table, 256), tier1_leaf_sum8(table, 13), tier1_leaf_sum8(table, 7));\n"
+    "    printf(\"%ld %ld\\n\", tier1_leaf_sum5(table, 256), tier1_leaf_sum5(table, 4));\n"
+    "    printf(\"%ld %ld %ld %ld\\n\", tier1_leaf_sum2(table, 255), tier1_leaf_sum2(table, 1), tier1_leaf_branch(table), tier1_leaf_branch(table + 100));\n"
+    "    for (int i = 0; i < 6; i += 1)\n"
+    "    {\n"
+    "        elems[i].next = i < 5 ? &elems[i + 1] : 0;\n"
+    "        elems[i].data = &triggers[i];\n"
+    "    }\n"
+    "    Tab tab = { \"ab\", &schemas[0], 0 };\n"
+    "    int count = 0;\n"
+    "    for (Trig* t = tier1_leaf_triggers(elems, &schemas[1], &tab); t != 0; t = t->next)\n"
+    "    {\n"
+    "        count += 1 + (int)(t - triggers) * 10;\n"
+    "    }\n"
+    "    printf(\"%d\\n\", count);\n"
+    "    return 0;\n"
+    "}\n";
+
 // The labels fixture (#789): every function in it has labels and indirect jumps, each one's shape another.
 // tier1_interpret's computed gotos go through its dispatch block, which the lowering puts last, with values live across
 // it in a loop; tier1_classify's switch is a jump table, with values live across it; tier1_pick jumps once through a ?:
@@ -2275,6 +2429,99 @@ static void check_test_driver_tier1_divide(CheckTest* test, const char* clang, c
     unlink(reference);
 }
 
+// The leaf fixture's (#2819), by --tier1, with and without rematerialization: its program prints what clang -O0's build
+// prints; tier1_leaf_sum8 addresses nothing from rsp, and pushes the callee-saved registers its values took and pops each:
+// three or four, as many as its loop has live values past the eight caller-saved registers (eleven, and the index's next
+// value at the loop's test); tier1_leaf_sum5 addresses nothing from rsp and pushes one; tier1_leaf_sum2 neither spills nor
+// pushes; tier1_leaf_branch, without a loop, spills to its frame (it addresses from rsp) and pushes none.
+static void check_test_driver_tier1_leaf(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_LEAF_RECORDS = 1024,
+    };
+    char source[512];
+    char main_source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-leaf.c", directory);
+    snprintf(main_source, sizeof(main_source), "%s/tier1-leaf-main.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-leaf-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_leaf_source, sizeof(check_test_tier1_leaf_source) - 1) &&
+                         parse_test_write(main_source, check_test_tier1_leaf_main, sizeof(check_test_tier1_leaf_main) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, main_source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[512] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the leaf fixture runs");
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_LEAF_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_LEAF_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_LEAF_RECORDS, sizeof(uint32_t));
+    const bool ready = ran && records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
+    static const char* const names[] = { "tier1_leaf_sum8", "tier1_leaf_sum2", "tier1_leaf_branch", "tier1_leaf_sum5", "tier1_leaf_triggers" };
+    for (uint32_t rematerialize = 0; ready && rematerialize < 2; rematerialize += 1)
+    {
+        char object[512];
+        char main_object[512];
+        char program[512];
+        snprintf(object, sizeof(object), "%s/tier1-leaf-%u.o", directory, rematerialize);
+        snprintf(main_object, sizeof(main_object), "%s/tier1-leaf-main-%u.o", directory, rematerialize);
+        snprintf(program, sizeof(program), "%s/tier1-leaf-%u", directory, rematerialize);
+        CheckTestTier1Build build;
+        CheckTestTier1Build main_build;
+        const bool compiled = check_test_tier1_build_names(executable, source, names, 5, object, rematerialize != 0, false, true, false, NULL, &build);
+        const bool main_compiled = check_test_tier1_build(executable, main_source, "main", main_object, rematerialize != 0, false, true, false, NULL, &main_build);
+        check_test_expect(test, compiled && main_compiled, "the leaf fixture compiles by --tier1, its functions Tier 1's");
+        char* link_arguments[] = { (char*)clang, "-o", program, object, main_object, NULL };
+        char* link_text = NULL;
+        const bool linked = compiled && main_compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+        free(link_text);
+        char actual[512] = { 0 };
+        check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0, "the leaf fixture prints clang's build's output");
+        uint32_t saved[5] = { 0 };
+        uint32_t stacked[5] = { 0 };
+        for (uint32_t f = 0; compiled && f < 5; f += 1)
+        {
+            uint32_t relocations = 0;
+            const uint32_t count = check_test_tier1_function(object, names[f], records, CHECK_TEST_TIER1_LEAF_RECORDS, offsets, types, &relocations);
+            uint32_t pushed = 0;
+            uint32_t popped = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const X86Instruction* instruction = &records[i].instruction;
+                const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                // A push's or pop's register is its +r form's, in rm; so is a memory operand's base.
+                const uint32_t reg = instruction->rm;
+                const bool callee = reg == X86_REGISTER_RBX || reg == X86_REGISTER_RBP || (reg >= X86_REGISTER_R12 && reg <= X86_REGISTER_R15);
+                pushed |= form == X86_FORM_PUSH_R64 && callee ? 1u << reg : 0;
+                popped |= form == X86_FORM_POP_R64 && callee ? 1u << reg : 0;
+                stacked[f] += instruction->mode != BUSTER_X86_REGISTER_DIRECT && reg == X86_REGISTER_RSP && form != X86_FORM_PUSH_R64 && form != X86_FORM_POP_R64;
+            }
+            saved[f] = (uint32_t)__builtin_popcount(pushed);
+            check_test_expect(test, count != 0 && pushed == popped, "the leaves restore each callee-saved register they save");
+        }
+        check_test_expect(test, compiled && saved[0] >= 3 && saved[0] <= 4 && stacked[0] == 0, "tier1_leaf_sum8's loop keeps its values in registers, and saves as many callee-saved ones as it took");
+        check_test_expect(test, compiled && saved[3] == 1 && stacked[3] == 0, "tier1_leaf_sum5's loop, one value past the caller-saved registers, takes one callee-saved register");
+        check_test_expect(test, compiled && saved[1] == 0 && stacked[1] == 0, "tier1_leaf_sum2's values fit the caller-saved registers, and it saves none");
+        check_test_expect(test, compiled && saved[2] == 0 && stacked[2] != 0, "tier1_leaf_branch, without a loop, spills rather than save a callee-saved register");
+        const bool triggers = rematerialize != 0 ? saved[4] == 0 && stacked[4] != 0 : saved[4] != 0 && stacked[4] == 0;
+        check_test_expect(test, compiled && triggers,
+                          rematerialize != 0 ? "tier1_leaf_triggers keeps its two spills rather than take three callee-saved registers" : "tier1_leaf_triggers, its table's address spilled too, takes callee-saved registers");
+        printf("  Tier 1's leaves (#2819), rematerialization %s: tier1_leaf_sum8 saves %u callee-saved registers, tier1_leaf_sum5 %u, tier1_leaf_branch %u (its rsp operands %u), tier1_leaf_triggers %u (%u); the unit spills %" PRIu64 " values\n",
+               rematerialize != 0 ? "on" : "off", saved[0], saved[3], saved[2], stacked[2], saved[4], stacked[4], build.slots);
+        unlink(object);
+        unlink(main_object);
+        unlink(program);
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(source);
+    unlink(main_source);
+    unlink(reference);
+}
+
 // The labels fixture's function `name` in the object at `path`: its indirect jumps through a register and through
 // memory, into *registers and *memory, into *same whether every one through a register reads the same register (a
 // dispatch block's indirect jump and the jumps' copies of it, #2554), and into *trailing the direct jumps after its last
@@ -2959,8 +3206,43 @@ static bool check_test_tier1_lifetime_build(const char* executable, const char* 
     return status == 0 && reported && taken;
 }
 
+// A lifetime start and end in live must not refer to the first two graph nodes, which belong to unused.
+static void check_test_tier1_lifetime_references(CheckTest* test, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/checker/lifetime-reference-roots.c", check_test_fixture_root);
+    snprintf(object, sizeof(object), "%s/lifetime-reference-roots.o", directory);
+    char* arguments[] = { (char*)executable, "--tier1", "-c", source, "-o", object, NULL };
+    char* text = NULL;
+    const int status = check_test_driver_spawn(arguments, &text);
+    uint64_t length = 0;
+    uint8_t* bytes = status == 0 ? check_test_driver_read_aligned(object, &length) : NULL;
+    CheckTestElf elf;
+    const bool opened = bytes != NULL && check_test_elf_open(&elf, (String8){ .pointer = (char*)bytes, .length = length });
+    bool live = false;
+    bool kept = false;
+    bool unused = false;
+    for (uint64_t i = 1; opened && i < elf.symbol_count; i += 1)
+    {
+        const Elf64_Sym* symbol = elf.symbols + i;
+        const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
+        if (name != NULL && symbol->st_shndx != SHN_UNDEF)
+        {
+            live |= strcmp(name, "live") == 0;
+            kept |= strcmp(name, "kept") == 0;
+            unused |= strcmp(name, "first") == 0 || strcmp(name, "second") == 0 || strcmp(name, "unused") == 0;
+        }
+    }
+    check_test_expect(test, opened && live && kept && !unused, "Tier 1 lifetime controls preserve only the live body's symbol references");
+    free(bytes);
+    free(text);
+    unlink(object);
+}
+
 static void check_test_driver_tier1_lifetimes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_tier1_lifetime_references(test, executable, directory);
     char source[512];
     char reference[512];
     snprintf(source, sizeof(source), "%s/tier1-lifetimes.c", directory);

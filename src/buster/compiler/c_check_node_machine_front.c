@@ -192,6 +192,7 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_DECLARATION_LINES,
     NODE_FACTS_COUNT_LINE_TICKS,
     NODE_FACTS_COUNT_LINE_VERSIONS,
+    NODE_FACTS_COUNT_LINE_ASKS,
     NODE_FACTS_COUNT_MEMBER_SLOTS,
     NODE_FACTS_COUNT_PAIR_SLOTS,
     NODE_FACTS_COUNT_TAKEN_RECORDS,
@@ -284,9 +285,6 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_CONTEXTS_VALUED,
     NODE_FACTS_COUNT_CONTEXTS_SUNK,
     NODE_FACTS_COUNT_CONTEXTS_COMMAS,
-    // The casts that list their expression for a truth their operand may have and their own value has not: a
-    // branch's condition over one has a truth its root's value does not say (a summary's side facts' piece).
-    NODE_FACTS_COUNT_CONTEXTS_PASSED,
     // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS): the expressions it ran on (those C takes on the window)
     // and their records; those whose tape it made, their records and their entries; the listed ones by their first
     // record's reason (BUSTER_NODE_ROWS_REASON_*, in its order); the made tapes that differ from the reference's, and
@@ -440,13 +438,14 @@ struct NodeFrontTypes
     // A summary's side facts (BUSTER_NODE_READER_WINDOW_ROWS; null otherwise), by root node, for an expression the
     // rows take whole on the window: its references' first in their store (UINT32_MAX: none is kept for the root) and
     // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
-    // objects one after another, `summary_count` of `summary_capacity`; an expression it had no room for keeps none
+    // objects, followed only for a switch by its selector's TypeId. `summary_count` counts all words stored,
+    // of `summary_capacity`; an expression it had no room for keeps none
     // (`summary_unkept`). And the unit's functions the return flow leaves unknown from a declaration on
     // (check_program_return_unknowns' table, by object; null where the unit has none).
     uint32_t* summary_firsts;
     uint16_t* summary_counts;
     uint8_t* summary_facts;
-    uint32_t* summary_objects;
+    uint32_t* summary_words;
     uint64_t summary_count;
     uint64_t summary_capacity;
     uint64_t summary_unkept;
@@ -460,11 +459,13 @@ struct NodeFrontTypes
     // The census's tests at reader time (BUSTER_NODE_READER_TESTS; null otherwise), by root node, for a root T took
     // (BUSTER_NODE_FRONT_TYPED_TESTED in `refusals`): the tests that refuse its expression, as bits of NodeCensusTest;
     // its root's kind as the reader derives it from the front's root (a NodeCensusRoot); and the declared type of the
-    // object it initializes (0 for none). C and X then run on the expressions no test refuses. `policy` is the unit's
-    // enabled warnings as reader time read them (a NodeCensusPolicy), which the shadow compares with the pipeline's.
+    // object it initializes (0 for none) and that object's declaration's token (BUSTER_CHECK_NONE for none). C and X
+    // then run on the expressions no test refuses. `policy` is the unit's enabled warnings as reader time read them (a
+    // NodeCensusPolicy), which the shadow compares with the pipeline's.
     uint64_t* tests;
     uint8_t* kinds;
     TypeId* declared;
+    uint32_t* declarations;
     const void* policy;
     // The expressions the tests ran on and those they refused; by test, the expressions it refuses (`tested_any`) and
     // those it refuses first in the tests' order (`tested_first`); and the nodes a test asked of T's records that the
@@ -518,6 +519,10 @@ struct NodeFrontTypes
     uint64_t own_quiet_casts;
     uint64_t own_quiet_casts_checked;
     uint64_t own_quiet_casts_wrong;
+    // And the ordered comparisons of two operands that are pointers once converted, which the orders' rule left out.
+    uint64_t own_quiet_orders;
+    uint64_t own_quiet_orders_checked;
+    uint64_t own_quiet_orders_wrong;
     // With the reader's verify: the integer constants whose record says its value (node_facts_small), and those of them
     // whose payload is another.
     uint64_t own_values_checked;
@@ -1714,7 +1719,7 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                 case CHECK_INPUT_CODE_RETURN:
                 {
                     const uint32_t count = node_front_values(front, mine, values);
-                    const TypeId type = reader->return_types[token];
+                    const TypeId type = reader->query_types[token];
                     left = type == 0 || count == BUSTER_NODE_FRONT_UNKNOWN || count > 1;
                     if (!left && count == 1)
                     {
