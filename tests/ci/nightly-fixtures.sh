@@ -377,41 +377,32 @@ full_jobs()
 {
     local odd=${1:-} conclusion=${2:-success} arch sanitizer shards shard name
     printf '{"jobs":['
-    for arch in x86-64 native; do
-        for sanitizer in none address thread memory; do
-            # The native architecture keeps its plain row alone (#2032).
-            if [ "$arch" = native ] && [ "$sanitizer" != none ]; then continue; fi
-            shards=4
-            if [ "$arch" = x86-64 ] && { [ "$sanitizer" = thread ] || [ "$sanitizer" = memory ]; }; then shards=6; fi
-            printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Build the compiler once for the row'"'"'s shards","status":"completed","conclusion":"success"},' "$arch" "$sanitizer"
-            printf '{"name":"Tests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})","status":"completed","conclusion":"skipped"},' "$arch" "$sanitizer"
-            for shard in $(seq 1 "$shards"); do
-                name="Tests on Ubuntu 26.04 ($arch, $sanitizer, O3) / Tests on Ubuntu 26.04 (Clang 23, $arch, $sanitizer, O3, shard $shard of $shards)"
-                if [ "$odd" = "$arch $sanitizer $shard" ]; then
-                    if [ "$conclusion" = missing ]; then continue; fi
-                    printf '{"name":"%s","status":"completed","conclusion":"%s"},' "$name" "$conclusion"
-                else
-                    printf '{"name":"%s","status":"completed","conclusion":"success"},' "$name"
-                fi
-            done
-        done
-    done
+    # The native plain row, drawn since #2924: a candidate and its verdict, the contract's.
+    printf '{"name":"Tests on Ubuntu 26.04 (native, none, O3) / Vector draw 1, candidate 2 (Clang 23, none, O3)","status":"completed","conclusion":"success"},'
+    case "$odd" in
+        native) ;;
+        native-failed) printf '{"name":"Tests on Ubuntu 26.04 (native, none, O3) / Vector row verdict (Clang 23, none, O3)","status":"completed","conclusion":"failure"},' ;;
+        *) printf '{"name":"Tests on Ubuntu 26.04 (native, none, O3) / Vector row verdict (Clang 23, none, O3)","status":"completed","conclusion":"success"},' ;;
+    esac
     printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Tests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})","status":"completed","conclusion":"skipped"},'
     printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector draw 1, candidate 3 (Clang 23, none address thread memory, O3)","status":"completed","conclusion":"success"},'
     if [ "$odd" != vector ]; then
         printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 23, none address thread memory, O3)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = vector-failed ] && echo failure || echo success )"
     fi
-    for entry in frontend elf-override crash-replay-proof; do
-        if [ "$odd" != "fuzz $entry" ]; then
-            printf '{"name":"libFuzzer (ASan + UBSan + leaks, %s)","status":"completed","conclusion":"success"},' "$entry"
-        fi
-    done
+    # The fuzz campaigns draw AVX-512 runners (drawn.yml, #2924): a candidate, a later draw skipped, and the verdict.
+    printf '{"name":"libFuzzer (ASan + UBSan + leaks) / Vector draw 1, candidate 5 (fuzz)","status":"completed","conclusion":"success"},'
+    printf '{"name":"libFuzzer (ASan + UBSan + leaks) / Vector draw 2, candidate ${{ matrix.candidate }} (${{ inputs.row }})","status":"completed","conclusion":"skipped"},'
+    if [ "$odd" != fuzz ]; then
+        printf '{"name":"libFuzzer (ASan + UBSan + leaks) / Vector row verdict (fuzz)","status":"completed","conclusion":"success"},'
+    fi
     printf '{"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"skipped"},'
     # The auxiliary workflows: selfhost.yml called (its jobs, a nested call's included), the others skipped.
     printf '{"name":"Auxiliary (build.yml)","status":"completed","conclusion":"skipped"},'
     printf '{"name":"Auxiliary (selfhost.yml) / Self-host harness regression tests","status":"completed","conclusion":"success"},'
     printf '{"name":"Auxiliary (selfhost.yml) / prepare-hosted-tools / Prepare verified hosted release inputs","status":"completed","conclusion":"success"},'
-    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = selfhost-failed ] && echo failure || echo success )"
+    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 1, candidate 2 (bootstrap)","status":"completed","conclusion":"success"},'
+    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 2'"'"'s assignment (${{ inputs.row }})","status":"completed","conclusion":"skipped"},'
+    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector row verdict (bootstrap)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = selfhost-failed ] && echo failure || echo success )"
     printf '{"name":"Build and execute on Ryzen 7 9700X","status":"in_progress","conclusion":null}]}\n'
 }
 coverage_case()
@@ -426,15 +417,15 @@ coverage_case()
 full_jobs > "$fixtures/jobs-9100.json"
 coverage_case 9100 0
 expect_line "$work/coverage.log" $'coverage\tcomplete' 'a full candidate'"'"'s coverage is complete'
-expect_line "$work/coverage.log" $'row\tx86-64 memory\tok\t6' 'each row by its own shard count'
-expect_line "$work/coverage.log" $'row\tnative none\tok\t4' 'the native plain row'
+expect_line "$work/coverage.log" $'native\tnone\tok' 'the native plain row, by its verdict'
+! grep -q $'^row\t' "$work/coverage.log" || fail 'no sharded row is the contract'"'"'s since #2924'
 ! grep -q $'^row\tnative memory' "$work/coverage.log" || fail 'a retired native sanitizer row is no row of the contract'
-expect_line "$work/coverage.log" $'auxiliary\tselfhost\tcalled\tok\t3' 'a called auxiliary workflow, every job of it'
+expect_line "$work/coverage.log" $'auxiliary\tselfhost\tcalled\tok\t5' 'a called auxiliary workflow, every job of it, its draws'"'"' too'
 expect_line "$work/coverage.log" $'auxiliary\tbuild\tnot called\tok\t0' 'and one not called, which ran nothing'
 expect_match "$GITHUB_STEP_SUMMARY" 'Merge-queue coverage' 'and the summary says so'
 test "$(grep -c 'actions/runs/9100/jobs' "$fixtures/calls.log")" -eq 1 || fail 'a complete set is read once'
 # Each way a candidate's coverage falls short fails it, after asking again.
-for odd in 'x86-64 address 3:missing' 'x86-64 memory 5:missing' 'x86-64 thread 2:cancelled' 'native none 1:skipped' 'x86-64 memory 6:timed_out' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
+for odd in 'native:' 'native-failed:' 'vector:' 'vector-failed:' 'fuzz:' 'selfhost-failed:'; do
     full_jobs "${odd%%:*}" "${odd#*:}" > "$fixtures/jobs-9101.json"
     coverage_case 9101 1
     expect_line "$work/coverage.log" $'coverage\tincomplete' "a candidate with $odd is incomplete"
@@ -447,13 +438,17 @@ full_jobs > "$fixtures/jobs-9101.json"
 coverage_case 9101 1 ,build,selfhost,
 expect_line "$work/coverage.log" $'auxiliary\tbuild\tcalled\tmissing\t0' 'a called auxiliary workflow that ran nothing'
 coverage_case 9101 1 ,
-expect_line "$work/coverage.log" $'auxiliary\tselfhost\tnot called\tran although it doesn\'t apply\t3' 'an auxiliary workflow the selector did not name'
+expect_line "$work/coverage.log" $'auxiliary\tselfhost\tnot called\tran although it doesn\'t apply\t5' 'an auxiliary workflow the selector did not name'
 coverage_case 9101 1 ''
 expect_line "$work/coverage.log" $'auxiliary\t\tnot the selector\'s list' 'no selector list'
 # A shard beyond the row's count, or a row whose shards disagree.
-full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 5 of 5)","status":"completed","conclusion":"success"},&/' > "$fixtures/jobs-9101.json"
+full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (native, none, O3) \/ Vector row verdict (Clang 24, none, O3)","status":"completed","conclusion":"success"},&/' > "$fixtures/jobs-9101.json"
 coverage_case 9101 1
-expect_line "$work/coverage.log" $'row\tx86-64 none\tshard counts disagree\t5' 'shard counts that disagree are no coverage'
+expect_line "$work/coverage.log" $'native\tnone\tmore than one verdict' 'two native verdicts are no coverage'
+# A run without the x86-64 rows (#2924) and an x86-64 shard that fails beside it: no row of the contract, no gap.
+full_jobs | sed 's/{"name":"Native tests/{"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) \/ Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)","status":"completed","conclusion":"failure"},&/' > "$fixtures/jobs-9103.json"
+coverage_case 9103 0
+expect_line "$work/coverage.log" $'coverage\tcomplete' 'a retired x86-64 row counts for nothing'
 # A failed API call, then the full set: the second read passes it.
 full_jobs > "$fixtures/jobs-9102.json"
 touch "$fixtures/jobs-9102.json.1.fail"

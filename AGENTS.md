@@ -92,10 +92,10 @@ precedence; do not undo it or add the trailer manually instead.
 
 The Zen 5 requirement describes the **host compiler executable**, not necessarily
 the instruction set of every program it generates. Keep host ISA, generated-code
-ISA, and output ABI separate. Linux/x86-64 hosts without the complete AVX-512
-feature set use scalar implementations. `BUSTER_HOST_ARCH=x86-64` builds the
-baseline executable; `native` is the default and `znver5` selects approved
-benchmark builds. The host choice is made at build time, outside compiler hot paths.
+ISA, and output ABI separate. The host needs the complete AVX-512 feature set
+`host_isa.h` names; a build for any other target stops there (#2924). `native`
+is the default, `znver5` selects approved benchmark builds and `vector` is CI's
+explicit target. The host choice is made at build time, outside compiler hot paths.
 Do not add other host operating systems. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
@@ -208,20 +208,19 @@ Design every stage and every pull request data-parallel, vectorized and
 branch-free first, as `src/buster/compiler/c_lexer.c` and `x86_64_encoder.c`
 are built. The tools include masks over many items, prefix sums, in-register
 permutes as table lookups, compress and expand, sorting and segmented scans,
-bitsets, nearest-smaller-values and pointer jumping. Each vector path has an
-exact scalar path for the rare cases, which is also its twin and test oracle:
-both must give identical output or, where the two algorithms legitimately
-differ, pass a semantic check.
+bitsets, nearest-smaller-values and pointer jumping. Since 2026-11-17 each
+function has one implementation, the vector one: no scalar twin, oracle or
+`--scalar` mode ([#2924](https://github.com/buster14a/buster/issues/2924));
+tests use external oracles, frozen outputs or semantic checks.
 
 No stage is assumed inherently sequential. Where C fixes an order (macro state,
 typedef visibility), vectorize within each step and keep the ordered part small.
 A part that stays scalar says why with measurements on the 9700X, as "SIMD: what
 pays" in `docs/object-writer-and-linker.md` does. The owner set this rule on
-2026-10-20, replacing the premise of
-[#15](https://github.com/buster14a/buster/issues/15) that the parser and
-the type checker are inherently sequential. The issues that apply it are listed
-in the "Data-parallel first" section of
-[#115](https://github.com/buster14a/buster/issues/115). "SIMD and Zen 5" in
+2026-10-20, against [#15](https://github.com/buster14a/buster/issues/15)'s
+premise that the parser and type checker are inherently sequential.
+[#115](https://github.com/buster14a/buster/issues/115) lists the issues that
+apply it under "Data-parallel first". "SIMD and Zen 5" in
 [the C coding style](docs/coding-style.md) has the Zen 5 costs that shape these
 designs and the compilers already built this way.
 
@@ -401,9 +400,9 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
-The compiler's host path follows the target feature macros, which the
+The compiler's host check follows the target feature macros, which the
 preprocessor's predefines give as clang's do for the same options
-(`c_predefines.c`). A baseline `-march=x86-64` build selects the scalar host path.
+(`c_predefines.c`), so `-march=native` self-checks need an AVX-512 host.
 
 ## Command and module index
 
@@ -419,7 +418,7 @@ index](docs/commands/README.md#detailed-sections).
 - `./build.sh, bake-tables, test-baked-tables` — `baked.c` — [guide](docs/commands/build.md).
 - `test-builtins, test-check-builtins, test-builtin-lowering, measure-helpers` — `c_builtin.c` — [guide](docs/commands/builtins.md).
 - `check-call-graph, test-call-graph` — `call_graph.c` — [guide](docs/commands/call-graph.md).
-- `test-calling-convention, benchmark-calling-convention` — `calling_convention.c` — [guide](docs/commands/calling-convention.md).
+- `{test,benchmark}-calling-convention` — `calling_convention.c` — [guide](docs/commands/calling-convention.md).
 - `check, test-checker[-driver]` — `c_checker.c` — [guide](docs/commands/checker.md).
 - `test-checker-asm` — `c_check_program_asm.c` — [guide](docs/commands/checker-asm.md).
 - `test-checker-corpus` — `c_check_corpus.c` — [guide](docs/commands/checker-corpus.md).
@@ -436,7 +435,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
 - `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
 - `test-emitted-code` — `emitted_code.c` — [guide](docs/commands/emission.md).
-- `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
+- `-E, parse, -fsyntax-only, -c, test-assembly-output` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
 - `benchmark-floors, test-floors-input` — [guide](docs/commands/floors.md).

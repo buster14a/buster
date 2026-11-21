@@ -193,10 +193,17 @@ static ForeignStringsError foreign_strings_intern(const ForeignStringInput* inpu
     return error;
 }
 
-static ForeignStringsError foreign_strings_build(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output)
+static bool foreign_strings_path_valid(ForeignPath path)
 {
-    ForeignStringsError error = arena == 0 || output == 0 || (input_count != 0 && inputs == 0) ||
-                                (path != FOREIGN_PATH_VECTOR && path != FOREIGN_PATH_EXACT) ? FOREIGN_STRINGS_ERROR_INPUT : FOREIGN_STRINGS_ERROR_NONE;
+    return path == FOREIGN_PATH_VECTOR || path == FOREIGN_PATH_EXACT;
+}
+
+// The final linker needs the pool only below its original byte count. Finish interning first: alignment can grow
+// the pool and offset overflow is an error even if the linker would discard it. An empty result reports no saving.
+static ForeignStringsError foreign_strings_build_below(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output, uint64_t limit)
+{
+    ForeignStringsError error = arena == 0 || output == 0 || (input_count != 0 && inputs == 0) || !foreign_strings_path_valid(path) ?
+                                FOREIGN_STRINGS_ERROR_INPUT : FOREIGN_STRINGS_ERROR_NONE;
     const uint64_t start = arena != 0 ? arena->length : 0;
     ForeignStrings strings = { .input_count = input_count };
     if (error == FOREIGN_STRINGS_ERROR_NONE)
@@ -248,12 +255,12 @@ static ForeignStringsError foreign_strings_build(const ForeignStringInput* input
         memset(table, 0, slots * sizeof(uint32_t));
         error = foreign_strings_intern(inputs, &strings, pointers, sections, hashes, table, slots);
     }
-    if (error == FOREIGN_STRINGS_ERROR_NONE)
+    if (error == FOREIGN_STRINGS_ERROR_NONE && strings.size < limit)
     {
         strings.bytes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)strings.size + 1);
         error = strings.bytes == 0 ? FOREIGN_STRINGS_ERROR_MEMORY : FOREIGN_STRINGS_ERROR_NONE;
     }
-    if (error == FOREIGN_STRINGS_ERROR_NONE)
+    if (error == FOREIGN_STRINGS_ERROR_NONE && strings.bytes != 0)
     {
         memset(strings.bytes, 0, strings.size);
         // Only table residents are unique. Copies are disjoint, including when equal strings need different alignment.
@@ -265,14 +272,22 @@ static ForeignStringsError foreign_strings_build(const ForeignStringInput* input
                 memcpy(strings.bytes + strings.output_offset[entry], pointers[entry], strings.lengths[entry]);
             }
         }
-        *output = strings;
     }
     scratch_end(scratch);
-    if (error != FOREIGN_STRINGS_ERROR_NONE && arena != 0)
+    if (arena != 0 && (error != FOREIGN_STRINGS_ERROR_NONE || strings.bytes == 0))
     {
         arena_pop_to(arena, start);
     }
+    if (error == FOREIGN_STRINGS_ERROR_NONE)
+    {
+        *output = strings.bytes != 0 ? strings : (ForeignStrings){ 0 };
+    }
     return error;
+}
+
+static ForeignStringsError foreign_strings_build(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output)
+{
+    return foreign_strings_build_below(inputs, input_count, path, arena, output, UINT64_MAX);
 }
 
 static bool foreign_strings_entry(const ForeignStrings* strings, uint32_t input, uint64_t offset, uint32_t* entry)

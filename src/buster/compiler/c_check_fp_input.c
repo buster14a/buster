@@ -83,7 +83,7 @@ struct CheckInputFpPragma
     bool valid;
 };
 
-static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, bool* quiet);
+static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, uint32_t id, bool* quiet);
 
 static uint8_t check_input_fp_environment(CheckFpState state)
 {
@@ -336,6 +336,12 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                         .error = directive && end == source + 5 && placement && !complex && !contract && on && !precise ? CHECK_FP_ERROR_FENV_PRECISE : 0,
                         .valid = accepted,
                     };
+                    if (!recognized)
+                    {
+                        // clang's -Wunknown-pragmas (ext_on_off_switch_syntax, #1970): its command line's policy here.
+                        CheckInputFpPragma* record = input->fp_pragmas + input->fp_pragma_count - 1;
+                        record->warning_severity = check_input_fp_warning_policy(reader->pp, source + 2, CHECK_WARNING_ID_UNKNOWN_PRAGMA, &record->warning_quiet);
+                    }
                     handled[pragma] = accepted ? 2 : 3;
                 }
                 else
@@ -422,7 +428,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                         if (empty)
                         {
                             CheckInputFpPragma* record = input->fp_pragmas + input->fp_pragma_count - 1;
-                            record->warning_severity = check_input_fp_warning_policy(reader->pp, source + 2, &record->warning_quiet);
+                            record->warning_severity = check_input_fp_warning_policy(reader->pp, source + 2, CHECK_WARNING_ID_IGNORED_PRAGMA, &record->warning_quiet);
                         }
                         handled[pragma] = accepted ? 2 : 3;
                     }
@@ -488,13 +494,12 @@ static void check_input_fp_types(CheckInputReader* reader)
     const bool active = !reader->lane && requested != BUSTER_PREDEFINES_EVAL_DEFAULT && input->fp_environments != NULL;
     const uint64_t temporary = reader->scratch->length;
     const uint32_t count = reader->parser->tokens.count;
-    const bool scalar = reader->parser->options.scalar;
     uint8_t* marked = NULL;
     const bool attributed = active && check_sparse_wide_present(input->attributes);
-    for (uint32_t first = attributed ? check_input_attributed_next(input->attributes, 0, count, scalar) : count;
-         first < count && !input->resource; first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
+    for (uint32_t first = attributed ? check_input_attributed_next(input->attributes, 0, count) : count;
+         first < count && !input->resource; first = check_input_attributed_next(input->attributes, first + 16, count))
     {
-        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count, scalar);
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
         for (uint32_t selected = lanes; selected != 0 && !input->resource; selected &= selected - 1)
         {
             const uint32_t declaration = first + (uint32_t)__builtin_ctz(selected);

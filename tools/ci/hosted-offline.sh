@@ -3,13 +3,15 @@
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
 # The hosted jobs' external inputs besides the release inputs (#2275; docs/hosted-toolchain.md, "Offline inputs"): the
-# apt packages setup-hosted.sh installs, the baseline runtime's .debs (setup-baseline-runtime.sh), the frozen corpus
+# apt packages setup-hosted.sh installs, the frozen corpus
 # (fetch-corpus.sh), c-testsuite's and SQLite's pinned commits (fetch-c-testsuite.sh, fetch-sqlite.sh), and Lua's release
 # archive (this script's lua command). The
 # preparation job acquires them once per run into a bundle, ROOT, which every hosted job then reads with no network:
 #
 #   ROOT/apt/MANIFEST, ROOT/apt/*.deb  The .debs that apt-get --download-only fetched for the package list on this
-#                                      runner image, and what MANIFEST records of them and of the image's own packages.
+#                                      runner image, those of the image's own packages that they pin to an exact
+#                                      version (carried: see pinned_outside), and what MANIFEST records of them and of
+#                                      the image's own packages.
 #   ROOT/ci                            BUSTER_CI_CACHE's layout, as on the 9700X: cached-download.sh's downloads/DIGEST
 #                                      and the fetch scripts' NAME.git mirrors holding refs/pinned/COMMIT.
 #
@@ -27,7 +29,8 @@
 #                                      are checked on use, by the scripts that read them.
 #   hosted-offline.sh apt-install ROOT setup-hosted.sh's install: the manifest's .debs by apt-get --no-download, resolved
 #                                      against the installed packages alone (no package lists), then every recorded
-#                                      version compared with dpkg's. The step summary lists them.
+#                                      version compared with dpkg's. The step summary lists them. On another image of
+#                                      a rollout a carried package moves to the bundle's version, up or down.
 #   hosted-offline.sh lua DIRECTORY    Reads the pinned Lua archive through cached-download.sh and extracts its source
 #                                      tree into DIRECTORY; hosted consumers require its verified offline copy.
 #
@@ -37,13 +40,15 @@ set -euo pipefail
 shopt -s inherit_errexit
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
-format='buster-hosted-apt 1'
+# 2: the bundle carries the image's packages that its .debs pin exactly (#2974), so a version 1 bundle is resolved again.
+format='buster-hosted-apt 2'
 # tools/ci/setup-hosted.sh's packages. The bundle holds what this runner image lacks of their closure, so it is the
-# image's: its cache key names the image.
-packages=(gcc g++ binutils libc6-dev gdb tcc zstd linux-perf qemu-user valgrind libzstd-dev libxml2-dev zlib1g-dev tcl8.6-dev)
+# image's: its cache key names the image. No valgrind: nothing hosted has run it since the scalar host went (#2924), and
+# its libc6-dbg pins the image's libc6 exactly, which dropped merge-queue candidates during an image rollout (#2974).
+packages=(gcc g++ binutils libc6-dev gdb tcc zstd linux-perf qemu-user libzstd-dev libxml2-dev zlib1g-dev tcl8.6-dev)
 # The inputs under ROOT/ci, each acquired and checked by its own script, and the scripts whose contents pin them.
-ci_inputs=(baseline corpus c-testsuite sqlite lua)
-ci_scripts=(setup-baseline-runtime.sh fetch-corpus.sh fetch-c-testsuite.sh fetch-sqlite.sh cached-download.sh hosted-offline.sh)
+ci_inputs=(corpus c-testsuite sqlite lua)
+ci_scripts=(fetch-corpus.sh fetch-c-testsuite.sh fetch-sqlite.sh cached-download.sh hosted-offline.sh)
 # The pause before a failed acquisition's next attempt, times the attempt's number: 20 and 40 s. The fixtures set it
 # to 0.
 retry_seconds=${BUSTER_HOSTED_RETRY_SECONDS:-20}
@@ -88,14 +93,77 @@ runner_image()
     printf '%s %s %s %s\n' "$ImageOS" "$ImageVersion" "$release" "$(dpkg --print-architecture)"
 }
 
-# The installed package NAME (PACKAGE or PACKAGE:ARCH) of this runner's architecture or of none, as `PACKAGE:ARCH
-# VERSION`; nothing when there is none.
+# Each installed package NAME (PACKAGE or PACKAGE:ARCH) of this runner's architecture or of none, as `PACKAGE:ARCH
+# VERSION`; nothing for one there is none of.
 installed_record()
 {
     local native
     native=$(dpkg --print-architecture)
-    { dpkg-query --show --showformat='${db:Status-Status} ${Package}:${Architecture} ${Version}\n' "$1" 2> /dev/null || true; } |
+    { dpkg-query --show --showformat='${db:Status-Status} ${Package}:${Architecture} ${Version}\n' "$@" 2> /dev/null || true; } |
         awk -v native="$native" '$1 == "installed" && ($2 ~ (":" native "$") || $2 ~ /:all$/) { print $2, $3 }'
+}
+
+# PACKAGE<TAB>VERSION<TAB>RELATIONS (its Pre-Depends and Depends) of each .deb in DIRECTORY.
+bundle_relations()
+{
+    local file
+    while IFS= read -r -d '' file; do
+        dpkg-deb --show --showformat='${Package}\t${Version}\t${Pre-Depends}, ${Depends}\n' "$file"
+    done < <(find "$1" -maxdepth 1 -type f -name '*.deb' -print0)
+}
+
+# Each exact relation, NAME (= VERSION), in standard input's PACKAGE<TAB>VERSION<TAB>RELATIONS lines, as
+# `PACKAGE VERSION NAME VERSION`. An architecture qualifier on NAME is dropped. (mawk's regular expressions: no classes.)
+exact_relations()
+{
+    awk -F '\t' '{
+        rest = $3
+        while (match(rest, /[a-z0-9][a-z0-9.+-]*(:[a-z0-9-]+)?[ \t]*\([ \t]*=[ \t]*[^) \t]+[ \t]*\)/)) {
+            relation = substr(rest, RSTART, RLENGTH)
+            rest = substr(rest, RSTART + RLENGTH)
+            name = relation
+            sub(/[: \t(].*/, "", name)
+            pinned = relation
+            sub(/^[^(]*\([ \t]*=[ \t]*/, "", pinned)
+            sub(/[ \t]*\)$/, "", pinned)
+            print $1, $2, name, pinned
+        }
+    }'
+}
+
+# NAME=VERSION, one per line, of each installed package that the bundle in DIRECTORY must carry and doesn't (#2974):
+# one that a .deb of the bundle depends on at exactly its installed version, and one that depends on a package of the
+# bundle at exactly the bundled version. Either pins the image's own package to this image's version of it. A runner
+# on another image of a rollout, where that package has moved, could not install the bundle without a download unless
+# the bundle carries that version too: libc6-dbg's libc6 (= 2.43-2ubuntu2.4) failed on images with 2.43-2ubuntu2.7 on
+# 2026-11-18, and dropped merge-queue candidates. An exact relation that holds for neither is an alternative apt didn't
+# take, and is left alone.
+pinned_outside()
+{
+    local directory=$1 native relations package version name pinned installed
+    local -A bundled=()
+    native=$(dpkg --print-architecture)
+    relations=$(bundle_relations "$directory")
+    while IFS=$'\t' read -r package version _; do
+        [ -z "$package" ] || bundled[$package]=$version
+    done <<< "$relations"
+    {
+        exact_relations <<< "$relations" | while read -r _ _ name pinned; do
+            if [ -z "${bundled[$name]:-}" ]; then
+                installed=$(installed_record "$name")
+                if [ -n "$installed" ] && [ "${installed#* }" = "$pinned" ]; then
+                    printf '%s=%s\n' "$name" "$pinned"
+                fi
+            fi
+        done
+        dpkg-query --show --showformat='${db:Status-Status}\t${Package}\t${Architecture}\t${Version}\t${Pre-Depends}, ${Depends}\n' |
+            awk -F '\t' -v native="$native" '$1 == "installed" && ($3 == native || $3 == "all") { print $2 "\t" $4 "\t" $5 }' |
+            exact_relations | while read -r package version name pinned; do
+                if [ -z "${bundled[$package]:-}" ] && [ "${bundled[$name]:-}" = "$pinned" ]; then
+                    printf '%s=%s\n' "$package" "$version"
+                fi
+            done
+    } | LC_ALL=C sort -u
 }
 
 keys()
@@ -158,6 +226,11 @@ check_apt()
         file=${file#"$directory/"}
         [ "$file" = MANIFEST ] || [ -n "${files[$file]:-}" ] || { echo "it holds $file, which its MANIFEST doesn't list"; return 1; }
     done < <(find "$directory" -mindepth 1 -print0)
+    # On its own image, it carries every package of this image's that it pins exactly.
+    if [ "$mode" = prepare ]; then
+        extra=$(pinned_outside "$directory")
+        [ -z "$extra" ] || { echo "it pins this image's $(tr '\n' ' ' <<< "$extra")without carrying them"; return 1; }
+    fi
 }
 
 # A runner's resolver can fail on Ubuntu's mirror names for a long while: from 13:51 UTC on 2026-11-11, for well over
@@ -167,7 +240,7 @@ check_apt()
 # attempts, each apt host that doesn't resolve here is pinned in /etc/hosts to an address a DNS-over-HTTPS resolver
 # gives it (Cloudflare's, else Google's), as setup-hosted.sh did before it stopped using the network. This brings in
 # nothing unverified: apt checks the archive's signed Release files and every package's hash, and the downloads here
-# keep their SHA-256 pins (setup-baseline-runtime.sh's come from snapshot.ubuntu.com, the archive's snapshots).
+# keep their SHA-256 pins.
 apt_hosts()
 {
     local file
@@ -245,7 +318,8 @@ offline_apt()
     fi
     lists=$(mktemp -d)
     mkdir "$lists/partial"
-    sudo apt-get "$@" install --yes --no-install-recommends --no-download \
+    # A carried package moves to the bundle's version, down as well as up; nothing of the image's is removed for it.
+    sudo apt-get "$@" install --yes --no-install-recommends --no-download --allow-downgrades --no-remove \
         -o "Dir::State::Lists=$lists" -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= \
         -o "Dir::Cache::archives=$archives" "${debs[@]}" || status=$?
     # apt ran as root: it may leave root's files there.
@@ -276,6 +350,29 @@ write_manifest()
     } > "$directory/MANIFEST"
 }
 
+# Adds to the bundle in DIRECTORY each package that pinned_outside names, downloaded at that version through SCRATCH,
+# until it names none: a carried package can pin others in turn.
+carry_pinned()
+{
+    local directory=$1 scratch=$2 list entry
+    local -a wanted=()
+    local -A requested=()
+    mkdir -p "$scratch"
+    list=$(pinned_outside "$directory")
+    while [ -n "$list" ]; do
+        mapfile -t wanted <<< "$list"
+        for entry in "${wanted[@]}"; do
+            [ -z "${requested[$entry]:-}" ] || die "the closure still pins this image's $entry after it was downloaded"
+            requested[$entry]=1
+            log "carrying $entry: the closure pins this image's version of it exactly"
+        done
+        (cd "$scratch" && apt_network download "${wanted[@]}")
+        sudo chown -R "$(id -u):$(id -g)" "$scratch"
+        find "$scratch" -maxdepth 1 -type f -name '*.deb' -exec mv -t "$directory" -- {} +
+        list=$(pinned_outside "$directory")
+    done
+}
+
 prepare_apt()
 {
     local root=$1 directory="$1/apt" reason count bytes
@@ -292,6 +389,7 @@ prepare_apt()
         apt_network install --download-only --yes --no-install-recommends -o "Dir::Cache::archives=$temporary/archives" "${packages[@]}"
         sudo chown -R "$(id -u):$(id -g)" "$temporary/archives"
         find "$temporary/archives" -maxdepth 1 -type f -name '*.deb' -exec mv -t "$temporary/apt" -- {} +
+        carry_pinned "$temporary/apt" "$temporary/carried"
         write_manifest "$temporary/apt"
         # What every consumer will do, on this image: the .debs alone must install, with no download.
         offline_apt "$temporary/apt" "$temporary/simulation" --simulate || die 'the downloaded closure does not install from the bundle alone on the image it was resolved on'
@@ -324,8 +422,6 @@ run_ci_input()
 {
     local name=$1 offline=$2 cache=$3 scratch=$4
     case "$name" in
-        baseline)
-            RUNNER_TEMP=$scratch GITHUB_ENV='' BUSTER_CI_CACHE=$cache BUSTER_CI_OFFLINE=$offline bash "$here/setup-baseline-runtime.sh" ;;
         corpus)
             BUSTER_CI_CACHE=$cache BUSTER_CI_OFFLINE=$offline bash "$here/fetch-corpus.sh" "$scratch/corpus" ;;
         c-testsuite)
@@ -403,12 +499,21 @@ verify()
 apt_install()
 {
     local root=$1 directory="$1/apt" runner recorded same=true kind package version actual origin differences=0
+    local -a names=()
+    local -A before=()
     verify "$root"
     runner=$(runner_image)
     recorded=$(sed -n 's/^runner //p' "$directory/MANIFEST")
     if [ "$recorded" != "$runner" ]; then
         same=false
         warn "this runner's image ($runner) is not the one the apt bundle was resolved on ($recorded), as during an image rollout: its .debs are installed all the same, and the image's own packages are compared below"
+    fi
+    # What the image had of the bundle's packages: a carried one, or one the bundle upgrades.
+    mapfile -t names < <(awk '$1 == "bundle" { print $2 }' "$directory/MANIFEST")
+    if [ "${#names[@]}" -ne 0 ]; then
+        while read -r package version; do
+            before[$package]=$version
+        done < <(installed_record "${names[@]}")
     fi
     if ! offline_apt "$directory" "$directory"; then
         if [ "$same" = true ]; then
@@ -437,6 +542,8 @@ apt_install()
             warn "$package is the runner image's ${actual:-(none)}, not the recorded $version"
             differences=$((differences + 1))
             origin="$origin (recorded $version)"
+        elif [ "$kind" = bundle ] && [ -n "${before[$package]:-}" ] && [ "${before[$package]}" != "$version" ]; then
+            origin="$origin (the image had ${before[$package]})"
         fi
         printf 'hosted-offline: %s %s from %s\n' "$package" "${actual:-(none)}" "$origin"
         summary "| \`$package\` | \`${actual:-(none)}\` | $origin |"

@@ -2,19 +2,18 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #141's selection on real C (benchmark-tier1-select-source): the time per IR instruction of selecting every function -c
-// compiles of a set of files (tier1_select_plan_verified, as the C driver plans the optimizer's verified result), by both
-// paths. Each function is lowered, promoted and optimized as the C driver's --tier1 takes it (c_check_tier1.c), and its
-// dominance found, outside the time; a function a step before
-// selection refuses, or that either path's selection refuses, is left out of both variants and counted by the step. Any
-// other failure fails the benchmark, which then reports no time. Each variant's run selects every function once, after a
-// warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which path runs first; --only times one alone, back to
-// back, and --after-scalar MS runs the scalar path, untimed, for MS ms before each of the vector path's passes. Before the
-// time, each selected function's bottom-up rewrite (tier1_select_burs.c) is checked against its twins and the walks'
-// candidates (tier1_burs_check_function), and a difference fails the benchmark. Include after tier1_cfg_source_benchmark.c,
+// compiles of a set of files (tier1_select_plan_verified, as the C driver plans the optimizer's verified result). Each
+// function is lowered, promoted and optimized as the C driver's --tier1 takes it (c_check_tier1.c), and its dominance
+// found, outside the time; a function a step before selection refuses, or that selection refuses, is left out and
+// counted by the step. Any other failure fails the benchmark, which then reports no time. The run selects every function
+// once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes; --after-scalar MS runs scalar integer work, untimed,
+// for MS ms before each pass. Before the
+// time, each selected function's bottom-up rewrite (tier1_select_burs.c) is checked against its definitions and the
+// walks' candidates (tier1_burs_check_function), and a broken one fails the benchmark. Include after tier1_cfg_source_benchmark.c,
 // tier0_benchmark_measure.c, whose clock, counters and medians it takes, and tier1_select_burs_test.c. Run it under the
 // 9700X's lock pinned to one CPU (taskset -c 2 ...).
 //
-//   build/compiler benchmark-tier1-select-source [--only select|select-scalar] [--after-scalar MS] [preprocessor options] file...
+//   build/compiler benchmark-tier1-select-source [--only select] [--after-scalar MS] [preprocessor options] file...
 //
 // The corpus's type and preparation also serve the checker's code-certificate benchmark. Keep those shared at their
 // original positions; only the backend unit reads this command's measurement and driver.
@@ -28,12 +27,10 @@
 
 #if BUSTER_TIER1_SELECT_SOURCE_BACKEND
 #define BUSTER_TIER1_SELECT_SOURCE_VECTOR 0
-#define BUSTER_TIER1_SELECT_SOURCE_SCALAR 1
-#define BUSTER_TIER1_SELECT_SOURCE_VARIANTS 2
+#define BUSTER_TIER1_SELECT_SOURCE_VARIANTS 1
 
 static const char* const tier1_select_source_variant_names[BUSTER_TIER1_SELECT_SOURCE_VARIANTS] = {
     "select",
-    "select-scalar",
 };
 #endif
 
@@ -51,7 +48,7 @@ struct Tier1SelectSourceCorpus
     uint64_t refused;
     uint64_t entries;
     uint64_t instructions;
-    // The bottom-up rewrite's twins on each function selected (tier1_select_burs_test.c), outside the time.
+    // The bottom-up rewrite's definitions on each function selected (tier1_select_burs_test.c), outside the time.
     Tier1BursCheck burs;
 };
 
@@ -66,7 +63,7 @@ static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tie
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
         // As the driver's --tier1 plans the optimizer's verified result (c_check_tier1.c).
-        failures += tier1_select_plan_verified(&corpus->functions[f], &corpus->dominance[f], 0, 0, output, scratch, variant == BUSTER_TIER1_SELECT_SOURCE_VECTOR, &plan, &node) != TIER1_SELECT_OK;
+        failures += tier1_select_plan_verified(&corpus->functions[f], &corpus->dominance[f], 0, 0, output, scratch, &plan, &node) != TIER1_SELECT_OK;
         arena_pop_to(output, output_mark);
     }
     const Tier0BenchmarkReading end = tier0_benchmark_read(counters);
@@ -135,7 +132,7 @@ static bool tier1_select_source_corpus_file(Tier1SelectSourceCorpus* corpus, con
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
             const uint64_t output_mark = output->length;
-            selected = tier1_select_plan(&optimized.function, &dominance, output, scratch, path == 0, &plan, &node) == TIER1_SELECT_OK;
+            selected = tier1_select_plan(&optimized.function, &dominance, output, scratch, &plan, &node) == TIER1_SELECT_OK;
             arena_pop_to(output, output_mark);
         }
         if (selected)
@@ -194,10 +191,17 @@ static bool tier1_select_source_measure(const Tier1SelectSourceCorpus* corpus, A
                 if (v == BUSTER_TIER1_SELECT_SOURCE_VECTOR && after_scalar != 0)
                 {
                     const uint64_t until = tier0_benchmark_now() + after_scalar * 1000000ull;
-                    while (tier0_benchmark_now() < until && failed == BUSTER_TIER1_SELECT_SOURCE_VARIANTS)
+                    // Scalar integer work, no vector instructions: a multiply-xor chain the compiler can't vectorize.
+                    uint64_t state = UINT64_C(0xcbf29ce484222325);
+                    while (tier0_benchmark_now() < until)
                     {
-                        failed = tier1_select_source_run(BUSTER_TIER1_SELECT_SOURCE_SCALAR, corpus, output, scratch, counters).failures != 0 ? BUSTER_TIER1_SELECT_SOURCE_SCALAR : failed;
+                        #pragma clang loop vectorize(disable) interleave(disable)
+                        for (uint32_t i = 0; i < 4096; i += 1)
+                        {
+                            state = (state ^ i) * UINT64_C(0x100000001b3);
+                        }
                     }
+                    __asm__ volatile("" : : "r"(state));
                 }
                 const Tier0BenchmarkReading taken = failed == BUSTER_TIER1_SELECT_SOURCE_VARIANTS ? tier1_select_source_run(v, corpus, output, scratch, counters) : (Tier0BenchmarkReading){ 0 };
                 failed = taken.failures != 0 ? v : failed;
@@ -322,13 +326,13 @@ static __attribute__((unused)) int run_tier1_select_source_benchmark(int count, 
                corpus.unprepared, corpus.refused, corpus.entries, corpus.instructions);
         printf("benchmark-tier1-select-source: bottom-up rewrite functions=%" PRIu64 " nodes=%" PRIu64 " mismatches=%" PRIu64 " uncovered=%" PRIu64 " matched=%" PRIu64 " munched=%" PRIu64 "\n", corpus.burs.functions,
                corpus.burs.nodes, corpus.burs.mismatches, corpus.burs.uncovered, corpus.burs.matched, corpus.burs.fallbacks);
-        // A difference between the twins, or a class the grammar covers without a candidate, fails the run.
+        // A broken definition, or a class the grammar covers without a candidate, fails the run.
         const bool twins = corpus.burs.functions == corpus.count && corpus.burs.mismatches == 0 && corpus.burs.uncovered == 0;
         measured = twins && corpus.count != 0 && corpus.instructions != 0 && tier1_select_source_measure(&corpus, &output, &scratch, only, after_scalar);
     }
     else if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-tier1-select-source [--only select|select-scalar] [--after-scalar MS] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-tier1-select-source [--only select] [--after-scalar MS] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);

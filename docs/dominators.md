@@ -8,7 +8,7 @@ for #134, and natural-loop membership for #139 and #140. These consumers must
 explicitly integrate the interface; the existence of this module does not
 establish their acceptance or source-corpus coverage.
 
-The implementation and fixtures are original. The scalar solver is SEMI-NCA,
+The implementation and fixtures are original. The solver is SEMI-NCA,
 as Georgiadis, Tarjan and Werneck describe it in
 [Finding Dominators in Practice](https://jgaa.info/index.php/jgaa/article/view/paper119)
 (JGAA 10(1), 2006): Lengauer and Tarjan's semidominators, from
@@ -63,29 +63,26 @@ length unchanged. Scratch is restored on every outcome. Output lives until
 the caller releases or rewinds its arena. Recompute after any CFG change;
 there is no incremental maintenance or stale-result detection.
 
-`dominators_options()` requests frontiers and loops, selects `DOMINATOR_AUTO`,
-and limits simultaneously live bitset storage to 64 MiB. Callers may request
+`dominators_options()` requests frontiers and loops, and limits simultaneously
+live bitset storage to 64 MiB. Callers may request
 only `BUSTER_DOMINATOR_FRONTIERS`, only `BUSTER_DOMINATOR_LOOPS`, both, or zero
 for tree-only analysis. Tree-only SEMI-NCA storage is linear in blocks and
 edges. The two quadratic output families are optional; a large sparse CFG
 never silently allocates an unlimited frontier or loop-body matrix.
 
 `max_matrix_bytes` is a memory limit, **not a measured performance threshold**.
-`AUTO` always solves the tree by SEMI-NCA, the measured choice ("Solver
-selection" below), and selects CSR loop worklists when retained output plus
-temporary predecessor rows would exceed the budget. Explicit `VECTOR` solves
-by the bit matrix and returns a matrix-limit error instead of either fallback.
-`SCALAR` never constructs the dominator or predecessor matrices. Requested output matrices must fit in every mode;
-otherwise the entire call fails. Zero permits tree-only scalar analysis and
-loop analysis with no natural loops. Arena exhaustion is a distinct failure.
+It bounds the requested output matrices, the frontier rows and the loop bodies;
+the analysis builds no other matrix. If they don't fit, the entire call fails.
+Zero permits tree-only analysis and loop analysis with no natural loops. Arena
+exhaustion is a distinct failure.
 
 All output bitset rows contain `row_words` u64s, rounded up to a multiple of
 eight, and start at a 64-byte boundary. Bits are original block IDs; inactive
 tail bits are zero. The padding is allocated, readable and writable, separate
 from the logical block count. No kernel reads past the row. Matrices are
 disjoint; consumers must preserve their zero tails. Empty outputs have null
-matrix pointers and zero rows. The host executes AVX-512 instructions directly,
-without runtime ISA dispatch; this does not change generated-program ISA.
+matrix pointers and zero rows. The layout lets consumers read whole rows with
+512-bit loads; the analysis itself is scalar ("Why it is scalar" below).
 
 ## Results
 
@@ -138,43 +135,13 @@ on its path through the forest of already-processed vertices, which an
 explicit stack compresses toward that forest's unprocessed root. Each immediate
 dominator is then, in increasing order, the nearest common dominator-tree
 ancestor of the DFS parent and the semidominator, found by walking up the
-finished part of the tree from the parent. `iterations` is 1. Compression bounds
+finished part of the tree from the parent. Compression bounds
 the semidominators by O(E log B). The walk costs the depth between the parent
 and the immediate dominator: a step or two on goto ladders, nested ifs and `?:`
 chains, but O(B²) in total when a deep block has many DFS
 children each also reachable from far above it, which Cooper–Harvey–Kennedy's
 intersection walks too. Its scratch is two u32 columns from the DFS plus
 12 bytes per reachable block.
-
-The vector solver iterates in RPO until stable. It starts reachable nonentry
-rows at the reachable universe, intersects reachable predecessor rows with
-`vpandq`, inserts the block's bit, and tests changes with vector masks. Entry
-stays a singleton, and unreachable rows stay zero. One vector covers up to
-512 blocks; larger rows use as many eight-word chunks as allocated. Vector
-popcounts determine each set's size; the strict dominator with the largest
-set is the immediate dominator. `iterations` includes the final stable sweep.
-Each sweep costs B²/512 vector operations, and choosing the immediate
-dominators enumerates every set bit, O(B × depth).
-
-### Solver selection
-
-`AUTO` solves the tree by SEMI-NCA at every size, for its speed rather than
-its memory: on the 9700X (`znver5` build, CPU 2, `--outputs tree`, whole
-analysis per block) it beats the bit matrix on every input measured. On
-sqlite3.c's 7,806 exported source CFGs (`benchmark-dominators --cfg`), the
-matrix took 1.3–1.4× SEMI-NCA's time for 2–16 blocks, 1.4–1.8× for 16–128,
-2.1–2.8× for 128–1,024 and 3.2–3.3× above, as for `sqlite3VdbeExec`'s 1,759
-blocks; 1.5× over all of them (38.5 against 25.4 ns per block). On the
-synthetic shapes it took 1.6× (16-block diamonds), 2.7–6.9× (256 to 2,049
-blocks), and 31×, 56× and 87× on the 8,192-block `ladder`, `nested-ifs` and
-`fan-in`, whose deep trees make its enumeration quadratic. AUTO's vector loop
-path, which it still takes when the loop matrices fit, made the complete
-analysis (`--outputs all`) 6% slower than the scalar one on the same CFGs, up
-to 19% on the largest. Cooper–Harvey–Kennedy, which SEMI-NCA replaced, was
-also faster than the matrix everywhere on sqlite3.c but quadratic in tree
-depth (#1352). The matrix solver stays as the explicit `VECTOR` path, the
-scalar solver's twin and test oracle. Raw logs:
-[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/dominators-semi-nca-1352-2026-11-07).
 
 Counting, prefix sums and filling produce the children CSR. An explicit tree
 stack assigns intervals for constant-time dominance queries. Frontier
@@ -188,12 +155,8 @@ join of many predecessors under a deep chain, as a `?:` chain's, made them
 O(E × depth). A goto ladder's frontiers are themselves quadratic in size.
 
 Backedges are edges whose target dominates their source. All latches at one
-header contribute to one natural loop. The scalar path walks predecessor CSR
-with a mark-before-push worklist, stopping at the header. The vector path
-constructs reachable predecessor rows once, expands a frontier by ORing those
-rows, and masks visited nodes before the next expansion. It uses two extra
-rows, clears every padding bit, and shares the memory budget with retained
-frontiers and loop bodies. Both return identical bodies.
+header contribute to one natural loop. Its body is walked over predecessor CSR
+with a mark-before-push worklist, stopping at the header.
 
 The smallest strict containing natural loop is the parent. Loops sharing a
 header are merged first; natural loops with different headers are nested or
@@ -209,66 +172,117 @@ an SCC. It is a safe optimization boundary, not a minimal irreducible-cycle
 decomposition. Unreachable SCCs and acyclic exits remain unflagged.
 
 The public `output_bytes` and `scratch_peak_bytes` include alignment padding;
-`matrix_peak_bytes` counts only bitset payload. DFS/RPO, SEMI-NCA, frontier
-walks, SCC traversal and sparse bit enumeration currently use scalar control
-flow. Their useful-work cost must be measured together with the vector
-parts; this implementation makes no claim that those choices are optimal on
-the 9700X or that a synthetic crossover establishes a production threshold.
+`matrix_peak_bytes` counts only bitset payload: the frontier rows and the loop
+bodies.
+
+### Why it is scalar
+
+DFS/RPO, SEMI-NCA, the frontier walks, SCC traversal, the loop-body worklist
+and sparse bit enumeration are scalar. Until #2924 the module also had an
+AVX-512 path. Its bit-matrix solver started every reachable nonentry row at the
+reachable set and swept in RPO until stable, intersecting predecessor rows with
+`vpandq`; vector popcounts then made each block's largest strict dominator its
+immediate one. Its loop-body sweep ORed reachable predecessor rows into a
+frontier. Both lost to the scalar code at every measured size, and #2924
+deleted them. The matrix is dense: each sweep costs B²/512 vector operations
+and choosing the immediate dominators enumerates every set bit, O(B × depth),
+where SEMI-NCA's semidominators cost O(E log B) and its tree walks are short.
+
+Re-measured on main `aa09d1a04` before the deletion (`znver5` Release build,
+CPU 2, the whole analysis per block, median of three processes):
+
+- **sqlite3.c's 7,806 exported CFGs, tree only:** the matrix took 1.27–1.37×
+  SEMI-NCA's time for 2–8 blocks, 1.35–1.94× for 8–128, 2.0× for 128–512, 2.7× for 512–1,024
+  and 3.3× above, as for `sqlite3VdbeExec`'s 1,577 blocks; 1.44× over all of them
+  (39.8 against 27.6 ns per block).
+- **The same CFGs, every output:** SEMI-NCA with the loop worklist took 46.3 ns
+  per block. The default before #2924, SEMI-NCA with the vector loop sweep
+  wherever its matrices fit, took 48.6: 5% slower over all, 10–15% above 128
+  blocks. The matrix with the sweep took 60.5.
+- **Synthetic shapes, tree only:** the matrix took 1.6× on 16-block diamonds,
+  2.7–6.8× on the 256- to 2,049-block shapes, and 31×, 56× and 90× on the
+  8,192-block `ladder`, `nested-ifs` and `fan-in`, whose deep trees make its
+  enumeration quadratic.
+
+#1352's measurements, when SEMI-NCA replaced Cooper–Harvey–Kennedy, agree.
+Cooper–Harvey–Kennedy was also faster than the matrix everywhere on sqlite3.c,
+but quadratic in tree depth. A data-parallel solver that beats SEMI-NCA at every
+size must be another design than a dense matrix; #2953 tracks it. Raw logs:
+[the re-measurement](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-dominators-gate)
+and [#1352's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/dominators-semi-nca-1352-2026-11-07).
 
 ## Tests and benchmark
 
-`test-dominators [--seed N] [--count N]` compares complete scalar/vector
-results on original chains, diamonds, nested suffix loops, irreducible regions,
-random graphs, unreachable components, and #1352's goto ladder, nested-if
-joins and a `?:` chain's single join, whose dominator trees are half the graph
-deep. Fixed sizes include
+`test-dominators [--seed N] [--count N]` analyzes original chains, diamonds,
+nested suffix loops, irreducible regions, random graphs, unreachable
+components, and #1352's goto ladder, nested-if joins and a `?:` chain's single
+join, whose dominator trees are half the graph deep. Fixed sizes include
 empty/singleton graphs and boundaries at 63/64/65, 511/512/513 and 1,025
-blocks. Random small
-graphs get full definition checks. A 100,000-block chain requests only the
-tree and a zero matrix budget, checking the explicit stacks and linear fallback.
+blocks. Every result is checked against the definitions below and the order
+and tree columns' contract (`rpo` and its inverse, each block after its
+immediate dominator, each block's children in ascending order), analyzed again
+to the same result, and must keep its rows aligned and their tails zero. A
+100,000-block chain requests only the tree and a zero matrix budget, checking
+the explicit stacks and linear storage.
 
 The independent dominance oracle deletes each candidate block and searches
 for paths from entry. Frontier checks use that relation's definition. The loop
 oracle searches forward to backedge latches with the header removed; it checks
-bodies, strict-containment parents, depths and innermost loops. Deleting all
-dominance backedges independently checks reducibility by topological removal.
+bodies, strict-containment parents, depths and innermost loops. It costs
+O(loops × blocks × edges), so it runs on the generated graphs of up to 127
+blocks, the random ones and one of 513 blocks, whose rows take two vectors.
+The rest get every other definition check. Deleting all dominance backedges
+independently checks reducibility by topological removal.
+
+On the default seed, the 36 generated graphs of 511 blocks and more must also
+match frozen digests of their complete results. They were taken from main at
+295417ae7, where SEMI-NCA and the bit-matrix solver gave equal results on every
+generated graph and every one passed the whole definition, loop bodies
+included. Another seed checks those graphs by the definitions alone.
+
 Fixtures cover several latches, repeated/self edges, entry incoming edges,
 an unreachable predecessor of reachable code, and natural self-loops inside a
 two-entry SCC. They verify its conservative flags exclude exits and unreachable
-cycles. CSR arrays and the vector solver's matrices end at inaccessible pages;
-poisoned matrix tails must be cleared. Malformed columns, mismatched CSR views,
-invalid IDs, arena exhaustion and independent matrix-budget failures check
-rollback. These are module checks, not corpus or frontend coverage.
+cycles. #2924's mutation check added three paths no generated shape takes: two
+6-block graphs on which SEMI-NCA's evaluation must climb through the vertex
+numbered right after the one being processed, and carry a compressed link's
+least semidominator; and a 3-block acyclic graph whose cross edge into a
+just-finished DFS subtree the SCC pass must not flag. CSR arrays end at
+inaccessible pages. Malformed columns, mismatched CSR views, invalid IDs, arena
+exhaustion at every allocation, and matrix budgets one byte short of the
+frontiers alone, or of the frontiers and loop bodies, check rollback. These are
+module checks, not corpus or frontend coverage. `test-ir-source --dominators`
+analyzes the IR CFGs of real C sources twice each, and checks them against the
+whole definition and the columns' contract.
 
-`benchmark-dominators [--seed N] [--only scalar|vector]
-[--phase analysis|pipeline] [--after-scalar MS]` checks equality, then measures
+`benchmark-dominators [--seed N] [--phase analysis|pipeline]` measures
 seven fixed synthetic shapes, the last three the 8,192-block `ladder`,
 `nested-ifs` and `fan-in`. It reports tree-only, tree-plus-loops and full
-analysis. Analysis timing includes validation, all allocation, RPO, the chosen
+analysis. Analysis timing includes validation, all allocation, RPO, the
 solver, requested derived data and ordinary dominance/loop/frontier consumers.
 Pipeline timing additionally creates the input edge stream and both CSR views;
 it includes preparation and handoff cost. Source parsing/lowering is absent.
+`benchmark-dominators --cfg EXPORT [--form N] [--outputs tree|loops|all]`
+times the analysis on the CFGs that `test-ir-source --dominators-cfg` exported:
+by block-count bucket, the eight largest alone, and all of them together.
 
-Each comparison uses 11 alternating-order samples with a shared repetition
-count, calibrated so the faster selected path's warm batch takes at least
-2 ms. Medians and ranges are nanoseconds per block and useful blocks per
+Each measurement takes 11 samples with a repetition count calibrated so a
+warm batch takes at least 2 ms. Medians and ranges are nanoseconds per block and useful blocks per
 second. Hardware cycles per block come from a nonmultiplexed `perf` counter;
 unavailable or multiplexed samples are reported as unavailable, not zero.
-The output also records blocks, edges, reachable blocks, loops, sweeps, output
-bytes, scratch peak and matrix peak. `--only` isolates a path;
-`--after-scalar 100` through `300` conditions each vector sample with complete
-scalar handoffs before timing it. Repeat independent processes and inspect
-emitted assembly when drawing a performance conclusion.
+The output also records blocks, edges, reachable blocks, loops, output bytes,
+scratch peak and matrix peak. Repeat independent processes and inspect emitted
+assembly when drawing a performance conclusion.
 
 On the shared 9700X, acquire the lock **separately for every build, test and
 benchmark**, and pin benchmark processes to CPU 2:
 
 ```sh
 EXCLUSIVE_OWNER=codex-138-dominators EXCLUSIVE_TITLE='Tier 1 issue 138' EXCLUSIVE_LINK=https://github.com/buster14a/buster/issues/174 ~/buster-fast-bench/exclusive.sh ./build/compiler test-dominators
-EXCLUSIVE_OWNER=codex-138-dominators EXCLUSIVE_TITLE='Tier 1 issue 138' EXCLUSIVE_LINK=https://github.com/buster14a/buster/issues/174 ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-dominators --only vector --phase pipeline
+EXCLUSIVE_OWNER=codex-138-dominators EXCLUSIVE_TITLE='Tier 1 issue 138' EXCLUSIVE_LINK=https://github.com/buster14a/buster/issues/174 ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-dominators --phase pipeline
 ```
 
-Local sanitizer checks and benchmark smoke runs are diagnostic. AUTO's solver
-choice rests on the sqlite3.c CFG measurements above; integration acceptance
+Local sanitizer checks and benchmark smoke runs are diagnostic. The scalar
+solvers rest on the measurements above; integration acceptance
 in #134/#139/#140 remains outstanding. Postdominators
 are not provided; #139 must request them if control dependence requires them.

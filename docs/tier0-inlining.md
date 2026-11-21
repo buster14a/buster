@@ -349,7 +349,7 @@ depths. `<immintrin.h>`'s chains are a few
 calls long (a masked form, its unmasked form, a `_mm*_set*` under that); the
 implementation counts them on clang 23's headers.
 
-## Data-parallel: the splice's vector path and its twin
+## Data-parallel: the splice's vector path
 
 Sites are rare among a caller's entries. The work is copying `F`'s entries between them and the callees' entries
 at them, and rebasing values, all of which is wide and branch-free. In
@@ -363,7 +363,7 @@ at them, and rebasing values, all of which is wide and branch-free. In
    the `CALL`.
 2. **Starts.** `start[i] = i + growth(sites before i)` is a step function. It is
    written one segment between two sites at a time, by `iota + delta` stores of
-   16 lanes. The scalar twin writes it entry by entry.
+   16 lanes.
 3. **The caller's segments.** `kinds` and `classes` are copied 64 bytes at a
    time (masked at the tail), and `values` 8 at a time. The lanes whose kind is
    a branch (a `vpermb` of the kind through a 64-byte table of meanings) gather
@@ -379,12 +379,13 @@ at them, and rebasing values, all of which is wide and branch-free. In
    `call_first` by the site's argument rows' base, and `call_result_objects` by
    the locals' base where it isn't 0.
 
-The scalar twin (`tier0_inline_scalar`) does each step an entry at a time, with
-a `switch` over the kind for the meaning. Both give identical bytes in every
-column, which the tests compare. The tests' reference rebases from the
-contract's text, written in the test, and doesn't use either path's table.
-`--scalar` runs the twin, so `test-c-testsuite`'s comparison of the two paths'
-executables compares them too.
+This is the splice's one implementation (#2924). Its scalar twin, which did
+each step an entry at a time with a `switch` over the kind for the meaning,
+took 1.09 to 1.23 times its ticks at every size on the 9700X ([the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-tier0-gate)) and
+went. `test-tier0-inline` checks each spliced stream (its starts,
+`tier0_validate` and Tier 0's compile), and the driver fixture's streams
+against a frozen digest; the driver fixture's programs run as clang -O0's
+build does.
 
 Every load is masked to its array or reads within its padding, and the
 tests put every column's end at a `PROT_NONE` page, as `test-tier0` does for
@@ -640,9 +641,9 @@ and the callees' bodies rebased by a `vpermb` of their kinds to meanings, a
 remapped lane by lane, not by `vpgatherqq` (Zen 5's gathers cost more than the
 few scalar loads). The plan between them is per site, not per entry: the
 arguments' starts, the levels and the insertions. The forwarding pass is one
-scan and a histogram of the locals, shared by both paths. Neither has been
-measured on the 9700X yet. `test-tier0-inline` compares the two paths on every
-body of a unit, and the driver fixture compares their objects.
+scan and a histogram of the locals. On the 9700X ([the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-tier0-gate)), the splice of
+`main.c`'s 137 bodies takes 7.7 M TSC ticks. `test-tier0-inline` checks every
+body of a unit, and the driver fixture runs its programs.
 
 **Callees that call callees** are expanded in each lane's cache
 (`CheckTier0InlineLane`), and which ones expand is a property of the unit's
@@ -719,8 +720,8 @@ functions where it defined 37; clang -O0's defines 3.
   copy's end, or with a value as a `JUMP_VALUE`, whose value the end finds where
   the last `RETURN`'s operand falls through to it, as an arm of `?:` leaves its
   own (`tier0.c`'s `JUMP_VALUE`: the target's depth is the next entry's plus
-  one). The vector path makes them by masked moves of a `RETURN` lane's kind and
-  value before the meanings' `vpermb`; the scalar twin by a select.
+  one). The splice makes them by masked moves of a `RETURN` lane's kind and
+  value before the meanings' `vpermb`.
 - *A result through a hidden pointer:* the callee's parameter 0 takes the
   address of the call's result object (`LOCAL_ADDRESS`, `SET_LOCAL`, after the
   last argument's binding), argument k binds parameter k + 1, the callee writes

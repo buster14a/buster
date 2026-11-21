@@ -53,6 +53,13 @@
 // there are the oracle. The words are made as the unit is read: a type's row when the type is (node_facts_settle), a
 // declaration's line at its first use, a literal's a batch's own. The end of the file has it (node_facts_reader_flush).
 //
+// The piece after it (--front-window; docs/one-core-path.md, "The front writes the window"): the lean front writes each
+// record's inputs for the kernel as it makes the record (node_facts_window_leaf, node_facts_window_operator and
+// node_facts_window_call here, called from c_check_node_machine_front.c's pass), a pass over a chunk's records gives
+// each name's leaf its declaration's line (node_facts_window_names), and the kernel reads the front's columns where
+// they are written: a chunk's records are its window (node_facts_window_run). The two other makings of the same inputs
+// are its twins.
+//
 // No compile takes any of it.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_FACTS_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_FACTS_INCLUDED
@@ -110,12 +117,48 @@
 // (BUSTER_NODE_MACHINE_WIDE), which whatever makes the windows without T reads here (node_facts_front_expression).
 #define BUSTER_NODE_FACTS_HIGH 0x04u
 
+// What a record's `exponent` says where its payload is no floating value's: the payload and one, 0xffff for a payload
+// past 0xfffd; 0 says none. The census's tests on the window read an integer constant's value there, with its standing,
+// where they would gather its payload (c_check_node_census.c's node_tests_window_bytes): of a constant whose type is an
+// integer's of 64 bits at most, whose payload is its value. T's own record says none (node_facts_expected), and so does
+// a record made as no constant's (node_facts_record). And a call's says 1 where its arguments have nothing for those
+// tests' call's test (node_facts_call_fast), which neither T's own record of a call nor the rule's (node_facts_call)
+// says: a call's record says no other bit than these.
+#define BUSTER_NODE_FACTS_QUIET_CALL 1u
+// And two bits more of a call's record's exponent, which the short path and the rule both say: every argument's
+// conversion is made, each in its argument's record's last quadword (node_facts_call_arguments); and the call is a
+// plain one as C asks (node_machine_classify_call's `plain` but for the call's own context): its callee's prototype's
+// result and parameters and its arguments' conversions' types are plain scalars. The second is said with the first.
+#define BUSTER_NODE_FACTS_CONVERTED_CALL 2u
+#define BUSTER_NODE_FACTS_PLAIN_CALL 4u
+// Two of a type's word's six bits for the census's tests (BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT): an aggregate, an
+// enumeration.
+#define BUSTER_NODE_FACTS_TESTS_AGGREGATE 0x02u
+#define BUSTER_NODE_FACTS_TESTS_ENUM 0x04u
+static inline __attribute__((always_inline)) uint32_t node_facts_small(uint64_t payload)
+{
+    return (uint32_t)(payload < 0xffffu ? payload : 0xfffeu) + 1u;
+}
+
+// A record's exponent: a floating value's (`exponent`, its operand's), or what its payload says.
+static inline __attribute__((always_inline)) uint32_t node_facts_exponent(uint32_t standing, uint64_t payload, uint32_t exponent)
+{
+    return (standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING ? exponent : node_facts_small(payload);
+}
+
 // A row's `function` field: whether the type is a function or a pointer to one, whether it is the function itself (a
-// designator's type), and whether its return type is void or complete somewhere in the unit; then its
-// BUSTER_TYPE_FLAG_* in bits 8 to 15 and its parameter count from bit 16.
+// designator's type), whether its return type is void or complete somewhere in the unit, and whether each of its
+// parameters takes an integer constant of zero or 1 to 126 unchanged (no enumeration's type, no floating one, no
+// integer's but a plain one of 8 to 64 bits: what the census's tests' conversion of a constant argument asks,
+// node_facts_call_fast's); then its BUSTER_TYPE_FLAG_* in bits 8 to 15 and its parameter count from bit 16.
 #define BUSTER_NODE_FACTS_FUNCTION 0x01u
 #define BUSTER_NODE_FACTS_DESIGNATOR 0x02u
 #define BUSTER_NODE_FACTS_RETURNS 0x04u
+#define BUSTER_NODE_FACTS_TAKES 0x08u
+// And whether its result is a plain scalar or void (check_lower_plain_scalar's): the prototype's part of C's plain
+// call. (A parameter's is its conversion's target's, which is its argument's answer's: a call has an argument a
+// parameter.)
+#define BUSTER_NODE_FACTS_PLAIN 0x10u
 
 // A row's `flags`: whether check_action_is_integer takes the type; a builtin integer type's sign and, in bits 8 to 15,
 // its width (node_machine_operand_width's, 0 for another type); and whether `stride` is its element's size (an element
@@ -222,6 +265,10 @@ struct NodeFactsRecord
     TypeId converted[2];
     uint32_t conversion_flags[2];
     uint64_t member_offset;
+    // Of a call's argument, its conversion as the call's rule made it (node_facts_call_arguments): its type and, from
+    // bit 32, its BUSTER_CHECK_CONVERT_* flags. Read where the call's record says every argument's is made
+    // (BUSTER_NODE_FACTS_CONVERTED_CALL): one the rule didn't make has no meaning, and any other record's is not
+    // written.
     uint64_t spare;
 };
 
@@ -241,11 +288,14 @@ struct NodeFactsRow
     TypeId decayed[2];
     TypeId returned;
     uint32_t returned_word;
-    uint32_t returned_complete_at;
+    // A function's (or a pointer's to one's) first parameter's place in the type table's parameters, which is its
+    // conversion's target's place among the kernel's (NodeFacts.targets).
+    uint32_t parameters;
     uint32_t function;
     uint32_t flags;
     uint32_t stride;
-    // Where a call of the type has its value's type: 0 for void, else returned_complete_at.
+    // Where a call of the type has its value's type: 0 for void, else where its return type is complete (UINT32_MAX:
+    // nowhere in the unit).
     uint32_t returned_ready_at;
 };
 
@@ -307,6 +357,85 @@ struct NodeFactsPair
 
 _Static_assert(sizeof(NodeFactsPair) == 16, "a pointer conversion's slot is a quarter of a line of the cache");
 
+// What the kernel's call rule makes of an argument (node_facts_argument_made), as bits; a call's arguments' together are
+// each bit every argument's.
+// - BUSTER_NODE_FACTS_ARGUMENT_MADE: its conversion, T's type and flags (node_machine_argument's), which the rule
+//   writes to the argument's record's last quadword.
+// - BUSTER_NODE_FACTS_ARGUMENT_KEPT: whoever makes the conversion, it changes nothing a call inherits of the argument
+//   (check_action_inherit's flags and fault), so the call's record is the kernel's. A made one's is said kept too.
+// - BUSTER_NODE_FACTS_ARGUMENT_PLAIN: a made conversion's type is a plain scalar's (check_lower_plain_scalar), C's
+//   term of a plain call's argument.
+// - BUSTER_NODE_FACTS_ARGUMENT_QUIET: it can't be a null pointer constant that is no literal (#3012, the compiler's
+//   -Wnon-literal-null-conversion, c_check_node_census.c's node_tests_null_asked): it is no integer constant, or its
+//   record has the literal's flag, or its parameter's conversion's type is no pointer's. A call with an argument
+//   without it is not quiet for the census's tests (BUSTER_NODE_FACTS_QUIET_CALL).
+// An argument with neither of the first two says the call is T's.
+#define BUSTER_NODE_FACTS_ARGUMENT_KEPT 0x01u
+#define BUSTER_NODE_FACTS_ARGUMENT_MADE 0x02u
+#define BUSTER_NODE_FACTS_ARGUMENT_PLAIN 0x04u
+#define BUSTER_NODE_FACTS_ARGUMENT_QUIET 0x08u
+
+// What the call's rule asks of a type, T's own answers once a type (node_facts_argued), so that the rule is words of
+// 0 or 1 an argument and asks the type table nothing. Of a type as an argument's value, by its index
+// (NodeFacts.argued's low half; the high half is the type such a value has past the parameters, the default argument
+// promotions', 0 where T's rule leaves it to the action), and of a parameter's conversion's target (NodeFacts.targets'
+// high half; the low half is the target).
+// - VALID: its word is.
+// - ARITHMETIC, SCALAR, BOOL: node_machine_arithmetic_assignable's terms of one side, an arithmetic type that is no
+//   vector, a scalar that is none, and bool.
+// - REAL: float, double or long double, among which a floating constant folds with no flag.
+// - INTEGER, VECTOR, COMPLEX, POINTER, AGGREGATE: its kind (a vector's either kind, a struct's or a union's).
+// - FOLDS: an integer constant of an integer's type folds to it with no flag (an integer's, an enumeration's, REAL).
+// - PLAIN: as a conversion's type, a plain scalar's (check_lower_plain_scalar).
+// - PROMOTED_PLAIN: the high half's type's PLAIN.
+// And from bit 24 a builtin integer type's width (node_machine_integer_widths), 0 for another type.
+#define BUSTER_NODE_FACTS_ARGUED_VALID 0x01u
+#define BUSTER_NODE_FACTS_ARGUED_ARITHMETIC 0x02u
+#define BUSTER_NODE_FACTS_ARGUED_SCALAR 0x04u
+#define BUSTER_NODE_FACTS_ARGUED_BOOL 0x08u
+#define BUSTER_NODE_FACTS_ARGUED_REAL 0x10u
+#define BUSTER_NODE_FACTS_ARGUED_INTEGER 0x20u
+#define BUSTER_NODE_FACTS_ARGUED_VECTOR 0x40u
+#define BUSTER_NODE_FACTS_ARGUED_COMPLEX 0x80u
+#define BUSTER_NODE_FACTS_ARGUED_POINTER 0x100u
+#define BUSTER_NODE_FACTS_ARGUED_AGGREGATE 0x200u
+#define BUSTER_NODE_FACTS_ARGUED_FOLDS 0x400u
+#define BUSTER_NODE_FACTS_ARGUED_PLAIN 0x800u
+#define BUSTER_NODE_FACTS_ARGUED_PROMOTED_PLAIN 0x1000u
+
+// An argument's answer's slot (by a hash of its key): what node_facts_argument_made makes of an argument whose record
+// has the key's type, flags, standing and zero, for a parameter whose conversion's target is the key's (or past the
+// parameters, BUSTER_NODE_FACTS_NO_PARAMETER). A memo of the rule's answer: an argument's answer is some hundreds of
+// instructions, and a unit's arguments have few keys (1,146 for sqlite3.c's 33,150). The key is everything the rule
+// reads of the record; what it reads beside is the unit's words, which once made don't change (the types' rows and
+// answers, the pointer conversions' slots) and which before they are made answer that the call is T's.
+#define BUSTER_NODE_FACTS_ARGUMENT_BITS 12u
+#define BUSTER_NODE_FACTS_NO_PARAMETER UINT32_MAX
+// The flags of an argument's record that the rule reads, a part of the key: a register's name (an array's pointer), a
+// volatile part and an integer constant expression's value (an lvalue's), the forms of a null pointer constant and
+// its flag, a literal zero's (the answer's BUSTER_NODE_FACTS_ARGUMENT_QUIET), and the inherited flags a vector's
+// conversion drops (check_vector_convert).
+#define BUSTER_NODE_FACTS_ARGUMENT_FLAGS \
+    (BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_LITERAL_ZERO | \
+     (BUSTER_CHECK_INHERITED & ~(BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT)))
+
+typedef struct NodeFactsArgumentSlot NodeFactsArgumentSlot;
+struct NodeFactsArgumentSlot
+{
+    // The argument's record's type and the target; then its flags of BUSTER_NODE_FACTS_ARGUMENT_FLAGS, its standing and
+    // whether it is an integer constant whose payload is zero (node_facts_argument_standing).
+    uint64_t types;
+    uint64_t standing;
+    // The conversion: its type and, from bit 32, its BUSTER_CHECK_CONVERT_* flags, as an argument's record's last
+    // quadword holds them; of no meaning for one not made.
+    uint64_t conversion;
+    // BUSTER_NODE_FACTS_ARGUMENT_*.
+    uint32_t outcome;
+    uint32_t spare;
+};
+
+_Static_assert(sizeof(NodeFactsArgumentSlot) == 32, "an argument's answer's slot is half a line of the cache");
+
 // An operand as its operator reads it (node_facts_operand): NodeMachineOperand's fields, and its type's kind after the
 // conversion.
 typedef struct NodeFactsOperand NodeFactsOperand;
@@ -357,6 +486,21 @@ struct NodeFacts
     NodeFactsPair* pairs;
     NodeFactsPair no_pair;
     uint32_t pair_count;
+    // The call rule's words (BUSTER_NODE_FACTS_ARGUED_*): each parameter's conversion's target with its answers above
+    // it, by its place in the type table's parameters (0 for a parameter T's argument rule leaves to the action), made
+    // with its function's row; and each type's answers as an argument's value, with the type its value has past the
+    // parameters above them, by its index, made with its row (the entry past the last row is empty, as that row is).
+    uint64_t* targets;
+    uint64_t* argued;
+    // The arguments' answers' slots; with `argument_one` (the tests', BUSTER_NODE_READER_ONE_SLOT) an answer is written
+    // to every slot, so the slots are one.
+    NodeFactsArgumentSlot* argument_slots;
+    bool argument_one;
+    // The answers the rule made (the slots' misses) and their ticks, and the calls it left for an argument alone, their
+    // callee's prototype taking them: the shadow's counts.
+    uint64_t argument_answers;
+    uint64_t argument_answer_ticks;
+    uint64_t argument_calls_left;
     uint32_t int_word;
     uint32_t ulong_word;
     // What a row asks of an operand's standing, by the standing (BUSTER_NODE_FACTS_STANDS_*).
@@ -397,6 +541,9 @@ struct NodeFacts
     TypeId* expected_converted;
     uint32_t* expected_conversion_flags;
     uint64_t* expected_member_offsets;
+    // And T's conversion of each record that is a call's argument, as the kernel's record's last quadword has one: its
+    // type and, from bit 32, its flags (0 for a record that is no call's argument).
+    uint64_t* expected_arguments;
     NodeFactsRecord* records;
     // The kernel's lists for the window at hand: its leaves and its made operators by their places; each operator's
     // class beside its place; each class's operators (BUSTER_NODE_FACTS_LISTS lists of a window's most, and `sizes`, how
@@ -493,6 +640,15 @@ static inline uint32_t node_facts_round(uint32_t round, uint32_t code, uint32_t 
     return needed > round ? needed : round;
 }
 
+// What node_facts_round asks of one operand, by arithmetic alone: the operand's round, and one more where its code is
+// after `code`; none for a record no operator made. A class's code is under 15 and `code` at most 15, so the sum of the
+// operand's code and 15 less `code` carries into its round exactly where the operand's code is the greater; and
+// BUSTER_NODE_FACTS_NO_CLASS, all ones, comes out sixteen, which the mask takes away.
+static inline __attribute__((always_inline)) uint32_t node_facts_round_of(uint32_t code, uint32_t operand)
+{
+    return ((operand + 15u - code) >> 4) & 15u;
+}
+
 // A made operator's class: its round (the deeper together) and its code.
 static inline uint8_t node_facts_class(uint32_t round, uint32_t code)
 {
@@ -507,9 +663,65 @@ static inline uint32_t node_facts_latest(uint32_t latest, uint32_t operand)
     return list > latest ? list : latest;
 }
 
+// Type `type`'s answers to the call's rule (BUSTER_NODE_FACTS_ARGUED_*), from the type table and the machine's word of
+// it: none for no type, whose word is not valid and has no kind (node_machine_make_word), and of whose kind the type
+// table's tests say no.
+static uint32_t node_facts_argued(const NodeMachine* machine, TypeId type)
+{
+    const TypeTable* types = machine->types;
+    const uint32_t word = node_machine_word(machine, type);
+    const uint8_t kind = (uint8_t)(word >> 16);
+    const bool valid = (word & BUSTER_NODE_MACHINE_WORD_VALID) != 0;
+    // A builtin type's code is its index: the type has no qualifier (an index's own type, or a conversion's operand).
+    const uint32_t code = type_index(type);
+    const bool real = code == type_index(BUSTER_TYPE_FLOAT) || code == type_index(BUSTER_TYPE_DOUBLE) || code == type_index(BUSTER_TYPE_LONG_DOUBLE);
+    const uint32_t width = code < BUSTER_NODE_MACHINE_KINDS ? node_machine_integer_widths[code] : 0;
+    // node_machine_arithmetic_assignable's terms of one side. (Its test that neither side is a vector is in them: an
+    // arithmetic type's kind and a scalar's are no vector's.) It strips each side of its qualifiers and its wrapper
+    // first: the type here has no qualifier, the two tests are of its kind under a wrapper, and whether it is bool is
+    // read of a conversion's target alone, which is a conversion's operand and has no wrapper.
+    const bool arithmetic = check_action_is_arithmetic(types, type);
+    const bool scalar = check_action_is_scalar(types, type);
+    const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+    return (valid ? BUSTER_NODE_FACTS_ARGUED_VALID : 0) | (arithmetic ? BUSTER_NODE_FACTS_ARGUED_ARITHMETIC : 0) | (scalar ? BUSTER_NODE_FACTS_ARGUED_SCALAR : 0) |
+           (type == BUSTER_TYPE_BOOL ? BUSTER_NODE_FACTS_ARGUED_BOOL : 0) | (real ? BUSTER_NODE_FACTS_ARGUED_REAL : 0) |
+           (kind == BUSTER_TYPE_KIND_INTEGER ? BUSTER_NODE_FACTS_ARGUED_INTEGER : 0) | (vector ? BUSTER_NODE_FACTS_ARGUED_VECTOR : 0) |
+           (kind == BUSTER_TYPE_KIND_COMPLEX ? BUSTER_NODE_FACTS_ARGUED_COMPLEX : 0) |
+           (kind == BUSTER_TYPE_KIND_POINTER ? BUSTER_NODE_FACTS_ARGUED_POINTER : 0) |
+           (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? BUSTER_NODE_FACTS_ARGUED_AGGREGATE : 0) |
+           (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || real ? BUSTER_NODE_FACTS_ARGUED_FOLDS : 0) |
+           (check_lower_plain_scalar(word, false) ? BUSTER_NODE_FACTS_ARGUED_PLAIN : 0) | width << 24;
+}
+
+// The type of index `index` as an argument's value: its answers, and above them the type its value has past the
+// parameters, node_machine_argument's steps there on a value of the type: its promotion, then the default argument
+// promotion of that (which has float and __fp16 as double, and is a conversion's operand already); where that is a
+// pointer type (a pointer's promotion is its own type) or one node_machine_arithmetic_assignable takes (which what is
+// no value's type is not: a function, an array, void, a type with no valid word). None for an enumeration, whose
+// promotion asks whether it is complete where the call is.
+static uint64_t node_facts_argued_value(const NodeMachine* machine, uint32_t index)
+{
+    const TypeTable* types = machine->types;
+    const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+    uint32_t argued = node_facts_argued(machine, type);
+    const uint8_t kind = (uint8_t)(machine->type_words[index] >> 16);
+    TypeId destination = 0;
+    if (kind != BUSTER_TYPE_KIND_ENUM)
+    {
+        const TypeId promoted = type_promote(types, type);
+        const TypeId to = type_default_argument_promote(types, promoted);
+        const bool taken = check_action_kind(types, to) == BUSTER_TYPE_KIND_POINTER || node_machine_arithmetic_assignable(machine, to, promoted);
+        destination = taken ? to : 0;
+        // Read of a made conversion alone, whose destination is `to`: of no meaning where it is not taken.
+        argued |= (node_facts_argued(machine, to) & BUSTER_NODE_FACTS_ARGUED_PLAIN) != 0 ? BUSTER_NODE_FACTS_ARGUED_PROMOTED_PLAIN : 0;
+    }
+    return (uint64_t)destination << 32 | argued;
+}
+
 // Type `type`'s row's fields, from the type table and the machine's words: what every lookup of the unit asks of it. And
-// its side row's size and alignment.
-static void node_facts_row(const NodeMachine* machine, uint32_t index, NodeFactsRow* row, NodeFactsSide* side)
+// its side row's size and alignment, its answers as an argument's value (`argued`), and a function's parameters'
+// conversions' targets with theirs (`targets`).
+static void node_facts_row(const NodeMachine* machine, uint32_t index, NodeFactsRow* row, NodeFactsSide* side, uint64_t* argued, uint64_t* targets)
 {
     const TypeTable* types = machine->types;
     const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
@@ -518,6 +730,7 @@ static void node_facts_row(const NodeMachine* machine, uint32_t index, NodeFacts
     const bool plain = (word & BUSTER_NODE_MACHINE_WORD_PLAIN) != 0;
     const uint8_t kind = (uint8_t)(word >> 16);
     *row = (NodeFactsRow){ .word = word, .complete_at = machine->type_complete_at[index], .returned_ready_at = UINT32_MAX };
+    *argued = node_facts_argued_value(machine, index);
     if (valid)
     {
         row->value = type_conversion_operand(types, type);
@@ -570,14 +783,31 @@ static void node_facts_row(const NodeMachine* machine, uint32_t index, NodeFacts
         const TypeId returned = type_return(types, function);
         const uint32_t returned_index = type_index(returned);
         uint32_t parameters = 0;
-        (void)type_parameters(types, function, &parameters);
+        const TypeId* parameter_types = type_parameters(types, function, &parameters);
+        const uint32_t first = types->types.index[function_index];
+        const uint32_t returned_word = node_machine_word(machine, returned);
+        bool takes = true;
+        for (uint32_t p = 0; p < parameters; p += 1)
+        {
+            const uint32_t word = node_machine_word(machine, parameter_types[p]);
+            const uint8_t parameter_kind = (uint8_t)(word >> 16);
+            const bool plain_integer = (word & 0x00ffffffu) - ((uint32_t)BUSTER_TYPE_KIND_INTEGER << 16 | BUSTER_TYPED_CLASS_I8) <= BUSTER_TYPED_CLASS_U64 - BUSTER_TYPED_CLASS_I8;
+            takes = takes && parameter_kind != BUSTER_TYPE_KIND_FLOATING && (word >> BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT & BUSTER_NODE_FACTS_TESTS_ENUM) == 0 &&
+                    (parameter_kind != BUSTER_TYPE_KIND_INTEGER || plain_integer);
+            // The parameter's type as an argument's conversion's target (check_action_call's destination): none for a
+            // type T's argument rule leaves to the action, an atomic one.
+            const bool target = (word & BUSTER_NODE_MACHINE_WORD_VALID) != 0 && check_action_kind(types, parameter_types[p]) != BUSTER_TYPE_KIND_ATOMIC;
+            const TypeId converted = target ? type_conversion_operand(types, parameter_types[p]) : 0;
+            targets[first + p] = (uint64_t)node_facts_argued(machine, converted) << 32 | converted;
+        }
+        const uint32_t ready = (uint8_t)(returned_word >> 16) == BUSTER_TYPE_KIND_VOID ? 0 : returned_index < machine->type_count ? machine->type_complete_at[returned_index] : UINT32_MAX;
         row->returned = returned;
-        row->returned_word = node_machine_word(machine, returned);
-        row->returned_complete_at = returned_index < machine->type_count ? machine->type_complete_at[returned_index] : UINT32_MAX;
-        row->returned_ready_at = (uint8_t)(row->returned_word >> 16) == BUSTER_TYPE_KIND_VOID ? 0 : row->returned_complete_at;
+        row->returned_word = returned_word;
+        row->parameters = first;
+        row->returned_ready_at = ready;
         row->function = BUSTER_NODE_FACTS_FUNCTION | (kind == BUSTER_TYPE_KIND_FUNCTION ? BUSTER_NODE_FACTS_DESIGNATOR : 0) |
-                        (row->returned_ready_at != UINT32_MAX ? BUSTER_NODE_FACTS_RETURNS : 0) | (uint32_t)types->types.flags[function_index] << 8 |
-                        (parameters < 0xffffu ? parameters : 0xffffu) << 16;
+                        (ready != UINT32_MAX ? BUSTER_NODE_FACTS_RETURNS : 0) | (takes ? BUSTER_NODE_FACTS_TAKES : 0) | (check_lower_plain_scalar(returned_word, true) ? BUSTER_NODE_FACTS_PLAIN : 0) |
+                        (uint32_t)types->types.flags[function_index] << 8 | (parameters < 0xffffu ? parameters : 0xffffu) << 16;
     }
 }
 
@@ -620,6 +850,10 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
     facts->rows = arena_push_array(arena, (uint64_t)row_capacity + 1, sizeof(NodeFactsRow), 64);
     facts->sides = arena_push_array(arena, (uint64_t)row_capacity + 1, sizeof(NodeFactsSide), 64);
     facts->pairs = arena_push_array(arena, UINT64_C(1) << BUSTER_NODE_FACTS_PAIR_BITS, sizeof(NodeFactsPair), 64);
+    // A target a parameter of the type table's room; a value's answers a row.
+    facts->targets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)machine->types->parameters.capacity + 1);
+    facts->argued = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)row_capacity + 1);
+    facts->argument_slots = arena_push_array(arena, UINT64_C(1) << BUSTER_NODE_FACTS_ARGUMENT_BITS, sizeof(NodeFactsArgumentSlot), 64);
     facts->lines = arena_push_array(arena, 4 * (uint64_t)facts->line_capacity, sizeof(uint64_t), 64);
     facts->numbers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)input->token_count + 1);
     facts->members = arena_push_array(arena, UINT64_C(1) << member_bits, sizeof(NodeFactsMember), 64);
@@ -645,6 +879,7 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
     facts->expected_converted = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, 2 * records);
     facts->expected_conversion_flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * records);
     facts->expected_member_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, records);
+    facts->expected_arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, records);
     facts->records = arena_push_array(arena, BUSTER_NODE_FACTS_WINDOW, sizeof(NodeFactsRecord), 64);
     facts->leaf_list = arena_push_array(arena, BUSTER_NODE_FACTS_WINDOW + 16, sizeof(uint32_t), 64);
     facts->lookup_list = arena_push_array(arena, BUSTER_NODE_FACTS_WINDOW + 16, sizeof(uint32_t), 64);
@@ -657,7 +892,8 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
                   facts->expected_objects != NULL && facts->expected_payloads != NULL && facts->expected_standings != NULL && facts->expected_exponents != NULL &&
                   facts->expected_words != NULL && facts->expected_converted != NULL && facts->expected_conversion_flags != NULL &&
                   facts->expected_member_offsets != NULL && facts->records != NULL && facts->classes != NULL && facts->fits != NULL && facts->leaf_list != NULL &&
-                  facts->lookup_list != NULL && facts->keys != NULL && facts->batches != NULL && facts->rare != NULL && facts->sides != NULL && facts->pairs != NULL;
+                  facts->lookup_list != NULL && facts->keys != NULL && facts->batches != NULL && facts->rare != NULL && facts->sides != NULL && facts->pairs != NULL &&
+                  facts->targets != NULL && facts->argued != NULL && facts->argument_slots != NULL && facts->expected_arguments != NULL;
     if (facts->room)
     {
         memset(facts->numbers, 0, ((uint64_t)input->token_count + 1) * sizeof(uint32_t));
@@ -665,10 +901,13 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
         memset(facts->rows + facts->row_count, 0, sizeof(NodeFactsRow));
         memset(facts->sides, 0, ((uint64_t)row_capacity + 1) * sizeof(NodeFactsSide));
         memset(facts->pairs, 0, (UINT64_C(1) << BUSTER_NODE_FACTS_PAIR_BITS) * sizeof(NodeFactsPair));
+        memset(facts->argued, 0, ((uint64_t)row_capacity + 1) * sizeof(uint64_t));
+        memset(facts->argument_slots, 0, (UINT64_C(1) << BUSTER_NODE_FACTS_ARGUMENT_BITS) * sizeof(NodeFactsArgumentSlot));
+        facts->argument_one = false;
         const uint64_t t0 = __rdtsc();
         for (uint32_t index = 0; index < facts->row_count; index += 1)
         {
-            node_facts_row(machine, index, facts->rows + index, facts->sides + index);
+            node_facts_row(machine, index, facts->rows + index, facts->sides + index, facts->argued + index, facts->targets);
         }
         facts->row_ticks = __rdtsc() - t0;
         facts->void_word = node_machine_word(machine, BUSTER_TYPE_VOID);
@@ -704,7 +943,7 @@ static void node_facts_settle(NodeFacts* facts)
         for (uint32_t index = facts->row_count; index < count; index += 1)
         {
             memset(facts->sides + index, 0, sizeof(NodeFactsSide));
-            node_facts_row(machine, index, facts->rows + index, facts->sides + index);
+            node_facts_row(machine, index, facts->rows + index, facts->sides + index, facts->argued + index, facts->targets);
         }
         facts->row_count = count;
         memset(facts->rows + count, 0, sizeof(NodeFactsRow));
@@ -790,6 +1029,7 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
         .payload = enumerator ? (uint64_t)value : 0,
         .standing = BUSTER_NODE_MACHINE_STANDING(category, enumerator ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_ADDRESS),
         .taken = 1,
+        .exponent = (uint16_t)(enumerator ? node_facts_small((uint64_t)value) : 0),
         .unfit = ((bits & BUSTER_CHECK_BITS_REGISTER) != 0 ? BUSTER_NODE_FACTS_REGISTER : 0) | (wide ? BUSTER_NODE_FACTS_WIDE : 0) |
                  (valued && (uint64_t)(value >> 64) != 0 ? BUSTER_NODE_FACTS_HIGH : 0),
     };
@@ -873,7 +1113,7 @@ static uint32_t node_facts_literal(NodeFacts* facts, uint32_t r)
         .payload = columns->payloads[r],
         .standing = standing,
         .taken = 1,
-        .exponent = (standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING ? columns->exponents[r] : 0,
+        .exponent = (uint16_t)node_facts_exponent(standing, columns->payloads[r], columns->exponents[r]),
     };
     const bool own = facts->literal_capacity != 0;
     const uint32_t number = own ? (facts->literal_count < facts->literal_capacity ? facts->literal_count + 1 : 0) :
@@ -971,6 +1211,9 @@ static void node_facts_append(NodeFacts* facts, uint32_t body)
                     for (uint32_t i = 0; before && i < argument_count; i += 1)
                     {
                         facts->arguments[facts->argument_count + i] = (uint16_t)(r - machine->arguments[first + i]);
+                        // An argument's array's or function's pointer type, as an operand's below: the call's rule
+                        // converts each argument.
+                        node_facts_decays(facts, columns->value_types[machine->arguments[first + i]]);
                     }
                     facts->argument_count += before ? argument_count : 0;
                 }
@@ -1043,6 +1286,13 @@ static void node_facts_append(NodeFacts* facts, uint32_t body)
             facts->expected_conversion_flags[2 * (uint64_t)w] = columns->conversion_flags[2 * r];
             facts->expected_conversion_flags[2 * (uint64_t)w + 1] = columns->conversion_flags[2 * r + 1];
             facts->expected_member_offsets[w] = columns->member_offsets[r];
+            // T's conversion of each of a call's arguments, at the argument's record: its operands are before it.
+            facts->expected_arguments[w] = 0;
+            for (uint32_t i = 0; i < arguments; i += 1)
+            {
+                const CheckConversion* conversion = machine->argument_conversions + columns->argument_first[r] + i;
+                facts->expected_arguments[w - facts->arguments[entry + i]] = (uint64_t)conversion->type | (uint64_t)conversion->flags << 32;
+            }
         }
         facts->record_total += count;
         facts->record_count = base + count;
@@ -1056,18 +1306,20 @@ static void node_facts_append(NodeFacts* facts, uint32_t body)
     }
 }
 
-// T's record of the unit's record `at`, as a line.
+// T's record of the unit's record `at`, as a line: with a floating value's exponent, and else an exponent that says
+// none (node_facts_small): T's columns don't hold what a payload says.
 static inline NodeFactsRecord node_facts_expected(const NodeFacts* facts, uint64_t at)
 {
+    const uint8_t standing = facts->expected_standings[at];
     return (NodeFactsRecord){
         .type = facts->expected_types[at],
         .word = facts->expected_words[at],
         .flags = facts->expected_flags[at],
         .object = facts->expected_objects[at],
         .payload = facts->expected_payloads[at],
-        .standing = facts->expected_standings[at],
+        .standing = standing,
         .taken = 1,
-        .exponent = facts->expected_exponents[at],
+        .exponent = (standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING ? facts->expected_exponents[at] : 0,
         .converted = { facts->expected_converted[2 * at], facts->expected_converted[2 * at + 1] },
         .conversion_flags = { facts->expected_conversion_flags[2 * at], facts->expected_conversion_flags[2 * at + 1] },
         .member_offset = facts->expected_member_offsets[at],
@@ -1094,6 +1346,8 @@ static void node_facts_given(NodeFacts* facts, uint32_t window, uint32_t poison)
         else
         {
             records[i] = node_facts_expected(facts, (uint64_t)first + i);
+            // A record's last quadword is written for a call's argument alone: what reads another's reads this.
+            memset(&records[i].spare, BUSTER_NODE_FACTS_POISON, sizeof(records[i].spare));
             if (made && poison == BUSTER_NODE_FACTS_POISON_LOADS)
             {
                 memset(&records[i].type, BUSTER_NODE_FACTS_POISON, sizeof(records[i].type));
@@ -1122,6 +1376,9 @@ struct NodeFactsView
     NodeFactsMember* members;
     const NodeFactsSide* sides;
     const NodeFactsPair* pairs;
+    const uint64_t* targets;
+    const uint64_t* argued;
+    const NodeFactsArgumentSlot* argument_slots;
     const uint8_t* stands;
     uint32_t row_count;
     uint32_t member_bits;
@@ -1151,6 +1408,18 @@ static inline __attribute__((always_inline)) void node_facts_record(NodeFactsRec
     node_facts_store(record, 24, (uint64_t)standing | 0x100u);
 }
 
+// The same of a record that may be an integer constant (a fold's, a truth's, a size's): its exponent says its payload
+// (node_facts_small).
+static inline __attribute__((always_inline)) void node_facts_record_integer(NodeFactsRecord* records, uint32_t w, TypeId type, uint32_t word, uint8_t standing, uint32_t flags,
+                                                                             uint32_t object, uint64_t payload)
+{
+    NodeFactsRecord* record = records + w;
+    node_facts_store(record, 0, (uint64_t)type | (uint64_t)word << 32);
+    node_facts_store(record, 8, (uint64_t)flags | (uint64_t)object << 32);
+    node_facts_store(record, 16, payload);
+    node_facts_store(record, 24, (uint64_t)standing | 0x100u | (uint64_t)node_facts_small(payload) << 16);
+}
+
 static inline __attribute__((always_inline)) void node_facts_conversions(NodeFactsRecord* records, uint32_t w, TypeId first, uint32_t first_flags, TypeId second,
                                                                           uint32_t second_flags, uint64_t member_offset)
 {
@@ -1168,29 +1437,14 @@ static inline __attribute__((always_inline)) bool node_facts_leaf(NodeFactsRecor
 {
     const uint64_t* line = view->lines + 4 * (uint64_t)view->inputs[w];
     const bool taken = (uint32_t)(line[3] >> 32) == 0;
-    if (BUSTER_SCALAR_PATH(false))
+    const __m256i half = _mm256_loadu_si256((const __m256i*)(const void*)line);
+    if (taken && lean)
     {
-        if (taken)
-        {
-            memcpy(records + w, line, 4 * sizeof(uint64_t));
-            if (!lean)
-            {
-                node_facts_conversions(records, w, (TypeId)line[0], 0, 0, 0, 0);
-                node_facts_store(records + w, 56, 0);
-            }
-        }
+        _mm256_storeu_si256((__m256i*)(void*)(records + w), half);
     }
-    else
+    else if (taken)
     {
-        const __m256i half = _mm256_loadu_si256((const __m256i*)(const void*)line);
-        if (taken && lean)
-        {
-            _mm256_storeu_si256((__m256i*)(void*)(records + w), half);
-        }
-        else if (taken)
-        {
-            _mm512_storeu_si512(records + w, _mm512_inserti64x4(_mm512_castsi256_si512(half), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)(uint32_t)line[0])), 1));
-        }
+        _mm512_storeu_si512(records + w, _mm512_inserti64x4(_mm512_castsi256_si512(half), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)(uint32_t)line[0])), 1));
     }
     return taken;
 }
@@ -1393,9 +1647,10 @@ static inline __attribute__((always_inline)) void node_facts_from(NodeFactsRecor
     node_facts_store(record, 24, (uint64_t)standing | 0x100u | (uint64_t)records[a].exponent << 16);
 }
 
-// Record `w`'s value: record `a`'s object and exponent with the type, standing (its category, constant kind and
-// payload's field), flags and payload given: node_machine_record_from's with an integer replaced, and a value's that
-// node_machine_put_value writes from record `a`'s made whole.
+// Record `w`'s value: record `a`'s object with the type, standing (its category, constant kind and payload's field),
+// flags and payload given: node_machine_record_from's with an integer replaced, and a value's that
+// node_machine_put_value writes from record `a`'s made whole. Its exponent is record `a`'s where the payload is a
+// floating value's, and else says the payload given (node_facts_small).
 static inline __attribute__((always_inline)) void node_facts_from_with(NodeFactsRecord* records, uint32_t w, uint32_t a, TypeId type, uint32_t word, uint8_t standing,
                                                                         uint32_t flags, uint64_t payload)
 {
@@ -1403,7 +1658,7 @@ static inline __attribute__((always_inline)) void node_facts_from_with(NodeFacts
     node_facts_store(record, 0, (uint64_t)type | (uint64_t)word << 32);
     node_facts_store(record, 8, (uint64_t)flags | (uint64_t)records[a].object << 32);
     node_facts_store(record, 16, payload);
-    node_facts_store(record, 24, (uint64_t)standing | 0x100u | (uint64_t)records[a].exponent << 16);
+    node_facts_store(record, 24, (uint64_t)standing | 0x100u | (uint64_t)node_facts_exponent(standing, payload, records[a].exponent) << 16);
 }
 
 // A dereference `w` of record `a`, node_machine_dereference's steps.
@@ -1416,12 +1671,17 @@ static inline __attribute__((always_inline)) bool node_facts_dereference(NodeFac
     const bool taken = node_facts_operand(records, row, a, &pointer, &converted, &conversion_flags) && pointer.kind == BUSTER_TYPE_KIND_POINTER;
     if (taken)
     {
-        const TypeId type = node_facts_pointee(records, a, row);
-        const CheckCategory category = (uint8_t)(row->element_word >> 16) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
+        // What the converted pointer points at: a pointer's and an array's row's element; a function's designator decayed
+        // to a pointer to its own type (node_facts_decays; a function type has no qualifier: type_qualify adds none), and a
+        // function type's row has no element.
+        const bool designator = (uint8_t)(records[a].word >> 16) == BUSTER_TYPE_KIND_FUNCTION;
+        const TypeId type = designator ? records[a].type : node_facts_pointee(records, a, row);
+        const uint32_t word = designator ? row->word : row->element_word;
+        const CheckCategory category = (uint8_t)(word >> 16) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
         uint32_t flags = pointer.flags;
         flags |= (flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
         flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
-        node_facts_from(records, w, a, type, row->element_word, category, check_value_source_flags(CHECK_OP_DEREFERENCE, flags), pointer.constant_kind);
+        node_facts_from(records, w, a, type, word, category, check_value_source_flags(CHECK_OP_DEREFERENCE, flags), pointer.constant_kind);
         node_facts_conversions(records, w, converted, conversion_flags, 0, 0, 0);
     }
     return taken;
@@ -1494,10 +1754,55 @@ static inline __attribute__((always_inline)) bool node_facts_pointer(NodeFactsRe
     return taken;
 }
 
+// What the census's tests on the window ask of a call's arguments (c_check_node_census.c's calls' rule), gathered where
+// the call's short path reads each one's record: the kinds of constant among them, a bit each; whether an integer constant
+// among them is not zero or 1 to 126, by what its record says of its value (node_facts_small); and their types' words
+// together, for an aggregate's bit.
+typedef struct NodeFactsArguments NodeFactsArguments;
+struct NodeFactsArguments
+{
+    uint32_t kinds;
+    uint32_t large;
+    uint32_t words;
+};
+
+static inline __attribute__((always_inline)) void node_facts_argument(NodeFactsArguments* asked, const NodeFactsRecord* argument)
+{
+    const uint32_t kind = ((uint32_t)argument->standing >> 2) & 0x07u;
+    asked->kinds |= 1u << kind;
+    asked->large |= (kind == CHECK_CONSTANT_INTEGER) & ((uint32_t)argument->exponent - 1u > 126u);
+    asked->words |= argument->word;
+}
+
+// Whether a call's arguments are quiet (BUSTER_NODE_FACTS_QUIET_CALL), of a callee whose type's row has `function`: no
+// aggregate among them, no constant but an address's or an integer's of zero or 1 to 126, and such an integer only
+// where each parameter takes it unchanged.
+static inline __attribute__((always_inline)) uint32_t node_facts_arguments_quiet(const NodeFactsArguments* asked, uint32_t function)
+{
+    const uint32_t quiet_kinds = 1u << CHECK_CONSTANT_NONE | 1u << CHECK_CONSTANT_INTEGER | 1u << CHECK_CONSTANT_ADDRESS;
+    const uint32_t loud = (asked->words >> BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT & BUSTER_NODE_FACTS_TESTS_AGGREGATE) | (asked->kinds & ~quiet_kinds) | asked->large;
+    const bool takes = (asked->kinds & 1u << CHECK_CONSTANT_INTEGER) == 0 || (function & BUSTER_NODE_FACTS_TAKES) != 0;
+    return loud == 0 && takes ? BUSTER_NODE_FACTS_QUIET_CALL : 0;
+}
+
+static uint32_t node_facts_call_arguments_ruled(NodeFacts* facts, NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, const NodeFactsRow* row);
+
+// What a call's record's exponent says of its arguments' conversions, from the outcomes of all of them together
+// (BUSTER_NODE_FACTS_ARGUMENT_*, each bit every argument's) and its callee's type's row's `function`: that each is
+// made, and with it that the call is a plain one.
+static inline __attribute__((always_inline)) uint32_t node_facts_call_says(uint32_t outcome, uint32_t function)
+{
+    const uint32_t made = outcome & BUSTER_NODE_FACTS_ARGUMENT_MADE;
+    const uint32_t plain = (outcome & BUSTER_NODE_FACTS_ARGUMENT_PLAIN) != 0 && (function & BUSTER_NODE_FACTS_PLAIN) != 0 ? BUSTER_NODE_FACTS_PLAIN_CALL : 0;
+    return (made != 0 ? BUSTER_NODE_FACTS_CONVERTED_CALL : 0) | plain;
+}
+
 // A call `w` of callee `a`: node_machine_call_rule's value, its callee's prototype's return type's rvalue with its
-// callee's and its arguments' inherited flags, where the prototype takes the arguments' count and no argument's value is
-// wide. Its arguments' conversions are the rule's.
-static inline __attribute__((always_inline)) bool node_facts_call(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a)
+// callee's and its arguments' inherited flags, where the prototype takes the arguments' count and each argument's
+// conversion changes nothing a call inherits of it (node_facts_call_arguments, which makes the conversions it can, each
+// in its argument's record). It says nothing of its arguments to the census's tests, as the short path does
+// (node_facts_call_fast): a call it makes stays in their list.
+static inline __attribute__((always_inline)) bool node_facts_call(NodeFacts* facts, NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a)
 {
     const NodeFactsRow* row = node_facts_row_of(view, records[a].type);
     const uint32_t function = row->function;
@@ -1509,8 +1814,7 @@ static inline __attribute__((always_inline)) bool node_facts_call(NodeFactsRecor
     uint32_t conversion_flags = 0;
     bool taken = (function & BUSTER_NODE_FACTS_FUNCTION) != 0 && node_facts_operand(records, row, a, &callee, &converted, &conversion_flags) &&
                  (function >> 8 & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 && count >= parameters && ((function >> 8 & BUSTER_TYPE_FLAG_VARIADIC) != 0 || count == parameters) &&
-                 ((uint8_t)(row->returned_word >> 16) == BUSTER_TYPE_KIND_VOID ||
-                  (row->returned_complete_at != UINT32_MAX && row->returned_complete_at <= view->positions[w]));
+                 (function & BUSTER_NODE_FACTS_RETURNS) != 0 && row->returned_ready_at <= view->positions[w];
     uint32_t flags = taken ? BUSTER_CHECK_SIDE_EFFECT | (callee.flags & BUSTER_CHECK_INHERITED) : 0;
 #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
     for (uint32_t i = 0; taken && i < count; i += 1)
@@ -1519,10 +1823,14 @@ static inline __attribute__((always_inline)) bool node_facts_call(NodeFactsRecor
         taken = (records[argument].standing & BUSTER_NODE_MACHINE_WIDE) == 0;
         flags |= records[argument].flags & BUSTER_CHECK_INHERITED;
     }
+    const uint32_t outcome = taken ? node_facts_call_arguments_ruled(facts, records, view, w, row) : 0;
+    facts->argument_calls_left += taken && (outcome & BUSTER_NODE_FACTS_ARGUMENT_KEPT) == 0;
+    taken = (outcome & BUSTER_NODE_FACTS_ARGUMENT_KEPT) != 0;
     if (taken)
     {
-        node_facts_record(records, w, row->returned, row->returned_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE),
-                          check_value_source_flags(CHECK_OP_CALL, flags), 0, 0);
+        const uint8_t made = BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE);
+        node_facts_record(records, w, row->returned, row->returned_word, made, check_value_source_flags(CHECK_OP_CALL, flags), 0, 0);
+        node_facts_store(records + w, 24, (uint64_t)made | 0x100u | (uint64_t)node_facts_call_says(outcome, function) << 16);
         node_facts_conversions(records, w, converted, conversion_flags, 0, 0, 0);
     }
     return taken;
@@ -1740,7 +2048,7 @@ static inline __attribute__((always_inline)) bool node_facts_fold(NodeFactsRecor
             const bool ice = (flags_a & BUSTER_CHECK_ICE) != 0 && (flags_b & BUSTER_CHECK_ICE) != 0;
             const bool gnu_ice = !ice && (flags_a & forms) != 0 && (flags_b & forms) != 0;
             const uint32_t flags = ((flags_a | flags_b) & BUSTER_CHECK_INHERITED) | (ice ? BUSTER_CHECK_ICE : gnu_ice ? BUSTER_CHECK_GNU_ICE_FORM : 0);
-            node_facts_record(records, w, BUSTER_TYPE_BUILTIN(row->result), view->rows[row->result].word, constant, node_facts_source(flags), 0, answer);
+            node_facts_record_integer(records, w, BUSTER_TYPE_BUILTIN(row->result), view->rows[row->result].word, constant, node_facts_source(flags), 0, answer);
             node_facts_conversions(records, w, BUSTER_TYPE_BUILTIN(row->converted[0]), row->conversion_flags[0], unary ? 0 : BUSTER_TYPE_BUILTIN(row->converted[1]),
                                    unary ? 0 : row->conversion_flags[1], 0);
         }
@@ -1820,8 +2128,8 @@ static inline __attribute__((always_inline)) bool node_facts_truth(NodeFactsReco
         const uint32_t forms = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM;
         const uint32_t flags = (operand.flags & BUSTER_CHECK_INHERITED) |
                                ((operand.flags & BUSTER_CHECK_ICE) != 0 ? BUSTER_CHECK_ICE : (operand.flags & forms) != 0 ? BUSTER_CHECK_GNU_ICE_FORM : 0);
-        node_facts_record(records, w, BUSTER_TYPE_INT, view->int_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE),
-                          node_facts_source(flags), 0, known ? (uint64_t)(negated ? !truth : truth) : 0);
+        node_facts_record_integer(records, w, BUSTER_TYPE_INT, view->int_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE),
+                                  node_facts_source(flags), 0, known ? (uint64_t)(negated ? !truth : truth) : 0);
         if (!lean)
         {
             node_facts_conversions(records, w, converted, conversion_flags, 0, 0, 0);
@@ -1859,8 +2167,8 @@ static inline __attribute__((always_inline)) bool node_facts_logic(NodeFactsReco
         const uint32_t flags = inherited | (ice ? BUSTER_CHECK_ICE : (left & forms) != 0 && right_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
         const bool constant = left_known && (skips_right || right_known);
         const bool value = conjunction ? left_truth && right_truth : left_truth || right_truth;
-        node_facts_record(records, w, BUSTER_TYPE_INT, view->int_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, constant ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE),
-                          node_facts_source(flags), 0, constant && value);
+        node_facts_record_integer(records, w, BUSTER_TYPE_INT, view->int_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, constant ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE),
+                                  node_facts_source(flags), 0, constant && value);
         if (!lean)
         {
             node_facts_conversions(records, w, converted[0], conversion_flags[0], converted[1], conversion_flags[1], 0);
@@ -2014,6 +2322,277 @@ static inline __attribute__((always_inline)) bool node_facts_store_made(NodeFact
         }
     }
     return taken;
+}
+
+// What the kernel's call rule makes of the window's record `g` as a call's argument: for a parameter (`parameter`)
+// whose conversion's target and its answers are `target` (NodeFacts.targets' entry), or past the parameters; `zero`
+// says its record is an integer constant whose payload is zero (its key's bit). Its answer's bits
+// (BUSTER_NODE_FACTS_ARGUMENT_*), and the conversion of a made one in `conversion` (its type and, from bit 32, its
+// BUSTER_CHECK_CONVERT_* flags; of no meaning for one not made). Words of 0 or 1, with no branch on what the argument
+// is but one: a pointer to another pointer type asks that pair's slot. It reads of the record what its key has
+// (node_facts_argument_standing) and no more.
+//
+// Made (T's type and flags): node_machine_argument's own cases, on the operand as node_facts_operand converts it
+// (node_machine_operand_value's twin, its four cases here as choices between words) and with the type table's answers
+// as the types' words have them: to a pointer parameter a null pointer constant (node_facts_null's test) or a pointer
+// of its type or one node_machine_pointer_assignable takes (its pair's slot); to another parameter what
+// node_machine_arithmetic_assignable takes; past the parameters the default argument promotions, of an arithmetic
+// type or a pointer. Its type is the target or the promoted type, its flags the operand's own conversion's and the
+// assignment's or the promotion's. And only where the conversion changes nothing check_action_inherit reads of the
+// argument, its inherited flags and its fault, by check_action_convert_plain's branches: with no constant, or an
+// address's, none sets either; an integer constant of an integer's type folds with neither to an integer's or an
+// enumeration's type and to float, double and long double (node_machine_memo_integers' types), and a floating
+// constant among those three.
+//
+// Kept (the conversion is T's, and the call's record the kernel's all the same): the other arguments whose conversion
+// changes nothing a call inherits. With no constant or an address's: a value node_facts_operand leaves to the action
+// (a struct's or a union's by value to a parameter of its type, an enumeration's lvalue, a type with a wrapper), and
+// one T's rule doesn't take. A vector's conversion (check_vector_convert, either side a vector) keeps three of the
+// inherited flags and drops the others: kept where the record has none of those. (The operand's own conversion adds a
+// side effect at most, which every call has.)
+//
+// Neither (the call is T's): a value the columns don't hold whole; a constant the cases above don't take (a floating
+// one to an integer's type saturates with two inherited flags where it is out of range; one to a half-precision type,
+// to __float128 or to a _BitInt may not fold; a complex one, a label's); a value of another type to a struct's or a
+// union's parameter (a transparent union's member is the action's choice, and may be a vector); a complex number on
+// either side, whose parts convert one by one; a vector with a flag its conversion drops; and a parameter without a
+// target.
+static inline __attribute__((always_inline)) uint32_t node_facts_argument_made(NodeFacts* facts, const NodeFactsRecord* records, const NodeFactsView* view, uint32_t g,
+                                                                                uint64_t target, bool parameter, uint32_t zero, uint64_t* conversion)
+{
+    _Static_assert(BUSTER_TYPE_KIND_COUNT <= 32, "a type's kind is a bit of a word");
+    _Static_assert(BUSTER_CHECK_CONVERT_LVALUE == 1, "an lvalue's conversion's flag is a word of 0 or 1");
+    const NodeFactsRecord* record = records + g;
+    const TypeId type = record->type;
+    const uint32_t word = record->word;
+    const uint32_t flags = record->flags;
+    const uint32_t standing = record->standing;
+    const NodeFactsRow* row = node_facts_row_of(view, type);
+    // node_facts_operand's four cases: an array's pointer, a function's, an lvalue's value, or the record's own.
+    const uint32_t own_kind = (word >> 16) & 0xffu;
+    const uint32_t own = own_kind < 32 ? 1u << own_kind : 0;
+    const uint32_t is_array = (own & (1u << BUSTER_TYPE_KIND_ARRAY | 1u << BUSTER_TYPE_KIND_INCOMPLETE_ARRAY | 1u << BUSTER_TYPE_KIND_VARIABLE_ARRAY)) != 0 ? 1u : 0u;
+    const uint32_t is_function = own_kind == BUSTER_TYPE_KIND_FUNCTION ? 1u : 0u;
+    const uint32_t decays = is_array | is_function;
+    const uint32_t lvalue = ((standing & 0x03u) == CHECK_LVALUE ? 1u : 0u) & (decays ^ 1u);
+    const uint32_t qualifiers = type_qualifiers(type);
+    const TypeId function_pointer = row->decayed[0];
+    const TypeId const_pointer = row->decayed[1];
+    const TypeId array_pointer = (flags & BUSTER_CHECK_REGISTER_NAME) == 0 && qualifiers <= BUSTER_TYPE_CONST ? (qualifiers != 0 ? const_pointer : function_pointer) : 0;
+    const TypeId pointer_value = is_array != 0 ? array_pointer : function_pointer;
+    const TypeId value = decays != 0 ? pointer_value : lvalue != 0 ? row->value : type;
+    const uint32_t read = (own & (1u << BUSTER_TYPE_KIND_INTEGER | 1u << BUSTER_TYPE_KIND_FLOATING | 1u << BUSTER_TYPE_KIND_POINTER)) != 0 &&
+                          (qualifiers & BUSTER_TYPE_VOLATILE) == 0 && (flags & BUSTER_CHECK_VOLATILE_PART) == 0 ? 1u : 0u;
+    // A value the record doesn't hold whole is no argument of a call either path takes, but one: a call of the same
+    // batch that the calls' loop has just left to the rule, which it marks so (node_facts_calls_of). Its consumer is
+    // then neither made nor kept, and follows it to the rule.
+    const uint32_t whole = (standing & BUSTER_NODE_MACHINE_WIDE) == 0 ? 1u : 0u;
+    const uint32_t taken = ((word & BUSTER_NODE_MACHINE_WORD_PLAIN) != 0 ? 1u : 0u) & whole & (decays != 0 ? (pointer_value != 0 ? 1u : 0u) : 1u) & (lvalue != 0 ? read : 1u);
+    // The value's constant: an lvalue's is none but an integer constant expression's. (An automatic array's pointer
+    // has none and an lvalue's address is none; the rule takes an address and none alike, so neither is told apart.)
+    const uint32_t constant = (lvalue & ((flags & BUSTER_CHECK_ICE) == 0 ? 1u : 0u)) != 0 ? (uint32_t)CHECK_CONSTANT_NONE : (standing >> 2) & 0x07u;
+    const uint32_t converts = is_array != 0 ? (uint32_t)BUSTER_CHECK_CONVERT_ARRAY : is_function != 0 ? (uint32_t)BUSTER_CHECK_CONVERT_FUNCTION : lvalue;
+    // The flags node_facts_operand clears of a value, the rule reads of none: the null pointer constant's test reads
+    // the integer constant expression's of a value that is no pointer, whose record keeps them.
+    const uint32_t forms = flags & view->null_forms;
+    const uint32_t source_pointer = decays | (own_kind == BUSTER_TYPE_KIND_POINTER ? 1u : 0u);
+    const uint32_t atomic = own_kind == BUSTER_TYPE_KIND_ATOMIC ? 1u : 0u;
+    // The value's type's answers: a decayed pointer's kind is a pointer's whether its row is made or not.
+    const uint32_t value_index = type_index(value);
+    const uint64_t argued = view->argued[value_index < view->row_count ? value_index : view->row_count];
+    const uint32_t value_facts = (uint32_t)argued;
+    const uint32_t unqualified = type_qualifiers(value) == 0 ? 1u : 0u;
+    const uint32_t real = ((value_facts & BUSTER_NODE_FACTS_ARGUED_REAL) != 0 ? 1u : 0u) & unqualified;
+    const uint32_t field = standing & BUSTER_NODE_MACHINE_FIELD;
+    const uint32_t none = constant == CHECK_CONSTANT_NONE ? 1u : 0u;
+    const uint32_t address = constant == CHECK_CONSTANT_ADDRESS ? 1u : 0u;
+    // An integer constant of an integer's type, its value its payload; a floating one of float, double or long double.
+    const uint32_t integer = (constant == CHECK_CONSTANT_INTEGER ? 1u : 0u) & ((value_facts & BUSTER_NODE_FACTS_ARGUED_INTEGER) != 0 ? 1u : 0u) & (field == 0 ? 1u : 0u);
+    const uint32_t floating = (constant == CHECK_CONSTANT_FLOATING ? 1u : 0u) & real;
+    const uint32_t flagged = (flags & BUSTER_CHECK_NULL_POINTER) != 0 ? 1u : 0u;
+    // The value's type is one with a row and valid (type_is_valid): the record's own is then valid too. An array's and a
+    // function's are (their kind is their word's), an rvalue's value's type is its own, and an lvalue's is its row's, which
+    // a type that isn't valid doesn't have.
+    const uint32_t valid = decays | ((value_facts & BUSTER_NODE_FACTS_ARGUED_VALID) != 0 ? 1u : 0u);
+    uint32_t vector = (value_facts & BUSTER_NODE_FACTS_ARGUED_VECTOR) != 0 ? 1u : 0u;
+    uint32_t complex = (value_facts & BUSTER_NODE_FACTS_ARGUED_COMPLEX) != 0 ? 1u : 0u;
+    uint32_t made = 0;
+    uint32_t neutral = 0;
+    uint32_t plain = 0;
+    uint32_t warned = 0;
+    TypeId made_type = 0;
+    uint32_t made_flags = 0;
+    if (parameter)
+    {
+        const TypeId target_type = (TypeId)target;
+        const uint32_t target_facts = (uint32_t)(target >> 32);
+        const uint32_t targeted = (target_facts & BUSTER_NODE_FACTS_ARGUED_VALID) != 0 ? 1u : 0u;
+        const uint32_t pointer = (target_facts & BUSTER_NODE_FACTS_ARGUED_POINTER) != 0 ? 1u : 0u;
+        // What the compiler may warn of as a null pointer constant that is no literal: the record's own constant an
+        // integer's (an lvalue's too: the warning reads the node's value), no literal's flag, a pointer's target.
+        warned = pointer & (((standing >> 2) & 0x07u) == CHECK_CONSTANT_INTEGER ? 1u : 0u) & ((flags & BUSTER_CHECK_LITERAL_ZERO) == 0 ? 1u : 0u);
+        const uint32_t same = target_type == value ? 1u : 0u;
+        // The rule's own tests: neither type atomic (a target is a conversion's operand, none where the parameter is
+        // atomic, and no target is neither a pointer's nor an arithmetic one); then a pointer's or an arithmetic
+        // conversion.
+        const uint32_t ruled = taken & (atomic ^ 1u);
+        // A null pointer constant: an integer constant zero in a form the unit takes, of a builtin integer type, or a
+        // pointer with the null pointer's flag. node_facts_null reads the payload under the type's width's mask; a
+        // payload that is zero whole is zero under any, which is what the key says of it (`zero`), and one that is zero
+        // under its mask alone is an argument the rule doesn't make.
+        const uint32_t sized = unqualified != 0 && (value_facts >> 24) != 0 ? 1u : 0u;
+        const uint32_t null_constant = (constant == CHECK_CONSTANT_INTEGER ? 1u : 0u) & (forms != 0 ? 1u : 0u) & sized & zero;
+        const uint32_t null = source_pointer != 0 ? flagged : null_constant;
+        // A pointer to another pointer type: its pair's slot, the one branch. (Its own type is one it takes; a pointer
+        // with the null pointer's flag is taken as the null pointer whatever its type.)
+        const uint32_t other = pointer & source_pointer & (same ^ 1u);
+        uint32_t pair = 0;
+        if (__builtin_expect((ruled & other) != 0, 0))
+        {
+            pair = node_facts_pair(facts, view, target_type, value)->flags;
+        }
+        const uint32_t pointed = (same | ((pair & BUSTER_NODE_FACTS_PAIR_ASSIGNABLE) != 0 ? 1u : 0u)) & (none | address);
+        const uint32_t arithmetic = ((target_facts & value_facts & BUSTER_NODE_FACTS_ARGUED_ARITHMETIC) != 0 ? 1u : 0u) |
+                                    (((target_facts & BUSTER_NODE_FACTS_ARGUED_BOOL) != 0 ? 1u : 0u) & ((value_facts & BUSTER_NODE_FACTS_ARGUED_SCALAR) != 0 ? 1u : 0u));
+        // An arithmetic conversion's constant: none or an address's; an integer's to node_machine_memo_integers' types;
+        // a floating one among float, double and long double.
+        const uint32_t folds = none | address | (integer & ((target_facts & BUSTER_NODE_FACTS_ARGUED_FOLDS) != 0 ? 1u : 0u)) |
+                               (floating & ((target_facts & BUSTER_NODE_FACTS_ARGUED_REAL) != 0 ? 1u : 0u));
+        made = ruled & (pointer != 0 ? pointed | null : arithmetic & folds);
+        made_type = target_type;
+        made_flags = converts | BUSTER_CHECK_CONVERT_ASSIGNMENT;
+        plain = (target_facts & BUSTER_NODE_FACTS_ARGUED_PLAIN) != 0 ? 1u : 0u;
+        // A struct's or a union's parameter takes its own type's value as it is; a transparent union's takes another
+        // type's to a member the action chooses.
+        neutral = targeted & (none | address) & (((target_facts & BUSTER_NODE_FACTS_ARGUED_AGGREGATE) == 0 ? 1u : 0u) | same);
+        vector |= (target_facts & BUSTER_NODE_FACTS_ARGUED_VECTOR) != 0 ? 1u : 0u;
+        complex |= (target_facts & BUSTER_NODE_FACTS_ARGUED_COMPLEX) != 0 ? 1u : 0u;
+    }
+    else
+    {
+        // The default argument promotions, of a value whose type has no qualifier: its type's own answer. (An integer
+        // constant of an integer's type and a floating one of a real type are no pointer's.)
+        const TypeId promoted = (TypeId)(argued >> 32);
+        const uint32_t ruled = taken & unqualified & (promoted != 0 ? 1u : 0u) & (atomic ^ 1u);
+        made = ruled & (none | address | integer | floating);
+        made_type = promoted;
+        made_flags = converts | (promoted != value ? (uint32_t)BUSTER_CHECK_CONVERT_PROMOTION : 0u);
+        plain = (value_facts & BUSTER_NODE_FACTS_ARGUED_PROMOTED_PLAIN) != 0 ? 1u : 0u;
+        neutral = none | address;
+    }
+    // A vector's conversion and a complex number's are their own (check_action_convert_value).
+    const uint32_t dropped = flags & BUSTER_CHECK_INHERITED & ~(uint32_t)(BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT);
+    neutral = whole & valid & (complex ^ 1u) & (vector != 0 ? (dropped == 0 ? 1u : 0u) : neutral);
+    // A made one's types are valid, and neither a vector's (no vector is arithmetic or a pointer); a complex number is
+    // arithmetic.
+    made &= complex ^ 1u;
+    *conversion = (uint64_t)made_type | (uint64_t)made_flags << 32;
+    return ((made | neutral) != 0 ? BUSTER_NODE_FACTS_ARGUMENT_KEPT : 0u) | (made != 0 ? BUSTER_NODE_FACTS_ARGUMENT_MADE : 0u) |
+           ((made & plain) != 0 ? BUSTER_NODE_FACTS_ARGUMENT_PLAIN : 0u) | (warned == 0 ? BUSTER_NODE_FACTS_ARGUMENT_QUIET : 0u);
+}
+
+// The second word of an argument's slot's key, of its record: its flags the rule reads, its standing, and whether it
+// is an integer constant whose payload is zero (a null pointer constant is asked of one).
+static inline __attribute__((always_inline)) uint64_t node_facts_argument_standing(const NodeFactsRecord* record)
+{
+    const uint32_t standing = record->standing;
+    const uint32_t valued = BUSTER_NODE_MACHINE_FIELD | 0x1cu;
+    const uint32_t zero = (standing & valued) == (uint32_t)CHECK_CONSTANT_INTEGER << 2 && record->payload == 0 ? 1u : 0u;
+    return (uint64_t)(record->flags & BUSTER_NODE_FACTS_ARGUMENT_FLAGS) << 16 | standing << 1 | zero;
+}
+
+// The slot of a key, its place among the slots: one place a key, the last answer made there.
+static inline __attribute__((always_inline)) uint64_t node_facts_argument_slot(uint64_t types, uint64_t standing)
+{
+    const uint64_t hash = (types * UINT64_C(0x9e3779b97f4a7c15)) ^ (standing * UINT64_C(0xc2b2ae3d27d4eb4f));
+    return hash >> (64 - BUSTER_NODE_FACTS_ARGUMENT_BITS);
+}
+
+// A miss of the arguments' slots: the rule's answer for record `g` and its key, kept at the key's slot. Out of the
+// calls' loop, which a unit's few keys leave seldom.
+static __attribute__((noinline)) const NodeFactsArgumentSlot* node_facts_argument_fill(NodeFacts* facts, const NodeFactsRecord* records, const NodeFactsView* view, uint32_t g,
+                                                                                         uint64_t target, bool parameter, uint64_t types, uint64_t standing)
+{
+    const uint64_t t0 = __rdtsc();
+    uint64_t conversion = 0;
+    const uint32_t zero = (uint32_t)standing & 1u;
+    const uint32_t outcome = parameter ? node_facts_argument_made(facts, records, view, g, target, true, zero, &conversion)
+                                       : node_facts_argument_made(facts, records, view, g, 0, false, zero, &conversion);
+    NodeFactsArgumentSlot* slot = facts->argument_slots + node_facts_argument_slot(types, standing);
+    *slot = (NodeFactsArgumentSlot){
+        .types = types,
+        .standing = standing,
+        .conversion = conversion,
+        .outcome = outcome,
+    };
+    if (__builtin_expect(facts->argument_one, 0))
+    {
+        // The tests' one slot: every slot has this key and its answer, so every other key's probe meets them at its own.
+        for (uint32_t other = 0; other < 1u << BUSTER_NODE_FACTS_ARGUMENT_BITS; other += 1)
+        {
+            facts->argument_slots[other] = *slot;
+        }
+    }
+    facts->argument_answers += 1;
+    facts->argument_answer_ticks += __rdtsc() - t0;
+    return slot;
+}
+
+// What the kernel makes of call `w`'s arguments, its callee's type's row `row`: every one's answer together (a bit
+// that every argument has; all of them for a call with no argument), and each one's conversion written to its
+// record's last quadword (none with `lean`). An argument at a time, its key's slot's answer, which
+// the rule makes where the slot has another key's or none: those the parameters take, then a variadic callee's others.
+static inline __attribute__((always_inline)) uint32_t node_facts_call_arguments(NodeFacts* facts, NodeFactsRecord* records, const NodeFactsView* view, uint32_t w,
+                                                                                 const NodeFactsRow* row, bool lean)
+{
+    // The call's prototype takes its arguments' count: an argument a parameter, and those past them a variadic callee's.
+    const uint32_t parameters = row->function >> 16;
+    const uint32_t count = view->counts[w];
+    const uint16_t* arguments = view->arguments + view->inputs[w];
+    const uint64_t* targets = view->targets + row->parameters;
+    uint32_t outcome = BUSTER_NODE_FACTS_ARGUMENT_KEPT | BUSTER_NODE_FACTS_ARGUMENT_MADE | BUSTER_NODE_FACTS_ARGUMENT_PLAIN | BUSTER_NODE_FACTS_ARGUMENT_QUIET;
+#pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
+    for (uint32_t i = 0; i < parameters; i += 1)
+    {
+        const uint32_t g = w - arguments[i];
+        const uint64_t target = targets[i];
+        const uint64_t key_types = (uint64_t)records[g].type << 32 | (TypeId)target;
+        const uint64_t key_standing = node_facts_argument_standing(records + g);
+        const NodeFactsArgumentSlot* slot = view->argument_slots + node_facts_argument_slot(key_types, key_standing);
+        if (__builtin_expect(slot->types != key_types || slot->standing != key_standing, 0))
+        {
+            slot = node_facts_argument_fill(facts, records, view, g, target, true, key_types, key_standing);
+        }
+        outcome &= slot->outcome;
+        if (!lean)
+        {
+            node_facts_store(records + g, 56, slot->conversion);
+        }
+    }
+#pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
+    for (uint32_t i = parameters; i < count; i += 1)
+    {
+        const uint32_t g = w - arguments[i];
+        const uint64_t key_types = (uint64_t)records[g].type << 32 | BUSTER_NODE_FACTS_NO_PARAMETER;
+        const uint64_t key_standing = node_facts_argument_standing(records + g);
+        const NodeFactsArgumentSlot* slot = view->argument_slots + node_facts_argument_slot(key_types, key_standing);
+        if (__builtin_expect(slot->types != key_types || slot->standing != key_standing, 0))
+        {
+            slot = node_facts_argument_fill(facts, records, view, g, 0, false, key_types, key_standing);
+        }
+        outcome &= slot->outcome;
+        if (!lean)
+        {
+            node_facts_store(records + g, 56, slot->conversion);
+        }
+    }
+    return outcome;
+}
+
+// The same out of the short paths' loop, for the call's rule.
+static __attribute__((noinline)) uint32_t node_facts_call_arguments_ruled(NodeFacts* facts, NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, const NodeFactsRow* row)
+{
+    return node_facts_call_arguments(facts, records, view, w, row, false);
 }
 
 // `&x`, `w` of record `a`: node_machine_address_rule's steps, the pointer type its operand's type's side row's.
@@ -2240,8 +2819,8 @@ static inline __attribute__((always_inline)) bool node_facts_query(NodeFactsReco
     if (taken)
     {
         const NodeFactsSide* side = view->sides + type_index(queried);
-        node_facts_record(records, w, BUSTER_TYPE_ULONG, view->ulong_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER), BUSTER_CHECK_ICE, 0,
-                          size ? side->size : side->alignment);
+        node_facts_record_integer(records, w, BUSTER_TYPE_ULONG, view->ulong_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER), BUSTER_CHECK_ICE, 0,
+                                  size ? side->size : side->alignment);
         if (!lean)
         {
             node_facts_conversions(records, w, valued ? queried : 0, 0, 0, 0, 0);
@@ -2472,7 +3051,7 @@ static inline __attribute__((always_inline)) bool node_facts_store_fast(NodeFact
                          ~(BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_NULL_POINTER | forms);
         flags = store ? (flags & ~stored) | BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION | (records[a].flags & BUSTER_CHECK_INHERITED) : flags;
         NodeFactsRecord* record = records + w;
-        const uint32_t exponent = records[s].exponent;
+        const uint32_t exponent = node_facts_exponent(standing, payload, records[s].exponent);
         node_facts_store(record, 0, (uint64_t)target | (uint64_t)target_row->word << 32);
         node_facts_store(record, 8, (uint64_t)node_facts_source(flags) | (uint64_t)object << 32);
         node_facts_store(record, 16, payload);
@@ -2498,42 +3077,26 @@ static inline __attribute__((always_inline)) void node_facts_list(uint32_t* leaf
     uint32_t leaves = 0;
     uint32_t lookups = 0;
     uint32_t present = 0;
-    if (BUSTER_SCALAR_PATH(false))
+    const __m512i step = _mm512_set1_epi32(16);
+    __m512i places = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    __m512i seen = _mm512_setzero_si512();
+    for (uint32_t w = 0; w < count; w += 16)
     {
-        for (uint32_t w = 0; w < count; w += 1)
-        {
-            const uint8_t kind = kinds[w] & 0x03u;
-            leaf_list[leaves] = w;
-            lookup_list[lookups] = w;
-            keys[lookups] = classes[w];
-            present |= kind == 0x03u ? 1u << (classes[w] >> 4) : 0;
-            leaves += kind == 0x02u;
-            lookups += kind == 0x03u;
-        }
+        const uint32_t live = count - w < 16 ? count - w : 16;
+        const __mmask16 mask = (__mmask16)((1u << live) - 1);
+        const __m128i block = _mm_and_si128(_mm_maskz_loadu_epi8(mask, kinds + w), _mm_set1_epi8(0x03));
+        const __mmask16 leaf = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x02));
+        const __mmask16 lookup = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x03));
+        const __m128i own = _mm_maskz_loadu_epi8(lookup, classes + w);
+        _mm512_storeu_si512(leaf_list + leaves, _mm512_maskz_compress_epi32(leaf, places));
+        _mm512_storeu_si512(lookup_list + lookups, _mm512_maskz_compress_epi32(lookup, places));
+        _mm_storeu_si128((__m128i*)(void*)(keys + lookups), _mm_maskz_compress_epi8(lookup, own));
+        seen = _mm512_or_si512(seen, _mm512_maskz_sllv_epi32(lookup, _mm512_set1_epi32(1), _mm512_srli_epi32(_mm512_cvtepu8_epi32(own), 4)));
+        leaves += (uint32_t)__builtin_popcount((uint32_t)leaf);
+        lookups += (uint32_t)__builtin_popcount((uint32_t)lookup);
+        places = _mm512_add_epi32(places, step);
     }
-    else
-    {
-        const __m512i step = _mm512_set1_epi32(16);
-        __m512i places = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        __m512i seen = _mm512_setzero_si512();
-        for (uint32_t w = 0; w < count; w += 16)
-        {
-            const uint32_t live = count - w < 16 ? count - w : 16;
-            const __mmask16 mask = (__mmask16)((1u << live) - 1);
-            const __m128i block = _mm_and_si128(_mm_maskz_loadu_epi8(mask, kinds + w), _mm_set1_epi8(0x03));
-            const __mmask16 leaf = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x02));
-            const __mmask16 lookup = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x03));
-            const __m128i own = _mm_maskz_loadu_epi8(lookup, classes + w);
-            _mm512_storeu_si512(leaf_list + leaves, _mm512_maskz_compress_epi32(leaf, places));
-            _mm512_storeu_si512(lookup_list + lookups, _mm512_maskz_compress_epi32(lookup, places));
-            _mm_storeu_si128((__m128i*)(void*)(keys + lookups), _mm_maskz_compress_epi8(lookup, own));
-            seen = _mm512_or_si512(seen, _mm512_maskz_sllv_epi32(lookup, _mm512_set1_epi32(1), _mm512_srli_epi32(_mm512_cvtepu8_epi32(own), 4)));
-            leaves += (uint32_t)__builtin_popcount((uint32_t)leaf);
-            lookups += (uint32_t)__builtin_popcount((uint32_t)lookup);
-            places = _mm512_add_epi32(places, step);
-        }
-        present = (uint32_t)_mm512_reduce_or_epi32(seen);
-    }
+    present = (uint32_t)_mm512_reduce_or_epi32(seen);
     *leaf_count = leaves;
     *lookup_count = lookups;
     *rounds = present;
@@ -2770,7 +3333,9 @@ static inline __attribute__((always_inline)) bool node_facts_subscript_fast(Node
 }
 
 // A call's short path: a function's designator, or a pointer to a function's value, of a prototype that takes the
-// arguments' count and whose return type is void or complete at the node, with no wide argument.
+// arguments' count and whose return type is void or complete at the node, with no wide argument. Its record is the
+// rule's where each argument's conversion changes nothing the call inherits, which the calls' loop asks next of each
+// call this takes (node_facts_call_arguments): until then the record stands as made.
 static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
 {
     const TypeId type = records[a].type;
@@ -2793,8 +3358,11 @@ static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFacts
     // the few calls of more have a loop for the rest. An argument's distance is read whether the call has the argument
     // or not (the list has entries to spare past its last call's), so that the choice is between two places in
     // registers: a choice with a load behind it is compiled as a branch on the count, which the predictor misses.
+    // What the census's tests ask of the arguments is gathered with them (node_facts_argument): the callee's record,
+    // which stands for an argument past the count, has an address's constant or none, and no aggregate's type.
     uint32_t gathered = flags;
     uint32_t standings = 0;
+    NodeFactsArguments asked = { 0 };
 #pragma clang loop vectorize(disable) interleave(disable) unroll(full)
     for (uint32_t i = 0; i < 4; i += 1)
     {
@@ -2802,6 +3370,7 @@ static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFacts
         const uint32_t place = i < count ? w - distance : a;
         gathered |= records[place].flags;
         standings |= records[place].standing;
+        node_facts_argument(&asked, records + place);
     }
 #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
     for (uint32_t i = 4; i < count; i += 1)
@@ -2809,14 +3378,16 @@ static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFacts
         const NodeFactsRecord* argument = records + (w - arguments[i]);
         gathered |= argument->flags;
         standings |= argument->standing;
+        node_facts_argument(&asked, argument);
     }
     const uint32_t unfit = (designator ? as_designator : as_value) | (~function & wanted) | (standings & BUSTER_NODE_MACHINE_WIDE) |
                            (count < parameters || ((function >> 8 & BUSTER_TYPE_FLAG_VARIADIC) == 0 && count != parameters) ? 1u : 0u);
     const bool fast = unfit == 0 && row->returned_ready_at <= view->positions[w];
     if (fast)
     {
-        node_facts_record(records, w, row->returned, row->returned_word, BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE),
-                          BUSTER_CHECK_SIDE_EFFECT | (gathered & BUSTER_CHECK_INHERITED), 0, 0);
+        const uint8_t made = BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE);
+        node_facts_record(records, w, row->returned, row->returned_word, made, BUSTER_CHECK_SIDE_EFFECT | (gathered & BUSTER_CHECK_INHERITED), 0, 0);
+        node_facts_store(records + w, 24, (uint64_t)made | 0x100u | (uint64_t)node_facts_arguments_quiet(&asked, function) << 16);
         if (!lean)
         {
             node_facts_conversions(records, w, designator ? pointer : lvalue != 0 ? row->value : type, designator ? BUSTER_CHECK_CONVERT_FUNCTION : lvalue & 1u, 0, 0, 0);
@@ -2863,6 +3434,9 @@ static inline __attribute__((always_inline)) NodeFactsView node_facts_view(const
         .members = facts->members,
         .sides = facts->sides,
         .pairs = facts->pairs,
+        .targets = facts->targets,
+        .argued = facts->argued,
+        .argument_slots = facts->argument_slots,
         .stands = facts->stands,
         .row_count = facts->row_count,
         .member_bits = facts->member_bits,
@@ -2906,7 +3480,7 @@ static __attribute__((noinline)) void node_facts_slow(NodeFacts* facts, uint32_t
         } break;
         case CHECK_OP_CALL:
         {
-            taken = node_facts_call(records, &view, w, a);
+            taken = node_facts_call(facts, records, &view, w, a);
         } break;
         case CHECK_OP_CAST:
         {
@@ -3073,6 +3647,23 @@ static __attribute__((noinline)) void node_facts_slow_each(NodeFacts* facts, uin
     for (uint32_t i = 0; i < count; i += 1)
     {
         node_facts_slow(facts, first, facts->rare[i]);
+    }
+}
+
+// A class's loop's list of the operators its short path left, made by two passes, each in the window's order (`first`
+// places, then the rest up to `count`): the two as one in that order, by insertion. Few: a call the rule takes.
+static __attribute__((noinline, cold)) void node_facts_rare_order(uint32_t* rare, uint32_t first, uint32_t count)
+{
+    for (uint32_t i = first; i < count; i += 1)
+    {
+        const uint32_t w = rare[i];
+        uint32_t at = i;
+        while (at != 0 && rare[at - 1] > w)
+        {
+            rare[at] = rare[at - 1];
+            at -= 1;
+        }
+        rare[at] = w;
     }
 }
 
@@ -3245,6 +3836,45 @@ static inline __attribute__((always_inline)) void node_facts_calls_of(NodeFacts*
             rare[rare_count] = w;
             rare_count += 1;
             records[w].standing = BUSTER_NODE_MACHINE_WIDE;
+        }
+    }
+    if (mode != BUSTER_NODE_FACTS_LOADS)
+    {
+        // The taken calls' arguments' conversions, in the batch's order: a call whose arguments' answers don't keep its
+        // record is the rule's as one the short path left, and marked so before the next call's arguments are read. A
+        // call of the batch may be an argument of a later one (a call's code is not after a call's): the short path
+        // made that one from this one's record as it stood, so it goes to the rule after it, which reads the record
+        // the rule has left by then. The loads' kernel writes a record's type and word alone, which no argument's
+        // conversion changes.
+        const bool lean = mode == BUSTER_NODE_FACTS_LEAN;
+        const uint32_t left_before = rare_count;
+        for (uint32_t i = 0; i < batched; i += 1)
+        {
+            const uint32_t w = batch[i];
+            if ((records[w].standing & BUSTER_NODE_MACHINE_WIDE) == 0)
+            {
+                const NodeFactsRow* row = node_facts_row_of(&view, records[w - left[w]].type);
+                const uint32_t outcome = node_facts_call_arguments(facts, records, &view, w, row, lean);
+                if (__builtin_expect((outcome & BUSTER_NODE_FACTS_ARGUMENT_KEPT) == 0, 0))
+                {
+                    rare[rare_count] = w;
+                    rare_count += 1;
+                    records[w].standing = BUSTER_NODE_MACHINE_WIDE;
+                }
+                else
+                {
+                    // It is not quiet for the census's tests where an argument may be a null pointer constant that is no
+                    // literal, whatever the short path said of the arguments by themselves.
+                    const uint32_t loud = (outcome & BUSTER_NODE_FACTS_ARGUMENT_QUIET) == 0 ? (uint32_t)BUSTER_NODE_FACTS_QUIET_CALL : 0u;
+                    const uint32_t says = lean ? 0u : node_facts_call_says(outcome, row->function);
+                    records[w].exponent = (uint16_t)((records[w].exponent & ~loud) | says);
+                }
+            }
+        }
+        // The rules run in the window's order (node_facts_slow_each): the two passes' lists, each in it, as one.
+        if (__builtin_expect(rare_count != left_before, 0))
+        {
+            node_facts_rare_order(rare, left_before, rare_count);
         }
     }
     if (rare_count != 0)
@@ -3623,7 +4253,12 @@ static __attribute__((noinline)) void node_facts_updates(NodeFacts* facts, uint3
 // lists before the leaves are made: the lists' lengths settle while the leaves' loop, which reads none of them, runs.
 // With `split`, the two parts' TSC ticks are added to the counts (three reads of the counter a window, which a pass
 // that is counted whole leaves out): the lists and the leaves, and the classes.
-static __attribute__((noinline)) void node_facts_window(NodeFacts* facts, uint32_t window, uint32_t mode, bool split)
+//
+// It starts at a cache line's first byte: its ticks went with where a build happened to put it. The same 736
+// instructions read 16.4 to 16.5 ticks a record on `sqlite3.c` in a build that had it 48 bytes into a line, and 16.0 in
+// that build's sources with this attribute, as in two builds that had it at a line's start unasked (the 9700X; the
+// measurement record's c-on-the-window-2850).
+static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts* facts, uint32_t window, uint32_t mode, bool split)
 {
     const uint32_t first = facts->windows[window];
     const uint32_t count = facts->windows[window + 1] - first;
@@ -3871,7 +4506,19 @@ static bool node_facts_same(const NodeFacts* facts, uint32_t base, uint32_t w, u
                       record->conversion_flags[0] == expected.conversion_flags[0] && record->conversion_flags[1] == expected.conversion_flags[1];
     const bool offset = record->member_offset == expected.member_offset;
     const bool whole = mode == BUSTER_NODE_FACTS_WHOLE || record->taken != BUSTER_NODE_FACTS_SHORT;
-    return whole ? half && rest && offset : mode == BUSTER_NODE_FACTS_LOADS && lookup ? loaded && (!member || offset) : half && (!member || offset);
+    // A call the kernel made whose record says its arguments' conversions are made: each one's, in its argument's
+    // record, is T's (a call's exponent is no floating value's; a record the kernel left says nothing).
+    bool arguments = true;
+    if (op == CHECK_OP_CALL && record->taken != BUSTER_NODE_FACTS_LEFT && !floating && (record->exponent & BUSTER_NODE_FACTS_CONVERTED_CALL) != 0)
+    {
+        const uint16_t* list = facts->arguments + facts->inputs[base + w];
+        for (uint32_t i = 0; i < facts->counts[base + w]; i += 1)
+        {
+            const uint32_t g = w - list[i];
+            arguments = arguments && facts->records[g].spare == facts->expected_arguments[(uint64_t)base + g];
+        }
+    }
+    return whole ? half && rest && offset && arguments : mode == BUSTER_NODE_FACTS_LOADS && lookup ? loaded && (!member || offset) : half && (!member || offset);
 }
 
 // What a lean kernel leaves out of record `w` of the window it ran last, made here by the record's rule from the
@@ -3908,8 +4555,10 @@ static bool node_facts_derived(NodeFacts* facts, uint32_t first, uint32_t w, boo
 
 // A batch's room: the records of the expressions T takes in a chunk of the reader's (a chunk is
 // BUSTER_CHECK_EXPRESSION_CHUNK tokens), and the expressions. A batch that would pass either is run where it stands.
-// The literals' lines of a batch: one a literal's leaf from each making of its windows' inputs (T's columns', the
-// front's, and the front's again for its time).
+// The literals' lines of a batch: one a literal's leaf from each making of its windows' inputs that takes one (T's
+// columns', the copy of the front's records by place, and that copy again for its time). Where the front writes the
+// window its own literals' lines are the first of them, a line a record of the front's (BUSTER_NODE_FRONT_RECORDS):
+// a literal's leaf is one record of two at least, so a batch's three makings and the front's lines have room.
 #define BUSTER_NODE_FACTS_READER_RECORDS (4u * BUSTER_NODE_FACTS_WINDOW)
 #define BUSTER_NODE_FACTS_READER_EXPRESSIONS 4096u
 #define BUSTER_NODE_FACTS_READER_LINES (3u * BUSTER_NODE_FACTS_READER_RECORDS)
@@ -3933,13 +4582,68 @@ struct NodeFactsInputs
     uint32_t argument_count;
 };
 
+// The census's tests on the window the front wrote (c_check_node_census.c, which follows this file in the unit;
+// BUSTER_NODE_READER_WINDOW_TESTS): `tests` is the unit's tests' state, and `state` has just run the kernel on `front`'s
+// chunk in place, whose records are the kernel's by the front's record.
+struct NodeCensusReader;
+struct NodeFactsReader;
+static void node_tests_window_chunk(struct NodeCensusReader* tests, struct NodeFactsReader* state, const NodeFront* front);
+static bool node_tests_window_lines(struct NodeCensusReader* tests, Arena* arena, uint32_t capacity);
+// C on the same window (c_check_node_machine_window.c, which follows this file in the unit;
+// BUSTER_NODE_READER_WINDOW_CONTEXTS): after the tests' sweep made the records' bytes.
+struct NodeContextsTables;
+static void node_contexts_tables(struct NodeContextsTables* tables);
+static void node_contexts_window_chunk(struct NodeFactsReader* state, const NodeFront* front);
+// X's rows on the same window (c_check_node_machine_rows.c, after it; BUSTER_NODE_READER_WINDOW_ROWS): from C's
+// answers there.
+struct NodeRowsTables;
+static void node_rows_tables(struct NodeRowsTables* tables);
+static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFront* front);
+// The lists of the rows' values (BUSTER_NODE_ROWS_LIST_*, c_check_node_machine_rows.c). And the bit of a record's
+// byte in the senses' column that says it is its expression's operand's last record, which the reader writes there
+// with its root's sense (node_facts_reader_expression): the values' sweep reads an expression's end of it.
+#define BUSTER_NODE_ROWS_LISTS 7u
+#define BUSTER_NODE_ROWS_SENSE_TOP 0x80u
+
+// An expression's byte in the reader's batch (NodeFactsReader.placed).
+#define BUSTER_NODE_FACTS_PLACED 0x01u
+#define BUSTER_NODE_FACTS_PLACED_WARNED 0x02u
+
 struct NodeFactsReader
 {
     NodeFacts facts;
     NodeFrontTypes* types;
     CheckInputReader* reader;
+    // The unit's tests' state where they run on the window too (BUSTER_NODE_READER_WINDOW_TESTS), or null.
+    struct NodeCensusReader* tests;
     // The batch's windows' inputs as the front's records give them (node_facts_front_expression).
     NodeFactsInputs front;
+    // Where the front writes the window (`windowed`), for the kernel's run on the front's columns in place
+    // (node_facts_window_run), each by the front's record: whether the record is one of an expression of the batch
+    // whose records are there in a row (the kernel makes those alone); the kinds as that run reads them, the front's
+    // for those records and a given record's for every other; T's record of each, as the batch has it by its own
+    // places (NodeFacts' expected_ columns); and zeros for the fits. `place_windows` is that run's one window.
+    bool windowed;
+    uint8_t* place_taken;
+    uint8_t* place_kinds;
+    uint8_t* place_fits;
+    TypeId* place_types;
+    uint32_t* place_flags;
+    uint32_t* place_objects;
+    uint64_t* place_payloads;
+    uint8_t* place_standings;
+    uint16_t* place_exponents;
+    uint32_t* place_words;
+    TypeId* place_converted;
+    uint32_t* place_conversion_flags;
+    uint64_t* place_member_offsets;
+    uint64_t* place_arguments;
+    uint32_t place_windows[2];
+    // The names' pass's own: a chunk's names' places, a vector's past the front's records; and its scalar path's
+    // scratch, a chunk's kinds and entries as the front left them.
+    uint32_t* name_list;
+    uint8_t* name_kinds;
+    uint32_t* name_entries;
     // The batch's expressions as T ran on them: each one's first node, its root and its records; its first record in the
     // batch; the front's root and its operand's record; its calls' first argument's place among the batch's; and whether
     // the front's records gave its inputs.
@@ -3951,6 +4655,10 @@ struct NodeFactsReader
     uint32_t* operands;
     uint32_t* argument_bases;
     uint8_t* given;
+    // Whether the expression's records are the front's window's in a row, which the kernel's run in place then makes
+    // (node_facts_window_expression): BUSTER_NODE_FACTS_PLACED; and for such a one, whether T's actions gave a warning
+    // in it (NodeMachine.action_warnings after T's run), which the tests on the window ask.
+    uint8_t* placed;
     uint32_t expression_count;
     // By the batch's record: whether its expression is one the whole machine takes there.
     uint8_t* taken;
@@ -3962,6 +4670,158 @@ struct NodeFactsReader
     uint64_t batches;
     // Whether T runs again for its time: not where it checks itself against the action, which counts what it warns of.
     bool again;
+    // C on the window (BUSTER_NODE_READER_WINDOW_CONTEXTS; c_check_node_machine_window.c), or null tables.
+    // - The reference's answers, C's on T's columns at reader time, by the front's record: a record's state, its
+    //   context, its template and its target (node_facts_window_expression keeps them as it keeps T's records).
+    // - By the batch's expression: what the reference did with it (BUSTER_NODE_CONTEXTS_RAN_*), its root's target as its
+    //   consumer gives it, the reference's ticks on it, and what the window made of it (BUSTER_NODE_CONTEXTS_LISTED...).
+    // - The window's columns, a chunk's records with a block of zeros before and after: the records' bytes the tests'
+    //   sweep makes for the loop (a type's class, facts and kind, a standing, and BUSTER_NODE_CONTEXTS_*'s flags), and
+    //   the loop's and the targets' answers: a template, a context, a target's source, a target, the record's
+    //   operator's class (for why it lists its expression), and eight masks a block (BUSTER_NODE_CONTEXTS_MASK_*).
+    //   And a pointer's stride, by the record the loop asked it for (node_contexts_stride): a pointer's sum, its
+    //   subscript and its update, whose PTR_ADD's value it is (X's rows' values read it).
+    struct NodeContextsTables* c_tables;
+    uint8_t* place_c_states;
+    uint8_t* place_c_contexts;
+    uint8_t* place_c_templates;
+    TypeId* place_c_targets;
+    uint8_t* c_ran;
+    TypeId* c_targets;
+    uint64_t* c_ticks;
+    uint8_t* c_verdicts;
+    uint8_t* window_c_classes;
+    uint8_t* window_c_facts;
+    uint8_t* window_c_kinds;
+    uint8_t* window_c_standings;
+    uint8_t* window_c_flags;
+    uint8_t* window_c_templates;
+    // A record's key, which its operands' rows are read by (BUSTER_NODE_CONTEXTS_KEY_*): its template's number, but
+    // for an update, a comma and a conditional.
+    uint8_t* window_c_keys;
+    uint8_t* window_c_contexts;
+    uint8_t* window_c_sources;
+    uint8_t* window_c_reasons;
+    TypeId* window_c_targets;
+    uint64_t* window_c_strides;
+    uint64_t* window_c_masks;
+    // The expression at hand's, from the reader's hook to node_facts_reader_expression: what the reference's C did
+    // with it, its ticks there, its root's target and its root's sense (a statement's condition's: 1 where its
+    // control branches where it holds, a do statement's).
+    uint8_t c_ran_now;
+    uint8_t c_sense_now;
+    uint64_t c_ticks_now;
+    TypeId c_target_now;
+    // The chunk at hand's updates, the records C's loop gave the update's template, and its operators evaluated as
+    // branches that take a turn of X's rows' loop (its `!`, `&&` and `||`: a statement's CONDITION takes none): X's
+    // rows' sweep for their two lists runs for a chunk that has any.
+    uint64_t c_updates_now;
+    uint64_t c_branches_now;
+    // test-checker's control of the comparison (BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT), and its turn.
+    bool c_fault;
+    uint32_t c_fault_turn;
+    // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS; c_check_node_machine_rows.c), or null tables.
+    // - The window's columns, as C's: a record's own shape and its conversion's, its row's entries' number,
+    //   its target's class and facts and its first operand's conversion's class, and the entries before its row in
+    //   its eight records'; its type, which the tests' sweep makes with the records' bytes
+    //   (node_tests_window_bytes_by); three bits of its line (BUSTER_NODE_ROWS_BIT_*); and two masks a block, the
+    //   records that convert and those of them whose target's word the reads read.
+    // - The chunk's streams: its entries' kinds and their classes, a register's room past a chunk's most entries (and
+    //   the shadow's copy of its first run's, which its second run's are compared with); and
+    //   the entries before each eight records'.
+    // - The reads' two lists, the numbers of the chunk's records whose target's word is read and of those whose line
+    //   is, and the updates' list, each a register's room past a chunk's records.
+    //   The loop over the updates' writes an update's two rows' shapes over the shapes' sweep's, its store's kind in
+    //   the bits' column and its computation's class in the first operand's conversion's (node_rows_window_update):
+    //   an update has no column of its own.
+    // - The list of the chunk's operators evaluated as branches, and their senses' column (node_rows_window_branch):
+    //   a statement's condition's sense is written at its operand's record as its expression is read
+    //   (node_facts_reader_expression), another's by its consumer's turn in the branches' loop. No sweep reads the
+    //   column.
+    // - The entries' values, the chunk's third stream, a quadword an entry beside its kind and its class (and the
+    //   shadow's copy of its first run's). A record's value, a column the tests' sweep makes with the records' bytes
+    //   (its object's number, or its payload: node_tests_window_bytes_by), in which the rows' reads leave a member's
+    //   offset in bytes. The values' lists (BUSTER_NODE_ROWS_LIST_*), the numbers of the chunk's records by where
+    //   their row's values come from, two registers' room past a chunk's records each. Two masks a block: the records
+    //   whose value is a number in its expression (an evaluated call, an operator with a label of its own, a postfix
+    //   update through an address), and the expressions' operands' last records (node_rows_window_values), with the
+    //   batch's expression each is the last record of, which the reader writes there; the list of the records that
+    //   are no first such record of their expression; and the numbering's scratch, a tested value's owner by its
+    //   record and an expression's numbered records.
+    // - By the batch's expression: what the rows made of it (BUSTER_NODE_ROWS_LISTED or _TAKEN), and the reference's
+    //   X's ticks on it; and the expression at hand's ticks, from the reader's hook.
+    struct NodeRowsTables* x_tables;
+    TypeId* window_x_types;
+    uint8_t* window_x_owns;
+    uint8_t* window_x_conversions;
+    uint8_t* window_x_lengths;
+    uint8_t* window_x_targets;
+    uint8_t* window_x_facts;
+    uint8_t* window_x_operands;
+    uint8_t* window_x_offsets;
+    uint8_t* window_x_bits;
+    uint8_t* window_x_senses;
+    uint64_t* window_x_reads;
+    uint32_t* x_cursors;
+    uint32_t* x_words;
+    uint32_t* x_lines;
+    uint32_t* x_updates;
+    uint32_t* x_branches;
+    uint8_t* x_kinds;
+    uint8_t* x_classes;
+    uint8_t* x_first_kinds;
+    uint8_t* x_first_classes;
+    uint64_t* x_values;
+    uint64_t* x_first_values;
+    uint64_t* window_x_values;
+    uint16_t* x_lists[BUSTER_NODE_ROWS_LISTS];
+    uint64_t* window_x_marks;
+    uint64_t* window_x_ends;
+    uint16_t* window_x_expressions;
+    uint16_t* x_owners;
+    uint16_t* x_marked;
+    uint8_t* x_verdicts;
+    uint64_t* x_ticks;
+    uint64_t x_ticks_now;
+    // A summary's side facts on the window (c_check_node_machine_rows.c's node_rows_window_summary; `summaries`: not
+    // with the shadow's switch, BUSTER_NODE_READER_WINDOW_SUMMARY_OFF):
+    // - a name's leaf's declaration's line's byte, which the tests' sweep copies beside the records' bytes
+    //   (BUSTER_NODE_ROWS_LINE_*: a plain function's, and one declared noreturn); another record's is zero;
+    // - a mask a block: the calls whose callee is no plain function's name in the block or the block before, which
+    //   the tests' loop makes;
+    // - the two lists, the chunk's records' numbers (the references' and those calls'), and a reference's object by
+    //   its place on its list;
+    // - the reduction's two bytes a record (its fact, and its operands' joined), for the expressions it runs on;
+    // - the references through each record (entry x is the count of those in the window's records up to x, and the
+    //   entry before the first is zero): an expression's are the list's from the count through the record before its
+    //   operand's first to the count through its last;
+    // - an expression's root's return fact;
+    // - and a chunk's first run's counts, facts and objects, which its second run's are compared with.
+    bool summaries;
+    uint8_t* window_x_lines;
+    uint8_t* window_x_returns;
+    uint8_t* window_x_joined;
+    uint64_t* window_x_suspects;
+    uint16_t* x_summary_references;
+    uint16_t* x_summary_suspects;
+    uint32_t* x_summary_objects;
+    uint16_t* window_x_referenced;
+    uint8_t* x_summary_facts;
+    uint16_t* x_first_summary_referenced;
+    uint8_t* x_first_summary_facts;
+    uint32_t* x_first_summary_objects;
+    // The operators whose turn listed their expression this run for a second operand whose truth is known
+    // (node_rows_window_decided). And test-checker's control of the side facts' comparison
+    // (BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT), with its turn of an expression's kept facts.
+    uint32_t x_decided_now;
+    bool summary_fault;
+    uint32_t summary_fault_turn;
+    uint32_t summary_again_turn;
+    // test-checker's control of the rows' comparisons (BUSTER_NODE_READER_WINDOW_ROWS_FAULT): its turn of the
+    // reference's answers, a tape, and of a chunk's first run's, a chunk.
+    bool x_fault;
+    uint32_t x_fault_turn;
+    uint32_t x_again_turn;
 };
 
 static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader, NodeMachine* machine, NodeFrontTypes* types)
@@ -3985,6 +4845,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->operands = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->argument_bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->given = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->placed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->taken = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
         state->front.ops = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
         state->front.kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
@@ -3997,14 +4858,235 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->front.positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, records);
         state->front.arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, records);
         room = state->firsts != NULL && state->roots != NULL && state->counts != NULL && state->bases != NULL && state->records != NULL && state->operands != NULL &&
-               state->argument_bases != NULL && state->given != NULL && state->taken != NULL && state->front.ops != NULL && state->front.kinds != NULL && state->front.classes != NULL &&
-               state->front.fits != NULL && state->front.left != NULL && state->front.right != NULL && state->front.inputs != NULL && state->front.counts != NULL &&
-               state->front.positions != NULL && state->front.arguments != NULL;
+               state->argument_bases != NULL && state->given != NULL && state->placed != NULL && state->taken != NULL && state->front.ops != NULL && state->front.kinds != NULL &&
+               state->front.classes != NULL && state->front.fits != NULL && state->front.left != NULL && state->front.right != NULL && state->front.inputs != NULL &&
+               state->front.counts != NULL && state->front.positions != NULL && state->front.arguments != NULL;
+    }
+    const bool window = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW) != 0;
+    if (room && window)
+    {
+        // By the front's record, each with a vector's records past the front's.
+        const uint64_t places = (uint64_t)BUSTER_NODE_FRONT_RECORDS + 64;
+        state->place_taken = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_fits = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_types = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, places);
+        state->place_flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        state->place_objects = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        state->place_payloads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, places);
+        state->place_standings = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_exponents = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, places);
+        state->place_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        state->place_converted = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, 2 * places);
+        state->place_conversion_flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * places);
+        state->place_member_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, places);
+        state->place_arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, places);
+        state->name_list = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        state->name_kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->name_entries = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, places);
+        room = state->place_taken != NULL && state->place_kinds != NULL && state->place_fits != NULL && state->place_types != NULL && state->place_flags != NULL &&
+               state->place_objects != NULL && state->place_payloads != NULL && state->place_standings != NULL && state->place_exponents != NULL &&
+               state->place_words != NULL && state->place_converted != NULL && state->place_conversion_flags != NULL && state->place_member_offsets != NULL && state->place_arguments != NULL &&
+               state->name_list != NULL && state->name_kinds != NULL && state->name_entries != NULL;
+        if (room)
+        {
+            // T's records of the places no expression has taken are read as given records': zeros, not what the arena had.
+            memset(state->place_taken, 0, places);
+            memset(state->place_kinds, 0, places);
+            memset(state->place_fits, 0, places);
+            memset(state->place_types, 0, places * sizeof(TypeId));
+            memset(state->place_flags, 0, places * sizeof(uint32_t));
+            memset(state->place_objects, 0, places * sizeof(uint32_t));
+            memset(state->place_payloads, 0, places * sizeof(uint64_t));
+            memset(state->place_standings, 0, places);
+            memset(state->place_exponents, 0, places * sizeof(uint16_t));
+            memset(state->place_words, 0, places * sizeof(uint32_t));
+            memset(state->place_converted, 0, 2 * places * sizeof(TypeId));
+            memset(state->place_conversion_flags, 0, 2 * places * sizeof(uint32_t));
+            memset(state->place_member_offsets, 0, places * sizeof(uint64_t));
+            memset(state->place_arguments, 0, places * sizeof(uint64_t));
+        }
+    }
+    if (room && window && (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_CONTEXTS) != 0)
+    {
+        // C on the window's own: the reference's answers by the front's record, the batch's expressions', and the
+        // window's columns, each a chunk's records with a block of zeros before them and two after.
+        const uint64_t places = (uint64_t)BUSTER_NODE_FRONT_RECORDS + 64;
+        const uint64_t padded = (uint64_t)BUSTER_NODE_FRONT_RECORDS + 192;
+        state->place_c_states = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_c_contexts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_c_templates = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, places);
+        state->place_c_targets = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, places);
+        state->c_ran = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->c_targets = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->c_ticks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->c_verdicts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->window_c_targets = arena_push_array(arena, padded, sizeof(TypeId), 64);
+        state->window_c_strides = arena_push_array(arena, padded, sizeof(uint64_t), 64);
+        state->window_c_masks = arena_push_array(arena, 8 * ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2), sizeof(uint64_t), 64);
+        state->c_tables = arena_push_array(arena, 1, 256, 64);
+        uint8_t** columns[] = { &state->window_c_classes, &state->window_c_facts, &state->window_c_kinds, &state->window_c_standings, &state->window_c_flags,
+                                &state->window_c_templates, &state->window_c_keys, &state->window_c_contexts, &state->window_c_sources, &state->window_c_reasons };
+        room = state->place_c_states != NULL && state->place_c_contexts != NULL && state->place_c_templates != NULL && state->place_c_targets != NULL &&
+               state->c_ran != NULL && state->c_targets != NULL && state->c_ticks != NULL && state->c_verdicts != NULL && state->window_c_targets != NULL &&
+               state->window_c_masks != NULL && state->c_tables != NULL && state->window_c_strides != NULL;
+        for (uint32_t c = 0; room && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+        {
+            uint8_t* column = arena_push_array(arena, padded, 1, 64);
+            room = column != NULL;
+            if (room)
+            {
+                memset(column, 0, padded);
+                *columns[c] = column + 64;
+            }
+        }
+        if (room)
+        {
+            memset(state->place_c_states, 0, places);
+            memset(state->place_c_contexts, 0, places);
+            memset(state->place_c_templates, 0, places);
+            memset(state->place_c_targets, 0, places * sizeof(TypeId));
+            memset(state->window_c_targets, 0, padded * sizeof(TypeId));
+            memset(state->window_c_strides, 0, padded * sizeof(uint64_t));
+            // The batch's expressions' too: a page first written in a sweep would be that sweep's time.
+            memset(state->c_ran, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+            memset(state->c_targets, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS * sizeof(TypeId));
+            memset(state->c_ticks, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS * sizeof(uint64_t));
+            memset(state->c_verdicts, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+            memset(state->window_c_masks, 0, 8 * ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2) * sizeof(uint64_t));
+            node_contexts_tables(state->c_tables);
+            state->c_fault = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT) != 0;
+            state->c_fault_turn = 0;
+        }
+        else
+        {
+            state->c_tables = NULL;
+        }
+    }
+    if (room && state->c_tables != NULL && (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_ROWS) != 0)
+    {
+        // The rows' own: the window's columns as C's are, the chunk's two streams, and the batch's expressions'.
+        const uint64_t padded = (uint64_t)BUSTER_NODE_FRONT_RECORDS + 192;
+        const uint64_t stream = (uint64_t)BUSTER_NODE_FRONT_RECORDS * 8 + 64;
+        state->window_x_reads = arena_push_array(arena, 2 * ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2), sizeof(uint64_t), 64);
+        state->x_cursors = arena_push_array(arena, padded / 8, sizeof(uint32_t), 64);
+        state->x_words = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        state->x_lines = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        state->x_updates = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        state->x_branches = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        state->window_x_types = arena_push_array(arena, padded, sizeof(TypeId), 64);
+        state->x_kinds = arena_push_array(arena, stream, 1, 64);
+        state->x_classes = arena_push_array(arena, stream, 1, 64);
+        state->x_first_kinds = arena_push_array(arena, stream, 1, 64);
+        state->x_first_classes = arena_push_array(arena, stream, 1, 64);
+        state->x_values = arena_push_array(arena, stream, sizeof(uint64_t), 64);
+        state->x_first_values = arena_push_array(arena, stream, sizeof(uint64_t), 64);
+        state->window_x_values = arena_push_array(arena, padded, sizeof(uint64_t), 64);
+        state->window_x_marks = arena_push_array(arena, (uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2, sizeof(uint64_t), 64);
+        state->window_x_ends = arena_push_array(arena, (uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2, sizeof(uint64_t), 64);
+        state->window_x_expressions = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        state->x_owners = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        state->x_marked = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        bool listed = true;
+        for (uint32_t list = 0; list < BUSTER_NODE_ROWS_LISTS; list += 1)
+        {
+            state->x_lists[list] = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+            listed = listed && state->x_lists[list] != NULL;
+        }
+        state->x_verdicts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->x_ticks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->x_tables = arena_push_array(arena, 1, 3072, 64);
+        const uint64_t summary_blocks = (uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2;
+        // (A list and the counts have a register's room past a chunk's records: the sweep stores one whole.)
+        state->window_x_suspects = arena_push_array(arena, summary_blocks, sizeof(uint64_t), 64);
+        state->x_summary_references = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        state->x_summary_suspects = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        state->x_summary_objects = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        // (The counts' column starts a register in: its stores are on a line's first byte, and the entry before its
+        // first is its own to keep zero.)
+        uint16_t* referenced = arena_push_array(arena, padded + 32, sizeof(uint16_t), 64);
+        state->window_x_referenced = referenced != NULL ? referenced + 32 : NULL;
+        state->x_summary_facts = arena_push_array(arena, padded, 1, 64);
+        state->x_first_summary_referenced = arena_push_array(arena, padded, sizeof(uint16_t), 64);
+        state->x_first_summary_facts = arena_push_array(arena, padded, 1, 64);
+        state->x_first_summary_objects = arena_push_array(arena, padded, sizeof(uint32_t), 64);
+        listed = listed && state->window_x_suspects != NULL && state->x_summary_references != NULL && state->x_summary_suspects != NULL &&
+                 state->x_summary_objects != NULL && state->window_x_referenced != NULL && state->x_summary_facts != NULL && state->x_first_summary_referenced != NULL &&
+                 state->x_first_summary_facts != NULL && state->x_first_summary_objects != NULL;
+        uint8_t** columns[] = { &state->window_x_owns,  &state->window_x_conversions, &state->window_x_lengths, &state->window_x_targets, &state->window_x_facts,
+                                &state->window_x_operands, &state->window_x_offsets, &state->window_x_bits, &state->window_x_senses, &state->window_x_lines,
+                                &state->window_x_returns, &state->window_x_joined };
+        room = state->window_x_reads != NULL && state->x_cursors != NULL && state->x_words != NULL && state->x_lines != NULL && state->x_updates != NULL &&
+               state->x_branches != NULL && state->x_first_kinds != NULL && state->x_first_classes != NULL && state->window_x_types != NULL && state->x_kinds != NULL && state->x_classes != NULL && state->x_verdicts != NULL && state->x_ticks != NULL &&
+               state->x_tables != NULL && state->x_values != NULL && state->x_first_values != NULL && state->window_x_marks != NULL && state->x_owners != NULL && state->x_marked != NULL && state->window_x_values != NULL && state->window_x_ends != NULL &&
+               state->window_x_expressions != NULL && listed;
+        for (uint32_t c = 0; room && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+        {
+            uint8_t* column = arena_push_array(arena, padded, 1, 64);
+            room = column != NULL;
+            if (room)
+            {
+                memset(column, 0, padded);
+                *columns[c] = column + 64;
+            }
+        }
+        if (room)
+        {
+            // Each page written here: one first written in a sweep would be that sweep's time.
+            memset(state->window_x_reads, 0, 2 * ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2) * sizeof(uint64_t));
+            memset(state->x_cursors, 0, padded / 8 * sizeof(uint32_t));
+            memset(state->x_words, 0, padded * sizeof(uint32_t));
+            memset(state->x_lines, 0, padded * sizeof(uint32_t));
+            memset(state->x_updates, 0, padded * sizeof(uint32_t));
+            memset(state->x_branches, 0, padded * sizeof(uint32_t));
+            memset(state->window_x_types, 0, padded * sizeof(TypeId));
+            memset(state->x_kinds, 0, stream);
+            memset(state->x_classes, 0, stream);
+            memset(state->x_first_kinds, 0, stream);
+            memset(state->x_first_classes, 0, stream);
+            memset(state->x_values, 0, stream * sizeof(uint64_t));
+            memset(state->x_first_values, 0, stream * sizeof(uint64_t));
+            memset(state->window_x_values, 0, padded * sizeof(uint64_t));
+            memset(state->window_x_marks, 0, ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2) * sizeof(uint64_t));
+            memset(state->window_x_ends, 0, ((uint64_t)BUSTER_NODE_FRONT_RECORDS / 64 + 2) * sizeof(uint64_t));
+            memset(state->window_x_expressions, 0, padded * sizeof(uint16_t));
+            memset(state->x_owners, 0, padded * sizeof(uint16_t));
+            memset(state->x_marked, 0, padded * sizeof(uint16_t));
+            for (uint32_t list = 0; list < BUSTER_NODE_ROWS_LISTS; list += 1)
+            {
+                memset(state->x_lists[list], 0, padded * sizeof(uint16_t));
+            }
+            memset(state->x_verdicts, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+            memset(state->x_ticks, 0, BUSTER_NODE_FACTS_READER_EXPRESSIONS * sizeof(uint64_t));
+            memset(state->window_x_suspects, 0, summary_blocks * sizeof(uint64_t));
+            memset(state->x_summary_references, 0, padded * sizeof(uint16_t));
+            memset(state->x_summary_suspects, 0, padded * sizeof(uint16_t));
+            memset(state->x_summary_objects, 0, padded * sizeof(uint32_t));
+            memset(state->window_x_referenced - 32, 0, (padded + 32) * sizeof(uint16_t));
+            memset(state->x_summary_facts, 0, padded);
+            memset(state->x_first_summary_referenced, 0, padded * sizeof(uint16_t));
+            memset(state->x_first_summary_facts, 0, padded);
+            memset(state->x_first_summary_objects, 0, padded * sizeof(uint32_t));
+            state->summaries = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_SUMMARY_OFF) == 0;
+            node_rows_tables(state->x_tables);
+            state->x_fault = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_ROWS_FAULT) != 0;
+            state->x_fault_turn = 0;
+            state->x_again_turn = 0;
+            state->x_decided_now = 0;
+            state->summary_fault = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT) != 0;
+            state->summary_fault_turn = 0;
+            state->summary_again_turn = 0;
+        }
+        else
+        {
+            state->x_tables = NULL;
+        }
     }
     room = room && node_facts_begin(&state->facts, machine, BUSTER_NODE_FACTS_READER_RECORDS, 0, true, false, true, BUSTER_NODE_FACTS_READER_LINES, arena);
     if (room)
     {
         state->facts.enum_values = reader->enum_values;
+        state->facts.argument_one = (reader->pp->options.node_reader & BUSTER_NODE_READER_ONE_SLOT) != 0;
         memset(state->front.fits, 0, records);
         for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
         {
@@ -4089,18 +5171,18 @@ static bool node_facts_value_line(const NodeMachine* machine, const CheckValue* 
     const bool rare = high != 0 || value->imaginary_storage[0] != 0 || (value->imaginary_storage[1] & 0xffffu) != 0 || value->overload_head != 0 ||
                       value->bit_width != 0 || value->fault != CHECK_FAULT_NONE || value->fault_node != 0 || value->object_bit_offset != 0 ||
                       (uint32_t)value->category > 0x03u || (uint32_t)kind > 0x07u;
-    const uint32_t fields = (low != 0) + (offset != 0) + floating;
+    const uint64_t payload = offset != 0 ? offset : floating ? significand : low;
     *line = (NodeFactsRecord){
         .type = value->type,
         .word = node_machine_word(machine, value->type),
         .flags = value->flags,
         .object = value->object,
-        .payload = offset != 0 ? offset : floating ? significand : low,
+        .payload = payload,
         .standing = (uint8_t)(BUSTER_NODE_MACHINE_STANDING(value->category & 0x03u, kind & 0x07u) | (offset != 0 ? BUSTER_NODE_MACHINE_OFFSET : floating ? BUSTER_NODE_MACHINE_FLOATING : 0)),
         .taken = 1,
-        .exponent = floating ? (uint16_t)exponent : 0,
+        .exponent = (uint16_t)(offset == 0 && floating ? exponent : node_facts_small(payload)),
     };
-    return !rare && fields <= 1;
+    return !rare && node_machine_whole(kind, low, offset, floating);
 }
 
 // A literal's or a string's line of its own for `value`, as node_facts_literal makes one from T's record: its number,
@@ -4144,6 +5226,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_front_integer(N
         .payload = integer,
         .standing = BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER),
         .taken = 1,
+        .exponent = (uint16_t)node_facts_small(integer),
     };
     const uint32_t number = facts->literal_count < facts->literal_capacity ? facts->literal_count + 1 : 0;
     if (number != 0)
@@ -4191,8 +5274,10 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
     const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE;
     const uint32_t size = operand < record ? front->sizes[operand] : 0;
     // Its subtree's records are the chunk's own, which are in a row: a record kept from an earlier chunk has its place
-    // alone (node_front_keep), and the records below it are gone.
-    bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 && operand + 1 - size >= front->made;
+    // alone (node_front_keep), and the records below it are gone. Where the front writes the window it keeps a waiting
+    // value's records whole, in a row, and says of each record whether its subtree is there.
+    const bool row = front->window ? front->window_classes[operand < record ? operand : record] != BUSTER_NODE_FACTS_CLASS_CUT : operand + 1 - size >= front->made;
+    bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 && row;
     uint32_t why = whole ? BUSTER_NODE_FACTS_WHY_GIVEN : BUSTER_NODE_FACTS_WHY_CUT;
     const uint32_t start = whole ? operand + 1 - size : 0;
     for (uint32_t r = 0; whole && r < count; r += 1)
@@ -4332,16 +5417,640 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
     return why;
 }
 
+// The inputs of the batch's records from `base`, `count` of them, and of their calls' arguments, from `argument_base` to
+// `argument_end`, taken into `set` from the windows' own, node_facts_append's: an expression `set`'s making doesn't give.
+static void node_facts_inputs_take(NodeFactsInputs* set, const NodeFacts* facts, uint32_t base, uint32_t count, uint32_t argument_base, uint32_t argument_end)
+{
+    memcpy(set->ops + base, facts->ops + base, count);
+    memcpy(set->kinds + base, facts->kinds + base, count);
+    memcpy(set->classes + base, facts->classes + base, count);
+    memcpy(set->left + base, facts->left + base, (uint64_t)count * sizeof(uint16_t));
+    memcpy(set->right + base, facts->right + base, (uint64_t)count * sizeof(uint16_t));
+    memcpy(set->inputs + base, facts->inputs + base, (uint64_t)count * sizeof(uint32_t));
+    memcpy(set->counts + base, facts->counts + base, (uint64_t)count * sizeof(uint16_t));
+    memcpy(set->positions + base, facts->positions + base, (uint64_t)count * sizeof(uint32_t));
+    memcpy(set->arguments + argument_base, facts->arguments + argument_base, (uint64_t)(argument_end - argument_base) * sizeof(uint16_t));
+}
+
+// The window the front writes (BUSTER_NODE_READER_WINDOW; measure-node-machine --shadow --front-window;
+// docs/one-core-path.md, "The front writes the window"). The copy above reads a record's fields back from the front's
+// columns, by a branch on its operator, after the front made the chunk: the front had each of those values in a register
+// when it made the record, and had branched on what the record is. Here the front's pass writes a record's inputs as it
+// makes the record, into columns of its own beside its others (NodeFront.window_kinds and the rest), and the kernel
+// reads them there: a chunk's records are its window, with nothing copied (node_facts_window_run).
+//
+// What the front has when it makes a record is all of a record's inputs but one:
+// - A literal's leaf's line is a batch's own. The batch's first lines have the front's records' numbers, so a
+//   literal's line is its record's, written as the record is.
+// - A call's arguments are the records the front has just taken off its stack: their distances go to a list of the
+//   front's, a call's in a row.
+// - A name's leaf's line is its declaration's, two loads from the leaf (the line's number by the declaration, then the
+//   line) that miss the nearest caches where the declaration is far. In the front's own pass, which retires some two
+//   hundred instructions a record, a load that misses holds the pass up: measured there on the 9700X the two cost
+//   three times what they cost in a loop of their own (docs/one-core-path.md). So the front writes the declaration and
+//   asks the cache for its line's number, and a pass over the chunk's records right after it gives each name's leaf
+//   its line (node_facts_window_names), by sweeps that ask for a load before they read it. A line is made at its
+//   declaration's first use, which is there.
+//
+// A record's subtree is the `NodeFront.sizes` records that end at it: the front makes an expression's records in its
+// postorder, each operand's subtree in a row before the next's, and the walk acts at no token within an expression
+// whose value no token takes (such a record among them would show in the front's comparison with the walk's nodes and
+// in T's own test of an expression's range). A chunk's end keeps a waiting value's row whole, or keeps its place alone
+// and cuts it (node_front_keep; BUSTER_NODE_FACTS_CLASS_CUT in its class), and a record with a cut operand is cut as it
+// is made. An operand's distance is the difference of the two records' places. A root's operand is wherever its value
+// waited (a control's condition's, for its body): the kernel reads an operand by its distance, whatever lies between.
+//
+// The kernel makes the records of the expressions T took whose records are there in a row, and reads every other
+// record of the window as given (`place_kinds`): the shadow has T's records for those alone, and a compile's kernel
+// would make every record and refuse by expression.
+
+// Whether the front writes the window in the unit `reader` reads, whose kernel at reader time is `front`'s typer's: the
+// options ask, and the kernel runs there on the lean front's records. With it, the operators' kinds and codes for the
+// writers, and the same lean front without the window on the reader's scratch, run beside this one for its ticks
+// (NodeFront.plain; without room for it the window is still written, and its ticks have nothing to be read against).
+static void node_facts_window_begin(NodeFront* front, CheckInputReader* reader)
+{
+    struct NodeFactsReader* state = front->typer != NULL ? front->typer->facts : NULL;
+    _Static_assert(CHECK_OP_COUNT <= 256, "an operator's kind and code are a byte's index away");
+    if (state != NULL && front->lean && state->place_taken != NULL)
+    {
+        memset(front->window_op_kinds, BUSTER_NODE_FACTS_GIVEN, sizeof(front->window_op_kinds));
+        memset(front->window_op_codes, BUSTER_NODE_FACTS_CODES, sizeof(front->window_op_codes));
+        memcpy(front->window_op_kinds, state->op_kinds, CHECK_OP_COUNT);
+        memcpy(front->window_op_codes, state->op_codes, CHECK_OP_COUNT);
+        NodeFront* plain = arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64);
+        NodeFrontShadow* shadow = arena_push_array(reader->scratch, 1, sizeof(NodeFrontShadow), _Alignof(NodeFrontShadow));
+        if (plain != NULL && shadow != NULL)
+        {
+            if ((reader->pp->options.node_front & BUSTER_NODE_FRONT_WARM) != 0)
+            {
+                memset(plain, 0, sizeof(NodeFront));
+            }
+            // Its report is its own: no node of the walk's is its to mark (a node's capacity of none).
+            memset(shadow, 0, sizeof(*shadow));
+            plain->shadow = shadow;
+            plain->count = 0;
+            plain->pending = 0;
+            plain->made = 0;
+            plain->stack_count = 0;
+            plain->group_count = 0;
+            plain->full = false;
+            plain->lean = true;
+            plain->ordinal = 0;
+            plain->argument_count = 0;
+            plain->wide_count = 0;
+            plain->typer = NULL;
+            plain->flat = NULL;
+            plain->window = false;
+            plain->window_facts = NULL;
+            plain->window_numbers = NULL;
+            plain->window_argument_count = 0;
+            plain->plain = NULL;
+            plain->chunks = 0;
+            front->plain = plain;
+        }
+        front->window = true;
+        front->window_facts = &state->facts;
+        front->window_numbers = state->facts.numbers;
+        front->window_argument_count = 0;
+        state->windowed = true;
+        // The lines' first numbers are the front's records': a literal's leaf's line has its record's.
+        state->facts.literal_count = BUSTER_NODE_FRONT_RECORDS;
+    }
+}
+
+// A record the front kept at a chunk's end (node_front_keep), at `to` from `from`. A literal's or a string's leaf's
+// line has its record's number, and moves with it. A call's arguments are kept after those of the calls kept before
+// it (`arguments` of them), where the next chunk's follow.
+static inline void node_facts_window_kept(NodeFront* front, uint32_t to, uint32_t from, uint32_t* arguments)
+{
+    if (front->window_kinds[to] == BUSTER_NODE_FACTS_LITERAL_LINE && to != from)
+    {
+        NodeFacts* facts = front->window_facts;
+        memcpy(facts->lines + 4 * ((uint64_t)to + 1), facts->lines + 4 * ((uint64_t)from + 1), 4 * sizeof(uint64_t));
+        front->window_entries[to] = to + 1;
+    }
+    else if (front->ops[to] == CHECK_OP_CALL)
+    {
+        const uint32_t count = front->window_counts[to];
+        memmove(front->window_arguments + *arguments, front->window_arguments + front->window_entries[to], (uint64_t)count * sizeof(uint16_t));
+        front->window_entries[to] = *arguments;
+        *arguments += count;
+    }
+}
+
+// A literal's leaf whose type's row is no integer's, or a string's: its line, as node_facts_front_expression makes it
+// (of the reader's decoding `decoded` of the literal, which the front has at hand; of the string's type and object),
+// at the lines' number `number`. Whether the columns hold the value whole, which a line's leaf is.
+static __attribute__((noinline)) bool node_facts_window_rare_leaf(NodeFront* front, CheckInputReader* reader, uint32_t record, uint32_t token, uint32_t category,
+                                                                  const CheckLiteral* decoded, uint32_t number)
+{
+    NodeFacts* facts = front->window_facts;
+    const TypeId type = front->leaf_types[record];
+    CheckValue value = { 0 };
+    if (category == BUSTER_NODE_FRONT_LEAF_LITERAL)
+    {
+        value = check_input_literal_value(reader, token, *decoded);
+    }
+    else
+    {
+        const uint32_t object = (uint32_t)front->leaf_integers[record];
+        value = (CheckValue){
+            .type = type,
+            .category = CHECK_LVALUE,
+            .flags = BUSTER_CHECK_STATIC_OBJECT | (object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
+            .constant_kind = CHECK_CONSTANT_ADDRESS,
+            .object = object,
+        };
+    }
+    // Its type's word is the machine's since it began: a literal's type is a basic one, and a string's array was made
+    // when the unit's names were resolved, before the walk.
+    NodeFactsRecord line;
+    const bool whole = node_facts_value_line(facts->machine, &value, &line);
+    if (whole)
+    {
+        memcpy(facts->lines + 4 * (uint64_t)number, &line, 4 * sizeof(uint64_t));
+    }
+    return whole;
+}
+
+// A leaf's record's inputs, as the lean front makes the record `record` at `token`, of `category`
+// (BUSTER_NODE_FRONT_LEAF_*): node_facts_front_expression's of the same record, from what the front holds.
+// - A name's (its declaration `declaration`): an identifier's kind and its declaration, whose line the names' pass
+//   over the chunk finds (node_facts_window_names).
+// - A literal's or a string's: a line of its own, the batch's line of its record's number (the lines' first numbers
+//   are the front's records': node_facts_window_begin), made here of the type and the value the front has just written
+//   in its own columns. `decoded` is the reader's decoding of a literal.
+static inline __attribute__((always_inline)) void node_facts_window_leaf(NodeFront* front, CheckInputReader* reader, uint32_t record, uint32_t token, uint32_t category,
+                                                                         uint32_t declaration, const CheckLiteral* decoded)
+{
+    uint8_t kind = BUSTER_NODE_FACTS_IDENTIFIER;
+    uint32_t entry = declaration;
+    if (category == BUSTER_NODE_FRONT_LEAF_IDENTIFIER)
+    {
+        // Its declaration's line's number is asked for, not read: the names' pass reads it, once the chunk is made.
+        __builtin_prefetch(front->window_numbers + declaration);
+    }
+    else
+    {
+        NodeFacts* facts = front->window_facts;
+        const uint32_t number = record + 1;
+        const TypeId type = front->leaf_types[record];
+        const uint32_t index = type_index(type);
+        bool whole = true;
+        // A literal of an integer's type (a string's is an array's, which has no integer's row). Its type has a row: it
+        // was the unit's before the walk, as node_facts_window_rare_leaf says.
+        if ((facts->rows[index].flags & BUSTER_NODE_FACTS_INTEGER) != 0)
+        {
+            // check_input_literal_value's leaf: a constant expression's value, and the spelling of zero where it is a
+            // number's (node_facts_front_integer's line).
+            // The line's four quadwords, each from registers (a record's first half: its type and word; its flags and
+            // object; its payload; its standing and `taken`): a record built in memory and copied would have the copy's
+            // load wait for its fields' stores.
+            const Parser* parser = facts->parser;
+            const uint64_t integer = front->leaf_integers[record];
+            const bool zero = integer == 0 && parser->tokens.kinds[token] == PARSE_KIND_NUMBER && parser->tokens.names[token] == 0;
+            uint64_t* const line = facts->lines + 4 * (uint64_t)number;
+            line[0] = (uint64_t)type | (uint64_t)facts->rows[index].word << 32;
+            line[1] = BUSTER_CHECK_ICE | (zero ? BUSTER_CHECK_LITERAL_ZERO : 0);
+            line[2] = integer;
+            line[3] = (uint64_t)BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER) | UINT64_C(1) << 8 | (uint64_t)node_facts_small(integer) << 16;
+        }
+        else
+        {
+            whole = node_facts_window_rare_leaf(front, reader, record, token, category, decoded, number);
+        }
+        kind = whole ? BUSTER_NODE_FACTS_LITERAL_LINE : BUSTER_NODE_FACTS_LITERAL;
+        entry = whole ? number : 0;
+    }
+    front->window_kinds[record] = kind;
+    front->window_classes[record] = BUSTER_NODE_FACTS_NO_CLASS;
+    front->window_left[record] = 0;
+    front->window_right[record] = 0;
+    front->window_entries[record] = entry;
+    front->window_positions[record] = check_input_expression_end(reader, token);
+}
+
+// An operator's record's inputs, as the lean front makes the record `record` of `op` at `token` with operands the
+// records a, b and c (BUSTER_NODE_FRONT_UNKNOWN for none; a conditional with its middle omitted has its first twice):
+// node_facts_front_expression's of the same record, from what the front holds. `entry` is a member's name, a cast's
+// type (void: a discard, a root's a statement's) or a return's conversion's; a conditional's is its third operand's
+// distance. A root's operand is wherever its value waited, and its distance says so.
+static inline __attribute__((always_inline)) void node_facts_window_operator(NodeFront* front, const CheckInputReader* reader, uint32_t record, CheckOp op, uint32_t token,
+                                                                             uint32_t a, uint32_t b, uint32_t c, uint32_t entry)
+{
+    const bool second = b != BUSTER_NODE_FRONT_UNKNOWN;
+    const bool third = c != BUSTER_NODE_FRONT_UNKNOWN;
+    const uint32_t class_a = front->window_classes[a];
+    const uint32_t class_b = second ? front->window_classes[b] : BUSTER_NODE_FACTS_NO_CLASS;
+    const uint32_t class_c = third ? front->window_classes[c] : BUSTER_NODE_FACTS_NO_CLASS;
+    const bool discard = op == CHECK_OP_CAST && entry == BUSTER_TYPE_VOID;
+    const uint8_t kind = discard ? BUSTER_NODE_FACTS_LOOKUP : front->window_op_kinds[op];
+    const uint32_t code = discard ? BUSTER_NODE_FACTS_CODE_DISCARD : front->window_op_codes[op];
+    const bool made = kind == BUSTER_NODE_FACTS_LOOKUP || kind == BUSTER_NODE_FACTS_OPERATOR;
+    // Its round: the greatest its operands ask (node_facts_round's).
+    const uint32_t round_a = node_facts_round_of(code, class_a);
+    const uint32_t round_b = node_facts_round_of(code, class_b);
+    const uint32_t round_c = node_facts_round_of(code, class_c);
+    const uint32_t round_ab = round_a > round_b ? round_a : round_b;
+    const uint32_t round = round_ab > round_c ? round_ab : round_c;
+    // Its records are in a row that ends at it unless an operand's are not.
+    const bool cut = class_a == BUSTER_NODE_FACTS_CLASS_CUT || class_b == BUSTER_NODE_FACTS_CLASS_CUT || class_c == BUSTER_NODE_FACTS_CLASS_CUT;
+    front->window_kinds[record] = kind;
+    front->window_classes[record] = (uint8_t)(cut ? BUSTER_NODE_FACTS_CLASS_CUT : made ? node_facts_class(round, code) : BUSTER_NODE_FACTS_NO_CLASS);
+    front->window_left[record] = (uint16_t)(record - a);
+    front->window_right[record] = (uint16_t)(second ? record - b : 0);
+    front->window_entries[record] = op == CHECK_OP_CONDITIONAL ? (third ? record - c : 0) : entry;
+    front->window_positions[record] = check_input_expression_end(reader, token);
+}
+
+// A call's record's inputs, as the lean front makes the record `record` at `token`: its callee's record and its
+// arguments' are `values`, `count` of them. Its arguments' distances are the next of the front's list.
+static inline __attribute__((always_inline)) void node_facts_window_call(NodeFront* front, const CheckInputReader* reader, uint32_t record, uint32_t token,
+                                                                         const uint32_t* values, uint32_t count)
+{
+    const uint32_t code = front->window_op_codes[CHECK_OP_CALL];
+    const uint32_t arguments = front->window_argument_count;
+    uint32_t round = 0;
+    bool cut = false;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const uint32_t operand = values[k];
+        const uint32_t class = front->window_classes[operand];
+        const uint32_t asked = node_facts_round_of(code, class);
+        round = asked > round ? asked : round;
+        cut = cut || class == BUSTER_NODE_FACTS_CLASS_CUT;
+        // The list has the arguments' distances: the callee's is written where the first argument's then is.
+        front->window_arguments[arguments + k - (k != 0 ? 1u : 0u)] = (uint16_t)(record - operand);
+    }
+    front->window_kinds[record] = front->window_op_kinds[CHECK_OP_CALL];
+    front->window_classes[record] = (uint8_t)(cut ? BUSTER_NODE_FACTS_CLASS_CUT : node_facts_class(round, code));
+    front->window_left[record] = (uint16_t)(record - values[0]);
+    front->window_right[record] = 0;
+    front->window_entries[record] = arguments;
+    front->window_counts[record] = (uint16_t)(count - 1);
+    front->window_positions[record] = check_input_expression_end(reader, token);
+    front->window_argument_count = arguments + count - 1;
+}
+
+// A name's leaf of the front's, at `r` among the records whose kinds and entries are `kinds` and `entries`, its token
+// `token`: its entry, its declaration, becomes its declaration's line's number, found by a load where an earlier use
+// made the line and made here at its first (node_facts_front_line); a literal's kind where the line is no leaf's of the
+// columns' (an enumerator past 64 bits, whose record T's columns don't hold).
+static inline __attribute__((always_inline)) void node_facts_window_name(NodeFacts* facts, uint8_t* kinds, uint32_t* entries, uint32_t r, uint32_t token)
+{
+    const uint32_t number = node_facts_front_line(facts, entries[r], token);
+    const bool high = number != 0 && ((uint32_t)(facts->lines[4 * (uint64_t)number + 3] >> 32) & BUSTER_NODE_FACTS_HIGH) != 0;
+    const bool named = number != 0 && !high;
+    kinds[r] = named ? BUSTER_NODE_FACTS_IDENTIFIER : BUSTER_NODE_FACTS_LITERAL;
+    entries[r] = named ? number : 0;
+}
+
+// The names' leaves among `count` records from the front's `first`, whose kinds and entries are `kinds` and `entries`
+// (the front's own columns, or a copy of them): each gets its declaration's line (node_facts_window_name). How many
+// there were. By three sweeps, each a loop of a few loads that the next record's don't wait for:
+// - the names' places into `list`, by a compare of the kinds and a compress of the lanes, sixteen records a step;
+// - each name's line asked for: its number is a load (the front asked for it as it made the leaf), and the line a
+//   prefetch;
+// - each name's line read and its kind and entry written.
+// A name's two loads are then in the cache when they are read, where one loop a name has the second wait for the
+// first (docs/one-core-path.md). The scalar path (`scalar`, a constant where this is inlined; a host without the
+// vectors has no other) is that loop, a test a record: the same kinds and entries.
+static inline __attribute__((always_inline)) uint32_t node_facts_window_names_by(NodeFacts* facts, const NodeFront* front, uint8_t* kinds, uint32_t* entries, uint32_t* list,
+                                                                                 uint32_t first, uint32_t count, const bool scalar)
+{
+    uint32_t names = 0;
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            if (kinds[r] == BUSTER_NODE_FACTS_IDENTIFIER)
+            {
+                node_facts_window_name(facts, kinds, entries, r, front->tokens[first + r]);
+                names += 1;
+            }
+        }
+    }
+    else
+    {
+        const __m512i step = _mm512_set1_epi32(16);
+        __m512i places = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+        for (uint32_t i = 0; i < count; i += 16)
+        {
+            const uint32_t live = count - i < 16 ? count - i : 16;
+            const __mmask16 mask = (__mmask16)((1u << live) - 1);
+            const __mmask16 found = _mm_mask_cmpeq_epi8_mask(mask, _mm_maskz_loadu_epi8(mask, kinds + i), _mm_set1_epi8(BUSTER_NODE_FACTS_IDENTIFIER));
+            _mm512_storeu_si512(list + names, _mm512_maskz_compress_epi32(found, places));
+            names += (uint32_t)__builtin_popcount((uint32_t)found);
+            places = _mm512_add_epi32(places, step);
+        }
+        const uint32_t* numbers = facts->numbers;
+        const uint64_t* lines = facts->lines;
+        for (uint32_t k = 0; k < names; k += 1)
+        {
+            __builtin_prefetch(lines + 4 * (uint64_t)numbers[entries[list[k]]]);
+        }
+        for (uint32_t k = 0; k < names; k += 1)
+        {
+            const uint32_t r = list[k];
+            node_facts_window_name(facts, kinds, entries, r, front->tokens[first + r]);
+        }
+    }
+    return names;
+}
+
+static __attribute__((noinline)) uint32_t node_facts_window_names_vector(NodeFacts* facts, const NodeFront* front, uint8_t* kinds, uint32_t* entries, uint32_t* list,
+                                                                         uint32_t first, uint32_t count)
+{
+    return node_facts_window_names_by(facts, front, kinds, entries, list, first, count, false);
+}
+
+static __attribute__((noinline)) uint32_t node_facts_window_names_scalar(NodeFacts* facts, const NodeFront* front, uint8_t* kinds, uint32_t* entries, uint32_t* list,
+                                                                         uint32_t first, uint32_t count)
+{
+    return node_facts_window_names_by(facts, front, kinds, entries, list, first, count, true);
+}
+
+// The names' pass over the chunk the front has just made (its records from `made`): each name's leaf gets its
+// declaration's line, in the front's own columns. A line made here reads its declaration's type's word, which the
+// machine has had since it began: the reader made the declarations' types before the walk. The pass's ticks, the names
+// and the lines it made with theirs go to the front's report. Then the same by the scalar path, on a copy of the
+// chunk's kinds and entries as the front left them: a leaf whose kind or line is not the pass's is counted.
+static void node_facts_window_names(NodeFront* front)
+{
+    struct NodeFactsReader* state = front->typer->facts;
+    NodeFacts* facts = &state->facts;
+    NodeFrontShadow* shadow = front->shadow;
+    const uint32_t first = front->made;
+    const uint32_t count = front->count - first;
+    memcpy(state->name_kinds, front->window_kinds + first, count);
+    memcpy(state->name_entries, front->window_entries + first, (uint64_t)count * sizeof(uint32_t));
+    const uint64_t lines = facts->line_count;
+    const uint64_t line_ticks = facts->line_ticks;
+    const uint64_t t0 = __rdtsc();
+    const uint32_t names = node_facts_window_names_vector(facts, front, front->window_kinds + first, front->window_entries + first, state->name_list, first, count);
+    shadow->window_name_ticks += __rdtsc() - t0;
+    shadow->window_names += names;
+    shadow->window_lines += facts->line_count - lines;
+    shadow->window_line_ticks += facts->line_ticks - line_ticks;
+    const uint32_t again = node_facts_window_names_scalar(facts, front, state->name_kinds, state->name_entries, state->name_list, first, count);
+    uint32_t differences = again != names;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        differences += state->name_kinds[r] != front->window_kinds[first + r] || state->name_entries[r] != front->window_entries[first + r];
+    }
+    shadow->window_name_differences += differences;
+}
+
+// Whether the inputs the front wrote of its record `x` are the batch's record `w`'s, as `facts` has them now
+// (node_facts_append's, or the copy's while they are exchanged for those): every field the kernel reads of a record, a
+// leaf's line by its number or its words, and a call's arguments. `root`: the record is its expression's root, whose
+// operand the front has at `distance` and the batch's record at one.
+static bool node_facts_window_same(const NodeFacts* facts, const NodeFront* front, uint32_t x, uint32_t w, bool root, uint32_t distance)
+{
+    const uint8_t kind = facts->kinds[w];
+    const CheckOp op = (CheckOp)facts->ops[w];
+    bool same = front->ops[x] == facts->ops[w] && front->window_kinds[x] == kind && front->window_classes[x] == facts->classes[w] &&
+                (root ? front->window_left[x] == distance && facts->left[w] == 1 : front->window_left[x] == facts->left[w]) &&
+                front->window_right[x] == facts->right[w] && front->window_positions[x] == facts->positions[w];
+    if (same && (kind == BUSTER_NODE_FACTS_LITERAL_LINE || kind == BUSTER_NODE_FACTS_IDENTIFIER))
+    {
+        same = front->window_entries[x] == facts->inputs[w] ||
+               memcmp(facts->lines + 4 * (uint64_t)front->window_entries[x], facts->lines + 4 * (uint64_t)facts->inputs[w], 4 * sizeof(uint64_t)) == 0;
+    }
+    else if (same && op == CHECK_OP_CALL && kind == BUSTER_NODE_FACTS_LOOKUP)
+    {
+        same = front->window_counts[x] == facts->counts[w];
+        for (uint32_t i = 0; same && i < facts->counts[w]; i += 1)
+        {
+            same = front->window_arguments[front->window_entries[x] + i] == facts->arguments[facts->inputs[w] + i];
+        }
+    }
+    else if (same && kind != BUSTER_NODE_FACTS_LITERAL)
+    {
+        same = front->window_entries[x] == facts->inputs[w];
+    }
+    return same;
+}
+
+// T's records as the batch has them by its own places, exchanged with `state`'s by the front's records (and back): the
+// kernel's run in place reads a given record and compares a made one by the front's place.
+static void node_facts_window_expected_exchange(struct NodeFactsReader* state)
+{
+    NodeFacts* facts = &state->facts;
+#define BUSTER_NODE_FACTS_EXCHANGE(type, mine, theirs) \
+    do \
+    { \
+        type* const kept = facts->theirs; \
+        facts->theirs = state->mine; \
+        state->mine = kept; \
+    } while (0)
+    BUSTER_NODE_FACTS_EXCHANGE(TypeId, place_types, expected_types);
+    BUSTER_NODE_FACTS_EXCHANGE(uint32_t, place_flags, expected_flags);
+    BUSTER_NODE_FACTS_EXCHANGE(uint32_t, place_objects, expected_objects);
+    BUSTER_NODE_FACTS_EXCHANGE(uint64_t, place_payloads, expected_payloads);
+    BUSTER_NODE_FACTS_EXCHANGE(uint8_t, place_standings, expected_standings);
+    BUSTER_NODE_FACTS_EXCHANGE(uint16_t, place_exponents, expected_exponents);
+    BUSTER_NODE_FACTS_EXCHANGE(uint32_t, place_words, expected_words);
+    BUSTER_NODE_FACTS_EXCHANGE(TypeId, place_converted, expected_converted);
+    BUSTER_NODE_FACTS_EXCHANGE(uint32_t, place_conversion_flags, expected_conversion_flags);
+    BUSTER_NODE_FACTS_EXCHANGE(uint64_t, place_member_offsets, expected_member_offsets);
+    BUSTER_NODE_FACTS_EXCHANGE(uint64_t, place_arguments, expected_arguments);
+#undef BUSTER_NODE_FACTS_EXCHANGE
+}
+
+// An expression of the batch whose records the front has in a row, the front's from `start` (`size` of them, its
+// operand's subtree) and its root `record` (but an initialization's), the batch's `count` from `base`: each of its
+// records is one the kernel's run in place makes (`place_taken`), with T's record of it at the front's place; and the
+// inputs the front wrote of it are compared with the batch's, node_facts_append's and, where the copy gave the
+// expression (`copied`), the copy's.
+static void node_facts_window_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t base, uint32_t count, uint32_t record, uint32_t start, uint32_t size,
+                                         bool copied)
+{
+    NodeFacts* facts = &state->facts;
+    NodeFrontTypes* types = state->types;
+    const uint32_t distance = record - (start + size - 1);
+    for (uint32_t twin = 0; twin < (copied ? 2u : 1u); twin += 1)
+    {
+        if (twin != 0)
+        {
+            node_facts_inputs_exchange(facts, &state->front);
+        }
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            const uint32_t x = r < size ? start + r : record;
+            if (!node_facts_window_same(facts, front, x, base + r, r == size, distance))
+            {
+                types->facts_counts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] += 1;
+                node_facts_reader_difference(state, base + r, front->tokens[x], BUSTER_NODE_FACTS_DIFFERENCE_WINDOW);
+            }
+        }
+        if (twin != 0)
+        {
+            node_facts_inputs_exchange(facts, &state->front);
+        }
+    }
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const uint32_t x = r < size ? start + r : record;
+        const uint64_t w = (uint64_t)base + r;
+        state->place_taken[x] = 1;
+        state->place_types[x] = facts->expected_types[w];
+        state->place_flags[x] = facts->expected_flags[w];
+        state->place_objects[x] = facts->expected_objects[w];
+        state->place_payloads[x] = facts->expected_payloads[w];
+        state->place_standings[x] = facts->expected_standings[w];
+        state->place_exponents[x] = facts->expected_exponents[w];
+        state->place_words[x] = facts->expected_words[w];
+        state->place_converted[2 * (uint64_t)x] = facts->expected_converted[2 * w];
+        state->place_converted[2 * (uint64_t)x + 1] = facts->expected_converted[2 * w + 1];
+        state->place_conversion_flags[2 * (uint64_t)x] = facts->expected_conversion_flags[2 * w];
+        state->place_conversion_flags[2 * (uint64_t)x + 1] = facts->expected_conversion_flags[2 * w + 1];
+        state->place_member_offsets[x] = facts->expected_member_offsets[w];
+        // With the comparison's control (BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT), T's conversion of each call's
+        // argument is another type's: every call whose arguments' conversions the kernel makes then differs from T's.
+        state->place_arguments[x] = facts->expected_arguments[w] ^ (state->c_fault && facts->expected_arguments[w] != 0 ? 1u : 0u);
+    }
+    if (state->c_tables != NULL && state->c_ran_now != 0)
+    {
+        // The reference's C has just run on the expression: its answers of each record, by the front's record.
+        const NodeMachineColumns* columns = facts->machine->columns;
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            const uint32_t x = r < size ? start + r : record;
+            state->place_c_states[x] = columns->states[r];
+            state->place_c_contexts[x] = columns->contexts[r];
+            state->place_c_templates[x] = columns->templates[r];
+            state->place_c_targets[x] = columns->targets[r];
+        }
+    }
+}
+
+// The kernel on the front's columns in place: the chunk's records the front holds are one window, read where the
+// front wrote them. Nothing is copied but, for the shadow, the kinds: the kernel makes the records of the batch's
+// expressions whose records are there in a row (node_facts_window_expression), and every other record is a given one.
+// Three runs, as the batch's: over poison, with every record it made compared with T's and its lists with their
+// twin's; over decoys; and a timed one, the later run's ticks. The batch's own inputs, T's records and windows are
+// exchanged for the front's while it runs, and are the batch's again after.
+static void node_facts_window_run(struct NodeFactsReader* state, const NodeFront* front)
+{
+    NodeFacts* facts = &state->facts;
+    uint64_t* counts = state->types->facts_counts;
+    const uint32_t mode = BUSTER_NODE_FACTS_WHOLE;
+    const uint32_t count = front->count;
+    for (uint32_t x = 0; x < count; x += 1)
+    {
+        state->place_kinds[x] = state->place_taken[x] != 0 ? front->window_kinds[x] : BUSTER_NODE_FACTS_GIVEN;
+    }
+    // The kernel reads its inputs through these; it writes none of them.
+    NodeFactsInputs place = {
+        .ops = (uint8_t*)(uintptr_t)front->ops,
+        .kinds = state->place_kinds,
+        .classes = (uint8_t*)(uintptr_t)front->window_classes,
+        .fits = state->place_fits,
+        .left = (uint16_t*)(uintptr_t)front->window_left,
+        .right = (uint16_t*)(uintptr_t)front->window_right,
+        .inputs = (uint32_t*)(uintptr_t)front->window_entries,
+        .counts = (uint16_t*)(uintptr_t)front->window_counts,
+        .positions = (uint32_t*)(uintptr_t)front->window_positions,
+        .arguments = (uint16_t*)(uintptr_t)front->window_arguments,
+        .argument_count = front->window_argument_count,
+    };
+    uint32_t* const windows = facts->windows;
+    const uint32_t window_count = facts->window_count;
+    node_facts_inputs_exchange(facts, &place);
+    node_facts_window_expected_exchange(state);
+    state->place_windows[0] = 0;
+    state->place_windows[1] = count;
+    facts->windows = state->place_windows;
+    facts->window_count = 0;
+    node_facts_given(facts, 0, BUSTER_NODE_FACTS_POISON_RECORDS);
+    const uint64_t calls_left = facts->argument_calls_left;
+    node_facts_window(facts, 0, mode, false);
+    counts[NODE_FACTS_COUNT_WINDOW_CALLS_ARGUMENT] += facts->argument_calls_left - calls_left;
+    if (!node_facts_lists_same(facts, 0))
+    {
+        counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] += 1;
+        node_facts_reader_difference(state, 0, front->tokens[0], BUSTER_NODE_FACTS_DIFFERENCE_LISTS);
+    }
+    for (uint32_t x = 0; x < count; x += 1)
+    {
+        const uint8_t kind = facts->kinds[x];
+        const bool line = kind == BUSTER_NODE_FACTS_LITERAL_LINE;
+        const bool wanted = kind == BUSTER_NODE_FACTS_IDENTIFIER || kind == BUSTER_NODE_FACTS_LOOKUP || kind == BUSTER_NODE_FACTS_OPERATOR;
+        if (line || wanted)
+        {
+            const uint8_t by = facts->records[x].taken;
+            counts[NODE_FACTS_COUNT_WINDOW_WANTED] += wanted;
+            counts[NODE_FACTS_COUNT_WINDOW_MADE] += wanted && (by == BUSTER_NODE_FACTS_SHORT || by == BUSTER_NODE_FACTS_RULED);
+            // Its calls: those made, and of them those whose record says its arguments' conversions are made, and
+            // that it is a plain one.
+            const bool call = wanted && (CheckOp)facts->ops[x] == CHECK_OP_CALL;
+            const bool made = call && (by == BUSTER_NODE_FACTS_SHORT || by == BUSTER_NODE_FACTS_RULED);
+            counts[NODE_FACTS_COUNT_WINDOW_CALLS] += call;
+            counts[NODE_FACTS_COUNT_WINDOW_CALLS_MADE] += made;
+            counts[NODE_FACTS_COUNT_WINDOW_CALLS_CONVERTED] += made && (facts->records[x].exponent & BUSTER_NODE_FACTS_CONVERTED_CALL) != 0;
+            counts[NODE_FACTS_COUNT_WINDOW_CALLS_PLAIN] += made && (facts->records[x].exponent & BUSTER_NODE_FACTS_PLAIN_CALL) != 0;
+            if (!node_facts_same(facts, 0, x, mode))
+            {
+                counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] += 1;
+                node_facts_reader_difference(state, x, front->tokens[x], BUSTER_NODE_FACTS_DIFFERENCE_PLACE);
+            }
+        }
+    }
+    node_facts_given(facts, 0, BUSTER_NODE_FACTS_POISON_DECOY);
+    node_facts_window(facts, 0, mode, false);
+    for (uint32_t x = 0; x < count; x += 1)
+    {
+        if ((facts->kinds[x] & 0x02u) != 0 && !node_facts_same(facts, 0, x, mode))
+        {
+            counts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] += 1;
+            node_facts_reader_difference(state, x, front->tokens[x], BUSTER_NODE_FACTS_DIFFERENCE_DECOY);
+        }
+    }
+    node_facts_given(facts, 0, BUSTER_NODE_FACTS_POISON_NONE);
+    const uint64_t answers = facts->argument_answers;
+    const uint64_t t0 = __rdtsc();
+    node_facts_window(facts, 0, mode, false);
+    counts[NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS] += __rdtsc() - t0;
+    // The arguments' answers the timed run made: with the slots filled by the runs before, the keys that were not at
+    // their slots (another key's answer was there).
+    counts[NODE_FACTS_COUNT_WINDOW_ANSWERS] += facts->argument_answers - answers;
+    if (state->tests != NULL)
+    {
+        // The tests of the chunk's expressions, from the records the kernel has just made in place.
+        node_tests_window_chunk(state->tests, state, front);
+        if (state->c_tables != NULL)
+        {
+            // C's answers of the same records, from the bytes the tests' sweep has just made of them.
+            node_contexts_window_chunk(state, front);
+            if (state->x_tables != NULL)
+            {
+                // X's rows of the expressions C takes there, from those answers.
+                node_rows_window_chunk(state, front);
+            }
+        }
+    }
+    facts->windows = windows;
+    facts->window_count = window_count;
+    node_facts_window_expected_exchange(state);
+    node_facts_inputs_exchange(facts, &place);
+    memset(state->place_taken, 0, count);
+}
+
 // Whether the front's inputs of the batch's record `w` are node_facts_append's: every field the kernel reads of a record,
-// a leaf's line by its words (each making has its own line of a literal), and a call's arguments.
+// a leaf's line by its number or its words, and a call's arguments.
 static bool node_facts_front_same(const NodeFacts* facts, const NodeFactsInputs* set, uint32_t w)
 {
     const uint8_t kind = facts->kinds[w];
     bool same = set->ops[w] == facts->ops[w] && set->kinds[w] == kind && set->classes[w] == facts->classes[w] && set->left[w] == facts->left[w] &&
                 set->right[w] == facts->right[w] && set->counts[w] == facts->counts[w] && set->positions[w] == facts->positions[w];
-    if (same && kind == BUSTER_NODE_FACTS_LITERAL_LINE)
+    if (same && (kind == BUSTER_NODE_FACTS_LITERAL_LINE || kind == BUSTER_NODE_FACTS_IDENTIFIER))
     {
-        same = memcmp(facts->lines + 4 * (uint64_t)set->inputs[w], facts->lines + 4 * (uint64_t)facts->inputs[w], 4 * sizeof(uint64_t)) == 0;
+        // A literal's line is each making's own. A declaration's is one, unless it was made again between two makings'
+        // reads of it (its type as a use reads it changed): then the two lines' words are the same.
+        same = set->inputs[w] == facts->inputs[w] ||
+               memcmp(facts->lines + 4 * (uint64_t)set->inputs[w], facts->lines + 4 * (uint64_t)facts->inputs[w], 4 * sizeof(uint64_t)) == 0;
     }
     else if (same && kind != BUSTER_NODE_FACTS_LITERAL)
     {
@@ -4368,6 +6077,10 @@ static void node_facts_reader_flush(struct NodeFactsReader* state, const NodeFro
         // An expression the windows had no room for (node_facts_append): the batch isn't run, and the next starts anew.
         counts[NODE_FACTS_COUNT_FAILURES] += 1;
         facts->room = true;
+        if (state->windowed)
+        {
+            memset(state->place_taken, 0, front->count);
+        }
     }
     else if (windows != 0)
     {
@@ -4508,6 +6221,11 @@ static void node_facts_reader_flush(struct NodeFactsReader* state, const NodeFro
         counts[NODE_FACTS_COUNT_EXPRESSIONS] += state->expression_count;
         counts[NODE_FACTS_COUNT_RECORDS] += facts->record_count;
         counts[NODE_FACTS_COUNT_WINDOWS] += windows;
+        if (state->windowed)
+        {
+            // The same kernel on the front's own columns, where the front wrote them.
+            node_facts_window_run(state, front);
+        }
     }
     // The words as they stand: the unit's totals so far.
     counts[NODE_FACTS_COUNT_ROWS] = facts->row_count;
@@ -4517,15 +6235,45 @@ static void node_facts_reader_flush(struct NodeFactsReader* state, const NodeFro
     counts[NODE_FACTS_COUNT_LINE_VERSIONS] = facts->line_versions;
     counts[NODE_FACTS_COUNT_MEMBER_SLOTS] = facts->member_count;
     counts[NODE_FACTS_COUNT_PAIR_SLOTS] = facts->pair_count;
+    counts[NODE_FACTS_COUNT_ARGUMENT_ANSWERS] = facts->argument_answers;
+    counts[NODE_FACTS_COUNT_ARGUMENT_ANSWER_TICKS] = facts->argument_answer_ticks;
     facts->record_count = 0;
     facts->argument_count = 0;
     facts->window_count = 0;
     facts->window_body = UINT32_MAX;
     facts->windows[0] = 0;
-    facts->literal_count = 0;
+    facts->literal_count = state->windowed ? BUSTER_NODE_FRONT_RECORDS : 0;
     state->front.argument_count = 0;
     state->expression_count = 0;
     state->batches += 1;
+    if (state->x_tables != NULL)
+    {
+        // The bytes the reader wrote as it read the batch's expressions, an expression's operand's last record's
+        // (BUSTER_NODE_ROWS_SENSE_TOP): cleared for the next batch's, whether this one's rows were made or not. The
+        // rows' values read the bits, and the clearing is theirs to pay.
+        const uint64_t t0 = __rdtsc();
+        for (uint32_t x = 0; x < front->count; x += 64)
+        {
+            _mm512_storeu_si512(state->window_x_senses + x, _mm512_setzero_si512());
+        }
+        counts[NODE_FACTS_COUNT_ROWS_VALUE_TICKS] += __rdtsc() - t0;
+    }
+}
+
+// test-checker's control of C on the window's comparison (BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT): one of the
+// reference's answers of the expression `e`, which C took and whose root's record of the window is `root`, changed: the
+// root's template, its context, its target or whether it is evaluated, or the expression's verdict, in turn. The
+// comparison then counts every decided expression the reference took (node_contexts_window_compare), by each of its
+// terms.
+static __attribute__((noinline, cold)) void node_facts_reader_fault(struct NodeFactsReader* state, uint32_t e, uint32_t root)
+{
+    const uint32_t turn = state->c_fault_turn % 5;
+    state->place_c_templates[root] ^= turn == 0 ? 1 : 0;
+    state->place_c_contexts[root] ^= turn == 1 ? BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS : 0;
+    state->place_c_targets[root] ^= turn == 2 ? 1u : 0u;
+    state->place_c_states[root] ^= turn == 3 ? BUSTER_NODE_MACHINE_EVALUATED : 0;
+    state->c_ran[e] = turn == 4 ? BUSTER_NODE_CONTEXTS_RAN_REFUSED : state->c_ran[e];
+    state->c_fault_turn += 1;
 }
 
 static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
@@ -4547,7 +6295,7 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
     const uint32_t argument_base = facts->argument_count;
     // The rows of the types made since: the walk's, and T's own derivations' for this expression.
     node_facts_settle(facts);
-    // The front's inputs first: a declaration's line is then made by whichever of the two meets its use first, here.
+    // The front's inputs first: a declaration's line is then made by whichever of the makings meets its use first, here.
     const uint64_t t0 = __rdtsc();
     const uint32_t why = node_facts_front_expression(state, front, base, count, record, operand);
     const bool given = why == BUSTER_NODE_FACTS_WHY_GIVEN;
@@ -4572,20 +6320,14 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
         types->facts_counts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] += state->front.argument_count != facts->argument_count;
     }
     const bool kept = given && state->front.argument_count == facts->argument_count;
+    bool placed = false;
+    // The root's record of the window: its own, or its operand's last where an initialization has no record of its own.
+    uint32_t root_place = record;
     if (appended && !kept)
     {
         // The front's records don't give the expression: its inputs are node_facts_append's.
-        NodeFactsInputs* set = &state->front;
-        memcpy(set->ops + base, facts->ops + base, count);
-        memcpy(set->kinds + base, facts->kinds + base, count);
-        memcpy(set->classes + base, facts->classes + base, count);
-        memcpy(set->left + base, facts->left + base, (uint64_t)count * sizeof(uint16_t));
-        memcpy(set->right + base, facts->right + base, (uint64_t)count * sizeof(uint16_t));
-        memcpy(set->inputs + base, facts->inputs + base, (uint64_t)count * sizeof(uint32_t));
-        memcpy(set->counts + base, facts->counts + base, (uint64_t)count * sizeof(uint16_t));
-        memcpy(set->positions + base, facts->positions + base, (uint64_t)count * sizeof(uint32_t));
-        memcpy(set->arguments + argument_base, facts->arguments + argument_base, (uint64_t)(facts->argument_count - argument_base) * sizeof(uint16_t));
-        set->argument_count = facts->argument_count;
+        node_facts_inputs_take(&state->front, facts, base, count, argument_base, facts->argument_count);
+        state->front.argument_count = facts->argument_count;
         types->facts_counts[NODE_FACTS_COUNT_FRONT_SKIPPED] += !given;
         if (!given)
         {
@@ -4595,6 +6337,34 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
                 types->facts_skipped_tokens[types->facts_skipped_listed] = front->tokens[record];
                 types->facts_skipped_reasons[types->facts_skipped_listed] = (uint8_t)why;
                 types->facts_skipped_listed += 1;
+            }
+        }
+    }
+    if (appended && state->windowed)
+    {
+        // The front's own window: the expression's records are there in a row, its operand's subtree's and its root's
+        // (but an initialization's), or it is not the window's.
+        const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE;
+        const uint32_t size = operand < record ? front->sizes[operand] : 0;
+        const bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 &&
+                           front->window_classes[operand] != BUSTER_NODE_FACTS_CLASS_CUT;
+        placed = whole;
+        root_place = whole && count == size ? operand : record;
+        if (whole)
+        {
+            node_facts_window_expression(state, front, base, count, record, operand + 1 - size, size, kept);
+            types->facts_counts[NODE_FACTS_COUNT_WINDOW_EXPRESSIONS] += 1;
+            types->facts_counts[NODE_FACTS_COUNT_WINDOW_RECORDS] += count;
+        }
+        else
+        {
+            types->facts_counts[NODE_FACTS_COUNT_WINDOW_SKIPPED] += 1;
+            types->facts_window_whys[BUSTER_NODE_FACTS_WHY_CUT] += 1;
+            if (types->facts_window_listed < BUSTER_NODE_FRONT_LISTED)
+            {
+                types->facts_window_tokens[types->facts_window_listed] = front->tokens[record];
+                types->facts_window_reasons[types->facts_window_listed] = BUSTER_NODE_FACTS_WHY_CUT;
+                types->facts_window_listed += 1;
             }
         }
     }
@@ -4609,6 +6379,31 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
         state->operands[e] = operand;
         state->argument_bases[e] = argument_base;
         state->given[e] = kept;
+        state->placed[e] = (uint8_t)(placed ? BUSTER_NODE_FACTS_PLACED | ((machine->action_warnings & 0x01ffffffu) != 0 ? BUSTER_NODE_FACTS_PLACED_WARNED : 0u) : 0u);
+        if (state->c_tables != NULL)
+        {
+            state->c_ran[e] = state->c_ran_now;
+            state->c_targets[e] = state->c_target_now;
+            state->c_ticks[e] = state->c_ticks_now;
+            if (state->x_tables != NULL)
+            {
+                state->x_ticks[e] = state->x_ticks_now;
+                // Its root's sense, at its operand's record of the window: a statement's condition evaluated as
+                // branches is over an `&&` or an `||`, whose turn reads it there (node_rows_window_branch), and no
+                // one reads another expression's. With it, that the record is its expression's operand's last, which
+                // the values' sweep reads (BUSTER_NODE_ROWS_SENSE_TOP); a batch's bytes are cleared at its end
+                // (node_facts_reader_flush).
+                if (placed)
+                {
+                    state->window_x_senses[operand] = (uint8_t)(state->c_sense_now | BUSTER_NODE_ROWS_SENSE_TOP);
+                    state->window_x_expressions[operand] = (uint16_t)e;
+                }
+            }
+            if (__builtin_expect(state->c_fault, 0) && placed && state->c_ran_now == BUSTER_NODE_CONTEXTS_RAN_TAKEN)
+            {
+                node_facts_reader_fault(state, e, root_place);
+            }
+        }
         state->expression_count = e + 1;
     }
 }
@@ -4616,6 +6411,26 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
 static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front)
 {
     node_facts_reader_flush(state, front);
+}
+
+static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target, bool sense)
+{
+    state->c_ran_now = ran;
+    state->c_sense_now = sense ? 1 : 0;
+    state->c_ticks_now = ticks;
+    state->c_target_now = target;
+}
+
+// The reference's X's ticks on the expression at hand, for X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS).
+static void node_facts_reader_rows(struct NodeFactsReader* state, uint64_t ticks)
+{
+    state->x_ticks_now = ticks;
+}
+
+static void node_facts_reader_tests(struct NodeFactsReader* state, struct NodeCensusReader* tests)
+{
+    // The tests keep a byte a declaration's line: without room for them they don't run on the window.
+    state->tests = node_tests_window_lines(tests, state->reader->scratch, state->facts.line_capacity) ? tests : NULL;
 }
 
 #endif

@@ -20,9 +20,9 @@
 // (check_driver_typo_edits, docs/c-checker.md).
 //
 // Only a unit with an undeclared name pays: the search replays the binding stream's scope stack once (CheckTypoScope),
-// with no per-typo walk of the stream. The vector path prefilters the visible names by length in AVX-512 and finds each
-// distance with Myers's bit-parallel algorithm, the candidate's equality masks from byte compares; the scalar path, its
-// twin and oracle, filters one name at a time and fills the dynamic-programming table.
+// with no per-typo walk of the stream. It prefilters the visible names by length in AVX-512 and finds each distance with
+// Myers's bit-parallel algorithm, the candidate's equality masks from byte compares, but a name longer than a word's,
+// which fills the dynamic-programming table.
 
 #define BUSTER_CHECK_TYPO_LIMIT 50
 // An undeclared function's call that made no search (CheckInput.implicit_function_corrections): one clang warns of, or
@@ -96,7 +96,7 @@ struct CheckTypo
     uint32_t* distances;
     uint32_t candidate_capacity;
     uint32_t distance_capacity;
-    // The dynamic-programming rows of the scalar path and of names longer than a word.
+    // The dynamic-programming rows of names longer than a word.
     uint32_t* row;
     uint32_t row_capacity;
     // The values' searches, made in source order after the walk's calls' (CheckInput's implicit list), and the calls'
@@ -484,39 +484,26 @@ static bool check_typo_builtins_before(CheckInputReader* reader, CheckTypoScope*
     const uint8_t* roles = parser->tree.roles;
     uint32_t token = scope->token_cursor;
     bool valid = true;
-    if (BUSTER_VECTOR_PATH(!parser->options.scalar))
+    const __m512i identifier = _mm512_set1_epi8(PARSE_KIND_IDENTIFIER);
+    const __m512i operand = _mm512_set1_epi8(PARSE_ROLE_OPERAND);
+    const __m512i semicolon = _mm512_set1_epi8(PARSE_KIND_SEMI);
+    while (valid && token < end)
     {
-        const __m512i identifier = _mm512_set1_epi8(PARSE_KIND_IDENTIFIER);
-        const __m512i operand = _mm512_set1_epi8(PARSE_ROLE_OPERAND);
-        const __m512i semicolon = _mm512_set1_epi8(PARSE_KIND_SEMI);
-        while (valid && token < end)
+        const uint32_t left = end - token;
+        const uint32_t lanes = left < 64 ? left : 64;
+        const __mmask64 live = lanes == 64 ? ~(__mmask64)0 : (((__mmask64)1 << lanes) - 1);
+        const __m512i token_kinds = _mm512_maskz_loadu_epi8(live, kinds + token);
+        const __m512i token_roles = _mm512_maskz_loadu_epi8(live, roles + token);
+        const __mmask64 identifiers = _mm512_mask_cmpeq_epi8_mask(live, token_kinds, identifier);
+        uint64_t candidates = (uint64_t)_mm512_mask_cmpeq_epi8_mask(identifiers, token_roles, operand) |
+                              (uint64_t)_mm512_mask_cmpeq_epi8_mask(live, token_kinds, semicolon);
+        while (valid && candidates != 0)
         {
-            const uint32_t left = end - token;
-            const uint32_t lanes = left < 64 ? left : 64;
-            const __mmask64 live = lanes == 64 ? ~(__mmask64)0 : (((__mmask64)1 << lanes) - 1);
-            const __m512i token_kinds = _mm512_maskz_loadu_epi8(live, kinds + token);
-            const __m512i token_roles = _mm512_maskz_loadu_epi8(live, roles + token);
-            const __mmask64 identifiers = _mm512_mask_cmpeq_epi8_mask(live, token_kinds, identifier);
-            uint64_t candidates = (uint64_t)_mm512_mask_cmpeq_epi8_mask(identifiers, token_roles, operand) |
-                                  (uint64_t)_mm512_mask_cmpeq_epi8_mask(live, token_kinds, semicolon);
-            while (valid && candidates != 0)
-            {
-                const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
-                candidates &= candidates - 1;
-                valid = check_typo_source_token(reader, scope, token + lane);
-            }
-            token += lanes;
+            const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
+            candidates &= candidates - 1;
+            valid = check_typo_source_token(reader, scope, token + lane);
         }
-    }
-    else
-    {
-        for (; valid && token < end; token += 1)
-        {
-            if (kinds[token] == PARSE_KIND_SEMI || (kinds[token] == PARSE_KIND_IDENTIFIER && roles[token] == PARSE_ROLE_OPERAND))
-            {
-                valid = check_typo_source_token(reader, scope, token);
-            }
-        }
+        token += lanes;
     }
     scope->token_cursor = valid && end > scope->token_cursor ? end : scope->token_cursor;
     return valid;
@@ -587,8 +574,8 @@ static bool check_typo_scope_advance(CheckInputReader* reader, CheckTypoScope* s
     return valid;
 }
 
-// Levenshtein's distance, the dynamic-programming table one row at a time (the scalar path, and the vector path's for
-// a name longer than a word): `row` has room for `b_length` + 1.
+// Levenshtein's distance, the dynamic-programming table one row at a time (for a name longer than a word): `row` has room
+// for `b_length` + 1.
 static uint32_t check_typo_distance_table(const uint8_t* a, uint32_t a_length, const uint8_t* b, uint32_t b_length, uint32_t* row)
 {
     for (uint32_t j = 0; j <= b_length; j += 1)
@@ -640,50 +627,35 @@ static uint32_t check_typo_distance_bits(const uint8_t* pattern, uint32_t patter
     return score;
 }
 
-static uint32_t check_typo_distance(CheckTypo* typo, bool vector, const uint8_t* a, uint32_t a_length, const uint8_t* b, uint32_t b_length)
+static uint32_t check_typo_distance(CheckTypo* typo, const uint8_t* a, uint32_t a_length, const uint8_t* b, uint32_t b_length)
 {
-    const bool bits = vector && a_length != 0 && a_length <= 64;
+    const bool bits = a_length != 0 && a_length <= 64;
     return bits ? check_typo_distance_bits(a, a_length, b, b_length) : b_length == 0 ? a_length :
            check_typo_distance_table(a, a_length, b, b_length, typo->row);
 }
 
 // The scope's names from `begin` to `end` near enough to the typo's `length` to be taken (3 * |difference| <= length),
 // in stack order, their positions written from `candidates` on.
-static uint32_t check_typo_prefilter(const CheckTypoScope* scope, uint32_t begin, uint32_t end, uint32_t name_capacity, uint32_t length, bool vector,
+static uint32_t check_typo_prefilter(const CheckTypoScope* scope, uint32_t begin, uint32_t end, uint32_t name_capacity, uint32_t length,
                                      uint32_t* candidates)
 {
     uint32_t count = 0;
-    uint32_t i = begin;
-    if (vector)
+    const __m512i wanted = _mm512_set1_epi32((int)length);
+    const __m512i limit = _mm512_set1_epi32((int)length);
+    const __m512i three = _mm512_set1_epi32(3);
+    const __m512i names = _mm512_set1_epi32((int)name_capacity);
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint32_t i = begin; i < end; i += 16)
     {
-        const __m512i wanted = _mm512_set1_epi32((int)length);
-        const __m512i limit = _mm512_set1_epi32((int)length);
-        const __m512i three = _mm512_set1_epi32(3);
-        const __m512i names = _mm512_set1_epi32((int)name_capacity);
-        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        for (; i < end; i += 16)
-        {
-            const uint32_t left = end - i;
-            const __mmask16 live = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
-            const __m512i keys = _mm512_maskz_loadu_epi32(live, scope->keys + i);
-            const __m512i lengths = _mm512_maskz_loadu_epi32(live, scope->lengths + i);
-            const __m512i difference = _mm512_abs_epi32(_mm512_sub_epi32(lengths, wanted));
-            const __mmask16 ordinary = _mm512_mask_cmplt_epu32_mask(live, keys, names);
-            const __mmask16 near = _mm512_mask_cmple_epu32_mask(ordinary, _mm512_mullo_epi32(difference, three), limit);
-            _mm512_mask_compressstoreu_epi32(candidates + count, near, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)i)));
-            count += (uint32_t)__builtin_popcount((uint32_t)near);
-        }
-    }
-    else
-    {
-        for (; i < end; i += 1)
-        {
-            const uint32_t difference = scope->lengths[i] > length ? scope->lengths[i] - length : length - scope->lengths[i];
-            if (scope->keys[i] < name_capacity && 3 * difference <= length)
-            {
-                candidates[count++] = i;
-            }
-        }
+        const uint32_t left = end - i;
+        const __mmask16 live = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        const __m512i keys = _mm512_maskz_loadu_epi32(live, scope->keys + i);
+        const __m512i lengths = _mm512_maskz_loadu_epi32(live, scope->lengths + i);
+        const __m512i difference = _mm512_abs_epi32(_mm512_sub_epi32(lengths, wanted));
+        const __mmask16 ordinary = _mm512_mask_cmplt_epu32_mask(live, keys, names);
+        const __mmask16 near = _mm512_mask_cmple_epu32_mask(ordinary, _mm512_mullo_epi32(difference, three), limit);
+        _mm512_mask_compressstoreu_epi32(candidates + count, near, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)i)));
+        count += (uint32_t)__builtin_popcount((uint32_t)near);
     }
     return count;
 }
@@ -816,7 +788,6 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
     const uint8_t* spelling = (const uint8_t*)intern_bytes(reader->pp->table, name);
     const uint32_t length = intern_length(reader->pp->table, name);
     const uint32_t bound = (length + 2) / 3;
-    const bool vector = BUSTER_VECTOR_PATH(!parser->options.scalar);
     uint32_t result = BUSTER_CHECK_NONE;
     typo->suggested_token = token;
     typo->suggested_keyword = 0;
@@ -834,16 +805,16 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
         const uint32_t name_capacity = bindings->name_capacity;
         // The predeclared types and used builtins first, as file scope's, so a stack declaration shadows them even when
         // the place does not take that declaration's kind (a local object hides a predefined typedef in type context).
-        const uint32_t permanent = check_typo_prefilter(scope, scope->capacity, scope->capacity + scope->permanent_count, name_capacity, length, vector,
+        const uint32_t permanent = check_typo_prefilter(scope, scope->capacity, scope->capacity + scope->permanent_count, name_capacity, length,
                                                        typo->candidates);
-        const uint32_t filtered = permanent + check_typo_prefilter(scope, 0, scope->count, name_capacity, length, vector, typo->candidates + permanent);
+        const uint32_t filtered = permanent + check_typo_prefilter(scope, 0, scope->count, name_capacity, length, typo->candidates + permanent);
         // The names within the bound, their distances beside them.
         uint32_t kept = 0;
         for (uint32_t c = 0; c < filtered; c += 1)
         {
             const uint32_t at = typo->candidates[c];
             const uint32_t other = scope->keys[at] % name_capacity;
-            const uint32_t distance = check_typo_distance(typo, vector, (const uint8_t*)intern_bytes(reader->pp->table, other), scope->lengths[at], spelling, length);
+            const uint32_t distance = check_typo_distance(typo, (const uint8_t*)intern_bytes(reader->pp->table, other), scope->lengths[at], spelling, length);
             if (distance <= bound)
             {
                 typo->candidates[kept] = at;
@@ -893,7 +864,7 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
             if (3 * difference <= length && (place.keywords & check_typo_keyword_kinds[w]) != 0 &&
                 check_typo_keyword_offered(keyword, parser->language.standard, parser->language.gnu))
             {
-                const uint32_t distance = check_typo_distance(typo, vector, (const uint8_t*)keyword, keyword_length, spelling, length);
+                const uint32_t distance = check_typo_distance(typo, (const uint8_t*)keyword, keyword_length, spelling, length);
                 const bool near = distance <= bound;
                 ties = near && distance == best ? ties + 1 : near && distance < best ? 1 : ties;
                 best_keyword = near && distance < best ? w + 1 : near && distance == best ? best_keyword : best_keyword;

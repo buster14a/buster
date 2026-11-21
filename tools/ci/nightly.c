@@ -904,23 +904,47 @@ static bool nightly_test_row(const char* full, uint32_t* architecture, uint32_t*
     return valid;
 }
 
+// The native plain row's verdict job (#2924): the native row draws AVX-512 runners as the vector row does, so its
+// credit is its verdict, `Tests on Ubuntu 26.04 (native, none, O3) / Vector row verdict (Clang V, none, O3)`, the
+// caller's part naming the row (a reusable workflow's job is `CALLER / JOB`; the caller may have callers of its own).
+static bool nightly_native_verdict(const char* full)
+{
+    static const char caller[] = "Tests on Ubuntu 26.04 (native, none, O3) / ";
+    static const char verdict[] = "Vector row verdict (Clang ";
+    const char* own = nightly_job_own_name(full);
+    bool valid = (size_t)(own - full) >= sizeof(caller) - 1 && memcmp(own - (sizeof(caller) - 1), caller, sizeof(caller) - 1) == 0 &&
+                 strncmp(own, verdict, sizeof(verdict) - 1) == 0;
+    const char* version = valid ? own + sizeof(verdict) - 1 : NULL;
+    const char* suffix = version;
+    while (valid && *suffix >= '0' && *suffix <= '9')
+    {
+        suffix += 1;
+    }
+    return valid && suffix != version && strcmp(suffix, ", none, O3)") == 0;
+}
+
 static bool nightly_test_job(const char* full, uint32_t* architecture, uint32_t* shard, uint32_t* shards, bool* plain)
 {
     uint32_t row = 0;
     return nightly_test_row(full, architecture, &row, shard, shards, plain);
 }
 
-// The run's plain hosted rows: ok when every shard 1..N of both architectures succeeded (one N throughout), failed
-// when any failed or timed out (a genuine failure: fail-fast's cancellations beside it don't hide it), and none
-// otherwise (none ran, or one was cancelled or skipped, or the shards disagree). Sanitizer rows don't count: the
-// nightly policy measures behind the plain rows, which are the pull request's own gate (docs/ci.md).
+// The run's plain hosted rows: ok when the native row's verdict succeeded (a run since #2924, whose native row is
+// drawn and has no shards), or, in an older run, when every shard 1..N of its native row succeeded, and of its x86-64
+// row where it has one (one N throughout); failed when the verdict or a shard failed or timed out (a genuine failure:
+// fail-fast's cancellations beside it don't hide it); none otherwise (none ran, or one was cancelled or skipped, or the
+// shards disagree, or the run has more than one verdict). Sanitizer rows don't count: the nightly policy measures
+// behind the plain rows, which are the pull request's own gate (docs/ci.md).
 static NightlyPlain nightly_plain_verdict(const NightlyFacts* facts, uint64_t run)
 {
     uint64_t succeeded[2] = { 0 };
+    bool seen[2] = { false };
     uint32_t shards = 0;
     bool consistent = true;
     bool failed = false;
     bool inconclusive = false;
+    uint32_t verdicts = 0;
+    bool verdict = false;
     for (uint32_t i = 0; i < facts->job_count; i += 1)
     {
         const NightlyJob* job = &facts->jobs[i];
@@ -928,6 +952,12 @@ static NightlyPlain nightly_plain_verdict(const NightlyFacts* facts, uint64_t ru
         uint32_t shard = 0;
         uint32_t count = 0;
         bool plain = false;
+        if (job->run == run && nightly_native_verdict(job->name))
+        {
+            verdicts += 1;
+            verdict = job->completed && job->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
+            failed = failed || (job->completed && (job->conclusion == NIGHTLY_CONCLUSION_FAILURE || job->conclusion == NIGHTLY_CONCLUSION_TIMED_OUT));
+        }
         if (job->run == run && nightly_test_job(job->name, &architecture, &shard, &count, &plain) && plain)
         {
             consistent = consistent && (shards == 0 || shards == count);
@@ -935,11 +965,14 @@ static NightlyPlain nightly_plain_verdict(const NightlyFacts* facts, uint64_t ru
             const bool success = job->completed && job->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
             failed = failed || (job->completed && (job->conclusion == NIGHTLY_CONCLUSION_FAILURE || job->conclusion == NIGHTLY_CONCLUSION_TIMED_OUT));
             inconclusive = inconclusive || !success;
+            seen[architecture] = true;
             succeeded[architecture] |= success ? (uint64_t)1 << (shard - 1) : 0;
         }
     }
     const uint64_t every = shards == 64 ? UINT64_MAX : ((uint64_t)1 << shards) - 1;
-    const bool complete = consistent && shards != 0 && succeeded[0] == every && succeeded[1] == every && !inconclusive;
+    const bool sharded = consistent && shards != 0 && (!seen[0] || succeeded[0] == every) && succeeded[1] == every && !inconclusive;
+    const bool drawn = verdicts == 1 && verdict && shards == 0;
+    const bool complete = verdicts == 0 ? sharded : drawn;
     return failed && consistent ? NIGHTLY_PLAIN_FAILED : complete ? NIGHTLY_PLAIN_OK : NIGHTLY_PLAIN_NONE;
 }
 
@@ -974,24 +1007,30 @@ static NightlyHosted nightly_hosted(const NightlyFacts* facts, const char* commi
 
 // --- A merge-queue candidate's coverage, job by job (#1430) ---
 
-// The fuzz campaigns (9700x.yml's fuzz matrix) and the vector pool's configurations (the test job's one call of the
-// row workflow for the vector row, where the sanitizer rows run).
-static const char* const nightly_fuzz_entries[] = { "frontend", "elf-override", "crash-replay-proof" };
+// The fuzz campaigns' verdict (9700x.yml's fuzz job, a call of drawn.yml whose items the campaigns are, since #2924) and
+// the vector pool's configurations (the test job's one call of the row workflow for the vector row, where the sanitizer
+// rows run).
+#define BUSTER_NIGHTLY_FUZZ_VERDICT "libFuzzer (ASan + UBSan + leaks) / Vector row verdict (fuzz)"
 #define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
 #define BUSTER_NIGHTLY_ROWS_FULL (2u * BUSTER_NIGHTLY_SANITIZERS)
 
-// The rows a full run's contract has (#2032): every x86-64 row, and the native plain row alone. The vector row's
-// sanitizer configurations replaced the native sanitizer rows, which built their compiler on every shard (35% of a
-// merged candidate's runner time, #2703); a native sanitizer row that runs anyway counts for nothing either way.
+// The sharded rows a full run's contract has: none. The native plain row is drawn, and its verdict is the contract's
+// (#2924); the vector row's sanitizer configurations replaced the native sanitizer rows (#2032), which built their
+// compiler on every shard (35% of a merged candidate's runner time, #2703), and the x86-64 rows, the scalar host's,
+// are gone (#2924); a sharded row that runs anyway counts for nothing.
 static bool nightly_row_required(uint32_t row)
 {
-    return row <= BUSTER_NIGHTLY_SANITIZERS;
+    return row > BUSTER_NIGHTLY_ROWS_FULL;
 }
 
 // The auxiliary workflows a candidate calls where its change touches their pull_request paths (tools/ci/changes.c's
 // changes_auxiliary, the same names in its order), each by 9700x.yml's job `Auxiliary (NAME.yml)`, whose called jobs
 // the API names `Auxiliary (NAME.yml) / JOB`.
 static const char* const nightly_auxiliary_names[] = { "build", "build-pgo", "selfhost", "tier1-problem" };
+// Each one's job that draws an AVX-512 runner (drawn.yml, #2924), by its row: its verdict, `... / Vector row verdict
+// (ROW)`, credits it, and its draws' jobs (`Vector draw ...`) may be skipped, the later draws' when an earlier one held
+// every item. NULL for a workflow without draws, whose every job must succeed.
+static const char* const nightly_auxiliary_rows[] = { "regressions", NULL, "bootstrap", "tier1-problem" };
 
 // The selector's auxiliary output: `,` or `,NAME,NAME,` of nightly_auxiliary_names, each at most once, in their
 // order. Sets each one's flag; false for anything else, an empty list (no selector) included.
@@ -1021,12 +1060,13 @@ static bool nightly_auxiliary_list(const char* list, bool* called)
 }
 
 // The run's full hosted contract from its own jobs, which a test job's result alone can't show (a skipped shard or row
-// leaves it green): every shard 1..N of each row nightly_row_required names (x86-64's with each sanitizer, and native's
-// plain row, -O3; one N per row), the vector
-// pool's verdict and each fuzz campaign, every one completed and successful, and no shard of a row that didn't succeed
-// (one beyond N, say, or a second attempt's). Each auxiliary workflow AUXILIARY names (the selector's list) must have
-// run a job and every job successful; one it doesn't name must have run none. Writes a line per row, the vector verdict,
-// each campaign and each auxiliary workflow, then `coverage complete` or `coverage incomplete`. Job names are their own,
+// leaves it green): every shard 1..N of each row nightly_row_required names (none since #2924), the native plain row's
+// verdict, the vector
+// pool's verdict and the fuzz campaigns' verdict, every one completed and successful, and no shard of a row that didn't
+// succeed (one beyond N, say, or a second attempt's). Each auxiliary workflow AUXILIARY names (the selector's list) must
+// have run a job and every job successful, but its draws' skipped ones, and its drawn job's one verdict; one it doesn't
+// name must have run none. Writes a line per row, the vector verdict, the campaigns and each auxiliary workflow, then
+// `coverage complete` or `coverage incomplete`. Job names are their own,
 // whatever their callers' (each row is a call of the row workflow); a skipped job's name keeps its unexpanded
 // expressions, which no row's pattern matches.
 static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char* auxiliary, FILE* output)
@@ -1035,13 +1075,18 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
     const bool listed = nightly_auxiliary_list(auxiliary, called);
     uint32_t auxiliary_jobs[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { 0 };
     uint32_t auxiliary_succeeded[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { 0 };
+    uint32_t auxiliary_verdicts[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { 0 };
+    bool auxiliary_verdict[BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names)] = { false };
     uint64_t succeeded[BUSTER_NIGHTLY_ROWS_FULL] = { 0 };
     uint32_t counts[BUSTER_NIGHTLY_ROWS_FULL] = { 0 };
     bool inconsistent[BUSTER_NIGHTLY_ROWS_FULL] = { false };
     bool unsuccessful[BUSTER_NIGHTLY_ROWS_FULL] = { false };
     uint32_t verdicts = 0;
     bool verdict = false;
-    bool fuzz[BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries)] = { false };
+    uint32_t natives = 0;
+    bool native = false;
+    uint32_t fuzzes = 0;
+    bool fuzz = false;
     for (uint32_t i = 0; i < facts->job_count; i += 1)
     {
         const NightlyJob* job = &facts->jobs[i];
@@ -1061,24 +1106,38 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
         }
         const size_t own_length = strlen(own);
         const char suffix[] = ", " BUSTER_NIGHTLY_VECTOR_POOL ", O3)";
+        if (job->run == run && nightly_native_verdict(job->name))
+        {
+            natives += 1;
+            native = success;
+        }
         if (job->run == run && strncmp(own, "Vector row verdict (Clang ", 26) == 0 && own_length > sizeof(suffix) - 1 && strcmp(own + own_length - (sizeof(suffix) - 1), suffix) == 0)
         {
             verdicts += 1;
             verdict = success;
         }
-        for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
+        if (job->run == run && strcmp(job->name, BUSTER_NIGHTLY_FUZZ_VERDICT) == 0)
         {
-            char name[BUSTER_NIGHTLY_NAME];
-            snprintf(name, sizeof(name), "libFuzzer (ASan + UBSan + leaks, %s)", nightly_fuzz_entries[j]);
-            fuzz[j] = fuzz[j] || (success && strcmp(own, name) == 0);
+            fuzzes += 1;
+            fuzz = success;
         }
+        const bool skipped = job->run == run && job->completed && job->conclusion == NIGHTLY_CONCLUSION_SKIPPED;
         for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names); j += 1)
         {
             char prefix[BUSTER_NIGHTLY_NAME];
             const int length = snprintf(prefix, sizeof(prefix), "Auxiliary (%s.yml) / ", nightly_auxiliary_names[j]);
             const bool mine = job->run == run && strncmp(job->name, prefix, (size_t)length) == 0;
+            const char* drawn = nightly_auxiliary_rows[j];
+            const bool draw = drawn != NULL && strncmp(own, "Vector draw ", 12) == 0;
             auxiliary_jobs[j] += mine ? 1 : 0;
-            auxiliary_succeeded[j] += mine && success ? 1 : 0;
+            auxiliary_succeeded[j] += mine && (success || (draw && skipped)) ? 1 : 0;
+            char verdict_name[BUSTER_NIGHTLY_NAME];
+            snprintf(verdict_name, sizeof(verdict_name), "Vector row verdict (%s)", drawn != NULL ? drawn : "");
+            if (mine && drawn != NULL && strcmp(own, verdict_name) == 0)
+            {
+                auxiliary_verdicts[j] += 1;
+                auxiliary_verdict[j] = success;
+            }
         }
     }
     bool complete = true;
@@ -1095,14 +1154,15 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
         const char* why = count == 0 ? "missing" : inconsistent[row] ? "shard counts disagree" : unsuccessful[row] ? "a shard did not succeed" : succeeded[row] != every ? "a shard is missing" : "ok";
         fprintf(output, "row\t%s %s\t%s\t%u\n", row < BUSTER_NIGHTLY_SANITIZERS ? "x86-64" : "native", nightly_sanitizer_names[row % BUSTER_NIGHTLY_SANITIZERS], why, count);
     }
+    const bool drawn = natives == 1 && native;
+    complete = complete && drawn;
+    fprintf(output, "native\tnone\t%s\n", natives == 0 ? "missing" : natives != 1 ? "more than one verdict" : native ? "ok" : "did not succeed");
     const bool vector = verdicts == 1 && verdict;
     complete = complete && vector;
     fprintf(output, "vector\t%s\t%s\n", BUSTER_NIGHTLY_VECTOR_POOL, verdicts == 0 ? "missing" : verdicts != 1 ? "more than one verdict" : verdict ? "ok" : "did not succeed");
-    for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
-    {
-        complete = complete && fuzz[j];
-        fprintf(output, "fuzz\t%s\t%s\n", nightly_fuzz_entries[j], fuzz[j] ? "ok" : "missing or did not succeed");
-    }
+    const bool fuzzed = fuzzes == 1 && fuzz;
+    complete = complete && fuzzed;
+    fprintf(output, "fuzz\tfrontend elf-override crash-replay-proof\t%s\n", fuzzes == 0 ? "missing" : fuzzes != 1 ? "more than one verdict" : fuzz ? "ok" : "did not succeed");
     complete = complete && listed;
     if (!listed)
     {
@@ -1111,9 +1171,10 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
     for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_auxiliary_names) && listed; j += 1)
     {
         const uint32_t jobs = auxiliary_jobs[j];
-        const bool ok = called[j] ? jobs != 0 && auxiliary_succeeded[j] == jobs : jobs == 0;
+        const bool verdict_ok = nightly_auxiliary_rows[j] == NULL || (auxiliary_verdicts[j] == 1 && auxiliary_verdict[j]);
+        const bool ok = called[j] ? jobs != 0 && auxiliary_succeeded[j] == jobs && verdict_ok : jobs == 0;
         complete = complete && ok;
-        const char* why = ok ? "ok" : !called[j] ? "ran although it doesn't apply" : jobs == 0 ? "missing" : "a job did not succeed";
+        const char* why = ok ? "ok" : !called[j] ? "ran although it doesn't apply" : jobs == 0 ? "missing" : auxiliary_succeeded[j] != jobs ? "a job did not succeed" : "its drawn job has no single successful verdict";
         fprintf(output, "auxiliary\t%s\t%s\t%s\t%u\n", nightly_auxiliary_names[j], called[j] ? "called" : "not called", why, jobs);
     }
     fprintf(output, "coverage\t%s\n", complete ? "complete" : "incomplete");
@@ -3125,6 +3186,45 @@ static void nightly_test_facts(NightlyTest* test)
     nightly_expect(test, nightly_plain_verdict(&facts, 8) == NIGHTLY_PLAIN_NONE, "shards that disagree on N: none");
     nightly_expect(test, nightly_plain_verdict(&facts, 9) == NIGHTLY_PLAIN_OK, "unsharded plain rows: ok");
     nightly_facts_free(&facts);
+    free(buffer);
+
+    // Since #2924 a run has no x86-64 rows: its native row decides alone. Without a native row, nothing does.
+    buffer = nightly_allocate(1, sizeof(NightlyBuffer));
+    nightly_test_run(buffer, 10, "push", "completed", "success", sha, 1, 2, "x");
+    nightly_append(buffer, "job\t10\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 2)\n");
+    nightly_append(buffer, "job\t10\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 2 of 2)\n");
+    nightly_test_run(buffer, 11, "push", "completed", "success", other, 1, 2, "x");
+    nightly_append(buffer, "job\t11\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 2)\n");
+    nightly_append(buffer, "job\t11\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 2)\n");
+    nightly_test_run(buffer, 12, "push", "completed", "failure", other, 1, 2, "x");
+    nightly_append(buffer, "job\t12\tcompleted\tsuccess\tTests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 1)\n");
+    nightly_append(buffer, "job\t12\tcompleted\tcancelled\tTests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 1)\n");
+    facts = nightly_facts_new();
+    nightly_expect(test, nightly_facts_parse(&facts, nightly_buffer_text(buffer)), "facts parse");
+    nightly_expect(test, nightly_plain_verdict(&facts, 10) == NIGHTLY_PLAIN_OK, "a run without x86-64 rows: its native row decides");
+    nightly_expect(test, nightly_plain_verdict(&facts, 11) == NIGHTLY_PLAIN_NONE, "x86-64 rows without a native row: none");
+    nightly_expect(test, nightly_plain_verdict(&facts, 12) == NIGHTLY_PLAIN_NONE, "an older run's x86-64 row that didn't succeed still counts");
+    nightly_facts_free(&facts);
+    free(buffer);
+
+    // Since #2924's draws the native row has no shards: its verdict decides, and the vector row's doesn't stand for it.
+    buffer = nightly_allocate(1, sizeof(NightlyBuffer));
+    static const char drawn[] = "Tests on Ubuntu 26.04 (native, none, O3) / Vector row verdict (Clang 23, none, O3)";
+    nightly_test_run(buffer, 13, "merge_group", "completed", "success", sha, 1, 2, "x");
+    nightly_append(buffer, "job\t13\tcompleted\tsuccess\t%s\n", drawn);
+    nightly_test_run(buffer, 14, "merge_group", "completed", "failure", other, 1, 2, "x");
+    nightly_append(buffer, "job\t14\tcompleted\tfailure\t%s\n", drawn);
+    nightly_test_run(buffer, 15, "merge_group", "completed", "success", other, 1, 2, "x");
+    nightly_append(buffer, "job\t15\tcompleted\tsuccess\tTests on Ubuntu 26.04 (vector, none, O3) / Vector row verdict (Clang 23, none, O3)\n");
+    nightly_test_run(buffer, 17, "merge_group", "completed", "success", other, 1, 2, "x");
+    nightly_append(buffer, "job\t17\tcompleted\tcancelled\t%s\n", drawn);
+    facts = nightly_facts_new();
+    nightly_expect(test, nightly_facts_parse(&facts, nightly_buffer_text(buffer)), "facts parse");
+    nightly_expect(test, nightly_plain_verdict(&facts, 13) == NIGHTLY_PLAIN_OK, "a drawn native row's verdict that succeeded: ok");
+    nightly_expect(test, nightly_plain_verdict(&facts, 14) == NIGHTLY_PLAIN_FAILED, "a drawn native row's verdict that failed: failed");
+    nightly_expect(test, nightly_plain_verdict(&facts, 15) == NIGHTLY_PLAIN_NONE, "the vector row's verdict alone: none");
+    nightly_expect(test, nightly_plain_verdict(&facts, 17) == NIGHTLY_PLAIN_NONE, "a cancelled native verdict: none");
+    nightly_facts_free(&facts);
 
     // Each row is a called workflow (hosted-correctness.yml, #2032): its jobs' names follow the caller's (the test job's
     // name, or its id with the matrix's values), and the job that builds a portable row's compiler once is no shard.
@@ -4288,23 +4388,15 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
 // (ROW SHARD, `vector` or `fuzz ENTRY`) names a job to leave out or, with `conclusion`, to conclude otherwise.
 static void nightly_test_candidate(NightlyBuffer* buffer, uint64_t run, const char* odd, const char* conclusion)
 {
-    static const char* const architectures[] = { "x86-64", "native" };
-    for (uint32_t row = 0; row <= BUSTER_NIGHTLY_SANITIZERS; row += 1)
+    // The native plain row, drawn since #2924: its skipped sharded job's unexpanded name, a draw's candidate, and its
+    // verdict, the contract's.
+    static const char native[] = "Tests on Ubuntu 26.04 (native, none, O3) / ";
+    nightly_append(buffer, "job\t%llu\tcompleted\tfailure\t%sVector draw 1, candidate 2 (Clang 23, none, O3)\n", (unsigned long long)run, native);
+    if (strcmp(odd, "native") != 0 || conclusion != NULL)
     {
-        const char* architecture = architectures[row / BUSTER_NIGHTLY_SANITIZERS];
-        const char* sanitizer = nightly_sanitizer_names[row % BUSTER_NIGHTLY_SANITIZERS];
-        const uint32_t shards = row == 2 || row == 3 ? 6 : 4;
-        nightly_append(buffer, "job\t%llu\tcompleted\tskipped\tTests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})\n", (unsigned long long)run, architecture, sanitizer);
-        for (uint32_t k = 1; k <= shards; k += 1)
-        {
-            char name[64];
-            snprintf(name, sizeof(name), "%s %s %u", architecture, sanitizer, k);
-            const bool is_odd = strcmp(name, odd) == 0;
-            if (!is_odd || conclusion != NULL)
-            {
-                nightly_append(buffer, "job\t%llu\t%s\t%s\tTests on Ubuntu 26.04 (%s, %s, O3) / Tests on Ubuntu 26.04 (Clang 23, %s, %s, O3, shard %u of %u)\n", (unsigned long long)run, is_odd && strcmp(conclusion, "-") == 0 ? "in_progress" : "completed", is_odd ? conclusion : "success", architecture, sanitizer, architecture, sanitizer, k, shards);
-            }
-        }
+        const bool running = strcmp(odd, "native") == 0 && strcmp(conclusion, "-") == 0;
+        nightly_append(buffer, "job\t%llu\t%s\t%s\t%sVector row verdict (Clang 23, none, O3)\n", (unsigned long long)run, running ? "in_progress" : "completed",
+                       strcmp(odd, "native") == 0 ? conclusion : "success", native);
     }
     static const char vector[] = "Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / ";
     nightly_append(buffer, "job\t%llu\tcompleted\tskipped\t%sTests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})\n", (unsigned long long)run, vector);
@@ -4313,15 +4405,12 @@ static void nightly_test_candidate(NightlyBuffer* buffer, uint64_t run, const ch
     {
         nightly_append(buffer, "job\t%llu\tcompleted\t%s\t%sVector row verdict (Clang 23, none address thread memory, O3)\n", (unsigned long long)run, strcmp(odd, "vector") == 0 ? conclusion : "success", vector);
     }
-    for (uint32_t j = 0; j < BUSTER_NIGHTLY_COUNT(nightly_fuzz_entries); j += 1)
+    // The fuzz campaigns' draws (#2924): a candidate, a later draw skipped, and their verdict.
+    nightly_append(buffer, "job\t%llu\tcompleted\tsuccess\tlibFuzzer (ASan + UBSan + leaks) / Vector draw 1, candidate 4 (fuzz)\n", (unsigned long long)run);
+    nightly_append(buffer, "job\t%llu\tcompleted\tskipped\tlibFuzzer (ASan + UBSan + leaks) / Vector draw 2, candidate ${{ matrix.candidate }} (${{ inputs.row }})\n", (unsigned long long)run);
+    if (strcmp(odd, "fuzz") != 0 || conclusion != NULL)
     {
-        char name[64];
-        snprintf(name, sizeof(name), "fuzz %s", nightly_fuzz_entries[j]);
-        const bool is_odd = strcmp(name, odd) == 0;
-        if (!is_odd || conclusion != NULL)
-        {
-            nightly_append(buffer, "job\t%llu\tcompleted\t%s\tlibFuzzer (ASan + UBSan + leaks, %s)\n", (unsigned long long)run, is_odd ? conclusion : "success", nightly_fuzz_entries[j]);
-        }
+        nightly_append(buffer, "job\t%llu\tcompleted\t%s\t" BUSTER_NIGHTLY_FUZZ_VERDICT "\n", (unsigned long long)run, strcmp(odd, "fuzz") == 0 ? conclusion : "success");
     }
     nightly_append(buffer, "job\t%llu\tcompleted\tskipped\t%s\n", (unsigned long long)run, BUSTER_NIGHTLY_HARDWARE_JOB);
 }
@@ -4351,12 +4440,20 @@ static bool nightly_test_coverage(const char* odd, const char* conclusion, const
 // A candidate's auxiliary workflows: those the selector named ran a job each, all successful; the others ran none.
 static void nightly_test_auxiliary(NightlyTest* test)
 {
-    const char* build = "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native)\n"
+    // The build's regressions and the self-host bootstrap draw AVX-512 runners (drawn.yml, #2924): a candidate, its
+    // collector, a later draw and its collector skipped (their names unexpanded), and the verdict.
+    const char* build = "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector draw 1, candidate 2 (regressions)\n"
+                        "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector draw 1's assignment (regressions)\n"
+                        "job\t60\tcompleted\tskipped\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector draw 2, candidate ${{ matrix.candidate }} (${{ inputs.row }})\n"
+                        "job\t60\tcompleted\tskipped\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector draw 2's assignment (${{ inputs.row }})\n"
+                        "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector row verdict (regressions)\n"
                         "job\t60\tcompleted\tsuccess\tAuxiliary (build.yml) / build.sh's now() under decimal points other than a period";
     const char* selfhost = "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host harness regression tests\n"
                            "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / prepare-hosted-tools / Prepare verified hosted release inputs\n"
-                           "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native)";
-    char both[1024];
+                           "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 1, candidate 3 (bootstrap)\n"
+                           "job\t60\tcompleted\tskipped\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 4, candidate ${{ matrix.candidate }} (${{ inputs.row }})\n"
+                           "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector row verdict (bootstrap)";
+    char both[4096];
     snprintf(both, sizeof(both), "%s\n%s", build, selfhost);
     nightly_expect(test, nightly_test_coverage_called("", NULL, build, ",build,"), "a called auxiliary workflow whose jobs succeeded");
     nightly_expect(test, nightly_test_coverage_called("", NULL, both, ",build,selfhost,"), "two called auxiliary workflows, nested calls included");
@@ -4369,7 +4466,11 @@ static void nightly_test_auxiliary(NightlyTest* test)
     } short_of[] = {
         { NULL, ",build,", "a called auxiliary workflow that ran nothing" },
         { "job\t60\tcompleted\tskipped\tAuxiliary (build.yml)", ",build,", "a called auxiliary workflow skipped" },
-        { "job\t60\tcompleted\tfailure\tAuxiliary (tier1-problem.yml) / correctness (native)", ",tier1-problem,", "a failed auxiliary job" },
+        { "job\t60\tcompleted\tfailure\tAuxiliary (tier1-problem.yml) / correctness (native) / Vector row verdict (tier1-problem)", ",tier1-problem,", "a failed auxiliary job" },
+        { "job\t60\tcompleted\tsuccess\tAuxiliary (tier1-problem.yml) / correctness (native) / Vector draw 1, candidate 1 (tier1-problem)", ",tier1-problem,", "a drawn auxiliary job without its verdict" },
+        { "job\t60\tcompleted\tskipped\tAuxiliary (tier1-problem.yml) / correctness (native) / Vector row verdict (tier1-problem)", ",tier1-problem,", "a drawn auxiliary job whose verdict was skipped" },
+        { "job\t60\tcompleted\tsuccess\tAuxiliary (tier1-problem.yml) / correctness (native) / Vector row verdict (bootstrap)", ",tier1-problem,", "another drawn job's verdict" },
+        { "job\t60\tcompleted\tskipped\tAuxiliary (build-pgo.yml) / build.sh refuses BUSTER_PGO's unsupported builds before compiling", ",build-pgo,", "a skipped job of an auxiliary workflow without draws" },
         { "job\t60\tcompleted\tcancelled\tAuxiliary (build-pgo.yml) / build.sh refuses BUSTER_PGO's unsupported builds before compiling", ",build-pgo,", "a cancelled auxiliary job" },
         { "job\t60\tin_progress\t-\tAuxiliary (build-pgo.yml) / build.sh refuses BUSTER_PGO's unsupported builds before compiling", ",build-pgo,", "an auxiliary job still running" },
         { "job\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host harness regression tests", ",", "an auxiliary workflow that ran though the selector didn't name it" },
@@ -4384,11 +4485,15 @@ static void nightly_test_auxiliary(NightlyTest* test)
     {
         nightly_expect(test, !nightly_test_coverage_called("", NULL, short_of[i].extra, short_of[i].auxiliary), short_of[i].what);
     }
-    char failed[1024];
-    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tfailure\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (x86-64)", selfhost);
+    char failed[4096];
+    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tfailure\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 1, candidate 2 (bootstrap)", selfhost);
     nightly_expect(test, !nightly_test_coverage_called("", NULL, failed, ",selfhost,"), "one failed job among an auxiliary workflow's successful ones");
-    nightly_expect(test, !nightly_test_coverage_called("x86-64 none 1", NULL, build, ",build,"), "a called auxiliary workflow doesn't make up for a missing shard");
-    nightly_expect(test, nightly_test_coverage_called("", NULL, "job\t61\tcompleted\tfailure\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native)", ","), "another run's auxiliary jobs don't count");
+    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tskipped\tAuxiliary (selfhost.yml) / Self-host harness regression tests", selfhost);
+    nightly_expect(test, !nightly_test_coverage_called("", NULL, failed, ",selfhost,"), "a skipped job of an auxiliary workflow that isn't a draw's");
+    snprintf(failed, sizeof(failed), "%s\njob\t60\tcompleted\tsuccess\tAuxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector row verdict (bootstrap)", selfhost);
+    nightly_expect(test, !nightly_test_coverage_called("", NULL, failed, ",selfhost,"), "two verdicts of an auxiliary workflow's drawn job");
+    nightly_expect(test, !nightly_test_coverage_called("native", NULL, build, ",build,"), "a called auxiliary workflow doesn't make up for a missing verdict");
+    nightly_expect(test, nightly_test_coverage_called("", NULL, "job\t61\tcompleted\tfailure\tAuxiliary (build.yml) / Fresh, incremental, failed and switched builds (Clang 23, native) / Vector row verdict (regressions)", ","), "another run's auxiliary jobs don't count");
 }
 
 static bool nightly_test_stale(const char* input, uint64_t own, const char* expected)
@@ -4451,28 +4556,33 @@ static void nightly_test_queue(NightlyTest* test)
         const char* conclusion;
         const char* what;
     } short_of[] = {
-        { "x86-64 none 1", NULL, "a plain shard missing" },
-        { "x86-64 memory 6", NULL, "a sanitizer row's last shard missing" },
-        { "x86-64 address 2", "failure", "a failed shard" },
-        { "x86-64 thread 6", "cancelled", "a cancelled shard" },
-        { "x86-64 thread 3", "skipped", "a skipped shard" },
-        { "native none 4", "timed_out", "a timed-out shard" },
-        { "x86-64 memory 1", "-", "a shard still in progress" },
+        { "native", NULL, "the native verdict missing" },
+        { "native", "failure", "the native verdict failed" },
+        { "native", "cancelled", "the native verdict cancelled" },
+        { "native", "skipped", "the native verdict skipped" },
+        { "native", "timed_out", "the native verdict timed out" },
+        { "native", "-", "the native verdict still in progress" },
         { "vector", NULL, "the vector verdict missing" },
         { "vector", "failure", "the vector verdict failed" },
         { "vector", "skipped", "the vector verdict skipped" },
-        { "fuzz frontend", NULL, "a fuzz campaign missing" },
-        { "fuzz crash-replay-proof", "cancelled", "a fuzz campaign cancelled" },
+        { "fuzz", NULL, "the fuzz campaigns' verdict missing" },
+        { "fuzz", "cancelled", "the fuzz campaigns' verdict cancelled" },
+        { "fuzz", "failure", "the fuzz campaigns' verdict failed" },
     };
     for (uint32_t i = 0; i < BUSTER_NIGHTLY_COUNT(short_of); i += 1)
     {
         nightly_expect(test, !nightly_test_coverage(short_of[i].odd, short_of[i].conclusion, NULL), short_of[i].what);
     }
-    nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 5 of 5)"), "a row whose shards disagree");
+    nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (native, none, O3) / Vector row verdict (Clang 24, none, O3)"), "two native verdicts");
+    nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 4)"), "a native row's shard (sharded before #2924) isn't the contract's, and doesn't count");
+    nightly_expect(test, !nightly_test_coverage("native", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (vector, none, O3) / Vector row verdict (Clang 23, none, O3)"), "a vector row's plain verdict doesn't stand for the native row's");
+    nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)"), "a retired x86-64 row (#2924) isn't the contract's, and doesn't count");
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, address, O1) / Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 1 of 4)"), "a row at another optimization isn't the contract's, and doesn't count");
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, memory, O3) / Tests on Ubuntu 26.04 (Clang 23, native, memory, O3, shard 1 of 5)"), "a retired native sanitizer row (#2032) isn't the contract's, and doesn't count");
     nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 24, none address thread memory, O3)"), "two vector verdicts");
-    nightly_expect(test, nightly_test_coverage("", NULL, "job\t61\tcompleted\tfailure\tlibFuzzer (ASan + UBSan + leaks, frontend)"), "another run's jobs don't count");
+    nightly_expect(test, nightly_test_coverage("", NULL, "job\t61\tcompleted\tfailure\t" BUSTER_NIGHTLY_FUZZ_VERDICT), "another run's jobs don't count");
+    nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\t" BUSTER_NIGHTLY_FUZZ_VERDICT), "two fuzz verdicts");
+    nightly_expect(test, !nightly_test_coverage("fuzz", NULL, "job\t60\tcompleted\tsuccess\tlibFuzzer (ASan + UBSan + leaks) / Vector row verdict (regressions)"), "another drawn job's verdict doesn't stand for the fuzz campaigns'");
 
     char a[41];
     char b[41];

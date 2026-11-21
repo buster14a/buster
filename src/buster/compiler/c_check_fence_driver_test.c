@@ -448,7 +448,7 @@ static void check_test_driver_counters(CheckTest* test, const char* executable, 
 }
 
 // #1059's audit: two volatile reads through pointers keep their order by Tier 1, by both paths. Its load folding moves a
-// load into its consumer past no other load (tier1_select_fold_barrier), as the IR doesn't know a C access's volatility:
+// load into its consumer past no other load (tier1_select_barriers), as the IR doesn't know a C access's volatility:
 // `ordered`'s first read, of p (rdi), comes before its second, of q (rsi), in the object's code, where folding the first
 // into the subtraction once read q first. clang's code reads them in this order too.
 static void check_test_driver_volatile_order(CheckTest* test, const char* executable, const char* directory)

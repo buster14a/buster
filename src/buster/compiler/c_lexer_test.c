@@ -161,18 +161,7 @@ static Comparison compare(String8 source, TokenArrays* vectorized, TokenArrays* 
     const bool fell_back = c_tokenize_vectorized(bytes, source.length, vectorized->kinds, vectorized->starts, vectorized->ends, flags) ==
                            C_TOKENIZER_ERROR_NEEDS_SCALAR;
     int64_t vectorized_count = c_tokenize(bytes, source.length, vectorized->kinds, vectorized->starts, vectorized->ends, flags);
-    // A scalar host's c_tokenize is c_tokenize_scalar (c_lexer.c), so lexing the input again there compared that function
-    // with itself: half of the portable rows' lexer commands, whose six headings were 9% of the x86-64 MSan row's work
-    // (#2658). Every input is still lexed once, under the row's sanitizer.
-    int64_t scalar_count = vectorized_count;
-    if (BUSTER_HOST_VECTOR)
-    {
-        scalar_count = c_tokenize_scalar(bytes, source.length, scalar->kinds, scalar->starts, scalar->ends, flags);
-    }
-    else
-    {
-        scalar = vectorized;
-    }
+    const int64_t scalar_count = c_tokenize_scalar(bytes, source.length, scalar->kinds, scalar->starts, scalar->ends, flags);
     int64_t i = 0;
     while (i < vectorized_count && i < scalar_count && vectorized->kinds[i] == scalar->kinds[i] && vectorized->starts[i] == scalar->starts[i] &&
            vectorized->ends[i] == scalar->ends[i])
@@ -220,14 +209,7 @@ static CheckCounts print_counts(const char* check, uint64_t total, const char* i
     for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
     {
         printf("%s%s: %lu of %lu %s differ", check, number_mode_names[mode], (unsigned long)counts[mode].different, (unsigned long)total, items);
-        if (BUSTER_HOST_VECTOR)
-        {
-            printf(", %lu need the scalar lexer for a part\n", (unsigned long)counts[mode].fell_back);
-        }
-        else
-        {
-            printf("; vector lexer execution unavailable in this build\n");
-        }
+        printf(", %lu need the scalar lexer for a part\n", (unsigned long)counts[mode].fell_back);
         sum.different += counts[mode].different;
         sum.fell_back += counts[mode].fell_back;
     }
@@ -1051,7 +1033,7 @@ static bool check_raw_strings(TokenArrays* vectorized, TokenArrays* scalar, uint
                              (unsigned long)start);
                     const Comparison comparison = compare(source, vectorized, scalar, flags, failed < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
                     const bool unexpected = comparison == COMPARISON_DIFFERENT ||
-                                            (BUSTER_HOST_VECTOR && ((raw && comparison != COMPARISON_FELL_BACK) ||
+                                            (((raw && comparison != COMPARISON_FELL_BACK) ||
                                                                     (!raw && !may_fall_back && comparison != COMPARISON_SAME)));
                     if (unexpected && comparison != COMPARISON_DIFFERENT && failed < BUSTER_TEST_REPORTED_INPUTS)
                     {
@@ -1063,8 +1045,7 @@ static bool check_raw_strings(TokenArrays* vectorized, TokenArrays* scalar, uint
             }
         }
     }
-    printf("raw strings: %lu of %lu cases fail%s\n", (unsigned long)failed, (unsigned long)checked,
-           BUSTER_HOST_VECTOR ? "" : " (vector fallback checks unavailable)");
+    printf("raw strings: %lu of %lu cases fail\n", (unsigned long)failed, (unsigned long)checked);
     return failed == 0;
 }
 

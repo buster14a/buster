@@ -164,9 +164,6 @@ static void x86_target_forms_scalar(const X86Target* target, uint8_t* allowed)
 // row's mark is in every target's unavailable bits, so the loop denies it, and the exact pass then decides it.
 static void x86_target_forms(const X86Target* target, uint8_t* allowed)
 {
-#if !BUSTER_HOST_VECTOR
-    x86_target_forms_scalar(target, allowed);
-#else
     const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
     const __m512i unavailable = _mm512_set1_epi32((int)~x86_target_compact_features(available));
     const __m512i zero = _mm512_setzero_si512();
@@ -185,7 +182,6 @@ static void x86_target_forms(const X86Target* target, uint8_t* allowed)
     {
         allowed[x86_target_classified_forms[i]] = (x86_target_classified_requirements[i] & ~available) == 0;
     }
-#endif
 }
 
 static bool x86_target_form_allowed(const uint8_t* allowed, uint32_t form)

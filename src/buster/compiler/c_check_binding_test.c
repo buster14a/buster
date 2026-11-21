@@ -1008,9 +1008,94 @@ static void check_test_binding_recovery_limits(CheckTest* test)
     arena_release(&storage);
 }
 
-// Typo correction's distances (#1447, c_check_typo.c): the vector path's bit-parallel Myers, against the scalar path's
-// dynamic-programming table, its twin, for random spellings of 1 to 64 bytes from small alphabets (many matches), with
-// the textbook cases among them.
+static uint32_t check_test_typo_draw(uint64_t* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return (uint32_t)(*state >> 32);
+}
+
+// Typo correction's length filter (c_check_typo.c) against its definition (#2924): every name from `begin` to `end` in
+// order whose key is below the name capacity and whose length differs from the typo's by at most a third of it, as
+// positions. Every count to 300 from four starts, so that the 16-name blocks end at every lane, for typos of 0 to 40
+// bytes, each column ending at a protected page; nothing is written past the names taken.
+static void check_test_typo_prefilter(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* key_mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* length_mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool ready = key_mapping != MAP_FAILED && length_mapping != MAP_FAILED && page >= 320 * sizeof(uint32_t);
+    ready = ready && mprotect(key_mapping + page, page, PROT_NONE) == 0 && mprotect(length_mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "typo prefilter: guarded columns");
+    static const uint32_t starts[] = { 0, 1, 7, 16 };
+    const uint32_t name_capacity = 1000;
+    uint64_t state = UINT64_C(0x8f3a5d2c71b4e609);
+    uint32_t candidates[320 + 16];
+    uint32_t expected[320];
+    bool same = true;
+    uint64_t taken = 0;
+    for (uint32_t count = 0; ready && count <= 300; count += 1)
+    {
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(starts); s += 1)
+        {
+            const uint32_t begin = starts[s];
+            const uint32_t end = begin + count;
+            uint32_t* keys = (uint32_t*)(key_mapping + page) - end;
+            uint32_t* lengths = (uint32_t*)(length_mapping + page) - end;
+            const uint32_t length = check_test_typo_draw(&state) % 41;
+            for (uint32_t i = 0; i < end; i += 1)
+            {
+                // A key past the capacity one name in eight; a length within 20 bytes of the typo's, not below zero.
+                keys[i] = check_test_typo_draw(&state) % 8 == 0 ? name_capacity + check_test_typo_draw(&state) % 3 : check_test_typo_draw(&state) % name_capacity;
+                const uint32_t spread = check_test_typo_draw(&state) % 41;
+                lengths[i] = length + spread >= 20 ? length + spread - 20 : spread;
+            }
+            uint32_t want = 0;
+            for (uint32_t i = begin; i < end; i += 1)
+            {
+                const uint32_t difference = lengths[i] > length ? lengths[i] - length : length - lengths[i];
+                if (keys[i] < name_capacity && 3 * difference <= length)
+                {
+                    expected[want] = i;
+                    want += 1;
+                }
+            }
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(candidates); i += 1)
+            {
+                candidates[i] = UINT32_MAX;
+            }
+            const CheckTypoScope scope = {
+                .keys = keys,
+                .lengths = lengths,
+            };
+            const uint32_t got = check_typo_prefilter(&scope, begin, end, name_capacity, length, candidates);
+            same &= got == want;
+            for (uint32_t i = 0; same && i < want; i += 1)
+            {
+                same = candidates[i] == expected[i];
+            }
+            for (uint32_t i = want; same && i < BUSTER_ARRAY_LENGTH(candidates); i += 1)
+            {
+                same = candidates[i] == UINT32_MAX;
+            }
+            taken += want;
+        }
+    }
+    check_test_expect(test, same && taken != 0, "typo prefilter: the names taken differ from the definition's");
+    if (key_mapping != MAP_FAILED)
+    {
+        munmap(key_mapping, page * 2);
+    }
+    if (length_mapping != MAP_FAILED)
+    {
+        munmap(length_mapping, page * 2);
+    }
+}
+
+// Typo correction's distances (#1447, c_check_typo.c): Myers's bit-parallel path, taken for spellings of 1 to 64 bytes,
+// against the dynamic-programming table, Levenshtein's definition and the path for longer ones, for random spellings of
+// 1 to 64 bytes from small alphabets (many matches), with the textbook cases among them.
 static void check_test_typo_distances(CheckTest* test)
 {
     static const struct { const char* a; const char* b; uint32_t distance; } known[] =
@@ -1049,13 +1134,14 @@ static void check_test_typo_distances(CheckTest* test)
         }
         const uint32_t table = check_typo_distance_table(a, a_length, b, b_length, row);
         const uint32_t bits = check_typo_distance_bits(a, a_length, b, b_length);
-        check_test_expect(test, table == bits, "typo bit-parallel distance differs from its scalar twin");
+        check_test_expect(test, table == bits, "typo bit-parallel distance differs from the table's");
     }
 }
 
 static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
 {
     check_test_typo_distances(test);
+    check_test_typo_prefilter(test);
     check_test_binding_source(test, "", "x", 0, 0, true, false);
     const uint32_t shadow[] = {
         0,

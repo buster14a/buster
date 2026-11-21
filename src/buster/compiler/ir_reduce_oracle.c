@@ -85,26 +85,27 @@ static IrReduceObservation ir_reduce_oracle(const IrFunction* function, const Ir
     const uint64_t mark = scratch->length;
     if (oracle != NULL && oracle->argument_count <= BUSTER_ARRAY_LENGTH(oracle->arguments))
     {
-        const IrCheck vector = ir_verify_complete(function, scratch, true);
-        IrCheck scalar = ir_verify_complete(function, scratch, false);
-        if (ir_reduce_resource(vector.error) || ir_reduce_resource(scalar.error))
+        const IrCheck verified = ir_verify_complete(function, scratch);
+        if (ir_reduce_resource(verified.error))
         {
             result.status = IR_REDUCE_PREDICATE_LIMIT;
         }
         else if (oracle->verifier)
         {
-            // Controlled bad-consumer observation, after both authoritative verifiers checked real valid IR.
-            if (oracle->injection == IR_REDUCE_INJECT_VERIFY_PHI && scalar.error == IR_OK && ir_reduce_has(function, IR_PHI))
+            // Controlled bad-consumer observation: the consumer's verdict against the verifier's, after the verifier
+            // checked real valid IR.
+            IrError observed = verified.error;
+            if (oracle->injection == IR_REDUCE_INJECT_VERIFY_PHI && observed == IR_OK && ir_reduce_has(function, IR_PHI))
             {
-                scalar.error = IR_ERROR_PHI;
+                observed = IR_ERROR_PHI;
             }
             result.status = IR_REDUCE_OBSERVED;
-            if (vector.error != scalar.error)
+            if (verified.error != observed)
             {
-                result.failure = (IrReduceFailure){ .kind = IR_REDUCE_FAILURE_VERIFY, .detail = (uint32_t)vector.error << 16 | scalar.error };
+                result.failure = (IrReduceFailure){ .kind = IR_REDUCE_FAILURE_VERIFY, .detail = (uint32_t)verified.error << 16 | observed };
             }
         }
-        else if (vector.error == IR_OK && scalar.error == IR_OK && oracle->argument_count == function->parameter_count)
+        else if (verified.error == IR_OK && oracle->argument_count == function->parameter_count)
         {
             const uint64_t available = scratch->capacity - scratch->length;
             const uint64_t half = (available / 2) & ~UINT64_C(63);
@@ -134,16 +135,15 @@ static IrReduceObservation ir_reduce_oracle(const IrFunction* function, const Ir
                         }
                         else
                         {
-                            const IrCheck optimized_vector = ir_verify_complete(&optimized.function, &execution, true);
-                            const IrCheck optimized_scalar = ir_verify_complete(&optimized.function, &execution, false);
-                            if (ir_reduce_resource(optimized_vector.error) || ir_reduce_resource(optimized_scalar.error))
+                            const IrCheck optimized_check = ir_verify_complete(&optimized.function, &execution);
+                            if (ir_reduce_resource(optimized_check.error))
                             {
                                 result.status = IR_REDUCE_PREDICATE_LIMIT;
                             }
-                            else if (optimized_vector.error != IR_OK || optimized_scalar.error != IR_OK)
+                            else if (optimized_check.error != IR_OK)
                             {
                                 result.failure = (IrReduceFailure){ .kind = IR_REDUCE_FAILURE_VERIFY, .pass = oracle->passes,
-                                    .detail = (uint32_t)optimized_vector.error << 16 | optimized_scalar.error };
+                                    .detail = (uint32_t)optimized_check.error << 16 | optimized_check.error };
                             }
                             else
                             {
