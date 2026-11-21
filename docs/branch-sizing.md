@@ -441,8 +441,8 @@ are as before.
 `./build/compiler test-branch-sizing` (AGENTS.md, "Branch sizing tests"): every
 function sized is one `branch_sizing_validate` accepts, and each result must be
 the reference's (relaxation over the records, each record
-re-encoded by `x86_encode_scalar`), pass `x86_validate`, have
-`x86_encode_scalar`'s offsets and length, aim every branch at its label's
+re-encoded by `x86_encode`), pass `x86_validate`, have
+`x86_encode`'s offsets and length, aim every branch at its label's
 record, and be long exactly where a rel8 can't reach. The checks cover every
 form number, `branch_sizing_validate`'s errors at every place, probes at every
 displacement around both rel8 limits over branches that grow or don't, random
@@ -455,7 +455,7 @@ contract's first error (as the test states it, with the forms from the form
 table) on random functions broken 0 to 3 times at random, and stay inside
 columns that end at `PROT_NONE` pages. With `--cross-check`, GNU as
 relaxes 404 of the functions printed as source with labels, and its bytes must
-be `x86_encode_scalar`'s of the sized records.
+be `x86_encode`'s of the sized records.
 
 ## Next steps
 

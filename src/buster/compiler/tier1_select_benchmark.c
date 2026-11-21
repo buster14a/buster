@@ -239,7 +239,7 @@ static bool tier1_select_bench_run(Tier1SelectBench* bench, bool vector, bool co
                 }
                 const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
                 uint8_t* bytes = arena_push(&bench->output, capacity, 64);
-                const int64_t encoded = valid && bytes != 0 ? (vector ? x86_encode(code->records, code->count, bytes, capacity, 0, 0) : x86_encode_scalar(code->records, code->count, bytes, capacity, 0, 0)) : -1;
+                const int64_t encoded = valid && bytes != 0 ? x86_encode(code->records, code->count, bytes, capacity, 0, 0) : -1;
                 valid = valid && encoded >= 0;
                 if (valid)
                 {

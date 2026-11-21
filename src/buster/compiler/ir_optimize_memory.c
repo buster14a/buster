@@ -5,7 +5,8 @@
 // after SCCP and the identities and before dead-code removal, on the analyses it already has (CFG, uses, dominators,
 // SCCP's constants). A plain load takes the value of an earlier access of the same bytes, the same type and the same
 // memory: an earlier load's value, or the value an earlier store stored, where no write of that memory may come between
-// on any path from the access to the load. The load forwards that value as an identity does (IrOptimizeWork.forward):
+// on any path from the access to the load. A byte or word load can also take the operand of a zero extension that the
+// preceding memory event stored at the same address in this block. The load forwards its value as an identity does:
 // its users read the value, and the load is gone.
 //
 // An access's address is a root value, an optional index value and its scale, and a constant offset, read through the
@@ -25,9 +26,10 @@
 // and its family's write counts there, and an undo log that restores the entries and the counts as the walk leaves a
 // subtree (ir_memory_walk). Across a block boundary a value survives where no path from the block's immediate dominator
 // to the block may write its class's memory (ir_memory_clear). The data-parallel phases before the walk (classification,
-// the slots' derivation and escapes, the event lists and the families' and keys' hashes) have vector versions and exact
-// scalar twins, which the caller's explicit request chooses; the addresses' chains, the grouping, the overlaps, the
-// blocks' summaries and the walk are shared.
+// the slots' derivation and escapes, the event lists and the families' and keys' hashes) are vector code. Their scalar
+// versions take only a function whose value spaces a signed dword gather can't index (2^30 instructions or address
+// rows): a fallback, which #2924's phase D removes. The addresses' chains, the grouping, the overlaps, the blocks'
+// summaries and the walk are one code for both.
 
 #define BUSTER_IR_MEMORY_NONE 0u
 #define BUSTER_IR_MEMORY_LOAD 1u
@@ -196,7 +198,7 @@ static uint32_t ir_memory_kind(const IrOptimizeWork* work, uint32_t i)
 
 // The instructions' info words, and the operands their addresses are read through: a conversion's (inttoptr's of an
 // i64 alone), an IR_ADDRESS's base, an addition's other operand than its constant one and a subtraction's of a constant.
-// Scalar twin.
+// The fallback past the gathers' reach.
 static void ir_memory_classify_scalar(IrMemoryWork* m)
 {
     const IrOptimizeWork* work = m->ir;
@@ -294,7 +296,7 @@ static void ir_memory_classify_vector(IrMemoryWork* m)
 }
 
 // The slot each reachable value's follow chain starts at: in reverse postorder, each one's followed operand first (it
-// dominates the value). Scalar twin.
+// dominates the value). The fallback past the gathers' reach.
 static void ir_memory_derive_scalar(IrMemoryWork* m)
 {
     const IrOptimizeWork* work = m->ir;
@@ -388,7 +390,8 @@ static void ir_memory_escape_uses(IrMemoryWork* m, uint32_t v)
     }
 }
 
-// The slots whose addresses escape, from the uses of the values derived from them, which are few. Scalar twin.
+// The slots whose addresses escape, from the uses of the values derived from them, which are few. The fallback past the
+// gathers' reach.
 static void ir_memory_escapes_scalar(IrMemoryWork* m)
 {
     for (uint32_t v = 0; v < m->ir->function->instruction_count; v += 1)
@@ -425,7 +428,7 @@ static uint32_t ir_memory_undos(uint32_t kind)
 }
 
 // The events and accesses, each block's first event, every slot's first IR_STACK_ADDR and the undo bound; a volatile
-// slot's access becomes a write. Scalar twin.
+// slot's access becomes a write. The fallback past the gathers' reach.
 static void ir_memory_events_scalar(IrMemoryWork* m)
 {
     const IrFunction* f = m->ir->function;
@@ -599,7 +602,8 @@ static uint32_t ir_memory_type(const IrFunction* f, uint32_t i)
     return f->op[i] == IR_STORE ? f->type[f->b[i]] : f->type[i];
 }
 
-// The accesses' family hashes (`keys` false) or key hashes (true, from their families). Scalar twin.
+// The accesses' family hashes (`keys` false) or key hashes (true, from their families). The fallback past the gathers'
+// reach.
 static void ir_memory_hash_scalar(IrMemoryWork* m, bool keys)
 {
     const IrFunction* f = m->ir->function;
@@ -904,6 +908,28 @@ static void ir_memory_count(IrMemoryUndo* undo, uint32_t* undo_count, uint32_t* 
     *counter = value;
 }
 
+// On x86-64 a wider integer's low bytes start at its address. If the preceding event is a plain store, it is also
+// access - 1. Matching its address family and offset excludes a different byte or a possibly aliasing address.
+static uint32_t ir_memory_narrow_load(const IrMemoryWork* m, uint32_t load, uint32_t access, uint32_t previous)
+{
+    const IrFunction* f = m->ir->function;
+    uint32_t value = load;
+    if ((m->info[previous] & BUSTER_IR_MEMORY_KIND) == BUSTER_IR_MEMORY_STORE &&
+        m->families[access - 1] == m->families[access] && m->offsets[access - 1] == m->offsets[access])
+    {
+        const uint32_t stored = ir_optimize_forwarded(m->ir, f->b[previous]);
+        if (f->op[stored] == IR_ZEXT)
+        {
+            const uint32_t narrow = ir_optimize_forwarded(m->ir, f->a[stored]);
+            if (f->type[narrow] == f->type[load] && f->op[narrow] != IR_UNDEF)
+            {
+                value = narrow;
+            }
+        }
+    }
+    return value;
+}
+
 // The decision: the dominator tree in preorder, each block's events in order (`access_first[b]` the first of block b's
 // accesses among them). A write adds to general memory's
 // count, a marker to its slot's class's (or general memory's), a store to its class's and its family's and enters its
@@ -943,7 +969,8 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
             }
             const bool executable = work->blocks[block] != 0;
             uint32_t k = access_first[block];
-            for (uint32_t event = m->event_first[block]; event < m->event_first[(uint64_t)block + 1]; event += 1)
+            const uint32_t first = m->event_first[block];
+            for (uint32_t event = first; event < m->event_first[(uint64_t)block + 1]; event += 1)
             {
                 const uint32_t i = m->events[event];
                 const uint32_t kind = m->info[i] & BUSTER_IR_MEMORY_KIND;
@@ -962,7 +989,6 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
                     const uint32_t family = m->families[k];
                     const uint32_t class = m->classes[k];
                     const uint32_t epoch = epochs[class != 0];
-                    k += 1;
                     if (kind == BUSTER_IR_MEMORY_STORE)
                     {
                         ir_memory_count(undo, &undo_count, &class_counts[class], class_counts[class] + 1);
@@ -975,14 +1001,17 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
                         const uint32_t writes = class_counts[class] - entry.class_count;
                         taken = m->key_overlapped[key] != 0 ? writes == 0 : writes == family_counts[family] - entry.family_count;
                     }
-                    if (taken)
+                    uint32_t value = taken ? entry.value : i;
+                    if (!taken)
                     {
-                        work->forward[i] = entry.value;
-                        forwarded += 1;
-                    }
-                    else
-                    {
-                        const uint32_t value = kind == BUSTER_IR_MEMORY_STORE ? ir_optimize_forwarded(work, f->b[i]) : i;
+                        if (kind == BUSTER_IR_MEMORY_STORE)
+                        {
+                            value = ir_optimize_forwarded(work, f->b[i]);
+                        }
+                        else if (executable && event != first && (f->type[i] == IR_I8 || f->type[i] == IR_I16))
+                        {
+                            value = ir_memory_narrow_load(m, i, k, m->events[event - 1]);
+                        }
                         undo[undo_count] = (IrMemoryUndo){ .key = key, .entry = entry };
                         undo_count += 1;
                         entries[key] = (IrMemoryEntry){
@@ -992,6 +1021,12 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
                             .epoch = f->op[value] == IR_UNDEF ? UINT32_MAX : epoch,
                         };
                     }
+                    if (kind == BUSTER_IR_MEMORY_LOAD && value != i)
+                    {
+                        work->forward[i] = value;
+                        forwarded += 1;
+                    }
+                    k += 1;
                 }
             }
         }
@@ -1024,10 +1059,10 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
 
 // Value numbering with memory on the optimizer's work, after SCCP and the identities: the loads it forwards go to
 // work->forward (made here where the identities made none), their number to `forwarded`. Its other columns are scratch's
-// and go before it returns. `scalar` is the caller's explicit request for the scalar twins, not the AUTO policy's size
-// bound (work->scalar): this pass's vector phases have no set-up that small functions don't repay (the verifier's rule
-// too, #786). Returns false where scratch has no room for them.
-static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool requested_scalar, uint32_t* forwarded)
+// and go before it returns. Its vector phases run whatever the AUTO policy's size bound (work->scalar): they have no
+// set-up that small functions don't repay (the verifier's rule too, #786). Returns false where scratch has no room for
+// them.
+static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* forwarded)
 {
     const IrFunction* f = work->function;
     const uint32_t n = f->instruction_count;
@@ -1044,8 +1079,8 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
     }
     const uint64_t mark = scratch->length;
     // AVX-512's gather indices are signed dwords, and the constants' and addresses' gathers double theirs: larger value
-    // spaces take the scalar twin.
-    const bool scalar = !BUSTER_VECTOR_PATH(!requested_scalar) || n >= (UINT32_C(1) << 30) || f->address_count >= (UINT32_C(1) << 30);
+    // spaces take the scalar phases.
+    const bool scalar = n >= (UINT32_C(1) << 30) || f->address_count >= (UINT32_C(1) << 30);
     IrMemoryWork m = { .ir = work, .undo_bound = (uint64_t)f->block_count * 2 };
     m.info = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
     m.follow = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);

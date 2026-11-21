@@ -102,11 +102,11 @@ struct IrReduceResult
 typedef struct IrReduceCache IrReduceCache;
 struct IrReduceCache
 {
-    IrReduceCache* next;
-    uint8_t* bytes;
+    IrReduceCache* children[2];
     uint64_t length;
     uint64_t hash;
     IrReduceObservation observation;
+    uint8_t bytes[];
 };
 
 typedef struct IrReduceWork IrReduceWork;
@@ -116,7 +116,7 @@ struct IrReduceWork
     Arena candidate;
     Arena scratch;
     Arena cache;
-    IrReduceCache* first;
+    IrReduceCache* root;
     IrReduceLimits limits;
     IrReducePredicate predicate;
     void* context;
@@ -338,41 +338,45 @@ static bool ir_reduce_observe(IrReduceWork* work, const IrFunction* function, Ir
     uint64_t length = 0;
     uint64_t hash = 0;
     uint8_t* key = ir_reduce_key(function, &work->scratch, &length, &hash);
-    IrReduceCache* found = NULL;
-    for (IrReduceCache* entry = work->first; key != NULL && found == NULL && entry != NULL; entry = entry->next)
+    // Each level consumes one high hash bit. After 64 levels only equal hashes can share the path and follow child 0.
+    uint64_t bits = hash;
+    IrReduceCache** slot = &work->root;
+    while (key != NULL && *slot != NULL)
     {
+        IrReduceCache* entry = *slot;
         if (entry->hash == hash && entry->length == length && memcmp(entry->bytes, key, length) == 0)
         {
-            found = entry;
+            break;
         }
+        slot = &entry->children[bits >> 63];
+        bits <<= 1;
     }
     if (key == NULL)
     {
         work->result.status = IR_REDUCE_RESOURCE;
         valid = false;
     }
-    else if (found != NULL)
+    else if (*slot != NULL)
     {
-        *result = found->observation;
+        *result = (*slot)->observation;
         work->result.cache_hits += 1;
     }
     else
     {
-        const uint64_t cache_mark = work->cache.length;
-        IrReduceCache* entry = BUSTER_ARENA_PUSH_ARRAY(&work->cache, IrReduceCache, 1);
-        uint8_t* saved = entry != NULL ? arena_push(&work->cache, length, 1) : NULL;
-        if (saved == NULL)
+        // The key immediately follows the header. Its former pointer pays for the second child in the same budget.
+        IrReduceCache* entry = arena_push(&work->cache, sizeof(*entry) + length, _Alignof(IrReduceCache));
+        if (entry == NULL)
         {
-            arena_pop_to(&work->cache, cache_mark);
             work->result.status = IR_REDUCE_CACHE_LIMIT;
             valid = false;
         }
         else
         {
-            memcpy(saved, key, length);
+            *entry = (IrReduceCache){ .length = length, .hash = hash };
+            memcpy(entry->bytes, key, length);
             *result = ir_reduce_predicate(function, work);
-            *entry = (IrReduceCache){ .next = work->first, .bytes = saved, .length = length, .hash = hash, .observation = *result };
-            work->first = entry;
+            entry->observation = *result;
+            *slot = entry;
             work->result.predicates += 1;
         }
     }

@@ -2012,12 +2012,12 @@ static void check_asm_unit_number(Arena* output, int64_t value, bool* valid)
 }
 
 // Records `records[0, count)` as the bytes they encode, a `.byte` line of them each (check_asm_unit_helper).
-static void check_asm_unit_records(Arena* output, const X86Instruction* records, uint32_t count, bool scalar, bool* valid)
+static void check_asm_unit_records(Arena* output, const X86Instruction* records, uint32_t count, bool* valid)
 {
     for (uint32_t r = 0; *valid && r < count; r += 1)
     {
         uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-        const int64_t length = BUSTER_SCALAR_PATH(scalar) ? x86_encode_scalar(records + r, 1, bytes, sizeof(bytes), 0, 0) : x86_encode(records + r, 1, bytes, sizeof(bytes), 0, 0);
+        const int64_t length = x86_encode(records + r, 1, bytes, sizeof(bytes), 0, 0);
         *valid = length > 0 && length <= 15;
         check_asm_unit_text(output, ".byte ", valid);
         for (int64_t b = 0; *valid && b < length; b += 1)
@@ -2062,7 +2062,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
     const Tier0Code code = check_asm_helper_code(places, count, &empty, saved, stores, block, pops, 0, 0, labels, exit, &first, scratch);
     bool valid = code.error == TIER0_OK;
     check_asm_unit_text(output, ".att_syntax prefix\n", &valid);
-    check_asm_unit_records(output, code.records, valid ? first : 0, scalar, &valid);
+    check_asm_unit_records(output, code.records, valid ? first : 0, &valid);
     check_asm_unit_bytes(output, text.pointer, text.length, &valid);
     // The template may have left another syntax or another section behind; the helper's stores and epilogue are its own
     // default text section's.
@@ -2083,7 +2083,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
         }
         if (r % 2 == 0)
         {
-            check_asm_unit_records(output, code.records + first + r, 1, scalar, &valid);
+            check_asm_unit_records(output, code.records + first + r, 1, &valid);
         }
         else
         {
@@ -2097,7 +2097,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
         check_asm_unit_goto(output, statement, BUSTER_CHECK_NONE, &valid);
         check_asm_unit_text(output, ":\n", &valid);
     }
-    check_asm_unit_records(output, valid ? code.records + first + exits : 0, valid ? code.count - first - exits : 0, scalar, &valid);
+    check_asm_unit_records(output, valid ? code.records + first + exits : 0, valid ? code.count - first - exits : 0, &valid);
     const uint64_t length = output->length - mark;
     AsmResult result = valid ? asm_assemble((String8){ .pointer = (char*)output->base + mark, .length = length }, index,
                                             (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output) :

@@ -96,8 +96,8 @@ static uint64_t mask_spill_expected(const MaskSpillShape* shape, uint32_t k, uin
     return (k + steps) & every;
 }
 
-// The program's records into `code` (BUSTER_MASK_SPILL_CODE_SIZE bytes, writable), encoded by both encoders into the
-// same bytes; its body's instruction count (the loop's, without its dec and jne) in *body.
+// The program's records encoded into `code` (BUSTER_MASK_SPILL_CODE_SIZE bytes, writable); its body's instruction count
+// (the loop's, without its dec and jne) in *body.
 static bool mask_spill_encode(const MaskSpillShape* shape, uint8_t* code, uint32_t* length, uint32_t* body)
 {
     const uint8_t saved[] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
@@ -124,7 +124,7 @@ static bool mask_spill_encode(const MaskSpillShape* shape, uint8_t* code, uint32
     }
     // The loop starts on a 64-byte boundary, so that the programs' loops are placed alike.
     uint8_t prefix[512];
-    const int64_t prefix_length = x86_encode_scalar(records, count, prefix, sizeof(prefix), 0, 0);
+    const int64_t prefix_length = x86_validate(records, count) == count ? x86_encode(records, count, prefix, sizeof(prefix), 0, 0) : -1;
     bool valid = prefix_length > 0;
     for (uint32_t i = 0; valid && i < (64 - (uint64_t)prefix_length % 64) % 64; i += 1)
     {
@@ -168,16 +168,14 @@ static bool mask_spill_encode(const MaskSpillShape* shape, uint8_t* code, uint32
     }
     records[count++] = (X86Instruction){ .form = X86_FORM_RET };
     valid = valid && count <= BUSTER_MASK_SPILL_RECORDS && x86_validate(records, count) == count;
-    int64_t encoded = valid ? x86_encode_scalar(records, count, code, BUSTER_MASK_SPILL_CODE_SIZE, offsets, 0) : -1;
+    int64_t encoded = valid ? x86_encode(records, count, code, BUSTER_MASK_SPILL_CODE_SIZE, offsets, 0) : -1;
     valid = valid && encoded > 0 && offsets[loop] % 64 == 0;
     if (valid)
     {
         // The loop's branch, back to its first step, which the first encoding measured.
         records[branch].displacement = (int32_t)offsets[loop] - (int32_t)offsets[branch + 1];
-        encoded = x86_encode_scalar(records, count, code, BUSTER_MASK_SPILL_CODE_SIZE, offsets, 0);
-        uint8_t vector[BUSTER_MASK_SPILL_CODE_SIZE];
-        const int64_t vector_length = x86_encode(records, count, vector, sizeof(vector), 0, 0);
-        valid = encoded > 0 && vector_length == encoded && memcmp(vector, code, (size_t)encoded) == 0;
+        encoded = x86_encode(records, count, code, BUSTER_MASK_SPILL_CODE_SIZE, offsets, 0);
+        valid = encoded > 0;
     }
     *length = valid ? (uint32_t)encoded : 0;
     return valid;

@@ -257,20 +257,19 @@ the width) exactly when the form takes `v`. The issue's boundaries:
 | 0xffffffff | no value | no value | imm8 (it's −1) | none: needs a register |
 
 The assembler's matcher (`x86_match.c`, #222) takes a value's immediate by this
-rule (`x86_match_immediate` calls `x86_immediate_encodes`, once the operand is a
-value of the operation's width) and writes the field's bits
-(`x86_immediate_field`). So the unsigned spelling of a sign-extended pattern
-takes the shorter field, as GNU as gives it: `add eax, 0xffffffff` is `83 c0
-ff`, `pushw 0xffc8` is `66 6a c8`. It used ranges of its own until #221's
-follow-up, which refused 18 such pairs. Its vector path keeps the rule as two
-intervals per form (`x86_match_range`): the field's signed range, and the
+rule, once the operand is a value of the operation's width, and writes the
+field's bits (`x86_immediate_field`). So the unsigned spelling of a
+sign-extended pattern takes the shorter field, as GNU as gives it: `add eax,
+0xffffffff` is `83 c0 ff`, `pushw 0xffc8` is `66 6a c8`. It used ranges of its
+own until #221's follow-up, which refused 18 such pairs. It keeps the rule as
+two intervals per form (`x86_match_range`): the field's signed range, and the
 unsigned spellings of its negative values at the width. Any other immediate (a
 count, a control byte) takes the field's bits, signed or unsigned, as GNU as
-takes them. `test-x86-semantics` checks the scalar rule and the intervals against
+takes them. `test-x86-semantics` checks the intervals against
 `x86_immediate_encodes` on the 114 forms the matcher supports with a value
 immediate, at every boundary value and at `__int128`s past 64 bits, and that
 every form the matcher reads as sign-extending is such a form; `test-assembler`
-compares the two paths, and with `--cross-check` GNU as's bytes on the spellings.
+with `--cross-check` compares GNU as's bytes on the spellings.
 
 ## Form choice
 

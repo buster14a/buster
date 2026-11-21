@@ -140,8 +140,6 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
     IrOptimizeWork work = { 0 };
     IrVerifiedAnalysis candidate = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
-    // Capture the caller's policy for the memory pass before AUTO chooses the other transformation passes' twin.
-    const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
     if (revision->number != UINT64_MAX && output != scratch && analyses != scratch && analyses != output &&
         options.path <= BUSTER_IR_OPTIMIZE_SCALAR &&
         (options.passes & ~BUSTER_IR_OPTIMIZE_PASSES) == 0)
@@ -199,7 +197,7 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
         {
             check.error = IR_ERROR_MEMORY;
         }
-        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, BUSTER_SCALAR_PATH(verify_scalar), &work.statistics.forwarded_loads))
+        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, &work.statistics.forwarded_loads))
         {
             check.error = IR_ERROR_MEMORY;
         }

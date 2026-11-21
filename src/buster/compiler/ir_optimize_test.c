@@ -21,7 +21,25 @@ struct IrOptimizeTest
     uint64_t checks;
     uint64_t failures;
     uint64_t random;
+    // FNV-1a digests of every if-converted, threaded and sunk fixture's result, in order (#2924): frozen where each pass's
+    // vector path and its scalar twin agreed. The fixtures don't depend on the seed, which picks execution inputs alone.
+    uint64_t if_convert_digest;
+    uint64_t thread_digest;
+    uint64_t sink_digest;
+    // test-ir-unroll's: every fixture's unrolled function and counts, with the default seed and shapes.
+    uint64_t unroll_digest;
+    // Value numbering with memory's generated programs' and overflow fixture's results (ir_optimize_memory_test.c), in
+    // order, frozen where the pass's vector path and its scalar twin agreed: with the default seed, which generates them.
+    uint64_t memory_digest;
 };
+
+#define BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
+#define BUSTER_IR_OPTIMIZE_TEST_IF_CONVERT_DIGEST UINT64_C(0x08b48b9d3a2b7413)
+#define BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST UINT64_C(0xb3cb1a793dad0e42)
+#define BUSTER_IR_OPTIMIZE_TEST_SINK_DIGEST UINT64_C(0x9f4d956b5e0b38fc)
+#define BUSTER_IR_OPTIMIZE_TEST_UNROLL_DIGEST UINT64_C(0xc92a6941c51cf4e2)
+#define BUSTER_IR_OPTIMIZE_TEST_SEED UINT64_C(139)
+#define BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST UINT64_C(0x5d860cd5f67a13ce)
 
 static void ir_optimize_test_expect(IrOptimizeTest* test, bool condition, const char* description)
 {
@@ -236,6 +254,162 @@ static bool ir_optimize_test_equal(const IrFunction* a, const IrFunction* b)
         equal = equal && a->parameter_passed == b->parameter_passed && a->result_size == b->result_size && memcmp(&a->result_abi, &b->result_abi, sizeof(AbiReturn)) == 0 && a->variadic == b->variadic && memcmp(&a->incoming, &b->incoming, sizeof(AbiCall)) == 0;
     }
     return equal;
+}
+
+static void ir_optimize_test_fold(uint64_t* digest, uint64_t value)
+{
+    for (uint32_t k = 0; k < 8; k += 1)
+    {
+        *digest = (*digest ^ ((value >> (k * 8)) & 0xff)) * UINT64_C(0x100000001b3);
+    }
+}
+
+static void ir_optimize_test_fold_bytes(uint64_t* digest, const void* bytes, uint64_t count)
+{
+    const uint8_t* source = bytes;
+    for (uint64_t k = 0; k < count; k += 1)
+    {
+        *digest = (*digest ^ source[k]) * UINT64_C(0x100000001b3);
+    }
+}
+
+static void ir_optimize_test_fold_return(uint64_t* digest, const AbiReturn* result)
+{
+    ir_optimize_test_fold(digest, result->kind);
+    ir_optimize_test_fold(digest, result->flags);
+    ir_optimize_test_fold(digest, result->part_bytes);
+    ir_optimize_test_fold_bytes(digest, result->registers, sizeof(result->registers));
+}
+
+static void ir_optimize_test_fold_abi_call(uint64_t* digest, const AbiCall* call)
+{
+    ir_optimize_test_fold(digest, call->stack_bytes);
+    ir_optimize_test_fold(digest, call->stack_alignment_log2);
+    ir_optimize_test_fold(digest, call->integer_registers);
+    ir_optimize_test_fold(digest, call->vector_registers);
+    ir_optimize_test_fold_return(digest, &call->result);
+}
+
+// Every field ir_optimize_test_equal compares, in its order, a structure's fields one at a time (no padding bytes).
+static void ir_optimize_test_fold_function(uint64_t* digest, const IrFunction* f)
+{
+    const uint64_t counts[] = {
+        f->instruction_count,
+        f->block_count,
+        f->constant_count,
+        f->extra_count,
+        f->slot_count,
+        f->address_count,
+        f->call_count,
+        f->call_type_count,
+        f->parameter_count,
+        f->result_type,
+        f->symbol_count,
+        f->vector_constant_count,
+        f->label_count,
+        f->abi_call_count,
+        f->passed_count,
+        f->parameter_passed,
+        f->result_size,
+        f->variadic,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(counts); i += 1)
+    {
+        ir_optimize_test_fold(digest, counts[i]);
+    }
+    const uint64_t n = f->instruction_count;
+    ir_optimize_test_fold_bytes(digest, f->op, n);
+    ir_optimize_test_fold_bytes(digest, f->type, n);
+    ir_optimize_test_fold_bytes(digest, f->flags, n);
+    ir_optimize_test_fold_bytes(digest, f->alignment_log2, n);
+    ir_optimize_test_fold_bytes(digest, f->a, n * 4);
+    ir_optimize_test_fold_bytes(digest, f->b, n * 4);
+    ir_optimize_test_fold_bytes(digest, f->c, n * 4);
+    ir_optimize_test_fold_bytes(digest, f->block_offsets, ((uint64_t)f->block_count + 1) * 4);
+    ir_optimize_test_fold_bytes(digest, f->extra, (uint64_t)f->extra_count * 4);
+    for (uint32_t k = 0; k < f->constant_count; k += 1)
+    {
+        ir_optimize_test_fold(digest, f->constants[k].low);
+        ir_optimize_test_fold(digest, f->constants[k].high);
+    }
+    ir_optimize_test_fold_bytes(digest, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
+    for (uint32_t k = 0; k < f->call_count; k += 1)
+    {
+        const IrCall* call = &f->calls[k];
+        const uint64_t fields[] = {
+            call->argument_first,
+            call->argument_count,
+            call->type_first,
+            call->parameter_count,
+            call->result_type,
+            call->variadic,
+            call->abi,
+            call->row,
+            call->body,
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fields); i += 1)
+        {
+            ir_optimize_test_fold(digest, fields[i]);
+        }
+    }
+    ir_optimize_test_fold_bytes(digest, f->labels, (uint64_t)f->label_count * 4);
+    for (uint32_t k = 0; k < f->abi_call_count; k += 1)
+    {
+        ir_optimize_test_fold_abi_call(digest, &f->abi_calls[k].call);
+        ir_optimize_test_fold(digest, f->abi_calls[k].passed);
+        ir_optimize_test_fold(digest, f->abi_calls[k].result_size);
+    }
+    for (uint32_t k = 0; k < f->passed_count; k += 1)
+    {
+        const AbiLocation location = f->passed[k].location;
+        ir_optimize_test_fold(digest, location.stack_offset);
+        ir_optimize_test_fold_bytes(digest, location.registers, sizeof(location.registers));
+        ir_optimize_test_fold(digest, location.kind);
+        ir_optimize_test_fold(digest, location.flags);
+        ir_optimize_test_fold(digest, f->passed[k].size);
+    }
+    ir_optimize_test_fold_return(digest, &f->result_abi);
+    ir_optimize_test_fold_abi_call(digest, &f->incoming);
+}
+
+// Random columns for the scans' definition checks (#2924): ops weighted toward the scans' hits (conditional branches,
+// loads, phis and stores), types and operands from small ranges so that keys and values repeat, and every flag bit.
+#define BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS 200u
+
+typedef struct IrOptimizeTestScan IrOptimizeTestScan;
+struct IrOptimizeTestScan
+{
+    uint8_t op[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t type[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint8_t flags[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t a[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t b[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    uint32_t c[BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS];
+    IrFunction function;
+};
+
+static void ir_optimize_test_scan_fill(IrOptimizeTest* test, IrOptimizeTestScan* scan)
+{
+    static const uint8_t common[] = { IR_CBR, IR_LOAD, IR_PHI, IR_STORE, IR_ICMP, IR_TRUNC, IR_ADD, IR_CALL };
+    for (uint32_t i = 0; i < BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS; i += 1)
+    {
+        const uint64_t r = ir_optimize_test_random(test);
+        scan->op[i] = (r & 1) != 0 ? common[(r >> 1) % BUSTER_ARRAY_LENGTH(common)] : (uint8_t)((r >> 4) % IR_OP_COUNT);
+        scan->type[i] = (r & 0x300) == 0 ? IR_I1 : (uint8_t)((r >> 10) % IR_TYPE_COUNT);
+        scan->flags[i] = (uint8_t)(r >> 16);
+        scan->a[i] = (r >> 24) % 5 == 4 ? BUSTER_IR_NONE : (uint32_t)((r >> 24) % 5);
+        scan->b[i] = (r >> 32) % 5 == 4 ? BUSTER_IR_NONE : (uint32_t)((r >> 32) % 5);
+        scan->c[i] = (r >> 40) % 5 == 4 ? BUSTER_IR_NONE : (uint32_t)((r >> 40) % 5);
+    }
+    scan->function = (IrFunction){
+        .op = scan->op,
+        .type = scan->type,
+        .flags = scan->flags,
+        .a = scan->a,
+        .b = scan->b,
+        .c = scan->c,
+        .instruction_count = BUSTER_IR_OPTIMIZE_TEST_SCAN_ROWS,
+    };
 }
 
 typedef struct IrOptimizeExecution IrOptimizeExecution;
@@ -1827,9 +2001,17 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test);
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 
+#include "tier1_schedule_ir_test.c"
+
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
-    IrOptimizeTest test = { .random = 139 };
+    IrOptimizeTest test = {
+        .random = BUSTER_IR_OPTIMIZE_TEST_SEED,
+        .if_convert_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
+        .thread_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
+        .sink_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
+        .memory_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
+    };
     bool arguments_valid = true;
     bool print_text = false;
     for (int i = 1; i < argc; i += 1)
@@ -1857,6 +2039,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
     }
     else if (arguments_valid)
     {
+        const uint64_t seed = test.random;
         ir_optimize_test_folds(&test);
         ir_optimize_test_fold_guards(&test);
         ir_optimize_test_ir(&test);
@@ -1864,9 +2047,27 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_simd(&test);
         ir_if_convert_tests(&test);
         ir_thread_tests(&test);
+        tier1_schedule_ir_test_empty_segments(&test);
+        tier1_schedule_ir_test_segment(&test);
         tier1_sink_ir_tests(&test);
+        const bool digests = test.if_convert_digest == BUSTER_IR_OPTIMIZE_TEST_IF_CONVERT_DIGEST && test.thread_digest == BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST &&
+                             test.sink_digest == BUSTER_IR_OPTIMIZE_TEST_SINK_DIGEST;
+        ir_optimize_test_expect(&test, digests, "if-conversion's, threading's and the operand sink's results have their frozen digests");
+        if (!digests)
+        {
+            fprintf(stderr, "ir-optimize: digests: if-conversion %#018" PRIx64 ", threading %#018" PRIx64 ", operand sink %#018" PRIx64 "\n", test.if_convert_digest, test.thread_digest,
+                    test.sink_digest);
+        }
         ir_optimize_text_tests(&test);
         ir_optimize_memory_tests(&test);
+        if (seed == BUSTER_IR_OPTIMIZE_TEST_SEED)
+        {
+            ir_optimize_test_expect(&test, test.memory_digest == BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST, "value numbering with memory's results have their frozen digest");
+            if (test.memory_digest != BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST)
+            {
+                fprintf(stderr, "ir-optimize: memory digest %#018" PRIx64 "\n", test.memory_digest);
+            }
+        }
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

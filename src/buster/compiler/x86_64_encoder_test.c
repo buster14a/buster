@@ -14,24 +14,27 @@
 //     and 1 but the XSAVE family's, and only there, but in the FS and GS forms with no room for its payload. And every
 //     form's template, built for each mode into a template that ends at a PROT_NONE page, rejected without writing past
 //     it where its positions don't fit.
-//   - Known encodings: x86_encode_scalar and x86_encode on x86_known_encodings, instructions on the paths most worth
+//   - Known encodings: x86_encode on x86_known_encodings, instructions on the paths most worth
 //     pinning down (REX, SIB, RBP and R13 bases, RSP and R12 bases, RIP, absolute and index-only addresses,
 //     displacement sizes, byte registers, prefixes, opcode maps; VEX2 and VEX3, BMI, opmasks, EVEX's opmasks,
 //     zeroing, broadcasts, rounding, compressed displacements and registers 16 to 31), with bytes from GNU as, and each
-//     again with the fixup flag, whose end both must report.
+//     again with the fixup flag, whose end it must report.
 //   - Known fixups: x86_known_fixups, marked instructions with a symbolic field (branches, RIP-relative, absolute,
 //     index-only and base operands, with and without an immediate after them, imm32s and 64-bit immediates), where
 //     the reported end minus x86_fixup_distance must be where GNU as puts the field's relocation.
-//   - The reference digest: a hash of x86_encode_scalar's output for BUSTER_X86_TEST_DIGEST_INSTRUCTIONS random
-//     instructions (from the stream --print-assembly prints with --seed BUSTER_X86_TEST_DIGEST_SEED), recorded when
-//     GNU as encoded the same stream to the same bytes. A change to the form table or the scalar encoder changes it;
+//   - The reference digest: a hash of the reference encoder's output (x86_test_encode_reference: x86_encode after
+//     x86_validate) for BUSTER_X86_TEST_DIGEST_INSTRUCTIONS random instructions (from the stream --print-assembly prints
+//     with --seed BUSTER_X86_TEST_DIGEST_SEED), recorded when GNU as encoded the same stream to the same bytes. A change
+//     to the form table or the encoder changes it;
 //     cross-check the new output with GNU as (as AGENTS.md shows) before recording the new value.
 //   - Random streams: x86_encode at every batch width (x86_encode_4 ... x86_encode_64) and the gather and store
-//     variants against x86_encode_scalar, byte for byte, offset for offset and fixup end for fixup end, with and without
+//     variants against the reference encoder, byte for byte, offset for offset and fixup end for fixup end, with and without
 //     each of the offsets and the fixup ends, on random instructions of every form (with empty X86_FORM_NONE
 //     instructions among them, and one in BUSTER_X86_TEST_MARKED marked with the fixup flag): every count from 0 to
-//     BUSTER_X86_TEST_SHORT_COUNTS - 1, then N instructions (BUSTER_X86_TEST_DEFAULT_COUNT by default) at once.
-//   - Lengths without bytes, in 64-bit mode: x86_measure and its scalar twin against both encoders, on known
+//     BUSTER_X86_TEST_SHORT_COUNTS - 1, then N instructions (BUSTER_X86_TEST_DEFAULT_COUNT by default) at once. With the
+//     default seed and count, the streams' lengths, bytes, offsets and fixup ends must hash to the mode's recorded
+//     digest (BUSTER_X86_TEST_RANDOM_DIGEST and the others).
+//   - Lengths without bytes, in 64-bit mode: x86_measure against the encoder's offsets and length, on known
 //     encodings, every form with generated operands and accepted FS/GS/fixup variants, random streams, legal batch
 //     partitions and empty records. Exact guarded tails and every dword alignment include the 1024-record boundary.
 //   - Page edges: instructions that end exactly at the end of a readable page, and an output capacity (or, for the
@@ -49,22 +52,24 @@
 //     without an opmask, a gather whose destination, index and mask aren't different registers, a SIB operand without a
 //     SIB byte or with SIB's none and a scale, a RIP-relative operand of MPX's bndmk or a MIB operand, a MIB operand's
 //     scaled index, a 3DNow! form's immediate other than its operation byte, or a NOTRACK form with a segment
-//     override): x86_validate must find them all, and the scalar encoder, which validates first, reject them.
+//     override): x86_validate must find them all, and so the reference encoder, which validates first, reject them.
 //     x86_encode takes what x86_validate accepts and doesn't check them.
+//   - Entry errors: a capacity a byte short of BUSTER_X86_ENCODER_CAPACITY(count), and a count past
+//     BUSTER_X86_ENCODER_MAX_INSTRUCTIONS, which x86_encode must refuse, and the exact capacity, which it must take.
 // Then the same again with 32-bit addresses (x86_test_mode, from the seed's first state again), but the known fixups:
-// x86_encode_address32 and x86_encode_scalar_address32 on x86_known_encodings_address32, a digest of their own
+// x86_encode_address32 on x86_known_encodings_address32, a digest of its own
 // (BUSTER_X86_TEST_DIGEST_ADDRESS32), x86_encode_16_address32 and x86_encode_64_address32 on the random streams and at
 // page edges, and the invalid instructions, with two more breaks: an MPX memory operand and a memory operand in a form
 // without room for the 67. --address32 runs only this pass.
-// And again for APX, but the known fixups, which is all --apx runs: x86_encode_apx and x86_encode_scalar_apx on
-// x86_known_encodings_apx, the instructions of x86_known_invalid_apx, which x86_validate_apx and x86_encode_scalar_apx
-// must reject (as GNU as does), a digest of their own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_16_apx and
+// And again for APX, but the known fixups, which is all --apx runs: x86_encode_apx on x86_known_encodings_apx, the
+// instructions of x86_known_invalid_apx, which x86_validate_apx and so the reference encoder must reject (as GNU as
+// does), a digest of its own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_16_apx and
 // x86_encode_64_apx on the random streams (in which half the forms have REX2 and a quarter are EVEX ones, whose general
 // registers, bases and general indexes are 16 to 31 half the time) and at page edges, and the invalid instructions, with
 // three more breaks: a high byte register with REX2, a general register, base or index from 16 to 31 in a form without
 // REX2 or EVEX, and a vector register rm from 16 to 31 in a form with REX2.
 // And in 32-bit mode and in 16-bit mode, which is all --mode32 and --mode16 run: x86_encode_mode32 and
-// x86_encode_scalar_32, and x86_encode_mode16 and x86_encode_scalar_16, on the known encodings of
+// x86_encode_mode16 (the modes' references after x86_validate_32 and x86_validate_16), on the known encodings of
 // x86_known_encodings_32 and x86_known_encodings_16 and the known fixups of x86_known_fixups_32 and x86_known_fixups_16
 // (with x86_fixup_distance_address16 for a 16-bit address), a digest of each (BUSTER_X86_TEST_DIGEST_32 and
 // BUSTER_X86_TEST_DIGEST_16), the mode's loops at 16 and 64 per iteration (x86_encode_16_mode32 and
@@ -76,17 +81,16 @@
 // passes break with too), an instruction longer than 15 bytes, and a segment override in the decorations that the
 // instruction can't take.
 //
-// --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in a
+// --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from the reference encoder in a
 // comment, choosing operands GNU as encodes with the same form (with {load}, {store}, {vex} and {evex} where GNU as
 // would pick another, and a default flags value as {dfv=...}), and has GNU as record each one's length in a .lengths
 // section. Some instructions are marked (x86_mark_symbolic, with a random sequence of their own, so the instructions
 // are the same ones either way), and their fields that GNU as would encode the same way with a symbol (32-bit
 // displacements, a rel32 or loop's and jrcxz's rel8, imm32 and 64-bit immediates) are printed as symbols plus the
 // field's value, for which GNU as writes zeros and a relocation. --compare-object reads the .text, .lengths and
-// .rela.text sections of the object GNU as makes of that and compares them with x86_encode_scalar's bytes, with the
+// .rela.text sections of the object GNU as makes of that and compares them with the reference encoder's bytes, with the
 // symbolic fields zeroed where its fixup ends put them, and with the relocations the fixup ends and x86_fixup_distance
-// give: offset, type, addend and symbol; and the mode's vectorized encoder's bytes and fixup ends with
-// x86_encode_scalar's. With --address32, both take the stream with 32-bit addresses, which the printer writes with
+// give: offset, type, addend and symbol; and the mode's vectorized encoder's bytes and fixup ends with the reference's. With --address32, both take the stream with 32-bit addresses, which the printer writes with
 // 32-bit registers, and with addr32 where no general register says the address's size; with --apx, the stream with
 // APX's registers, whose registers 16 to 31 the printer writes as r16 to r31 (r16d, r16w and r16b); and with --mode32
 // or --mode16, the stream of 32-bit or 16-bit mode, for GNU as's .code32 or .code16, with both address sizes (addr16 or
@@ -127,7 +131,7 @@
 #define BUSTER_X86_TEST_MARKED 8
 // --print-assembly prints one field in this many of those that can be symbolic as a symbol.
 #define BUSTER_X86_TEST_SYMBOLIC 4
-// The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
+// The digest's stream and the hash of the reference encoder's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
 #define BUSTER_X86_TEST_DIGEST 0x7d15a411bce393a8ull
@@ -137,6 +141,13 @@
 #define BUSTER_X86_TEST_DIGEST_APX 0xa93018755bf10a0eull
 #define BUSTER_X86_TEST_DIGEST_32 0x7dd46140275c23b6ull
 #define BUSTER_X86_TEST_DIGEST_16 0xa1ca8dc80cc67494ull
+// The random streams' digest (x86_check_random) with the default seed and count, by mode: every stream's length, bytes,
+// offsets and fixup ends, as the mode's encoders give them (FNV-1a, 64-bit), recorded where the scalar encoders agreed.
+#define BUSTER_X86_TEST_RANDOM_DIGEST 0x63cbbbe711e7245dull
+#define BUSTER_X86_TEST_RANDOM_DIGEST_ADDRESS32 0xfa4a971b0670c68bull
+#define BUSTER_X86_TEST_RANDOM_DIGEST_APX 0xbebd9a4926a2da72ull
+#define BUSTER_X86_TEST_RANDOM_DIGEST_32 0x032afd6b72dbf3fbull
+#define BUSTER_X86_TEST_RANDOM_DIGEST_16 0xb724d4597bd11115ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -152,10 +163,10 @@
 
 // The entry point the instructions are for, which --address32, --apx, --mode32 and --mode16 and the passes of
 // x86_encode_address32, x86_encode_apx, x86_encode_mode32 and x86_encode_mode16 set: with 32-bit addresses, which
-// x86_validate_address32 checks, x86_encode_scalar_address32 encodes and the printer writes with 32-bit registers; with
-// APX's general registers 16 to 31 in the forms with REX2 (x86_form_has_rex2), which x86_validate_apx checks and
-// x86_encode_scalar_apx encodes; or in 32-bit or 16-bit mode, without REX, which x86_validate_32 and x86_validate_16
-// check and x86_encode_scalar_32 and x86_encode_scalar_16 encode.
+// x86_validate_address32 checks, x86_encode_address32 encodes and the printer writes with 32-bit registers; with APX's
+// general registers 16 to 31 in the forms with REX2 (x86_form_has_rex2), which x86_validate_apx checks and
+// x86_encode_apx encodes; or in 32-bit or 16-bit mode, without REX, which x86_validate_32 and x86_validate_16
+// check and x86_encode_mode32 and x86_encode_mode16 encode.
 static X86EncoderMode x86_test_mode;
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // xorshift64*.
@@ -280,15 +291,24 @@ static uint32_t x86_form_opcode(const X86FormDescription* form)
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
-// The mode's scalar encoder and validation (see x86_test_mode), and its vectorized encoder: x86_encode's,
-// x86_encode_address32's, x86_encode_apx's, x86_encode_mode32's or x86_encode_mode16's.
-static int64_t x86_test_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
+// The mode's reference encoder, which validates the instructions first (see x86_test_mode): the mode's vectorized entry
+// point after its validation, the encoder's one implementation (#2924), which the known encodings, the reference digests
+// and GNU as check.
+static int64_t x86_test_encode_reference(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
-    return x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_encode_scalar_address32(instructions, count, output, capacity, offsets, fixup_ends)
-           : x86_test_mode == X86_ENCODER_MODE_APX     ? x86_encode_scalar_apx(instructions, count, output, capacity, offsets, fixup_ends)
-           : x86_test_mode == X86_ENCODER_MODE_32      ? x86_encode_scalar_32(instructions, count, output, capacity, offsets, fixup_ends)
-           : x86_test_mode == X86_ENCODER_MODE_16      ? x86_encode_scalar_16(instructions, count, output, capacity, offsets, fixup_ends)
-                                                       : x86_encode_scalar(instructions, count, output, capacity, offsets, fixup_ends);
+    const bool checked = count <= BUSTER_X86_ENCODER_MAX_INSTRUCTIONS && capacity >= BUSTER_X86_ENCODER_CAPACITY(count);
+    const uint64_t valid = !checked                                        ? count
+                           : x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_validate_address32(instructions, count)
+                           : x86_test_mode == X86_ENCODER_MODE_APX       ? x86_validate_apx(instructions, count)
+                           : x86_test_mode == X86_ENCODER_MODE_32        ? x86_validate_32(instructions, count)
+                           : x86_test_mode == X86_ENCODER_MODE_16        ? x86_validate_16(instructions, count)
+                                                                         : x86_validate(instructions, count);
+    return valid != count                                ? X86_ENCODER_ERROR_INVALID_INSTRUCTION
+           : x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_encode_address32(instructions, count, output, capacity, offsets, fixup_ends)
+           : x86_test_mode == X86_ENCODER_MODE_APX       ? x86_encode_apx(instructions, count, output, capacity, offsets, fixup_ends)
+           : x86_test_mode == X86_ENCODER_MODE_32        ? x86_encode_mode32(instructions, count, output, capacity, offsets, fixup_ends)
+           : x86_test_mode == X86_ENCODER_MODE_16        ? x86_encode_mode16(instructions, count, output, capacity, offsets, fixup_ends)
+                                                         : x86_encode(instructions, count, output, capacity, offsets, fixup_ends);
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
@@ -1299,7 +1319,7 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction,
                 // The instruction's length, which the mode's prefixes change in 16- and 32-bit modes (or for an invalid
                 // instruction, the form's).
                 uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-                const int64_t length = x86_test_encode_scalar(instruction, 1, bytes, sizeof(bytes), 0, 0);
+                const int64_t length = x86_test_encode_reference(instruction, 1, bytes, sizeof(bytes), 0, 0);
                 const int64_t own = length > 0 ? length : (int64_t)(x86_prefix_count(form) + form->opcode_bytes + form->relative_bytes);
                 fprintf(file, " .%+lld", (long long)instruction->displacement + own);
             }
@@ -3048,7 +3068,7 @@ static const KnownEncoding x86_known_encodings_apx[] = {
     { { .form = X86_FORM_XSAVE_M, .rm = X86_REGISTER_R15, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x41, 0x0f, 0xae, 0x27 } },
 };
 
-// Known encodings in 32-bit mode (x86_encode_scalar_32), with bytes from GNU as's .code32: the mode's operand and
+// Known encodings in 32-bit mode (x86_encode_mode32), with bytes from GNU as's .code32: the mode's operand and
 // address sizes and the other ones', and its own forms.
 static const KnownEncoding x86_known_encodings_32[] = {
     // 32- and 16-bit operands, and a high byte register: add eax, ebx; add ax, bx; add dl, ah
@@ -3256,7 +3276,7 @@ static const KnownEncoding x86_known_encodings_32[] = {
     { { .form = X86_FORM_MONTMUL, .mode = BUSTER_X86_MODE_ADDRESS_SIZE }, 5, { 0x67, 0xf3, 0x0f, 0xa6, 0xc0 } },
 };
 
-// Known encodings in 16-bit mode (x86_encode_scalar_16), with bytes from GNU as's .code16: ModRM's 16-bit addresses,
+// Known encodings in 16-bit mode (x86_encode_mode16), with bytes from GNU as's .code16: ModRM's 16-bit addresses,
 // the mode's operand and address sizes and the other ones', and its own forms.
 static const KnownEncoding x86_known_encodings_16[] = {
     // 16- and 32-bit operands, and high byte registers: add ax, bx; add eax, ebx; add bh, ch
@@ -3472,9 +3492,9 @@ static const KnownEncoding* x86_mode_known_encodings(uint64_t* count)
                                                        : x86_known_encodings;
 }
 
-// Checks one encoder of the mode on its known encodings, encoding each alone, and again with the fixup flag, whose end
-// it must report.
-static uint64_t x86_check_known_with(const char* name, bool vectorized)
+// Checks the mode's vectorized entry point on its known encodings, encoding each alone, and again with the fixup flag,
+// whose end it must report.
+static uint64_t x86_check_known_with(const char* name)
 {
     static uint8_t output[BUSTER_X86_ENCODER_CAPACITY(1)];
     uint32_t fixup_ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)];
@@ -3489,8 +3509,7 @@ static uint64_t x86_check_known_with(const char* name, bool vectorized)
             X86Instruction instruction = known->instruction;
             instruction.form |= marked ? BUSTER_X86_FORM_FIXUP : 0;
             fixup_ends[0] = UINT32_MAX;
-            const int64_t length = vectorized ? x86_test_encode(&instruction, 1, output, sizeof(output), 0, fixup_ends)
-                                              : x86_test_encode_scalar(&instruction, 1, output, sizeof(output), 0, fixup_ends);
+            const int64_t length = x86_test_encode(&instruction, 1, output, sizeof(output), 0, fixup_ends);
             if (length != known->length || memcmp(output, known->bytes, known->length) != 0 || (marked && fixup_ends[0] != known->length))
             {
                 if (failures < BUSTER_X86_TEST_REPORTED)
@@ -3515,25 +3534,18 @@ static uint64_t x86_check_known_with(const char* name, bool vectorized)
     return failures;
 }
 
-// Checks the mode's encoders on its known encodings.
+// Checks the mode's vectorized entry point on its known encodings.
 static bool x86_check_known(void)
 {
-    const char* scalar_name = x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? "x86_encode_scalar_address32"
-                              : x86_test_mode == X86_ENCODER_MODE_APX     ? "x86_encode_scalar_apx"
-                              : x86_test_mode == X86_ENCODER_MODE_32      ? "x86_encode_scalar_32"
-                              : x86_test_mode == X86_ENCODER_MODE_16      ? "x86_encode_scalar_16"
-                                                                          : "x86_encode_scalar";
-    const uint64_t scalar = x86_check_known_with(scalar_name, false);
-    const uint64_t vectorized = x86_check_known_with(x86_test_vectorized_name(), true);
+    const uint64_t failures = x86_check_known_with(x86_test_vectorized_name());
     uint64_t count = 0;
     x86_mode_known_encodings(&count);
-    printf("known encodings%s: %lu instructions, %lu wrong (scalar), %lu wrong (vectorized)\n", x86_test_mode_words(), (unsigned long)count, (unsigned long)scalar,
-           (unsigned long)vectorized);
-    return scalar == 0 && vectorized == 0;
+    printf("known encodings%s: %lu instructions, %lu wrong\n", x86_test_mode_words(), (unsigned long)count, (unsigned long)failures);
+    return failures == 0;
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
-// Instructions that x86_validate_apx and x86_encode_scalar_apx must reject, as GNU as does: the XSAVE
+// Instructions that x86_validate_apx and so the reference encoder must reject, as GNU as does: the XSAVE
 // family with a base or index from 16 to 31 (REX2 is #UD with it), a high byte register with REX2, XMM16 to XMM31 in
 // SSE's forms (which only EVEX has), and registers 16 to 31 in VEX forms that have no EVEX one.
 static const X86Instruction x86_known_invalid_apx[] = {
@@ -3591,7 +3603,7 @@ static bool x86_check_known_invalid_apx(void)
     {
         const X86Instruction* instruction = &x86_known_invalid_apx[i];
         const bool rejected = x86_validate_apx(instruction, 1) == 0 &&
-                              x86_encode_scalar_apx(instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+                              x86_test_encode_reference(instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
         if (!rejected && failures < BUSTER_X86_TEST_REPORTED)
         {
             printf("  accepted: ");
@@ -3738,44 +3750,46 @@ static bool x86_check_known_fixups(void)
     {
         const KnownFixup* known = &fixups[i];
         const bool address16 = x86_test_address16(&known->instruction) && (known->instruction.mode & BUSTER_X86_MODE_MEMORY);
-        for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+        fixup_ends[0] = UINT32_MAX;
+        const int64_t length = x86_test_encode(&known->instruction, 1, output, sizeof(output), 0, fixup_ends);
+        const uint32_t distance = address16 ? x86_fixup_distance_address16(known->instruction.form, known->field) : x86_fixup_distance(known->instruction.form, known->field);
+        if (length != known->length || fixup_ends[0] != known->length || fixup_ends[0] - distance != known->offset)
         {
-            fixup_ends[0] = UINT32_MAX;
-            const int64_t length = vectorized ? x86_test_encode(&known->instruction, 1, output, sizeof(output), 0, fixup_ends)
-                                              : x86_test_encode_scalar(&known->instruction, 1, output, sizeof(output), 0, fixup_ends);
-            const uint32_t distance = address16 ? x86_fixup_distance_address16(known->instruction.form, known->field) : x86_fixup_distance(known->instruction.form, known->field);
-            if (length != known->length || fixup_ends[0] != known->length || fixup_ends[0] - distance != known->offset)
+            if (failures < BUSTER_X86_TEST_REPORTED)
             {
-                if (failures < BUSTER_X86_TEST_REPORTED)
-                {
-                    printf("  %s: ", vectorized ? "x86_encode" : "x86_encode_scalar");
-                    x86_print_instruction(stdout, &known->instruction, 1u << known->field);
-                    printf(": %lld bytes, end %u, field at %d; expected %u bytes, field at %u\n", (long long)length, fixup_ends[0],
-                           (int)fixup_ends[0] - (int)distance, known->length, known->offset);
-                }
-                failures += 1;
+                printf("  %s: ", x86_test_vectorized_name());
+                x86_print_instruction(stdout, &known->instruction, 1u << known->field);
+                printf(": %lld bytes, end %u, field at %d; expected %u bytes, field at %u\n", (long long)length, fixup_ends[0],
+                       (int)fixup_ends[0] - (int)distance, known->length, known->offset);
             }
+            failures += 1;
         }
     }
     printf("known fixups%s: %lu fields, %lu wrong\n", x86_test_mode_words(), (unsigned long)count, (unsigned long)failures);
     return failures == 0;
 }
 
-static uint64_t x86_fnv1a(const uint8_t* bytes, uint64_t length)
+// FNV-1a of `length` bytes, from `hash`.
+static uint64_t x86_fnv1a_fold(uint64_t hash, const void* bytes, uint64_t length)
 {
-    uint64_t hash = 0xcbf29ce484222325ull;
+    const uint8_t* byte = bytes;
     for (uint64_t i = 0; i < length; i += 1)
     {
-        hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+        hash = (hash ^ byte[i]) * 0x100000001b3ull;
     }
     return hash;
+}
+
+static uint64_t x86_fnv1a(const uint8_t* bytes, uint64_t length)
+{
+    return x86_fnv1a_fold(0xcbf29ce484222325ull, bytes, length);
 }
 
 static bool x86_check_digest(X86Instruction* instructions, uint8_t* output)
 {
     uint64_t state = BUSTER_X86_TEST_DIGEST_SEED * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
     x86_random_instructions(&state, instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, false, true);
-    const int64_t length = x86_test_encode_scalar(instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, output, BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_DIGEST_INSTRUCTIONS), 0, 0);
+    const int64_t length = x86_test_encode_reference(instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, output, BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_DIGEST_INSTRUCTIONS), 0, 0);
     const uint64_t digest = length >= 0 ? x86_fnv1a(output, (uint64_t)length) : 0;
     const uint64_t recorded = x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? BUSTER_X86_TEST_DIGEST_ADDRESS32
                               : x86_test_mode == X86_ENCODER_MODE_APX     ? BUSTER_X86_TEST_DIGEST_APX
@@ -3866,45 +3880,46 @@ struct X86Buffers
     uint32_t* fixup_ends;
 };
 
-// The lengths-only paths against the scalar and vector encoders. `offsets` can be the guarded output of the bounds
-// check; the byte-producing encoders use the ordinary buffers, whose spare capacity is part of their contract.
+// The lengths-only path against the encoder's offsets and length (in 64-bit mode). `offsets` can be the guarded output
+// of the bounds check; the encoder uses the ordinary buffers, whose spare capacity is part of its contract.
 static bool x86_compare_measures(const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, uint32_t* offsets, bool report)
 {
-    const int64_t expected = x86_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets, 0);
-    const int64_t encoded = x86_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), buffers->offsets, 0);
-    bool result = expected >= 0 && encoded == expected && memcmp(buffers->offsets, buffers->expected_offsets, count * sizeof(uint32_t)) == 0;
-    for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+    const int64_t expected = x86_test_encode_reference(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets, 0);
+    memset(offsets, 0xa5, count * sizeof(uint32_t));
+    const int64_t length = x86_measure(instructions, count, offsets);
+    const bool same = expected >= 0 && length == expected && memcmp(offsets, buffers->expected_offsets, count * sizeof(uint32_t)) == 0;
+    if (!same && report)
     {
-        memset(offsets, 0xa5, count * sizeof(uint32_t));
-        const int64_t length = vectorized ? x86_measure(instructions, count, offsets) : x86_measure_scalar(instructions, count, offsets);
-        const bool same = expected >= 0 && length == expected && memcmp(offsets, buffers->expected_offsets, count * sizeof(uint32_t)) == 0;
-        if (!same && report)
+        printf("  x86_measure on %lu instructions: %lld bytes, expected %lld\n", (unsigned long)count, (long long)length, (long long)expected);
+        uint64_t first = 0;
+        while (first < count && offsets[first] == buffers->expected_offsets[first])
         {
-            printf("  x86_measure%s on %lu instructions: %lld bytes, expected %lld\n", vectorized ? "" : "_scalar", (unsigned long)count,
-                   (long long)length, (long long)expected);
-            uint64_t first = 0;
-            while (first < count && offsets[first] == buffers->expected_offsets[first])
-            {
-                first += 1;
-            }
-            if (first < count)
-            {
-                printf("    offset %lu: %u, expected %u\n", (unsigned long)first, offsets[first], buffers->expected_offsets[first]);
-            }
+            first += 1;
         }
-        result = result && same;
+        if (first < count)
+        {
+            printf("    offset %lu: %u, expected %u\n", (unsigned long)first, offsets[first], buffers->expected_offsets[first]);
+        }
     }
-    return result;
+    return same;
 }
 
-// Compares a variant with the mode's scalar encoder on `count` instructions, with each combination of offsets and fixup
-// ends. Prints the first difference if `report`.
-static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, bool report)
+// Compares a variant with the mode's reference encoder on `count` instructions, with each combination of offsets and
+// fixup ends, and folds the reference's length, bytes, offsets and fixup ends into *digest. Prints the first difference if
+// `report`.
+static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, bool report, uint64_t* digest)
 {
-    const int64_t expected = x86_test_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets,
+    const int64_t expected = x86_test_encode_reference(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets,
                                                     buffers->expected_fixup_ends);
     const uint64_t marked = x86_count_marked(instructions, count);
     bool result = expected >= 0;
+    *digest = x86_fnv1a_fold(*digest, &expected, sizeof(expected));
+    if (result)
+    {
+        *digest = x86_fnv1a_fold(*digest, buffers->expected, (uint64_t)expected);
+        *digest = x86_fnv1a_fold(*digest, buffers->expected_offsets, count * sizeof(uint32_t));
+        *digest = x86_fnv1a_fold(*digest, buffers->expected_fixup_ends, marked * sizeof(uint32_t));
+    }
     for (uint32_t outputs = 0; outputs < BUSTER_X86_TEST_OUTPUT_COMBINATIONS; outputs += 1)
     {
         const bool with_offsets = (outputs & BUSTER_X86_TEST_WITH_OFFSETS) != 0;
@@ -3957,9 +3972,12 @@ static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction
     return result;
 }
 
-static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* instructions, X86Buffers* buffers)
+// The variants on the random streams. With the default seed and count (`frozen`), the streams' digest must be the mode's
+// recorded one (BUSTER_X86_TEST_RANDOM_DIGEST and the others).
+static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* instructions, X86Buffers* buffers, bool frozen)
 {
     bool result = true;
+    uint64_t digest = 0xcbf29ce484222325ull;
     uint64_t variants = 0;
     const X86Variant* mode_variants = x86_mode_variants(&variants);
     for (uint64_t v = 0; v < variants; v += 1)
@@ -3972,17 +3990,25 @@ static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* in
             x86_random_instructions(state, instructions, n, true, false);
             x86_mark_random(state, instructions, n);
             marked += x86_count_marked(instructions, n);
-            failures += !x86_compare_encoders(variant, instructions, n, buffers, failures < BUSTER_X86_TEST_REPORTED);
+            failures += !x86_compare_encoders(variant, instructions, n, buffers, failures < BUSTER_X86_TEST_REPORTED, &digest);
         }
         x86_random_instructions(state, instructions, count, true, false);
         x86_mark_random(state, instructions, count);
         marked += x86_count_marked(instructions, count);
-        failures += !x86_compare_encoders(variant, instructions, count, buffers, failures < BUSTER_X86_TEST_REPORTED);
+        failures += !x86_compare_encoders(variant, instructions, count, buffers, failures < BUSTER_X86_TEST_REPORTED, &digest);
         printf("random: %-35s %d short streams and %lu instructions (%lu marked), %lu differ\n", variant->name, BUSTER_X86_TEST_SHORT_COUNTS,
                (unsigned long)count, (unsigned long)marked, (unsigned long)failures);
         result = result && failures == 0;
     }
-    return result;
+    const uint64_t recorded = x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? BUSTER_X86_TEST_RANDOM_DIGEST_ADDRESS32
+                              : x86_test_mode == X86_ENCODER_MODE_APX     ? BUSTER_X86_TEST_RANDOM_DIGEST_APX
+                              : x86_test_mode == X86_ENCODER_MODE_32      ? BUSTER_X86_TEST_RANDOM_DIGEST_32
+                              : x86_test_mode == X86_ENCODER_MODE_16      ? BUSTER_X86_TEST_RANDOM_DIGEST_16
+                                                                          : BUSTER_X86_TEST_RANDOM_DIGEST;
+    const bool same = !frozen || digest == recorded;
+    printf("random digest%s: 0x%016llx (%s)\n", x86_test_mode_words(), (unsigned long long)digest,
+           !frozen ? "not the default seed and count" : same ? "the recorded one" : "DIFFERENT FROM THE RECORDED ONE");
+    return result && same;
 }
 
 // The page-edge check's input, for the fault handler.
@@ -4066,7 +4092,7 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
                     x86_mark_random(state, scratch, n);
                     X86Instruction* instructions = (X86Instruction*)(input_end - n * sizeof(X86Instruction));
                     memcpy(instructions, scratch, n * sizeof(X86Instruction));
-                    const int64_t expected = x86_test_encode_scalar(instructions, n, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(n), buffers->expected_offsets,
+                    const int64_t expected = x86_test_encode_reference(instructions, n, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(n), buffers->expected_offsets,
                                                                buffers->expected_fixup_ends);
                     const uint64_t marked = x86_count_marked(instructions, n);
                     // The output ends where the instructions do (for an exact variant) or where its capacity does, and
@@ -4144,16 +4170,13 @@ static bool x86_check_measure(uint64_t* state, uint64_t count, X86Instruction* i
 {
     uint64_t failures = 0;
     uint32_t untouched = UINT32_MAX;
-    for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
-    {
-        const int64_t empty = vectorized ? x86_measure(0, 0, 0) : x86_measure_scalar(0, 0, 0);
-        const int64_t empty_output = vectorized ? x86_measure(0, 0, &untouched) : x86_measure_scalar(0, 0, &untouched);
-        const uint64_t excessive = (uint64_t)BUSTER_X86_ENCODER_MAX_INSTRUCTIONS + 1;
-        const int64_t rejected = vectorized ? x86_measure(0, excessive, 0) : x86_measure_scalar(0, excessive, 0);
-        const int64_t rejected_max = vectorized ? x86_measure(0, UINT64_MAX, 0) : x86_measure_scalar(0, UINT64_MAX, 0);
-        failures += empty != 0 || empty_output != 0 || untouched != UINT32_MAX || rejected != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS ||
-                    rejected_max != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
-    }
+    const int64_t empty = x86_measure(0, 0, 0);
+    const int64_t empty_output = x86_measure(0, 0, &untouched);
+    const uint64_t excessive = (uint64_t)BUSTER_X86_ENCODER_MAX_INSTRUCTIONS + 1;
+    const int64_t rejected = x86_measure(0, excessive, 0);
+    const int64_t rejected_max = x86_measure(0, UINT64_MAX, 0);
+    failures += empty != 0 || empty_output != 0 || untouched != UINT32_MAX || rejected != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS ||
+                rejected_max != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
     // Pin the lengths to the independent known encodings too, rather than to agreement between implementations.
     for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_known_encodings); i += 1)
     {
@@ -4167,15 +4190,12 @@ static bool x86_check_measure(uint64_t* state, uint64_t count, X86Instruction* i
                 UINT32_MAX,
                 UINT32_MAX,
             };
-            const int64_t scalar = x86_measure_scalar(&instruction, 1, offsets + 1);
-            bool same = scalar == known->length && offsets[1] == 0 && offsets[0] == UINT32_MAX && offsets[2] == UINT32_MAX;
-            offsets[1] = UINT32_MAX;
             const int64_t vectorized = x86_measure(&instruction, 1, offsets + 1);
-            same = same && vectorized == known->length && offsets[1] == 0 && offsets[0] == UINT32_MAX && offsets[2] == UINT32_MAX;
+            const bool same = vectorized == known->length && offsets[1] == 0 && offsets[0] == UINT32_MAX && offsets[2] == UINT32_MAX;
             if (!same && failures < BUSTER_X86_TEST_REPORTED)
             {
-                printf("  x86_measure known encoding %lu%s: %lld bytes scalar, %lld vectorized, expected %u\n", (unsigned long)i,
-                       marked ? " with fixup" : "", (long long)scalar, (long long)vectorized, known->length);
+                printf("  x86_measure known encoding %lu%s: %lld bytes, expected %u\n", (unsigned long)i, marked ? " with fixup" : "", (long long)vectorized,
+                       known->length);
             }
             failures += !same;
         }
@@ -4237,29 +4257,26 @@ static bool x86_check_measure(uint64_t* state, uint64_t count, X86Instruction* i
             x86_random_instructions(state, instructions, BUSTER_X86_TEST_MEASURE_PARTITIONS, true, false);
         }
         x86_mark_random(state, instructions, BUSTER_X86_TEST_MEASURE_PARTITIONS);
-        const int64_t expected = x86_encode_scalar(instructions, BUSTER_X86_TEST_MEASURE_PARTITIONS, buffers->expected,
-                                                   BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_MEASURE_PARTITIONS), buffers->expected_offsets, 0);
+        const int64_t expected = x86_test_encode_reference(instructions, BUSTER_X86_TEST_MEASURE_PARTITIONS, buffers->expected,
+                                                           BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_MEASURE_PARTITIONS), buffers->expected_offsets, 0);
         for (uint32_t partition = 1; partition < BUSTER_ARRAY_LENGTH(x86_measure_test_boundaries); partition += 1)
         {
             const uint32_t width = x86_measure_test_boundaries[partition];
-            for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+            int64_t total = 0;
+            bool same = expected >= 0;
+            for (uint32_t first = 0; same && first < BUSTER_X86_TEST_MEASURE_PARTITIONS; first += width)
             {
-                int64_t total = 0;
-                bool same = expected >= 0;
-                for (uint32_t first = 0; same && first < BUSTER_X86_TEST_MEASURE_PARTITIONS; first += width)
+                const uint32_t remaining = BUSTER_X86_TEST_MEASURE_PARTITIONS - first;
+                const uint32_t n = remaining < width ? remaining : width;
+                const int64_t length = x86_measure(instructions + first, n, buffers->offsets);
+                same = length >= 0;
+                for (uint32_t i = 0; same && i < n; i += 1)
                 {
-                    const uint32_t remaining = BUSTER_X86_TEST_MEASURE_PARTITIONS - first;
-                    const uint32_t n = remaining < width ? remaining : width;
-                    const int64_t length = vectorized ? x86_measure(instructions + first, n, buffers->offsets) : x86_measure_scalar(instructions + first, n, buffers->offsets);
-                    same = length >= 0;
-                    for (uint32_t i = 0; same && i < n; i += 1)
-                    {
-                        same = (uint64_t)total + buffers->offsets[i] == buffers->expected_offsets[first + i];
-                    }
-                    total += length;
+                    same = (uint64_t)total + buffers->offsets[i] == buffers->expected_offsets[first + i];
                 }
-                failures += !same || total != expected;
+                total += length;
             }
+            failures += !same || total != expected;
         }
     }
     printf("lengths only: %lu generated form/operand cases, %lu random instructions, boundaries and partitions, %lu differ\n",
@@ -4285,7 +4302,7 @@ static bool x86_check_measure_bounds(uint64_t* state, X86Instruction* scratch, X
         action.sa_handler = x86_test_report_fault;
         sigaction(SIGSEGV, &action, &previous_segv);
         sigaction(SIGBUS, &action, &previous_bus);
-        x86_test_page_edge_variant = "x86_measure/scalar";
+        x86_test_page_edge_variant = "x86_measure";
         x86_test_page_edge_outputs = BUSTER_X86_TEST_WITH_OFFSETS;
         for (uint32_t test = 0; test < BUSTER_X86_TEST_SHORT_COUNTS + 3; test += 1)
         {
@@ -5280,8 +5297,8 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
             broken += 1;
             broken_for_validate += validate_only;
             const bool validated = x86_test_validate(instructions, count) == victim;
-            // The scalar encoder validates the instructions first, so it rejects them all.
-            const bool rejected = x86_test_encode_scalar(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+            // The reference encoder validates the instructions first, so it rejects them all.
+            const bool rejected = x86_test_encode_reference(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
             if (!(validated && rejected))
             {
                 if (failures < BUSTER_X86_TEST_REPORTED)
@@ -5289,7 +5306,7 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
                     printf("  instruction %lu of %lu (form %s, reg 0x%02x, rm 0x%02x, index 0x%02x, mode 0x%02x): %s%s\n", (unsigned long)victim,
                            (unsigned long)count, x86_form_description(instructions[victim].form)->mnemonic, instructions[victim].reg, instructions[victim].rm,
                            instructions[victim].index, instructions[victim].mode, validated ? "" : "x86_validate missed it ",
-                           rejected ? "" : "the scalar encoder accepted it");
+                           rejected ? "" : "the reference encoder accepted it");
                 }
                 failures += 1;
             }
@@ -5300,11 +5317,36 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
     return failures == 0;
 }
 
+// The mode's vectorized entry point's own checks, which the other checks give room enough to pass: a capacity a byte
+// short of BUSTER_X86_ENCODER_CAPACITY(count) is X86_ENCODER_ERROR_OUTPUT_TOO_SMALL and the exact one encodes, at counts
+// around a quad and a group; and a count past BUSTER_X86_ENCODER_MAX_INSTRUCTIONS is
+// X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS, without touching the arrays. Its random instructions have a state of their
+// own, so that the streams after it stay the digests'.
+static bool x86_check_entry_errors(X86Instruction* instructions, X86Buffers* buffers)
+{
+    static const uint32_t counts[] = { 0, 1, 3, 4, 5, 15, 16, 17, 64 };
+    uint64_t state = BUSTER_X86_TEST_GOLDEN_RATIO * 3 + 1;
+    uint64_t failures = 0;
+    for (uint64_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        const uint64_t count = counts[c];
+        x86_random_instructions(&state, instructions, count, true, false);
+        const int64_t short_by_one = x86_test_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count) - 1, 0, 0);
+        const int64_t exact = x86_test_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, 0);
+        failures += short_by_one != X86_ENCODER_ERROR_OUTPUT_TOO_SMALL || exact < 0;
+    }
+    const int64_t too_many = x86_test_encode(0, (uint64_t)BUSTER_X86_ENCODER_MAX_INSTRUCTIONS + 1, 0, UINT64_MAX, 0, 0);
+    const int64_t most = x86_test_encode(0, UINT64_MAX, 0, UINT64_MAX, 0, 0);
+    failures += too_many != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS || most != X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
+    printf("entry errors%s: %d counts and two too many, %lu wrong\n", x86_test_mode_words(), (int)BUSTER_ARRAY_LENGTH(counts), (unsigned long)failures);
+    return failures == 0;
+}
+
 // In 16- and 32-bit modes, BUSTER_X86_TEST_OVERLONG_INSTRUCTIONS instructions longer than 15 bytes of each of three
 // kinds (the longest of the forms that can be, x86_overflowing_rows', so none in 32-bit mode): of the FS forms, of the
 // forms without FS and with an override in the decorations instead, and of those with neither but an index past 7,
 // whose REX bits (invalid in these modes) make REX's presence bit, the override position's, present. x86_validate must
-// reject every one, and so must the scalar encoder, which validates first: x86_encode doesn't check them, and its
+// reject every one, and so must the reference encoder, which validates first: x86_encode doesn't check them, and its
 // template of 16 positions makes such an instruction 16 bytes long.
 static bool x86_check_overlong(uint64_t* state)
 {
@@ -5322,7 +5364,7 @@ static bool x86_check_overlong(uint64_t* state)
             instruction.index |= (uint8_t)(kind == 2 ? 8 : 0);
             uint8_t output[BUSTER_X86_ENCODER_CAPACITY(1)];
             const bool rejected = x86_test_validate(&instruction, 1) == 0 &&
-                                  x86_test_encode_scalar(&instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+                                  x86_test_encode_reference(&instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
             if (!rejected && accepted < BUSTER_X86_TEST_REPORTED)
             {
                 printf("  accepted: ");
@@ -5341,7 +5383,7 @@ static bool x86_check_overlong(uint64_t* state)
 // ---------------------------------------------------------------------------------------------------------------------
 // The cross-check modes, and the command
 
-// Prints the instructions for GNU as, each with its bytes from x86_encode_scalar in a comment, and GNU as's length
+// Prints the instructions for GNU as, each with its bytes from the reference encoder in a comment, and GNU as's length
 // for each one in a .lengths section, a byte per instruction, so that --compare-object can find each instruction
 // in GNU as's output even after one whose length differs. The marked instructions' symbolic fields are symbols plus
 // the fields' values (see x86_mark_symbolic).
@@ -5354,7 +5396,7 @@ static bool x86_print_assembly(uint64_t seed, uint64_t* state, uint64_t count, X
            x86_test_mode == X86_ENCODER_MODE_32 ? ".code32\n" : x86_test_mode == X86_ENCODER_MODE_16 ? ".code16\n" : "");
     for (uint64_t i = 0; i < count; i += 1)
     {
-        const int64_t length = x86_test_encode_scalar(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
+        const int64_t length = x86_test_encode_reference(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
         // GNU as takes the test registers with the 386's and 486's architectures alone: the 386's, as the 486's would
         // tune for the 486 too, which .arch pop keeps, and GNU as then writes a shift by 1 with an imm8.
         const bool test_register = (x86_form_description(instructions[i].form)->reg & BUSTER_X86_OPERAND_TEST) != 0;
@@ -5493,10 +5535,10 @@ static void x86_print_relocation(const char* name, const X86Relocation* relocati
            (long long)relocation->addend);
 }
 
-// Compares x86_encode_scalar's bytes and fixup ends with GNU as's object of the instructions --print-assembly printed:
+// Compares the reference encoder's bytes and fixup ends with GNU as's object of the instructions --print-assembly printed:
 // its .text, with the marked instructions' symbolic fields zeroed where the fixup ends put them (as GNU as leaves them),
-// its .lengths and its relocations, which must be the expected ones of those fields, in order. x86_encode's fixup ends
-// must be the scalar encoder's too.
+// its .lengths and its relocations, which must be the expected ones of those fields, in order. The mode's vectorized
+// encoder's bytes and fixup ends must be the reference's too.
 static bool x86_compare_object(uint64_t seed, uint64_t* state, const char* object_path, uint64_t count, X86Instruction* instructions, uint8_t* symbolic,
                                X86Buffers* buffers)
 {
@@ -5507,7 +5549,7 @@ static bool x86_compare_object(uint64_t seed, uint64_t* state, const char* objec
     uint8_t* output = buffers->expected;
     uint32_t* offsets = buffers->expected_offsets;
     uint32_t* fixup_ends = buffers->expected_fixup_ends;
-    const int64_t length = x86_test_encode_scalar(instructions, count, output, BUSTER_X86_ENCODER_CAPACITY(count), offsets, fixup_ends);
+    const int64_t length = x86_test_encode_reference(instructions, count, output, BUSTER_X86_ENCODER_CAPACITY(count), offsets, fixup_ends);
     const int64_t vectorized = x86_test_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, buffers->fixup_ends);
     // The mode's vectorized encoder must give the same bytes and fixup ends, before the symbolic fields are zeroed.
     const bool same_vectorized = vectorized == length && length >= 0 && memcmp(buffers->output, output, (uint64_t)length) == 0 &&
@@ -5588,7 +5630,7 @@ static bool x86_compare_object(uint64_t seed, uint64_t* state, const char* objec
                 {
                     printf("instruction %lu: ", (unsigned long)i);
                     x86_print_instruction(stdout, &instructions[i], symbolic[i]);
-                    printf("\n  x86_encode_scalar: ");
+                    printf("\n  ours:              ");
                     x86_print_bytes(output + start, end - start);
                     printf("\n  GNU as:            ");
                     x86_print_bytes(text + assembled, assembled + lengths[i] <= text_header->sh_size ? lengths[i] : 0);
@@ -5733,7 +5775,7 @@ static bool x86_check_mode(uint64_t seed, uint64_t count, X86Instruction* instru
         passed = x86_check_known_invalid_apx() && passed;
     }
     passed = x86_check_digest(instructions, buffers->output) && passed;
-    passed = x86_check_random(&state, count, instructions, buffers) && passed;
+    passed = x86_check_random(&state, count, instructions, buffers, seed == BUSTER_X86_TEST_DIGEST_SEED && count == BUSTER_X86_TEST_DEFAULT_COUNT) && passed;
     passed = x86_check_page_edges(&state, instructions, buffers) && passed;
     if (x86_test_mode == X86_ENCODER_MODE_64)
     {
@@ -5746,6 +5788,7 @@ static bool x86_check_mode(uint64_t seed, uint64_t count, X86Instruction* instru
         passed = x86_check_overlong(&state) && passed;
     }
     passed = x86_check_invalid(&state, instructions, buffers) && passed;
+    passed = x86_check_entry_errors(instructions, buffers) && passed;
     return passed;
 }
 

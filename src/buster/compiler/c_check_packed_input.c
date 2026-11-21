@@ -52,19 +52,9 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
             {
                 const uint32_t width = count - first < 16 ? count - first : 16;
                 uint32_t present = 0;
-                if (BUSTER_SCALAR_PATH(reader->parser->options.scalar))
-                {
-                    for (uint32_t i = 0; i < width; i += 1)
-                    {
-                        present |= (uint32_t)(reader->tag_types[first + i] != 0) << i;
-                    }
-                }
-                else
-                {
-                    const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, width);
-                    const __m512i values = _mm512_maskz_loadu_epi32(active, reader->tag_types + first);
-                    present = _mm512_mask_cmpneq_epi32_mask(active, values, _mm512_setzero_si512());
-                }
+                const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, width);
+                const __m512i values = _mm512_maskz_loadu_epi32(active, reader->tag_types + first);
+                present = _mm512_mask_cmpneq_epi32_mask(active, values, _mm512_setzero_si512());
                 while (present != 0)
                 {
                     const uint32_t token = first + (uint32_t)__builtin_ctz(present);
@@ -96,21 +86,11 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
             {
                 const uint32_t width = bindings->count - first < 64 ? bindings->count - first : 64;
                 uint64_t selected = 0;
-                if (BUSTER_SCALAR_PATH(reader->parser->options.scalar))
-                {
-                    for (uint32_t i = 0; i < width; i += 1)
-                    {
-                        selected |= (uint64_t)(bindings->operation[first + i] == C_BINDING_DECLARE && bindings->kind[first + i] == C_BINDING_TYPEDEF) << i;
-                    }
-                }
-                else
-                {
-                    const __mmask64 active = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
-                    const __m512i operations = _mm512_maskz_loadu_epi8(active, bindings->operation + first);
-                    const __m512i kinds = _mm512_maskz_loadu_epi8(active, bindings->kind + first);
-                    selected = _mm512_mask_cmpeq_epi8_mask(active, operations, _mm512_set1_epi8(C_BINDING_DECLARE)) &
-                               _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_BINDING_TYPEDEF));
-                }
+                const __mmask64 active = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+                const __m512i operations = _mm512_maskz_loadu_epi8(active, bindings->operation + first);
+                const __m512i kinds = _mm512_maskz_loadu_epi8(active, bindings->kind + first);
+                selected = _mm512_mask_cmpeq_epi8_mask(active, operations, _mm512_set1_epi8(C_BINDING_DECLARE)) &
+                           _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_BINDING_TYPEDEF));
                 while (selected != 0)
                 {
                     const uint32_t event = first + (uint32_t)__builtin_ctzll(selected);
@@ -450,26 +430,16 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
     }
 }
 
-static bool check_input_packed_any(const uint8_t* bytes, uint32_t first, uint32_t count, uint8_t bits, bool scalar)
+static bool check_input_packed_any(const uint8_t* bytes, uint32_t first, uint32_t count, uint8_t bits)
 {
-    (void)scalar;
-
     bool found = false;
     for (uint32_t i = first; !found && i < count;)
     {
-        if (BUSTER_SCALAR_PATH(scalar))
-        {
-            found = (bytes[i] & bits) != 0;
-            i += 1;
-        }
-        else
-        {
-            const uint32_t width = count - i < 64 ? count - i : 64;
-            const __mmask64 valid = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
-            const __m512i values = _mm512_maskz_loadu_epi8(valid, bytes + i);
-            found = (_mm512_test_epi8_mask(values, _mm512_set1_epi8((char)bits)) & valid) != 0;
-            i += width;
-        }
+        const uint32_t width = count - i < 64 ? count - i : 64;
+        const __mmask64 valid = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        const __m512i values = _mm512_maskz_loadu_epi8(valid, bytes + i);
+        found = (_mm512_test_epi8_mask(values, _mm512_set1_epi8((char)bits)) & valid) != 0;
+        i += width;
     }
     return found;
 }
@@ -477,22 +447,11 @@ static bool check_input_packed_any(const uint8_t* bytes, uint32_t first, uint32_
 static uint64_t check_input_packed_candidates(const Parser* parser, uint32_t first, uint32_t width)
 {
     uint64_t result = 0;
-    if (BUSTER_SCALAR_PATH(parser->options.scalar))
-    {
-        for (uint32_t i = 0; i < width; i += 1)
-        {
-            const bool address = parser->tokens.kinds[first + i] == PARSE_KIND_AMP && parser->tree.roles[first + i] == PARSE_ROLE_PREFIX;
-            result |= (uint64_t)address << i;
-        }
-    }
-    else
-    {
-        const __mmask64 valid = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
-        const __m512i kinds = _mm512_maskz_loadu_epi8(valid, parser->tokens.kinds + first);
-        const __m512i roles = _mm512_maskz_loadu_epi8(valid, parser->tree.roles + first);
-        result = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(PARSE_KIND_AMP)) &
-                 _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_PREFIX));
-    }
+    const __mmask64 valid = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+    const __m512i kinds = _mm512_maskz_loadu_epi8(valid, parser->tokens.kinds + first);
+    const __m512i roles = _mm512_maskz_loadu_epi8(valid, parser->tree.roles + first);
+    result = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(PARSE_KIND_AMP)) &
+             _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_PREFIX));
     return result;
 }
 
@@ -506,37 +465,24 @@ static void check_input_packed_exclude(uint32_t* events, uint32_t count, uint32_
 }
 
 // Inclusive unsigned difference scan, bounded to count entries for both input and output.
-static void check_input_packed_analyzed(const uint32_t* events, uint8_t* analyzed, uint32_t count, bool scalar)
+static void check_input_packed_analyzed(const uint32_t* events, uint8_t* analyzed, uint32_t count)
 {
-    (void)scalar;
-
     uint32_t running = 0;
     for (uint32_t first = 0; first < count; first += 16)
     {
         const uint32_t width = count - first < 16 ? count - first : 16;
-        if (BUSTER_SCALAR_PATH(scalar))
-        {
-            for (uint32_t i = 0; i < width; i += 1)
-            {
-                running += events[first + i];
-                analyzed[first + i] = running == 0;
-            }
-        }
-        else
-        {
-            const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, width);
-            const __m512i deltas = _mm512_maskz_loadu_epi32(active, events + first);
-            const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-            __m512i sums = deltas;
-            sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfffe, _mm512_sub_epi32(lanes, _mm512_set1_epi32(1)), sums));
-            sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfffc, _mm512_sub_epi32(lanes, _mm512_set1_epi32(2)), sums));
-            sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfff0, _mm512_sub_epi32(lanes, _mm512_set1_epi32(4)), sums));
-            sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xff00, _mm512_sub_epi32(lanes, _mm512_set1_epi32(8)), sums));
-            sums = _mm512_add_epi32(sums, _mm512_set1_epi32((int)running));
-            const __mmask16 allowed = _mm512_mask_cmpeq_epi32_mask(active, sums, _mm512_setzero_si512());
-            _mm_mask_storeu_epi8(analyzed + first, active, _mm_maskz_set1_epi8(allowed, 1));
-            running += (uint32_t)_mm512_mask_reduce_add_epi32(active, deltas);
-        }
+        const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, width);
+        const __m512i deltas = _mm512_maskz_loadu_epi32(active, events + first);
+        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        __m512i sums = deltas;
+        sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfffe, _mm512_sub_epi32(lanes, _mm512_set1_epi32(1)), sums));
+        sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfffc, _mm512_sub_epi32(lanes, _mm512_set1_epi32(2)), sums));
+        sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfff0, _mm512_sub_epi32(lanes, _mm512_set1_epi32(4)), sums));
+        sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xff00, _mm512_sub_epi32(lanes, _mm512_set1_epi32(8)), sums));
+        sums = _mm512_add_epi32(sums, _mm512_set1_epi32((int)running));
+        const __mmask16 allowed = _mm512_mask_cmpeq_epi32_mask(active, sums, _mm512_setzero_si512());
+        _mm_mask_storeu_epi8(analyzed + first, active, _mm_maskz_set1_epi8(allowed, 1));
+        running += (uint32_t)_mm512_mask_reduce_add_epi32(active, deltas);
     }
 }
 
@@ -573,7 +519,7 @@ static CheckInputPackedContexts check_input_packed_contexts(CheckInputReader* re
                 check_input_packed_exclude(events, count, reader->ends[selected] + 1, token);
             }
         }
-        check_input_packed_analyzed(events, analyzed, count, BUSTER_SCALAR_PATH(parser->options.scalar));
+        check_input_packed_analyzed(events, analyzed, count);
         // The prefix scan has consumed the difference counts. Reuse them for the inverse selection map:
         // association separators are not expression parents, so a parent walk cannot transparently cross them.
         memset(events, 0xff, (uint64_t)count * sizeof(uint32_t));
@@ -604,9 +550,8 @@ static void check_input_packed_members(CheckInputReader* reader)
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count < reader->expression_limit ? parser->tokens.count : reader->expression_limit;
     const TypeTable* types = reader->types;
-    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
-    const bool packed = check_input_packed_any(types->tags.packed, 1, types->tags.count, UINT8_MAX, scalar) ||
-                        check_input_packed_any(types->members.flags, 1, types->members.count, BUSTER_TYPE_MEMBER_PACKED, scalar);
+    const bool packed = check_input_packed_any(types->tags.packed, 1, types->tags.count, UINT8_MAX) ||
+                        check_input_packed_any(types->members.flags, 1, types->members.count, BUSTER_TYPE_MEMBER_PACKED);
     const uint64_t mark = reader->scratch->length;
     uint32_t capacity = 0;
     for (uint32_t token = 0; packed && token < count; token += 64)

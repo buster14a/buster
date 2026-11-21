@@ -895,12 +895,10 @@ static void tier0_test_large_call_records(Tier0TestTally* tally)
                     x86_validate(scalar.records, scalar.count) == scalar.count;
         const uint64_t capacity = same ? BUSTER_X86_ENCODER_CAPACITY(scalar.count) : 0;
         uint8_t* a = same ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, capacity) : NULL;
-        uint8_t* b = same ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, capacity) : NULL;
         uint32_t* ends = same ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)scalar.count + 1) : NULL;
-        same = same && a != NULL && b != NULL && ends != NULL;
+        same = same && a != NULL && ends != NULL;
         const int64_t a_length = same ? x86_encode(scalar.records, scalar.count, a, capacity, 0, ends) : -1;
-        const int64_t b_length = same ? x86_encode_scalar(vector.records, vector.count, b, capacity, 0, ends) : -1;
-        tier0_test_expect(tally, same && a_length >= 0 && a_length == b_length && memcmp(a, b, (uint64_t)a_length) == 0,
+        tier0_test_expect(tally, same && a_length >= 0,
                           "large call records", "%u maximum-size aggregates: validation %u, scalar %u/%u records, vector %u/%u", arguments,
                           checked.error, scalar.error, scalar.count, vector.error, vector.count);
     }
@@ -3083,22 +3081,18 @@ static __attribute__((no_sanitize("function"))) void tier0_test_variadic_calls(T
                                   "fixture %u: rule \"%s\" at %u, error %d, or the paths differ", fixture, check.rule != 0 ? check.rule : "", check.node, scalar.error);
         ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0 && scalar.reference_count == 0,
                                            "variadic calls", "fixture %u: an invalid record, a branch or a reference", fixture);
-        // Each path's records by an encoder of its own: the vector path's by x86_encode, the scalar's by its twin.
+        // Each path's records, run apart.
         for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
         {
             const uint32_t run = fixture * 2 + encoder;
             const Tier0Code* code = encoder == 0 ? &vector : &scalar;
             const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(code->count);
             images[run] = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room);
-            const int64_t length = images[run] == 0 ? -1
-                                   : encoder == 0   ? x86_encode(code->records, code->count, images[run], room, 0, 0)
-                                                    : x86_encode_scalar(code->records, code->count, images[run], room, 0, 0);
-            ready = tier0_test_expect(tally, length > 0, "variadic calls", "fixture %u: encoder %u failed", fixture, encoder);
+            const int64_t length = images[run] == 0 ? -1 : x86_encode(code->records, code->count, images[run], room, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "variadic calls", "fixture %u: path %u's code doesn't encode", fixture, encoder);
             lengths[run] = ready ? (uint32_t)length : 0;
             expected[run] = result;
         }
-        ready = ready && tier0_test_expect(tally, lengths[fixture * 2] == lengths[fixture * 2 + 1] && memcmp(images[fixture * 2], images[fixture * 2 + 1], lengths[fixture * 2]) == 0,
-                                           "variadic calls", "fixture %u: the encoders differ", fixture);
     }
     // The callers at page starts and the probe on a page after them, mapped before the fork, so that the probe's
     // address, which r11 must hold when the probe runs, is known here.
@@ -3108,7 +3102,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_variadic_calls(T
     X86Instruction probe[32];
     const uint32_t probe_count = ready ? tier0_test_probe(probe, (uint64_t)(uintptr_t)shared) : 0;
     bool loaded = region != MAP_FAILED && x86_validate(probe, probe_count) == probe_count &&
-                  x86_encode_scalar(probe, probe_count, probe_code, BUSTER_TIER0_TEST_PAGE, 0, 0) > 0;
+                  x86_encode(probe, probe_count, probe_code, BUSTER_TIER0_TEST_PAGE, 0, 0) > 0;
     for (uint32_t run = 0; run < BUSTER_TIER0_TEST_PROBE_RUNS && loaded; run += 1)
     {
         memcpy(region + run * BUSTER_TIER0_TEST_PAGE, images[run], lengths[run]);
@@ -3291,9 +3285,8 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
         {
             const Tier0Code* code = encoder == 0 ? &vector : &scalar;
             uint8_t* page = region + (signature * 2 + encoder) * BUSTER_TIER0_TEST_PAGE;
-            const int64_t length = encoder == 0 ? x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0)
-                                                : x86_encode_scalar(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
-            ready = tier0_test_expect(tally, length > 0, "unsigned floating", "%s: encoder %u failed", names[signature], encoder);
+            const int64_t length = x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "unsigned floating", "%s: path %u's code doesn't encode", names[signature], encoder);
         }
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating", "the code can't be loaded");
@@ -3677,9 +3670,8 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
         {
             const Tier0Code* code = encoder == 0 ? &vector : &scalar;
             uint8_t* page = region + (f * 2 + encoder) * BUSTER_TIER0_TEST_PAGE;
-            const int64_t length = encoder == 0 ? x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0)
-                                                : x86_encode_scalar(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
-            ready = tier0_test_expect(tally, length > 0, "unsigned floating limits", "%s over %u integers: encoder %u failed", tier0_test_unsigned_names[signature],
+            const int64_t length = x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "unsigned floating limits", "%s over %u integers: path %u's code doesn't encode", tier0_test_unsigned_names[signature],
                                       limit->integers, encoder);
         }
     }
@@ -5110,8 +5102,7 @@ static void tier0_test_aggregate_callee(Tier0TestCallee* callee, const Tier0Test
     function->result_size = hidden ? 0 : fixture->result_size;
 }
 
-// A function's code by both paths, which must agree and be valid, encoded by each path's encoder of its own (the vector
-// path's by x86_encode, the scalar's by its twin) into `images` (a page each), which must agree too.
+// A function's code by both paths, which must agree and be valid, each path's encoded into `images` (a page each).
 static bool tier0_test_aggregate_encode(Tier0TestTally* tally, const char* check, const char* name, const Tier0Function* function, Arena* arena, uint8_t* images)
 {
     const Tier0Check validation = tier0_validate(function);
@@ -5127,21 +5118,20 @@ static bool tier0_test_aggregate_encode(Tier0TestTally* tally, const char* check
         const Tier0Code* code = encoder == 0 ? &vector : &scalar;
         const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(code->count);
         uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, room);
-        lengths[encoder] = bytes == 0 ? -1 : encoder == 0 ? x86_encode(code->records, code->count, bytes, room, 0, 0) : x86_encode_scalar(code->records, code->count, bytes, room, 0, 0);
-        ready = tier0_test_expect(tally, lengths[encoder] > 0 && lengths[encoder] <= BUSTER_TIER0_TEST_PAGE, check, "%s: encoder %u failed", name, encoder);
+        lengths[encoder] = bytes == 0 ? -1 : x86_encode(code->records, code->count, bytes, room, 0, 0);
+        ready = tier0_test_expect(tally, lengths[encoder] > 0 && lengths[encoder] <= BUSTER_TIER0_TEST_PAGE, check, "%s: path %u's code doesn't encode", name, encoder);
         if (ready)
         {
             memcpy(images + encoder * BUSTER_TIER0_TEST_PAGE, bytes, (size_t)lengths[encoder]);
         }
     }
-    return ready && tier0_test_expect(tally, lengths[0] == lengths[1] && memcmp(images, images + BUSTER_TIER0_TEST_PAGE, (size_t)lengths[0]) == 0, check,
-                                      "%s: the encoders differ", name);
+    return ready;
 }
 
-// Records encoded by the scalar encoder into a page.
+// Records encoded into a page.
 static bool tier0_test_aggregate_load(const X86Instruction* records, uint32_t count, uint8_t* page)
 {
-    return x86_validate(records, count) == count && x86_encode_scalar(records, count, page, BUSTER_TIER0_TEST_PAGE, 0, 0) > 0;
+    return x86_validate(records, count) == count && x86_encode(records, count, page, BUSTER_TIER0_TEST_PAGE, 0, 0) > 0;
 }
 
 // The pages for the passed bytes: for each of a fixture's passed aggregates and its result, a page between two
