@@ -6146,9 +6146,8 @@ static void node_window_test_compile(CheckTest* test)
             }
             const CheckValue value = check_stream_value(&window.path.stream, node);
             const CheckValue regular = check_stream_value(&plain.path.stream, other);
-            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && value.type == regular.type &&
-                   value.category == regular.category && value.flags == regular.flags && value.constant_kind == regular.constant_kind &&
-                   value.integer == regular.integer && row->class == BUSTER_TYPED_CLASS_I32;
+            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 &&
+                   check_test_value_equal(&value, &regular) && row->class == BUSTER_TYPED_CLASS_I32;
             if (row->read_offset != 0)
             {
                 const uint32_t token = returned + row->read_offset;

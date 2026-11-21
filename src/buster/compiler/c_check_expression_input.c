@@ -1914,7 +1914,10 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
             CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
             if (name)
             {
+                // The direct lvalue-to-rvalue conversion retains its object even after losing its
+                // address-constant kind. Unary plus produces a new arithmetic value with no object.
                 summary.flags = operands == 1 ? BUSTER_CHECK_NONNULL_ADDRESS : 0;
+                summary.object = operands == 1 ? value : 0;
             }
             else
             {
