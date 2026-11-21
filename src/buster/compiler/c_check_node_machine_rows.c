@@ -2018,8 +2018,7 @@ _Static_assert(BUSTER_NODE_FACTS_LITERAL_LINE == 6 && BUSTER_NODE_FACTS_OPERATOR
 //   (node_rows_summary_reduce).
 // A condition's truth and a constant root's fold are a summary node's value's to answer: the turns list an `&&` or an
 // `||` whose second operand's truth is known (node_rows_window_decided), and C lists a folded comma. A `switch`'s
-// selector's type is not: -Wswitch reads the node at the selector's first token (#3200), which only the walk makes,
-// and a `switch`'s condition stays the walk's.
+// selector type is its operand's before the POSITIVE root applies the integer promotions (node_rows_window_keep).
 static __attribute__((noinline)) void node_rows_window_summary(struct NodeFactsReader* state, const NodeFront* front, uint32_t count, NodeRowsSummaryCounts* made)
 {
     const __m512i places = _mm512_load_si512(state->x_tables->places);
@@ -2214,24 +2213,32 @@ static uint32_t node_rows_window_keep(struct NodeFactsReader* state, const NodeF
     const uint32_t kept = (uint32_t)before[operand + 1] - first;
     const uint32_t turn = state->summary_fault ? state->summary_fault_turn % 4 : 4;
     const bool more = turn == 0 || (turn == 1 && kept == 0);
+    // Only a switch has a POSITIVE wrapper at the expression root. Its operand's type is the selector's:
+    // the front makes an implicit CONVERT only at a return, never inside a taken selector.
+    const bool switched = front->ops[state->records[e]] == CHECK_OP_POSITIVE;
+    const uint32_t words = kept + (more ? 1u : 0u) + (switched ? 1u : 0u);
     if (types->summary_firsts != NULL && root < types->node_capacity)
     {
-        if (types->summary_count + kept + (more ? 1u : 0u) <= types->summary_capacity && kept < UINT16_MAX)
+        if (types->summary_count + words <= types->summary_capacity && kept < UINT16_MAX)
         {
-            uint32_t* objects = types->summary_objects + types->summary_count;
-            memcpy(objects, state->x_summary_objects + first, (uint64_t)kept * sizeof(uint32_t));
+            uint32_t* destination = types->summary_words + types->summary_count;
+            memcpy(destination, state->x_summary_objects + first, (uint64_t)kept * sizeof(uint32_t));
             if (more)
             {
-                objects[kept] = turn == 0 ? 0 : UINT32_MAX;
+                destination[kept] = turn == 0 ? 0 : UINT32_MAX;
             }
             else if (turn == 1)
             {
-                objects[0] = 0;
+                destination[0] = 0;
             }
             types->summary_firsts[root] = (uint32_t)types->summary_count;
             types->summary_counts[root] = (uint16_t)(kept + (more ? 1u : 0u));
             types->summary_facts[root] = (uint8_t)(state->x_summary_facts[e] ^ (turn == 2 ? BUSTER_CHECK_RETURN_STOPS : turn == 3 ? BUSTER_CHECK_RETURN_UNKNOWN : 0u));
-            types->summary_count += kept + (more ? 1u : 0u);
+            if (switched)
+            {
+                destination[types->summary_counts[root]] = state->window_x_types[operand] ^ (state->summary_fault ? 1u : 0u);
+            }
+            types->summary_count += words;
         }
         else
         {
@@ -2254,31 +2261,42 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     uint64_t* counts = types->facts_counts;
     const uint32_t count = front->count;
     NodeRowsCounts read = { 0 };
+    NodeWindowCounter* const counter = node_window_counting != NULL && node_window_counting->family == NODE_WINDOW_ROWS ? node_window_counting : NULL;
+    uint64_t first_sample[8];
+    uint64_t second_sample[8];
     const uint64_t t0 = __rdtsc();
+    first_sample[0] = node_window_stamp(counter);
     node_rows_window_reads(state, count, &read);
     const uint64_t reads_end = __rdtsc();
+    first_sample[1] = node_window_stamp(counter);
     node_rows_window_shapes(state, front, count);
     const uint64_t shapes_end = __rdtsc();
+    first_sample[2] = node_window_stamp(counter);
     if ((state->c_updates_now | state->c_branches_now) != 0)
     {
         node_rows_window_updates(state, front, count, &read);
     }
     const uint64_t t1 = __rdtsc();
+    first_sample[3] = node_window_stamp(counter);
     const uint32_t written = node_rows_window_write(state, front, count);
     const uint64_t t2 = __rdtsc();
+    first_sample[4] = node_window_stamp(counter);
     uint32_t lists[BUSTER_NODE_ROWS_LISTS] = { 0 };
     uint32_t numbered = 0;
     uint64_t steps = 0;
     node_rows_window_values(state, front, count, written, &read, lists, &numbered, &steps);
     const uint64_t values_end = __rdtsc();
+    first_sample[5] = node_window_stamp(counter);
     node_rows_window_part(state, front);
     const uint64_t t3 = __rdtsc();
+    first_sample[6] = node_window_stamp(counter);
     NodeRowsSummaryCounts summary = { 0 };
     if (state->summaries)
     {
         node_rows_window_summary(state, front, count, &summary);
     }
     const uint64_t summary_end = __rdtsc();
+    first_sample[7] = node_window_stamp(counter);
     const uint32_t decided = state->x_decided_now;
     state->x_decided_now = 0;
     // The first run's side facts, kept like its streams. And their comparison's control (NodeFactsReader.summary_fault):
@@ -2324,31 +2342,44 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
         first_lists[list] = lists[list] ^ (turn == 6 + list ? 1u : 0u);
     }
     const uint64_t later_start = __rdtsc();
+    second_sample[0] = node_window_stamp(counter);
     NodeRowsCounts again = { 0 };
     node_rows_window_reads(state, count, &again);
     const uint64_t later_reads_end = __rdtsc();
+    second_sample[1] = node_window_stamp(counter);
     node_rows_window_shapes(state, front, count);
     const uint64_t later_shapes_end = __rdtsc();
+    second_sample[2] = node_window_stamp(counter);
     if ((state->c_updates_now | state->c_branches_now) != 0)
     {
         node_rows_window_updates(state, front, count, &again);
     }
     const uint64_t t4 = __rdtsc();
+    second_sample[3] = node_window_stamp(counter);
     const uint32_t written_again = node_rows_window_write(state, front, count);
     const uint64_t t5 = __rdtsc();
+    second_sample[4] = node_window_stamp(counter);
     uint32_t lists_again[BUSTER_NODE_ROWS_LISTS] = { 0 };
     uint32_t numbered_again = 0;
     uint64_t steps_again = 0;
     node_rows_window_values(state, front, count, written_again, &again, lists_again, &numbered_again, &steps_again);
     const uint64_t later_values_end = __rdtsc();
+    second_sample[5] = node_window_stamp(counter);
     node_rows_window_part(state, front);
     const uint64_t t6 = __rdtsc();
+    second_sample[6] = node_window_stamp(counter);
     NodeRowsSummaryCounts summary_again = { 0 };
     if (state->summaries)
     {
         node_rows_window_summary(state, front, count, &summary_again);
     }
     const uint64_t later_summary_end = __rdtsc();
+    second_sample[7] = node_window_stamp(counter);
+    if (counter != NULL)
+    {
+        node_window_collect(counter, 0, first_sample, (state->summaries ? 7u : 6u), count);
+        node_window_collect(counter, 1, second_sample, (state->summaries ? 7u : 6u), count);
+    }
     const uint32_t decided_again = state->x_decided_now;
     state->x_decided_now = 0;
     for (uint32_t e = 0; e < state->expression_count; e += 1)

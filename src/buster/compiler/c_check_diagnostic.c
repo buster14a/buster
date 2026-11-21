@@ -506,19 +506,19 @@ static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input
     return suppressed ? CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, baseline);
 }
 
-static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
+// The string of the ignored asm label of the declaration at `token`, or BUSTER_CHECK_NONE (#2936): a label after a
+// definition, which check_input_asm_labels drops with -Wignored-attributes' warning there. Its event is published as any
+// other's; the first error's scans (check_diagnostic_first_error, the corpus's) read its place and severity here.
+static uint32_t check_diagnostic_ignored_label(const CheckInput* input, uint32_t token)
 {
     const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) && token < input->token_count ? check_input_attributes_at(input, token) : NULL;
-    uint32_t warnings = 0;
+    uint32_t label = BUSTER_CHECK_NONE;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored)
-        {
-            warnings |= CHECK_WARNING_IGNORED_ATTRIBUTES;
-        }
+        label = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored && label == BUSTER_CHECK_NONE ? attribute->argument_first : label;
     }
-    return warnings;
+    return label;
 }
 
 static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t node)
@@ -685,10 +685,10 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     }
     for (uint32_t at = 0; policies && check_sparse_wide_present(input->attributes) && at < input->token_count && at < first; at += 1)
     {
-        const uint32_t warnings = check_diagnostic_attribute_warnings(input, at);
-        if (warnings != 0 && check_diagnostic_severity(input, at, warnings) >= CHECK_WARNING_ERROR)
+        const uint32_t label = check_diagnostic_ignored_label(input, at);
+        if (label < first && check_diagnostic_severity(input, label, CHECK_WARNING_IGNORED_ATTRIBUTES) >= CHECK_WARNING_ERROR)
         {
-            first = at;
+            first = label;
         }
     }
     for (uint32_t at = 0; policies && input->constant_warnings != NULL && at < input->token_count; at += 1)
@@ -776,7 +776,10 @@ static uint32_t check_diagnostic_custom_attribute_name(const Parser* parser, uin
     {
         custom |= parser->meanings.custom_attributes[s] == name;
     }
-    return custom ? token + 3 : BUSTER_CHECK_NONE;
+    // Suppress shares the parser's preserved-argument table so its string list reaches the checker, but Clang keeps
+    // its attribute at the scope. It does not use the custom parsers' name location for a label's subject error.
+    const bool suppress = custom && check_input_attribute_suppress_name(check_input_attribute_spelling(parser->meanings.table, name));
+    return custom && !suppress ? token + 3 : BUSTER_CHECK_NONE;
 }
 
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)

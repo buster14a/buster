@@ -169,8 +169,76 @@ struct CheckInitFrame
     CheckInitHistoryNode* history;
     CheckInitHistoryPending* pending;
     uint32_t designator;
+    // A traced walk's (CheckInitCounted, #1842's 3d): the list of counted members this frame's record is, plus one (0 for
+    // none), and, for braces, the first list made inside them, which their `}` fills in.
+    uint32_t counted;
+    uint32_t counted_first;
     bool braced;
     bool wrapper;
+    // Whether the frame is a brace elision's, whose list ends at the last value it takes.
+    bool counted_elided;
+};
+
+// The lists of records with counted_by or counted_by_or_null pointer members (#1842's 3d), which a diagnostic walk traces
+// only where the unit has such members (check_initializers_counted): clang's "cannot initialize 'B::p' with
+// '__counted_by' attributed type ... because the pointee type ... is incomplete" at each value such a member takes, and
+// "cannot implicitly initialize 'B::p' ..." for a list of its record that leaves it out, while the pointee is incomplete.
+// As clang's InitListChecker makes them: a list is a record's explicit braces, a brace elision's, or a designator's, which
+// a later one reuses and braces or a whole value replace. Explicit braces fill in, as they close, every list made inside
+// them that no inner braces filled: at their `}` for their own, at the last value an elision took, and at the end of
+// the designation that made a designator's.
+typedef enum CheckInitCountedKind
+{
+    CHECK_INIT_COUNTED_BRACED,
+    CHECK_INIT_COUNTED_ELIDED,
+    CHECK_INIT_COUNTED_DESIGNATED,
+} CheckInitCountedKind;
+
+typedef struct CheckInitCountedList CheckInitCountedList;
+struct CheckInitCountedList
+{
+    TypeId type;
+    uint64_t offset;
+    // Where its implicit errors are, and the first of its written bits (one each counted member, in member order).
+    uint32_t location;
+    uint32_t written;
+    bool alive;
+};
+
+typedef struct CheckInitCountedError CheckInitCountedError;
+struct CheckInitCountedError
+{
+    // Where it is, and its place in clang's order: a value's own token, or the `}` its list is filled in at.
+    uint32_t token;
+    uint32_t position;
+    // The member (TypeMember) and its record.
+    uint32_t member;
+    TypeId record;
+    // Its initializer's end, which the driver publishes it at, as the conversion errors of the same initializer.
+    uint32_t completion;
+    bool implicit;
+};
+
+typedef struct CheckInitCounted CheckInitCounted;
+struct CheckInitCounted
+{
+    // The unit's errors, in `arena`, which outlives the walks and is neither their output nor their scratch.
+    Arena* arena;
+    CheckInitCountedError* errors;
+    uint32_t count;
+    uint32_t capacity;
+    // Each tag's counted pointer members plus one, 0 where not yet counted, in `arena`.
+    uint32_t* tags;
+    uint32_t tag_count;
+    // One walk's lists and written bits, in its scratch; whether their offsets came in order, which a binary search reads.
+    CheckInitCountedList* lists;
+    uint32_t list_count;
+    uint32_t list_capacity;
+    uint64_t* bits;
+    uint32_t bit_words;
+    uint32_t bit_capacity;
+    bool ordered;
+    bool failed;
 };
 
 typedef struct CheckInitSelection CheckInitSelection;
@@ -311,6 +379,8 @@ struct CheckInitWalker
     CheckInitializer* result;
     CheckInitFailureSink* failures;
     CheckInitFailure first_failure;
+    // The counted members' trace (#1842's 3d), only in a diagnostic walk of a unit that has them.
+    CheckInitCounted* counted;
 };
 
 // GNU's obsolete `member: value` is a field designator, not an identifier expression or a conditional colon.
@@ -1094,6 +1164,396 @@ static uint32_t check_init_excess_end(const Parser* parser, uint32_t begin, uint
     return token;
 }
 
+// The member a value for subobject `selected` initializes, where it is a member of the innermost aggregate's frame (past
+// a braced scalar's) by its position there; 0 for none.
+static __attribute__((noinline, cold)) uint32_t check_init_selected_member(const CheckInitWalker* walker, const CheckInitSelection* selected)
+{
+    const TypeTable* types = walker->types;
+    uint32_t d = walker->depth;
+    while (d > 1 && !check_init_aggregate(types, walker->frames[d - 1].type))
+    {
+        d -= 1;
+    }
+    const CheckInitFrame* frame = d > 1 ? walker->frames + d - 1 : NULL;
+    const TypeId record = frame != NULL ? type_strip_aligned(types, frame->type) : 0;
+    const uint8_t kind = record != 0 ? type_kind(types, record) : BUSTER_TYPE_KIND_NONE;
+    const uint32_t tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? types->types.index[type_index(record)] : 0;
+    const bool inside = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && frame->next < types->tags.member_count[tag];
+    const uint32_t member = inside ? types->tags.member_begin[tag] + (uint32_t)frame->next : 0;
+    return member != 0 && selected->offset == frame->offset + types->members.offset[member] ? member : 0;
+}
+
+// Whether `member` is one a counted walk traces (CheckInitCounted): a counted_by or counted_by_or_null pointer to a tag
+// type, which may be incomplete where its record is initialized.
+static bool check_init_counted_member(const TypeTable* types, uint32_t member)
+{
+    const uint32_t kind = (types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) >> BUSTER_TYPE_MEMBER_COUNT_SHIFT;
+    const TypeId pointer = kind == BUSTER_TYPE_COUNTED_BY || kind == BUSTER_TYPE_COUNTED_BY_OR_NULL ? type_strip_aligned(types, types->members.type[member]) : 0;
+    const TypeId pointee = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, pointer)) : 0;
+    const uint8_t pointee_kind = pointee != 0 ? type_kind(types, pointee) : BUSTER_TYPE_KIND_NONE;
+    return pointee_kind == BUSTER_TYPE_KIND_STRUCT || pointee_kind == BUSTER_TYPE_KIND_UNION || pointee_kind == BUSTER_TYPE_KIND_ENUM;
+}
+
+// Whether the unit has a member check_init_counted_member traces, which few units have: only then is the trace made.
+static bool check_init_counted_unit(const TypeTable* types)
+{
+    bool result = false;
+    for (uint32_t m = 1; !result && m < types->members.count; m += 1)
+    {
+        result = check_init_counted_member(types, m);
+    }
+    return result;
+}
+
+// The traced members of record `type` (CheckInitCounted.tags' memo), 0 for any other type.
+static uint32_t check_init_counted_members(CheckInitWalker* walker, TypeId type)
+{
+    const TypeTable* types = walker->types;
+    CheckInitCounted* counted = walker->counted;
+    const TypeId base = type_strip_aligned(types, type);
+    const uint8_t kind = type_kind(types, base);
+    const uint32_t tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? types->types.index[type_index(base)] : UINT32_MAX;
+    uint32_t result = 0;
+    if (tag < counted->tag_count)
+    {
+        if (counted->tags[tag] == 0)
+        {
+            const uint32_t begin = types->tags.member_begin[tag];
+            uint32_t found = 0;
+            for (uint32_t m = begin; m < begin + types->tags.member_count[tag]; m += 1)
+            {
+                found += check_init_counted_member(types, m);
+            }
+            counted->tags[tag] = found + 1;
+        }
+        result = counted->tags[tag] - 1;
+    }
+    return result;
+}
+
+// Whether traced member `member`'s pointee is incomplete where the walk's initializer ends, as clang's
+// RequireCompleteType asks it there.
+static bool check_init_counted_incomplete(const CheckInitWalker* walker, uint32_t member)
+{
+    const TypeTable* types = walker->types;
+    const TypeId pointee = type_element(types, type_strip_aligned(types, types->members.type[member]));
+    const CheckGraph* graph = walker->graph;
+    const CheckContext context = {
+        .tag_completions = graph != NULL ? graph->tag_completions : NULL,
+        .tag_completion_count = graph != NULL ? graph->tag_completion_count : 0,
+        .source_position = walker->source_position,
+    };
+    return !check_context_source_complete(types, pointee, &context);
+}
+
+static void check_init_counted_error(CheckInitWalker* walker, uint32_t token, uint32_t position, uint32_t member, TypeId record, bool implicit)
+{
+    CheckInitCounted* counted = walker->counted;
+    if (counted->count == counted->capacity)
+    {
+        const uint32_t capacity = counted->capacity != 0 && counted->capacity <= UINT32_MAX / 2 ? counted->capacity * 2 : 16;
+        CheckInitCountedError* errors = capacity > counted->capacity ? BUSTER_ARENA_PUSH_ARRAY(counted->arena, CheckInitCountedError, capacity) : NULL;
+        if (errors != NULL && counted->count != 0)
+        {
+            memcpy(errors, counted->errors, (uint64_t)counted->count * sizeof(*errors));
+        }
+        counted->failed |= errors == NULL;
+        counted->errors = errors != NULL ? errors : counted->errors;
+        counted->capacity = errors != NULL ? capacity : counted->capacity;
+    }
+    if (counted->count < counted->capacity)
+    {
+        counted->errors[counted->count++] = (CheckInitCountedError){
+            .token = token,
+            .position = position,
+            .member = member,
+            .record = record,
+            .completion = walker->source_position,
+            .implicit = implicit,
+        };
+    }
+}
+
+// The first list at an offset not below `offset`, where the lists' offsets came in order, else 0.
+static uint32_t check_init_counted_first(const CheckInitCounted* counted, uint64_t offset)
+{
+    uint32_t low = 0;
+    uint32_t high = counted->ordered ? counted->list_count : 0;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool below = counted->lists[middle].offset < offset;
+        low = below ? middle + 1 : low;
+        high = below ? high : middle;
+    }
+    return low;
+}
+
+// Braces or a whole value for the subobject of `bits` at `offset` replace the lists inside it.
+static __attribute__((noinline, cold)) void check_init_counted_kill(CheckInitWalker* walker, uint64_t offset, uint64_t bits)
+{
+    CheckInitCounted* counted = walker->counted;
+    for (uint32_t i = check_init_counted_first(counted, offset); i < counted->list_count && (!counted->ordered || counted->lists[i].offset - offset < bits); i += 1)
+    {
+        CheckInitCountedList* list = counted->lists + i;
+        const uint64_t size = type_size(walker->types, list->type) * 8;
+        list->alive = list->alive && !(list->offset >= offset && list->offset - offset < bits && size <= bits - (list->offset - offset));
+    }
+}
+
+// The alive list of record `type` at `offset`, or UINT32_MAX.
+static uint32_t check_init_counted_find(const CheckInitWalker* walker, TypeId type, uint64_t offset)
+{
+    const TypeTable* types = walker->types;
+    const CheckInitCounted* counted = walker->counted;
+    const TypeId record = type_unqualified(type_strip_aligned(types, type));
+    uint32_t result = UINT32_MAX;
+    for (uint32_t i = check_init_counted_first(counted, offset); i < counted->list_count && (!counted->ordered || counted->lists[i].offset <= offset); i += 1)
+    {
+        const CheckInitCountedList* list = counted->lists + i;
+        result = list->alive && list->offset == offset && type_unqualified(type_strip_aligned(types, list->type)) == record ? i : result;
+    }
+    return result;
+}
+
+// A new list of record `type` at `offset`, its `members` traced members all unwritten; UINT32_MAX where the scratch is
+// full.
+static uint32_t check_init_counted_list(CheckInitWalker* walker, TypeId type, uint64_t offset, uint32_t members, uint32_t location)
+{
+    CheckInitCounted* counted = walker->counted;
+    const uint32_t words = (members + 63) / 64;
+    if (counted->list_count == counted->list_capacity)
+    {
+        const uint32_t capacity = counted->list_capacity != 0 && counted->list_capacity <= UINT32_MAX / 2 ? counted->list_capacity * 2 : 16;
+        CheckInitCountedList* lists = capacity > counted->list_capacity ? BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitCountedList, capacity) : NULL;
+        if (lists != NULL && counted->list_count != 0)
+        {
+            memcpy(lists, counted->lists, (uint64_t)counted->list_count * sizeof(*lists));
+        }
+        counted->failed |= lists == NULL;
+        counted->lists = lists != NULL ? lists : counted->lists;
+        counted->list_capacity = lists != NULL ? capacity : counted->list_capacity;
+    }
+    if (counted->bit_capacity - counted->bit_words < words)
+    {
+        uint64_t capacity = counted->bit_capacity != 0 ? (uint64_t)counted->bit_capacity * 2 : 64;
+        capacity = capacity < (uint64_t)counted->bit_words + words ? (uint64_t)counted->bit_words + words : capacity;
+        uint64_t* bits = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(walker->scratch, uint64_t, capacity) : NULL;
+        if (bits != NULL && counted->bit_words != 0)
+        {
+            memcpy(bits, counted->bits, (uint64_t)counted->bit_words * sizeof(*bits));
+        }
+        counted->failed |= bits == NULL;
+        counted->bits = bits != NULL ? bits : counted->bits;
+        counted->bit_capacity = bits != NULL ? (uint32_t)capacity : counted->bit_capacity;
+    }
+    uint32_t result = UINT32_MAX;
+    if (!counted->failed)
+    {
+        memset(counted->bits + counted->bit_words, 0, (uint64_t)words * sizeof(*counted->bits));
+        counted->ordered = counted->ordered && (counted->list_count == 0 || counted->lists[counted->list_count - 1].offset <= offset);
+        counted->lists[counted->list_count] = (CheckInitCountedList){
+            .type = type,
+            .offset = offset,
+            .location = location,
+            .written = counted->bit_words,
+            .alive = true,
+        };
+        counted->bit_words += words;
+        result = counted->list_count++;
+    }
+    return result;
+}
+
+// The walk's top frame, just pushed for `kind` at `token`: braces remember where their lists start and replace those
+// inside their subobject; a record with traced members has its list, braces' a new one, an elision's or a designator's
+// the one its subobject has or a new one.
+static __attribute__((noinline, cold)) void check_init_counted_pushed(CheckInitWalker* walker, CheckInitCountedKind kind, uint32_t token)
+{
+    CheckInitCounted* counted = walker->counted;
+    CheckInitFrame* frame = walker->frames + walker->depth - 1;
+    if (!walker->semantic_suppressed && !counted->failed)
+    {
+        const uint32_t members = check_init_counted_members(walker, frame->type);
+        if (kind == CHECK_INIT_COUNTED_BRACED)
+        {
+            check_init_counted_kill(walker, frame->offset, type_size(walker->types, frame->type) * 8);
+            frame->counted_first = counted->list_count;
+        }
+        uint32_t list = members != 0 && kind != CHECK_INIT_COUNTED_BRACED ? check_init_counted_find(walker, frame->type, frame->offset) : UINT32_MAX;
+        list = members != 0 && list == UINT32_MAX ? check_init_counted_list(walker, frame->type, frame->offset, members, token) : list;
+        frame->counted = list != UINT32_MAX ? list + 1 : 0;
+        frame->counted_elided = kind == CHECK_INIT_COUNTED_ELIDED;
+    }
+}
+
+// The elided frames above the innermost braces took a value or braces that end at `last`: their lists end there, as
+// clang's CheckImplicitInitList moves its list's end to the last initializer it took.
+static __attribute__((noinline, cold)) void check_init_counted_took(CheckInitWalker* walker, uint32_t last)
+{
+    CheckInitCounted* counted = walker->counted;
+    for (uint32_t d = walker->depth; !walker->semantic_suppressed && !counted->failed && d > 1 && !walker->frames[d - 1].braced; d -= 1)
+    {
+        const CheckInitFrame* frame = walker->frames + d - 1;
+        if (frame->counted != 0 && frame->counted_elided)
+        {
+            counted->lists[frame->counted - 1].location = last;
+        }
+    }
+}
+
+// The number of traced members of record tag `tag` before `member`.
+static uint32_t check_init_counted_ordinal(const TypeTable* types, uint32_t tag, uint32_t member)
+{
+    uint32_t result = 0;
+    for (uint32_t m = types->tags.member_begin[tag]; m < member; m += 1)
+    {
+        result += check_init_counted_member(types, m);
+    }
+    return result;
+}
+
+// A value from `token` to `end` (exclusive) for subobject `selected`: a whole record's replaces the lists inside it; a
+// traced member's is written, with clang's "cannot initialize" error at `token` where its pointee is incomplete; and the
+// elisions that took it end at its last token.
+static __attribute__((noinline, cold)) void check_init_counted_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end)
+{
+    CheckInitCounted* counted = walker->counted;
+    const TypeTable* types = walker->types;
+    if (!walker->semantic_suppressed && !counted->failed)
+    {
+        if (check_init_aggregate(types, selected->type))
+        {
+            check_init_counted_kill(walker, selected->offset, type_size(types, selected->type) * 8);
+        }
+        // The record whose member it is: the innermost aggregate's frame, past a braced scalar's.
+        uint32_t d = walker->depth;
+        while (d > 1 && !check_init_aggregate(types, walker->frames[d - 1].type))
+        {
+            d -= 1;
+        }
+        const CheckInitFrame* frame = d > 1 ? walker->frames + d - 1 : NULL;
+        const uint32_t list = frame != NULL && frame->counted != 0 && counted->lists[frame->counted - 1].alive ? frame->counted - 1 : UINT32_MAX;
+        const TypeId record = list != UINT32_MAX ? type_strip_aligned(types, frame->type) : 0;
+        const uint32_t tag = record != 0 ? types->types.index[type_index(record)] : 0;
+        const bool inside = record != 0 && frame->next < types->tags.member_count[tag];
+        const uint32_t member = inside ? types->tags.member_begin[tag] + (uint32_t)frame->next : 0;
+        if (inside && check_init_counted_member(types, member) && selected->offset == frame->offset + types->members.offset[member])
+        {
+            const uint32_t ordinal = check_init_counted_ordinal(types, tag, member);
+            counted->bits[counted->lists[list].written + ordinal / 64] |= UINT64_C(1) << (ordinal % 64);
+            if (check_init_counted_incomplete(walker, member))
+            {
+                check_init_counted_error(walker, token, token, member, frame->type, false);
+            }
+        }
+        check_init_counted_took(walker, end - 1);
+    }
+}
+
+// The designation from `token` to `end` made the lists from `first` on: each ends where its value does, as the
+// designated initializer's end is the end of the list clang makes for it.
+static __attribute__((noinline, cold)) void check_init_counted_designated(CheckInitWalker* walker, uint32_t first, uint32_t token, uint32_t end)
+{
+    CheckInitCounted* counted = walker->counted;
+    const uint32_t stop = token < end ? check_init_expression_end(walker->parser, token, end) : token;
+    for (uint32_t i = first; stop > token && i < counted->list_count; i += 1)
+    {
+        counted->lists[i].location = stop - 1;
+    }
+}
+
+// An implicit error's member at `offset`, in the bits of its subobject, which orders those of one fill.
+typedef struct CheckInitCountedMissing CheckInitCountedMissing;
+struct CheckInitCountedMissing
+{
+    uint64_t offset;
+    uint32_t list;
+    uint32_t member;
+};
+
+// The braces of the top frame close at `token`: their own list ends there, and every list made inside them that is still
+// alive is filled in, each traced member it leaves out whose pointee is incomplete an implicit error, in clang's order
+// (its FillInEmptyInitializations': by the members' offsets through the subobjects), then those lists are done.
+static __attribute__((noinline, cold)) void check_init_counted_close(CheckInitWalker* walker, uint32_t token)
+{
+    CheckInitCounted* counted = walker->counted;
+    const TypeTable* types = walker->types;
+    const CheckInitFrame* closing = walker->frames + walker->depth - 1;
+    if (!walker->semantic_suppressed && !counted->failed)
+    {
+        if (closing->counted != 0)
+        {
+            counted->lists[closing->counted - 1].location = token;
+        }
+        const uint64_t mark = walker->scratch->length;
+        uint32_t missing = 0;
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            CheckInitCountedMissing* found = pass == 1 && missing != 0 ? BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitCountedMissing, 2 * (uint64_t)missing) : NULL;
+            counted->failed |= pass == 1 && missing != 0 && found == NULL;
+            uint32_t count = 0;
+            for (uint32_t i = closing->counted_first; !counted->failed && i < counted->list_count; i += 1)
+            {
+                const CheckInitCountedList* list = counted->lists + i;
+                const TypeId record = list->alive ? type_strip_aligned(types, list->type) : 0;
+                const uint32_t tag = record != 0 ? types->types.index[type_index(record)] : 0;
+                const uint32_t begin = record != 0 ? types->tags.member_begin[tag] : 0;
+                const uint32_t members = record != 0 ? types->tags.member_count[tag] : 0;
+                uint32_t ordinal = 0;
+                for (uint32_t m = begin; m < begin + members; m += 1)
+                {
+                    const bool traced = check_init_counted_member(types, m);
+                    const bool written = traced && (counted->bits[list->written + ordinal / 64] >> (ordinal % 64) & 1) != 0;
+                    if (traced && !written && check_init_counted_incomplete(walker, m))
+                    {
+                        if (found != NULL)
+                        {
+                            found[count] = (CheckInitCountedMissing){ .offset = list->offset + types->members.offset[m], .list = i, .member = m };
+                        }
+                        count += 1;
+                    }
+                    ordinal += traced;
+                }
+            }
+            missing = pass == 0 ? count : missing;
+            // In member order: a bottom-up merge sort, stable, through the spare half.
+            CheckInitCountedMissing* from = found;
+            CheckInitCountedMissing* to = found != NULL ? found + count : NULL;
+            for (uint32_t width = 1; found != NULL && width < count; width *= 2)
+            {
+                for (uint32_t left = 0; left < count; left += 2 * width)
+                {
+                    const uint32_t middle = left + width < count ? left + width : count;
+                    const uint32_t last = middle + width < count ? middle + width : count;
+                    uint32_t a = left;
+                    uint32_t b = middle;
+                    for (uint32_t k = left; k < last; k += 1)
+                    {
+                        const bool take_a = a < middle && (b >= last || from[a].offset <= from[b].offset);
+                        to[k] = take_a ? from[a] : from[b];
+                        a += take_a;
+                        b += !take_a;
+                    }
+                }
+                CheckInitCountedMissing* swap = from;
+                from = to;
+                to = swap;
+            }
+            for (uint32_t k = 0; found != NULL && k < count; k += 1)
+            {
+                const CheckInitCountedList* list = counted->lists + from[k].list;
+                check_init_counted_error(walker, list->location, token, from[k].member, list->type, true);
+            }
+        }
+        arena_pop_to(walker->scratch, mark);
+        for (uint32_t i = closing->counted_first; i < counted->list_count; i += 1)
+        {
+            counted->lists[i].alive = false;
+        }
+    }
+}
+
 static uint32_t check_init_node(CheckInitWalker* walker, uint32_t begin, uint32_t end)
 {
     uint32_t result = BUSTER_CHECK_NONE;
@@ -1488,7 +1948,10 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                             if (check_init_select(walker, frame, &selected))
                             {
                                 check_init_used(walker, frame, token, true);
-                                check_init_push(walker, &selected, false, token);
+                                if (check_init_push(walker, &selected, false, token) && __builtin_expect(walker->counted != NULL, 0))
+                                {
+                                    check_init_counted_pushed(walker, CHECK_INIT_COUNTED_DESIGNATED, token);
+                                }
                             }
                             else
                             {
@@ -1531,9 +1994,9 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                     {
                         check_init_fail(walker, CHECK_INIT_INVALID, token);
                     }
-                    else
+                    else if (check_init_push(walker, &selected, false, token) && __builtin_expect(walker->counted != NULL, 0))
                     {
-                        check_init_push(walker, &selected, false, token);
+                        check_init_counted_pushed(walker, CHECK_INIT_COUNTED_DESIGNATED, token);
                     }
                 }
             }
@@ -2529,6 +2992,10 @@ static bool check_init_const_copy(CheckInitWalker* walker, const CheckInitSelect
 static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
+    if (__builtin_expect(walker->counted != NULL, 0))
+    {
+        check_init_counted_value(walker, selected, token, end);
+    }
     // GCC's cast to a union (#2301, BUSTER_CHECK_CONVERT_TO_UNION) initializes its member: the union's bytes cleared, then
     // the operand's value is the member's, at the union's offset, as clang's constant evaluator folds CK_ToUnion (a static
     // object's initializer too). The operand starts after the cast's `)`.
@@ -2667,6 +3134,9 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 if (check_warning_null_event(walker->parser, walker->types, selected->type, action.operands,
                                               token, end, walker->warning_completion, &warning))
                 {
+                    // A counted_by family member's type keeps its sugar (#1842's 3c): the member, plus one, in its detail.
+                    const uint32_t member = check_init_selected_member(walker, selected);
+                    warning.detail = member != 0 && (walker->types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) != 0 ? member + 1 : 0;
                     check_init_semantic_warning(walker, &warning, NULL, 0);
                 }
                 const CheckNoderefInitializer* noderef = walker->warnings != NULL && walker->warnings->sink != NULL ? &walker->warnings->sink->noderef : NULL;
@@ -2768,6 +3238,17 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
         const TypeId base = type_strip_aligned(walker->types, type);
         walker->incomplete = type_kind(walker->types, base) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? base : 0;
     }
+    if (walker->counted != NULL)
+    {
+        // The lists are one walk's, in its scratch.
+        walker->counted->lists = NULL;
+        walker->counted->list_count = 0;
+        walker->counted->list_capacity = 0;
+        walker->counted->bits = NULL;
+        walker->counted->bit_words = 0;
+        walker->counted->bit_capacity = 0;
+        walker->counted->ordered = true;
+    }
     uint32_t token = begin;
     bool after_value = false;
     while (token < end && walker->result->status == CHECK_INIT_OK)
@@ -2788,6 +3269,10 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
             {
                 const CheckInitFrame* closing = walker->frames + walker->depth - 1;
                 const uint32_t resume = closing->resume;
+                if (__builtin_expect(walker->counted != NULL, 0))
+                {
+                    check_init_counted_close(walker, token);
+                }
                 if (closing->copy != 0)
                 {
                     check_init_finish_copy(walker, closing->copy, token);
@@ -2798,6 +3283,10 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                     check_init_history_warning(walker, &closing->pending->previous, closing->pending->token, false);
                 }
                 walker->depth -= 1;
+                if (__builtin_expect(walker->counted != NULL, 0))
+                {
+                    check_init_counted_took(walker, token);
+                }
                 check_init_advance(walker);
                 token = resume != 0 ? resume : token + 1;
                 after_value = true;
@@ -2821,7 +3310,12 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                                     check_init_old_style_designator(walker->parser, token, end);
             if (designated)
             {
+                const uint32_t first_list = walker->counted != NULL ? walker->counted->list_count : 0;
                 check_init_designate(walker, &token, end);
+                if (__builtin_expect(walker->counted != NULL, 0))
+                {
+                    check_init_counted_designated(walker, first_list, token, end);
+                }
             }
             CheckInitSelection selected = { 0 };
             CheckInitFrame* frame = &walker->frames[walker->depth - 1];
@@ -2915,6 +3409,10 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                     if (check_init_push(walker, &selected, true, token))
                     {
                         walker->frames[walker->depth - 1].pending = pending;
+                        if (__builtin_expect(walker->counted != NULL, 0))
+                        {
+                            check_init_counted_pushed(walker, CHECK_INIT_COUNTED_BRACED, token);
+                        }
                     }
                     token += 1;
                 }
@@ -2978,6 +3476,10 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                             const uint32_t compound = check_init_compound(walker, &selected, token, stop, node, &root_type, &source_offset);
                             if (compound != BUSTER_CHECK_NONE)
                             {
+                                if (__builtin_expect(walker->counted != NULL, 0) && !walker->semantic_suppressed)
+                                {
+                                    check_init_counted_kill(walker, selected.offset, type_size(walker->types, selected.type) * 8);
+                                }
                                 check_init_history_value(walker, &selected, token, node, false, 0);
                                 check_init_clear(walker, selected.type, selected.offset, token);
                                 CheckInitCopy* copy = BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitCopy, 1);
@@ -3022,9 +3524,9 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                         {
                             check_init_fail(walker, CHECK_INIT_INVALID, token);
                         }
-                        else
+                        else if (check_init_push(walker, &selected, false, token) && __builtin_expect(walker->counted != NULL, 0))
                         {
-                            check_init_push(walker, &selected, false, token);
+                            check_init_counted_pushed(walker, CHECK_INIT_COUNTED_ELIDED, token);
                         }
                     }
                 }
@@ -3075,7 +3577,8 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
                                    const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, CheckSparseColumn string_ids,
                                    TypeId type, uint32_t begin, uint32_t end, bool static_storage, bool diagnostic_only, bool ignore_excess,
                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph,
-                                   CheckInitWarningCollector* warnings, const CheckInitObjects* objects, CheckInitFailureSink* failures)
+                                   CheckInitWarningCollector* warnings, const CheckInitObjects* objects, CheckInitFailureSink* failures,
+                                   CheckInitCounted* counted)
 {
     *result = (CheckInitializer){
         .type = type,
@@ -3131,6 +3634,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .scratch = scratch,
             .result = result,
             .failures = failures,
+            .counted = counted != NULL && diagnostic_only && graph != NULL && !counted->failed ? counted : NULL,
         };
         valid = check_init_walk(&walker, type, begin, end);
         if (failures != NULL && walker.first_failure.failed_source != 0)
@@ -3212,7 +3716,7 @@ static bool check_initializer_plan(TypeTable* types, const Parser* parser, const
                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph)
 {
     return check_initializer_plan_warnings(types, parser, token_nodes, stream, strings, string_count, string_ids, type, begin, end,
-                                           static_storage, diagnostic_only, ignore_excess, output, scratch, result, graph, NULL, NULL, NULL);
+                                           static_storage, diagnostic_only, ignore_excess, output, scratch, result, graph, NULL, NULL, NULL, NULL);
 }
 
 static bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,

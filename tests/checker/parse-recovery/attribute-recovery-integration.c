@@ -7,10 +7,10 @@ int known(int);
 void first(int x)
 {
     __attribute__((suppress(1), minsize)) retry: x++;
-#if __STDC_VERSION__ < 202311L
 #if __STDC_VERSION__ >= 199901L
     __attribute__((unused)) (x)++;
 #endif
+#if __STDC_VERSION__ < 202311L
     __attribute__((unused)) undeclared_fn(unread_first);
 #endif
     int *tail = 1;
@@ -21,10 +21,10 @@ void first(int x)
 void second(int x)
 {
     __attribute__((minsize, suppress(1))) again: x++;
-#if __STDC_VERSION__ < 202311L
 #if __STDC_VERSION__ >= 199901L
     __attribute__((unused)) (x)++;
 #endif
+#if __STDC_VERSION__ < 202311L
     __attribute__((unused)) known(unread_second);
 #endif
     int *tail = 2;

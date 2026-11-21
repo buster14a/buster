@@ -559,7 +559,7 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
             break;
         // K4's three loops alone, in turn; a file too deep for them gets the token-at-a-time K4 in the first.
         case PARSE_TIMED_VECTOR_K4_PREPARE:
-            bench->deep = parse_deepest(k, count) > BUSTER_PARSE_MAX_VECTOR_DEPTH;
+            bench->deep = k->deep_node_depths;
             if (bench->deep)
             {
                 parse_parents_scalar(k, count);

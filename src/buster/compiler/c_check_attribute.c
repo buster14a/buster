@@ -302,6 +302,9 @@ struct CheckInputAttribute
     uint32_t argument_count;
     CheckInputAttributeKind kind;
     CheckInputAttributeSchema schema;
+    // An asm label's reserved warning after a definition (#2936, check_input_attribute_late), its index in the reader's
+    // warning events plus one, 0 for none: the asm labels' pass publishes it where it drops the label.
+    uint32_t warning;
     int64_t value;
     int64_t* argument_values;
     uint32_t* argument_ends;
@@ -349,6 +352,10 @@ struct CheckInputAttribute
     bool constant_argument;
     uint32_t constants;
     uint32_t wide;
+    // A counted_by family's top-level `,` (#1842), where clang's parser expects the argument's `)`, or 0: the argument ends
+    // there, and the member's check gives the "expected ')'" (check_input_counted_by_member). (In the hole before the
+    // pointer that follows, which keeps the record's size.)
+    uint32_t counted_paren;
     // An argument's error clang's handler gives once the attribute's subject takes it (#147: tls_model's model, constructor's,
     // destructor's and assume_aligned's integers), which the attributes' reader made and moved here
     // (check_input_attribute_defer), for check_input_attribute_subjects to give; or NULL.
@@ -783,6 +790,7 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_UNKNOWN_TYPE,
     CHECK_ARGUMENT_EXPECTED_TYPE,
     CHECK_ARGUMENT_EXPECTED_PAREN,
+    CHECK_ARGUMENT_EXPECTED_SQUARE,
     // pcs's "invalid PCS type", at the attribute; a variadic function's convention that takes none, "variadic function
     // cannot use C calling convention" (the convention, CheckInputCallingConvention, the number).
     CHECK_ARGUMENT_PCS_TYPE,
@@ -2377,6 +2385,196 @@ static bool check_input_attribute_suppress_name(String8 name)
     return check_input_attribute_equal(name, "suppress") || check_input_attribute_equal(name, "__suppress__");
 }
 
+// The syntactic disposition of a balanced suppress clause, without publishing its diagnostics. An invalid literal
+// drops the item. Recovery inside a literal's parentheses keeps it; a tail outside those parentheses drops the rest
+// of the list. The statement/declaration classifier uses these same boundaries as the argument reader below.
+static bool check_input_attribute_suppress_kept(const Parser* parser, uint32_t first, uint32_t end, bool* tail)
+{
+    uint32_t token = first;
+    bool kept = true;
+    bool done = token == end;
+    *tail = false;
+    while (!done && token <= end)
+    {
+        const uint32_t argument = token;
+        while (token < end && parser->tokens.kinds[token] == PARSE_KIND_L_PAREN)
+        {
+            token += 1;
+        }
+        uint32_t open = token;
+        kept = token < end && parser->tokens.kinds[token] == PARSE_KIND_STRING;
+        while (token < end && parser->tokens.kinds[token] == PARSE_KIND_STRING)
+        {
+            token += 1;
+        }
+        while (kept && open > argument)
+        {
+            open -= 1;
+            const uint32_t close = parser->tree.parents[open];
+            kept = close > open && close < end;
+            token = kept ? close + 1 : token;
+        }
+        *tail = kept && token < end && parser->tokens.kinds[token] != PARSE_KIND_COMMA;
+        kept &= !*tail;
+        done = !kept || token == end;
+        token += !done;
+    }
+    return kept && (parser->tokens.flags[end] & BUSTER_PARSE_DROPPED_ATTRIBUTE) == 0;
+}
+
+// Clang's statement attribute names in their written syntax. GNU and C23 lists share a block prefix, so a C23
+// scope must be classified together with its name rather than treating the list's `[` as a declaration.
+static bool check_input_statement_attribute_name(String8 scope, String8 name, bool standard)
+{
+    static const char* const gnu_names[] = {
+        "always_inline", "atomic", "assume", "code_align", "fallthrough", "musttail", "noinline", "nomerge", "no_outline", "opencl_unroll_hint", "suppress",
+    };
+    static const char* const clang_names[] = {
+        "always_inline", "assume", "atomic", "code_align", "likely", "musttail", "no_outline", "noinline", "nomerge", "suppress", "unlikely",
+    };
+    static const char* const scoped_gnu_names[] = { "always_inline", "fallthrough", "noinline" };
+    static const char* const msvc_names[] = { "forceinline", "forceinline_calls", "noinline" };
+    const bool clang = standard && (check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang"));
+    const bool gnu = standard && (check_input_attribute_equal(scope, "gnu") || check_input_attribute_equal(scope, "__gnu__"));
+    const bool msvc = standard && check_input_attribute_equal(scope, "msvc");
+    const char* const* names = !standard ? gnu_names : clang ? clang_names : gnu ? scoped_gnu_names : msvc_names;
+    const uint32_t count = !standard ? BUSTER_ARRAY_LENGTH(gnu_names) : clang ? BUSTER_ARRAY_LENGTH(clang_names) :
+                           gnu ? BUSTER_ARRAY_LENGTH(scoped_gnu_names) : msvc ? BUSTER_ARRAY_LENGTH(msvc_names) : 0;
+    bool result = standard && scope.length == 0 && check_input_attribute_equal(name, "fallthrough");
+    for (uint32_t i = 0; !result && i < count; i += 1)
+    {
+        result = check_input_attribute_equal(name, names[i]);
+    }
+    return result;
+}
+
+typedef struct CheckInputStatementAttributes CheckInputStatementAttributes;
+struct CheckInputStatementAttributes
+{
+    bool named;
+    bool kept;
+    bool statements;
+    bool gnu;
+    bool standard;
+    bool tail;
+};
+
+// A block prefix's complete balanced lists. Named but dropped suppress entries still let the checker read their
+// argument errors before deciding that no attribute remains. Discarded C23 siblings never affect classification.
+static CheckInputStatementAttributes check_input_statement_attribute_scan(CheckInputReader* reader, uint32_t first, uint32_t after)
+{
+    const Parser* parser = reader->parser;
+    const InternTable* table = reader->pp != NULL ? reader->pp->table : NULL;
+    CheckInputStatementAttributes result = { .statements = true };
+    uint32_t token = first;
+    bool valid = after <= parser->tokens.count;
+    while (valid && token < after)
+    {
+        const bool standard = parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE;
+        const bool gnu = parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE;
+        const uint32_t open = standard ? token : token + 1;
+        valid = (standard || gnu) && open + 1 < after;
+        const uint32_t close = valid ? parser->tree.parents[open] : after;
+        const uint32_t list_end = valid ? parser->tree.parents[open + 1] : after;
+        valid = valid && close < after && list_end > open + 1 && list_end + 1 == close;
+        result.gnu |= gnu;
+        result.standard |= standard;
+        uint32_t item = open + 2;
+        while (valid && item < list_end)
+        {
+            if (parser->tokens.kinds[item] == PARSE_KIND_COMMA)
+            {
+                item += 1;
+            }
+            else
+            {
+                const bool scoped = standard && item + 3 < list_end && parser->tokens.kinds[item + 1] == PARSE_KIND_COLON &&
+                                    parser->tokens.kinds[item + 2] == PARSE_KIND_COLON;
+                const uint32_t scope_name = scoped ? parser->tokens.names[item] : 0;
+                const String8 scope = table != NULL && scope_name != 0 && scope_name < table->count ?
+                                          (String8){ (char*)intern_bytes(table, scope_name), intern_length(table, scope_name) } : (String8){ 0 };
+                const uint32_t name_token = scoped ? item + 3 : item;
+                const uint32_t name_id = parser->tokens.names[name_token];
+                const bool msvc = check_input_attribute_equal(scope, "msvc") && name_id != 0 && name_id < table->count;
+                const String8 name = msvc ? (String8){ (char*)intern_bytes(table, name_id), intern_length(table, name_id) } :
+                                           check_input_attribute_name(reader, name_id);
+                uint32_t next = name_token + 1;
+                const bool arguments = next < list_end && parser->tokens.kinds[next] == PARSE_KIND_L_PAREN;
+                const uint32_t argument_end = arguments ? parser->tree.parents[next] : next;
+                const bool suppress = check_input_attribute_suppress_name(name) &&
+                                      (!standard || (scoped && (check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang"))));
+                bool tail = false;
+                valid = name.length != 0 && (!arguments || (argument_end > next && argument_end < list_end));
+                const bool kept = valid && (!suppress || !arguments || check_input_attribute_suppress_kept(parser, next + 1, argument_end, &tail));
+                result.named = true;
+                result.kept |= kept;
+                result.statements &= !kept || check_input_statement_attribute_name(scope, name, standard);
+                result.tail |= tail && !standard;
+                next = arguments ? argument_end + 1 : next;
+                item = tail ? list_end : next;
+            }
+        }
+        token = valid ? close + 1 : after;
+    }
+    result.statements &= valid;
+    return result;
+}
+
+// A rejected block item's tail is unread by clang. Discard only a complete, balanced semicolon-bounded item, never
+// a following block or an unmatched group. This also prevents an invalid attribute prefix from diagnosing its RHS.
+static bool check_input_attribute_discard_tail(CheckInputReader* reader, uint32_t first)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t end = first;
+    bool balanced = true;
+    while (balanced && end < count && parser->tokens.kinds[end] != PARSE_KIND_SEMI)
+    {
+        const uint8_t kind = parser->tokens.kinds[end];
+        if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE ||
+            (kind == PARSE_KIND_L_BRACE && parser->tree.roles[end] == PARSE_ROLE_OPEN_INITIALIZER))
+        {
+            const uint32_t close = parser->tree.parents[end];
+            balanced = close > end && close < count;
+            end = balanced ? close + 1 : end;
+        }
+        else
+        {
+            balanced = kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_R_PAREN && kind != PARSE_KIND_R_SQUARE;
+            end += balanced;
+        }
+    }
+    const bool discarded = balanced && end < count;
+    if (discarded)
+    {
+        memset(reader->ignored + first, 1, end + 1 - first);
+    }
+    return discarded;
+}
+
+// The start of adjacent block-prefix lists before `first`. Their completed tree gives each outer opener without
+// confusing an argument's nested parentheses or brackets with an earlier list. Used only by a failed GNU tail.
+static uint32_t check_input_attribute_sequence_first(const Parser* parser, uint32_t first)
+{
+    uint32_t result = first;
+    bool more = result != 0 && parser->tree.roles[result - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+    while (more)
+    {
+        const uint32_t close = result - 1;
+        uint32_t open = close;
+        while (open > 0 && !(parser->tree.roles[open] == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER && parser->tree.parents[open] == close))
+        {
+            open -= 1;
+        }
+        const bool standard = parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE;
+        const bool gnu = open > 0 && parser->tokens.kinds[open - 1] == PARSE_KIND_ATTRIBUTE;
+        more = open < close && (standard || gnu);
+        result = more ? standard ? open : open - 1 : result;
+        more = more && result != 0 && parser->tree.roles[result - 1] == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+    }
+    return result;
+}
+
 // A suppress string-list parser's diagnostic (#2332). Each delimiter is reported, even at a token that already has
 // another error. `after` locates a missing outer delimiter after the preceding token, as clang's ExpectAndConsume does;
 // `open` gives an inner pair's matching note, or BUSTER_CHECK_NONE. All are attribute-reading errors, so the ordinary
@@ -2411,6 +2609,7 @@ static bool check_input_attribute_suppress_parse(CheckInputReader* reader, Check
 {
     const Parser* parser = reader->parser;
     const uint32_t end = attribute->argument_end;
+    const bool repaired = end < parser->tokens.count && (parser->tokens.flags[end] & BUSTER_PARSE_DROPPED_ATTRIBUTE) != 0;
     uint32_t token = attribute->argument_first;
     bool valid = true;
     bool done = token == end;
@@ -2440,7 +2639,9 @@ static bool check_input_attribute_suppress_parse(CheckInputReader* reader, Check
             {
                 token += 1;
             }
-            *escaped = check_input_unevaluated_strings(reader, literal, token, BUSTER_CHECK_NONE);
+            // A synthesized argument closer shares the following original token's source. Complete the literal's
+            // warnings before that delimiter error, as the original parser read the literal before expecting ')'.
+            *escaped = check_input_unevaluated_strings(reader, literal, token, repaired ? literal : BUSTER_CHECK_NONE);
             valid &= !*escaped;
             done = *escaped;
             while (!done && open > first)
@@ -2456,10 +2657,28 @@ static bool check_input_attribute_suppress_parse(CheckInputReader* reader, Check
             }
             if (!done && token < end && parser->tokens.kinds[token] != PARSE_KIND_COMMA)
             {
+                const bool semicolon = parser->tokens.kinds[token] == PARSE_KIND_SEMI && token + 1 == end && end + 1 == list_end;
                 check_input_attribute_suppress_error(reader, attributes, attribute, token, CHECK_ARGUMENT_EXPECTED_PAREN, true, BUSTER_CHECK_NONE);
                 check_input_attribute_suppress_error(reader, attributes, attribute, token,
-                                                     attribute->standard ? CHECK_ARGUMENT_EXPECTED_COMMA : CHECK_ARGUMENT_EXPECTED_PAREN, true, BUSTER_CHECK_NONE);
-                if (attribute->standard)
+                                                     attribute->standard ? semicolon ? CHECK_ARGUMENT_EXPECTED_SQUARE : CHECK_ARGUMENT_EXPECTED_COMMA :
+                                                                           CHECK_ARGUMENT_EXPECTED_PAREN, true, BUSTER_CHECK_NONE);
+                if (semicolon)
+                {
+                    // A semicolon ends recovery before the balanced closers in the retained tree. GNU's third ')'
+                    // is still missing there; the leftovers start invalid expression statements, which skip the tail.
+                    if (!attribute->standard)
+                    {
+                        check_input_attribute_suppress_error(reader, attributes, attribute, token, CHECK_ARGUMENT_EXPECTED_PAREN, true, BUSTER_CHECK_NONE);
+                    }
+                    check_input_attribute_suppress_error(reader, attributes, attribute, end, CHECK_ARGUMENT_EXPECTED_EXPRESSION, false, BUSTER_CHECK_NONE);
+                    if (attribute->standard)
+                    {
+                        check_input_attribute_suppress_error(reader, attributes, attribute, list_end, CHECK_ARGUMENT_EXPECTED_EXPRESSION, false, BUSTER_CHECK_NONE);
+                    }
+                    attributes->suppress_tail = true;
+                    *cursor = list_end;
+                }
+                else if (attribute->standard)
                 {
                     check_input_attribute_suppress_error(reader, attributes, attribute, end, CHECK_ARGUMENT_EXPECTED_COMMA, false, BUSTER_CHECK_NONE);
                     // Clang recovers this failed separator through the C23 list's closing brackets. Later items in
@@ -2478,9 +2697,12 @@ static bool check_input_attribute_suppress_parse(CheckInputReader* reader, Check
                         start -= 1;
                     }
                     start = start >= 2 ? start - 2 : start;
-                    const uint8_t before = start != 0 ? parser->tree.roles[start - 1] : PARSE_ROLE_NONE;
+                    const uint32_t prefix = check_input_attribute_sequence_first(parser, start);
+                    const uint8_t before = prefix != 0 ? parser->tree.roles[prefix - 1] : PARSE_ROLE_NONE;
+                    const CheckInputStatementAttributes spelling = check_input_statement_attribute_scan(reader, prefix, list_end + 2);
+                    const bool block = reader->function_body < parser->tokens.count && parser->tree.roles[start + 1] == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER;
                     const bool expression = before == PARSE_ROLE_LABEL || before == PARSE_ROLE_CLOSE_CONDITION || before == PARSE_ROLE_CLOSE_FOR ||
-                                            before == PARSE_ROLE_ELSE || before == PARSE_ROLE_DO;
+                                            before == PARSE_ROLE_ELSE || before == PARSE_ROLE_DO || (block && spelling.kept && spelling.statements);
                     check_input_attribute_suppress_error(reader, attributes, attribute, list_end + 1,
                                                          expression ? CHECK_ARGUMENT_EXPECTED_EXPRESSION : CHECK_ARGUMENT_EXPECTED_DECLARATOR, false, BUSTER_CHECK_NONE);
                     attributes->suppress_tail = true;
@@ -2645,8 +2867,9 @@ static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputA
 
 // The counted_by family's argument as clang's parser reads it (#148, ParseBoundsAttribute): one expression in
 // parentheses. Without them, its count's error ("takes at least 1 argument"), at the name; with nothing in them, "argument
-// required after attribute" at the `)`; with a second argument, "expected ')'" at the `,` (a note at the `(`). The
-// expression itself the member's declaration checks (check_input_counted_by_member).
+// required after attribute" at the `)`. With a second argument, the first is the argument, as clang's parser keeps it, and
+// the `,` is where it expects the `)` (#1842, CheckInputAttribute.counted_paren). The expression itself the member's
+// declaration checks (check_input_counted_by_member).
 static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
 {
     const Parser* parser = reader->parser;
@@ -2659,7 +2882,7 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
     {
         comma = parser->tokens.kinds[i] == PARSE_KIND_COMMA ? i : BUSTER_CHECK_NONE;
     }
-    const bool valid = parenthesized && first < end && comma == BUSTER_CHECK_NONE;
+    const bool valid = parenthesized && first < end && comma != first;
     const uint32_t reported = reader->output->report_count;
     if (!parenthesized)
     {
@@ -2669,8 +2892,9 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
     {
         check_input_report(reader, end, CHECK_INPUT_COUNTED_REQUIRED);
     }
-    else if (comma != BUSTER_CHECK_NONE)
+    else if (comma == first)
     {
+        // An empty first argument: clang's parser expects an expression.
         const uint32_t before = reader->output->report_count;
         check_input_report(reader, comma, CHECK_INPUT_COUNTED_PAREN);
         if (reader->output->report_count > before)
@@ -2678,6 +2902,11 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
             reader->output->reports[before].note_token = first - 1;
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
         }
+    }
+    else if (comma != BUSTER_CHECK_NONE)
+    {
+        attribute->counted_paren = comma;
+        attribute->argument_end = comma;
     }
     if (!valid && reader->output->report_count > reported)
     {
@@ -3494,6 +3723,7 @@ static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t
 #define BUSTER_CHECK_PLACE_QUALIFIERS 3u
 #define BUSTER_CHECK_PLACE_FUNCTION 4u
 #define BUSTER_CHECK_PLACE_GROUP 5u
+#define BUSTER_CHECK_PLACE_PROHIBITED 6u
 
 static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
 {
@@ -4406,7 +4636,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                                       related ? check_input_objc_bridge_related_parse(reader, attributes, &attribute) :
                                       newtype ? check_input_swift_newtype_parse(reader, attributes, &attribute) : BUSTER_CHECK_CUSTOM_KEPT;
         valid &= custom_parse != BUSTER_CHECK_CUSTOM_ERROR;
-        const bool dropped = custom_parse == BUSTER_CHECK_CUSTOM_DROPPED;
+        const bool dropped = custom_parse == BUSTER_CHECK_CUSTOM_DROPPED ||
+                             (suppress && attribute.argument_end < parser->tokens.count &&
+                              (parser->tokens.flags[attribute.argument_end] & BUSTER_PARSE_DROPPED_ATTRIBUTE) != 0);
         // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
         // no type "expected a type" and, in a GNU list, "expected ')'" there; a type followed by a `,` is "expected ')'"
         // at it, with its note at the `(` in a GNU list (a C23 list's arguments clang reads as a balanced run then).
@@ -4569,7 +4801,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const uint32_t type_name_end = gnu_fact != NULL && (gnu_fact->flags & BUSTER_CHECK_FACT_TYPE) == 0 ?
                                        check_input_attribute_type_name_end(parser, attribute.first) : BUSTER_CHECK_NONE;
         const bool type_name = type_name_end != BUSTER_CHECK_NONE;
-        if (valid && dropped)
+        if (valid && (dropped || place == BUSTER_CHECK_PLACE_PROHIBITED))
         {
             unknown = true;
         }
@@ -4930,6 +5162,8 @@ static bool check_input_attribute_starts(const Parser* parser, uint32_t token, u
            (kind == PARSE_KIND_L_SQUARE && token + 1 < end && parser->tokens.kinds[token + 1] == PARSE_KIND_L_SQUARE);
 }
 
+static uint32_t check_input_skip_attributes(const Parser* parser, uint32_t token, uint32_t end);
+
 // A successful no-op leaves cursor unchanged. Failure retains the first exact diagnostic range and never consumes
 // a non-attribute token. The caller can report the specific message alongside its ordinary declaration failure.
 static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes* attributes)
@@ -4949,7 +5183,24 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
         const uint32_t name = parser->tokens.names[i];
         const bool standard = kind == PARSE_KIND_L_SQUARE;
         // (A list after a bare tag declaration's name is the tag's, its declaration's: CheckInputReader.tag_name_list.)
-        const uint32_t place = standard && !reader->tag_name_list ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
+        uint32_t place = standard && !reader->tag_name_list ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
+        uint32_t type_completion = 0;
+        // In a block declaration, a C23 list after GNU's belongs to the type. An explicit type after it instead makes
+        // the list prohibited: the parser retained that diagnostic, but its arguments are still read before it.
+        if (standard && !reader->statement_attributes && reader->function_body < parser->tokens.count && place == BUSTER_CHECK_PLACE_DECLARATION)
+        {
+            const uint32_t prefix = check_input_attribute_sequence_first(parser, first);
+            if (prefix < first && parser->tokens.kinds[prefix] == PARSE_KIND_ATTRIBUTE)
+            {
+                const uint32_t after = check_input_skip_attributes(parser, first, end);
+                const bool unknown = after < end && parser->recovered_types != NULL && parser->recovered_types[after] == PARSE_RECOVERED_TYPE_UNKNOWN;
+                const uint8_t next = after < end ? parser->tokens.kinds[after] : PARSE_KIND_END;
+                const bool specified = after < end && (parser->tree.roles[after] == PARSE_ROLE_SPECIFIER || next == PARSE_KIND_STRUCT ||
+                                                       next == PARSE_KIND_ENUM || next == PARSE_KIND_TYPEOF || next == PARSE_KIND_ATOMIC);
+                place = specified && !unknown ? BUSTER_CHECK_PLACE_PROHIBITED : BUSTER_CHECK_PLACE_SPECIFIERS;
+                type_completion = unknown ? after : 0;
+            }
+        }
         bool recovered = false;
         if (kind == PARSE_KIND_ATTRIBUTE || standard)
         {
@@ -5024,6 +5275,10 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                         for (uint32_t r = moved; r < reader->output->recovered_count; r += 1)
                         {
                             reader->output->recovered_reports[r].pending = false;
+                            if (type_completion != 0 && reader->output->recovered_reports[r].message == CHECK_INPUT_ATTRIBUTE_TYPES)
+                            {
+                                reader->output->recovered_reports[r].completion = type_completion;
+                            }
                         }
                         const uint32_t item_end = check_input_attribute_item_end(parser, item, list_end);
                         i = i > item_end ? i : item_end;
@@ -6917,8 +7172,6 @@ static bool check_input_ownership_no_pointer(const TypeTable* types, TypeId bare
     const TypeId function = check_input_ownership_function(types, bare);
     return returns && function != 0 && type_kind(types, type_strip_aligned(types, type_return(types, function))) != BUSTER_TYPE_KIND_POINTER;
 }
-
-static uint32_t check_input_skip_attributes(const Parser* parser, uint32_t token, uint32_t end);;
 
 // The place clang's D->getLocation() is (#147): a declaration's name, a tag's (its keyword's, `begin`, for one of none), or
 // the declaration's first token.
@@ -9650,6 +9903,42 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
             }
         }
     }
+    // An asm label after the definition (#2936): clang drops it with "attribute declaration must precede definition" at its
+    // string, noted at the definition, unless the definition has a label. The asm labels' pass decides that, as it knows
+    // the definition's label from every declaration of the object, a block's too (check_input_asm_labels). Its warning is
+    // reserved here, suppressed, at this merge and before the other attributes' below, where clang gives it; a
+    // redefinition's, whose others complete at their names, at the first name of the declaration's attributes. A body's on
+    // a lane goes to source order, whose events keep their indices.
+    const CheckInputAttribute* label = NULL;
+    uint32_t first_name = UINT32_MAX;
+    for (uint32_t i = 0; after && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        label = label == NULL && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored ? attribute : label;
+        first_name = attribute->name_token < first_name ? attribute->name_token : first_name;
+    }
+    check_input_lane_refuse(reader, label != NULL && reader->lane, "a body's redeclaration after a definition has an asm label");
+    uint32_t reserved = 0;
+    if (label != NULL && !reader->lane)
+    {
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+            .kind = CHECK_WARNING_EVENT_LATE_ATTRIBUTE,
+            .token = label->argument_first,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = BUSTER_CHECK_WARNING_SUPPRESSED,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = redefinition ? first_name : point,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        const CheckWarningNote note = {
+            .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+            .token = reader->definition_origins[previous] - 1,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        reserved = check_input_warning_event(reader, &event, &note, 1) ? reader->warning_events.count : 0;
+    }
     bool dropped = false;
     for (uint32_t i = 0; copied && !reader->lane && reader->late_attribute_masks != NULL && i < copy->count; i += 1)
     {
@@ -9704,6 +9993,13 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
             check_input_attribute_summary(copy);
         }
         check_input_set_attributes_at(reader->output, token, copy);
+    }
+    // (The label's own record, in the declaration's list as it now is: its reserved warning.)
+    CheckInputAttributes* merged = reserved != 0 ? check_input_attributes_at(reader->output, token) : NULL;
+    for (uint32_t i = 0; merged != NULL && i < merged->count; i += 1)
+    {
+        CheckInputAttribute* record = merged->records + i;
+        record->warning = record->first == label->first && record->kind == CHECK_ATTRIBUTE_ASM_LABEL ? reserved : record->warning;
     }
     check_input_attribute_merge_exclusions(reader, token, previous, visible);
 }
@@ -10815,7 +11111,7 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
                          role == PARSE_ROLE_SPECIFIER && check_input_typedef_declared(reader, declared) && reader->declaration_starts != NULL;
     if (delayed)
     {
-        const uint32_t first = reader->declaration_starts[t];
+        const uint32_t first = check_input_declaration_start_at(reader->declaration_starts, t);
         if (pass->delayed_first != first)
         {
             pass->delayed_first = first;
