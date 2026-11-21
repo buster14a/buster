@@ -4,6 +4,36 @@
 // Sparse semantic facts to atomic diagnostic groups. The located token governs source policy and system-header
 // visibility; the independent completion governs ordering. The collector copies all temporary text and notes.
 
+// c_check_semantic_diagnostic.c's, included after this file: an expression's tokens as a highlighted range (#2376).
+static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node, bool parentheses);
+
+// The highlighted ranges clang's diagnostic of a warning event has (#2376), before its publication; the caller clears
+// them. A folded shift's count: the shift's right operand. An unknown attribute: its name, from its scope where it has
+// one (`gnu::bar`, the `::` one token in C23 and two colons before it).
+static void check_warning_event_ranges(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
+{
+    const uint32_t count = parser->tokens.count;
+    if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE && event->token < count)
+    {
+        const uint32_t first = event->token;
+        const bool scoped = (event->payload.data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0 && first + 2 < count;
+        const bool colons = scoped && parser->tokens.kinds[first + 1] == PARSE_KIND_COLON && parser->tokens.kinds[first + 2] == PARSE_KIND_COLON;
+        const uint32_t last = !scoped ? first : colons ? first + 3 : first + 2;
+        if (last < count)
+        {
+            pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, first), parse_source_index(&parser->tokens, last));
+        }
+    }
+    const bool shift = event->id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || event->id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = shift && input->token_nodes != NULL && event->token < input->token_count ? input->token_nodes[event->token] : BUSTER_CHECK_NONE;
+    const uint32_t right = node < graph->count ? graph->operand1[node] : BUSTER_CHECK_NONE;
+    if (right < graph->count)
+    {
+        check_semantic_range(parser, pp, graph->tokens[right], true);
+    }
+}
+
 static const char* check_warning_text(Arena* arena, const char* format, ...) __attribute__((format(printf, 2, 3)));
 static const char* check_warning_text(Arena* arena, const char* format, ...)
 {
@@ -164,6 +194,13 @@ static String8 check_warning_strings_value(const Parser* parser, Preprocessor* p
 // the unit has unnamed tags, a `file:line:col` or typedef-name text by tag index. Both are built once before the
 // pass's events take their marks, so per-event release cannot invalidate them; `anonymous` stays empty where
 // the unit's tags are all named or the input keeps no declaration columns.
+typedef struct CheckWarningTagPlace
+{
+    uint32_t source;
+    bool member;
+    bool available;
+} CheckWarningTagPlace;
+
 typedef struct CheckWarningSpelling CheckWarningSpelling;
 struct CheckWarningSpelling
 {
@@ -171,6 +208,7 @@ struct CheckWarningSpelling
     uint32_t* lengths;
     uint32_t count;
     String8* anonymous;
+    CheckWarningTagPlace* tag_places;
     uint32_t anonymous_count;
     // The target address spaces a macro writes throughout the unit (check_driver_space_macros, #1447).
     uint32_t* space_macro_spaces;
@@ -199,22 +237,23 @@ static bool check_driver_typedef_qualified(const TypeTable* types, TypeId type)
     return type_unqualified(type) != type || type_unqualified(type_strip_aligned(types, type)) != type_strip_aligned(types, type);
 }
 
-static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
-                                        CheckWarningSpelling* spell, Arena* scratch)
+// A tag and any later naming typedef share this table. Record its first written place until a diagnostic
+// actually needs the file, line and column. Its name and either kind of anonymous tag need no preprocessing history.
+static bool check_driver_spelling_tags(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                       CheckWarningSpelling* spell, Arena* scratch)
 {
     bool valid = true;
-    if (input != NULL && input->declaration_kinds != NULL && input->declared_types != NULL)
+    if (spell->tag_places == NULL && input != NULL && input->declaration_kinds != NULL && input->declared_types != NULL)
     {
         const uint32_t tag_count = types->tags.count;
         const uint32_t named_words = tag_count / 64 + 1;
         uint64_t* named = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, named_words);
         String8* anonymous = named != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, tag_count) : NULL;
-        valid = anonymous != NULL;
-        if (anonymous != NULL)
+        CheckWarningTagPlace* places = anonymous != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningTagPlace, tag_count) : NULL;
+        valid = places != NULL;
+        if (valid)
         {
-            // The history is already ensured for the diagnostic the pass is about to publish; an expanded
-            // tag's location is the expansion's then, not the definition's (#992).
-            const bool history = pp_history_ensure(pp);
+            memset(places, 0, (uint64_t)tag_count * sizeof(*places));
             memset(named, 0, (uint64_t)named_words * sizeof(*named));
             memset(anonymous, 0, (uint64_t)tag_count * sizeof(*anonymous));
             const uint32_t count = input->token_count < parser->tokens.count ? input->token_count : parser->tokens.count;
@@ -261,20 +300,8 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
                                     }
                                 }
                             }
-                            else if (anonymous[tag].length == 0)
+                            else if (anonymous[tag].length == 0 && !places[tag].available)
                             {
-                                const uint32_t source = parse_source_index(&parser->tokens, i);
-                                const uint32_t origin = history ? pp_history_at(pp, source) : 0;
-                                const uint32_t location = source < pp->output.count ? pp_expansion_location(pp, source, origin) : 0;
-                                const char* file = NULL;
-                                uint32_t file_length = 0;
-                                const uint32_t line = pp_presumed(pp, location, &file, &file_length);
-                                const uint32_t range = pp_find_range(pp, location);
-                                uint32_t column = 1;
-                                if (range != BUSTER_PP_NONE)
-                                {
-                                    (void)pp_line_of(pp, range, location, &column);
-                                }
                                 // clang's anonymous member's record (a definition with no declarator in a record's
                                 // body) is "anonymous", any other "unnamed".
                                 const uint32_t body = check_input_skip_attributes(parser, i + 1, parser->tokens.count);
@@ -283,19 +310,53 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
                                                        parser->tokens.count;
                                 const bool member = after < parser->tokens.count && parser->tokens.kinds[after] == PARSE_KIND_SEMI && open_count != 0 &&
                                                     opens[open_count - 1];
-                                const char* text = check_warning_text(scratch, "(%s at %.*s:%u:%u)", member ? "anonymous" : "unnamed", (int)file_length, file, line, column);
-                                valid = text != NULL;
-                                if (valid)
-                                {
-                                    anonymous[tag] = (String8){ .pointer = (char*)text, .length = (uint64_t)strlen(text) };
-                                }
+                                places[tag] = (CheckWarningTagPlace){ .source = parse_source_index(&parser->tokens, i), .member = member, .available = true };
                             }
                         }
                     }
                 }
             }
-            spell->anonymous = anonymous;
-            spell->anonymous_count = tag_count;
+            if (valid)
+            {
+                spell->tag_places = places;
+                spell->anonymous = anonymous;
+                spell->anonymous_count = tag_count;
+            }
+        }
+    }
+    return valid;
+}
+
+// Only full diagnostic printing needs file, line and column. An enum-mix policy check can share the
+// typedef and unnamed-tag classification without asking the preprocessor to replay its history.
+static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                        CheckWarningSpelling* spell, Arena* scratch)
+{
+    bool valid = check_driver_spelling_tags(parser, pp, input, types, spell, scratch);
+    for (uint32_t tag = 0; valid && tag < spell->anonymous_count; tag += 1)
+    {
+        const CheckWarningTagPlace place = spell->tag_places[tag];
+        if (place.available && spell->anonymous[tag].length == 0)
+        {
+            const uint32_t source = place.source;
+            const uint32_t origin = pp_history_ensure(pp) ? pp_history_at(pp, source) : 0;
+            const uint32_t location = pp_expansion_location(pp, source, origin);
+            const char* file = NULL;
+            uint32_t file_length = 0;
+            const uint32_t line = pp_presumed(pp, location, &file, &file_length);
+            const uint32_t range = pp_find_range(pp, location);
+            uint32_t column = 1;
+            if (range != BUSTER_PP_NONE)
+            {
+                (void)pp_line_of(pp, range, location, &column);
+            }
+            const char* text = check_warning_text(scratch, "(%s at %.*s:%u:%u)", place.member ? "anonymous" : "unnamed",
+                                                  (int)file_length, file, line, column);
+            valid = text != NULL;
+            if (valid)
+            {
+                spell->anonymous[tag] = (String8){ .pointer = (char*)text, .length = (uint64_t)strlen(text) };
+            }
         }
     }
     return valid;
@@ -3042,9 +3103,12 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE || event->kind == CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE)
                     {
-                        // At its backslash inside the literal's token (#1447), with the macro argument it came from.
+                        // At its backslash inside the literal's token (#1447), with the macro argument it came from, the
+                        // backslash and its character highlighted (#2376, clang's MakeCharSourceRange).
                         pp->diagnostic_arguments = true;
+                        pp_diagnostic_range_offsets(pp, source, event->payload.data, 2);
                         pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data, boundary, "%s%s", message, suffix);
+                        pp_diagnostic_ranges_clear(pp);
                         pp->diagnostic_arguments = false;
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE ||
@@ -3105,7 +3169,9 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     }
                     else
                     {
+                        check_warning_event_ranges(parser, pp, input, event);
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnostic_ranges_clear(pp);
                     }
                     pp_diagnostic_suborder(pp, previous, event->suborder);
                     valid = !pp->diagnostic_collection_failed;

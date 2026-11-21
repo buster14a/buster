@@ -19,11 +19,13 @@
 // call, a stack release, a lifetime marker or an observable load), since no arm row writes. Then only the rows the
 // join's phis need, through represented operands, move to the head's end, before its branch. Each needed row must be
 // total: constants, copies, wrapping integer arithmetic, bitwise operations, integer comparisons, selects, integer and
-// pointer conversions, addresses, and shifts by an in-range constant. A plain load is speculated where the head made
-// a plain access (a load or a store) of the same address and at least its size after its last release (a call, a
-// stack restore or a lifetime marker), which could unmap or reuse the memory; nothing else proves an address. A row
-// no phi needs stays in its arm, which becomes an unreachable stub ending in `unreachable`, for SCCP/DCE/CFG cleanup to
-// remove; it must still be one that could have moved (or a reused one), so that dropping it drops no effect or fault.
+// pointer conversions, addresses, shifts by an in-range constant and floating negations; its values integers, pointers
+// or (#2842) F32 and F64, which raise no floating exception there (ir_if_convert_value_type). A plain load is
+// speculated where the head made a plain access (a load or a store) of the same address and at least its size after its
+// last release (a call, a stack restore or a lifetime marker), which could unmap or reuse the memory; nothing else
+// proves an address. A row no phi needs stays in its arm, which becomes an unreachable stub ending in `unreachable`,
+// for SCCP/DCE/CFG cleanup to remove; it must still be one that could have moved (or a reused one), so that dropping it
+// drops no effect or fault.
 // Each arm moves at most four non-constant rows (its blocks hold at most 32 in all); their cost and two per select is
 // at most eight. These are conservative policy bounds, not measured latencies; IR_CBR has no branch probability.
 //
@@ -221,6 +223,7 @@ static const uint8_t ir_if_convert_costs[BUSTER_IR_OP_TABLE] = {
     [IR_ASHR] = 1,
     [IR_NEG] = 1,
     [IR_NOT] = 1,
+    [IR_FNEG] = 1,
     [IR_ICMP] = 1,
     [IR_SELECT] = 2,
     [IR_TRUNC] = 1,
@@ -282,6 +285,16 @@ static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t cou
 static bool ir_if_convert_scalar_type(uint32_t type)
 {
     return (type >= IR_I1 && type <= IR_I64) || type == IR_PTR;
+}
+
+// A row's or a phi's type the pass takes: the scalar ones, and since #2842 the floating values Tier 1 selects without a
+// branch (TIER1_RULE_FLOAT_BLEND), F32 and F64. Of the total operations only a copy, a select, a bitcast and a negation
+// make one: none of them raises a floating exception (C's -x and IEC 60559's negate are quiet, the others move bits),
+// so a moved one sets no status flag C's code wouldn't have. The arithmetic, the comparisons and the conversions may,
+// and have no cost: they stay in their arms, which then refuse the region.
+static bool ir_if_convert_value_type(uint32_t type)
+{
+    return ir_if_convert_scalar_type(type) || type == IR_F32 || type == IR_F64;
 }
 
 // The last row of [first, end) whose class has one of `classes`' bits, or BUSTER_IR_NONE: the classes looked up 64
@@ -441,11 +454,11 @@ static uint32_t ir_if_convert_cost(const IrIfConvertWork* work, uint32_t i, uint
     const uint32_t op = f->op[i];
     const bool load = op == IR_LOAD && f->flags[i] == 0;
     uint32_t cost = op == IR_CONST ? 0 : load ? 1 : ir_if_convert_costs[op] != 0 ? ir_if_convert_costs[op] : BUSTER_IR_IF_CONVERT_UNSAFE;
-    bool safe = cost != BUSTER_IR_IF_CONVERT_UNSAFE && ir_if_convert_scalar_type(f->type[i]) && (f->flags[i] == 0 || load);
+    bool safe = cost != BUSTER_IR_IF_CONVERT_UNSAFE && ir_if_convert_value_type(f->type[i]) && (f->flags[i] == 0 || load);
     const uint32_t mask = ir_value_mask(f, i);
-    safe = safe && ((mask & 1) == 0 || ir_if_convert_scalar_type(f->type[f->a[i]]));
-    safe = safe && ((mask & 2) == 0 || ir_if_convert_scalar_type(f->type[f->b[i]]));
-    safe = safe && ((mask & 4) == 0 || ir_if_convert_scalar_type(f->type[f->c[i]]));
+    safe = safe && ((mask & 1) == 0 || ir_if_convert_value_type(f->type[f->a[i]]));
+    safe = safe && ((mask & 2) == 0 || ir_if_convert_value_type(f->type[f->b[i]]));
+    safe = safe && ((mask & 4) == 0 || ir_if_convert_value_type(f->type[f->c[i]]));
     if (safe && (op == IR_SHL || op == IR_LSHR || op == IR_ASHR))
     {
         const uint32_t count = work->alias[f->b[i]];
@@ -764,7 +777,7 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
     for (uint32_t i = join_first; safe && i < f->block_offsets[(uint64_t)join + 1] && f->op[i] == IR_PHI; i += 1)
     {
         phis += 1;
-        safe = phis <= BUSTER_IR_IF_CONVERT_PHI_LIMIT && f->b[i] == predecessors && ir_if_convert_scalar_type(f->type[i]);
+        safe = phis <= BUSTER_IR_IF_CONVERT_PHI_LIMIT && f->b[i] == predecessors && ir_if_convert_value_type(f->type[i]);
     }
     safe = safe && phis != 0;
     const bool recurrence = safe && ir_if_convert_recurrence(f, f->a[branch], join_first, phis);

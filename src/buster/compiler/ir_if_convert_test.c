@@ -48,7 +48,7 @@ static bool ir_if_convert_test_fixture(Arena* arena, IrFunction* f, uint32_t typ
             const uint32_t rows = arm == 0 ? yes_rows : no_rows;
             for (uint32_t row = 0; row < rows; row += 1)
             {
-                const uint32_t op = type == IR_PTR || type == IR_F64 ? IR_COPY : arm == 0 ? IR_ADD : IR_SUB;
+                const uint32_t op = type == IR_PTR || type == IR_F32 || type == IR_F64 ? IR_COPY : arm == 0 ? IR_ADD : IR_SUB;
                 ir_optimize_test_instruction(f, next, op, type, arm_value[arm], op == IR_COPY ? BUSTER_IR_NONE : 3, BUSTER_IR_NONE);
                 arm_value[arm] = next++;
             }
@@ -785,6 +785,138 @@ static void ir_if_convert_test_and(IrOptimizeTest* test, Arena* input, Arena* ou
     arena_pop_to(input, im);
 }
 
+// A floating arm's load (#2842): `r = *(u64*)p > 3 ? *(T*)(p + offset) : x`, a triangle whose head loads p's first eight
+// bytes as an integer and compares them, and whose arm loads a T, F64 or F32. Variant 0 loads p's first F64, which the
+// head's eight bytes prove dereferenceable, so it is speculated; 1 loads p + 8, which nothing proves; 2 is 0 with the
+// arm's load volatile; 3 loads p's first F32, inside the proven bytes.
+static bool ir_if_convert_test_floating_load(Arena* arena, IrFunction* f, uint32_t variant)
+{
+    const uint8_t type = variant == 3 ? IR_F32 : IR_F64;
+    const IrSizes sizes = {
+        .instruction_count = 12,
+        .block_count = 3,
+        .extra_count = 4,
+        .constant_count = 1,
+        .address_count = 2,
+        .parameter_count = 2,
+    };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->parameter_types[0] = IR_PTR;
+        f->parameter_types[1] = type;
+        f->result_type = type;
+        f->constants[0].low = 3;
+        f->addresses[0] = (IrAddress){
+            .offset = 0,
+            .scale = 1,
+        };
+        f->addresses[1] = (IrAddress){
+            .offset = variant == 1 ? 8 : 0,
+            .scale = 1,
+        };
+        const uint32_t offsets[] = { 0, 7, 10, 12 };
+        memcpy(f->block_offsets, offsets, sizeof(offsets));
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 1, IR_PARAM, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 3, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 0);
+        ir_optimize_test_instruction(f, 4, IR_LOAD, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 5, IR_ICMP, IR_I1, 4, 2, IR_UGT);
+        ir_optimize_test_instruction(f, 6, IR_CBR, IR_VOID, 5, 1, 2);
+        ir_optimize_test_instruction(f, 7, IR_ADDRESS, IR_PTR, 0, BUSTER_IR_NONE, 1);
+        ir_optimize_test_instruction(f, 8, IR_LOAD, type, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        f->flags[8] = variant == 2 ? BUSTER_IR_VOLATILE : 0;
+        ir_optimize_test_instruction(f, 9, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 10, IR_PHI, type, 0, 2, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t extra[] = { 0, 1, 1, 8 };
+        memcpy(f->extra, extra, sizeof(extra));
+    }
+    return created;
+}
+
+// #2842's floating arms, at F32 and F64 and each shape: phis of an F32's copies (the F64's are the scalar types' loop's)
+// and a negation move (C's -x raises no exception), and an addition, a subtraction, a multiplication, a division and a
+// dead comparison keep the region a branch, since each may raise one; a load moves where the head's access proves its
+// address, and not past it or where it is volatile.
+static void ir_if_convert_test_floating(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* optimized, Arena* scratch)
+{
+    static const uint8_t operations[] = { IR_FNEG, IR_FADD, IR_FSUB, IR_FMUL, IR_FDIV, IR_FCMP };
+    // The fixtures draw their trials' parameters from a stream of their own: the later tests' draws stay as they were,
+    // and with them the digests they fold (value numbering with memory's).
+    const uint64_t random = test->random;
+    test->random = UINT64_C(0x2842284228422842);
+    for (uint32_t shape = 0; shape < 3; shape += 1)
+    {
+        IrFunction f = { 0 };
+        const bool created = ir_if_convert_test_fixture(input, &f, IR_F32, shape, 2, 1, 1);
+        ir_optimize_test_expect(test, created, "if-conversion F32 type and triangle fixture allocation");
+        if (created)
+        {
+            ir_if_convert_test_compare(test, &f, vector, optimized, scratch, 1, 2);
+        }
+        arena_pop_to(input, 0);
+    }
+    for (uint32_t type = IR_F32; type <= IR_F64; type += 1)
+    {
+        for (uint32_t shape = 0; shape < 3; shape += 1)
+        {
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operations); k += 1)
+            {
+                const uint32_t op = operations[k];
+                IrFunction f = { 0 };
+                // The comparison's arm has two rows: the dead comparison, then the copy its phi takes.
+                const bool created = ir_if_convert_test_fixture(input, &f, type, shape, 1, op == IR_FCMP ? 2 : 1, 1);
+                ir_optimize_test_expect(test, created, "if-conversion floating arm fixture allocation");
+                if (created && op == IR_FNEG)
+                {
+                    ir_optimize_test_instruction(&f, 5, IR_FNEG, (uint8_t)type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_if_convert_test_compare(test, &f, vector, optimized, scratch, 1, 1);
+                }
+                else if (created)
+                {
+                    if (op == IR_FCMP)
+                    {
+                        ir_optimize_test_instruction(&f, 5, IR_FCMP, IR_I1, 1, 3, IR_LT);
+                        f.a[6] = 1;
+                    }
+                    else
+                    {
+                        ir_optimize_test_instruction(&f, 5, (uint8_t)op, (uint8_t)type, 1, 3, BUSTER_IR_NONE);
+                    }
+                    const uint64_t vm = vector->length;
+                    IrIfConvertResult result = { 0 };
+                    const bool verified = ir_verify_complete(&f, scratch).error == IR_OK;
+                    const IrCheck check = ir_if_convert(&f, vector, scratch, &result);
+                    ir_optimize_test_expect(test, verified && check.error == IR_OK && result.regions == 0 && result.function.op == f.op && vector->length == vm,
+                                            "if-conversion keeps the branch of a floating arm that may raise an exception");
+                    ir_optimize_test_fold(&test->if_convert_digest, result.regions);
+                    arena_pop_to(vector, vm);
+                }
+                arena_pop_to(input, 0);
+            }
+        }
+    }
+    for (uint32_t variant = 0; variant < 4; variant += 1)
+    {
+        IrFunction f = { 0 };
+        const bool created = ir_if_convert_test_floating_load(input, &f, variant);
+        ir_optimize_test_expect(test, created, "if-conversion floating load fixture allocation");
+        if (created)
+        {
+            const uint32_t expected = variant == 0 || variant == 3 ? 1 : 0;
+            ir_if_convert_test_compare(test, &f, vector, optimized, scratch, expected, expected);
+            IrIfConvertResult v = { 0 };
+            const IrCheck vc = ir_if_convert(&f, vector, scratch, &v);
+            ir_optimize_test_expect(test, vc.error == IR_OK && v.loads == expected, "if-conversion speculates a floating arm's load only behind the head's proof");
+            arena_pop_to(vector, 0);
+        }
+        arena_pop_to(input, 0);
+    }
+    test->random = random;
+}
+
 static void ir_if_convert_tests(IrOptimizeTest* test)
 {
     ir_if_convert_test_scans(test);
@@ -826,6 +958,7 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
             arena_pop_to(&vector, 0);
             arena_pop_to(&input, 0);
         }
+        // A floating value's phi of copies converts too (#2842), as Tier 1 selects it without a branch.
         const uint8_t types[] = { IR_I1, IR_I8, IR_I16, IR_I32, IR_I64, IR_PTR, IR_F64 };
         for (uint32_t type = 0; type < sizeof(types); type += 1)
         {
@@ -836,11 +969,12 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                 ir_optimize_test_expect(test, created, "if-conversion scalar type and triangle fixture allocation");
                 if (created)
                 {
-                    ir_if_convert_test_compare(test, &f, &vector, &optimized, &scratch, types[type] == IR_F64 ? 0 : 1, types[type] == IR_F64 ? 0 : 2);
+                    ir_if_convert_test_compare(test, &f, &vector, &optimized, &scratch, 1, 2);
                 }
                 arena_pop_to(&input, 0);
             }
         }
+        ir_if_convert_test_floating(test, &input, &vector, &optimized, &scratch);
         for (uint32_t kind = 0; kind < 19; kind += 1)
         {
             IrFunction f = { 0 };

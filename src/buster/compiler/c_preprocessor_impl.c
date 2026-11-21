@@ -7,6 +7,7 @@
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
+static void pp_diagnostic_resolve_ranges(Preprocessor* pp, bool resolve);
 static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const PPDiagnosticSourceNote* placed_notes, uint32_t placed_note_count, const char* format, va_list arguments);
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
@@ -136,7 +137,12 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         }
         else
         {
+            pp_diagnostic_resolve_ranges(pp, false);
+            pp->render_ranges = pp->diagnostic_ranges;
+            pp->render_range_count = pp->diagnostic_range_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
+            pp->render_ranges = NULL;
+            pp->render_range_count = 0;
         }
         va_end(arguments);
     }
@@ -9492,6 +9498,30 @@ static bool pp_alphanumeric(uint8_t c)
 }
 
 // The file a #include, #include_next or #import (`kind`) at `location` in the context's file names, written at
+// A header name's highlighted range (#2376), clang's FilenameRange: the name written at `location` as it was, from its
+// '"' or '<' to its closing one on the same line, as characters; none for a name a macro made (`origin`).
+static void pp_diagnostic_header_range(Preprocessor* pp, uint32_t location, uint32_t origin)
+{
+    const uint32_t range = location != 0 && origin == 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
+    {
+        const uint8_t* bytes = pp->ranges[range].bytes;
+        const uint32_t length = pp->ranges[range].length;
+        const uint32_t start = location - pp->ranges[range].base;
+        const uint8_t opener = start < length ? bytes[start] : 0;
+        const uint8_t closer = opener == '"' ? '"' : opener == '<' ? '>' : 0;
+        uint32_t end = start + 1;
+        while (closer != 0 && end < length && bytes[end] != closer && bytes[end] != '\n' && bytes[end] != '\r')
+        {
+            end += 1;
+        }
+        if (closer != 0 && end < length && bytes[end] == closer)
+        {
+            pp_diagnostic_range_characters(pp, location, end + 1 - start);
+        }
+    }
+}
+
 // `name_location` (with `name_origin`, the history of a name a macro made): entered, unless #import read it. As
 // clang's HandleHeaderIncludeOrImport goes: an empty name is an error; a name that ends in a space or a dot is
 // nonportable; an #include in an assume_nonnull or arc_cf_code_audited region is an error, which ends the region. A
@@ -9534,7 +9564,9 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
             file = pp_find_include(pp, name, length, false, next, context->file, context->search_index, &found_in, name_location);
             if (file != BUSTER_PP_NONE)
             {
+                pp_diagnostic_header_range(pp, name_location, name_origin);
                 pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'%.*s' file not found with <angled> include; use \"quotes\" instead", (int)length, (const char*)name);
+                pp_diagnostic_ranges_clear(pp);
             }
         }
         uint32_t first = 0;
@@ -9558,7 +9590,9 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
         }
         if (file == BUSTER_PP_NONE && !pp->fatal)
         {
+            pp_diagnostic_header_range(pp, name_location, name_origin);
             pp_diagnose(pp, PP_SEVERITY_FATAL, name_location, "'%.*s' file not found", (int)length, (const char*)name);
+            pp_diagnostic_ranges_clear(pp);
         }
     }
     pp->diagnostic_origin = saved_origin;

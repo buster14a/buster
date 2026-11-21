@@ -55,6 +55,11 @@
 // and of every bit, locked or not, 4 or 8 bytes wide) is certified, and one that changes it (an or of 1, an and of
 // 0x7fffffff, an adc of 0, which adds the carry, a mov of 0, an or of a register) is refused, the restore reading bytes
 // the barrier wrote.
+//
+// A frame address recomputed at its base itself (#3149), rsp or, under a frame pointer, rbp: the base's register copy,
+// `mov rbx, base`, is its recipe's copy and is certified, the checker finding the value in rbx; the same record for a
+// recipe 16 bytes from the base, a lea at the base, a lea at the other displacement and the other register's copy are
+// refused (tier1_code_certificate_frame_copy).
 
 typedef struct Tier1CodeCertificateCounts Tier1CodeCertificateCounts;
 struct Tier1CodeCertificateCounts
@@ -1771,33 +1776,38 @@ static bool tier1_code_certificate_aggregate_copy_checked(Tier1EmitTest* test, c
 // #1816: a rematerialized aggregate address uses r11, so its bytes go through RAX. Controlled allocation columns
 // cover a dead RAX, a live one, a live value still owed from a call-save row, and a stale owner whose current interval
 // expired, spilled or moved to another register. The real emitter and decoder run, then the independent certificate
-// checks their records and preservation mutants.
+// checks their records and preservation mutants. Each state twice: the address 16 bytes from rsp, recomputed by a lea,
+// and 0 bytes from it, recomputed by rsp's register copy into r11 (#3149).
 static void tier1_code_certificate_aggregate_copy(Tier1EmitTest* test)
 {
     uint32_t certified = 0;
     uint32_t refused = 0;
-    for (uint32_t state = 0; state < 6; state += 1)
+    uint32_t copies = 0;
+    // The address at 16 from rsp, recomputed by a lea, and at 0, by rsp's register copy (#3149).
+    for (uint32_t state = 0; state < 12; state += 1)
     {
-        const bool live = state == 1 || state == 2;
-        const bool owed = state == 2;
+        const uint64_t displacement = state < 6 ? 16 : 0;
+        const uint32_t rax_state = state % 6;
+        const bool live = rax_state == 1 || rax_state == 2;
+        const bool owed = rax_state == 2;
         uint32_t node_values[3] = { 0, 1, BUSTER_TIER1_CFG_NONE };
         uint32_t value_nodes[2] = { 0, 1 };
         uint32_t sizes[3] = { 8, 8, 0 };
         uint32_t value_offsets[3] = { 0, 1, 2 };
         uint32_t starts[2] = { 0, 0 };
-        uint32_t ends[2] = { 8, state == 3 ? 4 : 8 };
+        uint32_t ends[2] = { 8, rax_state == 3 ? 4 : 8 };
         uint32_t fragment_offsets[3] = { 0, 1, 2 };
         uint32_t spill_ids[2] = { BUSTER_TIER1_CFG_NONE, 0 };
         uint8_t classes[2] = { BUSTER_TIER1_ALLOCATE_GPR, BUSTER_TIER1_ALLOCATE_GPR };
         uint8_t rematerializable[2] = { 1, 0 };
-        uint8_t kinds[2] = { BUSTER_TIER1_ALLOCATE_REMATERIALIZE, state == 4 ? BUSTER_TIER1_ALLOCATE_SPILL : BUSTER_TIER1_ALLOCATE_REGISTER };
-        uint8_t registers[2] = { UINT8_MAX, state == 5 ? X86_REGISTER_RCX : X86_REGISTER_RAX };
+        uint8_t kinds[2] = { BUSTER_TIER1_ALLOCATE_REMATERIALIZE, rax_state == 4 ? BUSTER_TIER1_ALLOCATE_SPILL : BUSTER_TIER1_ALLOCATE_REGISTER };
+        uint8_t registers[2] = { UINT8_MAX, rax_state == 5 ? X86_REGISTER_RCX : X86_REGISTER_RAX };
         uint8_t hinted_registers[2] = { UINT8_MAX, X86_REGISTER_RAX };
         const Tier1RematerializationInput recipes = {
             .operations = (const uint8_t[]){ BUSTER_TIER1_REMAT_STACK, BUSTER_TIER1_REMAT_NONE, BUSTER_TIER1_REMAT_NONE },
             .widths = (const uint8_t[]){ 8, 8, 0 },
             .flags = (const uint8_t[]){ BUSTER_TIER1_REMAT_STABLE, 0, 0 },
-            .values = (const uint64_t[]){ 16, 0, 0 },
+            .values = (const uint64_t[]){ displacement, 0, 0 },
             .count = 3,
         };
         Tier1EmitResult emitted = {
@@ -1817,13 +1827,19 @@ static void tier1_code_certificate_aggregate_copy(Tier1EmitTest* test)
         {
             transitions.owners[r] = BUSTER_IR_NONE;
         }
-        transitions.owners[X86_REGISTER_RAX] = state == 0 ? BUSTER_IR_NONE : 1;
+        transitions.owners[X86_REGISTER_RAX] = rax_state == 0 ? BUSTER_IR_NONE : 1;
         X86Instruction records[8] = { 0 };
         Tier1EmitBuffer buffer = { .records = records, .capacity = BUSTER_ARRAY_LENGTH(records) };
         const Tier1EmitError error = tier1_emit_cfg_aggregate_copy(&emitted, &transitions, owed ? 1u << X86_REGISTER_RAX : 0, 0, 4, X86_REGISTER_RSP, 0, 0, 8, &buffer);
         const uint32_t copied = buffer.count;
-        const bool kept = state == 1;
+        const bool kept = rax_state == 1;
         tier1_emit_test_expect(test, error == TIER1_EMIT_OK && copied == (kept ? 5u : 3u), "aggregate copies preserve only a live RAX that is physically present");
+        // The recomputed address's record: rsp's register copy into the scratch register at 0, a lea at 16.
+        for (uint32_t r = 0; error == TIER1_EMIT_OK && r < copied; r += 1)
+        {
+            const bool copy = records[r].form == X86_FORM_MOV_R64_RM64 && records[r].mode == BUSTER_X86_REGISTER_DIRECT && records[r].reg == BUSTER_TIER1_SELECT_SCRATCH && records[r].rm == X86_REGISTER_RSP;
+            copies += copy && displacement == 0 ? 1 : copy ? 100 : 0;
+        }
         if (error == TIER1_EMIT_OK && owed)
         {
             tier1_emit_append(&buffer, (X86Instruction){ .displacement = 32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 });
@@ -1873,7 +1889,204 @@ static void tier1_code_certificate_aggregate_copy(Tier1EmitTest* test)
             refused += rejected;
         }
     }
-    tier1_emit_test_expect(test, certified == 6 && refused == 7, "aggregate preservation covers all six RAX states and all seven mutants");
+    tier1_emit_test_expect(test, certified == 12 && refused == 14, "aggregate preservation covers all six RAX states and all seven mutants, its address at 16 and at 0 from rsp");
+    tier1_emit_test_expect(test, copies == 6, "the address at 0 is recomputed by rsp's register copy in each RAX state, and at 16 by none");
+}
+
+// #3149: a recomputed frame address's record `record`, alone, decoded as the CFG consumer's move of node 0 (its value
+// 0's recipe a frame address `displacement` bytes from the frame's base register `base`, rsp or, under a frame pointer,
+// rbp; rematerializable or not) and checked by the independent certificate, which must find value 0 in rbx after it.
+// Whether it is certified.
+static bool tier1_code_certificate_frame_copy_checked(Tier1EmitTest* test, uint8_t base, uint64_t displacement, bool recomputed, X86Instruction record)
+{
+    const bool pointer = base == X86_REGISTER_RBP;
+    uint32_t node_values[2] = {
+        0,
+        BUSTER_TIER1_CFG_NONE,
+    };
+    uint32_t value_nodes[1] = { 0 };
+    uint32_t sizes[2] = {
+        8,
+        0,
+    };
+    uint8_t classes[1] = { BUSTER_TIER1_ALLOCATE_GPR };
+    uint8_t rematerializable[1] = { recomputed ? 1 : 0 };
+    X86Instruction records[1] = { record };
+    const Tier1RematerializationInput recipes = {
+        .operations = (const uint8_t[]){ BUSTER_TIER1_REMAT_STACK },
+        .widths = (const uint8_t[]){ 8 },
+        .flags = (const uint8_t[]){ BUSTER_TIER1_REMAT_STABLE },
+        .values = &displacement,
+        .count = 1,
+    };
+    Tier1EmitResult emitted = {
+        .prepared = {
+            .recipes = recipes,
+            .sizes = sizes,
+        },
+        .frame = {
+            .base_register = base,
+            .frame_pointer = pointer,
+        },
+        .cfg_input = {
+            .classes = classes,
+            .rematerializable = rematerializable,
+            .value_count = 1,
+        },
+        .node_values = node_values,
+        .value_nodes = value_nodes,
+    };
+    emitted.code.records = records;
+    emitted.code.count = 1;
+    const IrFunction function = { .instruction_count = 1 };
+    const Tier1SelectPlan plan = { .function = &function };
+    Tier1CertLocation locations[64] = { 0 };
+    Tier1CertSource source[4] = { 0 };
+    Tier1CertInstruction code[4] = { 0 };
+    uint32_t references[1] = { UINT32_MAX };
+    Tier1CertEmittedStats stats = { 0 };
+    Tier1CertEmittedBuild build = {
+        .plan = &plan,
+        .emitted = &emitted,
+        .stats = &stats,
+        .locations = locations,
+        .location_count = 32,
+        .location_capacity = BUSTER_ARRAY_LENGTH(locations),
+        .low = -128,
+        .high = 64,
+        .base = base,
+        .source = source,
+        .source_capacity = BUSTER_ARRAY_LENGTH(source),
+        .code = code,
+        .code_capacity = BUSTER_ARRAY_LENGTH(code),
+        .references = references,
+        .frame_pointer = pointer ? -8 : INT64_MIN,
+        .frame_unit = 128,
+    };
+    for (uint32_t r = 0; r < 32; r += 1)
+    {
+        locations[r] = (Tier1CertLocation){
+            .unit = 8 * (r / 2),
+            .width = r % 2 == 0 ? 8 : 4,
+            .extent = 8,
+            .class = TIER1_CERT_GPR,
+            .reg = (uint8_t)(r / 2),
+        };
+    }
+    bool valid = tier1_cert_emitted_append_move(&build, 0, 0, BUSTER_CERT_NONE);
+    const Tier1CertFact exit = {
+        .value = 0,
+        .location = tier1_cert_emitted_gpr(X86_REGISTER_RBX, 8),
+    };
+    const Tier1CertValue values[1] = {
+        {
+            .width = 8,
+            .class = TIER1_CERT_GPR,
+            .recipe = recomputed ? TIER1_CERT_INTEGER_RECIPE : TIER1_CERT_NO_RECIPE,
+        },
+    };
+    const Tier1CertBlock block = {
+        .source = source,
+        .code = code,
+        .source_count = build.source_count,
+        .code_count = build.code_count,
+    };
+    const Tier1CertProgram program = {
+        .locations = locations,
+        .values = values,
+        .blocks = &block,
+        .exit = &exit,
+        .unit_count = 320,
+        .location_count = build.location_count,
+        .value_count = BUSTER_ARRAY_LENGTH(values),
+        .block_count = 1,
+        .exit_count = 1,
+        .flags_location = BUSTER_CERT_NONE,
+    };
+    const uint64_t saved = test->scratch.length;
+    const size_t bytes = valid ? tier1_certificate_scratch_size(&program) : 0;
+    void* scratch = bytes != 0 ? arena_push(&test->scratch, bytes, 64) : NULL;
+    Tier1CertReport report = { 0 };
+    valid = valid && scratch != NULL && tier1_certificate_check(&program, scratch, bytes, &report) == TIER1_CERT_OK;
+    arena_pop_to(&test->scratch, saved);
+    return valid;
+}
+
+// #3149: a frame address recomputed into rbx, its recipe 0 or 16 bytes from the frame's base register: rsp, or rbp
+// under a frame pointer. The emitter's copy (tier1_rematerialize: the base's register copy `mov rbx, base` at 0, `lea
+// rbx, [base + 16]` at 16) is certified; the base's register copy for the recipe at 16 (a move of the base, which holds
+// no value), a lea at 0 (no recipe's record now), a lea at the other displacement and the other register's copy (`mov
+// rbx, rbp` where rsp is the base, `mov rbx, rsp` where rbp is) are refused, and so is each record for a value without
+// a recipe.
+static void tier1_code_certificate_frame_copy(Tier1EmitTest* test)
+{
+    uint32_t certified = 0;
+    uint32_t refused = 0;
+    uint32_t bare = 0;
+    for (uint32_t b = 0; b < 2; b += 1)
+    {
+        const uint8_t base = b == 0 ? X86_REGISTER_RSP : X86_REGISTER_RBP;
+        const uint8_t other = b == 0 ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+        const X86Instruction move = {
+            .reg = X86_REGISTER_RBX,
+            .rm = base,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOV_R64_RM64,
+        };
+        const X86Instruction near = {
+            .reg = X86_REGISTER_RBX,
+            .rm = base,
+            .mode = BUSTER_X86_MEMORY_BASE,
+            .form = X86_FORM_LEA_R64_M,
+        };
+        const X86Instruction far = {
+            .displacement = 16,
+            .reg = X86_REGISTER_RBX,
+            .rm = base,
+            .mode = BUSTER_X86_MEMORY_BASE,
+            .form = X86_FORM_LEA_R64_M,
+        };
+        const X86Instruction crossed = {
+            .reg = X86_REGISTER_RBX,
+            .rm = other,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOV_R64_RM64,
+        };
+        const X86Instruction records[4] = {
+            move,
+            near,
+            far,
+            crossed,
+        };
+        for (uint32_t d = 0; d < 2; d += 1)
+        {
+            const uint64_t displacement = d == 0 ? 0 : 16;
+            const uint8_t operation = BUSTER_TIER1_REMAT_STACK;
+            const uint8_t width = 8;
+            const uint8_t stable = BUSTER_TIER1_REMAT_STABLE;
+            const Tier1RematerializationInput input = {
+                .operations = &operation,
+                .widths = &width,
+                .flags = &stable,
+                .values = &displacement,
+                .count = 1,
+            };
+            Tier1Rematerialized copy = { 0 };
+            const bool made = tier1_rematerialize(&input, 0, X86_REGISTER_RBX, base, 0, &copy);
+            tier1_emit_test_expect(test, made && memcmp(&copy.instruction, &records[d == 0 ? 0 : 2], sizeof(X86Instruction)) == 0, "a frame address at 0 from its base is the base's register copy, at 16 a lea");
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(records); k += 1)
+            {
+                const bool expected = k == (d == 0 ? 0u : 2u);
+                const bool checked = tier1_code_certificate_frame_copy_checked(test, base, displacement, true, records[k]);
+                tier1_emit_test_expect(test, checked == expected, expected ? "a frame address's recomputation is certified" : "a frame address's other record is refused");
+                certified += checked && expected;
+                refused += !checked && !expected;
+                bare += !tier1_code_certificate_frame_copy_checked(test, base, displacement, false, records[k]);
+            }
+        }
+    }
+    tier1_emit_test_expect(test, certified == 4 && refused == 12 && bare == 16, "each recipe's own copy alone is certified, from rsp and from rbp, and no record of a value without a recipe");
+    printf("tier1 code certificate: frame addresses recomputed from rsp and rbp, %u of 4 copies certified, %u of 12 other records and %u of 16 without a recipe refused\n", certified, refused, bare);
 }
 
 // #2820's destination: a call whose aggregate result goes through the hidden pointer to a pointer value, no frame
@@ -2152,6 +2365,7 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
     tier1_code_certificate_aggregate_copy(test);
+    tier1_code_certificate_frame_copy(test);
     for (uint32_t variant = 0; variant < 8; variant += 1)
     {
         tier1_code_certificate_carry(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0);

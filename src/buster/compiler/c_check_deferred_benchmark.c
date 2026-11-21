@@ -220,7 +220,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     PPOptions pp_options;
     const char* input = 0;
     CheckRequestRefusal refusal = { .error = CHECK_REQUEST_ACCEPTED };
-    bool valid = check_request_parse(&pp_options, &refusal, &input, file, options, option_count, false, &option_arena);
+    bool valid = check_request_parse(&pp_options, &refusal, &input, file, options, option_count, CHECK_REQUEST_CODE_NONE, &option_arena);
     if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");

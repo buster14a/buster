@@ -1203,6 +1203,27 @@ static void check_common_shift_report(Preprocessor* pp, CheckCommonShiftWarning*
     }
 }
 
+// Whether a warning is stashed at this operator (check_common_shift_replay's search alone).
+static bool check_common_shift_stashed(const CheckCommonShiftWarnings* shifts, uint32_t token)
+{
+    uint32_t first = 0;
+    uint32_t last = shifts != NULL ? shifts->count : 0;
+    const uint32_t count = last;
+    while (first < last)
+    {
+        const uint32_t middle = first + (last - first) / 2;
+        const bool before = shifts->records[middle].token < token;
+        first = before ? middle + 1 : first;
+        last = before ? last : middle;
+    }
+    bool result = false;
+    for (uint32_t i = first; i < count && shifts->records[i].token == token; i += 1)
+    {
+        result |= shifts->records[i].message != NULL;
+    }
+    return result;
+}
+
 // The stashed warnings at this operator, reported where the arithmetic walk places them among its new runtime
 // diagnostics: whether it has any.
 static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings* shifts, uint32_t token)
@@ -2026,7 +2047,13 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
     const bool emitted = (emission->emitted[node] & BUSTER_CHECK_EMITTED_SHIFT_COUNT) != 0;
     const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
+    // A stashed warning's count highlighted (#2376), as a new one's below.
+    if (!emitted && right < graph->count && check_common_shift_stashed(emission->shifts, token))
+    {
+        check_semantic_range(emission->parser, emission->pp, graph->tokens[right], true);
+    }
     const bool replayed = !emitted && check_common_shift_replay(emission->pp, emission->shifts, token);
+    pp_diagnostic_ranges_clear(emission->pp);
     if (replayed)
     {
         emission->emitted[node] |= BUSTER_CHECK_EMITTED_SHIFT_COUNT;
@@ -2045,12 +2072,15 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
         if (warning != 0)
         {
             const bool negative = warning == CHECK_WARNING_SHIFT_COUNT_NEGATIVE;
+            // The count highlighted (#2376), clang's RHS.get()->getSourceRange().
+            check_semantic_range(emission->parser, emission->pp, graph->tokens[right], true);
             check_common_report_deferred(emission->parser, emission->pp, emission->input, token,
                                          negative ? CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE : CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW,
                                          false, negative ? "shift count is negative" : "shift count >= width of type",
                                          NULL, 0, emission->scratch);
             // Queued as the shift is built (#2252).
             check_common_queue(emission->parser, emission->pp, previous, graph, NULL, node, false);
+            pp_diagnostic_ranges_clear(emission->pp);
             // An ineligible ordinary visit (notably a dropped arm) cannot suppress a later detached visit.
             emission->emitted[node] |= BUSTER_CHECK_EMITTED_SHIFT_COUNT;
         }
@@ -2246,10 +2276,13 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
                 const uint32_t boundary = check_common_function_boundary(parser, token);
                 const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, emission->input, token) : BUSTER_CHECK_NONE;
                 const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
+                // The divisor highlighted (#2376), clang's RHS.get()->getSourceRange().
+                check_semantic_range(parser, emission->pp, graph->tokens[graph->operand1[node]], true);
                 check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
                                               declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_DIVISION_BY_ZERO,
                                               false, op == CHECK_OP_DIVIDE || op == CHECK_OP_DIVIDE_ASSIGN ? "division by zero is undefined" : "remainder by zero is undefined",
                                               NULL, 0, emission->scratch);
+                pp_diagnostic_ranges_clear(emission->pp);
                 if (declarator != BUSTER_CHECK_NONE && node < emission->input->graph.count && emission->input->graph.source_positions != NULL)
                 {
                     pp_diagnostic_suborder(emission->pp, previous, (uint64_t)emission->input->graph.source_positions[node] + 1);
@@ -5190,8 +5223,11 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
             };
             // Clang checks the condition once it is whole (CheckBooleanCondition): after the diagnostics its operands gave as
             // they were built, a call's format or a statement expression's own (#1941), so published at its `)` or `;`.
+            // The assignment highlighted (#2376), clang's E->getSourceRange() in DiagnoseAssignmentAsCondition.
+            check_semantic_range(parser, pp, token, true);
             check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES, false,
                                    "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
+            pp_diagnostic_ranges_clear(pp);
         }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
         {
@@ -5496,6 +5532,17 @@ static uint32_t check_common_enum_question(const Parser* parser, uint32_t colon,
     return question;
 }
 
+// A bare enum the canonical printer will call "(unnamed ...)" or "(unnamed)". A tag with a name or
+// an unqualified naming typedef is never one. The location text of an anonymous member and any non-enum
+// outer type retain the printer's complete classification.
+static bool check_common_unnamed_enum(const TypeTable* types, const CheckWarningSpelling* spell, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    const uint32_t tag = types->types.index[index];
+    return types->types.kind[index] == BUSTER_TYPE_KIND_ENUM && tag < spell->anonymous_count && types->tags.name[tag] == 0 &&
+           spell->anonymous[tag].length == 0 && (!spell->tag_places[tag].available || !spell->tag_places[tag].member);
+}
+
 // One operator's enumeration mix (clang's checkEnumArithmeticConversions), reported at `question` (a conditional's `?`):
 // `kind` its message's (0 arithmetic, 1 bitwise, 2 comparison, 3 conditional, 4 compound assignment), `omitted` a GNU
 // `a ?: b`'s, whose omitted middle operand is its condition promoted (clang's UsualUnaryConversions): an enumeration's is
@@ -5522,6 +5569,25 @@ static void check_common_enum_mix(const Parser* parser, Preprocessor* pp, const 
                        type_unqualified(type_strip_aligned(types, left_type)) != type_unqualified(type_strip_aligned(types, right_type));
     if (floating || mixed)
     {
+        if (pp->fatal || question >= parser->tokens.count)
+        {
+            return;
+        }
+        const uint32_t named_id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL :
+                                  kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE : CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+        const bool named_ignored = check_common_severity(pp, parser, input, question, named_id, named_id != CHECK_WARNING_ID_ENUM_COMPARE) == CHECK_WARNING_IGNORE;
+        const bool unnamed_ignored = !mixed || check_common_severity(pp, parser, input, question, CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION, true) == CHECK_WARNING_IGNORE;
+        if (named_ignored && unnamed_ignored)
+        {
+            return;
+        }
+        // A comparison can be enabled for named enums and ignored for an unnamed operand. Its group can then
+        // be decided from the declarators without building names or replaying preprocessing for source locations.
+        if (mixed && unnamed_ignored && !spell->built && check_driver_spelling_tags(parser, pp, input, types, spell, scratch) &&
+            (check_common_unnamed_enum(types, spell, left_type) || check_common_unnamed_enum(types, spell, right_type)))
+        {
+            return;
+        }
         const TypeId left_alias = left_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[left_spelling] : 0;
         const TypeId right_alias = right_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[right_spelling] : 0;
         left_spelling = rvalue_left && left_alias != 0 && type_qualifiers(left_alias) != 0 ? 0 : left_spelling;
@@ -5532,9 +5598,7 @@ static void check_common_enum_mix(const Parser* parser, Preprocessor* pp, const 
         const String8 right_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, 0) : (String8){ 0 };
         const bool anonymous = mixed && (memmem(left_plain.pointer, left_plain.length, "(unnamed", 8) != NULL ||
                                          memmem(right_plain.pointer, right_plain.length, "(unnamed", 8) != NULL);
-        const uint32_t id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION :
-                            kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL : kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE :
-                            CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+        const uint32_t id = anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION : named_id;
         const char* message = floating ?
             check_warning_text(scratch, "%s %s type %.*s %s %s type %.*s", kinds[kind], left_enum ? "enumeration" : "floating-point",
                                (int)left_name.length, left_name.pointer, kind == 2 ? "with" : kind == 4 ? "from" : "and",
@@ -6854,6 +6918,9 @@ static bool check_common_literal_blocked(const CheckGraph* graph, const uint32_t
     return blocked;
 }
 
+static bool check_common_literal_contexts_tree(const CheckGraph* graph, const Parser* parser, const CheckCommonFacts* facts,
+                                               uint8_t* emitted, uint32_t* stack, Arena* scratch);
+
 // Literal conversions are source checks even in unreachable statements and short-circuited operands. They still
 // exclude sizeof/alignof operands and static selections' unchosen arms. Only a skipped conversion with a floating
 // value or branching source builds this context, reusing visit bytes and keeping runtime reachability unchanged.
@@ -7737,7 +7804,9 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         const uint64_t* initializers = initializer_keys.literal;
         if (source_contexts && parents != NULL)
         {
-            if (!check_common_literal_contexts(graph, parser, parents, emitted, scratch))
+            const bool valid = facts->roots != NULL ? check_common_literal_contexts_tree(graph, parser, facts, emitted, work_nodes, scratch) :
+                                                      check_common_literal_contexts(graph, parser, parents, emitted, scratch);
+            if (!valid)
             {
                 check_common_exhausted(pp);
             }
@@ -7884,7 +7953,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             // (Only a root holding a modification can warn: the cheap tests first.)
             const uint32_t root_token = graph->tokens[node];
             const bool unsequenced_candidate = root && !planned && unsequenced_marks != NULL && node < graph->count &&
-                                               (unsequenced_marks[node] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0 && evaluated[node] != 0;
+                                               (unsequenced_marks[node] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0 && evaluated[node] != 0 &&
+                                               (facts->roots == NULL || !check_unseq_sole_modification(graph, unsequenced_marks, node));
             const bool unsequenced_dropped = unsequenced_candidate && program != NULL &&
                                              (facts->flushed == NULL || root_token >= parser->tokens.count || facts->flushed[root_token] == 0) &&
                                              root_token < parser->tokens.count && check_program_token_dropped(program, root_token);
@@ -10930,12 +11000,75 @@ static void check_common_clear_below(const CheckGraph* graph, uint8_t* evaluated
     }
 }
 
+// Start every node evaluated, then clear each root that control or static selection left out, with its
+// subtree. In the validated postorder tree every child precedes its parent, including call arguments.
+// Thus a cleared root only writes nodes in blocks already initialized or in its own initialized block.
+static void check_common_mark_subtrees(const CheckGraph* graph, const uint64_t* roots, uint8_t* marks, uint8_t value, uint32_t* stack)
+{
+    for (uint32_t first = 0; first < graph->count;)
+    {
+        const uint32_t live = graph->count - first < 64 ? graph->count - first : 64;
+        const __mmask64 lanes = live == 64 ? (__mmask64)UINT64_MAX : (__mmask64)((UINT64_C(1) << live) - 1);
+        const __m512i initial = _mm512_maskz_loadu_epi8(lanes, marks + first);
+        uint64_t cleared = _mm512_mask_cmpeq_epi8_mask(roots[first >> 6], initial, _mm512_setzero_si512());
+        _mm512_mask_storeu_epi8(marks + first, lanes, _mm512_set1_epi8((char)value));
+        for (; cleared != 0; cleared &= cleared - 1)
+        {
+            stack[0] = first + (uint32_t)__builtin_ctzll(cleared);
+            check_common_clear_below(graph, marks, stack, 1);
+        }
+        first += live;
+    }
+}
+
+// In the validated tree only suppressed roots, unselected roots and query operands interrupt the source
+// context. Mark their complement using the same postorder guarantee as evaluation. The owning expression
+// walker lends its empty work stack, so this scan needs no additional graph-sized storage.
+static bool check_common_literal_contexts_tree(const CheckGraph* graph, const Parser* parser, const CheckCommonFacts* facts,
+                                               uint8_t* emitted, uint32_t* stack, Arena* scratch)
+{
+    const __m512i suppressed = _mm512_set1_epi8((char)check_constant_unevaluated_warnings());
+    for (uint32_t first = 0; first < graph->count;)
+    {
+        const uint32_t live = graph->count - first < 64 ? graph->count - first : 64;
+        const __mmask64 lanes = live == 64 ? (__mmask64)UINT64_MAX : (__mmask64)((UINT64_C(1) << live) - 1);
+        __mmask64 roots = facts->roots[first >> 6];
+        if (graph->warning_suppressed != NULL)
+        {
+            const __m512i flags = _mm512_maskz_loadu_epi8(lanes, graph->warning_suppressed + first);
+            roots &= ~_mm512_cmpeq_epi8_mask(_mm512_and_si512(flags, suppressed), suppressed);
+        }
+        _mm512_mask_storeu_epi8(emitted + first, lanes, _mm512_maskz_mov_epi8(roots, _mm512_set1_epi8(BUSTER_CHECK_EMITTED_LITERAL_CONTEXT)));
+        first += live;
+    }
+    const bool valid = check_common_unselected_roots_indexed(graph, parser, emitted, emitted, 0, facts->candidates, scratch);
+    check_common_mark_subtrees(graph, facts->roots, emitted, BUSTER_CHECK_EMITTED_LITERAL_CONTEXT, stack);
+    static const CheckOp queries[] = { CHECK_OP_SIZEOF, CHECK_OP_ALIGNOF };
+    const CheckCommonOps set = check_common_ops(queries, BUSTER_ARRAY_LENGTH(queries));
+    CheckCommonScan scan = { 0 };
+    for (uint32_t node = check_common_next_op(graph, &set, &scan); node < graph->count; node = check_common_next_op(graph, &set, &scan))
+    {
+        const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+        uint32_t depth = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+        {
+            const uint32_t child = operands[i];
+            if (child < graph->count && !(i == 0 && (graph->ops[child] == CHECK_OP_VLA_BOUND || graph->ops[child] == CHECK_OP_VLA_EXTENT)))
+            {
+                stack[depth++] = child;
+            }
+        }
+        check_common_clear_below(graph, emitted, stack, depth);
+    }
+    return valid;
+}
+
 // What check_common_evaluated makes, over the tree check_common_facts_tree found: a node is evaluated where its root is
 // and no node on its way there leaves its operand out (check_common_operand_mask). So every node a parent reads starts
 // evaluated, and then the roots the control and selection walks left out and the operands the masks leave out (their
 // nodes found 16 at a time) are cleared with every node below them, a worklist's walk each, which visits each node once.
 static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
-                                            const CheckProgram* program, const uint32_t* parents, const uint64_t* root_bits,
+                                            const CheckProgram* program, const uint64_t* root_bits,
                                             const CheckCommonCandidates* candidates, Arena* scratch)
 {
     const uint32_t count = graph->count;
@@ -10969,45 +11102,20 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
         {
             result = NULL;
         }
-        // A node a parent reads takes its evaluation from it, whatever the walks above marked it.
-        for (uint32_t first = 0; first < count;)
-        {
-            const uint32_t live = count - first < 64 ? count - first : 64;
-            const __mmask64 lanes = live == 64 ? (__mmask64)UINT64_MAX : (__mmask64)((UINT64_C(1) << live) - 1);
-            // All evaluation marks are boolean. Preserve the roots the control and selection walks just changed;
-            // every child starts evaluated until its unevaluated root or operand clears the subtree below it.
-            _mm512_mask_storeu_epi8(evaluated + first, lanes & ~root_bits[first >> 6], _mm512_set1_epi8(1));
-            first += live;
-        }
-        CheckCommonScan roots = { 0 };
+        check_common_mark_subtrees(graph, root_bits, evaluated, 1, stack);
         CheckCommonScan masks = { 0 };
-        uint32_t root = check_common_next_root(parents, root_bits, count, &roots);
-        uint32_t node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_MASK, &masks);
-        while (root < count || node < count)
+        for (uint32_t node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_MASK, &masks); node < count;
+             node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_MASK, &masks))
         {
             uint32_t depth = 0;
-            if (root < count)
+            const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
+            const uint32_t slots[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
             {
-                // A root the walks cleared: marked again so that its own walk clears it with everything below it.
-                if (evaluated[root] == 0)
+                if (slots[i] < count && (mask & (1u << i)) == 0)
                 {
-                    evaluated[root] = 1;
-                    stack[depth++] = root;
+                    stack[depth++] = slots[i];
                 }
-                root = check_common_next_root(parents, root_bits, count, &roots);
-            }
-            else
-            {
-                const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
-                const uint32_t slots[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
-                {
-                    if (slots[i] < count && (mask & (1u << i)) == 0)
-                    {
-                        stack[depth++] = slots[i];
-                    }
-                }
-                node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_MASK, &masks);
             }
             check_common_clear_below(graph, evaluated, stack, depth);
         }
@@ -11160,7 +11268,7 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         // (Short of scratch for the list, the facts fail as a whole rather than leave comparisons out.)
         const bool short_of = enabled->out_of_range && !enabled->sign_compare && comparisons == NULL;
         check_common_assertion_reach(graph, stream, reach);
-        evaluated = short_of ? NULL : check_common_evaluated_tree(graph, stream, types, parser, program, parents, roots, candidates, scratch);
+        evaluated = short_of ? NULL : check_common_evaluated_tree(graph, stream, types, parser, program, roots, candidates, scratch);
     }
     else if (allocated)
     {

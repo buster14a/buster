@@ -413,6 +413,10 @@ static void check_test_program_scans(CheckTest* test)
             uint32_t allocation_next[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t vla_blocks[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t vla_saves[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            // Each path's walks to the statements keep their own answers (check_program_statement, #2995).
+            uint32_t statement_ends[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t statement_keys[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint64_t statement_known[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 64) / 64];
             CheckProgram programs[2] = { 0 };
             for (uint32_t path = 0; path < 2; path += 1)
             {
@@ -421,7 +425,14 @@ static void check_test_program_scans(CheckTest* test)
                 memset(allocation_next[path], 0xa5, sizeof(allocation_next[path]));
                 memset(vla_blocks[path], 0, sizeof(vla_blocks[path]));
                 memset(vla_saves[path], 0, sizeof(vla_saves[path]));
-                check_program_allocations(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path], vla_saves[path], path == 0);
+                memset(statement_known[path], 0, sizeof(statement_known[path]));
+                const CheckProgramStatements statements = {
+                    .ends = statement_ends[path],
+                    .keys = statement_keys[path],
+                    .known = statement_known[path],
+                };
+                check_program_allocations(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path], vla_saves[path],
+                                          &statements, path == 0);
             }
             check_test_expect(test, programs[0].status == programs[1].status && programs[0].token == programs[1].token &&
                                    memcmp(allocation_first[0], allocation_first[1], sizeof(allocation_first[0])) == 0 &&
@@ -614,6 +625,7 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
             .previous = body_columns + slots * 3,
             .case_map = case_map,
             .source_labels = body_columns + slots * 4,
+            .all_loop_targets = true,
             .stops = body_columns + slots * 5,
             .repeats = body_columns + slots * 6,
             .labels = body_columns + slots * 7,
@@ -626,6 +638,9 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
             if (roles[opening] == PARSE_ROLE_OPEN_BODY && closing < count && closing > opening)
             {
                 writer.label_count = 0;
+                writer.opening = opening;
+                writer.closing = closing;
+                writer.scalar_children = (bodies & 1) != 0;
                 check_control_children(&writer, opening, closing);
                 bodies += 1;
                 uint32_t label = 0;
@@ -652,7 +667,9 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
                     }
                     const bool labeled = token != opening && token != closing && (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE);
                     const uint32_t expected_label = labeled ? label : BUSTER_CHECK_NONE;
-                    equal = equal && writer.source_labels[token] == expected_label && writer.stops[token] == BUSTER_CHECK_NONE &&
+                    equal = equal && (labeled ? writer.source_labels[token] == expected_label : writer.source_labels[token] == UINT32_C(0xa5a5a5a5)) &&
+                            check_control_named_target(&writer, token) == (roles[token] == PARSE_ROLE_LABEL ? expected_label : BUSTER_CHECK_NONE) &&
+                            writer.stops[token] == BUSTER_CHECK_NONE &&
                             writer.repeats[token] == BUSTER_CHECK_NONE;
                     if (labeled && roles[token] == PARSE_ROLE_CLOSE_CASE)
                     {
@@ -665,6 +682,26 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
                 }
                 equal = equal && writer.label_count == label && writer.case_start == case_start && writer.case_end == case_end &&
                         program.status == CHECK_PROGRAM_OK;
+                // Exercise the other label scan with the same body. No consumer requested loop targets, so keep
+                // their poisoned entries. The relative numbers of every source label and case stay the same.
+                writer.scalar_children = !writer.scalar_children;
+                writer.all_loop_targets = false;
+                writer.stops[opening] = UINT32_C(0xa5a5a5a5);
+                writer.repeats[opening] = UINT32_C(0x5a5a5a5a);
+                writer.label_count = 0;
+                check_control_children(&writer, opening, closing);
+                uint32_t again = 0;
+                for (uint32_t token = opening + 1; token < closing; token += 1)
+                {
+                    if (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE)
+                    {
+                        equal = equal && writer.source_labels[token] == again;
+                        again += 1;
+                    }
+                }
+                equal = equal && again == label && writer.label_count == label && writer.case_start == case_start && writer.case_end == case_end &&
+                        writer.stops[opening] == UINT32_C(0xa5a5a5a5) && writer.repeats[opening] == UINT32_C(0x5a5a5a5a);
+                writer.all_loop_targets = true;
                 labels_seen += label;
             }
         }
@@ -1964,6 +2001,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
                 check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
         uint64_t return_flow_work = 0;
+        uint64_t region_target_work = 0;
+        uint64_t statement_walk_work = 0;
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -1973,6 +2012,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             .initializer_reference_count = data.reference_count,
             .scalar = path == 0,
             .return_flow_work = &return_flow_work,
+            .region_target_work = &region_target_work,
+            .statement_walk_work = &statement_walk_work,
             .target = pp_options.target,
             .predefines = &predefines,
         };
@@ -1982,6 +2023,22 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             check_test_expect(test, program.body_count >= 65 && return_flow_work >= input.graph.count &&
                                    return_flow_work <= (uint64_t)input.graph.count * 8 + 1,
                               "aggregate return graph-mark initialization and visited work are linear in the unit graph");
+        }
+        // #2995: the walks from statement expressions to their break targets and from variable-length arrays to their
+        // statements keep their answers, so in every program they pass a token at most once a body, and twice for the
+        // arrays' two walks; walks that kept none pass a region's or a bound's ancestors again for each, which the checker
+        // sources' deep shapes take far past these bounds.
+        if (ready)
+        {
+            const bool regions = strcmp(name, "quadratic-statement-expressions") == 0;
+            const bool statements = strcmp(name, "quadratic-vla-bounds") == 0;
+            char walks[320];
+            snprintf(walks, sizeof(walks), "%s: %s walks to break targets and statements take %llu and %llu parent steps for %u tokens", name,
+                     path == 0 ? "scalar" : "vector", (unsigned long long)region_target_work, (unsigned long long)statement_walk_work, input.token_count);
+            check_test_expect(test,
+                              region_target_work <= input.token_count && statement_walk_work <= 2 * (uint64_t)input.token_count &&
+                                  (!regions || region_target_work != 0) && (!statements || statement_walk_work != 0),
+                              walks);
         }
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
@@ -2349,6 +2406,24 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     check_test_program_source_char(test, source, name, clang, false);
 }
 
+// A checker source (tests/checker/sources/NAME.c) as a program fixture, against `clang`'s build of it: its `tested` runs.
+static void check_test_program_checker_source(CheckTest* test, const char* name, const char* clang)
+{
+    CheckTestFixtures fixture = { .storage = arena_reserve(UINT64_C(1) << 20) };
+    char path[PATH_MAX + 128];
+    snprintf(path, sizeof(path), "%s/checker/sources/%s.c", check_test_fixture_root, name);
+    uint64_t length = 0;
+    const char* source = fixture.storage.base != NULL ? check_test_fixture_read(&fixture, path, &length) : NULL;
+    char description[PATH_MAX + 160];
+    snprintf(description, sizeof(description), "%s: the checker source %s is read", name, path);
+    check_test_expect(test, source != NULL && length != 0, description);
+    if (source != NULL && length != 0)
+    {
+        check_test_program_source(test, source, name, clang);
+    }
+    arena_release(&fixture.storage);
+}
+
 // A program fixture in another language mode, with clang reading the same source and mode as the oracle.
 static void check_test_program_source_standard(CheckTest* test, const char* source, const char* name, const char* clang, uint32_t standard, bool gnu,
                                                const char* standard_flag)
@@ -2566,6 +2641,25 @@ static bool check_test_program_locals(const CheckProgram* program, const CheckLo
         same &= shared->local_map[object] == BUSTER_CHECK_NONE && check_lower_local_of(&writer, object) == BUSTER_CHECK_NONE;
     }
     return same;
+}
+
+// Selection keeps source order and emits target clones immediately after their original.
+static void check_test_lower_opening_owner(CheckTest* test)
+{
+    CheckProgramBody bodies[] = { { .opening = 0 }, { .opening = 11 }, { .opening = 11 }, { .opening = 32 } };
+    CheckProgram program = { .bodies = bodies, .body_count = BUSTER_ARRAY_LENGTH(bodies) };
+    const uint32_t openings[] = { 32, 7, 11, 11, 0, 32, 33, 1 };
+    const uint32_t expected[] = { 3, BUSTER_CHECK_NONE, 1, 1, 0, 3, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+    CheckProgramBodyCursor cursor = { 0 };
+    bool same = true;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(openings); i += 1)
+    {
+        same &= check_lower_opening_owner(&program, openings[i], &cursor) == expected[i];
+    }
+    program.body_count = 0;
+    cursor = (CheckProgramBodyCursor){ 0 };
+    check_test_expect(test, same && check_lower_opening_owner(&program, 0, &cursor) == BUSTER_CHECK_NONE,
+                      "local ownership finds the original selected body and skips omitted openings");
 }
 
 // The branches' targets (check_lower_resolve_labels): by 64 kinds at a time as by its scalar twin, the same targets
@@ -4118,6 +4212,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_control_walks(test);
         check_test_program_addressed(test);
         check_test_program_lifetime_planning(test);
+        check_test_program_lifetime_jumps(test);
         check_test_program_scans(test);
         check_test_program_many_declarators(test, clang);
         check_test_program_source(test,
@@ -4127,6 +4222,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "for(int i=0,j=2;i<3;i++,j++){int u=i,v=j;r+=u+v;}"
             "int s=({int i=n+3,j=i+2;i+j;}),t=s+1;return r+s+t+a+b+c;}",
             "multi-declarator-plan-scopes", clang);
+        check_test_lower_opening_owner(test);
         check_test_program_resolve_labels(test);
         check_test_program_bodies(test, clang);
         // C89's implicit int in the runtime program harness (#1121): the declarations' types and qualifiers decide what
@@ -5317,6 +5413,41 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test,
             "int tested(int n){int x=0;int y=3+({int z=4+({x++;n+1;});for(int i=0;i<3;i++)z+=i;z;});return x*100+y;}",
             "nested-statement-regions-and-loop", clang);
+        // #2995: GNU breaks and continues in statement expressions nested in each other, in loops and switches inside
+        // regions, a do statement's body, and nine regions deep; each region's targets reuse its enclosing tokens' answers.
+        check_test_program_source(test,
+            "#define W(e) ({int w_=(e);w_;})\n"
+            "int tested(int n){int x=0;for(int i=0;i<8;i++){"
+            "x+=({int a=({int b=({if(i==2)continue;if(i==6+n%3)break;i;});b*2;});a+1;});"
+            "x+=({int s=0;for(int j=0;j<5;j++){s+=({int c=({if(j==1)continue;if(j==3+(n&1))break;j;});c+1;});}s;});"
+            "switch(i&3){case 0:x+=({int d=({if(n>4)break;5;});d;});x+=100;break;case 1:x+=({int e=({if(i==5)continue;7;});e;});break;"
+            "default:x+=({int t=0;do{t+=({int g=({if(t>3+(n&3))break;2;});g;});}while(t<10);t;});}"
+            "x+=W(W(W(W(W(W(W(W(({if(i==4&&n<0)continue;i*3;})))))))));}return x;}",
+            "statement-regions-nested-loop-targets", clang);
+        // The same in a while condition, whose break and continue are its enclosing loop's: GCC's, as above.
+        check_test_program_source(test,
+            "int tested(int n){int x=0;for(int i=0;i<6;i++){int k=0;"
+            "while(({int c=({if(i==2)continue;k<3+(n&1);});c;})){k++;x+=({({if(k==2&&i==4)break;k;});});}"
+            "x+=k*10+({int s=0;while(({({if(s>2+(n&1)&&i==4)break;s<3;});})){s++;}s;});}return x;}",
+            "statement-regions-nested-loop-condition-targets-gcc", "gcc");
+        // Variable-length arrays of several bounds in nested blocks, a loop's, a declaration of several, one of 31 bounds
+        // and one in a statement expression that a break leaves (#2995: their statements found by walks that share paths).
+        check_test_program_source(test,
+            "#define O5 [one][one][one][one][one]\n"
+            "int tested(int n){int m=n+5,one=m-n-4,r=0;"
+            "{int a[m][m+1][2];a[1][2][1]=7;r+=(int)sizeof a+a[1][2][1];"
+            "{int b[m][2][m][3],c[m],d[2][m],e0[one],e1[one+1],e2[one+2];b[m-1][1][m-1][2]=m;c[0]=1;d[1][m-1]=2;"
+            "r+=(int)(sizeof b+sizeof c+sizeof d+sizeof e0+sizeof e1+sizeof e2)+b[m-1][1][m-1][2]+c[0]+d[1][m-1];"
+            "for(int i=0;i<m;i++){int f[i+1][m];f[i][m-1]=i;r+=(int)sizeof f+f[i][m-1];if(i==2)continue;r+=1;}}}"
+            "int z O5 O5 O5 O5 O5 O5[m];z[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][m-1]=4;"
+            "r+=(int)(sizeof z/sizeof(int))+z[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][m-1];"
+            "for(int i=0;i<m;i++){r+=({int h[m][i+1];h[m-1][i]=i;if(i==3)break;(int)sizeof h+h[m-1][i];});}"
+            "return r+({int g[m][m];g[0][1]=3;(int)sizeof g+g[0][1];});}",
+            "vla-several-bounds-nested-blocks", clang);
+        // The checker sources' deep shapes of both (#2995), whose walks the program harness counts: GCC's for the break in
+        // a while condition, as above.
+        check_test_program_checker_source(test, "quadratic-statement-expressions", "gcc");
+        check_test_program_checker_source(test, "quadratic-vla-bounds", clang);
         check_test_program_source(test,
             "int tested(int n){int x=0;double z=0.5+({double y=n+0.25;x++;y;});return (int)(z*4)+x;}", "statement-region-floating-pending-value", clang);
         check_test_program_source(test,

@@ -805,6 +805,17 @@ static const char* check_driver_interrupt_message(uint32_t detail)
     return messages[rule < BUSTER_ARRAY_LENGTH(messages) ? rule : 0];
 }
 
+// The highlighted ranges clang's diagnostic of an input report has (#2376), as tokens of the output, before its
+// publication at output token `source`; the caller clears them after it (pp_diagnostic_ranges_clear).
+static void check_driver_input_ranges(Preprocessor* pp, const CheckInputReport* report, uint32_t source)
+{
+    // A name that names nothing: the name (clang's Sema::DiagnoseEmptyLookup, its lookup's name range).
+    if (report->message == CHECK_INPUT_UNDECLARED || report->message == CHECK_INPUT_UNDECLARED_CORRECTED)
+    {
+        pp_diagnostic_range_tokens(pp, source, source);
+    }
+}
+
 static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
 {
     const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
@@ -3948,6 +3959,11 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
                                                                  target_declaration, target_node, 0, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
+    // The source expression highlighted (#2376), clang's SrcExpr->getSourceRange() in DiagnoseAssignmentResult.
+    if (result != NULL && source < stream->count)
+    {
+        check_semantic_range(parser, pp, graph->tokens[source], true);
+    }
     return result;
 }
 
@@ -4025,6 +4041,8 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
                 pp_diagnostic_suborder(pp, previous, suborder);
             }
         }
+        // The ranges check_semantic_expression gave the message are its alone (#2376).
+        pp_diagnostic_ranges_clear(pp);
     }
 }
 
@@ -4329,6 +4347,8 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     uint32_t argument = BUSTER_CHECK_NONE;
     const char* words = function || other ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, &argument,
                                                                           scratch) : NULL;
+    // (Only the conversion's words: its highlighted range is no overload's, #2376.)
+    pp_diagnostic_ranges_clear(pp);
     const char* prefix = "incompatible function pointer types ";
     const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
     // The target as the words spell it: between the action's words and the source's, whatever comes before them for
@@ -5489,6 +5509,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         // expression's end, as for an attribute count diagnosed after an argument's call error.
                         const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
                         const bool named = phase == 0 && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER;
+                        // Its highlighted ranges (#2376), for the kinds whose branch below publishes it alone.
+                        if (phase == 0)
+                        {
+                            check_driver_input_ranges(pp, input->reports + index, source);
+                        }
                         if (kind >= CHECK_INPUT_MUSTTAIL_ARGUMENTS && kind <= CHECK_INPUT_MUSTTAIL_STATEMENT && named)
                         {
                             // clang's musttail attribute where it doesn't go (#147), spelled as clang spells it there.
@@ -6894,6 +6919,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     {
                         check_driver_diagnose(parser, pp, located, message);
                     }
+                    // A report's highlighted ranges, which its message's producer or check_driver_input_ranges set, are its
+                    // alone (#2376).
+                    pp_diagnostic_ranges_clear(pp);
                     if (types->atomic_records && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_ACTION &&
                         stream->reports[index].diagnostic == CHECK_DIAG_MEMBER && node < input->graph.count &&
                         check_common_atomic_member(&input->graph, stream, types, node))
@@ -12880,6 +12908,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 _Static_assert(BUSTER_CHECK_CLOCK_WALK_PARTS == BUSTER_CHECK_EXPRESSION_PARTS, "the clock reports each of the walk's parts");
                 stage_clock->expression_ticks += input.expression_ticks;
+                if (pp->options.node_window_constants)
+                {
+                    fprintf(errors, "constant-window: roots=%u removed=%u graph-nodes=%u\n",
+                            input.integer_window_count, input.integer_window_removed, input.graph.count);
+                }
                 if (pp->options.node_window)
                 {
                     fprintf(errors, "node-window: taken=%u ordinary-nodes-replaced=%u summary-nodes=%u graph-nodes=%u\n", input.window_count, input.window_nodes,
@@ -14248,6 +14281,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool check_transitions = false;
     bool node_window = false;
     bool node_window_assignments = false;
+    bool node_window_constants = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -14535,13 +14569,21 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             verify = true;
         }
+        else if (match.exact == C_OPTION_NODE_WINDOW_CONSTANTS)
+        {
+            node_window_constants = true;
+            node_window = false;
+            node_window_assignments = false;
+        }
         else if (match.exact == C_OPTION_NODE_WINDOW_ASSIGNMENTS)
         {
+            node_window_constants = false;
             node_window = true;
             node_window_assignments = true;
         }
         else if (match.exact == C_OPTION_NODE_WINDOW)
         {
+            node_window_constants = false;
             node_window = true;
         }
         else if (match.exact == C_OPTION_CHECK_TRANSITIONS)
@@ -14873,8 +14915,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
     // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested, else,
     // where it emits code, the object and linkage options its producer doesn't implement (#1124: a command line's
-    // default visibility, per-definition sections), before any input or output is opened.
-    const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, emit_object || link);
+    // default visibility, per-definition sections), before any input or output is opened. -c's code goes into an object
+    // another link may take; a link's into its executable alone, which takes -fPIC and -fpic (#2101).
+    const CheckRequestCode request_code = link ? CHECK_REQUEST_CODE_EXECUTABLE : emit_object ? CHECK_REQUEST_CODE_OBJECT : CHECK_REQUEST_CODE_NONE;
+    const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, request_code);
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
     PPOptions options = { 0 };
     const char* path = 0;
@@ -14905,7 +14949,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
     // Resolve the remaining request refusals before the archive probe or any source stream is opened: PIC/PIE,
     // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
-    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
+    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, request_code) : codegen;
     const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
                                                tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || lanes->tier1_no_hold || tier1_schedule_seen || tier1_passes_seen);
     const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
@@ -14919,6 +14963,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         parsed = driver_cache_streams(&arena, inputs, input_kinds, input_count, &options);
     }
+    options.node_window_constants = node_window_constants;
+    options.skip_expression_profile = !time_stages;
     options.semantic_pragmas = true;
     options.timing = time_stages;
     options.node_window_assignments = node_window_assignments && !options.predefines.debug && !options.predefines.debug_modules;
@@ -15039,14 +15085,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments | --node-window-constants] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c | -S] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
     // opened: the instrumentation's, decided from the resolved predefines rather than from an enabling option, which a
-    // later -fno-sanitize= or -fno-openmp may have cancelled, then position-independent code, the layouts and the
-    // language and target.
+    // later -fno-sanitize= or -fno-openmp may have cancelled, then position-independent code (but in a link's
+    // executable, #2101), the layouts and the language and target.
     else if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");

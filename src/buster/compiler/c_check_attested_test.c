@@ -897,6 +897,8 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "window_capacity", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "window_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "window_nodes", CHECK_ATTESTED_FIELD_MEASURE },
+    { "integer_window_count", CHECK_ATTESTED_FIELD_MEASURE },
+    { "integer_window_removed", CHECK_ATTESTED_FIELD_MEASURE },
 };
 
 static const CheckAttestedField check_attested_reader_fields[] =
@@ -924,6 +926,7 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "warning_bound_open", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "warning_query_arena", CHECK_ATTESTED_FIELD_AMBIENT },
     { "warning_queries", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "internal_linkage_roots", CHECK_ATTESTED_FIELD_NAME },
     { "bindings", CHECK_ATTESTED_FIELD_NAME },
     { "declared_types", CHECK_ATTESTED_FIELD_OWN },
     { "query_types", CHECK_ATTESTED_FIELD_OWN },

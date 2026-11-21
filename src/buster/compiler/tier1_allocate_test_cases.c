@@ -961,6 +961,128 @@ static void tier1_allocation_test_rematerialization(Tier1AllocationTestTally* ta
     tier1_allocation_test_expect(tally, !tier1_rematerialization_marks(&input, vector) && !tier1_rematerialize(&input, 0, 0, 4, 0, &copy), "recipe limit shared by marking and materialization");
 }
 
+// #3149: a frame address's copy, from each of the 16 general registers as the frame base into each destination, at
+// displacements 0, 8, -32 and 128: the lea `lea r64, [base + displacement]` but where the displacement is 0 and the
+// base's low three bits are rsp's or rbp's (rsp, rbp, r12, r13), whose lea needs a SIB byte or a zero disp8: there the
+// base's register copy, `mov r64, base`, one byte shorter by the encoder. Elsewhere the copy is the lea's record
+// exactly, so the code is byte for byte what it was. The Zen 5 model prices the copy at displacement 0 from rsp as its
+// register copy, `mov rax, rsp`, below the lea's at 8, and neither above the reload's: both stay rematerializable.
+static void tier1_allocation_test_frame_copies(Tier1AllocationTestTally* tally)
+{
+    const int32_t displacements[] = {
+        0,
+        8,
+        -32,
+        128,
+    };
+    const uint8_t operation = BUSTER_TIER1_REMAT_STACK;
+    const uint8_t width = 8;
+    const uint8_t stable = BUSTER_TIER1_REMAT_STABLE;
+    uint32_t copies = 0;
+    uint32_t leas = 0;
+    uint32_t shorter = 0;
+    uint32_t exact = 0;
+    bool valid = x86_encoder_initialize();
+    for (uint32_t d = 0; valid && d < BUSTER_ARRAY_LENGTH(displacements); d += 1)
+    {
+        const uint64_t value = (uint64_t)(int64_t)displacements[d];
+        const Tier1RematerializationInput input = {
+            .operations = &operation,
+            .widths = &width,
+            .flags = &stable,
+            .values = &value,
+            .count = 1,
+        };
+        for (uint8_t base = 0; valid && base < 16; base += 1)
+        {
+            for (uint8_t destination = 0; valid && destination < 16; destination += 1)
+            {
+                Tier1Rematerialized copy = { 0 };
+                const X86Instruction lea = {
+                    .displacement = displacements[d],
+                    .reg = destination,
+                    .rm = base,
+                    .mode = BUSTER_X86_MEMORY_BASE,
+                    .form = X86_FORM_LEA_R64_M,
+                };
+                const bool copied = displacements[d] == 0 && ((base & 7) == X86_REGISTER_RSP || (base & 7) == X86_REGISTER_RBP);
+                valid = tier1_rematerialize(&input, 0, destination, base, 0, &copy) && copy.symbol == BUSTER_TIER1_REMAT_NO_SYMBOL && x86_validate(&copy.instruction, 1) == 1;
+                uint8_t bytes[2][BUSTER_X86_ENCODER_CAPACITY(1)];
+                const int64_t made = valid ? x86_encode(&copy.instruction, 1, bytes[0], sizeof(bytes[0]), 0, 0) : -1;
+                const int64_t reference = valid ? x86_encode(&lea, 1, bytes[1], sizeof(bytes[1]), 0, 0) : -1;
+                if (copied)
+                {
+                    const bool move = copy.instruction.form == X86_FORM_MOV_R64_RM64 && copy.instruction.mode == BUSTER_X86_REGISTER_DIRECT && copy.instruction.reg == destination &&
+                                      copy.instruction.rm == base && copy.instruction.displacement == 0 && copy.instruction.index == 0 && copy.instruction.immediate == 0;
+                    copies += move;
+                    shorter += made == 3 && reference == 4;
+                }
+                else
+                {
+                    leas += memcmp(&copy.instruction, &lea, sizeof(lea)) == 0;
+                    exact += made > 0 && made == reference && memcmp(bytes[0], bytes[1], (size_t)made) == 0;
+                }
+            }
+        }
+    }
+    // 4 bases of 16 at displacement 0, 16 destinations each: 64 copies; the other 12 bases and the 3 other displacements' 16.
+    tier1_allocation_test_expect(tally, valid && copies == 64 && shorter == 64, "a zero frame displacement from rsp, rbp, r12 or r13 is the base's register copy, 3 bytes for the lea's 4");
+    tier1_allocation_test_expect(tally, valid && leas == 960 && exact == 960, "every other frame address's copy is its lea, the same bytes");
+    // The model's costs, from rsp as both consumers ask for them: the copy at 0 and the lea at 8 against the reload.
+    const uint8_t operations[2] = {
+        BUSTER_TIER1_REMAT_STACK,
+        BUSTER_TIER1_REMAT_STACK,
+    };
+    const uint8_t widths[2] = {
+        8,
+        8,
+    };
+    const uint8_t flags[2] = {
+        BUSTER_TIER1_REMAT_STABLE,
+        BUSTER_TIER1_REMAT_STABLE,
+    };
+    const uint64_t values[2] = {
+        0,
+        8,
+    };
+    uint16_t costs[2] = { 0 };
+    uint16_t reloads[2] = { 0 };
+    uint8_t marks[2] = { 0 };
+    Tier1RematerializationInput costed = {
+        .operations = operations,
+        .widths = widths,
+        .flags = flags,
+        .values = values,
+        .count = 2,
+    };
+    const bool modeled = x86_zen5_initialize() && tier1_rematerialization_model_costs(&costed, X86_REGISTER_RSP, costs, reloads);
+    costed.costs = costs;
+    costed.reload_costs = reloads;
+    const bool marked = modeled && tier1_rematerialization_marks(&costed, marks);
+    // The model's own latencies of the two records, as the consumers' frame base gives them: rsp's register copy, and a
+    // lea from rsp. The copy at 0 is priced as the register copy, strictly below the lea (#3149), the lea at 8 as the lea.
+    const X86Instruction register_copy = {
+        .reg = X86_REGISTER_RAX,
+        .rm = X86_REGISTER_RSP,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .form = X86_FORM_MOV_R64_RM64,
+    };
+    const X86Instruction lea = {
+        .displacement = 8,
+        .reg = X86_REGISTER_RAX,
+        .rm = X86_REGISTER_RSP,
+        .mode = BUSTER_X86_MEMORY_BASE,
+        .form = X86_FORM_LEA_R64_M,
+    };
+    const uint16_t copy_latency = modeled ? x86_zen5_columns[X86_COST_LATENCY][x86_zen5_id(&register_copy)] : BUSTER_X86_COST_UNKNOWN;
+    const uint16_t lea_latency = modeled ? x86_zen5_columns[X86_COST_LATENCY][x86_zen5_id(&lea)] : BUSTER_X86_COST_UNKNOWN;
+    const bool measured = copy_latency != BUSTER_X86_COST_UNKNOWN && lea_latency != BUSTER_X86_COST_UNKNOWN && copy_latency != 0 && copy_latency < lea_latency;
+    tier1_allocation_test_expect(tally, marked && measured && costs[0] == copy_latency && costs[1] == lea_latency && costs[1] <= reloads[1] && costs[0] <= reloads[0] && marks[0] == 1 && marks[1] == 1,
+                                 "the model prices a zero displacement's copy as rsp's register copy, below a lea, neither above a reload, and both stay rematerializable");
+    printf("frame copies: %u register copies of a base (%u 3 bytes for the lea's 4), %u leas the same bytes; model latency (cycles * 256) of rsp's copy %u, of a lea from it %u, of a reload %u\n",
+           copies, shorter, exact, (uint32_t)costs[0], (uint32_t)costs[1], (uint32_t)reloads[0]);
+}
+
 // Generated machine code has no Clang UBSan function-type prefix before its first byte. Only this actual JIT call
 // bypasses that metadata check; address/undefined sanitizers still cover the producer, allocator and test driver.
 static __attribute__((no_sanitize("function"))) uint64_t tier1_allocation_test_call(void* code)
@@ -981,10 +1103,13 @@ static void tier1_allocation_test_native_recipes(Tier1AllocationTestTally* tally
         0,
         (uint64_t)(int64_t)-32,
         123,
+        0,
     };
-    for (uint32_t fixture = 0; fixture < 9; fixture += 1)
+    // Fixtures 7 and 9 are frame addresses from rsp, at -32 (a lea) and at 0 (rsp's register copy, #3149).
+    for (uint32_t fixture = 0; fixture < 10; fixture += 1)
     {
-        const uint8_t operation = fixture == 7 ? BUSTER_TIER1_REMAT_STACK : fixture == 8 ? BUSTER_TIER1_REMAT_SYMBOL : BUSTER_TIER1_REMAT_INTEGER;
+        const bool frame = fixture == 7 || fixture == 9;
+        const uint8_t operation = frame ? BUSTER_TIER1_REMAT_STACK : fixture == 8 ? BUSTER_TIER1_REMAT_SYMBOL : BUSTER_TIER1_REMAT_INTEGER;
         const uint8_t width = 8;
         const uint8_t stable = BUSTER_TIER1_REMAT_STABLE;
         const Tier1RematerializationInput input = {
@@ -995,7 +1120,7 @@ static void tier1_allocation_test_native_recipes(Tier1AllocationTestTally* tally
             .count = 1,
         };
         Tier1Rematerialized copy = { 0 };
-        const uint8_t destination = fixture == 6 || fixture == 7 ? 10 : 0;
+        const uint8_t destination = fixture == 6 || frame ? 10 : 0;
         bool valid = tier1_rematerialize(&input, 0, destination, 4, fixture == 6 ? 1 : 0, &copy);
         X86Instruction records[8] = { 0 };
         uint32_t count = 0;
@@ -1013,7 +1138,7 @@ static void tier1_allocation_test_native_recipes(Tier1AllocationTestTally* tally
             count += 1;
             expected = 0;
         }
-        else if (fixture == 7)
+        else if (frame)
         {
             records[count] = (X86Instruction){
                 .rm = 4,
@@ -1030,7 +1155,7 @@ static void tier1_allocation_test_native_recipes(Tier1AllocationTestTally* tally
             };
             count += 1;
         }
-        else if (fixture == 7)
+        else if (frame)
         {
             records[count] = (X86Instruction){
                 .rm = 10,
@@ -1341,6 +1466,7 @@ static int run_tier1_allocate_tests(int argc, char** argv)
         tier1_allocation_test_avoided(&tally, &arena, seed);
         tier1_allocation_test_guarded(&tally, &arena);
         tier1_allocation_test_rematerialization(&tally);
+        tier1_allocation_test_frame_copies(&tally);
         tier1_allocation_test_native(&tally, &arena, seed);
         tier1_allocation_test_native_recipes(&tally);
         printf("test-tier1-allocation: %" PRIu64 " checks, %" PRIu64 " failures, seed %" PRIu64 "\n", tally.checks, tally.failures, seed);

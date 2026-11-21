@@ -41,6 +41,56 @@ static uint32_t check_semantic_first_token(const Parser* parser, uint32_t node)
     return first;
 }
 
+// Whether parser token `token`'s parents reach `node` (a token is its own).
+static bool check_semantic_inside(const Parser* parser, uint32_t token, uint32_t node)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t ancestor = token;
+    for (uint32_t steps = 0; ancestor < count && ancestor != node && steps < count; steps += 1)
+    {
+        const uint32_t up = parser->tree.parents[ancestor];
+        ancestor = up != ancestor ? up : count;
+    }
+    return ancestor == node;
+}
+
+// Adds the parser tokens of `node`'s subtree, which are contiguous around it, as a highlighted range of the next
+// diagnostic (#2376): clang's source range of the expression the node is (getSourceRange), with `parentheses` the ones
+// around it, which clang's ParenExpr keeps where a diagnostic doesn't look through them (IgnoreParens).
+static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node, bool parentheses)
+{
+    const uint32_t count = parser->tokens.count;
+    if (node < count)
+    {
+        uint32_t first = node;
+        uint32_t last = node;
+        while (first != 0 && check_semantic_inside(parser, first - 1, node))
+        {
+            first -= 1;
+        }
+        while (last + 1 < count && check_semantic_inside(parser, last + 1, node))
+        {
+            last += 1;
+        }
+        // The parentheses around it, which the graph leaves out and clang's ParenExpr keeps: a group's opener and closer
+        // just outside it, one level outside its shallowest token.
+        bool grouped = parentheses;
+        while (grouped && first != 0 && last + 1 < count)
+        {
+            uint32_t shallowest = UINT32_MAX;
+            for (uint32_t at = first; at <= last; at += 1)
+            {
+                shallowest = parser->tree.depths[at] < shallowest ? parser->tree.depths[at] : shallowest;
+            }
+            grouped = parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.roles[last + 1] == PARSE_ROLE_CLOSE_GROUP &&
+                      parser->tree.depths[first - 1] + 1 == shallowest && parser->tree.depths[last + 1] + 1 == shallowest;
+            first -= grouped ? 1 : 0;
+            last += grouped ? 1 : 0;
+        }
+        pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, first), parse_source_index(&parser->tokens, last));
+    }
+}
+
 static const char* check_semantic_text(Preprocessor* pp, const char* text)
 {
     // Do not quietly replace a failed contextual rendering with a successful generic diagnostic.
@@ -3200,6 +3250,16 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                      aggregate ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) :
                      suggestion ? check_warning_text(scratch, "member reference type %.*s is a pointer; did you mean to use '->'?", (int)type.length, type.pointer) :
                      check_warning_text(scratch, "member reference base type %.*s is not a structure or union", (int)type.length, type.pointer);
+            // The base highlighted (#2376), clang's BaseExpr->getSourceRange(), and for a base of no record the member's
+            // name too (its MemberLoc).
+            if (result != NULL && kind != BUSTER_TYPE_KIND_EXT_VECTOR && operand < count)
+            {
+                check_semantic_range(parser, pp, graph->tokens[operand], true);
+            }
+            if (result != NULL && !aggregate && !suggestion && kind != BUSTER_TYPE_KIND_EXT_VECTOR && token + 1 < parser->tokens.count)
+            {
+                pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, token + 1), parse_source_index(&parser->tokens, token + 1));
+            }
             if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
             {
                 // The typed action already rejected this member. Spell its first illegal component, or the valid
@@ -3415,6 +3475,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_value_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "indirection requires pointer operand (%.*s invalid)", (int)type.length, type.pointer) : NULL;
+            // The operand (#2376), clang's Op->getSourceRange().
+            if (result != NULL && operand < count)
+            {
+                check_semantic_range(parser, pp, graph->tokens[operand], true);
+            }
         }
         else if ((report->diagnostic == CHECK_DIAG_POINTER_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED) &&
                  op == CHECK_OP_SUBSCRIPT && token < parser->tokens.count)
@@ -3533,6 +3598,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool found = open < parser->tokens.count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close;
             result = found ? "assignment to cast is illegal, lvalue casts are not supported" : "expression is not assignable";
             *location = found ? open : token;
+            // The expression assigned to (#2376), clang's E->getSourceRange(); a cast's has another shape, not yet given.
+            if (!found && operand < count)
+            {
+                check_semantic_range(parser, pp, graph->tokens[operand], true);
+            }
         }
         else if (report->diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED && operand_type != 0)
         {
@@ -3551,6 +3621,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 // A record with a const member: its first, else what the lvalue's chain finds.
                 const char* fields = check_semantic_const_fields(parser, pp, input, stream, types, operand, operand_type, note, &note_count, scratch);
                 result = fields != NULL ? fields : check_semantic_const_assignment(parser, pp, input, stream, types, spell, operand, note, &note_count, scratch);
+            }
+            // The expression assigned to (#2376), clang's E->getSourceRange() in DiagnoseConstAssignment and its kin.
+            if (result != NULL && operand < count)
+            {
+                check_semantic_range(parser, pp, graph->tokens[operand], true);
             }
         }
         else if (report->diagnostic == CHECK_DIAG_COUNTED_INCOMPLETE)
@@ -3642,6 +3717,12 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                     integer ? "-Wint-conversion" : function_pointer ? "-Wincompatible-function-pointer-types" : "-Wincompatible-pointer-types") : NULL;
             }
         }
+    }
+    // A register variable's address (#2376): its operand without its parentheses, clang's op->getSourceRange() once
+    // CheckAddressOfOperand has looked through them.
+    if (report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_REGISTER_ADDRESS && op == CHECK_OP_ADDRESS && operand < count)
+    {
+        check_semantic_range(parser, pp, graph->tokens[operand], false);
     }
     return check_semantic_text(pp, result);
 }

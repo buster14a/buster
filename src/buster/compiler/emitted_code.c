@@ -136,6 +136,9 @@ struct EmittedCode
     // An assembly template's code (a naked function's, an asm statement's helper's): its frame events, if any, are the
     // frame the compiler built around the templates, whose own instructions the verifier doesn't read.
     bool assembly;
+    // A Tier 0 body whose frame is the fixed shape alone (emitted_tier0_frame_direct): it has no frame events, and its
+    // unwind descriptor is made from its Tier0Code at its final offsets (unwind_tier0_frame_tails), once it is encoded.
+    bool frame_direct;
     // The producer's failure (Tier 0's Tier0Error, which the emission reports; 0 for none) and its node.
     uint32_t error;
     uint32_t node;
@@ -385,6 +388,14 @@ static uint32_t emitted_tier0_preserve_rows(const Tier0Code* code, EmissionFrame
     return count + 3 * registers;
 }
 
+// Whether a Tier 0 frame's probed reservation (#177) has a loop, whose CFA is in r11 (emitted_tier0_probe_rows): a frame
+// without a frame pointer that probes whole pages.
+static bool emitted_tier0_probe_loop(const Tier0Code* code)
+{
+    const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+    return !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
+}
+
 // A probed reservation's loop without a frame pointer (#177, tier0_emit_probed_reservation): its CFA in r11 from the end
 // of r11's subtraction to the loop's bound, which no record of the loop changes, and back in rsp at the loop's exit,
 // where rsp equals it, as Tier 1's frame events have it (tier1_frame_emit.c). The fixed shape's rows (`rows`, `count` of
@@ -394,7 +405,7 @@ static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow
 {
     const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
     const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
-    const bool loop = !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
+    const bool loop = emitted_tier0_probe_loop(code);
     uint32_t result = count;
     if (loop && count + 2 <= room)
     {
@@ -413,6 +424,17 @@ static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow
         result = count + 2;
     }
     return loop && count + 2 > room ? UINT32_MAX : result;
+}
+
+// Whether a Tier 0 body's unwind descriptor can be its frame's fixed shape at its final offsets, with no frame events
+// (EmittedCode.frame_direct): pushes, a reservation, a frame pointer and a realignment, each transition the end of its
+// prologue's or epilogue's record (unwind_tier0_frame_tails), and none of what emitted_from_tier0 adds rows to that
+// shape for: a probed reservation's loop, preserved registers (every interrupt service routine's frame has some) or
+// tail calls' teardowns, an eh_return function's among them (the lowering makes __builtin_eh_return a tail call). Tier
+// 0's frames are never open (Tier 1's are).
+static __attribute__((unused)) bool emitted_tier0_frame_direct(const Tier0Code* code)
+{
+    return !emitted_tier0_probe_loop(code) && emitted_tier0_preserved(code) == 0 && code->tail_count == 0;
 }
 
 // Tier 0's code as the emission takes it: its records, columns, references and labels as they are; with `sources` its

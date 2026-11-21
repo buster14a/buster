@@ -8,6 +8,7 @@
 // Temporary arrays have one record per token in the requested bounded slice, with no padding assumption.
 
 #define BUSTER_CHECK_CONSTANT_BOUND_CONTEXT 2u
+#define BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT 4u
 
 #include "c_check_warning_input.c"
 

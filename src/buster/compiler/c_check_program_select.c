@@ -505,7 +505,8 @@ struct CheckProgramBodyCursor
     uint32_t opened;
 };
 
-static uint32_t check_program_token_body_next(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
+// Count bodies opening at or before token. Selected target clones each count as one body.
+static uint32_t check_program_opened_through(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
 {
     uint32_t opened = 0;
     if (token >= last->token)
@@ -533,6 +534,12 @@ static uint32_t check_program_token_body_next(const CheckProgram* program, uint3
         }
     }
     *last = (CheckProgramBodyCursor){ .token = token, .opened = opened };
+    return opened;
+}
+
+static uint32_t check_program_token_body_next(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
+{
+    const uint32_t opened = check_program_opened_through(program, token, last);
     const uint32_t body = opened != 0 && token <= program->parser->tree.parents[program->bodies[opened - 1].opening] ? opened : 0;
     return body;
 }

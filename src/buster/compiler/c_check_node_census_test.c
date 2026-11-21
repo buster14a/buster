@@ -6127,6 +6127,73 @@ static bool node_front_test_builtins(const char* directory, uint8_t front, uint6
     return valid && same;
 }
 
+static void node_window_test_constants(CheckTest* test, bool remapped)
+{
+    char file[PATH_MAX];
+    snprintf(file, sizeof(file), "%s/checker/node-window-constants.c", check_test_fixture_root);
+    char* options[] = { "-nostdinc", "-g", "-DWINDOW_REMAPPED_SOURCE" };
+    const uint32_t option_count = remapped ? BUSTER_ARRAY_LENGTH(options) : BUSTER_ARRAY_LENGTH(options) - 1;
+    static LowerSource plain;
+    static LowerSource window;
+    const bool prepared = lower_source_open(&plain, file, options, option_count, 0) && plain.prepared &&
+                          lower_source_open(&window, file, options, option_count, BUSTER_LOWER_SOURCE_WINDOW_CONSTANTS) && window.prepared;
+    const CheckInput* input = &window.path.input;
+    const CheckGraph* reference = &plain.path.input.graph;
+    const bool smaller = prepared && input->integer_window_count >= 4 && input->graph.count + input->integer_window_removed == reference->count;
+    check_test_expect(test, smaller, "constant windows remove integer arithmetic below ordinary parents");
+    uint32_t matched = 0;
+    uint32_t shifts = 0;
+    uint32_t comparisons = 0;
+    bool division_kept = false;
+    bool mask_value = false;
+    for (uint32_t node = 0; smaller && node < input->graph.count; ++node)
+    {
+        const uint32_t token = input->graph.tokens[node];
+        shifts += input->graph.ops[node] == CHECK_OP_SHIFT_LEFT;
+        comparisons += input->graph.ops[node] == CHECK_OP_LESS;
+        if (input->graph.ops[node] == CHECK_OP_DIVIDE)
+        {
+            const uint32_t left = input->graph.operand0[node];
+            division_kept |= left < input->graph.count && input->graph.ops[left] == CHECK_OP_SUBTRACT;
+        }
+        if (input->graph.ops[node] == CHECK_OP_VALUE)
+        {
+            for (uint32_t old = 0; old < reference->count; ++old)
+            {
+                if (reference->tokens[old] == token && reference->ops[old] >= CHECK_OP_POSITIVE && reference->ops[old] <= CHECK_OP_BIT_XOR)
+                {
+                    const CheckValue original = check_stream_value(&plain.path.stream, old);
+                    const CheckValue actual = check_stream_value(&window.path.stream, node);
+                    matched += check_test_value_equal(&original, &actual);
+                    if (reference->ops[old] == CHECK_OP_BIT_OR && actual.constant_kind == CHECK_CONSTANT_INTEGER && actual.integer == 39)
+                    {
+                        const ParseTokens* tokens = &window.parser.tokens;
+                        mask_value = tokens->identity_sources == !remapped && (parse_source_index(tokens, token) != token) == remapped;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    check_test_expect(test, smaller && matched == input->integer_window_count && shifts == 1 && comparisons == 1 && division_kept,
+                      "constant operands preserve checked values and original assertion, shift and division syntax used by diagnostics");
+    check_test_expect(test, mask_value, remapped ? "the remapped source identifies the hexadecimal operand in the folded mask" :
+                                                 "the identity source identifies the hexadecimal operand in the folded mask");
+    CheckProgramLowered ordinary = { 0 };
+    CheckProgramLowered taken = { 0 };
+    bool same = smaller && check_program_lower_sources(&ordinary, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+                check_program_lower_sources(&taken, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) && taken.count == ordinary.count;
+    for (uint32_t b = 0; same && b < taken.count; ++b)
+    {
+        const uint32_t count = ordinary.functions[b].count;
+        same = check_test_program_function(ordinary.functions + b, taken.functions + b) &&
+               (count == 0 || memcmp(ordinary.entry_tokens[b], taken.entry_tokens[b], (size_t)count * sizeof(uint32_t)) == 0);
+    }
+    check_test_expect(test, same, "ordinary parents lower constant children with the same native entries and source tokens");
+    lower_source_close(&window);
+    lower_source_close(&plain);
+}
+
 // Compile the source independently both ways. Change the retained first row after checking and lower it again:
 // only a lowering that actually splices the reader's tape can emit the changed value.
 static void node_window_test_compile(CheckTest* test, bool debug, bool assignments)
@@ -6340,6 +6407,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     node_window_test_compile(test, true, false);
     node_window_test_compile(test, true, true);
     node_window_test_void(test);
+    node_window_test_constants(test, false);
+    node_window_test_constants(test, true);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready && node_window_test_debug_driver(directory), "node-window takes integer returns under -g and preserves the debug object");
