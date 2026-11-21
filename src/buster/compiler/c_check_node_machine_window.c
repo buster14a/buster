@@ -1228,24 +1228,40 @@ static void node_contexts_window_chunk(struct NodeFactsReader* state, const Node
     NodeFrontTypes* types = state->types;
     uint64_t* counts = types->facts_counts;
     const uint32_t count = front->count;
+    NodeWindowCounter* const counter = node_window_counting != NULL && node_window_counting->family == NODE_WINDOW_CONTEXTS ? node_window_counting : NULL;
+    uint64_t first_sample[4];
+    uint64_t second_sample[4];
     const uint64_t t0 = __rdtsc();
+    first_sample[0] = node_window_stamp(counter);
     NodeContextsLoopCounts loop_counts = { 0 };
     node_contexts_window_loop(state, front, count, &loop_counts);
     state->c_updates_now = loop_counts.updates_taken;
     state->c_branches_now = loop_counts.branched - loop_counts.branched_roots + loop_counts.valued;
     const uint64_t t1 = __rdtsc();
+    first_sample[1] = node_window_stamp(counter);
     node_contexts_window_targets(state, front, count);
     const uint64_t t2 = __rdtsc();
+    first_sample[2] = node_window_stamp(counter);
     node_contexts_window_part(state, front);
     const uint64_t t3 = __rdtsc();
+    first_sample[3] = node_window_stamp(counter);
+    second_sample[0] = first_sample[3];
     // The shadow's own: the second run, the counts, and each decided expression against the reference.
     NodeContextsLoopCounts again = { 0 };
     node_contexts_window_loop(state, front, count, &again);
     const uint64_t t4 = __rdtsc();
+    second_sample[1] = node_window_stamp(counter);
     node_contexts_window_targets(state, front, count);
     const uint64_t t5 = __rdtsc();
+    second_sample[2] = node_window_stamp(counter);
     node_contexts_window_part(state, front);
     const uint64_t t6 = __rdtsc();
+    second_sample[3] = node_window_stamp(counter);
+    if (counter != NULL)
+    {
+        node_window_collect(counter, 0, first_sample, 3, count);
+        node_window_collect(counter, 1, second_sample, 3, count);
+    }
     uint64_t decided_records = 0;
     for (uint32_t e = 0; e < state->expression_count; e += 1)
     {

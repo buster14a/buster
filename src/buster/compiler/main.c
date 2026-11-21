@@ -720,6 +720,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 // #2850's step 2's second piece: what reads T's record, counted in the shadow (measure-node-machine --shadow --facts-reads).
 #include "buster/compiler/c_check_node_machine_reads.c"
 // #2850's step 2, C on the window: C's answers from the window's bytes, 64 records a step (--shadow --window-contexts).
+#include "buster/compiler/c_check_node_window_counter.c"
 #include "buster/compiler/c_check_node_machine_window.c"
 // #2850's step 2, X's rows on the window: the kinds and classes of X's entries from C's answers there (--shadow --window-rows).
 #include "buster/compiler/c_check_node_machine_rows.c"

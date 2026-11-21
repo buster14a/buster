@@ -2226,31 +2226,42 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
     uint64_t* counts = types->facts_counts;
     const uint32_t count = front->count;
     NodeRowsCounts read = { 0 };
+    NodeWindowCounter* const counter = node_window_counting != NULL && node_window_counting->family == NODE_WINDOW_ROWS ? node_window_counting : NULL;
+    uint64_t first_sample[8];
+    uint64_t second_sample[8];
     const uint64_t t0 = __rdtsc();
+    first_sample[0] = node_window_stamp(counter);
     node_rows_window_reads(state, count, &read);
     const uint64_t reads_end = __rdtsc();
+    first_sample[1] = node_window_stamp(counter);
     node_rows_window_shapes(state, front, count);
     const uint64_t shapes_end = __rdtsc();
+    first_sample[2] = node_window_stamp(counter);
     if ((state->c_updates_now | state->c_branches_now) != 0)
     {
         node_rows_window_updates(state, front, count, &read);
     }
     const uint64_t t1 = __rdtsc();
+    first_sample[3] = node_window_stamp(counter);
     const uint32_t written = node_rows_window_write(state, front, count);
     const uint64_t t2 = __rdtsc();
+    first_sample[4] = node_window_stamp(counter);
     uint32_t lists[BUSTER_NODE_ROWS_LISTS] = { 0 };
     uint32_t numbered = 0;
     uint64_t steps = 0;
     node_rows_window_values(state, front, count, written, &read, lists, &numbered, &steps);
     const uint64_t values_end = __rdtsc();
+    first_sample[5] = node_window_stamp(counter);
     node_rows_window_part(state, front);
     const uint64_t t3 = __rdtsc();
+    first_sample[6] = node_window_stamp(counter);
     NodeRowsSummaryCounts summary = { 0 };
     if (state->summaries)
     {
         node_rows_window_summary(state, front, count, &summary);
     }
     const uint64_t summary_end = __rdtsc();
+    first_sample[7] = node_window_stamp(counter);
     const uint32_t decided = state->x_decided_now;
     state->x_decided_now = 0;
     // The first run's side facts, kept like its streams. And their comparison's control (NodeFactsReader.summary_fault):
@@ -2296,31 +2307,44 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
         first_lists[list] = lists[list] ^ (turn == 6 + list ? 1u : 0u);
     }
     const uint64_t later_start = __rdtsc();
+    second_sample[0] = node_window_stamp(counter);
     NodeRowsCounts again = { 0 };
     node_rows_window_reads(state, count, &again);
     const uint64_t later_reads_end = __rdtsc();
+    second_sample[1] = node_window_stamp(counter);
     node_rows_window_shapes(state, front, count);
     const uint64_t later_shapes_end = __rdtsc();
+    second_sample[2] = node_window_stamp(counter);
     if ((state->c_updates_now | state->c_branches_now) != 0)
     {
         node_rows_window_updates(state, front, count, &again);
     }
     const uint64_t t4 = __rdtsc();
+    second_sample[3] = node_window_stamp(counter);
     const uint32_t written_again = node_rows_window_write(state, front, count);
     const uint64_t t5 = __rdtsc();
+    second_sample[4] = node_window_stamp(counter);
     uint32_t lists_again[BUSTER_NODE_ROWS_LISTS] = { 0 };
     uint32_t numbered_again = 0;
     uint64_t steps_again = 0;
     node_rows_window_values(state, front, count, written_again, &again, lists_again, &numbered_again, &steps_again);
     const uint64_t later_values_end = __rdtsc();
+    second_sample[5] = node_window_stamp(counter);
     node_rows_window_part(state, front);
     const uint64_t t6 = __rdtsc();
+    second_sample[6] = node_window_stamp(counter);
     NodeRowsSummaryCounts summary_again = { 0 };
     if (state->summaries)
     {
         node_rows_window_summary(state, front, count, &summary_again);
     }
     const uint64_t later_summary_end = __rdtsc();
+    second_sample[7] = node_window_stamp(counter);
+    if (counter != NULL)
+    {
+        node_window_collect(counter, 0, first_sample, (state->summaries ? 7u : 6u), count);
+        node_window_collect(counter, 1, second_sample, (state->summaries ? 7u : 6u), count);
+    }
     const uint32_t decided_again = state->x_decided_now;
     state->x_decided_now = 0;
     for (uint32_t e = 0; e < state->expression_count; e += 1)

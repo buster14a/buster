@@ -10,7 +10,7 @@
 //   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
 //                                       [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--front | --front-first] [--front-lean]
 //                                       [--front-warm] [--front-types] [--front-sweeps] [--front-tests] [--front-tests-last] [--passes N]
-//                                       [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--repeat N]]
+//                                       [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows [--window-counter FAMILY EVENT]] [--repeat N]]
 //                                       [preprocessor options]
 //                                       file...
 //
@@ -4259,14 +4259,45 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
     uint64_t* counts = types->facts_counts;
     NodeTestsLoop* loops = tests->loops;
     const bool verify_quiet = tests->verify_quiet;
+    NodeWindowCounter* const counter = node_window_counting != NULL && node_window_counting->family == NODE_WINDOW_TESTS ? node_window_counting : NULL;
+    uint64_t first_sample[3];
     const uint64_t t0 = __rdtsc();
+    first_sample[0] = node_window_stamp(counter);
     node_tests_window_bytes(tests, state, front, &counts[NODE_FACTS_COUNT_TESTS_LINES]);
     const uint64_t t1 = __rdtsc();
+    first_sample[1] = node_window_stamp(counter);
     uint32_t ask_count = 0;
     node_tests_window_loop(tests, state, front, front->count, &counts[NODE_FACTS_COUNT_TESTS_FAR], &types->own_quiet, &types->own_quiet_calls, &types->own_quiet_casts,
                            &ask_count);
     types->own_result_asks += node_tests_window_asks(tests, front, ask_count);
     const uint64_t t2 = __rdtsc();
+    first_sample[2] = node_window_stamp(counter);
+    if (counter != NULL)
+    {
+        // The repeated bytes and masks replace the same columns. The first run has filled the declaration
+        // memos already. Keep the shadow's counters and the first run's number of asks.
+        const uint64_t checked = types->own_values_checked;
+        const uint64_t wrong = types->own_values_wrong;
+        uint64_t made = 0;
+        uint64_t far = 0;
+        uint64_t quiet = 0;
+        uint64_t calls = 0;
+        uint64_t casts = 0;
+        uint32_t asks = 0;
+        uint64_t second_sample[3];
+        second_sample[0] = node_window_stamp(counter);
+        node_tests_window_bytes(tests, state, front, &made);
+        (void)__rdtsc();
+        second_sample[1] = node_window_stamp(counter);
+        node_tests_window_loop(tests, state, front, front->count, &far, &quiet, &calls, &casts, &asks);
+        (void)node_tests_window_asks(tests, front, asks);
+        (void)__rdtsc();
+        second_sample[2] = node_window_stamp(counter);
+        types->own_values_checked = checked;
+        types->own_values_wrong = wrong;
+        node_window_collect(counter, 0, first_sample, 2, front->count);
+        node_window_collect(counter, 1, second_sample, 2, front->count);
+    }
     types->own_result_casts += ask_count;
     // What every expression with nothing listed has, by the unit's warnings; and the unit's switches as bits.
     const uint64_t fixed = policy->unmodeled ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
@@ -7626,6 +7657,7 @@ static int run_node_census(int count, char** arguments)
     uint32_t file_count = 0;
     bool valid = options != 0 && files != 0;
     bool shadowed = false;
+    NodeWindowCounter window_counter = { .descriptor = -1 };
     NodeShadow shadow = { .passes = 5, .repeat = 1 };
     for (int i = 0; valid && i < count; i += 1)
     {
@@ -7745,6 +7777,11 @@ static int run_node_census(int count, char** arguments)
             shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
                              BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS;
         }
+        else if (strcmp(arguments[i], "--window-counter") == 0)
+        {
+            valid = window_counter.event == NULL && i + 2 < count && node_window_select(&window_counter, arguments[i + 1], arguments[i + 2]);
+            i += valid ? 2 : 0;
+        }
         else if (strcmp(arguments[i], "--no-window-summaries") == 0)
         {
             // The switch for a summary's side facts' cost: --window-rows without them, in the same executable.
@@ -7798,12 +7835,33 @@ static int run_node_census(int count, char** arguments)
             !(shadow.facts_operators && shadow.facts_mode == BUSTER_NODE_FACTS_LOADS) && !(shadow.facts_reads && shadow.facts_mode != BUSTER_NODE_FACTS_WHOLE);
     // --verify with T at reader time checks its rows and rules against the action there too.
     shadow.reader |= shadow.verify && (shadow.front & BUSTER_NODE_FRONT_TYPES) != 0 ? BUSTER_NODE_READER_VERIFY : 0;
+    valid = valid && (window_counter.event == NULL || (shadowed && (shadow.reader & BUSTER_NODE_READER_WINDOW_ROWS) != 0));
+    if (valid && window_counter.event != NULL)
+    {
+        valid = node_window_pmu_open(&window_counter);
+        if (!valid)
+        {
+            fprintf(stderr, "measure-node-machine: could not open or schedule pinned user counter %s\n", window_counter.event->name);
+        }
+        node_window_counting = valid ? &window_counter : NULL;
+    }
     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
         valid = node_census_file(&census, files[i], options, option_count);
         fflush(stdout);
     }
+    node_window_counting = NULL;
+    if (window_counter.failed)
+    {
+        fprintf(stderr, "measure-node-machine: hardware counter reading failed\n");
+        valid = false;
+    }
+    if (valid && window_counter.event != NULL)
+    {
+        node_window_pmu_report(&window_counter, (shadow.reader & BUSTER_NODE_READER_WINDOW_SUMMARY_OFF) == 0);
+    }
+    node_window_pmu_close(&window_counter);
     if (valid)
     {
         node_census_report(&census);
@@ -7822,7 +7880,7 @@ static int run_node_census(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-lean | --facts-loads] [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-lean | --facts-loads] [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--window-rows [--window-counter FAMILY EVENT]] [--passes N] [--repeat N]] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
