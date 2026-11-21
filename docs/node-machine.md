@@ -7491,9 +7491,10 @@ objects')
   integer", an automatic object's label's "in a body", "with no linkage" and
   "an object"), a rename pragma the reader did not take (an error unit)
   twice, and three of work with the same answer. On the code here the 9700X
-  ran 24 of the 116 before the hand-off: 21 caught and
-  `ordered-any-other-operand`, `ordered-two-pointers-too` and
-  `segment-unextended-asked` survived, each one of those nine.
+  ran 40 of the 116 before the hand-off: 35 caught and
+  `ordered-any-other-operand`, `ordered-two-pointers-too`,
+  `orders-any-operator`, `own-order-unasked` and `segment-unextended-asked`
+  survived, each one of those nine.
 - **O5, the fixtures: met.** Each kind has a line in a fixture, in a unit of
   its own where its answer is a unit's. Of the 13 new fixtures 10 have
   status 1 on the code before (20 of the holes' 47 annotated lines do not
