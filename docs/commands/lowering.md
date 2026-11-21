@@ -2719,10 +2719,16 @@ unreachable read still counts as a syntactic use of a written parameter.
 Other storage classes, special registers and qualified types keep their graph.
 
 Admission requires the entire expression in the same coded chunk. Other types,
-operators and spellings, debug information, deferred parts, and units requiring
+operators and spellings, deferred parts, and units requiring
 musttail validation use the existing graph. The window checks the coded tokens
 before any of their graph actions run. A refusal consumes no tokens. No ordinary
 graph or shadow run supplies a successful fold.
+
+With debug information enabled, the CONST row keeps the return token. The
+ordinary lowering uses this same token for the folded return conversion,
+including when its operands occur on different lines or come from macros.
+The node-machine fixture compares every native entry and its source token
+between the two lowerings.
 
 `--time-stages` reports the expressions taken, the ordinary nodes they replace,
 the summaries and the resulting graph size per unit. The

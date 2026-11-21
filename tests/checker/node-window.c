@@ -2,10 +2,21 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 
 #define NINE 9
-int positive(void) { return 18 + 24; }
+int positive(void)
+{
+    return
+        18
+        +
+        24;
+}
 int negative(void) { return 8 - 50; }
 int negated(void) { return -42; }
-int multiplied(void) { return NINE * 7; }
+int multiplied(void)
+{
+    return NINE
+        *
+        7;
+}
 int zero(void) { return 0; }
 int literal(void) { return 4; }
 int from_argument(int x) { return x + 7; }

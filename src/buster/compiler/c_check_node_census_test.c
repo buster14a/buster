@@ -6170,6 +6170,20 @@ static void node_window_test_compile(CheckTest* test)
             lowered = check_test_program_function(original.functions + b, first.functions + b);
         }
         check_test_expect(test, lowered, "node-window mixed returns lower to the ordinary functions' native tapes");
+        // The ordinary CONVERT and the summary both own the return token. A difference in any
+        // entry's token matters even on one line, where the final DWARF row can coalesce it.
+        CheckProgramLowered plain_debug = { 0 };
+        CheckProgramLowered window_debug = { 0 };
+        bool tokens = check_program_lower_sources(&plain_debug, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+                      check_program_lower_sources(&window_debug, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) &&
+                      plain_debug.count == window_debug.count;
+        for (uint32_t b = 0; tokens && b < plain_debug.count; b += 1)
+        {
+            const uint32_t entries = plain_debug.functions[b].count;
+            tokens = check_test_program_function(plain_debug.functions + b, window_debug.functions + b) &&
+                     (entries == 0 || memcmp(plain_debug.entry_tokens[b], window_debug.entry_tokens[b], (size_t)entries * sizeof(uint32_t)) == 0);
+        }
+        check_test_expect(test, tokens, "node-window debug lowering keeps the exact source token and native row for each entry");
         bool replayed = false;
         if (lowered && input->window_count != 0)
         {
@@ -6193,11 +6207,40 @@ static void node_window_test_compile(CheckTest* test)
     lower_source_close(&plain);
 }
 
+// Exercise the public driver option too. With -g it must take returns and emit the same whole object.
+static bool node_window_test_debug_driver(const char* directory)
+{
+    char file[PATH_MAX];
+    char ordinary[PATH_MAX];
+    char window[PATH_MAX];
+    snprintf(file, sizeof(file), "%s/checker/node-window.c", check_test_fixture_root);
+    snprintf(ordinary, sizeof(ordinary), "%s/ordinary.o", directory);
+    snprintf(window, sizeof(window), "%s/window.o", directory);
+    char* arguments[] = { "/proc/self/exe", "-c", "-g", "-nostdinc", "-o", ordinary, file, NULL, NULL, NULL };
+    char* diagnostics = NULL;
+    const int baseline = check_test_driver_spawn(arguments, &diagnostics);
+    free(diagnostics);
+    arguments[5] = window;
+    arguments[7] = "--node-window";
+    arguments[8] = "--time-stages";
+    const int status = check_test_driver_spawn(arguments, &diagnostics);
+    const char* count = diagnostics != NULL ? strstr(diagnostics, "node-window: taken=") : NULL;
+    unsigned taken = 0;
+    const bool same = baseline == 0 && status == 0 && count != NULL && sscanf(count, "node-window: taken=%u", &taken) == 1 &&
+                      taken >= 7 && check_test_driver_files_equal(ordinary, window);
+    free(diagnostics);
+    unlink(window);
+    unlink(ordinary);
+    return same;
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
     node_window_test_compile(test);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
+    check_test_expect(test, ready && node_window_test_debug_driver(directory), "node-window takes integer returns under -g and preserves the debug object");
+
     check_test_expect(test, ready, "node-census fixtures' directory is made");
     char* loud[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum" };
     char* quiet[] = { "-nostdinc" };
