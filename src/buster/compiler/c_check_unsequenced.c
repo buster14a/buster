@@ -1073,6 +1073,32 @@ static uint8_t* check_unseq_marks(const CheckGraph* graph, const uint32_t* paren
     return marks;
 }
 
+// A full expression with just its outer modification cannot conflict with itself. Its pre-modification
+// check precedes its operands' reads. Its post-modification check only tests for another modification.
+// A single unary wrapper adds no sibling access, and its child (the modification) names no read object.
+// This uses marks only in a verified tree, where every child's modifications reach its unique parent.
+static bool check_unseq_sole_modification(const CheckGraph* graph, const uint8_t* marks, uint32_t root)
+{
+    const uint32_t count = graph->count;
+    const CheckOp op = graph->ops[root];
+    const bool wrapper = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITION || op == CHECK_OP_POSITIVE;
+    const uint32_t node = wrapper && graph->operand0[root] < count && graph->operand1[root] >= count && graph->operand2[root] >= count ?
+                          graph->operand0[root] : root;
+    if (!check_unseq_modification(graph->ops[node]))
+    {
+        return false;
+    }
+    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+    {
+        if (operands[i] < count && (marks[operands[i]] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 // A warning's publication, as clang's DiagRuntimeBehavior queues it: in a function at its end, in a file-scope
 // initializer at its declarator's end.
 static void check_unseq_publish(CheckCommonEmission* emission, uint32_t token, const char* message)

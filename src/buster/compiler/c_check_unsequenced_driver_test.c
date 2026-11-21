@@ -156,8 +156,29 @@ static const char check_driver_unsequenced_lanes_source[] =
     "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
     "}\n";
 
+// A sole outer modification may read its own target. A nested modification, or a sibling use,
+// still diagnoses the offending operator with its original macro expansion.
+static const char check_driver_unsequenced_sole_source[] =
+    "#define STEP(v) ((v)++)\n"
+    "void pair(int, int);\n"
+    "int f(volatile int x, int y, int *p) {\n"
+    "    x = x + y; x += x; ++x; x--; (void)(x -= y); *p = x;\n"
+    "    if ((x = y)) { (void)STEP(x); }\n"
+    "    x = STEP(x);\n"
+    "    x += ++x;\n"
+    "    pair(STEP(x), x);\n"
+    "    return x += y;\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_unsequenced_fixtures[] =
 {
+    {
+        .name = "sole volatile modifications and nested unsequenced accesses",
+        .source = check_driver_unsequenced_sole_source,
+        .options = { "-Wno-everything", "-Wunsequenced" },
+        .warnings = 3,
+        .notes = 2,
+    },
     {
         .name = "unsequenced modifications and reads by operator",
         .source = check_driver_unsequenced_operators_source,
