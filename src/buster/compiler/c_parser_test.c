@@ -2330,6 +2330,11 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
         // K4 as the vector path runs it, then with windows of fewer lanes and through its deep fallback.
         parse_parents_vector(kernels, count, &buffers);
         const bool deep = !kernels->unbalanced && parse_deepest(kernels, count) > BUSTER_PARSE_MAX_VECTOR_DEPTH;
+        if (!kernels->unbalanced && kernels->deep_node_depths != deep)
+        {
+            parse_test_report("%s: K1's depth bound disagrees with the full node-depth column\n", name);
+            result += 1;
+        }
         tally->deep_units += deep;
         if (!kernels->unbalanced && !deep)
         {
@@ -2379,12 +2384,16 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
         // K6 leave some of what it reads unwritten (#528), and the vector path doesn't run it.
         const bool everything = kernels->unbalanced || kernels->unsupported || !settled;
         memcpy(copies.check_input, kernels->flags, count);
-        static const uint32_t periods[] = { 0, 2, 3 };
+        // Compare the ordinary K4 key path with a complete full-depth K6 pass and then with the forced block fallbacks.
+        const ParseBlockWork* depth_work = kernels->depth_work;
+        static const uint32_t periods[] = { 0, 0, 2, 3 };
         for (uint32_t p = 0; !everything && p < sizeof(periods) / sizeof(periods[0]); p += 1)
         {
             memcpy(kernels->flags, copies.check_input, count);
             uint64_t blocks = 0;
+            kernels->depth_work = p == 1 ? NULL : depth_work;
             parse_check_avx512_period(kernels, names, parser->tokens.flags, count, copies.typed, &blocks, periods[p]);
+            kernels->depth_work = depth_work;
             uint32_t first = BUSTER_PARSE_NONE;
             if (p == 0)
             {
