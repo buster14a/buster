@@ -173,7 +173,6 @@ static bool tier1_schedule_bench_run(Tier1ScheduleBench* bench, uint32_t variant
 static bool tier1_schedule_bench_check(Tier1ScheduleBench* bench, uint64_t* moved, uint64_t* missing)
 {
     bool valid = true;
-    uint8_t scalar_code[BUSTER_X86_ENCODER_CAPACITY(BUSTER_TIER1_SCHEDULE_MAX_RECORDS)];
     *moved = 0;
     *missing = 0;
     for (uint32_t block = 0; valid && block < bench->blocks; block += 1)
@@ -192,9 +191,7 @@ static bool tier1_schedule_bench_check(Tier1ScheduleBench* bench, uint64_t* move
             {
                 bench->reordered[i] = records[bench->order[i]];
             }
-            const int64_t scalar_bytes = x86_encode_scalar(bench->reordered, bench->count, scalar_code, sizeof(scalar_code), 0, 0);
-            const int64_t vector_bytes = x86_encode(bench->reordered, bench->count, bench->code, sizeof(bench->code), 0, 0);
-            valid = scalar_bytes >= 0 && scalar_bytes == vector_bytes && memcmp(scalar_code, bench->code, (uint64_t)scalar_bytes) == 0;
+            valid = x86_validate(bench->reordered, bench->count) == bench->count && x86_encode(bench->reordered, bench->count, bench->code, sizeof(bench->code), 0, 0) >= 0;
         }
     }
     return valid;

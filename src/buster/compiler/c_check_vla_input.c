@@ -964,9 +964,8 @@ static void check_input_vla_finish(CheckInputReader* reader)
     // lifetime, so one stack scan gives every transfer target its complete entry constraint in constant space
     // per token. Binding replay is finished; its scope scratch columns are available for this temporary map.
     // A unit without a variably modified declaration has no lifetime for a jump to enter, and the scans below would find
-    // nothing: the vector path tests the declarations' lifetimes 16 tokens at a time for one, and the scalar reader
-    // makes the scans anyway, their twin.
-    bool lifetimes = BUSTER_SCALAR_PATH(parser->options.scalar);
+    // nothing: the declarations' lifetimes are tested 16 tokens at a time for one.
+    bool lifetimes = false;
     for (uint32_t first = 0; !lifetimes && first < parser->tokens.count; first += 16)
     {
         // 64 bytes of the column that no write claimed are all zero (check_input_rare_marked, #628).

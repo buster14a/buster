@@ -1601,6 +1601,16 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "_Static_assert(__builtin_types_compatible_p(__typeof__(g), N), \"the typedef's hidden\");\n",
         "__attribute__((intel_ocl_bicc, no_caller_saved_registers)) long f(long a) { return a; } __attribute__((no_caller_saved_registers)) long h(long a) "
         "__attribute__((preserve_all)) { return f(a); }\n",
+        // Runs of GNU groups after a declarator: each group of a run before a body gives -Wgcc-compat, which the first
+        // group's scan of the run decides for the rest of it (#2995), and a keyword or a C23 list within a run.
+        "int f(void) __attribute__((noinline)) __attribute__((cold)) __attribute__((used)) { return 0; }\n"
+        "int g(void) __attribute__((cold)) __attribute__((unused)) __attribute__((noinline));\n",
+        "int f(void) __attribute__((noinline)) __attribute__((cold)) __attribute__((used)), g(void) __attribute__((cold)) __attribute__((unused));\n"
+        "int h(void) __attribute__((noinline)) __attribute__((unused)) { return 0; }\n",
+        "int f(void) __attribute__((noinline)) _Alignas(8) __attribute__((cold)) { return 1; }\n",
+        "int f(void) __attribute__((noinline)) [[gnu::cold]] __attribute__((used)) { return 2; }\n",
+        // A declarator that a later group's arguments keep from completing: each group's warning is the run's reading's.
+        "int f(void) __attribute__((noinline)) __attribute__((cold)) __attribute__((used)) __attribute__((regparm(9))) { return 0; }\n",
         // target diagnostics name the decoded unsupported fragment, including permitted escapes.
         "int f(void) __attribute__((target(\"bo\\\\gus\")));\n",
         "int f(void) __attribute__((target(\"bo\\tgus\")));\n",

@@ -156,23 +156,20 @@ static void check_test_packed_intervals(CheckTest* test)
                     }
                 }
             }
-            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            memset(analyzed - 1, 0xa5, (uint64_t)count + 1);
+            check_input_packed_analyzed(events, analyzed, count);
+            bool same = analyzed[-1] == 0xa5;
+            for (uint32_t i = 0; i < count; i += 1)
             {
-                memset(analyzed - 1, 0xa5, (uint64_t)count + 1);
-                check_input_packed_analyzed(events, analyzed, count, scalar != 0);
-                bool same = analyzed[-1] == 0xa5;
-                for (uint32_t i = 0; i < count; i += 1)
+                // Independent point membership, not another difference/prefix implementation.
+                bool expected = true;
+                for (uint32_t interval = 0; interval < 3; interval += 1)
                 {
-                    // Independent point membership, not another difference/prefix implementation.
-                    bool expected = true;
-                    for (uint32_t interval = 0; interval < 3; interval += 1)
-                    {
-                        expected &= !(i >= starts[pattern][interval] && i < ends[pattern][interval]);
-                    }
-                    same &= analyzed[i] == expected;
+                    expected &= !(i >= starts[pattern][interval] && i < ends[pattern][interval]);
                 }
-                check_test_expect(test, same, "packed interval scan matches independent membership at guarded lane boundaries");
+                same &= analyzed[i] == expected;
             }
+            check_test_expect(test, same, "packed interval scan matches independent membership at guarded lane boundaries");
         }
     }
     if (memory != MAP_FAILED)
@@ -224,11 +221,8 @@ static void check_test_packed_bounds(CheckTest* test)
             {
                 expected |= i % 3 == 0;
             }
-            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-            {
-                check_test_expect(test, check_input_packed_any(kinds, first, width, 4, scalar != 0) == expected,
-                                  "packed metadata scan respects the logical end and guard page");
-            }
+            check_test_expect(test, check_input_packed_any(kinds, first, width, 4) == expected,
+                              "packed metadata scan respects the logical end and guard page");
         }
     }
     if (memory != MAP_FAILED)

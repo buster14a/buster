@@ -77,6 +77,7 @@ static const char* const snapshot_benchmark_kind_options[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "static",
     [RUNTIME_KIND_STATIC_PIE] = "static-pie",
     [RUNTIME_KIND_SHARED] = "shared",
+    [RUNTIME_KIND_NO_PIE] = "no-pie",
 };
 
 static const char* const snapshot_benchmark_kind_names[RUNTIME_KINDS] = {
@@ -84,6 +85,7 @@ static const char* const snapshot_benchmark_kind_names[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "static",
     [RUNTIME_KIND_STATIC_PIE] = "static PIE",
     [RUNTIME_KIND_SHARED] = "shared library",
+    [RUNTIME_KIND_NO_PIE] = "position-dependent",
 };
 
 static const char* const snapshot_benchmark_imports[RUNTIME_KINDS] = {
@@ -91,6 +93,7 @@ static const char* const snapshot_benchmark_imports[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "runtime_import_static",
     [RUNTIME_KIND_STATIC_PIE] = "runtime_import_static_pie",
     [RUNTIME_KIND_SHARED] = "runtime_import_shared",
+    [RUNTIME_KIND_NO_PIE] = "runtime_import_kind (no PIE)",
 };
 
 static int snapshot_benchmark_compare(const void* a, const void* b)

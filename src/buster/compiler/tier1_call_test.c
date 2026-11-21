@@ -833,12 +833,10 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     uint32_t* offsets = calloc((uint64_t)code->count + 1, sizeof(uint32_t));
     uint32_t* ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint32_t* twin_ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint8_t* twin = malloc(capacity);
     // Narrow fixtures put helper TEXT before the caller; wide fixtures put it after. Both rel32 signs execute.
     const uint32_t entry_offset = fixture->width == 4 ? 16u << 10 : 64;
     uint8_t* entry = mapping + entry_offset;
-    bool ready = offsets && ends && twin_ends && twin && capacity + entry_offset <= BUSTER_TIER1_CALL_CODE_BYTES;
+    bool ready = offsets && ends && capacity + entry_offset <= BUSTER_TIER1_CALL_CODE_BYTES;
     tier1_emit_test_expect(test, ready, "direct-call loader storage");
     int64_t length = -1;
     if (ready)
@@ -850,10 +848,9 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
     }
     if (ready)
     {
-        length = x86_encode(code->records, code->count, entry, capacity, 0, ends);
-        const int64_t twin_length = x86_encode_scalar(code->records, code->count, twin, capacity, offsets, twin_ends);
-        ready = length > 0 && length == twin_length && memcmp(entry, twin, (size_t)length) == 0 && memcmp(ends, twin_ends, emitted->reference_count * sizeof(uint32_t)) == 0;
-        tier1_emit_test_expect(test, ready, "call encoders agree on bytes and symbolic instruction ends");
+        length = x86_encode(code->records, code->count, entry, capacity, offsets, ends);
+        ready = length > 0;
+        tier1_emit_test_expect(test, ready, "the direct-call code encodes");
     }
     uint32_t targets[BUSTER_TIER1_CALL_HELPERS] = {0};
     uint32_t used = fixture->width == 4 ? 64 : ready ? (entry_offset + (uint32_t)length + 15) & ~15u : 0;
@@ -923,8 +920,6 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
         ready = mprotect(mapping, BUSTER_TIER1_CALL_CODE_BYTES, PROT_READ | PROT_EXEC) == 0;
         tier1_emit_test_expect(test, ready, "patched direct-call image is executable");
     }
-    free(twin);
-    free(twin_ends);
     free(ends);
     free(offsets);
     return ready && native ? entry : 0;
@@ -1155,6 +1150,60 @@ static uint32_t tier1_call_record(const Tier1EmitResult* emitted, uint32_t k)
     return found;
 }
 
+// #2646: whether the CFG consumer's input names, at each call, the register each register argument is read in (the
+// argument registers by the arguments' places, an xmm one's number in the vector class), a use of the argument's value
+// at the call's input position, where the allocation takes it as its hint (Tier1CfgInput.use_registers); and whether the
+// straight-line consumer's allocation input hints that register to each argument's interval that ends at the call
+// (Tier1AllocationInput.register_hints), the first argument's of a value passed twice.
+static bool tier1_call_use_registers(Tier1EmitTest* test, const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
+{
+    const IrFunction* function = plan->function;
+    const Tier1CfgInput* input = &emitted->cfg_input;
+    const Tier1AllocationInput* straight = &emitted->prepared.allocation;
+    const bool general = emitted->general;
+    const uint32_t base = general ? 2 * (input->block_count - function->block_count) : 0;
+    bool named = !general || input->use_registers != 0;
+    for (uint32_t node = 0; named && node < function->instruction_count; node += 1)
+    {
+        const bool call = tier1_select_function_call(function, node);
+        const IrCall* called = call ? &function->calls[function->b[node]] : 0;
+        Tier1SelectPlaces places = { 0 };
+        for (uint32_t argument = 0; named && call && argument < called->argument_count; argument += 1)
+        {
+            const Tier1SelectPlace place = tier1_select_argument_place(function, called, argument, &places);
+            const bool registered = place.kind == BUSTER_TIER1_PLACE_GENERAL || place.kind == BUSTER_TIER1_PLACE_VECTOR;
+            const uint8_t expected = place.kind == BUSTER_TIER1_PLACE_GENERAL ? tier1_select_parameter_registers[place.index] : place.index;
+            const uint32_t value = plan->effective_use_values[plan->effective_use_offsets[node] + argument];
+            bool found = !registered;
+            if (general)
+            {
+                const uint32_t v = emitted->node_values[value];
+                found = found || v == BUSTER_TIER1_CFG_NONE;
+                for (uint32_t u = v != BUSTER_TIER1_CFG_NONE ? input->use_offsets[v] : 0; !found && u < input->use_offsets[v + 1]; u += 1)
+                {
+                    found = input->use_positions[u] == base + 2 * node && input->use_registers[u] == expected;
+                    test->general_hints += found;
+                }
+            }
+            else
+            {
+                bool earlier = false;
+                for (uint32_t k = 0; k < argument; k += 1)
+                {
+                    earlier |= plan->effective_use_values[plan->effective_use_offsets[node] + k] == value;
+                }
+                const uint32_t interval = emitted->prepared.value_intervals[value];
+                const bool ends = interval < straight->count && straight->values[interval] == value && straight->ends[interval] == 2 * node + 1;
+                const bool hinted = straight->register_hints != 0 && straight->register_hints[interval] == expected;
+                test->straight_hints += registered && !earlier && ends && hinted;
+                found = found || earlier || !ends || hinted;
+            }
+            named = found;
+        }
+    }
+    return named;
+}
+
 static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixture, bool vector, bool rematerialize, uint32_t frame_flags)
 {
     test->terms = fixture->terms;
@@ -1199,6 +1248,7 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             Tier1CfgCheck check;
             const bool verified = emitted.general ? tier1_cfg_verify(&emitted.cfg_input, &emitted.cfg, &test->scratch, &check) : tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation);
             tier1_emit_test_expect(test, verified, "direct-call allocation passes independent interference verification");
+            tier1_emit_test_expect(test, tier1_call_use_registers(test, &plan, &emitted), "a call's register arguments' uses name the registers it reads them in (#2646)");
             tier1_emit_test_expect(test, tier1_emit_test_saves_loaded(&emitted), "every value a call stores is loaded back before the code leaves its straight-line run");
             tier1_emit_test_expect(test, tier1_emit_test_general_rows_used(&emitted), "a call-save row is a register some call stores, and no other register has one (#177)");
             // A call past which no value lives (the pointer's, the empty one's) takes no call-save row, where every
@@ -1534,6 +1584,8 @@ static void tier1_call_cases(Tier1EmitTest* test)
         }
         arena_pop_to(&test->input, 0);
     }
+    // Both consumers' hints were checked where a call reads an argument in a register (#2646).
+    tier1_emit_test_expect(test, test->general_hints != 0 && test->straight_hints != 0, "the call fixtures check both consumers' argument register hints");
     tier1_call_failures(test);
     tier1_call_probe_tests(test);
 }

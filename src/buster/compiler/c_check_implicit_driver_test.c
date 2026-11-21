@@ -381,8 +381,8 @@ static uint32_t check_test_common_candidate_reference(const uint8_t* kinds, cons
     return result;
 }
 
-// check_common_self_candidate's AVX-512 blocks against its scalar twin and the direct reading, on random streams that
-// end at a protected page: every start and end near the tail, block edges, members across a block edge, and walks of
+// check_common_self_candidate's AVX-512 blocks against the direct reading, on random streams that end at a protected
+// page: every start and end near the tail, block edges, members across a block edge, and walks of
 // every candidate the way the brace scan takes them.
 static void check_test_common_self_candidates(CheckTest* test)
 {
@@ -418,27 +418,25 @@ static void check_test_common_self_candidates(CheckTest* test)
             begin = begin + query % 2 <= length ? begin + query % 2 : begin;
             const uint32_t end = query % 4 == 0 ? length : begin + check_test_random(test) % (length - begin + 1);
             const uint32_t expected = check_test_common_candidate_reference(kinds, names, name, begin, end);
-            const uint32_t vector = check_common_self_candidate(kinds, names, name, begin, end, true);
-            const uint32_t scalar = check_common_self_candidate(kinds, names, name, begin, end, false);
-            same = vector == expected && scalar == expected;
+            same = check_common_self_candidate(kinds, names, name, begin, end) == expected;
         }
         uint32_t vector_count = 0;
-        uint32_t scalar_count = 0;
+        uint32_t reference_count = 0;
         uint64_t vector_sum = 0;
-        uint64_t scalar_sum = 0;
-        for (uint32_t at = check_common_self_candidate(kinds, names, name, 0, length, true); at < length;
-             at = check_common_self_candidate(kinds, names, name, at + 1, length, true))
+        uint64_t reference_sum = 0;
+        for (uint32_t at = check_common_self_candidate(kinds, names, name, 0, length); at < length;
+             at = check_common_self_candidate(kinds, names, name, at + 1, length))
         {
             vector_count += 1;
             vector_sum += (uint64_t)at * 2654435761u + vector_count;
         }
-        for (uint32_t at = check_common_self_candidate(kinds, names, name, 0, length, false); at < length;
-             at = check_common_self_candidate(kinds, names, name, at + 1, length, false))
+        for (uint32_t at = check_test_common_candidate_reference(kinds, names, name, 0, length); at < length;
+             at = check_test_common_candidate_reference(kinds, names, name, at + 1, length))
         {
-            scalar_count += 1;
-            scalar_sum += (uint64_t)at * 2654435761u + scalar_count;
+            reference_count += 1;
+            reference_sum += (uint64_t)at * 2654435761u + reference_count;
         }
-        walked = walked && vector_count == scalar_count && vector_sum == scalar_sum;
+        walked = walked && vector_count == reference_count && vector_sum == reference_sum;
         found += vector_count;
     }
     // A member's name straddling a block edge: `.` is lane 63 of the first block and the name lane 0 of the next.
@@ -460,12 +458,11 @@ static void check_test_common_self_candidates(CheckTest* test)
         for (uint32_t begin = 0; carried && begin <= 130; begin += 1)
         {
             const uint32_t expected = begin <= 129 ? 129 : 130;
-            carried = check_common_self_candidate(kinds, names, name, begin, 130, true) == expected &&
-                      check_common_self_candidate(kinds, names, name, begin, 130, false) == expected;
+            carried = check_common_self_candidate(kinds, names, name, begin, 130) == expected;
         }
     }
-    check_test_expect(test, same, "self-read candidates: SIMD blocks, scalar twin and the direct reading agree on every range");
-    check_test_expect(test, walked && found > 1000, "self-read candidates: both walks visit the same candidates");
+    check_test_expect(test, same, "self-read candidates: the SIMD blocks and the direct reading agree on every range");
+    check_test_expect(test, walked && found > 1000, "self-read candidates: the walk visits the direct reading's candidates");
     check_test_expect(test, carried, "self-read candidates: a member operator before a block edge carries into the next block");
     if (kind_map != MAP_FAILED)
     {
