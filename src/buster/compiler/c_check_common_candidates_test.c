@@ -31,6 +31,8 @@ static bool check_test_common_candidate(CheckCommonCandidate kind, CheckOp op)
                 case CHECK_OP_REMAINDER:
                 case CHECK_OP_SHIFT_LEFT:
                 case CHECK_OP_SHIFT_RIGHT:
+                case CHECK_OP_DIVIDE_ASSIGN:
+                case CHECK_OP_REMAINDER_ASSIGN:
                 case CHECK_OP_SHIFT_LEFT_ASSIGN:
                 case CHECK_OP_SHIFT_RIGHT_ASSIGN:
                 {

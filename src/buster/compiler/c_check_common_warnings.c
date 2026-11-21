@@ -1929,6 +1929,11 @@ static bool check_common_truth_floating(const CheckGraph* graph, const CheckStre
     return result;
 }
 
+static bool check_common_division_op(CheckOp op)
+{
+    return op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || op == CHECK_OP_DIVIDE_ASSIGN || op == CHECK_OP_REMAINDER_ASSIGN;
+}
+
 static bool check_common_shift_op(CheckOp op)
 {
     const bool result = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT ||
@@ -2077,7 +2082,9 @@ static bool check_common_zero_divisor(const CheckGraph* graph, const CheckStream
     {
         if (check_common_integer_constant(stream, at))
         {
-            result = check_stream_value(stream, at).integer == 0;
+            const CheckValue value = check_stream_value(stream, at);
+            bool truth = false;
+            result = check_action_truth(types, &value, &truth) && !truth;
             going = false;
         }
         else if (graph->ops[at] == CHECK_OP_CAST || graph->ops[at] == CHECK_OP_CONVERT)
@@ -2181,16 +2188,15 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
                                          "indirection of non-volatile null pointer will be deleted, not trap", &note, 1, emission->scratch);
         }
     }
-    else if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER)
+    else if (check_common_division_op(op))
     {
         const uint32_t divisor = graph->operand1[node];
         const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
         const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
         if (!ice && check_common_zero_divisor(graph, emission->stream, emission->types, &emission->input->const_values, node, divisor))
         {
-            uint32_t width = 0;
-            bool sign = false;
-            if (check_common_integer(emission->types, check_stream_type(emission->stream, graph->operand0[node]), &width, &sign))
+            const TypeId left_type = check_stream_type(emission->stream, graph->operand0[node]);
+            if (check_action_is_integer(emission->types, type_conversion_operand(emission->types, left_type)))
             {
                 // In a file-scope initializer clang's DiagRuntimeBehavior queues it to the declarator's end, after the
                 // initializer's own errors (`const int d = 1 / 0;`'s "not a compile-time constant", #1447), as a comma's left
@@ -2202,8 +2208,8 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
                 const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
                 check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
                                               declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_DIVISION_BY_ZERO,
-                                              false, op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined", NULL, 0,
-                                              emission->scratch);
+                                              false, op == CHECK_OP_DIVIDE || op == CHECK_OP_DIVIDE_ASSIGN ? "division by zero is undefined" : "remainder by zero is undefined",
+                                              NULL, 0, emission->scratch);
                 if (declarator != BUSTER_CHECK_NONE && node < emission->input->graph.count && emission->input->graph.source_positions != NULL)
                 {
                     pp_diagnostic_suborder(emission->pp, previous, (uint64_t)emission->input->graph.source_positions[node] + 1);
@@ -6974,10 +6980,9 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     const uint32_t divisor = graph->operand1[node];
     TypeId divisor_type = 0;
     // A null dereference shares the arithmetic scan with division and shifts.
-    const bool division = ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
-                           check_common_stream_integer(stream, divisor, &divisor_type) == 0) ||
-                          ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !check_common_integer_constant(stream, divisor) &&
-                           check_common_zero_divisor(graph, stream, types, enabled->const_values, node, divisor)) ||
+    const bool division = (check_common_division_op(op) && (check_common_integer_constant(stream, divisor) ?
+                           check_common_stream_integer(stream, divisor, &divisor_type) == 0 :
+                           check_common_zero_divisor(graph, stream, types, enabled->const_values, node, divisor))) ||
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, divisor);
     const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL &&
