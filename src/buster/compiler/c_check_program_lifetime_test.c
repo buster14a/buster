@@ -695,6 +695,9 @@ static bool check_test_lifetime_forest_case(CheckTestLifetimeForest* forest, Are
             .capacity = capacity,
             .lifetime_nearest = nearest,
             .lifetime_stops = lifetime_stops,
+            // Lifetimes make check_program keep every loop's targets (all_loop_targets), which check_control_children
+            // then resets for each body (#2995).
+            .all_loop_targets = true,
         };
         memset(lifetime_stops, 0xa5, (uint64_t)capacity * sizeof(uint32_t));
         uint64_t state = seed * 4 + 3;
