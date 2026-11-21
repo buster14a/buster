@@ -1441,6 +1441,9 @@ struct ParseBracketBlock
     uint8_t opener_lanes[64];
     int8_t relative_depths[64];
     uint64_t open;
+    // Absolute depth at lane zero. A scalar block clamps a closer at zero; the bit marks that closer.
+    uint32_t base_depth;
+    uint64_t clamps;
 } __attribute__((aligned(64)));
 
 // What K2's rules read of each lane's kind and its neighbors' kinds, the same in every round, for a block
@@ -1464,7 +1467,6 @@ struct ParseKernels
     uint8_t* vkinds;
     // The depth before each token of ( [ { (K1), and each token's node depth in every group, ? : and case : included,
     // where a closer is outside its group (K1's second part).
-    uint32_t* depths;
     uint32_t* node_depths;
     // The precedence keys encode each live lane's relative depth in their upper three bits.
     const ParseBlockWork* depth_work;

@@ -2227,7 +2227,11 @@ static uint64_t parse_test_vector_digest(Parser* parser, Preprocessor* pp, Parse
         if (!result.everything)
         {
             const uint64_t words = (uint64_t)count * sizeof(uint32_t);
-            digest = pp_kernel_fold(digest, kernels.depths, words);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const uint32_t depth = parse_bracket_depth(&kernels, i);
+                digest = pp_kernel_fold(digest, &depth, sizeof(depth));
+            }
             digest = pp_kernel_fold(digest, kernels.enclosing, words);
             for (uint32_t block = 0; block < count; block += 64)
             {
@@ -2305,9 +2309,22 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
         kernels->unsupported = false;
         parse_kernels_predeclared(kernels, parser->predeclared, true);
         // K1 on ( [ {, and K3: the typedef pass, then the classification.
-        kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->depths, kernels->enclosing, buffers.open_stack, kernels->bracket_blocks);
+        kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->enclosing, buffers.open_stack, kernels->bracket_blocks);
         if (!kernels->unbalanced)
         {
+            // K1's compressed carry must give each token its scalar absolute depth, including
+            // deep groups across block boundaries. Its live rows are the input to K2 and K3.
+            int32_t depth = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                if (parse_bracket_depth(kernels, token) != (uint32_t)depth)
+                {
+                    parse_test_report("%s: K1 depth at token %u differs from the scalar prefix\n", name, token);
+                    result += 1;
+                    break;
+                }
+                depth += parse_kind_deltas[kinds[token]];
+            }
             parse_typedefs(kernels, kinds, names, count);
         }
         parse_classify_mask_avx512(kernels, kinds, names, count);
@@ -2963,7 +2980,7 @@ static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOp
                 const uint32_t* names = parser.tokens.names;
                 // The vector kernels up to K5, as parse_vector runs them, then K6 with its reasons.
                 parse_kernels_predeclared(&kernels, parser.predeclared, true);
-                kernels.unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels.depths, kernels.enclosing, buffers.open_stack, kernels.bracket_blocks);
+                kernels.unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels.enclosing, buffers.open_stack, kernels.bracket_blocks);
                 if (!kernels.unbalanced)
                 {
                     parse_typedefs(&kernels, kinds, names, count);

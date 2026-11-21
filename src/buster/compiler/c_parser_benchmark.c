@@ -539,7 +539,7 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
     switch (which)
     {
         case PARSE_TIMED_VECTOR_K1:
-            k->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, k->depths, k->enclosing, buffers->open_stack, k->bracket_blocks);
+            k->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, k->enclosing, buffers->open_stack, k->bracket_blocks);
             break;
         case PARSE_TIMED_VECTOR_K3_PASS:
             parse_typedefs_clear(k);
