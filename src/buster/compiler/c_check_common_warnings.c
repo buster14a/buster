@@ -2647,68 +2647,7 @@ static bool check_common_out_of_range(CheckCommonEmission* emission, uint32_t no
     return decided;
 }
 
-// An ordinary conditional has a nonnegative result when both possible arms do. Its usual arithmetic conversions
-// preserve each arm's nonnegative value whenever its result is signed; an unsigned result needs no further proof.
-// Follow only conditionals and the existing nonnegative leaves, not arithmetic or explicit signed casts. GNU's
-// shared middle operand is clang's promoted opaque value, so its original unsigned/boolean range is not a proof.
-static bool check_common_conditional_nonnegative(const CheckCommonEmission* emission, uint32_t node)
-{
-    const CheckGraph* graph = &emission->input->graph;
-    const CheckStream* stream = emission->stream;
-    const uint32_t count = graph->count < stream->count ? graph->count : stream->count;
-    // Borrow only the emission worklist's unused node slots. This walk invokes no emitter, changes no live frame
-    // or work_count, and its local top never escapes. A full tail or repeated-DAG work budget leaves the warning.
-    uint32_t* const nodes = emission->work_nodes;
-    const uint32_t first = emission->work_count;
-    const uint32_t capacity = emission->work_capacity;
-    uint32_t top = first;
-    uint32_t remaining = node < count ? node + 1 : 0;
-    bool nonnegative = node < count && graph->ops[node] == CHECK_OP_CONDITIONAL;
-    while (nonnegative && node < count && remaining != 0)
-    {
-        remaining -= 1;
-        const CheckOp op = graph->ops[node];
-        uint32_t width = 0;
-        bool is_signed = false;
-        const bool integer = check_common_integer(emission->types, check_stream_type(stream, node), &width, &is_signed);
-        const bool boolean = op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ||
-                             (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL);
-        const bool constant = integer && check_common_integer_constant(stream, node);
-        const CheckValue value = constant ? check_stream_value(stream, node) : (CheckValue){ 0 };
-        const bool source_constant = constant && (value.flags & BUSTER_CHECK_ICE) != 0;
-        const bool leaf = integer && (!is_signed || boolean || (source_constant && check_common_integer_value(&value, width, true) >= 0));
-        if (leaf)
-        {
-            node = top != first ? nodes[--top] : BUSTER_CHECK_NONE;
-        }
-        else if (integer && op == CHECK_OP_CONDITIONAL && graph->operand0[node] < node &&
-                 graph->operand1[node] < node && graph->operand2[node] < node && graph->operand1[node] != graph->operand0[node])
-        {
-            const CheckValue condition = check_stream_value(stream, graph->operand0[node]);
-            bool truth = false;
-            // A folded assignment or statement-expression result is not source constant-condition evidence.
-            const bool known = (condition.flags & BUSTER_CHECK_ICE) != 0 && check_action_truth(emission->types, &condition, &truth);
-            if (known)
-            {
-                node = truth ? graph->operand1[node] : graph->operand2[node];
-            }
-            else if (nodes != NULL && top < capacity)
-            {
-                nodes[top++] = graph->operand2[node];
-                node = graph->operand1[node];
-            }
-            else
-            {
-                nonnegative = false;
-            }
-        }
-        else
-        {
-            nonnegative = false;
-        }
-    }
-    return nonnegative && node == BUSTER_CHECK_NONE && top == first;
-}
+#include "c_check_sign_range.c"
 
 // The sign-mismatch visit one scan frame runs after its subtree: these warnings follow every other
 // warning the expression produces.
@@ -2730,90 +2669,69 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
         uint32_t right_width = 0;
         bool left_signed = false;
         bool right_signed = false;
-        bool integer = left < graph->count && right < graph->count &&
+        const bool integer = left < graph->count && right < graph->count &&
                        check_common_integer(types, check_stream_type(stream, left), &left_width, &left_signed) &&
                        check_common_integer(types, check_stream_type(stream, right), &right_width, &right_signed);
-        // Keep the source operands' unsignedness before promotion: a narrow unsigned value still cannot
-        // be negative after it becomes int (#1391). Explicit casts retain their own result type here.
-        const bool unsigned_operands = integer && !left_signed && !right_signed;
-        // Promotions still determine which signed values the common comparison type can represent.
-        if (left_width != 0 && left_width < 32)
+        // The checked conversion supplies the actual comparison type, including bit-field and _BitInt promotions.
+        // The source operands keep their own signs: two narrow unsigned operands never become a mixed-sign pair.
+        const bool different_signs = integer && left_signed != right_signed;
+        const TypeId converted = different_signs && stream->conversions != NULL ? stream->conversions[node].operands[0].type : 0;
+        uint32_t comparison_width = 0;
+        bool comparison_signed = false;
+        bool comparison_integer = different_signs && converted != 0 && check_common_integer(types, converted, &comparison_width, &comparison_signed);
+        if (different_signs && converted == 0)
         {
-            left_width = 32;
-            left_signed = true;
+            // A hand-built stream may omit conversion rows. Reconstruct the integer promotions without creating
+            // types; ranks can decide the common spelling, but its width and sign follow these promoted widths.
+            const CheckValue left_value = check_stream_value(stream, left);
+            const CheckValue right_value = check_stream_value(stream, right);
+            const TypeId promoted_left = (left_value.flags & BUSTER_CHECK_BIT_FIELD) != 0 ? type_promote_bit_field(types, left_value.type, left_value.bit_width) :
+                                                                                         type_promote(types, left_value.type);
+            const TypeId promoted_right = (right_value.flags & BUSTER_CHECK_BIT_FIELD) != 0 ? type_promote_bit_field(types, right_value.type, right_value.bit_width) :
+                                                                                           type_promote(types, right_value.type);
+            uint32_t promoted_left_width = 0;
+            uint32_t promoted_right_width = 0;
+            bool promoted_left_signed = false;
+            bool promoted_right_signed = false;
+            comparison_integer = check_common_integer(types, promoted_left, &promoted_left_width, &promoted_left_signed) &&
+                                 check_common_integer(types, promoted_right, &promoted_right_width, &promoted_right_signed);
+            comparison_width = promoted_left_width > promoted_right_width ? promoted_left_width : promoted_right_width;
+            comparison_signed = promoted_left_signed == promoted_right_signed ? promoted_left_signed :
+                                promoted_left_signed ? promoted_left_width > promoted_right_width : promoted_right_width > promoted_left_width;
         }
-        if (right_width != 0 && right_width < 32)
-        {
-            right_width = 32;
-            right_signed = true;
-        }
-        bool constant_suppressed = false;
-        if (integer && left_signed != right_signed)
+        const bool mixed = comparison_integer && !comparison_signed;
+        const bool constants = mixed && check_common_integer_constant(stream, left) && check_common_integer_constant(stream, right) &&
+                               (check_stream_flags(stream, left) & BUSTER_CHECK_ICE) != 0 && (check_stream_flags(stream, right) & BUSTER_CHECK_ICE) != 0;
+        bool suppressed = constants;
+        if (mixed && !suppressed)
         {
             const uint32_t signed_operand = left_signed ? left : right;
             const uint32_t unsigned_operand = left_signed ? right : left;
-            const uint32_t signed_width = left_signed ? left_width : right_width;
             const uint32_t unsigned_width = left_signed ? right_width : left_width;
-            const CheckOp signed_op = graph->ops[signed_operand];
-            const CheckValue signed_value = check_stream_value(stream, signed_operand);
-            const bool evaluated_constant = check_value_evaluated_constant(&signed_value);
-            uint32_t conditional = signed_operand;
-            bool conditional_range = true;
-            if (signed_value.constant_kind == CHECK_CONSTANT_INTEGER && !evaluated_constant)
+            suppressed = check_common_sign_range(emission, signed_operand).nonnegative;
+            if (!suppressed && (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL))
             {
-                // Only the folded operand's own unary wrapper chain: every child precedes its parent. Selections
-                // and unary + preserve a conditional's range; an explicit cast has its target type's range instead.
-                while (true)
-                {
-                    const CheckOp wrapper = graph->ops[conditional];
-                    const bool unary = wrapper == CHECK_OP_SELECT || wrapper == CHECK_OP_POSITIVE || wrapper == CHECK_OP_CAST;
-                    const uint32_t child = unary ? graph->operand0[conditional] : BUSTER_CHECK_NONE;
-                    if (child >= conditional)
-                    {
-                        break;
-                    }
-                    conditional_range &= wrapper != CHECK_OP_CAST;
-                    conditional = child;
-                }
+                // A narrower unsigned range cannot collide with a negative signed value converted to the common
+                // unsigned type. UINT_MAX fills that type, unlike a small constant or an independently masked value.
+                suppressed = check_common_sign_range(emission, unsigned_operand).width < comparison_width;
             }
-            const bool conditional_source = graph->ops[conditional] == CHECK_OP_CONDITIONAL;
-            // A modifying condition can fold a conditional to one arm without proving its source range. Clang
-            // then checks both arms; the conditional proof below does that too. Other folded operators keep
-            // their existing range rules, and a side-effect-free GNU constant need not be a standard ICE.
-            const bool signed_constant = signed_value.constant_kind == CHECK_CONSTANT_INTEGER &&
-                                         (!conditional_source || evaluated_constant);
-            if (signed_constant && unsigned_width != 0)
+            else if (!suppressed && op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && check_common_integer_constant(stream, unsigned_operand) &&
+                     (check_stream_flags(stream, unsigned_operand) & BUSTER_CHECK_ICE) != 0)
             {
-                const __int128 constant = check_common_integer_value(&signed_value, signed_width, true);
-                constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(unsigned_width);
-            }
-            else if ((op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) && check_common_integer_constant(stream, unsigned_operand) && signed_width != 0)
-            {
+                // Clang's tautological unsigned-zero boundary suppresses the sign warning for `<` and `>=`,
+                // after canonicalizing the signed operand to the left.
                 const CheckValue unsigned_value = check_stream_value(stream, unsigned_operand);
-                const __int128 constant = check_common_integer_value(&unsigned_value, unsigned_width, false);
-                constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(signed_width);
-            }
-            else if (op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && check_common_integer_constant(stream, unsigned_operand) &&
-                     unsigned_width != 0)
-            {
-                // Clang canonicalizes the signed operand to the left; a zero unsigned constant leaves the
-                // result unchanged for `<` and `>=`, whose truth is already the same for every signed value.
-                const CheckValue unsigned_value = check_stream_value(stream, unsigned_operand);
-                const __int128 constant = check_common_integer_value(&unsigned_value, unsigned_width, false);
                 CheckOp normalized = op;
                 if (right_signed)
                 {
                     normalized = op == CHECK_OP_LESS ? CHECK_OP_GREATER : op == CHECK_OP_LESS_EQUAL ? CHECK_OP_GREATER_EQUAL :
                                  op == CHECK_OP_GREATER ? CHECK_OP_LESS : CHECK_OP_LESS_EQUAL;
                 }
-                constant_suppressed = constant == 0 && (normalized == CHECK_OP_LESS || normalized == CHECK_OP_GREATER_EQUAL);
+                suppressed = (unsigned_value.integer & check_action_mask(unsigned_width)) == 0 &&
+                             (normalized == CHECK_OP_LESS || normalized == CHECK_OP_GREATER_EQUAL);
             }
-            constant_suppressed = constant_suppressed || signed_op == CHECK_OP_NOT || (signed_op >= CHECK_OP_LESS && signed_op <= CHECK_OP_NOT_EQUAL) ||
-                                  signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR ||
-                                  (conditional_source && conditional_range && signed_width <= unsigned_width &&
-                                   check_common_conditional_nonnegative(emission, conditional));
         }
-        if (integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
+        if (mixed && !suppressed)
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                 check_stream_type(stream, left),
@@ -11315,8 +11233,10 @@ static bool check_common_sizeof_operand(const uint8_t* roles, const uint32_t* pa
     return answer == 2;
 }
 
+#include "c_check_uninitialized_flow.c"
+
 static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                       TypeTable* types, const CheckCommonFacts* facts, Arena* scratch)
+                                       TypeTable* types, const CheckCommonFacts* facts, const CheckProgram* program, Arena* scratch)
 {
     const uint32_t count = input->token_count;
     const CheckGraph* graph = &input->graph;
@@ -11548,8 +11468,10 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 check_common_mark_written(graph, stream, statement->operands[o].node, addressed, count);
             }
         }
-        // Graph order is evaluation order: an assignment's right hand side is read before its target is written. A
-        // compound assignment's write is one past its read, so an uninitialized read-modify-write still warns.
+        // Within an expression, an assignment's right hand side is read before its target is written. The graph's
+        // source roots do not have execution order (a for increment precedes its body here); the candidate proof
+        // below uses their retained controls. A compound assignment's write is one past its read, so an
+        // uninitialized read-modify-write still warns.
         // Writes and outside uses are syntactic — a statement after `return` still sets its object and still uses
         // what it reads, as clang's set-but-not-used sees them; only -Wuninitialized's first read and write keep
         // to evaluations the control walk actually reaches. The loop's own tests name the writes' operators and VALUE.
@@ -11614,6 +11536,12 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                     }
                 }
             }
+        }
+        if (!check_common_uninitialized_flow(parser, input, stream, types, program, evaluated, nonread, parameters, addressed,
+                                             first_read, first_write, scratch))
+        {
+            check_common_exhausted(pp);
+            valid = false;
         }
         // The brace initializers' sizeof answers, per parser token (check_common_sizeof_operand): allocated at the
         // unit's first candidate read, so a unit without one pays nothing.
@@ -12707,7 +12635,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         check_common_return_stack(parser, pp, input, stream, types, &candidates, scratch);
         if (enabled.uninitialized)
         {
-            check_common_uninitialized(parser, pp, input, stream, types, &facts, scratch);
+            check_common_uninitialized(parser, pp, input, stream, types, &facts, program, scratch);
         }
         check_common_format(parser, pp, input, stream, types, &spell, program, &candidates, scratch);
         check_common_type_safety(parser, pp, input, stream, types, &spell, scratch);
