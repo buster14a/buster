@@ -3609,10 +3609,14 @@ static bool pp_test_lookup_accounting(const char* directory)
     // The successful run needs ordinary missing candidates: a symlink loop is fatal even for __has_include, and is
     // tested separately above. Print any unexpected diagnostic from this run rather than hiding its failure's cause.
     options.quiet = false;
+    Arena search_arena = arena_reserve(1ull << 20);
+    PPSearchDirectories search = { 0 };
+    result = result && pp_prepare_search(&search, &search_arena, &options);
     static InternTable tables[3];
     static Preprocessor runs[3];
     for (uint32_t k = 0; result && k < 3; k += 1)
     {
+        options.search = k == 0 ? NULL : &search;
         options.scalar = k == 1;
         options.timing = k != 2;
         Preprocessor* pp = &runs[k];
@@ -3623,7 +3627,7 @@ static bool pp_test_lookup_accounting(const char* directory)
         result = result && pp->probes.opens == 10 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0;
         if (options.timing)
         {
-            result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == 8 &&
+            result = result && stats->directory_stats == (options.search == NULL ? 4u : 0u) && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == 8 &&
                      stats->include_fstats == 2 && stats->include_ticks != 0 && stats->embed_searches == 5 && stats->embed_found == 3 && stats->embed_stats == 10 &&
                      stats->embed_ticks != 0;
         }
@@ -3668,6 +3672,7 @@ static bool pp_test_lookup_accounting(const char* directory)
         pp_release(&runs[k]);
         intern_release(&tables[k]);
     }
+    arena_release(&search_arena);
     unlink(path);
     unlink(header);
     unlink(alias);
@@ -7695,16 +7700,16 @@ static bool pp_test_header_beside(void)
                  pp_clang_resource_directory(resource, sizeof(resource), 0) && (size_t)snprintf(includer_path, sizeof(includer_path), "%s/immintrin.h", resource) < sizeof(includer_path);
         // The search directory clang's headers are in: the fallback, or the resource directory.
         uint32_t search = BUSTER_PP_NONE;
-        for (uint32_t i = 0; result && i < pp.directory_count; i += 1)
+        for (uint32_t i = 0; result && i < pp.search.directory_count; i += 1)
         {
-            search = strcmp(pp.directories[i], resource) == 0 ? i : search;
+            search = strcmp(pp.search.directories[i], resource) == 0 ? i : search;
         }
-        result = result && search != BUSTER_PP_NONE && (buster == 0 || search == pp.fallback_directory);
+        result = result && search != BUSTER_PP_NONE && (buster == 0 || search == pp.search.fallback_directory);
         const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_NONE, 0, BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = includer != BUSTER_PP_NONE && pp.files[includer].data != BUSTER_PP_NONE;
         uint32_t found_in = BUSTER_PP_NONE;
         const uint32_t stddef = result ? pp_find_include(&pp, (const uint8_t*)"stddef.h", 8, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;
-        const char* expected = buster != 0 ? pp.buster_directory : resource;
+        const char* expected = buster != 0 ? pp.search.buster_directory : resource;
         const size_t expected_length = expected != 0 ? strlen(expected) : 0;
         const bool stddef_right = stddef != BUSTER_PP_NONE && strncmp(pp.files[stddef].path, expected, expected_length) == 0 && pp.files[stddef].path[expected_length] == '/';
         const uint32_t other = result ? pp_find_include(&pp, (const uint8_t*)"mmintrin.h", 10, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;
