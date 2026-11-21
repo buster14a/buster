@@ -658,7 +658,8 @@ static void check_test_declaration_starts(CheckTest* test)
     uint8_t roles[MAXIMUM];
     uint8_t opens[MAXIMUM];
     uint32_t expected[MAXIMUM + 1];
-    uint32_t column[MAXIMUM + 1];
+    CheckDeclarationStarts column[(MAXIMUM >> 6) + 1];
+    static const uint32_t edges[] = { 0, 1, 63, 64, 65, 127, 128, 129 };
     uint32_t stack[MAXIMUM + 1];
     uint32_t differences = 0;
     // This test's own generator, so that its draws leave the default run's seed for the fixtures after it unchanged.
@@ -666,7 +667,7 @@ static void check_test_declaration_starts(CheckTest* test)
     for (uint32_t round = 0; round < 400; round += 1)
     {
         state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
-        const uint32_t count = (uint32_t)(state >> 32) % MAXIMUM;
+        const uint32_t count = round < BUSTER_ARRAY_LENGTH(edges) ? edges[round] : (uint32_t)(state >> 32) % MAXIMUM;
         uint32_t depth = 0;
         // A struct or enum body's opener follows its keyword, as every parse tree's does: no boundary is ever directly
         // followed by an opener.
@@ -709,7 +710,7 @@ static void check_test_declaration_starts(CheckTest* test)
         for (uint32_t token = 0; token <= count; token += 1)
         {
             expected[token] = check_input_declaration_begin(&parser, token);
-            differences += column[token] != expected[token];
+            differences += check_input_declaration_start_at(column, token) != expected[token];
         }
     }
     check_test_expect(test, differences == 0, "the declaration-start column gives the walk's start for every random role");

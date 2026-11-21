@@ -2330,6 +2330,11 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
         // K4 as the vector path runs it, then with windows of fewer lanes and through its deep fallback.
         parse_parents_vector(kernels, count, &buffers);
         const bool deep = !kernels->unbalanced && parse_deepest(kernels, count) > BUSTER_PARSE_MAX_VECTOR_DEPTH;
+        if (!kernels->unbalanced && kernels->deep_node_depths != deep)
+        {
+            parse_test_report("%s: K1's depth bound disagrees with the full node-depth column\n", name);
+            result += 1;
+        }
         tally->deep_units += deep;
         if (!kernels->unbalanced && !deep)
         {
@@ -2379,12 +2384,16 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
         // K6 leave some of what it reads unwritten (#528), and the vector path doesn't run it.
         const bool everything = kernels->unbalanced || kernels->unsupported || !settled;
         memcpy(copies.check_input, kernels->flags, count);
-        static const uint32_t periods[] = { 0, 2, 3 };
+        // Compare the ordinary K4 key path with a complete full-depth K6 pass and then with the forced block fallbacks.
+        const ParseBlockWork* depth_work = kernels->depth_work;
+        static const uint32_t periods[] = { 0, 0, 2, 3 };
         for (uint32_t p = 0; !everything && p < sizeof(periods) / sizeof(periods[0]); p += 1)
         {
             memcpy(kernels->flags, copies.check_input, count);
             uint64_t blocks = 0;
+            kernels->depth_work = p == 1 ? NULL : depth_work;
             parse_check_avx512_period(kernels, names, parser->tokens.flags, count, copies.typed, &blocks, periods[p]);
+            kernels->depth_work = depth_work;
             uint32_t first = BUSTER_PARSE_NONE;
             if (p == 0)
             {
@@ -4063,10 +4072,13 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
 {
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", 0, 0, "", false },
     { PARSE_TEST_DRIVER_TEXT, "", 0, 0, "", false },
-    { PARSE_TEST_DRIVER_TEXT, "int x\n", 0, 1, "%s:1:6: error: expected ';' after top level declarator\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--scalar", 1, "%s:1:6: error: expected ';' after top level declarator\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#error stop\n", 0, 1, "%s:1:2: error: stop\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#include \"driver-none.h\"\n", 0, 1, "%s:1:10: fatal error: 'driver-none.h' file not found\n", false },
+    // Each located diagnostic with its source line and caret (#2376); clang's fix-it line and range come with #2376's later
+    // pieces.
+    { PARSE_TEST_DRIVER_TEXT, "int x\n", 0, 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--scalar", 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#error stop\n", 0, 1, "%s:1:2: error: stop\n    1 | #error stop\n      |  ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#include \"driver-none.h\"\n", 0, 1, "%s:1:10: fatal error: 'driver-none.h' file not found\n    1 | #include \"driver-none.h\"\n      |          ^\n",
+      false },
     { PARSE_TEST_DRIVER_MISSING, 0, 0, 1, "fatal error: can't read '%s': No such file or directory\n", false },
     { PARSE_TEST_DRIVER_DIRECTORY, 0, 0, 1, "fatal error: can't read '%s': Is a directory\n", false },
     { PARSE_TEST_DRIVER_LARGE, 0, 0, 1, "fatal error: can't read '%s': File too large\n", false },
@@ -4076,15 +4088,16 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
     // Errors after a macro's expansion, placed after the invocation by its expansion history, which the driver records
     // only for its diagnostics (PPOptions.defer_history).
-    { PARSE_TEST_DRIVER_TEXT, "#define DECL int x\nDECL\n", 0, 1, "%s:2:5: error: expected ';' after top level declarator\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#define END(a) a\nint y = END(1)\n", 0, 1, "%s:2:15: error: expected ';' after top level declarator\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#define DECL int x\nDECL\n", 0, 1, "%s:2:5: error: expected ';' after top level declarator\n    2 | DECL\n      |     ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#define END(a) a\nint y = END(1)\n", 0, 1, "%s:2:15: error: expected ';' after top level declarator\n    2 | int y = END(1)\n      |               ^\n",
+      false },
     // A warning, which the driver prints by preprocessing the unit again for its history: with code after it; and in a
     // unit of directives alone, whose output is empty, after a #if line of 300 expansions, for which the replay's history
     // grows while it runs (parse_test_driver_limits fails that growth too, which the empty output wouldn't show).
-    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only [-W#warnings]\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only [-W#warnings]\n    1 | #warning only\n      |  ^\n", false },
     { PARSE_TEST_DRIVER_TEXT,
       "#define A(x) x\n#define B A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)\n#define C B+B+B+B+B+B+B+B\n#define D C+C+C+C\n#if D\n#endif\n#warning only\n", 0, 0,
-      "%s:7:2: warning: only [-W#warnings]\n", false },
+      "%s:7:2: warning: only [-W#warnings]\n    7 | #warning only\n      |  ^\n", false },
 };
 
 // Whether a run of case `c` did what it must.

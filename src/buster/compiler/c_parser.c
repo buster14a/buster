@@ -1457,6 +1457,7 @@ struct ParseRoleStatics
 } __attribute__((aligned(64)));
 
 // The working arrays of the kernels, by token, and what they found.
+typedef struct ParseBlockWork ParseBlockWork;
 typedef struct ParseKernels ParseKernels;
 struct ParseKernels
 {
@@ -1465,6 +1466,9 @@ struct ParseKernels
     // where a closer is outside its group (K1's second part).
     uint32_t* depths;
     uint32_t* node_depths;
+    // The precedence keys encode each live lane's relative depth in their upper three bits.
+    const ParseBlockWork* depth_work;
+    bool deep_node_depths;
     uint32_t* enclosing;
     // K1's view of each block of 64 tokens, and what K2's rules read of each block's kinds.
     ParseBracketBlock* bracket_blocks;
@@ -2325,7 +2329,6 @@ struct ParseFound8
 
 // A block's in-block work for both passes, which depends on no other block, so that every block's runs first, many
 // blocks in flight at once, and the passes are left with the window work, whose chain from block to block is short.
-typedef struct ParseBlockWork ParseBlockWork;
 struct ParseBlockWork
 {
     // The keys relative to the block's lowest node depth * 32 (dead lanes 0xFF), and the searches' thresholds.

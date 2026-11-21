@@ -397,9 +397,15 @@ command line's `-W[no-]c23-extensions`, `-W[no-]c2x-extensions`,
 `-pedantic-errors`, under the source's `#pragma clang diagnostic` for the group,
 which the preprocessor follows through push and pop, at any depth, for it
 alone. Clang's -Wpre-c23-compat warning of
-it in C23 isn't given. One difference from clang remains: clang takes an
-imaginary one (`5wbi`, a `_Complex _BitInt(4)` that it doesn't let a program
-spell otherwise), which the checker refuses, as GCC does.
+it in C23 isn't given. An imaginary one (#2219: `5wbi`, and `i` or `j` before
+or after the other suffixes, `5iwb`, `5uwbi`, `5wbiu`) is clang's
+`_Complex _BitInt(N)` of the real one's width, a type a program can't spell
+otherwise, which the reader makes (`type_complex` of the `_BitInt`); GCC refuses
+it. Its diagnostics are the real one's: none in C23, -Wc23-extensions before
+it. Past 64 bits its value is a complex constant's parts' limbs ("Complex
+integer constants past 64 bits" below). A failed static assertion prints an
+imaginary constant as clang's StmtPrinter does, its imaginary part's literal
+then `i` (`5iwb` as `5wbi`, `0x10i` as `16i`).
 
 What this compiler's own `main.c` needed (#129) the checker takes as clang 23
 does, each rule checked against clang's answers on probes of it:
@@ -1848,6 +1854,26 @@ intermediate `long double` could round twice around a midpoint. Complex
 constants retain real and imaginary components in their source format; GNU
 integer-complex values retain separately masked components. A failed component
 conversion clears the entire constant payload while preserving its fault.
+
+**Complex integer constants past 64 bits** (#2219, `c_check_complex.c`): a
+complex `_BitInt` of 65 bits or more (an imaginary bit-precise constant's, or
+the usual arithmetic conversions', `5wbi * (_BitInt(200))1`) and GNU's
+`_Complex __int128` (`5wbi * (__int128)1`) hold each part as limbs in the wide
+constants' region, as a `_BitInt` past 128 bits holds its own: the real part's
+pointed to from the floating payload's first word and the imaginary part's from
+the imaginary payload's, the words a `_Complex __float128` constant's parts
+already use, which every copy, stream and comparison carries; `integer` keeps
+the real part's low 128 bits. A part read out (`check_complex_component`) is an
+integer constant of the element, its limbs past 128 bits; a conversion into the
+type sets both (`check_complex_wide_set`); `+`, `-`, `*`, `/`, unary `-` and `~`
+fold each part's operation as the element's (`check_complex_part_fold`:
+`check_action_fold_integer` up to 128 bits, `check_wide_fold` past them), `==`
+and `!=` and truth compare the limbs, and static data and the lowering's
+constants write each part's object representation, its bits past the width
+extended from its sign (`check_complex_wide_bytes`). An element of up to 64
+bits keeps both parts in `integer`'s halves, and a complex `_BitInt`'s part
+there extends its sign through its storage in static data, as a `_BitInt`
+does.
 Exotic floating formats retain explicit unsupported folding requirements.
 
 Constraint diagnostics and evaluation faults are separate. An invalid operand
@@ -3967,7 +3993,9 @@ What the lowering covers past scalars (#145's programs):
   address, computes and stores the result back converted; `__real__` and
   `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
   parts are a floating constant's (a `long double`'s in the function's table),
-  or a complex integer constant's halves, each its part's bits.
+  or a complex integer constant's halves, each its part's bits, or past 64 bits
+  its parts' limbs, a store of each word with the bits past the width extended
+  (#2219, `check_lower_complex_constant`).
   The direct path's executables take the libgcc functions from `libgcc.a`'s
   members (#483): `test-checker-driver --executable` links products and
   quotients of each type by both paths into the same bytes, which need
@@ -6379,7 +6407,13 @@ The test command fails if the oracle cannot run. It covers:
   spellings C23 doesn't have; their types by `_Generic` and their values by
   static assertions in a C23 source fixture, by both paths and against clang,
   and at run time in a program against clang -O0's
-  (`bit-precise-constants`); and a 129-bit one refused by name.
+  (`bit-precise-constants`); and a 129-bit one refused by name. Their
+  imaginary forms (#2219): each order and case of the suffixes, to 257 bits,
+  and their complex constants' parts; the complex `_BitInt`s of 65 to 200 bits
+  and `_Complex __int128` by actions (`check_test_complex_wide_actions`:
+  conversions, `+ - * /`, unary `-` and `~`, parts, equality, truth and a
+  part's bytes); and static assertions of them against clang in GNU17, GNU23
+  and C99.
 - Named UCNs (`\N{...}`, #1447), which clang reads as its extension in C, in
   identifiers, `#if`'s character constants, literals and a static assertion's
   message, accepted by both paths and the default route, writing an object
@@ -7173,17 +7207,20 @@ A failed static assertion's tree is excluded from the rejected unit's warning
 walk. `check_driver_reports_from` therefore calls
 `check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
 Its bounded worklist visits the retained condition tree, using the existing
-integer and floating literal conversion emitters at the error's expression
-boundary and in the preceding diagnostic phase. Conditional conditions are
-checked first in source postorder, as Clang constructs them; the assertion's
-own conversion and nested logical operands then follow the completed
-expression's order. Static selections retain only their selected result,
-explicit casts do not create implicit conversions, and a conditional's arms
-do not inherit its outer boolean context. GNU omitted-middle conditionals
+integer and floating literal conversion emitters. The source span also locates
+retained conditional and comma nodes, including detached operands of static
+selections, through the token-to-node map (`check_common_failed_assert_source`).
+Those nodes are checked first in graph postorder, as Clang constructs their
+source expressions; the assertion's own conversion and nested logical operands
+then follow the completed expression's order. An inner assertion owns its own
+warnings. Explicit casts do not create implicit conversions, and a conditional's
+arms do not inherit its outer boolean context. GNU omitted-middle conditionals
 visit their shared condition once and do not diagnose that saved value as a
-new conversion of the written expression. This keeps the warnings before the
-unchanged assertion error, with the normal command-line and pragma policy,
-including promotion, suppression and fatal/error-limit handling. The original
+new conversion of the written expression. Discarded comma operands reuse the
+ordinary unused-value emitter: source warnings complete with the comma, while a
+block's scalar discarded value keeps its deferred function-end publication.
+The normal command-line and pragma policy applies, including promotion,
+suppression and fatal/error-limit handling. The original
 runtime sources `tests/driver/assert_bool_*.c`, through
 `c_check_assert_bool_driver_test.c`, compare complete Clang diagnostics for
 file, member and block scopes, nested and short-circuited logical operands,
@@ -7191,12 +7228,19 @@ conditional warning order, floating literals, selections, explicit casts,
 unevaluated controls, worklist growth, builtin arguments, repeated failures,
 successful and non-warning controls, unrelated errors, macro expansion notes,
 C17/C23 and both reader choices and lane requests. The focused driver selector
-is `--assert-bool-only`. Clang is the external behavioral oracle; the fixtures
-and implementation are original. The cold path does not reconstruct source
-operands erased by static selections or queries, or restore other warning
-families such as `-Wconstant-logical-operand`; those remain separate recovery
-work. Successful-assertion conditional warning ordering also continues to use
-the ordinary warning walk.
+is `--assert-bool-only`; `--assert-diagnostics-only` also runs requirement
+printing and member-recovery checks. Clang is the external behavioral oracle;
+the fixtures and implementation are original. The cold path cannot recover
+operands that queries or type declarations erased altogether; those and the
+ordinary successful-expression gaps are tracked in
+[#2899](https://github.com/buster14a/buster/issues/2899).
+`-Wconstant-logical-operand`, absent from ordinary expressions too, is tracked
+in [#2900](https://github.com/buster14a/buster/issues/2900).
+The ordinary equality emitter's extra assignment-suggestion note for a
+nonassignable left operand is tracked in
+[#2906](https://github.com/buster14a/buster/issues/2906).
+Successful-assertion conditional warning ordering continues to use the
+ordinary warning walk.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
@@ -11470,6 +11514,19 @@ enables, which this checker doesn't all give.
   `__builtin_choose_expr`, `__extension__`) is looked through as clang's
   IgnoreParenImpCasts does, so a selected literal is a literal and
   `_Generic(x, int: 1) == 2` notes nothing (`check_semantic_unselected`).
+  The failed conjunction-term search also looks through those selections: a
+  selected literal alone prints the plain error, while another nonliteral
+  failing term supplies the requirement. Pointer declarators keep the space
+  after their specifiers and between a qualifier and the next pointer.
+  Attributed type names in parentheses with a builtin, typedef or tagged base
+  and a direct pointer chain use the ordinary constant/type reader in private
+  arenas and a copied type table
+  (`check_semantic_requirement_types`): attribute arguments are folded,
+  address-space qualifiers use the type printer's spelling, and ignored
+  attributes disappear. Only a failed requirement containing attributes takes
+  this replay; it cannot change the checked input's types or warning state.
+  More complex declarators and attribute arguments needing unavailable reader
+  state retain their source spelling.
   Still separate: a type name's literals print as written
   (`sizeof(int[0x10])`, clang `int[16]`); a complex value's note.
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at

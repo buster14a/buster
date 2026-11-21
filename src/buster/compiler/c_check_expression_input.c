@@ -1799,37 +1799,63 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
 #endif
 }
 
-// --node-window's first complete expressions have one native CONST each and no references, events, calls or
-// relocations. Admit them from the chunk's coded postorder and the reader's int literals, before the walk numbers
-// any of their nodes. Their return type is already bound. For other spellings or a fault the walk sees the
+// Complete integer returns and discarded assignments carry their native entries into lowering. The chunk's
+// postorder, decoded literals, bound names and return type establish admission before the walk numbers their
+// nodes. A local access also carries its warning event and object for relocation. For other spellings or a fault the walk sees the
 // original tokens, including the original literal cursor. The node machine's fold lives in the checker unit.
 bool check_node_window_prepare(void);
 bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result);
-void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value);
+void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uint32_t token, bool local);
+void check_node_window_store(CheckInputWindowRow* rows, uint32_t object, uint32_t token);
 
 static uint32_t check_input_window_code(const uint32_t* classes, uint32_t i)
 {
     return (classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
 }
 
-// Where this return's candidate begins. Returns the return's position to leave the ordinary path its whole expression.
-// Both its source tokens and their postorder must agree: a match cannot consume a sibling, or only part of a return.
+// Find a complete expression ending at this candidate. Its source tokens and postorder must agree: a match
+// cannot consume a sibling or only part of the expression. Return end to give the ordinary path all its actions.
 static uint32_t check_input_window_first(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t start, uint32_t end)
 {
     const uint32_t token = tokens[end];
     const Parser* parser = reader->parser;
     uint32_t first = end;
-    if (token < parser->tokens.count && parser->tokens.count - token >= 3 && parser->tokens.kinds[token] == PARSE_KIND_RETURN &&
-        reader->query_types[token] == BUSTER_TYPE_INT)
+    if (check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR)
     {
-        if (end - start >= 1 && tokens[end - 1] == token + 1 && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL &&
+        // A stand-alone assignment ending this block statement. Its two names or literal and its operator
+        // must also be the last three actions, in postorder. A statement-expression's final value may escape.
+        if (end - start >= 3 && token >= 3 && parser->tokens.kinds[token] == PARSE_KIND_SEMI &&
+            parser->tree.roles[token] == PARSE_ROLE_TERMINATOR &&
+            reader->conditions[token] == 0 && parser->tree.parents[token] < parser->tokens.count &&
+            (parser->tree.roles[parser->tree.parents[token]] == PARSE_ROLE_CLOSE_BLOCK || parser->tree.roles[parser->tree.parents[token]] == PARSE_ROLE_CLOSE_BODY) &&
+            tokens[end - 3] == token - 3 && tokens[end - 2] == token - 1 && tokens[end - 1] == token - 2 &&
+            check_input_window_code(classes, end - 3) == CHECK_INPUT_CODE_IDENTIFIER &&
+            (check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_IDENTIFIER || check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL) &&
+            check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_BINARY && parser->tokens.kinds[token - 2] == PARSE_KIND_EQUAL &&
+            parser->tree.parents[token - 2] == token && parser->tree.parents[token - 3] == token - 2 && parser->tree.parents[token - 1] == token - 2)
+        {
+            const CheckInput* input = reader->output;
+            const uint32_t region = input->region_count != 0 ? input->expression_regions[parser->tree.parents[token]] : 0;
+            if (region == 0 || input->regions[region - 1].final_statement != token)
+            {
+                first = end - 3;
+            }
+        }
+    }
+    else if (token < parser->tokens.count && parser->tokens.count - token >= 3 && parser->tokens.kinds[token] == PARSE_KIND_RETURN &&
+             reader->query_types[token] == BUSTER_TYPE_INT)
+    {
+        if (end - start >= 1 && tokens[end - 1] == token + 1 &&
+            (check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL || check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_IDENTIFIER) &&
             parser->tokens.kinds[token + 2] == PARSE_KIND_SEMI)
         {
             first = end - 1;
         }
         else if (end - start >= 2 && parser->tokens.count - token >= 4 && tokens[end - 2] == token + 2 && tokens[end - 1] == token + 1 &&
-                 check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_PREFIX &&
-                 parser->tokens.kinds[token + 1] == PARSE_KIND_MINUS && parser->tokens.kinds[token + 3] == PARSE_KIND_SEMI)
+                 check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_PREFIX &&
+                 ((check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL && parser->tokens.kinds[token + 1] == PARSE_KIND_MINUS) ||
+                  (check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_IDENTIFIER && parser->tokens.kinds[token + 1] == PARSE_KIND_PLUS)) &&
+                 parser->tokens.kinds[token + 3] == PARSE_KIND_SEMI)
         {
             first = end - 2;
         }
@@ -1847,99 +1873,228 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
     return first;
 }
 
-// Keep a durable tape entry only after admission. A refusal to grow this optional tape leaves the graph path available.
-static CheckInputWindowEntry* check_input_window_entry(CheckInputReader* reader)
+// Growing either column can fail independently. Its committed ranges remain valid, and a refused expression
+// consumes no tokens. The spare room from the other successful allocation can serve the next expression.
+static void* check_input_window_room(Arena* arena, void* previous, uint32_t occupied, uint32_t* capacity, uint32_t requested, size_t size)
 {
-    CheckInput* input = reader->output;
-    if (input->window_count == input->window_capacity)
+    void* result = previous;
+    const uint64_t needed = (uint64_t)occupied + requested;
+    if (needed > *capacity)
     {
-        const uint64_t capacity = input->window_capacity != 0 ? (uint64_t)input->window_capacity * 2 : 8;
-        CheckInputWindowEntry* entries = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWindowEntry, capacity) : NULL;
-        if (entries != NULL)
+        const uint64_t doubled = *capacity != 0 ? (uint64_t)*capacity * 2 : 8;
+        const uint64_t room = doubled >= needed && doubled <= UINT32_MAX ? doubled : needed;
+        result = room <= UINT32_MAX ? arena_push_array(arena, room, size, 8) : NULL;
+        if (result != NULL)
         {
-            if (input->window_count != 0)
+            if (occupied != 0)
             {
-                memcpy(entries, input->window_entries, (size_t)input->window_count * sizeof(*entries));
+                memcpy(result, previous, (size_t)occupied * size);
             }
-            input->window_entries = entries;
-            input->window_capacity = (uint32_t)capacity;
+            *capacity = (uint32_t)room;
         }
     }
-    return input->window_count < input->window_capacity ? input->window_entries + input->window_count : NULL;
+    return result;
+}
+
+static uint32_t check_input_window_publish(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckValue value,
+                                           const CheckInputWindowRow* rows, uint32_t count, uint32_t replaced)
+{
+    CheckInput* input = reader->output;
+    uint32_t node = BUSTER_CHECK_NONE;
+    CheckInputWindowSummary* summaries = check_input_window_room(reader->arena, input->window_summaries, input->window_count, &input->window_capacity,
+                                                                 1, sizeof(*summaries));
+    if (summaries != NULL)
+    {
+        input->window_summaries = summaries;
+        CheckInputWindowRow* tape = check_input_window_room(reader->arena, input->window_rows, input->window_row_count, &input->window_row_capacity,
+                                                            count, sizeof(*tape));
+        if (tape != NULL)
+        {
+            input->window_rows = tape;
+            check_input_expression_room(reader, batch, 1);
+            node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
+            if (node != BUSTER_CHECK_NONE)
+            {
+                check_input_batch_set_leaf(reader, batch, node, &value);
+                memcpy(tape + input->window_row_count, rows, (size_t)count * sizeof(*rows));
+                summaries[input->window_count] = (CheckInputWindowSummary){ .node = node, .first = input->window_row_count, .count = count };
+                input->window_count += 1;
+                input->window_row_count += count;
+                input->window_nodes += replaced;
+                batch->members[node - batch->base] = input->window_count;
+            }
+        }
+    }
+    return node;
+}
+
+static bool check_input_window_local(const CheckInputReader* reader, const CheckInputIdentifiers* identifiers, uint32_t i)
+{
+    const uint32_t declaration = identifiers->declarations[i];
+    const CheckInput* input = reader->output;
+    return !reader->pp->options.predefines.debug && !reader->pp->options.predefines.debug_modules &&
+           identifiers->status[i] == (BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) &&
+           identifiers->types[i] == (BUSTER_TYPE_INT | ((uint64_t)CHECK_LVALUE << 32)) &&
+           identifiers->flags[i] == (((uint64_t)CHECK_CONSTANT_ADDRESS << 32) | BUSTER_CHECK_NONNULL_ADDRESS) &&
+           declaration < input->token_count && identifiers->objects[i] == (uint64_t)declaration + 1 &&
+           input->declaration_kinds[declaration] == C_BINDING_OBJECT && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) &&
+           check_sparse_get(input->declaration_bodies, declaration) < input->token_count;
 }
 
 static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, uint32_t first, uint32_t end,
-                                    const CheckInputLiterals* literals, uint32_t* literal)
+                                    const CheckInputLiterals* literals, uint32_t* literal, const CheckInputIdentifiers* identifiers, uint32_t* identifier)
 {
     const uint32_t returned = tokens[end];
     const uint32_t operands = end - first;
     const bool binary = operands == 3;
-    const uint32_t left = literals->values[*literal];
-    const uint32_t right = binary ? literals->values[*literal + 1] : 0;
-    uint32_t value = left;
-    const CheckOp op = binary ? check_input_binary(reader->parser->tokens.kinds[tokens[end - 1]]) : CHECK_OP_NEGATIVE;
-    const bool admitted = left != BUSTER_CHECK_NONE && right != BUSTER_CHECK_NONE && (operands == 1 || check_node_window_fold_int(op, left, right, binary, &value));
-    CheckInputWindowEntry* entry = admitted ? check_input_window_entry(reader) : NULL;
-    bool published = false;
-    if (entry != NULL)
+    const bool name = reader->parser->tokens.kinds[tokens[first]] == PARSE_KIND_IDENTIFIER;
+    uint32_t value = 0;
+    bool admitted;
+    if (name)
     {
-        check_input_expression_room(reader, batch, 1);
-        const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, returned, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
+        admitted = check_input_window_local(reader, identifiers, *identifier);
+        value = (uint32_t)identifiers->objects[*identifier];
+    }
+    else
+    {
+        const uint32_t left = literals->values[*literal];
+        const uint32_t right = binary ? literals->values[*literal + 1] : 0;
+        const CheckOp op = binary ? check_input_binary(reader->parser->tokens.kinds[tokens[end - 1]]) : CHECK_OP_NEGATIVE;
+        value = left;
+        admitted = left != BUSTER_CHECK_NONE && right != BUSTER_CHECK_NONE && (operands == 1 || check_node_window_fold_int(op, left, right, binary, &value));
+    }
+    uint32_t node = BUSTER_CHECK_NONE;
+    if (admitted)
+    {
+        CheckInputWindowRow row;
+        check_node_window_int_entry(&row, value, name ? tokens[first] : returned, name);
+        CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+        if (name)
+        {
+            // A direct conversion retains the lvalue's object. Unary plus starts a new arithmetic value.
+            summary.flags = operands == 1 ? BUSTER_CHECK_NONNULL_ADDRESS : 0;
+            summary.object = operands == 1 ? value : 0;
+        }
+        else
+        {
+            summary.flags = BUSTER_CHECK_ICE;
+            summary.constant_kind = CHECK_CONSTANT_INTEGER;
+            summary.integer = value;
+        }
+        node = check_input_window_publish(reader, batch, returned, summary, &row, 1, operands + 1);
         if (node != BUSTER_CHECK_NONE)
         {
-            const CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = value };
-            check_input_batch_set_leaf(reader, batch, node, &summary);
-            check_node_window_int_entry(entry, value);
-            entry->node = node;
-            CheckInput* input = reader->output;
-            input->window_count += 1;
-            input->window_nodes += operands + 1;
-            batch->members[node - batch->base] = input->window_count;
-            input->token_nodes[returned] = node;
+            reader->output->token_nodes[returned] = node;
             reader->first_value[returned] = BUSTER_CHECK_NONE;
-            *literal += binary ? 2 : 1;
-            published = true;
+            *literal += name ? 0 : binary ? 2 : 1;
+            *identifier += name ? 1 : 0;
         }
     }
-    return published;
+    return node != BUSTER_CHECK_NONE;
 }
 
-// List return actions 16 at a time. The ordinary action loop runs unchanged between admitted spans, including a
-// return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
-static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
-                                                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
-                                                                     uint64_t* visited)
+// A write whose result is discarded. A literal or a distinct local supplies the only value read.
+// A self-assignment stays with the ordinary checker, which can report -Wself-assign.
+static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, const CheckInputIdentifiers* identifiers,
+                                      uint32_t* identifier, const CheckInputLiterals* literals, uint32_t* literal)
 {
-    uint32_t returns[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
+    const bool reads = reader->parser->tokens.kinds[token - 1] == PARSE_KIND_IDENTIFIER;
+    const uint32_t value = reads ? (uint32_t)identifiers->objects[*identifier + 1] : literals->values[*literal];
+    const uint32_t object = (uint32_t)identifiers->objects[*identifier];
+    const bool admitted = check_input_window_local(reader, identifiers, *identifier) &&
+                          (reads ? object != value && check_input_window_local(reader, identifiers, *identifier + 1) : value != BUSTER_CHECK_NONE);
+    uint32_t node = BUSTER_CHECK_NONE;
+    if (admitted)
+    {
+        CheckInputWindowRow rows[3];
+        check_node_window_int_entry(rows, value, token - 1, reads);
+        check_node_window_store(rows + 1, object, token - 2);
+        // The assignment and its cast to void clear the constant kind but preserve the payload of the RHS.
+        const CheckValue summary = { .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE,
+                                     .flags = BUSTER_CHECK_SIDE_EFFECT | (reads ? BUSTER_CHECK_NONNULL_ADDRESS : 0u),
+                                     .integer = reads ? 0 : value, .object = reads ? value : 0 };
+        node = check_input_window_publish(reader, batch, token, summary, rows, BUSTER_ARRAY_LENGTH(rows), 4);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            // The for-loop mutation visitor asks about the identifier's token. The summary's WRITE row
+            // answers it there even though the assignment and its destination have no nodes of their own.
+            reader->output->token_nodes[token - 3] = node;
+            if (reader->region_roots != NULL)
+            {
+                reader->region_roots[token] = node;
+            }
+            *identifier += reads ? 2 : 1;
+            *literal += reads ? 0 : 1;
+        }
+    }
+    return node != BUSTER_CHECK_NONE;
+}
+
+// Collect candidate ends in one pass over the action classes. Each caller selects its scan once per chunk.
+static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments)
+{
     uint32_t candidates = 0;
+    uint32_t previous_names = 0;
+    uint32_t previous_rhs = 0;
+    uint32_t previous_binary = 0;
     for (uint32_t i = 0; i < acting; i += 16)
     {
         const uint32_t run = acting - i < 16 ? acting - i : 16;
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, run);
         const __m512i bytes = _mm512_maskz_loadu_epi32(lanes, classes + i);
         const __m512i codes = _mm512_and_si512(bytes, _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
-        const __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+        __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+        if (assignments)
+        {
+            // Match the four postorder actions even when they straddle adjacent groups of 16.
+            const uint32_t names = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_IDENTIFIER << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            const uint32_t rhs = names | _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            const uint32_t binary = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            const uint32_t ended = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            found |= ended & (((names << 16) | previous_names) >> 13) & (((rhs << 16) | previous_rhs) >> 14) & (((binary << 16) | previous_binary) >> 15);
+            previous_names = names;
+            previous_rhs = rhs;
+            previous_binary = binary;
+        }
         for (uint32_t bits = found; bits != 0; bits &= bits - 1)
         {
-            returns[candidates++] = i + (uint32_t)__builtin_ctz(bits);
+            ends[candidates++] = i + (uint32_t)__builtin_ctz(bits);
         }
     }
-    returns[candidates] = acting;
+    ends[candidates] = acting;
+    return candidates;
+}
+
+// List complete returns and potentially assignable statements 16 actions at a time. The ordinary action loop runs unchanged between admitted spans, including a
+// return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
+static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
+                                                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
+                                                                     uint64_t* visited)
+{
+    uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
+    const uint32_t candidates = reader->pp->options.node_window_assignments ? check_input_window_ends(ends, classes, acting, true) :
+                                check_input_window_ends(ends, classes, acting, false);
     uint32_t identifier = 0;
     uint32_t literal = 0;
     uint32_t cursor = 0;
     for (uint32_t k = 0; k <= candidates && !reader->output->resource; k += 1)
     {
-        const uint32_t end = returns[k];
-        const uint32_t start = k != 0 ? returns[k - 1] + 1 : 0;
+        const uint32_t end = ends[k];
+        const uint32_t start = k != 0 ? ends[k - 1] + 1 : 0;
         const uint32_t first = k < candidates ? check_input_window_first(reader, tokens, classes, start, end) : end;
         for (; cursor < first && !reader->output->resource; cursor += 1)
         {
             check_input_expression_coded(reader, batch, tokens[cursor], (uint8_t)classes[cursor], true, identifiers, &identifier, literals, &literal, visited);
         }
-        if (!reader->output->resource && first < end && check_input_window_take(reader, batch, tokens, first, end, literals, &literal))
+        if (!reader->output->resource && first < end)
         {
-            cursor = end + 1;
+            const bool statement = check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR;
+            const bool taken = statement ? check_input_window_assign(reader, batch, tokens[end], identifiers, &identifier, literals, &literal) :
+                               check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier);
+            if (taken)
+            {
+                cursor = end + 1;
+            }
         }
     }
     return cursor;

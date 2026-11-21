@@ -1102,6 +1102,11 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 #include "buster/compiler/parallel_test.c"
 #endif
 
+// Clang's caret display compared whole with clang's (#2376), for the test-carets command.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+#include "buster/compiler/c_caret_test.c"
+#endif
+
 // The c-testsuite harness (#145), for the test-c-testsuite command: each program compiled and linked by this
 // executable, run and compared with its expected output.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
@@ -2547,6 +2552,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-oracle-cache") == 0)
     {
         result = run_oracle_cache_tests(argc - 2, argv + 2);
+    }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-carets") == 0)
+    {
+        result = run_caret_tests(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)

@@ -6129,7 +6129,7 @@ static bool node_front_test_builtins(const char* directory, uint8_t front, uint6
 
 // Compile the source independently both ways. Change the retained first row after checking and lower it again:
 // only a lowering that actually splices the reader's tape can emit the changed value.
-static void node_window_test_compile(CheckTest* test)
+static void node_window_test_compile(CheckTest* test, bool assignments)
 {
     char file[PATH_MAX];
     snprintf(file, sizeof(file), "%s/checker/node-window.c", check_test_fixture_root);
@@ -6137,24 +6137,30 @@ static void node_window_test_compile(CheckTest* test)
     static LowerSource plain;
     static LowerSource window;
     const bool opened_plain = lower_source_open(&plain, file, options, BUSTER_ARRAY_LENGTH(options), false);
-    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), true);
+    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), assignments ? BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS : 1u);
     const bool prepared = opened_plain && opened_window && plain.prepared && window.prepared;
     check_test_expect(test, prepared, "node-window prepares its mixed ordinary and taken returns");
     if (prepared)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        check_test_expect(test, reference->window_count == 0 && input->window_count == 7 && input->window_nodes == 23,
-                          "node-window admits each of the seven returns on baked and runtime-initialized transition tables");
+        check_test_expect(test, reference->window_count == 0 && input->window_count == (assignments ? 13u : 11u) && input->window_nodes == (assignments ? 40u : 32u),
+                          "node-window takes two additional complete assignments only with assignment discovery enabled");
         check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
-                          "node-window replaces the 23 ordinary nodes by the seven return summaries");
+                          "node-window replaces complete expressions by single checked roots");
         bool same = true;
+        uint32_t reads = 0;
+        uint32_t writes = 0;
         for (uint32_t i = 0; same && i < input->window_count; i += 1)
         {
-            const CheckInputWindowEntry* row = input->window_entries + i;
-            const uint32_t node = row->node;
-            const uint32_t returned = node < input->graph.count ? input->graph.tokens[node] : BUSTER_CHECK_NONE;
-            const uint32_t other = returned < reference->token_count ? reference->token_nodes[returned] : BUSTER_CHECK_NONE;
+            const CheckInputWindowSummary* summary = input->window_summaries + i;
+            const uint32_t node = summary->node;
+            const uint32_t token = node < input->graph.count ? input->graph.tokens[node] : BUSTER_CHECK_NONE;
+            uint32_t other = 0;
+            while (other < reference->graph.count && reference->graph.tokens[other] != token)
+            {
+                other += 1;
+            }
             if (other >= plain.path.stream.count)
             {
                 same = false;
@@ -6162,11 +6168,37 @@ static void node_window_test_compile(CheckTest* test)
             }
             const CheckValue value = check_stream_value(&window.path.stream, node);
             const CheckValue regular = check_stream_value(&plain.path.stream, other);
-            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && check_test_value_equal(&value, &regular) &&
-                   row->kind == BUSTER_TYPED_CONST && row->class == BUSTER_TYPED_CLASS_I32 &&
-                   row->value == (uint64_t)(int64_t)(int32_t)value.integer;
+            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && check_test_value_equal(&value, &regular);
+            const CheckInputWindowRow* rows = input->window_rows + summary->first;
+            const bool assignment = reference->graph.ops[other] == CHECK_OP_CAST;
+            same &= summary->count == (assignment ? 3u : 1u);
+            if (assignment && summary->count == 3)
+            {
+                const uint32_t lhs = rows[1].token + rows[1].event_offset;
+                same &= rows[1].kind == BUSTER_TYPED_STORE_LOCAL && rows[1].flags == (BUSTER_CHECK_WINDOW_LOCAL | BUSTER_CHECK_WINDOW_WRITE) &&
+                        lhs < input->token_count && input->declarations[lhs] + 1 == rows[1].value && rows[2].kind == BUSTER_TYPED_DISCARD;
+                writes += 1;
+            }
+            if ((rows[0].flags & BUSTER_CHECK_WINDOW_READ) != 0)
+            {
+                const uint32_t rhs = rows[0].token + rows[0].event_offset;
+                same &= rows[0].kind == BUSTER_TYPED_LOCAL && rhs < input->token_count && input->declarations[rhs] + 1 == rows[0].value;
+                reads += 1;
+            }
+            else
+            {
+                same &= rows[0].kind == BUSTER_TYPED_CONST && rows[0].value == (assignment ? 24 : (uint64_t)(int64_t)(int32_t)value.integer);
+            }
+            if (!same)
+            {
+                fprintf(stderr, "test-checker: node-window root %u at token %u, object %u/%u, integer %" PRIu64 "/%" PRIu64
+                        ", flags %u/%u, entries %u, first kind %u, first value %" PRIu64 "\n",
+                        i, token, regular.object, value.object, (uint64_t)regular.integer, (uint64_t)value.integer,
+                        regular.flags, value.flags, summary->count, rows[0].kind, rows[0].value);
+            }
         }
-        check_test_expect(test, same, "node-window publishes the full ordinary checked value and native row for each admitted return");
+        check_test_expect(test, same && reads == (assignments ? 5u : 4u) && writes == (assignments ? 2u : 0u),
+                          "node-window publishes the complete ordinary checked values, exact native rows and ordered reads and writes");
         CheckProgramLowered original = { 0 };
         CheckProgramLowered first = { 0 };
         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
@@ -6176,10 +6208,25 @@ static void node_window_test_compile(CheckTest* test)
             lowered = check_test_program_function(original.functions + b, first.functions + b);
         }
         check_test_expect(test, lowered, "node-window mixed returns lower to the ordinary functions' native tapes");
+        if (lowered)
+        {
+            CheckProgramLowered plain_debug = { 0 };
+            CheckProgramLowered window_debug = { 0 };
+            bool tokens = check_program_lower_sources(&plain_debug, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+                          check_program_lower_sources(&window_debug, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) &&
+                          plain_debug.count == window_debug.count;
+            for (uint32_t b = 0; tokens && b < plain_debug.count; b += 1)
+            {
+                const uint32_t entries = plain_debug.functions[b].count;
+                tokens = check_test_program_function(plain_debug.functions + b, window_debug.functions + b) &&
+                         (entries == 0 || memcmp(plain_debug.entry_tokens[b], window_debug.entry_tokens[b], (size_t)entries * sizeof(uint32_t)) == 0);
+            }
+            check_test_expect(test, tokens, "node-window sourced lowering keeps the ordinary source token and native row for each entry");
+        }
         bool replayed = false;
         if (lowered && input->window_count != 0)
         {
-            input->window_entries[0].value = 314159;
+            input->window_rows[input->window_summaries[0].first].value = 314159;
             CheckProgramLowered changed = { 0 };
             if (check_program_lower(&changed, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) && changed.count == first.count)
             {
@@ -6201,7 +6248,8 @@ static void node_window_test_compile(CheckTest* test)
 
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
-    node_window_test_compile(test);
+    node_window_test_compile(test, false);
+    node_window_test_compile(test, true);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready, "node-census fixtures' directory is made");
@@ -6825,6 +6873,20 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     check_test_expect(test, ready && node_summary_test_fixture(directory, "summaries.c", node_summary_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &summary_expected),
                       "node-summary: an expression's references and return fact on the window are the program's own walks', a kept condition's truth is its value's and a kept constant folds");
+    // The ordinary checker folds a strong pointer comparison in these required constant contexts. In particular,
+    // only the selected string in the conditional initializer is referenced alongside the condition's string.
+    char pointer_path[PATH_MAX + 128];
+    snprintf(pointer_path, sizeof(pointer_path), "%s/checker/sources/pointer-constant-equality.c", check_test_fixture_root);
+    NodeShadow pointer_shadow = {
+        .verify = true, .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN,
+        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW |
+                  BUSTER_NODE_READER_WINDOW_TESTS | BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS,
+        .repeat = 1,
+    };
+    NodeCensus pointer_census = { .shadow = &pointer_shadow };
+    check_test_expect(test, ready && node_census_file(&pointer_census, pointer_path, quiet, BUSTER_ARRAY_LENGTH(quiet)) && pointer_census.files == 1 &&
+                                pointer_census.failures == 0 && pointer_shadow.typed_expressions != 0 && !node_shadow_differs(&pointer_shadow),
+                      "node-summary: a static pointer comparison in a conditional initializer agrees with the ordinary reference walk");
     static const NodeSummaryExpected summary_unknowns_expected = {
         .taken = 16,
         .references = 15,

@@ -567,7 +567,11 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                 else if (root < types->node_capacity && inner <= root && size != 0 && size <= inner + 1)
                 {
                     const uint32_t first = inner + 1 - size;
-                    const NodeMachineRefusal refusal = node_machine_type(machine, first, root, records);
+                    // T types an initializer's value without its INITIALIZE record. The token's mark supplies that
+                    // record's VALUE context even when the outer node lies beyond the shadow's capacity.
+                    const uint32_t initializer = front->tokens[record];
+                    const bool required = initialization && initializer < reader->parser->tokens.count && BUSTER_CHECK_RARE(reader, static_initializers, initializer);
+                    const NodeMachineRefusal refusal = node_machine_type_in_context(machine, first, root, records, required);
                     if (pass != 0)
                     {
                         types->digests[root] = node_machine_digest(machine, refusal);

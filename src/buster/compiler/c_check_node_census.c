@@ -489,10 +489,8 @@ struct NodeCensusScratch
     uint32_t* type_ranges;
     const uint8_t* own_types;
     const uint8_t* own_properties;
-    uint8_t own_classes[128];
+    _Alignas(64) uint8_t own_classes[128];
     uint8_t own_operand_bits[128];
-    uint8_t own_copies[128];
-    uint8_t own_always[128];
     uint8_t own_sends[128];
     uint8_t own_quiets[128];
     uint8_t own_quiet_pairs[64];
@@ -2407,25 +2405,29 @@ static inline NodeTestsTrigger node_tests_constants(const NodeCensusScratch* s, 
     return trigger;
 }
 
-// An operator's classes for the tests' loop (NodeCensusScratch.own_classes, by CheckOp): outside the set, a write, an
-// address.
+// An operator's classes in the tests' loop. The set takes the first two bits directly; COPIES shares the
+// aggregate type's bit. The sign bit lists operators that have tests whatever their operands are.
 #define BUSTER_NODE_TESTS_CLASS_UNCODED 0x01u
-#define BUSTER_NODE_TESTS_CLASS_WRITE 0x04u
-#define BUSTER_NODE_TESTS_CLASS_ADDRESS 0x08u
+#define BUSTER_NODE_TESTS_CLASS_ADDRESS 0x02u
+#define BUSTER_NODE_TESTS_CLASS_COPIES BUSTER_NODE_CENSUS_TYPE_AGGREGATE
+#define BUSTER_NODE_TESTS_CLASS_WRITE 0x08u
+#define BUSTER_NODE_TESTS_CLASS_QUIET_ORDER 0x10u
+#define BUSTER_NODE_TESTS_CLASS_ALWAYS 0x80u
 // What a record is as an operand (NodeCensusScratch.own_properties, a byte a record): a constant; of an enumeration's
 // type, a pointer's, a pointer's whose pointee may be void, an array's; an addition or a subtraction; a comparison; a
 // left shift or a product. An operator's `own_sends` says which of its operands' properties send it to its own tests.
 #define BUSTER_NODE_TESTS_OPERAND_CONSTANT 0x01u
 #define BUSTER_NODE_TESTS_OPERAND_ENUM 0x02u
-#define BUSTER_NODE_TESTS_OPERAND_POINTER 0x04u
+#define BUSTER_NODE_TESTS_OPERAND_ARRAY 0x04u
 #define BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE 0x08u
-#define BUSTER_NODE_TESTS_OPERAND_ARRAY 0x10u
+#define BUSTER_NODE_TESTS_OPERAND_CONVERTS 0x10u
 #define BUSTER_NODE_TESTS_OPERAND_SUM 0x20u
 #define BUSTER_NODE_TESTS_OPERAND_COMPARISON 0x40u
 #define BUSTER_NODE_TESTS_OPERAND_TRUTH 0x80u
 // A pointer once converted as an operand (BUSTER_NODE_CENSUS_TYPE_CONVERTS, as an operand's properties): a pointer's, an
 // array's or a function's value.
-#define BUSTER_NODE_TESTS_OPERAND_CONVERTS (BUSTER_NODE_TESTS_OPERAND_POINTER | BUSTER_NODE_TESTS_OPERAND_ARRAY)
+_Static_assert(BUSTER_NODE_TESTS_OPERAND_CONVERTS == BUSTER_NODE_TESTS_CLASS_QUIET_ORDER,
+               "the ordered comparison and both operands use the same bit");
 _Static_assert(CHECK_OP_COUNT <= 128, "the own form's tables have an entry an operator");
 
 // The tree's tests (node_tests_tree) read a record's token's parent's role, and nearly every one ends there: a
@@ -2564,19 +2566,18 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
         const bool copies = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
                             op == CHECK_OP_CAST;
         const bool truth_parent = op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL;
-        s->own_classes[code] = (uint8_t)((!node_census_coded(op) ? BUSTER_NODE_TESTS_CLASS_UNCODED : 0) |
-                                         (node_census_modifies(op) ? BUSTER_NODE_TESTS_CLASS_WRITE : 0) | (op == CHECK_OP_ADDRESS ? BUSTER_NODE_TESTS_CLASS_ADDRESS : 0));
         s->own_operand_bits[code] = (uint8_t)((op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT ? BUSTER_NODE_TESTS_OPERAND_SUM : 0) |
                                               (comparison ? BUSTER_NODE_TESTS_OPERAND_COMPARISON : 0) |
                                               (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_MULTIPLY ? BUSTER_NODE_TESTS_OPERAND_TRUTH : 0));
-        s->own_copies[code] = copies ? UINT8_MAX : 0;
         // A call's callee and arguments and a comma's discard are read at each, and the third operand of a conditional
         // (or of an operator outside the set); a member's record only in a unit with an atomic one, a comparison's
         // operands' signs and an assignment's names only under their warnings.
         const bool always = op == CHECK_OP_CALL || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
                             !node_census_coded(op) || (types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)) ||
                             (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN);
-        s->own_always[code] = !leaf && always ? 1 : 0;
+        s->own_classes[code] = (uint8_t)((!node_census_coded(op) ? BUSTER_NODE_TESTS_CLASS_UNCODED : 0) | (op == CHECK_OP_ADDRESS ? BUSTER_NODE_TESTS_CLASS_ADDRESS : 0) |
+                                         (copies ? BUSTER_NODE_TESTS_CLASS_COPIES : 0) | (node_census_modifies(op) ? BUSTER_NODE_TESTS_CLASS_WRITE : 0) |
+                                         (order && policy->ordered && !always ? BUSTER_NODE_TESTS_CLASS_QUIET_ORDER : 0) | (!leaf && always ? BUSTER_NODE_TESTS_CLASS_ALWAYS : 0));
         // A constant operand's tests are no cast's (it converts nothing implicitly, and no other constant's test is a
         // cast's), and nor are an enumeration's: those read two operands' types, a conditional's arms' or a
         // conversion's, and a cast has one operand and converts by its own word.
@@ -2676,7 +2677,7 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
     // What sent it: a constant operand alone has the constants' tests and no other.
     const uint8_t sent = (uint8_t)(all & s->own_sends[op]);
     bool fires = false;
-    if (s->own_always[op] == 0 && sent == BUSTER_NODE_TESTS_OPERAND_CONSTANT)
+    if ((s->own_classes[op] & BUSTER_NODE_TESTS_CLASS_ALWAYS) == 0 && sent == BUSTER_NODE_TESTS_OPERAND_CONSTANT)
     {
         trigger = node_tests_constants(s, r, node, op, o, &fires);
     }
@@ -2690,7 +2691,7 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
             }
         }
     }
-    if (s->own_always[op] == 0 && sent == BUSTER_NODE_TESTS_OPERAND_CONSTANT)
+    if ((s->own_classes[op] & BUSTER_NODE_TESTS_CLASS_ALWAYS) == 0 && sent == BUSTER_NODE_TESTS_OPERAND_CONSTANT)
     {
         // Done above.
     }
@@ -3396,6 +3397,8 @@ _Static_assert(BUSTER_NODE_TESTS_LINE_PLAIN == BUSTER_NODE_ROWS_LINE_PLAIN && BU
 #define BUSTER_NODE_TESTS_SET_BIT_FIELD 0x10u
 #define BUSTER_NODE_TESTS_SET_ARRAY 0x20u
 #define BUSTER_NODE_TESTS_SET_DECLARATION 0x40u
+_Static_assert(BUSTER_NODE_TESTS_CLASS_UNCODED == BUSTER_NODE_TESTS_SET_UNCODED && BUSTER_NODE_TESTS_CLASS_ADDRESS == BUSTER_NODE_TESTS_SET_ADDRESS,
+               "the set takes the uncoded and address bits from the operator's class");
 // The masks a block, one line of the cache: the operators the loop left out of its list (the quiet rule's, and the calls
 // with no test to make), the operators listed for the tree's tests, the operators listed for their own, the writes, the
 // records that as a statement's top leave its test nothing (a write, a record of type void, a call left out whose
@@ -3405,6 +3408,9 @@ _Static_assert(BUSTER_NODE_TESTS_LINE_PLAIN == BUSTER_NODE_ROWS_LINE_PLAIN && BU
 #define BUSTER_NODE_TESTS_MASK_OPERATORS 2u
 #define BUSTER_NODE_TESTS_MASK_WRITES 3u
 #define BUSTER_NODE_TESTS_MASK_DISCARDS 4u
+#define BUSTER_NODE_TESTS_MASK_QUIET_CALLS 5u
+#define BUSTER_NODE_TESTS_MASK_QUIET_CASTS 6u
+#define BUSTER_NODE_TESTS_MASK_QUIET_ORDERS 7u
 #define BUSTER_NODE_TESTS_MASKS 8u
 
 // The outermost brace pair around token `token` into `opening` and `closing`: whether there is one. The parser's tree
@@ -4083,6 +4089,10 @@ static void node_tests_window_bytes(NodeCensusReader* tests, const struct NodeFa
     }
 }
 
+// A row of a GFNI byte transform. Bit 'to' in the result is copied from 'from' in
+// the input byte. GFNI stores the row for result bit 0 in the most significant byte.
+#define BUSTER_NODE_TESTS_COPY_BIT(to, from) ((uint64_t)(from) << (8u * (7u - (uint32_t)__builtin_ctz((uint32_t)(to)))))
+
 // The tests' loop over a chunk's `count` records, 64 a step: what each record is as an operand (its value's and its
 // type's bits and its operator's), its operands' such bytes together, its part of the set's tests, and a block's masks:
 // the operators listed for their operands' tree's tests, the operators with tests of their own, the writes, the records
@@ -4114,10 +4124,6 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
     const __m512i places = _mm512_set_epi16(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
     uint32_t ask_total = 0;
     uint64_t far_total = 0;
-    uint64_t quiet_total = 0;
-    uint64_t call_total = 0;
-    uint64_t cast_total = 0;
-    uint64_t order_total = 0;
     const __m512i converts = _mm512_set1_epi8((char)BUSTER_NODE_TESTS_OPERAND_CONVERTS);
     // A plain pointer that is a constant a test may read: its kind and its constant's bit, among a value's byte's
     // kind's three bits and that bit.
@@ -4129,8 +4135,7 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         const __m512i quiets = node_window_table(s->own_quiets, codes);
         const __m512i classes = node_window_table(s->own_classes, codes);
         const __m512i operand_bits = node_window_table(s->own_operand_bits, codes);
-        const __m512i copies = node_window_table(s->own_copies, codes);
-        const __m512i always = node_window_table(s->own_always, codes);
+        const __mmask64 always = _mm512_movepi8_mask(classes);
         const __m512i sends = node_window_table(s->own_sends, codes);
         const __m512i tree_marks = node_window_table(s->own_tree_marks, codes);
         const __m512i tree_firsts = node_window_table(s->own_tree_firsts, codes);
@@ -4140,10 +4145,14 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         // What it is as an operand: a constant, its type's four bits (an enumeration, a pointer, a pointer to void, an
         // array), its operator's three.
         const __m512i constant = _mm512_and_si512(values, _mm512_set1_epi8(BUSTER_NODE_TESTS_VALUE_CONSTANT));
-        const __m512i enumeration = _mm512_and_si512(_mm512_srli_epi16(own, 2), _mm512_set1_epi8(BUSTER_NODE_TESTS_OPERAND_ENUM));
-        const __m512i pointed = _mm512_and_si512(_mm512_srli_epi16(own, 3),
-                                                 _mm512_set1_epi8(BUSTER_NODE_TESTS_OPERAND_POINTER | BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE | BUSTER_NODE_TESTS_OPERAND_ARRAY));
-        const __m512i property = _mm512_or_si512(_mm512_or_si512(constant, enumeration), _mm512_or_si512(pointed, operand_bits));
+        // An array, pointer, function and nullptr are mutually exclusive type kinds, so the
+        // parity of the pointer and array bits is their union for the conversion property.
+        const __m512i type_properties = _mm512_gf2p8affine_epi64_epi8(own, _mm512_set1_epi64(
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_OPERAND_ENUM, BUSTER_NODE_CENSUS_TYPE_ENUM) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_OPERAND_CONVERTS, BUSTER_NODE_CENSUS_TYPE_CONVERTS) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE, BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_OPERAND_ARRAY, BUSTER_NODE_CENSUS_TYPE_ARRAY)), 0);
+        const __m512i property = _mm512_or_si512(_mm512_or_si512(constant, type_properties), operand_bits);
         _mm512_storeu_si512(tests->window_properties + x, property);
         __mmask64 near_left = 0;
         __mmask64 far_left = 0;
@@ -4194,15 +4203,16 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
             operands = _mm512_loadu_si512(tests->window_operands + x);
         }
         // Its part of the set's tests.
-        const __m512i uncoded = _mm512_and_si512(classes, _mm512_set1_epi8(BUSTER_NODE_TESTS_CLASS_UNCODED));
-        const __m512i address = _mm512_and_si512(_mm512_srli_epi16(classes, 2), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_ADDRESS));
-        const __m512i special = _mm512_and_si512(_mm512_slli_epi16(own, 1), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_SPECIAL));
-        const __m512i aggregate = _mm512_and_si512(_mm512_slli_epi16(_mm512_and_si512(own, copies), 1), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_AGGREGATE));
-        const __m512i bit_field = _mm512_and_si512(_mm512_slli_epi16(values, 3), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_BIT_FIELD));
-        const __m512i array = _mm512_and_si512(_mm512_srli_epi16(own, 2), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_ARRAY));
-        const __m512i declaration = _mm512_and_si512(_mm512_slli_epi16(values, 4), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_DECLARATION));
-        const __m512i set = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(uncoded, address), _mm512_or_si512(special, aggregate)),
-                                            _mm512_or_si512(_mm512_or_si512(bit_field, array), declaration));
+        const __m512i fixed = _mm512_and_si512(classes, _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_UNCODED | BUSTER_NODE_TESTS_SET_ADDRESS));
+        const __m512i copy_type = _mm512_and_si512(own, _mm512_or_si512(classes, _mm512_set1_epi8((char)~BUSTER_NODE_TESTS_CLASS_COPIES)));
+        const __m512i type_set = _mm512_gf2p8affine_epi64_epi8(copy_type, _mm512_set1_epi64(
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_SPECIAL, BUSTER_NODE_CENSUS_TYPE_SPECIAL) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_AGGREGATE, BUSTER_NODE_CENSUS_TYPE_AGGREGATE) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_ARRAY, BUSTER_NODE_CENSUS_TYPE_ARRAY)), 0);
+        const __m512i value_set = _mm512_gf2p8affine_epi64_epi8(values, _mm512_set1_epi64(
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_BIT_FIELD, BUSTER_NODE_TESTS_VALUE_BIT_FIELD) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_DECLARATION, BUSTER_NODE_TESTS_VALUE_DECLARATION)), 0);
+        const __m512i set = _mm512_or_si512(_mm512_or_si512(fixed, type_set), value_set);
         _mm512_storeu_si512(tests->window_sets + x, set);
         // The quiet rule: an operator listed for a constant operand alone, whose constants' tests have nothing to say of
         // its operands' kinds. A kind is in its record's value's byte, three bits up: the pair's place in the table is the
@@ -4215,8 +4225,7 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         const __m512i paired = _mm512_permutexvar_epi8(pair, quiet_pairs);
         const __m512i own_bit = _mm512_or_si512(values, _mm512_set1_epi8((char)~BUSTER_NODE_TESTS_KIND_OWN));
         const __mmask64 quiet_class = _mm512_test_epi8_mask(_mm512_and_si512(paired, own_bit), quiets);
-        const __mmask64 alone = _mm512_testn_epi8_mask(always, always) &
-                                _mm512_cmpeq_epi8_mask(_mm512_and_si512(sends, operands), _mm512_set1_epi8(BUSTER_NODE_TESTS_OPERAND_CONSTANT));
+        const __mmask64 alone = ~always & _mm512_cmpeq_epi8_mask(_mm512_and_si512(sends, operands), _mm512_set1_epi8(BUSTER_NODE_TESTS_OPERAND_CONSTANT));
         // A subscript of the class's pairs has one test more, a null constant pointer's dereference: one whose pointer
         // is a constant a test may read stays listed.
         const __mmask64 subscripts = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8((char)CHECK_OP_SUBSCRIPT));
@@ -4254,9 +4263,8 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         // it) and its operator has no test whatever its operands are (the sign comparison's). An operand before the
         // block before reads as none, and its comparison stays listed.
         const __m512i sent_by = _mm512_and_si512(sends, operands);
-        const __mmask64 quiet_orders = _mm512_test_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_RELATIONAL)) & _mm512_testn_epi8_mask(always, always) &
-                                       _mm512_test_epi8_mask(left, converts) & _mm512_test_epi8_mask(right, converts) & _mm512_test_epi8_mask(sent_by, sent_by) &
-                                       _mm512_testn_epi8_mask(_mm512_andnot_si512(converts, sent_by), _mm512_andnot_si512(converts, sent_by));
+        const __m512i both = _mm512_ternarylogic_epi64(left, right, classes, 0x80);
+        const __mmask64 quiet_orders = _mm512_test_epi8_mask(both, converts) & _mm512_cmpeq_epi8_mask(sent_by, converts);
         const __m512i left_out = _mm512_movm_epi8(quiet_calls);
         const __m512i top_left_out = node_window_operands(at_left, near_left, previous_left_out, left_out);
         const uint64_t asks = _cvtmask64_u64(casts & voids & _mm512_test_epi8_mask(top_left_out, top_left_out));
@@ -4266,27 +4274,36 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         _mm512_storeu_si512(tests->window_asks + ask_total, _mm512_maskz_compress_epi16((__mmask32)(asks >> 32), _mm512_add_epi16(numbers, _mm512_set1_epi16(32))));
         ask_total += (uint32_t)_mm_popcnt_u32((uint32_t)(asks >> 32));
         // The block's masks.
-        const __m512i sent = _mm512_or_si512(always, _mm512_and_si512(sends, operands));
+        const __mmask64 sent = always | _mm512_test_epi8_mask(sends, operands);
         uint64_t* masks = tests->window_masks + BUSTER_NODE_TESTS_MASKS * (uint64_t)(x / 64);
         masks[BUSTER_NODE_TESTS_MASK_TREE] = tree_first | _mm512_test_epi8_mask(tree_sends, operands);
         masks[BUSTER_NODE_TESTS_MASK_QUIET] = quiet | quiet_calls | quiet_casts | quiet_orders;
-        quiet_total += (uint64_t)_mm_popcnt_u64(quiet);
-        call_total += (uint64_t)_mm_popcnt_u64(quiet_calls);
-        cast_total += (uint64_t)_mm_popcnt_u64(quiet_casts);
-        order_total += (uint64_t)_mm_popcnt_u64(quiet_orders);
-        masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = _mm512_test_epi8_mask(sent, sent) & ~quiet & ~quiet_calls & ~quiet_casts & ~quiet_orders;
+        masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = sent & ~quiet & ~quiet_calls & ~quiet_casts & ~quiet_orders;
         masks[BUSTER_NODE_TESTS_MASK_WRITES] = writes;
         masks[BUSTER_NODE_TESTS_MASK_DISCARDS] = writes | voids | quiet_calls;
+        masks[BUSTER_NODE_TESTS_MASK_QUIET_CALLS] = quiet_calls;
+        masks[BUSTER_NODE_TESTS_MASK_QUIET_CASTS] = quiet_casts;
+        masks[BUSTER_NODE_TESTS_MASK_QUIET_ORDERS] = quiet_orders;
         previous = property;
         previous_values = values;
         previous_marks = tree_marks;
         previous_left_out = left_out;
     }
     *far_count += far_total;
-    *quiet_count += quiet_total;
-    *call_count += call_total;
-    *cast_count += cast_total;
-    *order_count += order_total;
+    // Each block occupies one cache line. Count its masks together after the sweep to keep the
+    // four counters out of the block's live set. The four quiet masks cover disjoint operators.
+    __m512i totals = _mm512_setzero_si512();
+    for (uint32_t x = 0; x < count; x += 64)
+    {
+        const uint64_t* masks = tests->window_masks + BUSTER_NODE_TESTS_MASKS * (uint64_t)(x / 64);
+        totals = _mm512_add_epi64(totals, _mm512_popcnt_epi64(_mm512_loadu_si512(masks)));
+    }
+    uint64_t counts[BUSTER_NODE_TESTS_MASKS];
+    _mm512_storeu_si512(counts, totals);
+    *call_count += counts[BUSTER_NODE_TESTS_MASK_QUIET_CALLS];
+    *cast_count += counts[BUSTER_NODE_TESTS_MASK_QUIET_CASTS];
+    *order_count += counts[BUSTER_NODE_TESTS_MASK_QUIET_ORDERS];
+    *quiet_count += counts[BUSTER_NODE_TESTS_MASK_QUIET] - counts[BUSTER_NODE_TESTS_MASK_QUIET_CALLS] - counts[BUSTER_NODE_TESTS_MASK_QUIET_CASTS] - counts[BUSTER_NODE_TESTS_MASK_QUIET_ORDERS];
     *ask_count = ask_total;
 }
 

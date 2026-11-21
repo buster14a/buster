@@ -5333,9 +5333,13 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
         uint16_t arguments = 0;
         // Each operand is within a byte's distance; and within the expression, which its subtree's size has said already
         // (the test keeps a wrong size from reading before the batch).
-        whole = a != BUSTER_NODE_FRONT_FAR && b != BUSTER_NODE_FRONT_FAR && c != BUSTER_NODE_FRONT_FAR && a <= r && b <= r && c <= r;
-        why = whole ? why : BUSTER_NODE_FACTS_WHY_REACH;
-        if (whole && op == CHECK_OP_VALUE)
+        const uint32_t limit = r < BUSTER_NODE_FRONT_FAR ? r : BUSTER_NODE_FRONT_FAR - 1;
+        if (a > limit || b > limit || c > limit)
+        {
+            why = BUSTER_NODE_FACTS_WHY_REACH;
+            break;
+        }
+        if (op == CHECK_OP_VALUE)
         {
             const uint8_t category = front->leaf_categories[x];
             const TypeId type = front->leaf_types[x];
@@ -5382,7 +5386,7 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
                 entry = number;
             }
         }
-        else if (whole)
+        else
         {
             kind = state->op_kinds[op];
             code = state->op_codes[op];
