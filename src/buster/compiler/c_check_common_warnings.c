@@ -6478,6 +6478,12 @@ static bool check_common_failed_assert_source(const Parser* parser, Preprocessor
                 {
                     emitted->position = (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_DEFERRED;
                 }
+                else if (!pp->fatal && emitted != NULL)
+                {
+                    // At a function body's end, clang queued it as it read the assertion: in source order among the body's
+                    // queued diagnostics, as a constant's comma is (#2252).
+                    pp_diagnostic_source_order(pp, previous);
+                }
             }
         }
     }

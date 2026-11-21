@@ -310,6 +310,38 @@ static const char check_driver_vla_body_commas_source[] =
     "    return H;\n"
     "}\n";
 
+// A rejected static assertion's comma in a body, which clang queues as it reads the assertion (#2252): in source order
+// among the body's queued diagnostics, as a constant's comma is, after the assertion's error. One assertion a unit: after
+// a unit's second rejected assertion a later constant's comma still comes after the body's later queued warnings
+// (docs/c-checker.md's "Left").
+static const char check_driver_vla_body_assertion_condition_source[] =
+    "int f(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    a[5] = 0;\n"
+    "    enum { B = (9, 1) };\n"
+    "    _Static_assert((1, 0) ? 1 : 0, \"x\");\n"
+    "    typedef int T[(7, 2)];\n"
+    "    a[6] = 1;\n"
+    "    enum { C = (4, 5) };\n"
+    "    a[7] = B + C;\n"
+    "    return 0;\n"
+    "}\n";
+
+static const char check_driver_vla_body_assertion_arm_source[] =
+    "int f(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    a[5] = 0;\n"
+    "    enum { B = (9, 1) };\n"
+    "    typedef int T[(7, 2)];\n"
+    "    a[6] = 1;\n"
+    "    _Static_assert(0 ? (3, 1) : 0, \"z\");\n"
+    "    enum { C = (4, 5) };\n"
+    "    a[7] = B + C;\n"
+    "    return 0;\n"
+    "}\n";
+
 // A body's constants' comparisons and `void *` cast as a comma's left operand, which clang gives at once rather than
 // queued (#2252): before the body's queued diagnostics, a plain comma's among them.
 static const char check_driver_vla_body_comparisons_source[] =
@@ -593,6 +625,20 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .source = check_driver_vla_body_member_comparisons_source,
         .warnings = 8,
         .notes = 2,
+    },
+    {
+        .name = "a body's rejected static assertion's condition's comma among its queued diagnostics in source order",
+        .source = check_driver_vla_body_assertion_condition_source,
+        .warnings = 7,
+        .errors = 1,
+        .notes = 3,
+    },
+    {
+        .name = "a body's rejected static assertion's arm's comma among its queued diagnostics in source order",
+        .source = check_driver_vla_body_assertion_arm_source,
+        .warnings = 7,
+        .errors = 1,
+        .notes = 3,
     },
     {
         .name = "constant bounds' comma operators' discarded left operands",

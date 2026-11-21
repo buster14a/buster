@@ -11402,7 +11402,10 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   each comma before the first other record there that clang queues after
   it, the others keeping their order (`pp_diagnostic_source_merge`), so a
   constant in a `sizeof`'s or a statement expression's operand comes before
-  the array index its full expression holds. A comparison's and the
+  the array index its full expression holds. A rejected static
+  assertion's comma in a body (`check_common_failed_assert_source`) is
+  ordered as a constant's is, since clang queues it as it reads the
+  assertion. A comparison's and the
   `void *` cast's question clang gives at once, in a body too, so they are
   published at the comma. At file scope it precedes the declarator's fold
   warning (`c_check_vla_fold_driver_test.c`). A variable bound that no graph
@@ -11422,7 +11425,9 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   `sizeof(int[(6, 2)]) + sizeof(int[(7, 3)])`); and a warning the driver
   queues to a body's end outside the walks (a shift's without a shift's
   node, an integer overflow's without its expression's end,
-  `check_driver_warning_position`) keeps its token as its place.
+  `check_driver_warning_position`) keeps its token as its place; and after
+  a unit's second rejected static assertion, a later constant's comma in a
+  body comes after the body's later queued warnings.
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
