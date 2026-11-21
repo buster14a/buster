@@ -562,7 +562,7 @@ static bool check_input_source_place(CheckInputReader* reader, uint32_t keyword,
     const Parser* parser = reader->parser;
     check_input_lane_refuse(reader, reader->lane, "a body uses a source-location builtin");
     const bool ready = !reader->lane && keyword < parser->tokens.count && pp_history_ensure(pp);
-    const uint32_t output = ready ? parser->tokens.sources[keyword] : BUSTER_PP_NONE;
+    const uint32_t output = ready ? parse_source_index(&parser->tokens, keyword) : BUSTER_PP_NONE;
     const uint32_t location = output < pp->output.count ? pp_output_expansion_end(pp, output, pp_history_at(pp, output)) : 0;
     const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     const bool valid = range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE;

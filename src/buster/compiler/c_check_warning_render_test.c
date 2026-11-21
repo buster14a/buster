@@ -199,7 +199,7 @@ static void check_test_warning_render(CheckTest* test)
                 .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
             };
             const CheckWarningEvents view = { .events = &event, .count = 1 };
-            ready = check_driver_warning_events_at(&prefix, &pp, &input, &types.table, &view, NULL, parser.tokens.sources[3], &scratch);
+            ready = check_driver_warning_events_at(&prefix, &pp, &input, &types.table, &view, NULL, parse_source_index(&parser.tokens, 3), &scratch);
         }
         else
         {

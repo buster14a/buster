@@ -280,6 +280,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         view->tokens.capacity = end;
         view->tokens.kinds = check_prefix_column(output, end, sizeof(uint8_t));
         view->tokens.names = check_prefix_column(output, end, sizeof(uint32_t));
+        view->tokens.identity_sources = false;
         view->tokens.sources = check_prefix_column(output, end, sizeof(uint32_t));
         view->tokens.flags = check_prefix_column(output, end, sizeof(uint8_t));
         view->tree.roles = check_prefix_column(output, end, sizeof(uint8_t));
@@ -296,7 +297,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         {
             memcpy(view->tokens.kinds, parser->tokens.kinds, end);
             memcpy(view->tokens.names, parser->tokens.names, (uint64_t)end * sizeof(uint32_t));
-            memcpy(view->tokens.sources, parser->tokens.sources, (uint64_t)end * sizeof(uint32_t));
+            parse_copy_sources(view->tokens.sources, &parser->tokens, 0, end);
             memcpy(view->tokens.flags, parser->tokens.flags, end);
             memcpy(view->tree.roles, parser->tree.roles, end);
             memcpy(view->tree.parents, parser->tree.parents, (uint64_t)end * sizeof(uint32_t));
@@ -624,7 +625,7 @@ static bool check_prefix_edit(Parser* view, uint32_t* origin, const Parser* orig
         const uint32_t length = to - from;
         memcpy(view->tokens.kinds + written, original->tokens.kinds + from, length);
         memcpy(view->tokens.names + written, original->tokens.names + from, (uint64_t)length * sizeof(uint32_t));
-        memcpy(view->tokens.sources + written, original->tokens.sources + from, (uint64_t)length * sizeof(uint32_t));
+        parse_copy_sources(view->tokens.sources + written, &original->tokens, from, length);
         memcpy(view->tokens.flags + written, original->tokens.flags + from, length);
         for (uint32_t k = 0; k < length; k += 1)
         {
@@ -642,7 +643,7 @@ static bool check_prefix_edit(Parser* view, uint32_t* origin, const Parser* orig
         {
             view->tokens.kinds[written] = edit->kind;
             view->tokens.names[written] = edit->name;
-            view->tokens.sources[written] = original->tokens.sources[to];
+            view->tokens.sources[written] = parse_source_index(&original->tokens, to);
             view->tokens.flags[written] = original->tokens.flags[to];
             origin[written] = to;
             written += 1;
@@ -721,6 +722,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
         view->tokens.kinds = check_prefix_column(output, capacity, 1);
         view->tokens.names = check_prefix_column(output, capacity, sizeof(uint32_t));
+        view->tokens.identity_sources = false;
         view->tokens.sources = check_prefix_column(output, capacity, sizeof(uint32_t));
         view->tokens.flags = check_prefix_column(output, capacity, 1);
         view->tree.roles = check_prefix_column(output, capacity, 1);
@@ -873,7 +875,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                     const uint32_t length = to - from;
                     memcpy(view->tokens.kinds + written, current->tokens.kinds + from, length);
                     memcpy(view->tokens.names + written, current->tokens.names + from, (uint64_t)length * sizeof(uint32_t));
-                    memcpy(view->tokens.sources + written, current->tokens.sources + from, (uint64_t)length * sizeof(uint32_t));
+                    parse_copy_sources(view->tokens.sources + written, &current->tokens, from, length);
                     memcpy(view->tokens.flags + written, current->tokens.flags + from, length);
                     if (dropped_declarator >= from && dropped_declarator < to)
                     {
@@ -925,7 +927,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                 // so no annotation position can be lost or moved by this retained slice.
                                 memcpy(view->tokens.kinds + written, current->tokens.kinds + first, attributes);
                                 memcpy(view->tokens.names + written, current->tokens.names + first, (uint64_t)attributes * sizeof(uint32_t));
-                                memcpy(view->tokens.sources + written, current->tokens.sources + first, (uint64_t)attributes * sizeof(uint32_t));
+                                parse_copy_sources(view->tokens.sources + written, &current->tokens, first, attributes);
                                 memcpy(view->tokens.flags + written, current->tokens.flags + first, attributes);
                                 for (uint32_t a = 0; a < attributes; a += 1)
                                 {
@@ -935,7 +937,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                 const uint32_t callee = diagnostic->resume_callee;
                                 view->tokens.kinds[written] = PARSE_KIND_SEMI;
                                 view->tokens.names[written] = 0;
-                                view->tokens.sources[written] = current->tokens.sources[callee];
+                                view->tokens.sources[written] = parse_source_index(&current->tokens, callee);
                                 view->tokens.flags[written] = BUSTER_PARSE_DROPPED_DECLARATOR;
                                 next_origin[written] = origin != NULL ? origin[callee] : callee;
                                 written += 1;
@@ -948,7 +950,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                 const uint32_t token = c < prefix ? diagnostic->resume_callee + c : arguments + c - prefix;
                                 view->tokens.kinds[written] = current->tokens.kinds[token];
                                 view->tokens.names[written] = current->tokens.names[token];
-                                view->tokens.sources[written] = current->tokens.sources[token];
+                                view->tokens.sources[written] = parse_source_index(&current->tokens, token);
                                 view->tokens.flags[written] = current->tokens.flags[token];
                                 next_origin[written] = origin != NULL ? origin[token] : token;
                                 written += 1;
@@ -965,7 +967,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                 const uint32_t source = c < closers ? to : diagnostic->resume_end;
                                 view->tokens.kinds[written] = c < closers ? kind : PARSE_KIND_SEMI;
                                 view->tokens.names[written] = 0;
-                                view->tokens.sources[written] = current->tokens.sources[source];
+                                view->tokens.sources[written] = parse_source_index(&current->tokens, source);
                                 view->tokens.flags[written] = c < closers && kind == PARSE_KIND_R_PAREN && diagnostic->resume_at != 0 ?
                                                                  BUSTER_PARSE_DROPPED_ATTRIBUTE : 0;
                                 next_origin[written] = origin != 0 ? origin[source] : source;
@@ -1037,7 +1039,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                 if (diagnostic->resume_call && diagnostic->resume_callee < original_count)
                 {
                     temporary[calls] = *diagnostic;
-                    temporary[calls].token = original->tokens.sources[diagnostic->resume_callee];
+                    temporary[calls].token = parse_source_index(&original->tokens, diagnostic->resume_callee);
                     calls += 1;
                 }
             }

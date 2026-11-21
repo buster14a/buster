@@ -1462,7 +1462,7 @@ static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
                 const uint32_t value = results[0].values[at];
                 // The literals' parser on the token's spelling, as check_input_literal spells it.
                 const uint32_t token = tokens[i];
-                const uint32_t source = parser.tokens.sources[token];
+                const uint32_t source = parse_source_index(&parser.tokens, token);
                 const uint8_t kind = kinds[source];
                 uint8_t spelled[24];
                 uint32_t length = 0;

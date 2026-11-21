@@ -2736,7 +2736,9 @@ The uninitialized pass uses the summary node's reach and order together with
 that token, so that it still reports the first evaluated read of an
 uninitialized variable, including its source position and note. An
 unreachable read still counts as a syntactic use of a written parameter.
-Other storage classes, special registers and qualified types keep their graph.
+Local reads use the ordinary graph with debug information enabled, preserving
+the identifier source positions. Other storage classes, special registers and
+qualified types also keep their graph.
 
 `--node-window-assignments` enables the same returns and also scans for complete
 discarded assignments such as `x = 24;` and `x = y;`, with distinct ordinary
@@ -2753,10 +2755,16 @@ still handles operands with side effects, loop clauses and the final value of
 a GNU statement expression.
 
 Admission requires the entire expression in the same coded chunk. Other types,
-operators and spellings, debug information, deferred parts, and units requiring
+operators and spellings, deferred parts, and units requiring
 musttail validation use the existing graph. The window checks the coded tokens
 before any of their graph actions run. A refusal consumes no tokens. No ordinary
 graph or shadow run supplies a successful fold.
+
+With debug information enabled, the CONST row keeps the return token. The
+ordinary lowering uses this same token for the folded return conversion,
+including when its operands occur on different lines or come from macros.
+The node-machine fixture compares every native entry and its source token
+between the two lowerings.
 
 `--time-stages` reports the expressions taken, the ordinary nodes they replace,
 the summaries and the resulting graph size per unit. The
@@ -2764,3 +2772,25 @@ the summaries and the resulting graph size per unit. The
 with the ordinary compile, then change a retained row to exercise the splice.
 The checker driver also checks warning policy, diagnostic order and object bytes
 for a unit containing both taken and refused expressions.
+
+
+#### Integer arithmetic inside an ordinary expression
+
+`./build/compiler --node-window-constants -g -c file.c -o file.o` enables
+a separate window for arithmetic on integer literals of type `int`. For
+example, in `return x + (0x20 | 7);` the reader can replace the inner
+bitwise OR and its literals with one checked value of 39 at the `|` token.
+The ordinary checker handles the addition and return, and ordinary lowering
+supplies their native entries and debug positions.
+
+The complete operand must fit in one coded postorder chunk. The shared
+integer rules preserve its type, value and integer-constant-expression
+status. Faulting arithmetic and operands whose written shape the shift,
+multiplicative, conditional or static-assert diagnostics inspect take the
+ordinary path. `--time-stages` reports the number of accepted roots, the
+nodes removed directly inside their spans and the final graph size. A
+builtin that receives a checked immediate can also avoid copying its value.
+
+The measured single-lane workload with a consistent wall-time gain was
+Buster compiling its own source. SQLite timing was inconclusive, and Lua
+and musl took longer with this option. [Four-corpus object-compile measurements](https://github.com/buster14a/buster-performance/tree/13fa6988bb35461f169986df1b2eecf69cf563ac/docs/measurements/window-compile-2850-2026-11-21/a60859270)

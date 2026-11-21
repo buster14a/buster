@@ -4226,7 +4226,12 @@ What the lowering covers past scalars (#145's programs):
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
   `goto` that leaves the arrays' scope, restoring the outermost block it
-  leaves; a `return` needs none. The lowering keeps the saved position and each
+  leaves; a `return` needs none. Each array's object and each bound find their
+  statement, whose terminator lists them, by a walk up their parents that leaves
+  its answer at every token it passes, under the walk's body
+  (`check_program_statement`): a declarator's bounds (`a[n][n]...[n]`) and a
+  declaration's declarators (`a0[n], a1[n], ...`) walk the path they share
+  once, where each walked it whole (#2995). The lowering keeps the saved position and each
   array's address in locals of their own (Tier 0's `STACK_SAVE`, `ALLOCA` and
   `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
   set once where they were declared, times its constant dimensions and its
@@ -8660,6 +8665,48 @@ the reader's `postorder_positions` and shared `subtree_sizes`; it allocates no
 new token column and does not require the parser's optional size metadata. It
 uses strict region-boundary rules, including jumps out of nested regions and
 refusals when entering sibling regions.
+
+The control writer gives a GNU `break` or `continue` in a statement expression
+its nearest enclosing loop's or switch's label (`check_control_region_targets`):
+the nearest ancestor of the region's opening before it (or a `do` statement's)
+that has one, so that a loop's own controlling expression belongs to the loop
+around it. Since every subtree is a run of tokens, a token's answer is its
+parent's label, where the parent qualifies and has one, or else the parent's
+answer. Each token of the body keeps its answer once a walk passes it, and a
+region's walk stops at the first kept token: nested statement expressions, and
+many under one deep statement, walk each token once, where each region walked
+to the body (#2995). The regions are written in token order, outer ones first,
+and a region's statements set the labels of the loops inside it alone, which
+only a later region is inside, so a kept answer stays right.
+
+This walk and the variable-length arrays' (`check_program_statement`) stay
+scalar. Each is a chain of dependent loads up a token's parents, started only
+at a statement expression or at an array's object or bound, and with the
+answers kept it passes a token at most once a body (the arrays' walks, of their
+objects and then of their bounds, twice). A data-parallel form, pointer jumping
+over a body's parents, reads every token of the body in each of its passes to
+answer a few walks. The counts, which no host changes (`-c` of the 614 units in
+`tests/**/*.c` and c-testsuite that compile without flags, the two deep checker
+sources below apart, and of three generated shapes):
+
+| Units | Walks' starts | Their tokens | Parents passed | Without kept answers |
+| --- | ---: | ---: | ---: | ---: |
+| 16 with statement expressions | 45 regions | 37,281 | 244 | 267 |
+| 14 with variable-length arrays | 15 bounds | 4,318 | 74 | 74 |
+| 8,000 nested statement expressions | 8,000 regions | 40,039 | 24,002 | 96,028,000 |
+| an array of 8,000 bounds | 8,000 bounds | 24,017 | 16,004 | 64,024,002 |
+| a declaration of 8,000 arrays | 8,000 bounds | 40,013 | 48,000 | 64,055,998 |
+
+Kept answers cost three stores and a bit for each token a region's walk passes
+(its link on the way up, then its two labels), two stores and a bit for each an
+array's walk passes (its end and its key), and clearing a bit a token for each
+body with a statement expression and for each unit with a variable-length
+array. `CheckProgramOptions.region_target_work` and
+`statement_walk_work` tally the parents passed: test-checker bounds them by
+every program fixture's tokens and twice them, and its program fixtures
+compile and run the deep checker sources (`quadratic-statement-expressions.c`,
+`quadratic-vla-bounds.c`), whose walks pass 717 parents in 1,744 tokens and 856
+in 1,005 (22,673 and 21,099 without kept answers, which fail those bounds).
 
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump

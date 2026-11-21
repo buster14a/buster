@@ -17,7 +17,13 @@ requirements. [Command index](README.md).
   register claims and stored-value continuations. `benchmark-tier1-allocation`
   measures full preparation and allocation (`--after-scalar MS` runs scalar
   integer work before each sample); `test-checker-driver`'s Tier 1
-  fixture runs every recipe through `--tier1` against clang.
+  fixture runs every recipe through `--tier1` against clang. A frame address
+  at offset 0 from rsp, rbp, r12 or r13 is the base's register copy, `mov r64,
+  base`, a byte shorter than its lea (#3149): `test-tier1-allocation` checks
+  every base's copies against the encoder and the Zen 5 model's price of them,
+  and runs one natively, and `test-checker-driver`'s frame fixture
+  (`check_test_driver_tier1_frame`) compiles four functions that recompute one
+  after a call by `--tier1 --verify`, against clang.
   [The allocation guide](../../docs/tier1-allocation.md)
   records producer constraints and the corpora's spills with and without
   rematerialization. Its clobbers (#2574), where a call evicts a recomputable

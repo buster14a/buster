@@ -1090,6 +1090,53 @@ static void check_test_leaf_rows_invalid(CheckTest* test, Arena* storage)
     arena_pop_to(storage, mark);
 }
 
+// Compare the first-write condition path with the ordinary actions on the same checked inputs.
+static void check_test_int_conditions(CheckTest* test, TypeTable* types, Arena* storage, Arena* output, Arena* scratch)
+{
+    const uint64_t storage_mark = storage->length;
+    const uint64_t output_mark = output->length;
+    Arena fresh = arena_reserve(1u << 20);
+    const CheckValue operands[] = {
+        { .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION },
+        { .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 17 },
+        { .type = BUSTER_TYPE_INT | BUSTER_TYPE_VOLATILE, .category = CHECK_LVALUE, .object = 1 },
+        { .type = BUSTER_TYPE_VOID },
+    };
+    CheckGraph graph;
+    const bool ready = fresh.base != NULL && check_graph_initialize(&graph, storage, 2 * BUSTER_ARRAY_LENGTH(operands), 0);
+    check_test_expect(test, ready, "fresh graph output for condition conversions");
+    if (ready)
+    {
+        uint32_t conditions[BUSTER_ARRAY_LENGTH(operands)];
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+        {
+            const uint32_t leaf = check_test_leaf(&graph, 2 * i, operands[i]);
+            conditions[i] = check_graph_add(&graph, CHECK_OP_CONDITION, 2 * i + 1, leaf, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        }
+        CheckStream checked;
+        CheckStream ordinary;
+        const CheckOptions first = { .verify = true, .fresh_output = true };
+        const CheckOptions reference = { .verify = true };
+        const bool ran = check_graph_run(types, &graph, &fresh, scratch, &first, &checked) && check_graph_run(types, &graph, output, scratch, &reference, &ordinary);
+        check_test_expect(test, ran, "both condition output paths checked");
+        if (ran)
+        {
+            const CheckValue unknown = check_stream_value(&checked, conditions[0]);
+            const CheckValue known = check_stream_value(&checked, conditions[1]);
+            check_test_expect(test, unknown.type == BUSTER_TYPE_INT && unknown.category == CHECK_RVALUE && unknown.constant_kind == CHECK_CONSTANT_NONE &&
+                              unknown.flags == operands[0].flags && checked.conversions[conditions[0]].operands[0].type == BUSTER_TYPE_INT,
+                              "unknown int condition retains the source's effects and operand conversion");
+            check_test_expect(test, known.constant_kind == CHECK_CONSTANT_INTEGER && known.integer == 1 &&
+                              (checked.conversions[conditions[2]].operands[0].flags & BUSTER_CHECK_CONVERT_LVALUE) != 0 &&
+                              checked.diagnostics[conditions[3]] == CHECK_DIAG_SCALAR_REQUIRED, "known, lvalue and invalid conditions use their complete actions");
+            check_test_expect(test, check_test_stream_equal(&checked, &ordinary, 0), "fresh and ordinary conditions agree on every checked field");
+        }
+    }
+    arena_release(&fresh);
+    arena_pop_to(output, output_mark);
+    arena_pop_to(storage, storage_mark);
+}
+
 static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
     check_test_leaf_records(test);
@@ -1097,6 +1144,7 @@ static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* te
     check_test_graph_partial_allocations(test, table, storage);
     check_test_graph_argument_guards(test, table, storage, output, scratch);
     check_test_graph_barriers(test, storage, output, scratch);
+    check_test_int_conditions(test, table, storage, output, scratch);
     check_test_graph_report_order(test, table, storage, output, scratch);
     check_test_graph_updates(test, table, storage, output, scratch);
     check_test_graph_validation(test, storage);

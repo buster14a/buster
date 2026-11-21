@@ -731,7 +731,7 @@ struct CheckInputReport
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
 {
     return report->pragma != 0 ? (report->pragma <= parser->tokens.pragma_count ? parser->tokens.pragma_sources[report->pragma - 1] + 1 : BUSTER_CHECK_NONE) :
-           report->token < parser->tokens.count ? parser->tokens.sources[report->token] : BUSTER_CHECK_NONE;
+           report->token < parser->tokens.count ? parse_source_index(&parser->tokens, report->token) : BUSTER_CHECK_NONE;
 }
 
 // Sparse source diagnostics, including calls checked only by sizeof/typeof rather than a retained graph.
@@ -1307,6 +1307,8 @@ struct CheckInput
     uint32_t window_capacity;
     uint32_t window_count;
     uint32_t window_nodes;
+    uint32_t integer_window_count;
+    uint32_t integer_window_removed;
 };
 
 // The summary owned by this VALUE. The reciprocal link distinguishes the other uses of the members column.
@@ -3557,7 +3559,7 @@ static void check_input_target_versions_calls(CheckInputReader* reader);
 // A retained malformed callee's index, or NONE. Original sources survive reparses, synthetic punctuation and macros.
 static uint32_t check_input_invalid_call_index(const Parser* parser, uint32_t token)
 {
-    const uint32_t source = parser->invalid_call_count != 0 ? parser->tokens.sources[token] : 0;
+    const uint32_t source = parser->invalid_call_count != 0 ? parse_source_index(&parser->tokens, token) : 0;
     uint32_t low = 0;
     uint32_t high = parser->invalid_call_count;
     while (low < high)
@@ -5750,7 +5752,7 @@ static void check_typo_parameter(CheckInputReader* reader, uint32_t token, uint3
 static void check_input_parameter_typo(CheckInputReader* reader, uint32_t token)
 {
     const PPTokens* output = reader->pp != NULL ? &reader->pp->output : NULL;
-    const uint32_t source = reader->parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&reader->parser->tokens, token);
     const bool spelled = output != NULL && source < output->count && output->kinds[source] == C_TOKEN_RAW_IDENTIFIER;
     const uint32_t name = spelled ? output->values[source] : 0;
     if (spelled && !reader->lane && reader->deferred == NULL && !reader->output->resource)
@@ -6471,7 +6473,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
 // Always inlined (#880), as profile-guided builds do; hot caller: check_input_literal, once per literal.
 static inline __attribute__((always_inline)) bool check_input_spelling(CheckInputReader* reader, uint32_t token, const uint8_t** bytes, uint32_t* length)
 {
-    const uint32_t source = reader->parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&reader->parser->tokens, token);
     PPTokens* output = &reader->pp->output;
     const uint8_t kind = output->kinds[source];
     // A compact resource has no single-token spelling. A speculative literal-table proof must fall back to the
@@ -16425,10 +16427,9 @@ static bool check_diagnostic_default_error_relaxed_at(const CheckInput* input, u
 static void check_input_relaxed_tokens(CheckInputReader* reader, Preprocessor* pp, uint8_t* tokens, uint32_t count, bool all)
 {
     const CheckInput* input = reader->output;
-    const uint32_t* sources = reader->parser->tokens.sources;
     for (uint32_t token = 0; token < count; token += 1)
     {
-        const bool relaxed = all || check_diagnostic_default_error_relaxed_at(input, token, sources[token]);
+        const bool relaxed = all || check_diagnostic_default_error_relaxed_at(input, token, parse_source_index(&reader->parser->tokens, token));
         tokens[token] |= relaxed ? BUSTER_CHECK_RELAXED_TOKEN : 0;
     }
     (void)pp;
@@ -16495,11 +16496,20 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         }
         // A token without a source in the output reads the entry past them all, a user file's, rather than a branch's:
         // as a branch, every token jumped (#1175).
-        const uint32_t* sources = parser->tokens.sources;
         const uint32_t limit = pp->output.count;
         levels[limit] = BUSTER_PP_USER_FILE;
         memset(levels + limit + 1, 0, 3);
-        check_input_system_token_map(tokens, sources, count, levels, limit);
+        if (parser->tokens.identity_sources)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                tokens[i] = levels[i] == BUSTER_PP_SYSTEM_FILE || levels[i] == BUSTER_PP_EXTERN_C_FILE;
+            }
+        }
+        else
+        {
+            check_input_system_token_map(tokens, parser->tokens.sources, count, levels, limit);
+        }
         memset(tokens + count, 0, 4);
     }
     if (tokens != NULL && (levels != NULL || mapped != NULL || relaxed))
@@ -16546,16 +16556,17 @@ static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, con
 
 // The constant context a token opens, if any: a static object's initializer, a static assertion's condition or a case
 // label's value.
-static void check_input_constant_context(CheckInputReader* reader, uint32_t token)
+static void check_input_constant_context(CheckInputReader* reader, uint32_t token, uint32_t* assertion_end)
 {
     const Parser* parser = reader->parser;
     const CheckInput* input = reader->output;
     const uint32_t count = parser->tokens.count;
+    const uint8_t context = 1u | (token < *assertion_end ? BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT : 0u);
     const uint32_t begin = check_sparse_get(input->initializer_begins, token);
     const uint32_t end = check_sparse_get(input->initializer_ends, token);
     if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && begin < end && end <= count)
     {
-        memset(reader->constant_contexts + begin, 1, end - begin);
+        memset(reader->constant_contexts + begin, context, end - begin);
     }
     if (parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT && token + 1 < count)
     {
@@ -16563,7 +16574,14 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         if (close > token + 1 && close < count)
         {
             const uint32_t separator = check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA);
-            memset(reader->constant_contexts + token + 2, 1, separator - token - 2);
+            // A failed assertion describes its written operand graph, even for a comparison below a comma.
+            // Tell the window reader to leave that graph in place. Nested case and initializer contexts keep the mark.
+            if (reader->pp->options.node_window_constants && separator > *assertion_end)
+            {
+                *assertion_end = separator;
+            }
+            const uint8_t assertion = 1u | (token < *assertion_end ? BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT : 0u);
+            memset(reader->constant_contexts + token + 2, assertion, separator - token - 2);
             // Clang parses this whole condition as constant-evaluated, including static-selection arms that the
             // evaluated graph does not retain as operands. Their runtime shift-count diagnostics are not queued.
             check_input_warning_suppress(reader, token + 2, separator, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
@@ -16588,7 +16606,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         const uint32_t close = parser->tree.parents[token];
         if (close > token && close < count)
         {
-            memset(reader->constant_contexts + token + 1, 1, close - token - 1);
+            memset(reader->constant_contexts + token + 1, context, close - token - 1);
             check_input_warning_suppress(reader, token + 1, close, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
         }
     }
@@ -16600,6 +16618,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
 static void check_input_constant_contexts_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
+    uint32_t assertion_end = 0;
     for (uint32_t first = begin; first < end; first += 64)
     {
         uint64_t selected = check_input_scan_bit(reader->output->declaration_bits, first, end, BUSTER_CHECK_BITS_STATIC) |
@@ -16607,7 +16626,7 @@ static void check_input_constant_contexts_range(CheckInputReader* reader, uint32
                             check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_CASE);
         for (; selected != 0; selected &= selected - 1)
         {
-            check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected));
+            check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected), &assertion_end);
         }
     }
 }
@@ -17843,20 +17862,27 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         check_input_sizeof_prepare(&reader);
                     }
-                    struct rusage before;
-                    const bool used = getrusage(RUSAGE_SELF, &before) == 0;
-                    const uint64_t expressions_start = __rdtsc();
-                    check_input_expressions(&reader);
-                    input->expression_ticks = __rdtsc() - expressions_start;
-                    struct rusage after;
-                    const bool read = used && getrusage(RUSAGE_SELF, &after) == 0;
-                    if (read)
+                    if (reader.pp->options.skip_expression_profile)
                     {
-                        input->expression_faults = (uint64_t)(after.ru_minflt - before.ru_minflt);
-                        input->expression_system_us = (uint64_t)((after.ru_stime.tv_sec - before.ru_stime.tv_sec) * 1000000 +
-                                                                 (after.ru_stime.tv_usec - before.ru_stime.tv_usec));
+                        check_input_expressions(&reader);
                     }
-                    input->expression_usage_failed = !read;
+                    else
+                    {
+                        struct rusage before;
+                        const bool used = getrusage(RUSAGE_SELF, &before) == 0;
+                        const uint64_t expressions_start = __rdtsc();
+                        check_input_expressions(&reader);
+                        input->expression_ticks = __rdtsc() - expressions_start;
+                        struct rusage after;
+                        const bool read = used && getrusage(RUSAGE_SELF, &after) == 0;
+                        if (read)
+                        {
+                            input->expression_faults = (uint64_t)(after.ru_minflt - before.ru_minflt);
+                            input->expression_system_us = (uint64_t)((after.ru_stime.tv_sec - before.ru_stime.tv_sec) * 1000000 +
+                                                                     (after.ru_stime.tv_usec - before.ru_stime.tv_usec));
+                        }
+                        input->expression_usage_failed = !read;
+                    }
                 }
                 if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
                 {

@@ -51,7 +51,10 @@ requirements. [Command index](README.md).
   depths is `unresolved`, and one whose jump table's targets take their
   indirect jump's depth `assumed`. It compares each file's frames with the
   first's over the functions both have, leaving the unresolved out: #177's
-  frame sizes against `clang -O2`.
+  frame sizes against `clang -O2`. Its frame-pointer column counts any `mov
+  rbp, rsp`, so a Tier 1 function without a frame pointer that recomputes a
+  frame address at rsp into rbp (rsp's register copy, #3149) reads as setting
+  one; its frame and state are unchanged.
 
 ## Lifetime planning on deep trees (#1355)
 
