@@ -377,13 +377,13 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     uint32_t* root_declarations = tested ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
     room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL && root_declarations != NULL));
     // A summary's side facts by root node, and their references' store: no expression has more references than
-    // leaves, so a node each is room for all.
+    // leaves, and each switch's additional selector type has its own promotion node, so a word a node is room for all.
     const bool summaries = (options & BUSTER_NODE_READER_WINDOW_ROWS) != 0;
     uint32_t* summary_firsts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
     uint16_t* summary_counts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint16_t), _Alignof(uint16_t)) : NULL;
     uint8_t* summary_facts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
-    uint32_t* summary_objects = summaries ? arena_push_array(reader->arena, (uint64_t)capacity + 1, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
-    room = room && (!summaries || (summary_firsts != NULL && summary_counts != NULL && summary_facts != NULL && summary_objects != NULL));
+    uint32_t* summary_words = summaries ? arena_push_array(reader->arena, (uint64_t)capacity + 1, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    room = room && (!summaries || (summary_firsts != NULL && summary_counts != NULL && summary_facts != NULL && summary_words != NULL));
     if (room)
     {
         typer->graph = reader->output->graph;
@@ -428,7 +428,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
             types->summary_firsts = summary_firsts;
             types->summary_counts = summary_counts;
             types->summary_facts = summary_facts;
-            types->summary_objects = summary_objects;
+            types->summary_words = summary_words;
             types->summary_capacity = capacity;
         }
         if (tested)
@@ -567,7 +567,11 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                 else if (root < types->node_capacity && inner <= root && size != 0 && size <= inner + 1)
                 {
                     const uint32_t first = inner + 1 - size;
-                    const NodeMachineRefusal refusal = node_machine_type(machine, first, root, records);
+                    // T types an initializer's value without its INITIALIZE record. The token's mark supplies that
+                    // record's VALUE context even when the outer node lies beyond the shadow's capacity.
+                    const uint32_t initializer = front->tokens[record];
+                    const bool required = initialization && initializer < reader->parser->tokens.count && BUSTER_CHECK_RARE(reader, static_initializers, initializer);
+                    const NodeMachineRefusal refusal = node_machine_type_in_context(machine, first, root, records, required);
                     if (pass != 0)
                     {
                         types->digests[root] = node_machine_digest(machine, refusal);

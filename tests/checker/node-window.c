@@ -27,3 +27,5 @@ int division(void) { return 42 / 7; }
 int overflow(void) { return 999999999 * 7; }
 int mixed(int x) { if (x) return x; return 1 + 4; }
 int local_read(int x) { int y = x; return +y; }
+int assigned_literal(int target) { target = 24; return target; }
+int assigned_local(int source, int target) { target = source; return target; }

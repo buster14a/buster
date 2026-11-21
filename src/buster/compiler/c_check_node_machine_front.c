@@ -285,9 +285,6 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_CONTEXTS_VALUED,
     NODE_FACTS_COUNT_CONTEXTS_SUNK,
     NODE_FACTS_COUNT_CONTEXTS_COMMAS,
-    // The casts that list their expression for a truth their operand may have and their own value has not: a
-    // branch's condition over one has a truth its root's value does not say (a summary's side facts' piece).
-    NODE_FACTS_COUNT_CONTEXTS_PASSED,
     // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS): the expressions it ran on (those C takes on the window)
     // and their records; those whose tape it made, their records and their entries; the listed ones by their first
     // record's reason (BUSTER_NODE_ROWS_REASON_*, in its order); the made tapes that differ from the reference's, and
@@ -441,13 +438,14 @@ struct NodeFrontTypes
     // A summary's side facts (BUSTER_NODE_READER_WINDOW_ROWS; null otherwise), by root node, for an expression the
     // rows take whole on the window: its references' first in their store (UINT32_MAX: none is kept for the root) and
     // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
-    // objects one after another, `summary_count` of `summary_capacity`; an expression it had no room for keeps none
+    // objects, followed only for a switch by its selector's TypeId. `summary_count` counts all words stored,
+    // of `summary_capacity`; an expression it had no room for keeps none
     // (`summary_unkept`). And the unit's functions the return flow leaves unknown from a declaration on
     // (check_program_return_unknowns' table, by object; null where the unit has none).
     uint32_t* summary_firsts;
     uint16_t* summary_counts;
     uint8_t* summary_facts;
-    uint32_t* summary_objects;
+    uint32_t* summary_words;
     uint64_t summary_count;
     uint64_t summary_capacity;
     uint64_t summary_unkept;

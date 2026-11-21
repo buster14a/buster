@@ -1446,6 +1446,71 @@ static const CheckDriverDefaultWarningFixture check_driver_counted_sugar_fixture
                   "void f(struct B *b, long *l) { l = b->p; l = b->q; l = &b->p; }\n",
         .errors = 3,
     },
+    {
+        // The operands of every other error that prints their types (#1842's 3c, check_driver_operand_type): binary and
+        // unary operators', a `.`'s base, an array's assignment and increment, sizeof's, a subtraction's, a conditional's
+        // and a switch's; through parentheses, a comma's right operand, a conditional of the same member's arms, `*&`, an
+        // increment, a struct's copy's member and a flexible array's decay.
+        .name = "counted_by sugar of operands",
+        .source = "struct B { int n; int *p __attribute__((counted_by(n))); char *q __attribute__((sized_by(n))); int fam[] __attribute__((counted_by(n))); };\n"
+                  "void f(struct B *b, struct B v, int k)\n"
+                  "{\n"
+                  "    (b->p) + 1.0;\n"
+                  "    b->fam + 1.0;\n"
+                  "    (0, b->p) * 2;\n"
+                  "    (k ? b->p : b->p) + 1.0;\n"
+                  "    -b->p;\n"
+                  "    ~b->p;\n"
+                  "    b->fam.x;\n"
+                  "    b->p.x;\n"
+                  "    b->p++ + 1.0;\n"
+                  "    *&b->p + 1.0;\n"
+                  "    b->fam = 0;\n"
+                  "    b->fam++;\n"
+                  "    sizeof(b->fam);\n"
+                  "    v.p * 2;\n"
+                  "    b->p - (char *)0;\n"
+                  "    b->p - b->q;\n"
+                  "    k ? b->p : 1.5;\n"
+                  "    switch (b->p) { }\n"
+                  "}\n",
+        .errors = 18,
+        .warnings = 1,
+    },
+    {
+        // A call's callee, a `.`'s base, `&`'s operand, one member on both sides (the second without its a.k.a.), a statement
+        // expression's value, an initializer's member target, -Wformat's argument, -Wnon-literal-null-conversion's assigned
+        // and initialized member, an ordered comparison's and a pointer type mismatch's operands (#1842's 3c); and the
+        // pointer arithmetic on a use that is clang's "cannot use" error, which reports nothing else (#1842's 3d).
+        .name = "counted_by sugar of callees, targets and warnings",
+        .source = "int printf(const char *, ...);\n"
+                  "struct B { int n; int *p __attribute__((counted_by(n))); char *q __attribute__((sized_by(n))); };\n"
+                  "struct I { int n; struct Inc *r __attribute__((counted_by(n))); };\n"
+                  "void g(struct B *b, struct B v, struct I *i, long *l)\n"
+                  "{\n"
+                  "    b->p();\n"
+                  "    b->q / 2;\n"
+                  "    &b->p + 1.0;\n"
+                  "    b->p * b->p;\n"
+                  "    v.p.x;\n"
+                  "    b->p % 2;\n"
+                  "    ({ b->p; }) + 1.0;\n"
+                  "    l = ({ b->p; });\n"
+                  "    i->r + 1;\n"
+                  "    struct B x = { .p = 2.5 };\n"
+                  "}\n"
+                  "void h(struct B *b)\n"
+                  "{\n"
+                  "    b->p = 1 - 1;\n"
+                  "    int r = b->p < 1;\n"
+                  "    printf(\"%d %s\\n\", b->p, b->q);\n"
+                  "    struct B y = { .p = 1 ? 0 : 0 };\n"
+                  "    (void)(b->n ? b->p : (char *)0);\n"
+                  "}\n",
+        .errors = 10,
+        .warnings = 5,
+        .notes = 2,
+    },
 };
 
 // A use of a counted_by or counted_by_or_null pointer member whose pointee type is incomplete there (#1842's 3d,
@@ -1492,6 +1557,43 @@ static const CheckDriverDefaultWarningFixture check_driver_counted_incomplete_fi
                   "}\n",
         .errors = 5,
         .notes = 10,
+    },
+    {
+        // Initializations (#1842's 3d, CheckInitCounted): "cannot initialize" at each value the member takes, a file scope
+        // object's and a compound literal's too, and "cannot implicitly initialize" where a list of its record leaves it out:
+        // at explicit braces' `}`, at the last value a brace elision took, and at the end of the designation that made a
+        // designator's list, each when the braces that fill it in close (`o1`'s and `o2`'s are out of source order), once
+        // a GNU range element; a typedef's anonymous record by the typedef's name; none for a sized_by member, an object
+        // with no initializer, a copy, or a pointee completed before.
+        .name = "counted_by initializations of an incomplete pointee",
+        .source = "#define __counted_by(n) __attribute__((counted_by(n)))\n"
+                  "struct Inc;\n"
+                  "struct B { int n; struct Inc *__counted_by(n) p; };\n"
+                  "struct O { struct B a; struct B b; };\n"
+                  "typedef struct { int n; struct Inc *__attribute__((counted_by_or_null(n))) p; struct Inc *__attribute__((sized_by(n))) s; } T;\n"
+                  "struct Inc *get(void);\n"
+                  "void take(struct B);\n"
+                  "struct B gb = { 0, 0 };\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    struct B b = { 1, get() };\n"
+                  "    struct B c = { .n = 2, .p = get() };\n"
+                  "    struct B e = { 0 };\n"
+                  "    struct B d[3] = { { 1 }, { 2, get() }, [2].n = 3 };\n"
+                  "    struct O o1 = { { 1 }, .b.n = 2, .a.p = get() };\n"
+                  "    struct O o2 = { .b.n = 2, .a = { 1 } };\n"
+                  "    struct O o3 = { 1, get(), 2 };\n"
+                  "    struct B r[3] = { [0 ... 2].n = 1 };\n"
+                  "    T t = { 1 };\n"
+                  "    take((struct B){ 1, get() });\n"
+                  "    struct B none;\n"
+                  "    struct B copy = b;\n"
+                  "    (void)c; (void)e; (void)d; (void)o1; (void)o2; (void)o3; (void)r; (void)t; (void)none; (void)copy;\n"
+                  "}\n"
+                  "struct Inc { int x; };\n"
+                  "void g(void) { struct B late = { 1 }; (void)late; }\n",
+        .errors = 19,
+        .notes = 38,
     },
 };
 

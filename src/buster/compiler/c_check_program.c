@@ -1189,6 +1189,18 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     return known;
 }
 
+// When a cast did not produce a constant, the nonzero address of a symbol cannot
+// decide the converted value. Its low bits may all be zero after truncation.
+static bool check_program_branch_cast(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t operand = graph->operand0[node];
+    const bool unproved = check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE && operand < graph->count &&
+                          check_stream_constant_kind(stream, operand) == CHECK_CONSTANT_ADDRESS;
+    return !unproved;
+}
+
 // A branch condition's truth as clang's CFG builder prunes its edges (#1447, CFGBuilder::tryEvaluateBool, whose
 // EvaluateAsBooleanCondition ignores side effects), which the -Wreturn-type walk and the runtime warnings' reachability
 // (check_common_body_reached) model: a known value's (check_program_runtime_truth), and a logical operator's that one
@@ -1216,13 +1228,14 @@ static bool check_program_branch_truth(const CheckProgram* program, uint32_t nod
         const uint32_t at = frames[top - 1];
         const uint8_t level = levels[top - 1];
         const CheckOp op = at < graph->count ? graph->ops[at] : CHECK_OP_COUNT;
-        const bool unary = op == CHECK_OP_CONDITION || op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_NOT;
+        const bool cast = op == CHECK_OP_CONVERT || op == CHECK_OP_CAST;
+        const bool unary = op == CHECK_OP_CONDITION || cast || op == CHECK_OP_NOT;
         const bool binary = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
         if (expanded[top - 1] == 0)
         {
             bool value = false;
             const bool known = at < graph->count && check_program_runtime_truth(program, node, at, &value);
-            if (!known && level < BUSTER_CHECK_BRANCH_TRUTH_DEPTH && (unary || binary))
+            if (!known && level < BUSTER_CHECK_BRANCH_TRUTH_DEPTH && (unary || binary) && (!cast || check_program_branch_cast(program, at)))
             {
                 // Its operands, the left one on top.
                 expanded[top - 1] = 1;

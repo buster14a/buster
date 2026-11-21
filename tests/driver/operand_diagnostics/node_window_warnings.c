@@ -79,3 +79,38 @@ int earliest(int branch)
     }
     return value;
 }
+
+int assigned_uninitialized(void)
+{
+    int missing;
+    int target;
+    target = missing;
+    return target;
+}
+
+int assigned_loop(int bound)
+{
+    int i = 0;
+    for (; i < bound;)
+    {
+        i = bound;
+    }
+    return i;
+}
+
+int self_assignment(int parameter)
+{
+    parameter = parameter;
+    return parameter;
+}
+
+int statement_result(int parameter)
+{
+    return ({ parameter = 2; });
+}
+
+int braced_after_write(void)
+{
+    int value = { ({ value = 2; value; }) };
+    return value;
+}
