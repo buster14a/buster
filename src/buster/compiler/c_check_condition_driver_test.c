@@ -183,6 +183,20 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
                   "void w(int x) __attribute__((enable_if(x < 10, \"p2\")));\n"
                   "void hw(void) { w(5); }\n",
     },
+    // A redeclaration whose own conditions are diagnose_ifs alone has no enable_if of its own, so it still inherits the
+    // previous declaration's first (#2464): `r(8)` is disabled. `n == 9` doesn't hold, so no disabled call's diagnose_if
+    // is at stake.
+    {
+        .name = "a redeclaration with a diagnose_if alone inherits the first enable_if",
+        .source = "int r(int n) __attribute__((enable_if(n < 100, \"small\")));\n"
+                  "int r(int n) __attribute__((diagnose_if(n == 9, \"nine\", \"warning\")));\n"
+                  "void t(void) { r(8); }\n"
+                  "int s(int n) __attribute__((enable_if(1, \"one\"), enable_if(0, \"zero\")));\n"
+                  "int s(int n) __attribute__((diagnose_if(n == 9, \"nine\", \"warning\")));\n"
+                  "void u(void) { int (*p)(int) = s; (void)p; s(8); }\n",
+        .errors = 1,
+        .notes = 1,
+    },
     {
         .name = "an inherited enable_if of a pass_object_size function",
         .source = "int r(void *p __attribute__((pass_object_size(0)))) __attribute__((enable_if(p != 0, \"nn\")));\n"
@@ -928,6 +942,17 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
                   "void t(void) { n(1); n(-1); h(30); h(-1); h(5); }\n",
         .errors = 1,
         .notes = 2,
+    },
+    // The one candidate without overloadable reads an enable_if it inherits with its parameters unknown (#2464), so it
+    // isn't viable and the call selects the other, whose diagnose_if holds.
+    {
+        .name = "an unmarked candidate's inherited enable_if in overload resolution",
+        .source = "int f(int n) __attribute__((enable_if(n < 100, \"small\")));\n"
+                  "int f(int n);\n"
+                  "int f(double d) __attribute__((overloadable, diagnose_if(d == 8.0, \"dbl\", \"warning\")));\n"
+                  "void t(void) { f(8); }\n",
+        .warnings = 1,
+        .notes = 1,
     },
     {
         .name = "an ambiguous call's candidates",
