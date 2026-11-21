@@ -1990,8 +1990,7 @@ _Static_assert(BUSTER_NODE_FACTS_LITERAL_LINE == 6 && BUSTER_NODE_FACTS_OPERATOR
 //   (node_rows_summary_reduce).
 // A condition's truth and a constant root's fold are a summary node's value's to answer: the turns list an `&&` or an
 // `||` whose second operand's truth is known (node_rows_window_decided), and C lists a folded comma. A `switch`'s
-// selector's type is not: -Wswitch reads the node at the selector's first token (#3200), which only the walk makes,
-// and a `switch`'s condition stays the walk's.
+// selector type is its operand's before the POSITIVE root applies the integer promotions (node_rows_window_keep).
 static __attribute__((noinline)) void node_rows_window_summary(struct NodeFactsReader* state, const NodeFront* front, uint32_t count, NodeRowsSummaryCounts* made)
 {
     const __m512i places = _mm512_load_si512(state->x_tables->places);
@@ -2186,24 +2185,32 @@ static uint32_t node_rows_window_keep(struct NodeFactsReader* state, const NodeF
     const uint32_t kept = (uint32_t)before[operand + 1] - first;
     const uint32_t turn = state->summary_fault ? state->summary_fault_turn % 4 : 4;
     const bool more = turn == 0 || (turn == 1 && kept == 0);
+    // Only a switch has a POSITIVE wrapper at the expression root. Its operand's type is the selector's:
+    // the front makes an implicit CONVERT only at a return, never inside a taken selector.
+    const bool switched = front->ops[state->records[e]] == CHECK_OP_POSITIVE;
+    const uint32_t words = kept + (more ? 1u : 0u) + (switched ? 1u : 0u);
     if (types->summary_firsts != NULL && root < types->node_capacity)
     {
-        if (types->summary_count + kept + (more ? 1u : 0u) <= types->summary_capacity && kept < UINT16_MAX)
+        if (types->summary_count + words <= types->summary_capacity && kept < UINT16_MAX)
         {
-            uint32_t* objects = types->summary_objects + types->summary_count;
-            memcpy(objects, state->x_summary_objects + first, (uint64_t)kept * sizeof(uint32_t));
+            uint32_t* destination = types->summary_words + types->summary_count;
+            memcpy(destination, state->x_summary_objects + first, (uint64_t)kept * sizeof(uint32_t));
             if (more)
             {
-                objects[kept] = turn == 0 ? 0 : UINT32_MAX;
+                destination[kept] = turn == 0 ? 0 : UINT32_MAX;
             }
             else if (turn == 1)
             {
-                objects[0] = 0;
+                destination[0] = 0;
             }
             types->summary_firsts[root] = (uint32_t)types->summary_count;
             types->summary_counts[root] = (uint16_t)(kept + (more ? 1u : 0u));
             types->summary_facts[root] = (uint8_t)(state->x_summary_facts[e] ^ (turn == 2 ? BUSTER_CHECK_RETURN_STOPS : turn == 3 ? BUSTER_CHECK_RETURN_UNKNOWN : 0u));
-            types->summary_count += kept + (more ? 1u : 0u);
+            if (switched)
+            {
+                destination[types->summary_counts[root]] = state->window_x_types[operand] ^ (state->summary_fault ? 1u : 0u);
+            }
+            types->summary_count += words;
         }
         else
         {

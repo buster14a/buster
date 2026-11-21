@@ -2482,9 +2482,9 @@ survey of those passes, what it measured and its gates.
 
   The controls' fold (`check_control_fold_truth`) does not fold a comma
   whose left operand is no constant: C lists a folded comma.
-- **Not made: a `switch`'s selector's type.** `-Wswitch` reads the node at
-  the selector's first token (#3200), which only the walk makes: a
-  `switch`'s condition stays the walk's.
+- **A switch's selector type.** The operand of its promotion in the window
+  supplies the type that `-Wswitch` reads. Each taken switch keeps this one
+  word after its references. Other expressions store their references alone.
 
 `--no-window-summaries` is the cost's switch: the same run with no lines'
 column, no calls' mask and no sweep, and with nothing kept or compared. The
@@ -2516,6 +2516,11 @@ The report adds:
   branch's condition, whether `check_program_branch_truth` knows its truth
   exactly where its value says it. The four differences, `not kept` and the
   second runs that differ must be 0: the command exits 1 otherwise.
+- `node-shadow: window summaries switch selectors=N enums=N type-differences=N`
+  counts the kept switches, how many have an enum selector before promotion,
+  and how many types disagree with `check_common_switch_selector_type`.
+  A difference makes the command exit 1. The summary fault control changes
+  the type of every kept selector.
 - `node-shadow: window summaries ticks=N (T a record swept, T a chunk); a
   second run over the same chunk, not counted: ticks=N (T a record swept,
   T a chunk)`: the sweep's TSC ticks.

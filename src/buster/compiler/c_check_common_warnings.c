@@ -9194,6 +9194,30 @@ static void check_common_switch_index(CheckCommonSwitchIndex* index, const Parse
     }
 }
 
+// The selector before its switch's integer promotion. Explicit casts and arithmetic supply their own type.
+static TypeId check_common_switch_selector_type(const CheckInput* input, const CheckStream* stream, uint32_t closer)
+{
+    const uint32_t condition = input->token_nodes != NULL && closer < input->token_count ? input->token_nodes[closer] : BUSTER_CHECK_NONE;
+    uint32_t selector_node = condition < stream->count && stream->graph->ops[condition] == CHECK_OP_POSITIVE ? stream->graph->operand0[condition] : BUSTER_CHECK_NONE;
+    // Unary +, - and ~ apply the integer promotions, so their selector operand is never the
+    // enum expression Clang analyzes: only an implicit enum-to-int conversion unwraps to it.
+    for (uint32_t steps = 0; selector_node < stream->count && steps < stream->count; steps += 1)
+    {
+        if (stream->graph->ops[selector_node] != CHECK_OP_CONVERT ||
+            (stream->conversions[selector_node].operands[0].flags & BUSTER_CHECK_CONVERT_CAST) != 0)
+        {
+            break;
+        }
+        const uint32_t operand = stream->graph->operand0[selector_node];
+        if (operand >= stream->count)
+        {
+            break;
+        }
+        selector_node = operand;
+    }
+    return selector_node < stream->count ? check_stream_type(stream, selector_node) : 0;
+}
+
 static void check_common_switches(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   TypeTable* types, CheckWarningSpelling* spell, const CheckProgram* program, Arena* scratch)
 {
@@ -9215,25 +9239,8 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         // condition's `)` (check_input_expression_condition), not the node of its first token: that is the selector's
         // only where its first token is its root's, and not for `s->kind`, `e[0]`, `get()` or `(e)` (#3200). The
         // warning stays at the first token, where clang puts it.
-        const uint32_t condition = input->token_nodes != NULL && closer < input->token_count ? input->token_nodes[closer] : BUSTER_CHECK_NONE;
-        uint32_t selector_node = condition < stream->count && stream->graph->ops[condition] == CHECK_OP_POSITIVE ? stream->graph->operand0[condition] : BUSTER_CHECK_NONE;
-        // Unary +, - and ~ apply the integer promotions, so their selector operand is never the
-        // enum expression Clang analyzes: only an implicit enum-to-int conversion unwraps to it.
-        for (uint32_t steps = 0; selector_node < stream->count && steps < stream->count; steps += 1)
-        {
-            if (stream->graph->ops[selector_node] != CHECK_OP_CONVERT ||
-                (stream->conversions[selector_node].operands[0].flags & BUSTER_CHECK_CONVERT_CAST) != 0)
-            {
-                break;
-            }
-            const uint32_t operand = stream->graph->operand0[selector_node];
-            if (operand >= stream->count)
-            {
-                break;
-            }
-            selector_node = operand;
-        }
-        const TypeId enum_type = selector_node < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, selector_node))) : 0;
+        const TypeId selector_type = check_common_switch_selector_type(input, stream, closer);
+        const TypeId enum_type = selector_type != 0 ? type_unqualified(type_strip_aligned(types, selector_type)) : 0;
         if (enum_type == 0 || type_kind(types, enum_type) != BUSTER_TYPE_KIND_ENUM)
         {
             continue;
