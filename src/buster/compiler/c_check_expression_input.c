@@ -1884,6 +1884,7 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
     if (entry != NULL)
     {
         check_input_expression_room(reader, batch, 1);
+        // The ordinary folded return conversion owns its CONST at this token, including in debug lowering.
         const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, returned, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
         if (node != BUSTER_CHECK_NONE)
         {
