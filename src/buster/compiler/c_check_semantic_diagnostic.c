@@ -87,7 +87,7 @@ static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_
             first -= grouped ? 1 : 0;
             last += grouped ? 1 : 0;
         }
-        pp_diagnostic_range_tokens(pp, parser->tokens.sources[first], parser->tokens.sources[last]);
+        pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, first), parse_source_index(&parser->tokens, last));
     }
 }
 
@@ -3258,7 +3258,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             }
             if (result != NULL && !aggregate && !suggestion && kind != BUSTER_TYPE_KIND_EXT_VECTOR && token + 1 < parser->tokens.count)
             {
-                pp_diagnostic_range_tokens(pp, parser->tokens.sources[token + 1], parser->tokens.sources[token + 1]);
+                pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, token + 1), parse_source_index(&parser->tokens, token + 1));
             }
             if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
             {

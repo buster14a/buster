@@ -21,7 +21,7 @@ static void check_warning_event_ranges(const Parser* parser, Preprocessor* pp, c
         const uint32_t last = !scoped ? first : colons ? first + 3 : first + 2;
         if (last < count)
         {
-            pp_diagnostic_range_tokens(pp, parser->tokens.sources[first], parser->tokens.sources[last]);
+            pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, first), parse_source_index(&parser->tokens, last));
         }
     }
     const bool shift = event->id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || event->id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE;
