@@ -489,7 +489,7 @@ struct NodeCensusScratch
     uint32_t* type_ranges;
     const uint8_t* own_types;
     const uint8_t* own_properties;
-    uint8_t own_classes[128];
+    _Alignas(64) uint8_t own_classes[128];
     uint8_t own_operand_bits[128];
     uint8_t own_sends[128];
     uint8_t own_quiets[128];
@@ -2418,15 +2418,16 @@ static inline NodeTestsTrigger node_tests_constants(const NodeCensusScratch* s, 
 // left shift or a product. An operator's `own_sends` says which of its operands' properties send it to its own tests.
 #define BUSTER_NODE_TESTS_OPERAND_CONSTANT 0x01u
 #define BUSTER_NODE_TESTS_OPERAND_ENUM 0x02u
-#define BUSTER_NODE_TESTS_OPERAND_POINTER 0x04u
+#define BUSTER_NODE_TESTS_OPERAND_ARRAY 0x04u
 #define BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE 0x08u
-#define BUSTER_NODE_TESTS_OPERAND_ARRAY 0x10u
+#define BUSTER_NODE_TESTS_OPERAND_CONVERTS 0x10u
 #define BUSTER_NODE_TESTS_OPERAND_SUM 0x20u
 #define BUSTER_NODE_TESTS_OPERAND_COMPARISON 0x40u
 #define BUSTER_NODE_TESTS_OPERAND_TRUTH 0x80u
 // A pointer once converted as an operand (BUSTER_NODE_CENSUS_TYPE_CONVERTS, as an operand's properties): a pointer's, an
 // array's or a function's value.
-#define BUSTER_NODE_TESTS_OPERAND_CONVERTS (BUSTER_NODE_TESTS_OPERAND_POINTER | BUSTER_NODE_TESTS_OPERAND_ARRAY)
+_Static_assert(BUSTER_NODE_TESTS_OPERAND_CONVERTS == BUSTER_NODE_TESTS_CLASS_QUIET_ORDER,
+               "the ordered comparison and both operands use the same bit");
 _Static_assert(CHECK_OP_COUNT <= 128, "the own form's tables have an entry an operator");
 
 // The tree's tests (node_tests_tree) read a record's token's parent's role, and nearly every one ends there: a
@@ -4088,6 +4089,10 @@ static void node_tests_window_bytes(NodeCensusReader* tests, const struct NodeFa
     }
 }
 
+// A row of a GFNI byte transform. Bit 'to' in the result is copied from 'from' in
+// the input byte. GFNI stores the row for result bit 0 in the most significant byte.
+#define BUSTER_NODE_TESTS_COPY_BIT(to, from) ((uint64_t)(from) << (8u * (7u - (uint32_t)__builtin_ctz((uint32_t)(to)))))
+
 // The tests' loop over a chunk's `count` records, 64 a step: what each record is as an operand (its value's and its
 // type's bits and its operator's), its operands' such bytes together, its part of the set's tests, and a block's masks:
 // the operators listed for their operands' tree's tests, the operators with tests of their own, the writes, the records
@@ -4140,10 +4145,14 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         // What it is as an operand: a constant, its type's four bits (an enumeration, a pointer, a pointer to void, an
         // array), its operator's three.
         const __m512i constant = _mm512_and_si512(values, _mm512_set1_epi8(BUSTER_NODE_TESTS_VALUE_CONSTANT));
-        const __m512i enumeration = _mm512_and_si512(_mm512_srli_epi16(own, 2), _mm512_set1_epi8(BUSTER_NODE_TESTS_OPERAND_ENUM));
-        const __m512i pointed = _mm512_and_si512(_mm512_srli_epi16(own, 3),
-                                                 _mm512_set1_epi8(BUSTER_NODE_TESTS_OPERAND_POINTER | BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE | BUSTER_NODE_TESTS_OPERAND_ARRAY));
-        const __m512i property = _mm512_or_si512(_mm512_or_si512(constant, enumeration), _mm512_or_si512(pointed, operand_bits));
+        // An array, pointer, function and nullptr are mutually exclusive type kinds, so the
+        // parity of the pointer and array bits is their union for the conversion property.
+        const __m512i type_properties = _mm512_gf2p8affine_epi64_epi8(own, _mm512_set1_epi64(
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_OPERAND_ENUM, BUSTER_NODE_CENSUS_TYPE_ENUM) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_OPERAND_CONVERTS, BUSTER_NODE_CENSUS_TYPE_CONVERTS) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE, BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_OPERAND_ARRAY, BUSTER_NODE_CENSUS_TYPE_ARRAY)), 0);
+        const __m512i property = _mm512_or_si512(_mm512_or_si512(constant, type_properties), operand_bits);
         _mm512_storeu_si512(tests->window_properties + x, property);
         __mmask64 near_left = 0;
         __mmask64 far_left = 0;
@@ -4195,13 +4204,15 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         }
         // Its part of the set's tests.
         const __m512i fixed = _mm512_and_si512(classes, _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_UNCODED | BUSTER_NODE_TESTS_SET_ADDRESS));
-        const __m512i special = _mm512_and_si512(_mm512_slli_epi16(own, 1), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_SPECIAL));
-        const __m512i aggregate = _mm512_and_si512(_mm512_slli_epi16(_mm512_and_si512(own, classes), 1), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_AGGREGATE));
-        const __m512i bit_field = _mm512_and_si512(_mm512_slli_epi16(values, 3), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_BIT_FIELD));
-        const __m512i array = _mm512_and_si512(_mm512_srli_epi16(own, 2), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_ARRAY));
-        const __m512i declaration = _mm512_and_si512(_mm512_slli_epi16(values, 4), _mm512_set1_epi8(BUSTER_NODE_TESTS_SET_DECLARATION));
-        const __m512i set = _mm512_or_si512(_mm512_or_si512(fixed, _mm512_or_si512(special, aggregate)),
-                                            _mm512_or_si512(_mm512_or_si512(bit_field, array), declaration));
+        const __m512i copy_type = _mm512_and_si512(own, _mm512_or_si512(classes, _mm512_set1_epi8((char)~BUSTER_NODE_TESTS_CLASS_COPIES)));
+        const __m512i type_set = _mm512_gf2p8affine_epi64_epi8(copy_type, _mm512_set1_epi64(
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_SPECIAL, BUSTER_NODE_CENSUS_TYPE_SPECIAL) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_AGGREGATE, BUSTER_NODE_CENSUS_TYPE_AGGREGATE) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_ARRAY, BUSTER_NODE_CENSUS_TYPE_ARRAY)), 0);
+        const __m512i value_set = _mm512_gf2p8affine_epi64_epi8(values, _mm512_set1_epi64(
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_BIT_FIELD, BUSTER_NODE_TESTS_VALUE_BIT_FIELD) |
+            BUSTER_NODE_TESTS_COPY_BIT(BUSTER_NODE_TESTS_SET_DECLARATION, BUSTER_NODE_TESTS_VALUE_DECLARATION)), 0);
+        const __m512i set = _mm512_or_si512(_mm512_or_si512(fixed, type_set), value_set);
         _mm512_storeu_si512(tests->window_sets + x, set);
         // The quiet rule: an operator listed for a constant operand alone, whose constants' tests have nothing to say of
         // its operands' kinds. A kind is in its record's value's byte, three bits up: the pair's place in the table is the
@@ -4252,9 +4263,8 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         // it) and its operator has no test whatever its operands are (the sign comparison's). An operand before the
         // block before reads as none, and its comparison stays listed.
         const __m512i sent_by = _mm512_and_si512(sends, operands);
-        const __mmask64 quiet_orders = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_TESTS_CLASS_QUIET_ORDER)) &
-                                       _mm512_test_epi8_mask(left, converts) & _mm512_test_epi8_mask(right, converts) &
-                                       _mm512_testn_epi8_mask(sent_by, _mm512_set1_epi8((char)~BUSTER_NODE_TESTS_OPERAND_CONVERTS));
+        const __m512i both = _mm512_ternarylogic_epi64(left, right, classes, 0x80);
+        const __mmask64 quiet_orders = _mm512_test_epi8_mask(both, converts) & _mm512_cmpeq_epi8_mask(sent_by, converts);
         const __m512i left_out = _mm512_movm_epi8(quiet_calls);
         const __m512i top_left_out = node_window_operands(at_left, near_left, previous_left_out, left_out);
         const uint64_t asks = _cvtmask64_u64(casts & voids & _mm512_test_epi8_mask(top_left_out, top_left_out));
