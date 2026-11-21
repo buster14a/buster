@@ -6825,6 +6825,20 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     check_test_expect(test, ready && node_summary_test_fixture(directory, "summaries.c", node_summary_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &summary_expected),
                       "node-summary: an expression's references and return fact on the window are the program's own walks', a kept condition's truth is its value's and a kept constant folds");
+    // The ordinary checker folds a strong pointer comparison in these required constant contexts. In particular,
+    // only the selected string in the conditional initializer is referenced alongside the condition's string.
+    char pointer_path[PATH_MAX + 128];
+    snprintf(pointer_path, sizeof(pointer_path), "%s/checker/sources/pointer-constant-equality.c", check_test_fixture_root);
+    NodeShadow pointer_shadow = {
+        .verify = true, .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN,
+        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW |
+                  BUSTER_NODE_READER_WINDOW_TESTS | BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS,
+        .repeat = 1,
+    };
+    NodeCensus pointer_census = { .shadow = &pointer_shadow };
+    check_test_expect(test, ready && node_census_file(&pointer_census, pointer_path, quiet, BUSTER_ARRAY_LENGTH(quiet)) && pointer_census.files == 1 &&
+                                pointer_census.failures == 0 && pointer_shadow.typed_expressions != 0 && !node_shadow_differs(&pointer_shadow),
+                      "node-summary: a static pointer comparison in a conditional initializer agrees with the ordinary reference walk");
     static const NodeSummaryExpected summary_unknowns_expected = {
         .taken = 16,
         .references = 15,
