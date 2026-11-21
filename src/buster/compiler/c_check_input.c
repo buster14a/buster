@@ -871,6 +871,9 @@ struct CheckInputCleanup
     uint32_t argument;
     uint32_t scope;
     uint32_t end;
+    // The furthest `end` of the records up to this one, which are in source order (check_input_cleanup_record): a token
+    // after this record's declaration and before the next one's is in some variable's scope where it is before this.
+    uint32_t reach;
 };
 
 // A return statement with clang's musttail attribute (#147, check_input_statement_attributes): its `return` token, the
@@ -897,6 +900,11 @@ struct CheckInput
     CheckInputPackPragmas* pack_pragmas;
     CheckInputVisibilityPragmas* visibility_pragmas;
     CheckInputSymbolPragmas* symbol_pragmas;
+    // The names the reader noted as weak addresses, each with the declaration token it is weak from
+    // (check_input_note_weak_name): a use of the name at or after the token may be null, a use before it still folds, as
+    // clang folds it (check_input_address_is_weak). The node machine's facts read them too (#3206).
+    const struct CheckInputWeakName* weak_names;
+    uint32_t weak_name_count;
     CheckInputMsPragmas* ms_pragmas;
     uint8_t* ms_struct;
     uint8_t* object_visibility;
@@ -2060,9 +2068,6 @@ struct CheckInputReader
     uint32_t* declaration_starts;
     uint32_t* declaration_storage;
     uint8_t* declaration_flags;
-    // Weak names applied so far, with the declaration token. A use before that token still folds, as clang folds it.
-    struct CheckInputWeakName* weak_names;
-    uint32_t weak_name_count;
     uint8_t* declaration_abis;
     CheckInputAttributes** attribute_bases;
     CheckInputAttributes* specifier_attributes;
@@ -6940,28 +6945,49 @@ static bool check_input_pragma_weak(const CheckInput* input, IdentId name, uint3
     return weak;
 }
 
+// Whether the reader noted `name` as a weak address at or before `use` (CheckInput.weak_names); with `use` UINT32_MAX,
+// anywhere in the unit. Eight records a step: a record is a name and its token.
+static bool check_input_weak_name(const CheckInput* input, IdentId name, uint32_t use)
+{
+    const __m512i names = _mm512_set1_epi32((int)name);
+    const __m512i uses = _mm512_set1_epi32((int)use);
+    const uint32_t count = input->weak_name_count;
+    __mmask16 found = 0;
+    for (uint32_t i = 0; found == 0 && i < count; i += 8)
+    {
+        const uint32_t live = count - i < 8 ? count - i : 8;
+        const __mmask16 lanes = (__mmask16)((1u << (2 * live)) - 1);
+        const __m512i records = _mm512_maskz_loadu_epi32(lanes, input->weak_names + i);
+        const __mmask16 named = _mm512_mask_cmpeq_epi32_mask(lanes & 0x5555, records, names);
+        const __mmask16 before = _mm512_mask_cmple_epu32_mask(lanes & 0xaaaa, records, uses);
+        found = named & (__mmask16)(before >> 1);
+    }
+    return found != 0;
+}
+
 // Records `name` as a weak address at `token`. A use before that token still folds.
 static void check_input_note_weak_name(CheckInputReader* reader, IdentId name, uint32_t token)
 {
+    CheckInput* input = reader->output;
     bool seen = name == 0;
-    for (uint32_t i = 0; !seen && i < reader->weak_name_count; i += 1)
+    for (uint32_t i = 0; !seen && i < input->weak_name_count; i += 1)
     {
-        seen = reader->weak_names[i].name == name && reader->weak_names[i].token == token;
+        seen = input->weak_names[i].name == name && input->weak_names[i].token == token;
     }
     if (!seen)
     {
-        CheckInputWeakName* names = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWeakName, (uint64_t)reader->weak_name_count + 1);
+        CheckInputWeakName* names = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWeakName, (uint64_t)input->weak_name_count + 1);
         if (names != 0)
         {
-            if (reader->weak_name_count != 0)
+            if (input->weak_name_count != 0)
             {
-                memcpy(names, reader->weak_names, (uint64_t)reader->weak_name_count * sizeof(CheckInputWeakName));
+                memcpy(names, input->weak_names, (uint64_t)input->weak_name_count * sizeof(CheckInputWeakName));
             }
-            names[reader->weak_name_count] = (CheckInputWeakName){ .name = name, .token = token };
-            reader->weak_names = names;
-            reader->weak_name_count += 1;
+            names[input->weak_name_count] = (CheckInputWeakName){ .name = name, .token = token };
+            input->weak_names = names;
+            input->weak_name_count += 1;
         }
-        reader->output->resource |= names == 0;
+        input->resource |= names == 0;
     }
 }
 
@@ -6971,12 +6997,7 @@ static bool check_input_address_is_weak(const CheckInputReader* reader, uint32_t
     const Parser* parser = reader->parser;
     const bool named = parser != NULL && parser->tokens.names != NULL && declaration < parser->tokens.count;
     const IdentId name = named ? parser->tokens.names[declaration] : 0;
-    bool weak = reader->output != NULL && check_input_pragma_weak(reader->output, name, use);
-    for (uint32_t i = 0; !weak && i < reader->weak_name_count; i += 1)
-    {
-        weak = reader->weak_names[i].name == name && reader->weak_names[i].token <= use;
-    }
-    return weak;
+    return reader->output != NULL && (check_input_pragma_weak(reader->output, name, use) || check_input_weak_name(reader->output, name, use));
 }
 
 // BUSTER_CHECK_NONNULL_ADDRESS for a declaration's address, or 0 when the address may be null or is not an object.

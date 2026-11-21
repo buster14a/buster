@@ -728,7 +728,7 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         identifiers->flags[at] |= (identifiers->flags[at] & BUSTER_CHECK_REGISTER) != 0 ? check_input_register_flags(reader, identifiers->declarations[at], found[at]) : 0;
     }
     // Weak addresses are rare. The gather marks every object non-null; this clears a weak attribute or `#pragma weak`.
-    if (reader->weak_name_count != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0))
+    if (input->weak_name_count != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0))
     {
         for (uint32_t at = 0; at < count; at += 1)
         {
