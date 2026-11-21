@@ -2745,6 +2745,13 @@ entries for its right operand, local store and discard, each with its own
 source token. The read and write events feed the existing warning passes.
 The base `--node-window` mode skips assignment discovery.
 
+A block statement such as `((void)7);` can also use the window. The cast
+must discard a plain integer literal from the chunk decoder. Grouping
+parentheses around the cast or the literal are accepted. The native CONST
+keeps the literal's token and the DISCARD keeps the cast's token. The checker
+still handles operands with side effects, loop clauses and the final value of
+a GNU statement expression.
+
 Admission requires the entire expression in the same coded chunk. Other types,
 operators and spellings, debug information, deferred parts, and units requiring
 musttail validation use the existing graph. The window checks the coded tokens
