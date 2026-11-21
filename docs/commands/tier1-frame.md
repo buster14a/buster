@@ -88,8 +88,12 @@ source, then backward ones as the greatest. A sweep from the last token back
 meets each block at its `{`, after every block inside it, passes its least
 source outward and leaves the block out when that source precedes the `{`; a
 sweep from the first token meets each block at its `}` and leaves it out when
-its greatest source follows the `}`. The work is linear in the tokens and the
-jumps, and the blocks left out are the old walks' exactly.
+its greatest source follows the `}`. The jumps' scan and both sweeps read 64
+tokens' kinds, roles and address marks a step as byte masks (the last chunk's
+lanes past the unit masked off) and visit only the set lanes: the gotos, the
+labels whose address is taken and the braces, the backward sweep's from the
+highest lane down. The work is linear in the tokens and the jumps, and the
+blocks left out are the old walks' exactly.
 
 The same pass then leaves in `lifetime_nearest` each token's innermost block
 that kept its lifetimes, past function bodies, and the control writer's ends
@@ -107,51 +111,69 @@ inside that label's loop or switch. The chain ends at the first block with
 lifetimes at or above the stop, so the entries and their order are the old
 walk's.
 
-`test-checker` includes `c_check_program_lifetime_test.c`: small forests with
-permuted token IDs and no retained postorder compare complete local lists and
-capacity against independent ancestor walks, including body boundaries and
-excluded declarations. Two 16,384-level fixtures, with and without locals,
-use closed-form expectations. 600 random forests whose heads come before
-their statements, with gotos into and out of blocks, computed gotos, labels
-whose address is taken, cases of their switch, another token or none, asm
-gotos, statement expressions' blocks and functions inside blocks, compare the
-blocks left out with the old stamped walks, kept in the test as the oracle,
-and each body's jumps, in a random order, with the old writer walk, its labels
-numbered by `check_control_label`. Six generated sources (goto out of and
-into else-if chains' blocks, cases in nested blocks with locals, labels whose
-address is taken, asm gotos, and breaks and continues of for, while, do and
-switch at depth) compare the checked program's `lifetime_first` and every
-jump's lifetime ends with the same walks. The existing driver frame/lifetime
-fixture retains native semantic coverage.
+`CheckProgramOptions.lifetime_work` counts the walks' steps: the parent paths'
+climbs and retraces (two a token at most in each of the two passes), the walks
+to a break's or continue's loop or switch (one a label), and the writer's
+walks along the chain (`CheckControlWriter.lifetime_steps`, the ends a jump
+makes and one more). `test-checker` includes `c_check_program_lifetime_test.c`:
+small forests with permuted token IDs and no retained postorder compare
+complete local lists and capacity against independent ancestor walks,
+including body boundaries and excluded declarations. Two 16,384-level
+fixtures, with and without locals, use closed-form expectations. 600 random
+forests whose heads come before their statements, with gotos into and out of
+blocks, computed gotos, labels whose address is taken, cases of their switch,
+another token or none, asm gotos, statement expressions' blocks and functions
+inside blocks, compare the blocks left out with the old stamped walks, kept in
+the test as the oracle, and each body's jumps, in a random order, with the old
+writer walk, its labels numbered by `check_control_label`; the parent paths
+take four steps a token at most, and a jump to a label whose stop is kept
+walks only the blocks it ends and one more. Six generated sources (goto out of
+and into else-if chains' blocks, cases in nested blocks with locals, labels
+whose address is taken, asm gotos, and breaks and continues of for, while, do
+and switch at depth), at 40 arms and at 1,024, and a source of several
+functions (loops whose labels have the same numbers, the second inside a block
+with locals; breaks, continues and gotos in statement expressions, nested
+ones, a for's condition and increment and a do's condition; cases in nested
+blocks with locals; computed gotos) compare the checked program's
+`lifetime_first` and every jump's lifetime ends with the same walks, and bound
+`lifetime_work` by eight steps a token, one a jump and one an end. The
+existing driver frame/lifetime fixture retains native semantic coverage.
 
-Measured in the cloud container, not on the 9700X (Develop build,
-`-w -c --tier1 --time-stages`, median of 3 runs, the `check-program` stage in
-ms, main before the slash): else-if chains of N arms, each arm's block with a
-local (but `cont`'s) and leaving by `goto out` (`gt`), `break` from `for(;;)`
-(`brk`), `continue` (`contl`, and `cont` without locals, from `while`), a
-`case` label down the chain (`case`), a label whose address is taken in each
-arm (`addr`) or an `asm goto` out (`asm`). Main grows fourfold or more a
-doubling, this twofold; at 32,000 arms the stage takes 22 to 52 ms, where
-`gt`'s and `brk`'s take 21 and 18 ms without `--tier1`. The objects are
-main's, byte for byte.
+The step counts are deterministic and host-independent. At 1,024 arms
+(`test-checker --part 5/8` prints them), the new walks' steps against the old
+walks' (main's, kept in the test as its oracles, which count their steps):
 
-| shape | 4,000 | 8,000 | 16,000 | 32,000 |
-| --- | --- | --- | --- | --- |
-| gt | 73 / 4.5 | 307 / 9.8 | 1226 / 19.4 | 6235 / 40.8 |
-| brk | 34 / 4.6 | 141 / 9.5 | 748 / 18.7 | 3243 / 38.9 |
-| contl | 34 / 4.3 | 135 / 9.0 | 763 / 19.1 | 4010 / 39.5 |
-| cont | 26 / 2.7 | 96 / 5.8 | 529 / 14.3 | 2821 / 22.3 |
-| case | 52 / 5.0 | 208 / 11.2 | 938 / 23.4 | 4234 / 49.1 |
-| addr | 34 / 4.3 | 128 / 9.0 | 529 / 21.1 | 2703 / 45.7 |
-| asm | 63 / 6.4 | 249 / 13.2 | 1421 / 26.8 | 6287 / 51.7 |
+| source | tokens | new steps | old steps |
+| --- | ---: | ---: | ---: |
+| goto out of the arms | 37,905 | 154,692 | 4,212,736 |
+| goto into other arms' blocks | 46,104 | 185,440 | 4,543,453 |
+| cases in nested blocks | 64,527 | 264,252 | 4,224,000 |
+| asm goto into other arms | 39,951 | 159,804 | 1,349,852 |
+| breaks and continues | 142,361 | 596,081 | 5,295,107 |
 
-The sweeps and the jumps' scans are scalar passes over the token columns, and
-the memoized parent paths are ordered; whether mask scans of the roles pay
-there is for the 9700X to measure. Unchanged and still depth-dependent:
+The new count is about four a token, the parent paths', which is more than
+the old walks' on short chains (the 40-arm breaks' source: 23,393 steps, the
+old walks 10,043). From 1,024 arms to 2,048 (the same sources) it doubles,
+where the old one quadruples (the gotos out: 309,316 steps, the old walks
+16,814,080). No timing here is the issue's acceptance: approved-host (9700X,
+Release, under the lock) measurements of #1355's source chains remain
+required before claiming the issue's scaling or wall-time acceptance,
+comparing main's and this planner's `check-program` stage under
+`-w -c --tier1 --time-stages` on else-if chains of 4,000 to 32,000 arms that
+leave each arm's block by goto, break or continue, reach a case down the
+chain, take a label's address or leave by asm goto.
+
+Two parts stay scalar, by their order: the memoized parent paths, whose every
+step loads the address of the next (pointer jumping would read every token
+once per doubling of the depth, against two reads a token here), and each
+block's fold at its brace, which reads the folds of the blocks inside it. The
+coding style asks for a part that stays scalar to say why with measurements
+on the 9700X; those measurements (the share of `check-program` in
+`check_program_lifetime_nearest` and in the folds, on the chains above) are
+also still to take. Unchanged and still depth-dependent:
 `check_control_leave`'s walk for blocks with variable-length arrays (which
 runs without `--tier1` too) and `check_control_loop`'s for a break or
 continue with cleanups to run. The break chain's `check-input` stage
-(`check_input_resolve_range`, about 4 s at 32,000 breaks) and the Tier 1
-backend's `tier0` stage (about 400 ms at 32,000 arms) are outside this
-planner.
+(`check_input_resolve_range`, quadratic in the chain's breaks) and the Tier 1
+backend's `tier0` stage are outside this planner.
 

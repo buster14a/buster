@@ -238,6 +238,10 @@ struct CheckProgramOptions
     bool unselected_operands;
     // Optional deterministic tally: unit graph-mark initialization plus return-warning expression visits.
     uint64_t* return_flow_work;
+    // Optional deterministic tally of the blocks' lifetimes' walks (#1355): the parent paths' steps
+    // (check_program_lifetime_entered) and the writer's (CheckControlWriter.lifetime_steps), which test-checker bounds by
+    // the tokens, the jumps and the ends they make.
+    uint64_t* lifetime_work;
     // The selection census (#2536's step 2.1, --selection-census): each body's candidates' references besides its own, by
     // a walk from every expression root of the body and by scans of the graph's VALUE nodes (check_program_census_walk and
     // _scan), into CheckProgram's census_walk, census_scan and census_arms.
@@ -876,6 +880,9 @@ struct CheckControlWriter
     // null otherwise.
     const uint32_t* lifetime_nearest;
     uint32_t* lifetime_stops;
+    // The steps of the walks to a break's or continue's stop and of the walks along lifetime_nearest
+    // (CheckProgramOptions.lifetime_work).
+    uint64_t lifetime_steps;
 };
 
 static void check_program_fail(CheckProgram* program, CheckProgramStatus status, uint32_t token)
@@ -1787,6 +1794,7 @@ static uint32_t check_control_lifetime_stop(CheckControlWriter* writer, uint32_t
             steps += 1;
         }
         stop = ancestor < count ? ancestor : count;
+        writer->lifetime_steps += steps;
         if (kept)
         {
             writer->lifetime_stops[target] = stop;
@@ -1823,6 +1831,7 @@ static void check_control_lifetimes_left(CheckControlWriter* writer, uint32_t ju
         block = holds ? count : nearest[block];
         steps += 1;
     }
+    writer->lifetime_steps += steps;
 }
 
 static void check_control_extent(const CheckControlWriter* writer, uint32_t arm, uint32_t* low, uint32_t* high);
@@ -5872,6 +5881,10 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     {
         *options.return_flow_work = 0;
     }
+    if (options.lifetime_work != NULL)
+    {
+        *options.lifetime_work = 0;
+    }
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;
@@ -6046,7 +6059,11 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         }
         if (lifetime_first != 0)
         {
-            check_program_lifetime_entered(program, parser, addressed, lifetime_nearest, lifetime_sources, lifetime_first);
+            const uint64_t lifetime_work = check_program_lifetime_entered(program, parser, addressed, lifetime_nearest, lifetime_sources, lifetime_first);
+            if (options.lifetime_work != NULL)
+            {
+                *options.lifetime_work = lifetime_work;
+            }
             program->lifetime_first = lifetime_first;
             program->lifetime_next = lifetime_next;
         }
@@ -6530,6 +6547,10 @@ static bool check_program_finish(CheckProgramRun* run)
     const uint32_t count = run->count;
     const uint32_t reference_count = run->reference_count;
     const CheckControlWriter writer = run->writer;
+    if (options.lifetime_work != NULL)
+    {
+        *options.lifetime_work += writer.lifetime_steps;
+    }
     bool valid = run->valid && program->status == CHECK_PROGRAM_OK;
     program->builtin_count = valid ? check_program_builtins(&input->graph, nodes, NULL, BUSTER_SCALAR_PATH(options.scalar)) : 0;
     program->builtin_nodes = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : 0;

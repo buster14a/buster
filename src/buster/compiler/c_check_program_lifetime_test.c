@@ -448,8 +448,9 @@ static void check_test_lifetime_forest(CheckTestLifetimeForest* forest, uint64_t
 
 // The blocks a jump enters, as check_program_lifetime_entered found them before #1355: each jump's source and its
 // ancestors stamped, then a walk from its target's parent clearing blocks up to the first stamped ancestor or a function's
-// body (every one up to the body for a label whose address is taken, `epoch` 0).
-static void check_test_lifetime_bypass(const Parser* parser, const uint32_t* stamps, uint32_t epoch, uint32_t token, uint32_t* first)
+// body (every one up to the body for a label whose address is taken, `epoch` 0). Each walk adds its steps to `work`, the
+// old passes' cost, which the tests print beside the new ones'.
+static void check_test_lifetime_bypass(const Parser* parser, const uint32_t* stamps, uint32_t epoch, uint32_t token, uint32_t* first, uint64_t* work)
 {
     const uint32_t count = parser->tokens.count;
     uint32_t ancestor = token < count ? parser->tree.parents[token] : count;
@@ -463,9 +464,10 @@ static void check_test_lifetime_bypass(const Parser* parser, const uint32_t* sta
         ancestor = parser->tree.parents[ancestor];
         steps += 1;
     }
+    *work += steps;
 }
 
-static void check_test_lifetime_stamp(const Parser* parser, uint32_t* stamps, uint32_t epoch, uint32_t token)
+static void check_test_lifetime_stamp(const Parser* parser, uint32_t* stamps, uint32_t epoch, uint32_t token, uint64_t* work)
 {
     const uint32_t count = parser->tokens.count;
     uint32_t ancestor = token;
@@ -476,10 +478,11 @@ static void check_test_lifetime_stamp(const Parser* parser, uint32_t* stamps, ui
         ancestor = parser->tree.parents[ancestor];
         steps += 1;
     }
+    *work += steps;
 }
 
 static void check_test_lifetime_entered_oracle(const Parser* parser, const CheckInput* input, const CheckProgramCase* cases, uint32_t case_count, const uint8_t* addressed,
-                                               uint32_t* stamps, uint32_t* first)
+                                               uint32_t* stamps, uint32_t* first, uint64_t* work)
 {
     const uint32_t count = parser->tokens.count;
     memset(stamps, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -491,19 +494,19 @@ static void check_test_lifetime_entered_oracle(const Parser* parser, const Check
         if (label < count)
         {
             epoch += 1;
-            check_test_lifetime_stamp(parser, stamps, epoch, token);
-            check_test_lifetime_bypass(parser, stamps, epoch, label, first);
+            check_test_lifetime_stamp(parser, stamps, epoch, token, work);
+            check_test_lifetime_bypass(parser, stamps, epoch, label, first, work);
         }
         if (addressed != NULL && addressed[token] != 0)
         {
-            check_test_lifetime_bypass(parser, stamps, 0, token, first);
+            check_test_lifetime_bypass(parser, stamps, 0, token, first, work);
         }
     }
     for (uint32_t c = 0; c < case_count; c += 1)
     {
         epoch += 1;
-        check_test_lifetime_stamp(parser, stamps, epoch, cases[c].owner);
-        check_test_lifetime_bypass(parser, stamps, epoch, cases[c].token, first);
+        check_test_lifetime_stamp(parser, stamps, epoch, cases[c].owner, work);
+        check_test_lifetime_bypass(parser, stamps, epoch, cases[c].token, first, work);
     }
     for (uint32_t a = 0; a < input->asm_count; a += 1)
     {
@@ -511,10 +514,10 @@ static void check_test_lifetime_entered_oracle(const Parser* parser, const Check
         if (assembly->label_count != 0 && assembly->statement < count)
         {
             epoch += 1;
-            check_test_lifetime_stamp(parser, stamps, epoch, assembly->statement);
+            check_test_lifetime_stamp(parser, stamps, epoch, assembly->statement, work);
             for (uint32_t l = 0; l < assembly->label_count; l += 1)
             {
-                check_test_lifetime_bypass(parser, stamps, epoch, assembly->labels[l].target, first);
+                check_test_lifetime_bypass(parser, stamps, epoch, assembly->labels[l].target, first, work);
             }
         }
     }
@@ -527,22 +530,28 @@ static void check_test_lifetime_entered_oracle(const Parser* parser, const Check
     }
 }
 
-// A block's opening brace: its first child of role OPEN_BLOCK, BUSTER_CHECK_NONE for none.
-static uint32_t check_test_lifetime_opening(const Parser* parser, uint32_t block)
+// Each block's opening brace, by the block (a token's room and one more): its first child of role OPEN_BLOCK,
+// BUSTER_CHECK_NONE for none.
+static void check_test_lifetime_openings(const Parser* parser, uint32_t* openings)
 {
-    uint32_t opening = BUSTER_CHECK_NONE;
-    for (uint32_t token = 0; token < block && opening == BUSTER_CHECK_NONE; token += 1)
+    const uint32_t count = parser->tokens.count;
+    memset(openings, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+    for (uint32_t token = 0; token < count; token += 1)
     {
-        opening = parser->tree.parents[token] == block && parser->tree.roles[token] == PARSE_ROLE_OPEN_BLOCK ? token : opening;
+        const uint32_t parent = parser->tree.parents[token];
+        if (parser->tree.roles[token] == PARSE_ROLE_OPEN_BLOCK && parent < count && openings[parent] == BUSTER_CHECK_NONE)
+        {
+            openings[parent] = token;
+        }
     }
-    return opening;
 }
 
 // The lifetime ends of a jump at `jump`, innermost first, as check_control_lifetimes_left made them before #1355: a walk
 // of every ancestor to `closing`, or to `stop` (a break's or continue's loop or switch), or for a goto (`goto_label` a
-// token) to the first block with lifetimes that holds its label. Returns how many it wrote to `blocks`.
-static uint32_t check_test_lifetime_left_oracle(const Parser* parser, const uint32_t* first, uint32_t closing, uint32_t jump, uint32_t stop, bool jumps_to_label,
-                                                uint32_t goto_label, uint32_t* blocks)
+// token) to the first block with lifetimes that holds its label (`openings`, by check_test_lifetime_openings). Returns how
+// many it wrote to `blocks`, and adds its steps to `work`.
+static uint32_t check_test_lifetime_left_oracle(const Parser* parser, const uint32_t* first, const uint32_t* openings, uint32_t closing, uint32_t jump, uint32_t stop,
+                                                bool jumps_to_label, uint32_t goto_label, uint32_t* blocks, uint64_t* work)
 {
     const uint32_t count = parser->tokens.count;
     uint32_t written = 0;
@@ -553,7 +562,7 @@ static uint32_t check_test_lifetime_left_oracle(const Parser* parser, const uint
         past = ancestor == stop || ancestor == closing;
         if (!past && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BLOCK && first[ancestor] != BUSTER_CHECK_NONE)
         {
-            const uint32_t opening = check_test_lifetime_opening(parser, ancestor);
+            const uint32_t opening = openings[ancestor];
             past = jumps_to_label && opening != BUSTER_CHECK_NONE && goto_label > opening && goto_label < ancestor;
             if (!past)
             {
@@ -563,6 +572,7 @@ static uint32_t check_test_lifetime_left_oracle(const Parser* parser, const uint
         }
         steps += 1;
     }
+    *work += steps;
     return written;
 }
 
@@ -578,7 +588,8 @@ static bool check_test_lifetime_left_tasks(const CheckControlWriter* writer, uin
     return equal;
 }
 
-// Counts of what a forest round compared, for its report.
+// Counts of what a forest round compared, for its report: and the steps of the new walks (`work`, the parent paths' and
+// the writer's) and of the old ones (`old_work`, the oracles').
 typedef struct CheckTestLifetimeTally CheckTestLifetimeTally;
 struct CheckTestLifetimeTally
 {
@@ -587,13 +598,17 @@ struct CheckTestLifetimeTally
     uint64_t jumps;
     uint64_t entries;
     uint64_t kept;
+    uint64_t work;
+    uint64_t old_work;
 };
 
 // One forest: check_program_lifetime_entered's blocks against the oracle's and its chain against a walk to each token's
 // innermost block with lifetimes; then each body written as the writer writes it (check_control_children, its labels from
 // 0 by check_control_label, a label of its own for each loop or switch, kept in the head's stops and repeats), and each of
 // its jumps, in a random order so that any of them can be the first to a label, against the oracle's walk: a goto to its
-// label, a break or continue to each loop around it and to a label no loop has.
+// label, a break or continue to each loop around it and to a label no loop has. The parent paths take two steps a token
+// at most in each of their two passes, and a jump to a label whose stop is kept walks only the blocks it ends and the one
+// where it stops (CheckControlWriter.lifetime_steps), with no walk to its loop.
 static bool check_test_lifetime_forest_case(CheckTestLifetimeForest* forest, Arena* arena, uint64_t seed, uint32_t budget, CheckTestLifetimeTally* tally)
 {
     check_test_lifetime_forest(forest, seed, budget);
@@ -601,7 +616,7 @@ static bool check_test_lifetime_forest_case(CheckTestLifetimeForest* forest, Are
     const uint64_t slots = (uint64_t)count + 1;
     const uint64_t saved = arena->length;
     const uint32_t capacity = count * 4 + 16;
-    uint32_t* columns = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots * 11 + (uint64_t)capacity * 2);
+    uint32_t* columns = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots * 12 + (uint64_t)capacity * 2);
     CheckControlTask* tasks = BUSTER_ARENA_PUSH_ARRAY(arena, CheckControlTask, capacity);
     const CheckSparseColumn label_targets = columns != NULL ? check_sparse_from_values(arena, forest->label_targets, count) : (CheckSparseColumn){ 0 };
     bool equal = columns != NULL && tasks != NULL && check_sparse_present(label_targets);
@@ -618,7 +633,8 @@ static bool check_test_lifetime_forest_case(CheckTestLifetimeForest* forest, Are
         uint32_t* children_previous = children_next + slots;
         uint32_t* stops = children_previous + slots;
         uint32_t* repeats = stops + slots;
-        uint32_t* labels = repeats + slots;
+        uint32_t* openings = repeats + slots;
+        uint32_t* labels = openings + slots;
         uint32_t* lifetime_stops = labels + capacity;
         Parser parser = { 0 };
         parser.tokens.count = count;
@@ -644,9 +660,11 @@ static bool check_test_lifetime_forest_case(CheckTestLifetimeForest* forest, Are
         memcpy(expected_first, forest->first, slots * sizeof(uint32_t));
         memset(nearest, 0xa5, slots * sizeof(uint32_t));
         memset(sources, 0xa5, slots * sizeof(uint32_t));
-        check_program_lifetime_entered(&program, &parser, forest->addressed, nearest, sources, first);
-        check_test_lifetime_entered_oracle(&parser, &input, forest->cases, forest->case_count, forest->addressed, stamps, expected_first);
-        equal = memcmp(first, expected_first, slots * sizeof(uint32_t)) == 0;
+        const uint64_t entered_work = check_program_lifetime_entered(&program, &parser, forest->addressed, nearest, sources, first);
+        check_test_lifetime_entered_oracle(&parser, &input, forest->cases, forest->case_count, forest->addressed, stamps, expected_first, &tally->old_work);
+        check_test_lifetime_openings(&parser, openings);
+        equal = memcmp(first, expected_first, slots * sizeof(uint32_t)) == 0 && entered_work <= (uint64_t)count * 4;
+        tally->work += entered_work;
         for (uint32_t token = 0; token < count; token += 1)
         {
             const bool block = forest->roles[token] == PARSE_ROLE_CLOSE_BLOCK;
@@ -743,9 +761,12 @@ static bool check_test_lifetime_forest_case(CheckTestLifetimeForest* forest, Are
                         const uint32_t label = to_label ? forest->label_targets[jump] : BUSTER_CHECK_NONE;
                         const bool known = !to_label && writer.lifetime_stops[target] != BUSTER_CHECK_NONE;
                         writer.depth = 0;
+                        const uint64_t before = writer.lifetime_steps;
                         check_control_lifetimes_left(&writer, jump, label, targets, target);
-                        const uint32_t expected = check_test_lifetime_left_oracle(&parser, first, closing, jump, stop, to_label, label, blocks);
-                        equal = check_test_lifetime_left_tasks(&writer, jump, blocks, expected) && program.status == CHECK_PROGRAM_OK;
+                        const uint64_t steps = writer.lifetime_steps - before;
+                        const uint32_t expected = check_test_lifetime_left_oracle(&parser, first, openings, closing, jump, stop, to_label, label, blocks, &tally->old_work);
+                        equal = check_test_lifetime_left_tasks(&writer, jump, blocks, expected) && program.status == CHECK_PROGRAM_OK && (!known || steps <= (uint64_t)expected + 1);
+                        tally->work += steps;
                         tally->jumps += 1;
                         tally->entries += expected;
                         tally->kept += known;
@@ -772,7 +793,9 @@ static void check_test_lifetime_append(char* text, size_t size, size_t* length, 
 
 // A loop or switch a break (`stops`) or a continue at `jump` leaves to, in a source of for, while, do and switch statements:
 // its first ancestor that is a for, a do, or a condition whose keyword (`keywords`, by the condition's closer) is a while,
-// or for a break a switch; BUSTER_CHECK_NONE for none.
+// or for a break a switch; BUSTER_CHECK_NONE for none. A for's, a while's or a switch's head counts only where the jump
+// follows it, in its statement: a jump in a statement expression of its controlling expressions leaves the loop around
+// it, as check_control_build gives a region its stop and repeat (GNU's break and continue).
 static uint32_t check_test_lifetime_loop(const Parser* parser, const uint32_t* keywords, uint32_t jump, bool stops)
 {
     const uint32_t count = parser->tokens.count;
@@ -782,7 +805,8 @@ static uint32_t check_test_lifetime_loop(const Parser* parser, const uint32_t* k
     {
         const uint8_t role = parser->tree.roles[ancestor];
         const uint8_t kind = role == PARSE_ROLE_CLOSE_CONDITION && keywords[ancestor] < count ? parser->tokens.kinds[keywords[ancestor]] : PARSE_KIND_IDENTIFIER;
-        found = role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_DO || kind == PARSE_KIND_WHILE || (stops && kind == PARSE_KIND_SWITCH);
+        const bool loop = role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_DO || kind == PARSE_KIND_WHILE || (stops && kind == PARSE_KIND_SWITCH);
+        found = loop && (jump > ancestor || role == PARSE_ROLE_DO);
         ancestor = found ? ancestor : parser->tree.parents[ancestor];
     }
     return found ? ancestor : BUSTER_CHECK_NONE;
@@ -792,7 +816,9 @@ static uint32_t check_test_lifetime_loop(const Parser* parser, const uint32_t* k
 // the oracle's blocks (the locals by check_test_lifetime_ancestor_room, the blocks jumps enter by the walks), and each
 // goto's, break's and continue's lifetime ends among its controls (outermost first, as the writer's worklist writes them)
 // against the old walk's, a break's and continue's loop found by its statements. `bypassed` is how many blocks with locals
-// the jumps must enter at least, `ends` how many of the jumps' ends the program must make at least.
+// the jumps must enter at least, `ends` how many of the jumps' ends the program must make at least. The walks' steps
+// (CheckProgramOptions.lifetime_work) are at most eight a token, one a jump and one an end: the parent paths take four a
+// token at most and the walks to the loops two, while the old walks' are quadratic in an else-if chain's depth.
 static void check_test_program_lifetime_source(CheckTest* test, const char* source, const char* name, uint32_t bypassed, uint32_t ends, CheckTestLifetimeTally* tally)
 {
     static InternTable identifiers;
@@ -805,8 +831,8 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
     const ParseOptions parse_options = { 0 };
     const CheckOptions options = { 0 };
     CheckTestTypes types = { 0 };
-    Arena input_arena = arena_reserve(UINT64_C(1) << 27);
-    Arena scratch = arena_reserve(UINT64_C(1) << 27);
+    Arena input_arena = arena_reserve(UINT64_C(1) << 30);
+    Arena scratch = arena_reserve(UINT64_C(1) << 30);
     bool ready = input_arena.base != NULL && scratch.base != NULL && check_test_types_open(&types) && intern_initialize(&identifiers) &&
                  pp_initialize(&pp, &pp_options, &identifiers) && pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source)) &&
                  parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
@@ -821,6 +847,7 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
             check_initializers_run(&initializers, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
             check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
             check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
+    uint64_t work = 0;
     const CheckProgramOptions program_options = {
         .initializers = &initializers,
         .asms = &asms,
@@ -829,6 +856,7 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
         .lifetimes = true,
+        .lifetime_work = &work,
     };
     ready = ready && check_program(&program, &parser, &input, &stream, &types.table, program_options, &input_arena, &scratch) && program.status == CHECK_PROGRAM_OK &&
             program.lifetime_first != NULL;
@@ -837,12 +865,14 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
     check_test_expect(test, ready, description);
     const uint32_t count = ready ? input.token_count : 0;
     const uint64_t slots = (uint64_t)count + 1;
-    uint32_t* columns = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, slots * 7) : NULL;
+    uint32_t* columns = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, slots * 8) : NULL;
     uint8_t* addressed = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, slots) : NULL;
     ready = ready && columns != NULL && addressed != NULL;
     bool equal = ready;
     uint32_t entered = 0;
     uint32_t made = 0;
+    uint32_t jumps = 0;
+    uint64_t old_work = 0;
     if (ready)
     {
         uint32_t* expected_first = columns;
@@ -852,7 +882,9 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
         uint32_t* keywords = stamps + slots;
         uint32_t* blocks = keywords + slots;
         uint32_t* actual = blocks + slots;
+        uint32_t* openings = actual + slots;
         check_test_lifetime_ancestor_room(&parser, &input, expected_first, expected_next);
+        check_test_lifetime_openings(&parser, openings);
         memcpy(located, expected_first, slots * sizeof(uint32_t));
         // The labels whose address is taken: a prefix &&'s label (check_program_addressed's own test's definition).
         memset(addressed, 0, slots);
@@ -869,7 +901,7 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
             keywords[slot] = keyword ? token : keywords[slot];
         }
         addressed[count] = 0;
-        check_test_lifetime_entered_oracle(&parser, &input, program.cases, program.case_count, addressed, stamps, expected_first);
+        check_test_lifetime_entered_oracle(&parser, &input, program.cases, program.case_count, addressed, stamps, expected_first, &old_work);
         for (uint32_t token = 0; equal && token < count; token += 1)
         {
             equal = program.lifetime_first[token] == expected_first[token];
@@ -890,7 +922,7 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
                 }
                 const uint32_t stop = to_label ? BUSTER_CHECK_NONE : check_test_lifetime_loop(&parser, keywords, jump, kind == PARSE_KIND_BREAK);
                 const uint32_t label = to_label ? check_sparse_get(input.label_targets, jump) : BUSTER_CHECK_NONE;
-                const uint32_t expected = check_test_lifetime_left_oracle(&parser, program.lifetime_first, closing, jump, stop, to_label, label, blocks);
+                const uint32_t expected = check_test_lifetime_left_oracle(&parser, program.lifetime_first, openings, closing, jump, stop, to_label, label, blocks, &old_work);
                 uint32_t found = 0;
                 for (uint32_t c = 0; c < program.control_count && found <= expected; c += 1)
                 {
@@ -909,12 +941,20 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
                 tally->jumps += 1;
                 tally->entries += expected;
                 made += expected;
+                jumps += 1;
             }
         }
         snprintf(description, sizeof(description), "%s: each jump's lifetime ends are the ancestor walk's, %u of them (at least %u)", name, made, ends);
         check_test_expect(test, equal && made >= ends, description);
+        const uint64_t bound = (uint64_t)count * 8 + jumps + made;
+        snprintf(description, sizeof(description), "%s: the lifetime walks take %llu steps, at most %llu (8 a token, 1 a jump and 1 an end)", name,
+                 (unsigned long long)work, (unsigned long long)bound);
+        check_test_expect(test, work <= bound, description);
+        tally->work += work;
+        tally->old_work += old_work;
     }
-    printf("  %s: %u blocks with locals entered by jumps, %u lifetime ends at jumps\n", name, entered, made);
+    printf("  %s: %u tokens, %u blocks with locals entered by jumps, %u lifetime ends at %u jumps; %llu steps of the walks, the old walks' %llu\n", name, count,
+           entered, made, jumps, (unsigned long long)work, (unsigned long long)old_work);
     parse_release(&parser);
     pp_release(&pp);
     intern_release(&identifiers);
@@ -998,7 +1038,25 @@ static void check_test_program_lifetime_sources(CheckTest* test, uint32_t branch
     free(text);
 }
 
-// #1355's checks: forests of every size up to a few hundred tokens and their seeds, then the generated sources.
+// Functions whose loops' labels have the same numbers (a body numbers them from 0), the second's loop inside a block with
+// locals, which a stop kept from the first would end too; breaks, continues and gotos in statement expressions, in nested
+// ones, in a loop with no other break, and in a for's condition and increment and a do's condition, which leave the loop
+// around it; cases in nested blocks with locals; and labels whose address is taken, with computed gotos (#1355).
+static const char check_test_lifetime_functions[] =
+    "int f0(int x){int r=0;for(int i=0;i<x;i++){int a=i;r+=({int t=a;if(t>5)break;if(t<0)continue;t;});"
+    "if(a&1){int b=a;if(b>9)break;continue;}r+=({int u=r;if(u>7)break;u;});}return r;}\n"
+    "int f1(int x){int r=0;{int c=x;for(int i=0;i<x;i++){int a=i;if(a>3)break;r+=({int t=a;if(t>5)break;t;});}r+=c;}return r;}\n"
+    "int f2(int x){int r=0;{int c=x;for(int i=0;i<x;i++){int a=i;r+=({int t=a;if(t==2)goto out;if(t>5)break;t;});}out:r+=c;}return r;}\n"
+    "int f3(int x){int r=0;for(int i=0;i<x;i++){int a=i;for(int j=0;({int t=j;if(t>3)break;t;})<a;j+=({int s=j;if(s>8)continue;1;})){int b=j;r+=b;}"
+    "do{int d=r;r+=d;}while(({int e=r;if(e>100)break;e<50;}));}return r;}\n"
+    "int f4(int x){int r=0;while(x--){int w=x;r+=({int s=w;if(s>3)break;s;});r+=({int p=w;({int q=p;if(q>6)break;if(q>7)continue;q;})+p;});}return r;}\n"
+    "int f5(int x){int r=0;switch(x){case 0:{int a=r;r+=a;case 1:{int b=r;r+=b;case 2:r++;break;}}default:r--;}"
+    "while(x--){int w=x;switch(w&3){case 0:{int q=w;if(q)continue;break;}default:r+=({int z=w;if(z>4)break;z;});}}return r;}\n"
+    "int f6(int x){static void*const t[]={&&l0,&&l1};int r=0;if(x<0)goto*t[(-x)&1];{int a=x;l0:r+=a;}{int b=x;l1:r+=b;}"
+    "for(;;){int c=r;if(c>5)goto*t[c&1];break;}return r;}\n";
+
+// #1355's checks: forests of every size up to a few hundred tokens and their seeds, then the generated sources, at 40 arms
+// and at 1,024, where the old walks' steps are quadratic and the work bound would fail them, and the functions' fixture.
 static void check_test_program_lifetime_jumps(CheckTest* test)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 26);
@@ -1017,11 +1075,14 @@ static void check_test_program_lifetime_jumps(CheckTest* test)
             printf("  lifetime forest %u (budget %u, %u tokens) differs from the ancestor walks\n", seed, budget, forest->count);
         }
     }
-    printf("  lifetime forests: %u, blocks with locals %llu, of which jumps enter %llu; %llu jumps' walks, %llu ends, %llu from a kept stop\n", forests,
-           (unsigned long long)tally.blocks, (unsigned long long)tally.entered, (unsigned long long)tally.jumps, (unsigned long long)tally.entries,
-           (unsigned long long)tally.kept);
+    printf("  lifetime forests: %u, blocks with locals %llu, of which jumps enter %llu; %llu jumps' walks, %llu ends, %llu from a kept stop; %llu steps of the "
+           "walks, the old walks' %llu\n",
+           forests, (unsigned long long)tally.blocks, (unsigned long long)tally.entered, (unsigned long long)tally.jumps, (unsigned long long)tally.entries,
+           (unsigned long long)tally.kept, (unsigned long long)tally.work, (unsigned long long)tally.old_work);
     check_test_expect(test, equal && tally.entered != 0 && tally.entered < tally.blocks && tally.kept != 0 && tally.entries != 0,
                       "the blocks jumps enter and the jumps' lifetime ends are the ancestor walks' on random forests");
     check_test_program_lifetime_sources(test, 40, &tally);
+    check_test_program_lifetime_sources(test, 1024, &tally);
+    check_test_program_lifetime_source(test, check_test_lifetime_functions, "lifetime-functions-regions", 15, 21, &tally);
     arena_release(&arena);
 }

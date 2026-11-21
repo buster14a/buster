@@ -132,12 +132,15 @@ static uint64_t check_program_lifetime_blocks(const Parser* parser, const CheckI
 // is a block whose `first` isn't BUSTER_CHECK_NONE, else its parent's own answer; `count` past the root, and with `bodies`
 // past a function's body too. Each path climbs to the first token whose answer is known or is its parent's own, then
 // retraces the tokens it climbed, each filled once, so the work is linear in the tokens (#1355), as
-// check_program_lifetime_blocks' passes are.
-static void check_program_lifetime_nearest(const Parser* parser, const uint32_t* first, uint32_t* nearest, bool bodies)
+// check_program_lifetime_blocks' passes are. Returns the steps of the climbs and the retraces, which test-checker bounds
+// (CheckProgramOptions.lifetime_work). The paths stay scalar, as check_program_lifetime_blocks' do: each step's load is
+// the address of the next (docs/commands/tier1-frame.md says why, and what is still to measure on the 9700X).
+static uint64_t check_program_lifetime_nearest(const Parser* parser, const uint32_t* first, uint32_t* nearest, bool bodies)
 {
     const uint32_t count = parser->tokens.count;
     const uint32_t* const parents = parser->tree.parents;
     const uint8_t* const roles = parser->tree.roles;
+    uint64_t work = 0;
     memset(nearest, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
     for (uint32_t token = 0; token < count; token += 1)
     {
@@ -154,6 +157,7 @@ static void check_program_lifetime_nearest(const Parser* parser, const uint32_t*
             steps += 1;
         }
         answer = answer == BUSTER_CHECK_NONE && ancestor < count ? nearest[ancestor] : answer;
+        work += steps;
         ancestor = token;
         steps = 0;
         while (ancestor < count && nearest[ancestor] == BUSTER_CHECK_NONE && steps < count)
@@ -165,7 +169,9 @@ static void check_program_lifetime_nearest(const Parser* parser, const uint32_t*
             ancestor = outside || held ? count : parent;
             steps += 1;
         }
+        work += steps;
     }
+    return work;
 }
 
 // A jump from `source` to `target` folded into the innermost block with locals above the target (`nearest`, the sink
@@ -182,24 +188,45 @@ static void check_program_lifetime_fold(const uint32_t* nearest, uint32_t* sourc
     }
 }
 
+// The lanes of the 64 tokens from `base` that are the unit's: every one but in the last chunk of `count`.
+static __mmask64 check_program_lifetime_lanes(uint32_t count, uint32_t base)
+{
+    return count - base < 64 ? _bzhi_u64(UINT64_MAX, count - base) : UINT64_MAX;
+}
+
 // Every jump into a token of the unit folded (check_program_lifetime_fold) with `backward`: a goto's (not a computed
 // one's) into its label, each label whose address is taken (`addressed`, null for none) from nowhere, a switch into each
-// of its cases, and an asm goto into each of its labels (unreached while the lowering refuses asm goto).
+// of its cases, and an asm goto into each of its labels (unreached while the lowering refuses asm goto). The gotos and the
+// labels come from masks of 64 tokens' kinds, roles and marks at a time, the last chunk's lanes past the unit's masked
+// off (#1355), and only their set lanes are visited.
 static void check_program_lifetime_jumps(const CheckProgram* program, const Parser* parser, const uint8_t* addressed, const uint32_t* nearest, uint32_t* sources,
                                          bool backward)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
-    for (uint32_t token = 0; token < count; token += 1)
+    const uint32_t chunks = count / 64 + (count % 64 != 0);
+    for (uint32_t chunk = 0; chunk < chunks; chunk += 1)
     {
-        const bool jump = parser->tree.roles[token] == PARSE_ROLE_RETURN && parser->tokens.kinds[token] == PARSE_KIND_GOTO && !check_input_indirect_goto(parser, token);
-        if (jump)
+        const uint32_t base = chunk * 64;
+        const __mmask64 lanes = check_program_lifetime_lanes(count, base);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, parser->tokens.kinds + base);
+        const __m512i roles = _mm512_maskz_loadu_epi8(lanes, parser->tree.roles + base);
+        const uint64_t gotos = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8(PARSE_KIND_GOTO)) & _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_RETURN));
+        const uint64_t marked = addressed != NULL ? _mm512_mask_test_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, addressed + base), _mm512_set1_epi8(-1)) : 0;
+        uint64_t selected = gotos | marked;
+        while (selected != 0)
         {
-            check_program_lifetime_fold(nearest, sources, count, token, check_sparse_get(input->label_targets, token), backward);
-        }
-        if (addressed != NULL && addressed[token] != 0)
-        {
-            check_program_lifetime_fold(nearest, sources, count, BUSTER_CHECK_NONE, token, backward);
+            const uint32_t lane = (uint32_t)_tzcnt_u64(selected);
+            const uint32_t token = base + lane;
+            if (((gotos >> lane) & 1) != 0 && !check_input_indirect_goto(parser, token))
+            {
+                check_program_lifetime_fold(nearest, sources, count, token, check_sparse_get(input->label_targets, token), backward);
+            }
+            if (((marked >> lane) & 1) != 0)
+            {
+                check_program_lifetime_fold(nearest, sources, count, BUSTER_CHECK_NONE, token, backward);
+            }
+            selected &= selected - 1;
         }
     }
     for (uint32_t c = 0; c < program->case_count; c += 1)
@@ -226,35 +253,56 @@ static void check_program_lifetime_jumps(const CheckProgram* program, const Pars
 // that a source before that brace enters (forward jumps, the least source); a sweep from the first token takes each at its
 // closing brace and leaves out one that a source after it enters (backward jumps, the greatest). `nearest` and `sources`
 // have a token's room and one more each; afterwards `nearest` holds each token's innermost block with lifetimes above it,
-// past function bodies, which the writer's walks follow (check_control_lifetimes_left).
-static void check_program_lifetime_entered(const CheckProgram* program, const Parser* parser, const uint8_t* addressed, uint32_t* nearest, uint32_t* sources, uint32_t* first)
+// past function bodies, which the writer's walks follow (check_control_lifetimes_left). The sweeps visit the braces alone,
+// by masks of 64 tokens' roles at a time; each block's fold reads the blocks' inside it, so the braces go in order.
+// Returns the steps of the parent paths (check_program_lifetime_nearest).
+static uint64_t check_program_lifetime_entered(const CheckProgram* program, const Parser* parser, const uint8_t* addressed, uint32_t* nearest, uint32_t* sources,
+                                               uint32_t* first)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     const uint32_t* const parents = parser->tree.parents;
     const uint8_t* const roles = parser->tree.roles;
-    check_program_lifetime_nearest(parser, first, nearest, true);
+    uint64_t work = check_program_lifetime_nearest(parser, first, nearest, true);
     memset(sources, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
     check_program_lifetime_jumps(program, parser, addressed, nearest, sources, false);
-    for (uint32_t opening = count; opening-- > 0;)
+    // From the last chunk of 64 tokens back, its opening braces from the last: a block inside another opens after it, so
+    // is met first.
+    const uint32_t chunks = count / 64 + (count % 64 != 0);
+    for (uint32_t chunk = chunks; chunk-- > 0;)
     {
-        const uint32_t block = roles[opening] == PARSE_ROLE_OPEN_BLOCK ? parents[opening] : count;
-        if (block < count && roles[block] == PARSE_ROLE_CLOSE_BLOCK)
+        const uint32_t base = chunk * 64;
+        const __mmask64 lanes = check_program_lifetime_lanes(count, base);
+        uint64_t openings = _mm512_mask_cmpeq_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, roles + base), _mm512_set1_epi8(PARSE_ROLE_OPEN_BLOCK));
+        while (openings != 0)
         {
-            const uint32_t outer = nearest[block] < count ? nearest[block] : count;
-            sources[outer] = sources[block] < sources[outer] ? sources[block] : sources[outer];
-            first[block] = sources[block] < opening ? BUSTER_CHECK_NONE : first[block];
+            const uint32_t lane = 63 - (uint32_t)__builtin_clzll(openings);
+            const uint32_t opening = base + lane;
+            const uint32_t block = parents[opening];
+            if (block < count && roles[block] == PARSE_ROLE_CLOSE_BLOCK)
+            {
+                const uint32_t outer = nearest[block] < count ? nearest[block] : count;
+                sources[outer] = sources[block] < sources[outer] ? sources[block] : sources[outer];
+                first[block] = sources[block] < opening ? BUSTER_CHECK_NONE : first[block];
+            }
+            openings ^= UINT64_C(1) << lane;
         }
     }
     memset(sources, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
     check_program_lifetime_jumps(program, parser, addressed, nearest, sources, true);
-    for (uint32_t block = 0; block < count; block += 1)
+    // From the first chunk, its closing braces from the first: a block inside another closes before it.
+    for (uint32_t chunk = 0; chunk < chunks; chunk += 1)
     {
-        if (roles[block] == PARSE_ROLE_CLOSE_BLOCK)
+        const uint32_t base = chunk * 64;
+        const __mmask64 lanes = check_program_lifetime_lanes(count, base);
+        uint64_t closings = _mm512_mask_cmpeq_epi8_mask(lanes, _mm512_maskz_loadu_epi8(lanes, roles + base), _mm512_set1_epi8(PARSE_ROLE_CLOSE_BLOCK));
+        while (closings != 0)
         {
+            const uint32_t block = base + (uint32_t)_tzcnt_u64(closings);
             const uint32_t outer = nearest[block] < count ? nearest[block] : count;
             sources[outer] = sources[block] > sources[outer] ? sources[block] : sources[outer];
             first[block] = sources[block] > block ? BUSTER_CHECK_NONE : first[block];
+            closings &= closings - 1;
         }
     }
     for (uint32_t r = 0; r < input->region_count; r += 1)
@@ -264,5 +312,6 @@ static void check_program_lifetime_entered(const CheckProgram* program, const Pa
             first[input->regions[r].block] = BUSTER_CHECK_NONE;
         }
     }
-    check_program_lifetime_nearest(parser, first, nearest, false);
+    work += check_program_lifetime_nearest(parser, first, nearest, false);
+    return work;
 }
