@@ -257,6 +257,11 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_CONVERT_LOAD,
     // The second multiplicand or the addend is in memory. The two register operands precede the base and index.
     TIER1_RULE_FLOAT_FMA_LOAD,
+    // A packed fused multiply-add (#2806): values[0] * values[1] + values[2], lanes in `source_width`. vfmadd213
+    // after the destination holds values[1].
+    TIER1_RULE_VECTOR_FMA,
+    // A packed same-width integer/float conversion (#2806): `operation` the IR opcode, lanes in `source_width`.
+    TIER1_RULE_VECTOR_CONVERT,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -467,7 +472,7 @@ static bool tier1_select_mask_rule(uint32_t rule)
 // Whether a rule is a floating value's (#141), which only the CFG consumer takes, its vector class's.
 static bool tier1_select_float_rule(uint32_t rule)
 {
-    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || (rule >= TIER1_RULE_FLOAT_CONVERT_LOAD && rule <= TIER1_RULE_FLOAT_FMA_LOAD);
+    return (rule >= TIER1_RULE_FLOAT_CONSTANT && rule <= TIER1_RULE_FLOAT_RETURN) || (rule >= TIER1_RULE_FLOAT_CONVERT_LOAD && rule <= TIER1_RULE_VECTOR_CONVERT);
 }
 
 // Register-only leaf bodies use caller-saved registers. R11 is reserved for a destructive instruction's second
@@ -1258,6 +1263,72 @@ static uint16_t tier1_select_lane_form(uint32_t operation, uint32_t lane, uint32
     const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
     const uint32_t level = width < 64 && encoding <= BUSTER_TIER1_ENCODING_SSE ? encoding : BUSTER_TIER1_ENCODING_EVEX;
     return operation < BUSTER_TIER1_VECTOR_OPERATIONS && lane < IR_SIMD_LANE_COUNT && index < 3 ? tier1_select_lane_forms[level][operation][lane][index] : (uint16_t)X86_FORM_NONE;
+}
+
+// Packed vfmadd213ps/pd (#2806). SSE has no FMA. A 64-byte vector is EVEX's.
+static uint16_t tier1_select_packed_fma_form(uint32_t lane, uint32_t width, uint32_t encoding)
+{
+    const bool pd = lane == IR_SIMD_LANE_F64;
+    const bool evex = encoding == BUSTER_TIER1_ENCODING_EVEX || width >= 64;
+    uint16_t form = X86_FORM_NONE;
+    if (lane == IR_SIMD_LANE_F32 || lane == IR_SIMD_LANE_F64)
+    {
+        if (width >= 64)
+        {
+            form = pd ? X86_FORM_VFMADD213PD_Z_Z_ZM512 : X86_FORM_VFMADD213PS_Z_Z_ZM512;
+        }
+        else if (evex && width == 32)
+        {
+            form = pd ? X86_FORM_VFMADD213PD_Y_Y_YM256_EVEX : X86_FORM_VFMADD213PS_Y_Y_YM256_EVEX;
+        }
+        else if (evex)
+        {
+            form = pd ? X86_FORM_VFMADD213PD_X_X_XM128_EVEX : X86_FORM_VFMADD213PS_X_X_XM128_EVEX;
+        }
+        else if (encoding == BUSTER_TIER1_ENCODING_VEX && width == 32)
+        {
+            form = pd ? X86_FORM_VFMADD213PD_Y_Y_YM256 : X86_FORM_VFMADD213PS_Y_Y_YM256;
+        }
+        else if (encoding == BUSTER_TIER1_ENCODING_VEX)
+        {
+            form = pd ? X86_FORM_VFMADD213PD_X_X_XM128 : X86_FORM_VFMADD213PS_X_X_XM128;
+        }
+    }
+    return form;
+}
+
+// Packed cvtdq2ps, cvtudq2ps, cvttps2dq and cvttps2udq (#2806), i32 and f32. Unsigned forms are AVX-512's.
+static uint16_t tier1_select_packed_convert_form(uint32_t op, uint32_t width, uint32_t encoding)
+{
+    const bool evex = encoding == BUSTER_TIER1_ENCODING_EVEX || width >= 64;
+    uint16_t form = X86_FORM_NONE;
+    if (op == IR_SITOFP)
+    {
+        form = width >= 64 ? X86_FORM_VCVTDQ2PS_Z_ZM512 :
+               evex && width == 32 ? X86_FORM_VCVTDQ2PS_Y_YM256_EVEX :
+               evex ? X86_FORM_VCVTDQ2PS_X_XM128_EVEX :
+               encoding == BUSTER_TIER1_ENCODING_VEX && width == 32 ? X86_FORM_VCVTDQ2PS_Y_YM256 :
+               encoding == BUSTER_TIER1_ENCODING_VEX ? X86_FORM_VCVTDQ2PS_X_XM128 :
+               width == 16 ? X86_FORM_CVTDQ2PS_X_XM128 : X86_FORM_NONE;
+    }
+    else if (op == IR_UITOFP && (evex || width >= 64))
+    {
+        form = width >= 64 ? X86_FORM_VCVTUDQ2PS_Z_ZM512 : width == 32 ? X86_FORM_VCVTUDQ2PS_Y_YM256 : X86_FORM_VCVTUDQ2PS_X_XM128;
+    }
+    else if (op == IR_FPTOSI)
+    {
+        form = width >= 64 ? X86_FORM_VCVTTPS2DQ_Z_ZM512 :
+               evex && width == 32 ? X86_FORM_VCVTTPS2DQ_Y_YM256_EVEX :
+               evex ? X86_FORM_VCVTTPS2DQ_X_XM128_EVEX :
+               encoding == BUSTER_TIER1_ENCODING_VEX && width == 32 ? X86_FORM_VCVTTPS2DQ_Y_YM256 :
+               encoding == BUSTER_TIER1_ENCODING_VEX ? X86_FORM_VCVTTPS2DQ_X_XM128 :
+               width == 16 ? X86_FORM_CVTTPS2DQ_X_XM128 : X86_FORM_NONE;
+    }
+    else if (op == IR_FPTOUI && (evex || width >= 64))
+    {
+        form = width >= 64 ? X86_FORM_VCVTTPS2UDQ_Z_ZM512 : width == 32 ? X86_FORM_VCVTTPS2UDQ_Y_YM256 : X86_FORM_VCVTTPS2UDQ_X_XM128;
+    }
+    return form;
 }
 
 // movaps between two xmm registers: a whole register's copy, which unlike movss's and movsd's doesn't merge into its
@@ -3014,6 +3085,48 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         record.reg = x;
         record.vvvv = kind == 2 ? c : a;
         tier1_select_append(&result, record);
+        break;
+    }
+    case TIER1_RULE_VECTOR_FMA:
+    {
+        // vfmadd213: dest = a * dest + c, so dest starts as b. A copy into dest saves a or c first when dest is one of them.
+        const uint32_t encoding = tier1_select_holes_encoding(holes);
+        const uint8_t x = destination & 15;
+        uint8_t a = holes->left & 15;
+        const uint8_t b = holes->right & 15;
+        uint8_t c = holes->third & 15;
+        if (x != b)
+        {
+            if (x == a)
+            {
+                tier1_select_append(&result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, a, width, encoding));
+                a = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+            }
+            else if (x == c)
+            {
+                tier1_select_append(&result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, c, width, encoding));
+                c = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+            }
+            tier1_select_append(&result, tier1_select_class_move(x, b, width, encoding));
+        }
+        tier1_select_append(&result, (X86Instruction){
+            .form = tier1_select_packed_fma_form(holes->source_width, width, encoding),
+            .reg = x,
+            .vvvv = a,
+            .rm = c,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        });
+        break;
+    }
+    case TIER1_RULE_VECTOR_CONVERT:
+    {
+        const uint32_t encoding = tier1_select_holes_encoding(holes);
+        tier1_select_append(&result, (X86Instruction){
+            .form = tier1_select_packed_convert_form(holes->operation, width, encoding),
+            .reg = destination & 15,
+            .rm = holes->left & 15,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        });
         break;
     }
     case TIER1_RULE_FLOAT_NEGATE:
@@ -5831,6 +5944,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
+                                                   op == IR_FMA || op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI ||
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
                                                                            c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE ||
                                                                            c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND ||
@@ -6165,6 +6279,39 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.intrinsic_cost = 1;
             if (tier1_select_lane_form(operation, lane, vector_width, false) != X86_FORM_NONE)
             {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
+        }
+        else if (vector_width != 0 && op == IR_FMA)
+        {
+            const uint32_t lane = function->flags[node];
+            const bool formed = tier1_select_packed_fma_form(lane, vector_width, BUSTER_TIER1_ENCODING_EVEX) != X86_FORM_NONE ||
+                                tier1_select_packed_fma_form(lane, vector_width, BUSTER_TIER1_ENCODING_VEX) != X86_FORM_NONE;
+            if (formed)
+            {
+                base.rule = TIER1_RULE_VECTOR_FMA;
+                base.width = (uint8_t)vector_width;
+                base.source_width = (uint8_t)lane;
+                base.values[0] = a;
+                base.values[1] = b;
+                base.values[2] = c;
+                base.intrinsic_cost = 4;
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
+        }
+        else if (vector_width != 0 && (op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI))
+        {
+            const bool formed = tier1_select_packed_convert_form(op, vector_width, BUSTER_TIER1_ENCODING_EVEX) != X86_FORM_NONE ||
+                                tier1_select_packed_convert_form(op, vector_width, BUSTER_TIER1_ENCODING_VEX) != X86_FORM_NONE ||
+                                tier1_select_packed_convert_form(op, vector_width, BUSTER_TIER1_ENCODING_SSE) != X86_FORM_NONE;
+            if (formed)
+            {
+                base.rule = TIER1_RULE_VECTOR_CONVERT;
+                base.width = (uint8_t)vector_width;
+                base.operation = (uint8_t)op;
+                base.source_width = function->flags[node];
+                base.values[0] = a;
+                base.intrinsic_cost = 1;
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
         }
