@@ -45,6 +45,7 @@ typedef struct ForeignGcLinkState ForeignGcLinkState;
 struct ForeignGcLinkState
 {
     ForeignGcFrame** frames;
+    bool needs_unwind_graph;
     ForeignGcRoots roots;
     ForeignGcEdges edges;
     Link graph;
@@ -261,6 +262,9 @@ static ForeignLinkResult foreign_gc_link_frames(ForeignGcLinkState* state, const
                     result = foreign_gc_link_frame(frame, foreign, input, path, arena);
                     state->frames[atom] = frame;
                     nodes += frame->current.record_count;
+                    // An empty EH atom with no fixups is already a non-root leaf. Other frames need
+                    // the placeholder rewrite and its fixup checks, even if no records survived COMDAT.
+                    state->needs_unwind_graph |= frame->current.record_count != 0 || link->atoms.size[atom] != 0 || link->atoms.fixup_count[atom] != 0;
                     if (nodes >= UINT32_MAX)
                     {
                         result.error = FOREIGN_LINK_ERROR_CAPACITY;
@@ -789,13 +793,15 @@ static ForeignLinkResult foreign_gc_link(ForeignLink* output, const Foreign* for
     {
         result = foreign_gc_link_frames(&state, foreign, input, path, scratch.arena);
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE)
+    const ForeignGcEdges* edges = 0;
+    if (result.error == FOREIGN_LINK_ERROR_NONE && state.needs_unwind_graph)
     {
         result = foreign_gc_link_graph(&state, input, scratch.arena);
+        edges = &state.edges;
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE)
     {
-        const ForeignGcError marked = foreign_gc_mark_edges(&state.graph, &state.roots, &state.edges, path, scratch.arena, &state.marked);
+        const ForeignGcError marked = foreign_gc_mark_edges(&state.graph, &state.roots, edges, path, scratch.arena, &state.marked);
         result.error = marked == FOREIGN_GC_ERROR_NONE ? FOREIGN_LINK_ERROR_NONE : marked == FOREIGN_GC_ERROR_MEMORY ? FOREIGN_LINK_ERROR_MEMORY : FOREIGN_LINK_ERROR_INPUT;
     }
     if (result.error == FOREIGN_LINK_ERROR_NONE)

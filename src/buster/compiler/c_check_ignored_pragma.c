@@ -157,18 +157,26 @@ static bool check_input_ignored_pragmas(CheckInputReader* reader, uint8_t* handl
                                     pp_token_is_name(reader->pp, &reader->pp->output, source + 2, reader->pp->output.count, "STDC");
                 uint32_t end = source;
                 parse_pragma_at(&reader->pp->output, source, &end);
+                // At the name after the namespace, or where the line has none, at its end (#1970: clang's eod, the newline
+                // after the line's last token, payload.data; a _Pragma's stays at its last token, which is the _Pragma's).
+                const bool bare = end == source + 2 || (vendor && end == source + 3);
                 const uint32_t located = end == source + 2 ? source + 1 : source + 2 + (vendor && source + 3 < end);
+                const bool directive = bare && pp_history_ensure(reader->pp) && pp_history_at(reader->pp, end - 1) == 0;
+                const uint32_t line_end = directive ? pp_output_line_end(reader->pp, end - 1) : 0;
+                // An unknown STDC pragma is clang's ext_stdc_pragma_ignored, -Wunknown-pragmas' extension on by default,
+                // its policy the STDC states' (CHECK_WARNING_ID_UNKNOWN_PRAGMA, #1970).
                 events[next++] = (CheckWarningEvent)
                 {
                     .id = disposition == CHECK_PRAGMA_OPENMP ? CHECK_WARNING_ID_SOURCE_OPENMP :
-                          disposition == CHECK_PRAGMA_IGNORED ? CHECK_WARNING_ID_IGNORED_PRAGMA : CHECK_WARNING_ID_UNRECOGNIZED_PRAGMA,
+                          disposition == CHECK_PRAGMA_IGNORED ? CHECK_WARNING_ID_IGNORED_PRAGMA :
+                          disposition == CHECK_PRAGMA_STDC_UNKNOWN ? CHECK_WARNING_ID_UNKNOWN_PRAGMA : CHECK_WARNING_ID_UNRECOGNIZED_PRAGMA,
                     .kind = CHECK_WARNING_EVENT_PRAGMA,
                     .token = tokens->pragma_positions[pragma],
                     .source = located,
                     .flags = disposition == CHECK_PRAGMA_UNKNOWN || disposition == CHECK_PRAGMA_OPENMP ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
                     .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                     .completion = tokens->pragma_positions[pragma],
-                    .payload = { .token = source },
+                    .payload = { .token = source, .data = line_end },
                 };
             }
         }

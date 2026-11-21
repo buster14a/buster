@@ -271,6 +271,122 @@ names once that pays:
     instead of 2,647. Its run times are the same, within 0.1 ms on 1 to 8
     lanes: the searches' time it saves goes to lane 0's listings.
 
+### A search directory asked for a subdirectory (#2873)
+
+glibc's headers include one another as `<bits/...>`, `<sys/...>`, `<gnu/...>`,
+`<linux/...>` and `<asm/...>`. Each such include is probed in every search
+directory before the one that has it, and clang's resource directory and
+`/usr/local/include` have no `bits`. On the 9700X those were 40 of the 52
+failed opens of a unit with only `<stdio.h>`, and 167 of `sqlite3.c`'s 207. A
+listing doesn't reach them: a small unit never gets a first look, and clang's
+directory is read whole only at its 256th miss. So the cache asks a directory
+about a missing subdirectory itself (`file_cache_miss_component`):
+
+- **Counting.** A probe that finds no file (ENOENT) at a path with more than
+  one component after its directory counts for that first component, in a
+  slot of the directory's `FileCacheDirectory`: its name and a count.
+- **Asking.** At a component's third miss
+  (`BUSTER_FILE_CACHE_ASKING_MISSES`), the cache `stat`s the component's own
+  path, once. ENOENT says the directory has no such name.
+- **Answering.** A path under a component its directory lacks is then absent
+  without a system call (`file_cache_component_absent`). Its path entry is the
+  one a failed probe gives it, as from a listing. A component the directory
+  has answers nothing, and its paths are opened as before.
+- **Exactly what a probe would find.** The ask is the lookup that every path
+  under the component begins with, a link followed as theirs is. So it is
+  right on every file system, those a listing can't answer for among them, and
+  for a dangling link and a name past ASCII.
+  - Never asked for: `.` and `..`, which every directory has.
+  - No miss: a regular file by the component's name gives its paths ENOTDIR,
+    and a component longer than `NAME_MAX` ENAMETOOLONG.
+  - A directory with a listing is asked nothing more: its listing answers.
+  - What an ask doesn't see is what a listing doesn't: a subdirectory made
+    during the run, after its directory was asked.
+- **The slots.** A directory counts 16 components
+  (`BUSTER_FILE_CACHE_COMPONENTS`), each a name of up to 15 bytes
+  (`BUSTER_FILE_CACHE_COMPONENT_NAME`). One past either is not counted, and
+  its paths are probed as before. A miss allocates nothing: the slots are the
+  directory record's own bytes, and the asked path is the probed path's first
+  bytes.
+- **One compare a miss.** Every failed probe is counted, in units that never
+  ask too, so the counting has no loop and no branch on a name's byte:
+  - A component's key is 16 bytes: its name, and zeros after it. One masked
+    load takes the 16 bytes after the directory's, which reads nothing past
+    the path's end, and the first `/` among them ends the component
+    (`file_cache_component_key`).
+  - A slot holds a key. The key is compared with every slot at once, four
+    slots a vector (`file_cache_find_component`).
+  - On the 9700X the counting is 2,800 to 9,400 instructions of a musl unit
+    and 150 to 350 mispredicted branches. As loops over the name's bytes and
+    over the slots it was 5,600 to 16,800 and 230 to 420: each unit is a new
+    process, whose predictor has not seen those loops.
+- **Why the third miss, and a `stat`.** An ask pays where the component is
+  absent and fails again. It is lost on a component that fails no more, and on
+  one the directory has. On the 9700X, on a warm dentry cache, a failed open
+  costs 1,270 cycles; a `stat` costs 990 of an absent path and 1,100 of one
+  that is there, where an open and a close cost 2,400. By those costs, from
+  the traces of compiles without asks, in cycles a unit:
+
+  | asked at the component's | `<stdio.h>` alone | `sqlite3.c` | a musl unit, of 1,336 |
+  | --- | ---: | ---: | ---: |
+  | first miss | +37,100 | +181,900 | -5,200 |
+  | second | +34,000 | +170,000 | -2,900 |
+  | **third** | **+33,400** | **+162,900** | **-600** |
+  | fourth | +30,900 | +155,000 | -160 |
+
+  musl's units, with seven `-I` directories, have 2,826 absent components that
+  fail twice or more, only 259 of them a third time, and 1,332 present ones
+  that fail twice or more. Measured, one executable asking at the third, the
+  fourth and the fifth miss reads alike: the unit with `<stdio.h>` 0.85%, 0.85%
+  and 0.99% fewer kernel cycles than with its asks off, and musl's units
+  within what one setting reads against itself. So the asks stay at the
+  earliest miss that isn't lost on musl's components.
+- **Across units and the walk.** As a listing's, the answers live in the
+  cache, so every unit of a run that shares it uses them. The walk moves past
+  an answered candidate as past a listed one, and counts a wave's failed
+  probes as it adds them, in the probes' order: every lane count asks at the
+  same point. A wave's own probes are all made before its first ask.
+- **The start order.** `file_cache_count_miss`, which every compile with a
+  failed probe runs, is no longer inlined. Left out of the start's code it
+  was a page of code more for every process: musl's units, a process each,
+  read 2% more instruction TLB misses than main's. `cmake/BusterStartOrder.txt`
+  was made again with it (docs/commands/build.md, "The start's code order"),
+  and they read 0.9% fewer.
+- **What stays scalar.** The asks themselves: a compile makes a handful, 2
+  for `<stdio.h>` and 11 for `sqlite3.c`, each after the probes that count
+  towards it and each a system call of a thousand cycles.
+- **Measured** on the 9700X (CPU 2, under the lock, Release), two ways: one
+  executable with its asks off and on, which is the asks' own effect, and
+  main `2d8174328` against the build with the asks and the list made again
+  ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/include-asks-2873-2026-11-17)).
+  The objects are the same bytes.
+
+  | `-c` of | `<stdio.h>` alone | `sqlite3.c` | a musl unit |
+  | --- | ---: | ---: | ---: |
+  | opens | 87 to 59 | 380 to 274 | 37 to 37 |
+  | of them failed | 52 to 24 | 207 to 101 | 23 to 23 |
+  | asks | 2 | 11 | 0 |
+
+  - **The unit with `<stdio.h>`:** with its asks on, one executable reads
+    0.85% and 1.07% fewer kernel cycles than with them off, in two comparisons
+    of 41 rounds (off against off: 0.05%), and retires 0.05% fewer user
+    instructions. The build reads 1.11% and 0.89% fewer than main's.
+  - **`sqlite3.c`:** its cycles read as main against a copy of itself does,
+    and it retires main's instructions to within 0.001%.
+  - **musl's 1,336 units, a process each:** their 850 asks, 259 of them of an
+    absent component, spare 86 opens of 70,664. With its asks on, one
+    executable reads 0.01% and 0.04% more kernel cycles than with them off and
+    0.05% and 0.04% fewer user cycles, in two comparisons of 11 rounds: what
+    off reads against off. The counting is 0.03% more instructions than
+    main. The build reads 0.10% and 0.14% more kernel cycles than main's and
+    0.17% and 0.07% more user cycles, where main against a copy of itself
+    reads 0.15% and 0.07% fewer.
+  - **Two builds on musl's units read less exactly than one copy does.** An
+    earlier build of this code read 0.73% and 0.45% more kernel cycles than
+    main's. One that takes its threshold from the environment read 0.21% to
+    0.69% more in four runs, the higher two with its asks off, where one copy
+    of it reads the two settings as equal.
+
 ### Per-file jobs on lanes
 
 `benchmark-files` and `test-files` start one command-owned `LaneTeam` before
@@ -367,8 +483,7 @@ The merge, in `files_prepare`, with a sync between steps:
 6. **Rewrite.** Each lane rewrites its files' identifier values, and their
    guards, from its own ids to the shared table's (`files_remap`, 64 tokens at a
    time: one compare finds the identifiers, and a gather takes 16 of their
-   shared ids at once; for the scalar kernels, `files_remap_scalar`, a token at
-   a time, is its twin).
+   shared ids at once).
 
 A lane writes only its own spellings and its own segments of the partitions,
 and reads the others' through the candidates (rule 2). The shared table's
@@ -675,9 +790,10 @@ the walk must do what it did. The checks:
   counts are exact: 13 files prepared, each identity once, in 4 rounds; 1
   unused; 2 requests not found; the units' errors (0, 0, 1) and warnings (1, 2,
   0); and after the walk, the unit with the computed include opens one path and
-  the others none. It runs with the vectorized kernels and their scalar twins,
-  its rounds cut into parts and split once, all on every lane (its rounds are
-  small enough for lane 0 alone otherwise).
+  the others none. It runs with `PPOptions.scalar` off and on (which now
+  selects `pp_define`'s scalar body scan alone, #2924), its rounds cut into
+  parts and split once, all on every lane (its rounds are small enough for lane
+  0 alone otherwise).
 - **Spellings:** 240 generated files of identifiers (a shared vocabulary drawn
   unevenly, names of their own, names past 16 and 63 bytes, line splices and
   UCNs), prepared without following includes, and a translation unit that
@@ -735,8 +851,7 @@ without it:
 
 - the vectorized printer doubling the space before an identifier whose id is
   odd: only that check fails, on the tree's, the spellings', the contexts' and
-  the special paths' `-E` text (the tree's scalar ways print with the scalar
-  printer);
+  the special paths' `-E` text;
 - a macro's id after its name in the "expanded from macro" note: that check
   fails on the tree's diagnostics, and without it so does the comparison with
   each unit alone, whose table gives the names other ids;

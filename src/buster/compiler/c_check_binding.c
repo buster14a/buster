@@ -163,17 +163,15 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
     return result;
 }
 
-// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn. The vector path
-// visits the bodies' openings alone (check_sparse_next), a few thousand of sqlite3.c's 716,158 tokens (#1489); the
-// scalar path, its twin, every token.
+// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn. It visits the
+// bodies' openings alone (check_sparse_next), a few thousand of sqlite3.c's 716,158 tokens (#1489).
 static bool check_input_parameter_marks(const CheckInput* input, const Parser* parser, uint8_t* marks)
 {
     bool valid = parser != NULL && marks != NULL && check_sparse_present(input->body_declarations) &&
                  check_sparse_present(input->parameters) && check_sparse_present(input->parameter_next);
     const uint32_t count = valid ? parser->tokens.count : 0;
-    const bool vector = valid && BUSTER_VECTOR_PATH(!parser->options.scalar);
-    for (uint32_t opening = check_sparse_next(input->body_declarations, 0, count, vector); valid && opening < count;
-         opening = check_sparse_next(input->body_declarations, opening + 1, count, vector))
+    for (uint32_t opening = check_sparse_next(input->body_declarations, 0, count); valid && opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count))
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         valid = declaration == BUSTER_CHECK_NONE || declaration < parser->tokens.count;

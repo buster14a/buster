@@ -6,8 +6,10 @@
 // stores to memory, and a callee that never returns) expanded into callers that call them from their entry, from a
 // loop's latch, twice from a phi's block, before a branch whose successor's phi names the call's block, under a guard,
 // and from a switch's targets. Each unit is generated from text templates with random constants, at two integer types,
-// and runs on the shared IR interpreter (an oracle independent of the inliner) before inlining, after it, and after SROA
-// and SSA promotion of the caller; the inliner's two twins must write the same columns (ir_inline_test_run). A by-value
+// and with each callee as written and with a constant ahead of its parameters (ir_inline_cfg_shift), which the
+// node-at-a-time splice takes; and runs on the shared IR interpreter (an oracle independent of the inliner) before
+// inlining, after it, and after SROA and SSA promotion of the caller; the inliner's two twins must write the same columns
+// (ir_inline_test_run). Callees of 16 and 17 parameters (ir_inline_test_general_wide) take the vector splice's bound. A by-value
 // callee with two returns, each of its own object's address, checks the aggregate result's phi and the lifetime ends'
 // place after its copy. Include after ir_optimize_inline_simd_test.c, whose parse and run helpers it uses.
 
@@ -74,7 +76,7 @@ static void ir_inline_cfg_callee(IrInlineCfgText* text, uint32_t shape, uint64_t
     }
     if (shape == 7)
     {
-        // Its parameters don't begin it: the vector splice leaves it to the scalar twin.
+        // Its parameters don't begin it: the vector splice leaves it to the node-at-a-time splice.
         ir_inline_cfg_line(text, "b0:\n  %%0 = const.%s %s\n  %%1 = param.%s 0\n  %%2 = param.%s 1\n", t, k, t, t);
     }
     else
@@ -145,6 +147,46 @@ static void ir_inline_cfg_callee(IrInlineCfgText* text, uint32_t shape, uint64_t
             break;
     }
     ir_inline_cfg_line(text, "}\n");
+}
+
+// The callee's text with a constant ahead of its parameters (#2924): `k`, as %0, and every value renumbered past it, so
+// that its parameters don't begin it and the node-at-a-time splice takes it, as it takes shape 7.
+static void ir_inline_cfg_shift(IrInlineCfgText* text, uint64_t k)
+{
+    char source[BUSTER_IR_INLINE_CFG_TEXT];
+    const uint32_t length = text->length;
+    memcpy(source, text->text, length);
+    char constant[40];
+    ir_inline_cfg_constant(constant, k);
+    text->length = 0;
+    bool inserted = false;
+    uint32_t i = 0;
+    while (i < length)
+    {
+        if (source[i] == '%')
+        {
+            uint32_t value = 0;
+            uint32_t end = i + 1;
+            while (end < length && source[end] >= '0' && source[end] <= '9')
+            {
+                value = value * 10 + (uint32_t)(source[end] - '0');
+                end += 1;
+            }
+            ir_inline_cfg_line(text, "%%%u", value + 1);
+            i = end;
+        }
+        else
+        {
+            ir_inline_cfg_line(text, "%c", source[i]);
+            // The entry block's label ends here: the constant is its first instruction.
+            if (!inserted && i >= 3 && memcmp(source + i - 3, "b0:\n", 4) == 0)
+            {
+                ir_inline_cfg_line(text, "  %%0 = const.%s %s\n", text->type, constant);
+                inserted = true;
+            }
+            i += 1;
+        }
+    }
 }
 
 // Caller `shape` of symbol 1 (the file's comment), which calls symbol 2 and, under a guard no argument meets, symbol 4.
@@ -298,8 +340,11 @@ static void ir_inline_test_general_units(IrInlineTest* test, Arena* input, Arena
         const uint64_t mask = width == 0 ? UINT32_MAX : UINT64_MAX;
         for (uint32_t callee = 0; callee < BUSTER_IR_INLINE_CFG_CALLEES; callee += 1)
         {
-            for (uint32_t caller = 0; caller < BUSTER_IR_INLINE_CFG_CALLERS; caller += 1)
+            for (uint32_t unit_shape = 0; unit_shape < BUSTER_IR_INLINE_CFG_CALLERS * 2; unit_shape += 1)
             {
+                // Each caller with the callee as written, then with a constant ahead of its parameters.
+                const uint32_t caller = unit_shape / 2;
+                const bool shifted = unit_shape % 2 != 0;
                 IrFunction functions[5];
                 bool parsed = true;
                 const uint64_t k1 = ir_inline_test_random(test) & 0xffff;
@@ -309,6 +354,10 @@ static void ir_inline_test_general_units(IrInlineTest* test, Arena* input, Arena
                 ir_inline_cfg_caller(&text, caller, guard);
                 parsed = parsed && ir_inline_cfg_parse(test, &text, input, scratch, &functions[0]);
                 ir_inline_cfg_callee(&text, callee, k1);
+                if (shifted)
+                {
+                    ir_inline_cfg_shift(&text, k2 ^ 0x5a5a);
+                }
                 parsed = parsed && ir_inline_cfg_parse(test, &text, input, scratch, &functions[1]);
                 for (uint32_t symbol = 3; parsed && symbol <= 5; symbol += 1)
                 {
@@ -404,16 +453,16 @@ static void ir_inline_test_general_units(IrInlineTest* test, Arena* input, Arena
                             ir_inline_test_expect(test, ir_inline_cfg_same(&before, &final, mask), "before inlining and after SROA and promotion");
                             if (!ir_inline_cfg_same(&before, &inlined, mask) || !ir_inline_cfg_same(&before, &final, mask))
                             {
-                                fprintf(stderr, "ir-inline: general unit callee=%u caller=%u type=%s trial=%u: status %u/%u/%u value %" PRIx64 "/%" PRIx64 "/%" PRIx64 "\n", callee, caller,
-                                        types[width], trial, before.result.status, inlined.result.status, final.result.status, before.result.value.low, inlined.result.value.low,
-                                        final.result.value.low);
+                                fprintf(stderr, "ir-inline: general unit callee=%u caller=%u shifted=%u type=%s trial=%u: status %u/%u/%u value %" PRIx64 "/%" PRIx64 "/%" PRIx64 "\n", callee,
+                                        caller, shifted, types[width], trial, before.result.status, inlined.result.status, final.result.status, before.result.value.low,
+                                        inlined.result.value.low, final.result.value.low);
                             }
                             test->executions += 3;
                         }
                     }
                     else
                     {
-                        fprintf(stderr, "ir-inline: general unit callee=%u caller=%u type=%s failed\n", callee, caller, types[width]);
+                        fprintf(stderr, "ir-inline: general unit callee=%u caller=%u shifted=%u type=%s failed\n", callee, caller, shifted, types[width]);
                     }
                 }
                 arena_pop_to(input, 0);
@@ -677,15 +726,144 @@ static void ir_inline_test_general_limits(IrInlineTest* test, Arena* input, Aren
         IrInlineUnit beyond = unit;
         beyond.only = 6;
         ir_inline_test_expect(test, ir_optimize_inline(&beyond, output, scratch, options, &refused, &failed).error == IR_ERROR_STRUCTURE, "an only function past the unit is refused");
+
+        // The sole caller's diamond needs no callee summary, even when its slot lifetime marks would exhaust scratch.
+        IrFunction caller = functions[1];
+        caller.slot_count = 8192;
+        caller.slots = BUSTER_ARENA_PUSH_ARRAY(input, IrSlot, caller.slot_count);
+        ir_inline_test_expect(test, caller.slots != NULL, "allocate the sole caller's slots");
+        if (caller.slots != NULL)
+        {
+            for (uint32_t slot = 0; slot < caller.slot_count; slot += 1)
+            {
+                caller.slots[slot] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64 };
+            }
+            IrInlineUnit single = unit;
+            single.functions = &caller;
+            single.count = 1;
+            options.trusted = true;
+            const uint64_t capacity = scratch->capacity;
+            scratch->capacity = scratch->length + 4096;
+            IrInlineResult single_result = { 0 };
+            const IrCheck check = ir_optimize_inline(&single, output, scratch, options, &single_result, &failed);
+            scratch->capacity = capacity;
+            ir_inline_test_expect(test, check.error == IR_OK && single_result.functions[0].slot_count == caller.slot_count, "a sole caller needs no scratch proportional to its slots");
+        }
     }
     arena_pop_to(input, 0);
     arena_pop_to(output, 0);
     arena_pop_to(twin, 0);
 }
 
+// Callees of 16 and 17 parameters (#2924), the vector splice's bound: a diamond whose arms read the last two parameters, each
+// argument its caller's first parameter plus a constant of its own, so that a parameter bound to another argument changes
+// the result. With the unit's helpers, the caller runs on the interpreter before and after the general splice.
+static void ir_inline_test_general_wide(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    IrInlineCfgText text;
+    for (uint32_t parameters = 16; parameters <= 17; parameters += 1)
+    {
+        IrFunction functions[5];
+        char constant[40];
+        text.type = "i64";
+        text.length = 0;
+        ir_inline_cfg_line(&text, "function (i64, i64) -> i64 {\nb0:\n  %%0 = param.i64 0\n  %%1 = param.i64 1\n");
+        for (uint32_t p = 0; p < parameters; p += 1)
+        {
+            ir_inline_cfg_constant(constant, UINT64_C(0x1001) * (p + 1) + (ir_inline_test_random(test) & 0xff));
+            ir_inline_cfg_line(&text, "  %%%u = const.i64 %s\n  %%%u = add.i64 %%0, %%%u\n", 2 + 2 * p, constant, 3 + 2 * p, 2 + 2 * p);
+        }
+        ir_inline_cfg_line(&text, "  %%%u = call.i64 @2(", 2 + 2 * parameters);
+        for (uint32_t p = 0; p < parameters; p += 1)
+        {
+            ir_inline_cfg_line(&text, p == 0 ? "%%%u" : ", %%%u", 3 + 2 * p);
+        }
+        ir_inline_cfg_line(&text, ") fixed=(");
+        for (uint32_t p = 0; p < parameters; p += 1)
+        {
+            ir_inline_cfg_line(&text, p == 0 ? "i64" : ", i64");
+        }
+        ir_inline_cfg_line(&text, ") variadic=0\n  %%%u = ret.void %%%u\n}\n", 3 + 2 * parameters, 2 + 2 * parameters);
+        bool parsed = ir_inline_cfg_parse(test, &text, input, scratch, &functions[0]);
+        text.length = 0;
+        ir_inline_cfg_line(&text, "function (");
+        for (uint32_t p = 0; p < parameters; p += 1)
+        {
+            ir_inline_cfg_line(&text, p == 0 ? "i64" : ", i64");
+        }
+        ir_inline_cfg_line(&text, ") -> i64 {\nb0:\n");
+        for (uint32_t p = 0; p < parameters; p += 1)
+        {
+            ir_inline_cfg_line(&text, "  %%%u = param.i64 %u\n", p, p);
+        }
+        const uint32_t last = parameters - 1;
+        const uint32_t next = parameters;
+        ir_inline_cfg_line(&text, "  %%%u = icmp.i1 %%0, %%1 ult\n  %%%u = cbr.void %%%u, b1, b2\n", next, next + 1, next);
+        ir_inline_cfg_line(&text, "b1:\n  %%%u = add.i64 %%%u, %%%u\n  %%%u = ret.void %%%u\n", next + 2, last, last - 1, next + 3, next + 2);
+        ir_inline_cfg_line(&text, "b2:\n  %%%u = sub.i64 %%%u, %%0\n  %%%u = ret.void %%%u\n}\n", next + 4, last, next + 5, next + 4);
+        parsed = parsed && ir_inline_cfg_parse(test, &text, input, scratch, &functions[1]);
+        for (uint32_t symbol = 3; parsed && symbol <= 5; symbol += 1)
+        {
+            ir_inline_cfg_helper(&text, symbol, 0x77);
+            parsed = ir_inline_cfg_parse(test, &text, input, scratch, &functions[symbol - 1]);
+        }
+        ir_inline_test_expect(test, parsed, "the wide callee's unit parses");
+        if (parsed)
+        {
+            const uint32_t symbols[5] = {
+                1,
+                2,
+                3,
+                4,
+                5,
+            };
+            const uint8_t flags[5] = {
+                0,
+                BUSTER_IR_INLINE_INTERNAL,
+                BUSTER_IR_INLINE_INTERNAL,
+                BUSTER_IR_INLINE_INTERNAL,
+                0,
+            };
+            const IrInlineUnit unit = {
+                .functions = functions,
+                .symbols = symbols,
+                .flags = flags,
+                .count = 5,
+                .symbol_count = 128,
+            };
+            IrInlineOptions options = ir_inline_options();
+            options.maximum_cost = UINT32_MAX - 1;
+            options.control_flow = true;
+            IrInlineResult result = { 0 };
+            if (ir_inline_test_run(test, &unit, options, output, twin, scratch, &result))
+            {
+                const bool selected = result.call_offsets[1] == result.call_offsets[0] + 1 && result.decisions[result.call_offsets[0]] == IR_INLINE_SELECTED;
+                ir_inline_test_expect(test, selected && result.inlined_calls == 1, "the wide callee's call is expanded");
+                bool same = true;
+                for (uint32_t trial = 0; trial < BUSTER_IR_INLINE_CFG_TRIALS; trial += 1)
+                {
+                    InterpreterValue arguments[2] = { 0 };
+                    arguments[0].low = trial < 2 ? trial : ir_inline_test_random(test);
+                    arguments[1].low = trial < 2 ? 1 - trial : ir_inline_test_random(test);
+                    uint8_t seed[BUSTER_IR_INLINE_CFG_MEMORY] = { 0 };
+                    const IrInlineCfgRun before = ir_inline_cfg_run(functions, arguments, seed, scratch);
+                    const IrInlineCfgRun inlined = ir_inline_cfg_run(result.functions, arguments, seed, scratch);
+                    same = same && before.result.status == INTERPRETER_OK && ir_inline_cfg_same(&before, &inlined, UINT64_MAX);
+                    test->executions += 2;
+                }
+                ir_inline_test_expect(test, same, "a wide callee runs as before its general splice");
+            }
+        }
+        arena_pop_to(input, 0);
+        arena_pop_to(output, 0);
+        arena_pop_to(twin, 0);
+    }
+}
+
 static void ir_inline_test_general(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     ir_inline_test_general_units(test, input, output, twin, scratch);
+    ir_inline_test_general_wide(test, input, output, twin, scratch);
     ir_inline_test_general_by_value(test, input, output, twin, scratch);
     ir_inline_test_general_limits(test, input, output, twin, scratch);
 }

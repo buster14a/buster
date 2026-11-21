@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Original #148 rounding-environment fixtures. The generated leaf and real Tier 0 CALL wrappers use both encoders.
-// Clang's __builtin_flt_rounds is an independent native oracle. Only an isolated child saves/changes/restores host
-// x87 control and MXCSR, exercising all four modes and deliberately divergent controls. No libm link dependency,
-// throughput claim or source integration claim is introduced. Guard pages bound record and encoder publication.
+// Original #148 rounding-environment fixtures. Run the generated leaf and real Tier 0 CALL wrappers against
+// Clang's __builtin_flt_rounds for all x87/MXCSR mode pairs in an isolated child. Guard pages bound publication.
 
 #include <signal.h>
 #include <sys/resource.h>
@@ -27,6 +25,8 @@ struct CBuiltinRoundsTestProgram
     uint64_t mapping_bytes;
     uint32_t byte_count;
 };
+
+static const uint32_t cbuiltin_rounds_test_expected[] = { 1, 3, 2, 0 };
 
 static bool cbuiltin_rounds_test_expect(CBuiltinRoundsTestTally* tally, bool condition, const char* check, uint32_t item)
 {
@@ -62,8 +62,7 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
     bool result = cbuiltin_rounds_test_expect(tally, program->mapping != MAP_FAILED, "native mapping", path);
     if (result)
     {
-        const int64_t encoded = path == 0 ? x86_encode_scalar(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL)
-                                          : x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
+        const int64_t encoded = x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
         result = cbuiltin_rounds_test_expect(tally, encoded > 0, "helper encoding", path);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
@@ -72,32 +71,27 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
             X86Instruction records[BUSTER_ARRAY_LENGTH(cbuiltin_rounds_helper_records)];
             uint32_t offsets[BUSTER_ARRAY_LENGTH(records)];
             memcpy(records, helper->code.records, sizeof(records));
-            const BranchSizing sized = path == 0 ? size_branches_scalar(records, helper->code.count, NULL, NULL, 0, offsets) :
-                                                  size_branches(records, helper->code.count, NULL, NULL, 0, offsets);
+            const BranchSizing sized = size_branches(records, helper->code.count, NULL, NULL, 0, offsets);
             Tier0Code sized_code = helper->code;
             sized_code.records = records;
             UnwindFunction published = { 0 };
-            UnwindFunction scalar_frame = { 0 };
-            UnwindFunction vector_frame = { 0 };
+            UnwindFunction proven_frame = { 0 };
             const UnwindError described = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &published);
-            const UnwindError scalar_proof = unwind_tier0_scalar(&sized_code, offsets, program->byte_count, &scalar_frame);
-            const UnwindError vector_proof = unwind_tier0(&sized_code, offsets, program->byte_count, &vector_frame);
-            result = cbuiltin_rounds_test_expect(tally, sized.error == BRANCH_SIZING_OK && described == UNWIND_OK &&
-                scalar_proof == UNWIND_OK && vector_proof == UNWIND_OK && memcmp(&published, &scalar_frame, sizeof(published)) == 0 &&
-                memcmp(&published, &vector_frame, sizeof(published)) == 0 && published.frame_size == 8 && published.event_count == 2 &&
+            const UnwindError proof = unwind_tier0(&sized_code, offsets, program->byte_count, &proven_frame);
+            result = cbuiltin_rounds_test_expect(tally, sized.error == BRANCH_SIZING_OK && described == UNWIND_OK && proof == UNWIND_OK &&
+                memcmp(&published, &proven_frame, sizeof(published)) == 0 && published.frame_size == 8 && published.event_count == 2 &&
                 published.saved == 0 && published.pointer == 0 && published.offsets[0] == 4 && published.offsets[1] == program->byte_count - 1,
-                "rounding-mode helper CFA matches both independent unwind proofs", path);
+                "rounding-mode helper CFA matches the records' unwind proof", path);
             sized_code.frame_size = 0;
             UnwindFunction wrong = { 0 };
             const UnwindError wrong_frame = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &wrong);
-            result = cbuiltin_rounds_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &scalar_frame, sizeof(wrong)) != 0,
+            result = cbuiltin_rounds_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &proven_frame, sizeof(wrong)) != 0,
                 "missing rounding-mode reservation disagrees with the record proof", path) && result;
         }
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
-            const int64_t caller_bytes = path == 0 ? x86_encode_scalar(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends)
-                                                  : x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
+            const int64_t caller_bytes = x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
             result = cbuiltin_rounds_test_expect(tally, caller_bytes > 0 && caller->reference_count == 1 && caller->references[0].target == 1 &&
                 caller->references[0].field == X86_FIXUP_DISPLACEMENT && caller->references[0].kind == BUSTER_LINK_FIXUP_CALL &&
                 caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "real Tier 0 helper CALL reference", path);
@@ -186,39 +180,82 @@ static __attribute__((noinline)) int cbuiltin_rounds_test_clang(void)
     return result;
 }
 
+// Supply the raw word in DI instead of loading it into the FPU: hardware normalizes reserved control-word bits.
+// The store writes the same two bytes as FNSTCW. Execute the rest of the published recipe verbatim.
+static __attribute__((no_sanitize("function"))) void cbuiltin_rounds_test_words(CBuiltinRoundsTestTally* tally, const CBuiltinRoundsHelper* helper)
+{
+    X86Instruction records[BUSTER_ARRAY_LENGTH(cbuiltin_rounds_helper_records)];
+    if (cbuiltin_rounds_test_expect(tally, helper->code.count == BUSTER_ARRAY_LENGTH(records) && helper->code.records[1].form == X86_FORM_FNSTCW_M16,
+        "input is the saved x87 control word", 0))
+    {
+        memcpy(records, helper->code.records, sizeof(records));
+        records[1].form = X86_FORM_MOV_RM16_R16;
+        records[1].reg = X86_REGISTER_RDI;
+        CBuiltinRoundsHelper injected = *helper;
+        injected.code.records = records;
+        CBuiltinRoundsTestProgram program = { 0 };
+        if (cbuiltin_rounds_test_map(tally, &injected, NULL, 0, &program))
+        {
+            uint32_t (*query)(uint16_t) = (uint32_t (*)(uint16_t))(void*)program.entry;
+            for (uint32_t word = 0; word <= UINT16_MAX; word += 1)
+            {
+                cbuiltin_rounds_test_expect(tally, query((uint16_t)word) == cbuiltin_rounds_test_expected[(word >> 10) & 3], "control-word mapping", word);
+            }
+        }
+        if (program.mapping != MAP_FAILED)
+        {
+            munmap(program.mapping, program.mapping_bytes);
+        }
+    }
+}
+
 // Generated entry points have no Clang function-type prefix.
 static __attribute__((no_sanitize("function"))) void cbuiltin_rounds_test_native(CBuiltinRoundsTestTally* tally, CBuiltinRoundsTestProgram direct[2], CBuiltinRoundsTestProgram callers[2])
 {
     const uint16_t original_control = cbuiltin_rounds_test_control();
     const uint32_t original_mxcsr = _mm_getcsr();
-    static const uint32_t expected[] = { 1, 3, 2, 0 };
+    // FNSAVE saves and initializes the x87. Masked 0/0 sets the invalid flag; leave its result and 1 on the stack.
+    uint8_t original_x87[108];
+    __asm__ volatile("fnsave %0\n\tfldz\n\tfldz\n\tfdivp\n\tfld1" : "=m"(original_x87) : : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)", "memory");
+    uint16_t status;
+    __asm__ volatile("fnstsw %0" : "=m"(status));
+    cbuiltin_rounds_test_expect(tally, (status & 0x383f) == 0x3001, "two x87 stack entries and masked invalid", 0);
     for (uint32_t x87 = 0; x87 < 4; x87 += 1)
     {
-        const uint16_t control = (uint16_t)((original_control & ~UINT16_C(0x0c00)) | (x87 << 10));
+        const uint16_t control = (uint16_t)((original_control & ~UINT16_C(0x0c00)) | (x87 << 10) | 1);
         for (uint32_t sse = 0; sse < 4; sse += 1)
         {
-            const uint32_t mxcsr = (original_mxcsr & ~UINT32_C(0x6000)) | (sse << 13);
+            const uint32_t mxcsr = (original_mxcsr & ~UINT32_C(0x6000)) | (sse << 13) | 0x21;
             __asm__ volatile("fldcw %0" : : "m"(control) : "memory");
             _mm_setcsr(mxcsr);
             const int oracle = cbuiltin_rounds_test_clang();
-            cbuiltin_rounds_test_expect(tally, oracle == (int)expected[x87], "Clang uses x87 rounding when controls diverge", x87 * 4 + sse);
+            cbuiltin_rounds_test_expect(tally, oracle == (int)cbuiltin_rounds_test_expected[x87], "Clang uses x87 rounding when controls diverge", x87 * 4 + sse);
             for (uint32_t path = 0; path < 2; path += 1)
             {
-                uint32_t (*leaf)(void) = (uint32_t (*)(void))(void*)direct[path].entry;
-                uint32_t (*call)(void) = (uint32_t (*)(void))(void*)callers[path].entry;
-                const uint32_t raw = leaf();
-                const uint32_t called = call();
-                cbuiltin_rounds_test_expect(tally, raw == expected[x87] && called == expected[x87] && raw == (uint32_t)oracle,
-                    "native leaf and ordinary helper CALL match Clang", x87 * 8 + sse * 2 + path);
-                cbuiltin_rounds_test_expect(tally, cbuiltin_rounds_test_control() == control && _mm_getcsr() == mxcsr,
-                    "helper leaves x87 control and MXCSR unchanged", x87 * 8 + sse * 2 + path);
+                const uint8_t* entries[] = { direct[path].entry, callers[path].entry };
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(entries); i += 1)
+                {
+                    uint32_t (*query)(void) = (uint32_t (*)(void))(void*)entries[i];
+                    uintptr_t before_sp, after_sp;
+                    uint16_t after_status;
+                    __asm__ volatile("mov %%rsp,%0" : "=r"(before_sp) : : "memory");
+                    const uint32_t answer = query();
+                    __asm__ volatile("fnstsw %1\n\tmov %%rsp,%0" : "=r"(after_sp), "=m"(after_status) : : "memory");
+                    const uint32_t item = ((x87 * 4 + sse) * 2 + path) * 2 + i;
+                    cbuiltin_rounds_test_expect(tally, answer == (uint32_t)oracle, "native leaf or ordinary helper CALL matches Clang", item);
+                    // FNSTCW leaves only the condition codes C0..C3 undefined.
+                    cbuiltin_rounds_test_expect(tally, before_sp == after_sp && ((after_status ^ status) & 0xb8ff) == 0 &&
+                        cbuiltin_rounds_test_control() == control && _mm_getcsr() == mxcsr, "RSP, x87 status and controls", item);
+                }
             }
         }
     }
-    __asm__ volatile("fldcw %0" : : "m"(original_control) : "memory");
+    uint64_t top;
+    __asm__ volatile("fstpl %0" : "=m"(top) : : "st", "memory");
+    __asm__ volatile("frstor %0" : : "m"(original_x87) : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)", "memory");
     _mm_setcsr(original_mxcsr);
-    cbuiltin_rounds_test_expect(tally, cbuiltin_rounds_test_control() == original_control && _mm_getcsr() == original_mxcsr,
-        "isolated child restores original controls", 0);
+    cbuiltin_rounds_test_expect(tally, top == UINT64_C(0x3ff0000000000000) && cbuiltin_rounds_test_control() == original_control && _mm_getcsr() == original_mxcsr,
+        "x87 stack sentinel and restored original controls", 0);
 }
 
 static void cbuiltin_rounds_test_guards(CBuiltinRoundsTestTally* tally)
@@ -320,6 +357,7 @@ static int run_builtin_rounds_helper_tests(int argc, char** argv)
         valid = valid && cbuiltin_rounds_test_callers(&tally, &arena, &helper, callers);
         if (valid)
         {
+            cbuiltin_rounds_test_expect(&tally, helper.code.count <= 9 && direct[0].byte_count <= 27, "baseline helper instruction and byte budgets", direct[0].byte_count);
             valid = cbuiltin_rounds_test_expect(&tally, direct[0].byte_count == direct[1].byte_count && callers[0].byte_count == callers[1].byte_count &&
                 memcmp(direct[0].entry, direct[1].entry, direct[0].byte_count) == 0 && memcmp(callers[0].entry, callers[1].entry, callers[0].byte_count) == 0,
                 "scalar/vector helper and patched caller bytes", 0);
@@ -342,6 +380,7 @@ static int run_builtin_rounds_helper_tests(int argc, char** argv)
                     _exit(98);
                 }
                 alarm(5);
+                cbuiltin_rounds_test_words(shared, &helper);
                 cbuiltin_rounds_test_native(shared, direct, callers);
                 _exit(shared->failures == 0 ? 0 : 1);
             }

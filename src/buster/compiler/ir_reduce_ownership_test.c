@@ -49,9 +49,8 @@ static void ir_reduce_test_simd_ownership(IrReduceTest* test)
             source.vector_constants = placement == 0 ? own :
                                       (IrSimdValue*)((placement & 1 ? output.base : scratch.base) + (placement < 3 ? 128 : 64));
             memset(source.vector_constants, 0x73, 2 * sizeof(IrSimdValue));
-            const bool verified = ir_verify_complete(&source, &verification, true).error == IR_OK &&
-                                  ir_verify_complete(&source, &verification, false).error == IR_OK;
-            ir_reduce_test_expect(test, verified && ir_function_has_simd(&source) && ir_function_has_simd_scalar(&source),
+            const bool verified = ir_verify_complete(&source, &verification).error == IR_OK;
+            ir_reduce_test_expect(test, verified && ir_function_has_simd(&source),
                                   "scalar return with an unused vector pool is valid and still a SIMD function");
             uint8_t out_before[384];
             uint8_t temp_before[384];
@@ -257,9 +256,8 @@ static void ir_reduce_test_ownership(IrReduceTest* test)
             memcpy(plan_copy, scratch.base, mark);
             IrFunction rebuilt = { 0 };
             const IrCheck rebuilt_check = ir_rebuild(&source, owned.plan, &output, &scratch, &rebuilt);
-            const IrCheck vector = rebuilt_check.error == IR_OK ? ir_verify_complete(&rebuilt, &verification, true) : rebuilt_check;
-            const IrCheck scalar = rebuilt_check.error == IR_OK ? ir_verify_complete(&rebuilt, &verification, false) : rebuilt_check;
-            preserved = rebuilt_check.error == IR_OK && vector.error == IR_OK && scalar.error == IR_OK && scratch.length == mark &&
+            const IrCheck verified = rebuilt_check.error == IR_OK ? ir_verify_complete(&rebuilt, &verification) : rebuilt_check;
+            preserved = rebuilt_check.error == IR_OK && verified.error == IR_OK && scratch.length == mark &&
                         output.length > 64 && rebuilt.instruction_count == source.instruction_count && rebuilt.block_count == source.block_count &&
                         rebuilt.result_type == source.result_type && rebuilt.parameter_count == source.parameter_count &&
                         memcmp(rebuilt.op, source.op, source.instruction_count) == 0 &&
@@ -270,7 +268,7 @@ static void ir_reduce_test_ownership(IrReduceTest* test)
                 preserved = output.base[i] == 0xea;
             }
         }
-        ir_reduce_test_expect(test, preserved, "a complete scratch-prefix plan remains valid and both verifiers approve its published rebuild");
+        ir_reduce_test_expect(test, preserved, "a complete scratch-prefix plan remains valid and the verifier approves its published rebuild");
     }
     const uint64_t available[] = { 0, 1, 7, 8, 15, 16, 31, 32, 63, 64, 65, 127, 128, 255, 256, 511, 512, 1023, 2048, 4096, 8192, 16384, 65536 };
     for (uint32_t axis = 0; ready && axis < 2; axis += 1)
@@ -293,8 +291,7 @@ static void ir_reduce_test_ownership(IrReduceTest* test)
             if (check.error == IR_OK)
             {
                 succeeded += 1;
-                preserved = preserved && out.length > 64 && ir_verify_complete(&unpublished, &verification, true).error == IR_OK &&
-                            ir_verify_complete(&unpublished, &verification, false).error == IR_OK;
+                preserved = preserved && out.length > 64 && ir_verify_complete(&unpublished, &verification).error == IR_OK;
             }
             else
             {

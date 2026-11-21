@@ -1414,7 +1414,6 @@ static __attribute__((noinline)) void check_attested_hashes(CheckAttested* censu
         {
             _mm512_storeu_si512(sums_low + d, carry_low);
             _mm512_storeu_si512(sums_high + d, carry_high);
-            d += 1;
         }
         uint64_t before_low = 0;
         uint64_t before_high = 0;

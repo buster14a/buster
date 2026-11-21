@@ -13,6 +13,7 @@ typedef struct CheckTestAmxTrace
     uint8_t config[64];
     uint64_t tiles[8];
     uint64_t vectors[32];
+    uint8_t zero_bytes[32];
     uint64_t result;
     uint32_t releases;
     uint32_t clears;
@@ -137,6 +138,7 @@ static void check_test_amx_step(CheckTestAmxTrace* trace, X86Instruction instruc
     {
         trace->valid &= instruction.rm == (form->family == BUSTER_X86_FAMILY_LEGACY ? instruction.reg : instruction.vvvv);
         trace->vectors[instruction.reg] = 0;
+        trace->zero_bytes[instruction.reg] = form->family == BUSTER_X86_FAMILY_LEGACY ? 16 : 64;
     }
     else if (strcmp(name, "lea") == 0)
     {
@@ -180,6 +182,7 @@ static void check_test_amx_step(CheckTestAmxTrace* trace, X86Instruction instruc
     }
     else if (strncmp(name, "tcvtrow", 7) == 0 || strcmp(name, "tilemovrow") == 0)
     {
+        trace->zero_bytes[instruction.reg] = 0;
         trace->vectors[instruction.reg] = check_test_amx_hash(check_test_amx_hash(check_test_amx_named(name), trace->tiles[instruction.rm]),
                                                            trace->registers[instruction.vvvv]);
     }
@@ -193,7 +196,7 @@ static void check_test_amx_step(CheckTestAmxTrace* trace, X86Instruction instruc
         const uint64_t address = check_test_amx_address(trace, instruction);
         if (address < sizeof(trace->stack))
         {
-            trace->valid &= trace->vectors[instruction.reg] == 0 && bytes <= sizeof(trace->stack) - address;
+            trace->valid &= bytes <= trace->zero_bytes[instruction.reg] && bytes <= sizeof(trace->stack) - address;
             if (trace->valid)
             {
                 memset(trace->stack + address, 0, bytes);
@@ -228,13 +231,35 @@ static void check_test_amx_step(CheckTestAmxTrace* trace, X86Instruction instruc
     }
 }
 
+// The leaf's entry RSP leaves room above the configuration for a guard before the saved RBP.
+static bool check_test_amx_config(const CheckTestAmxTrace* trace, uint64_t address, uint64_t entry_rsp, bool dot, uint32_t m, uint32_t n, uint32_t k)
+{
+    uint8_t expected[64] = { [0] = 1, [16] = (uint8_t)n, [17] = (uint8_t)(n >> 8), [48] = (uint8_t)m };
+    if (dot)
+    {
+        expected[18] = (uint8_t)k;
+        expected[19] = (uint8_t)(k >> 8);
+        expected[20] = (uint8_t)n;
+        expected[21] = (uint8_t)(n >> 8);
+        expected[49] = (uint8_t)m;
+        expected[50] = (uint8_t)(k >> 2);
+    }
+    uint8_t guard[16];
+    memset(guard, 0xa5, sizeof(guard));
+    const uint64_t frame = (entry_rsp - 8 - sizeof(expected)) & ~UINT64_C(63);
+    return address == frame && memcmp(trace->stack + frame, expected, sizeof(expected)) == 0 &&
+           memcmp(trace->stack + frame - sizeof(guard), guard, sizeof(guard)) == 0 &&
+           memcmp(trace->stack + frame + sizeof(expected), guard, sizeof(guard)) == 0;
+}
+
 static uint64_t check_test_amx_trace(const X86Instruction* records, const X86Decoded* decoded, uint32_t count,
                                    const CBuiltinX86HelperInfo* info, bool oracle, uint32_t m, uint32_t n, uint32_t k)
 {
     CheckTestAmxTrace trace = { .valid = true };
     // A missing config initializer must not be hidden by zero-initialized test memory.
     memset(trace.stack, 0xa5, sizeof(trace.stack));
-    trace.registers[X86_REGISTER_RSP] = 8192;
+    const uint64_t entry_rsp = oracle ? 8192 : 8192 - 8;
+    trace.registers[X86_REGISTER_RSP] = entry_rsp;
     if (oracle)
     {
         trace.registers[X86_REGISTER_RDI] = 0x50000;
@@ -256,7 +281,12 @@ static uint64_t check_test_amx_trace(const X86Instruction* records, const X86Dec
     }
     for (uint32_t r = 0; trace.valid && r < count; r += 1)
     {
-        check_test_amx_step(&trace, decoded != NULL ? decoded[r].instruction : records[r]);
+        const X86Instruction instruction = decoded != NULL ? decoded[r].instruction : records[r];
+        if (!oracle && instruction.form == X86_FORM_LDTILECFG_M512)
+        {
+            trace.valid = check_test_amx_config(&trace, check_test_amx_address(&trace, instruction), entry_rsp, info->amx == CBUILTIN_AMX_DOT, m, n, k);
+        }
+        check_test_amx_step(&trace, instruction);
     }
     return trace.valid && trace.releases == 1 && (oracle || info->output_bytes != 1024 || trace.clears == 1) ? trace.result : 0;
 }
@@ -368,9 +398,11 @@ static void check_test_program_amx_oracle(CheckTest* test, const char* clang)
                 check_test_expect(test, check_test_amx_trace(changed,NULL,helper.code.count,info,false,m,n,k) != oracle,
                                   "AMX oracle rejects a wrong configured source width");
                 memcpy(changed, helper.code.records, helper.code.count * sizeof(*changed));
-                for (uint32_t r = 0; r < helper.code.count; r += 1)
+                for (uint32_t r = 0; r < helper.code.count && changed[r].form != X86_FORM_LDTILECFG_M512; r += 1)
                 {
-                    if (changed[r].form == X86_FORM_MOV_RM64_R64 && changed[r].mode == BUSTER_X86_MEMORY_BASE && changed[r].displacement == 32)
+                    const uint32_t offset = (uint32_t)changed[r].displacement;
+                    if (changed[r].rm == X86_REGISTER_RSP && changed[r].mode == BUSTER_X86_MEMORY_BASE &&
+                        offset <= 32 && 32 - offset < x86_form_descriptions[changed[r].form].operand_bytes)
                     {
                         changed[r] = (X86Instruction){ .form = X86_FORM_NOP };
                     }

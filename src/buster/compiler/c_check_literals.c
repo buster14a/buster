@@ -512,7 +512,6 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
         if (c == 'i' || c == 'j')
         {
             imaginary = suffix - 1;
-            suffix -= 1;
             break;
         }
         if (c != 'f' && c != 'l' && c != 'u' && c != 'q')
@@ -952,7 +951,6 @@ static bool check_literal_string_part_scalar(const CheckStringPart* part, CheckS
     return valid;
 }
 
-#if BUSTER_HOST_VECTOR
 // #1388: a part's characters 64 bytes at a time, for the 1-byte encodings (ordinary and u8) outside raw string literals,
 // where every unit is a byte of its own or a few bytes that decode to one, and every valid UTF-8 character is the bytes
 // it is written with. A block starts at a unit and holds `avail` bytes of the part (masked loads: never past its end).
@@ -1146,7 +1144,6 @@ static uint32_t check_literal_string_blocks(const uint8_t* bytes, uint32_t posit
     *length = written;
     return position;
 }
-#endif
 
 // A part's characters in units (check_literal_string_step), appended to `output` (when not NULL) at `*length`. With a
 // vector host and a 1-byte encoding outside a raw string literal, check_literal_string_blocks reads as many units as
@@ -1155,7 +1152,6 @@ static uint32_t check_literal_string_blocks(const uint8_t* bytes, uint32_t posit
 static bool check_literal_string_part(const CheckStringPart* part, CheckStringEncoding encoding, bool c23, bool scalar, uint8_t* output, uint64_t* length)
 {
     bool valid;
-#if BUSTER_HOST_VECTOR
     const CheckStringSpan span = check_literal_string_span(part);
     const bool blocks = !scalar && !span.raw && (encoding == CHECK_STRING_ORDINARY || encoding == CHECK_STRING_UTF8);
     if (blocks)
@@ -1176,10 +1172,6 @@ static bool check_literal_string_part(const CheckStringPart* part, CheckStringEn
     {
         valid = check_literal_string_part_scalar(part, encoding, c23, output, length, false);
     }
-#else
-    (void)scalar;
-    valid = check_literal_string_part_scalar(part, encoding, c23, output, length, false);
-#endif
     return valid;
 }
 

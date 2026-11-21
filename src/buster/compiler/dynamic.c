@@ -23,7 +23,9 @@
 // interpreter, a library, versions or exports, with rcrt1.o's ABI note, crti.o's _init and _fini and RELR when libc.a's
 // startup takes it (dynamic_static_relr), and the static executable's ExecutableRuntime. A shared library's
 // (dynamic_shared_inputs) are a dynamic PIE's without the interpreter, the ABI note or __tls_get_addr, whose calls it
-// keeps, with its soname.
+// keeps, with its soname. A position-dependent dynamic executable's (-no-pie: a runtime of RUNTIME_KIND_NO_PIE) are a
+// dynamic PIE's, crt1.o's ABI note among them, with ExecutableDynamic.position_dependent and without RELR, which has
+// no RELATIVE relocation to hold there.
 //
 // main.c includes this file after bind.c and executable.c. dynamic_inputs takes BUSTER_LINKER_ENTRY rather than static:
 // main.c's units compile it in one unit alone (link.c).
@@ -131,6 +133,7 @@ BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynami
             relr_version = libc && !version->base && import_equal(version->name, BUSTER_DYNAMIC_RELR_VERSION) ? version->index : relr_version;
         }
     }
+    const bool position_dependent = runtime->kind == RUNTIME_KIND_NO_PIE;
     *dynamic = (ExecutableDynamic){
         .interpreter = {
             .pointer = (char*)dynamic_interpreter,
@@ -146,8 +149,9 @@ BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynami
         .exports = bind->exports,
         .export_count = bind->export_count,
         .relr_version = relr_version,
-        .relr = relr_version != 0,
+        .relr = relr_version != 0 && !position_dependent,
         .tls_get_addr = dynamic_global(runtime, bind, "__tls_get_addr"),
+        .position_dependent = position_dependent,
     };
     return versions != 0 && needed != 0;
 }

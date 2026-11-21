@@ -886,7 +886,6 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
         .identifiers = identifiers,
         .types = types,
         .output = scratch,
-        .scalar = parser->options.scalar,
     };
     Scratch mangle_scratch = { 0 };
     for (uint32_t i = 0; valid && overloads && i < graph->overload_candidate_count; i += 1)

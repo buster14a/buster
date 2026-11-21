@@ -903,7 +903,7 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
     }
     if (check.error == IR_OK)
     {
-        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
+        check = ir_optimize_verify_result(&work.statistics.function, output, scratch);
     }
     if (check.error == IR_OK)
     {

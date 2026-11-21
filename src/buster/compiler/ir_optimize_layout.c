@@ -47,7 +47,6 @@ static void ir_optimize_layout_ranks(const IrOptimizeLayoutBatch* batch, bool sc
             ranks[lane] = ((active >> lane) & 1) != 0 ? 3 + adjacent + 2 * back : 0;
         }
     }
-#if BUSTER_HOST_VECTOR
     else
     {
         const __m512i source = _mm512_loadu_si512(batch->source_enter);
@@ -59,7 +58,6 @@ static void ir_optimize_layout_ranks(const IrOptimizeLayoutBatch* batch, bool sc
         const __m512i ranked = _mm512_mask_add_epi32(direct, adjacent, direct, _mm512_set1_epi32(1));
         _mm512_storeu_si512(ranks, _mm512_mask_add_epi32(ranked, back, ranked, _mm512_set1_epi32(2)));
     }
-#endif
 }
 
 static IrError ir_optimize_layout_order(const IrOptimizeWork* work, const uint32_t* threads, Arena* scratch, bool scalar, uint32_t* order, uint32_t* order_count)

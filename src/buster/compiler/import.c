@@ -2194,9 +2194,6 @@ static bool import_object_vector(Link* link, String8 bytes, uint32_t unit, uint8
 
 BUSTER_LINKER_ENTRY ImportResult import_object(Link* link, String8 bytes, uint32_t unit, uint8_t source, Arena* arena, ImportObject* object)
 {
-#if !BUSTER_HOST_VECTOR
-    return import_object_scalar(link, bytes, unit, source, arena, object);
-#else
     const ImportMark mark = import_mark(link, arena);
     ImportResult result = { 0 };
     if (!import_object_vector(link, bytes, unit, source, arena, object))
@@ -2205,7 +2202,6 @@ BUSTER_LINKER_ENTRY ImportResult import_object(Link* link, String8 bytes, uint32
         result = import_object_scalar(link, bytes, unit, source, arena, object);
     }
     return result;
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2580,30 +2576,13 @@ static bool import_archive_index_parse(ImportArchiveIndex* archive_index, String
     // An index of at least one symbol: the exact path reads an archive without one.
     result = result && width != 0 && count != 0 && count <= (index.length - width) / width && count <= UINT32_MAX;
     Scratch scratch = scratch_begin(arena);
-    uint64_t* offsets = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, count) : 0;
     uint32_t* ranks = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count) : 0;
     archive_index->member_offsets = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count) : 0;
     archive_index->symbols = result ? BUSTER_ARENA_PUSH_ARRAY(arena, ImportArchiveSymbol, count) : 0;
-    result = result && offsets != 0 && ranks != 0 && archive_index->member_offsets != 0 && archive_index->symbols != 0;
-    // The offsets, big-endian: each vector's bytes reversed within each lane, then widened to 64 bits.
-    const __m512i reverse32 = _mm512_broadcast_i32x4(_mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12));
+    result = result && ranks != 0 && archive_index->member_offsets != 0 && archive_index->symbols != 0;
+    const __m256i reverse32 = _mm256_broadcastsi128_si256(_mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12));
     const __m512i reverse64 = _mm512_broadcast_i32x4(_mm_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8));
     const char* table = index.pointer + width;
-    for (uint64_t first = 0; result && first < count; first += BUSTER_IMPORT_BATCH)
-    {
-        const uint32_t n = (uint32_t)(count - first < BUSTER_IMPORT_BATCH ? count - first : BUSTER_IMPORT_BATCH);
-        __m512i lanes;
-        if (width == 4)
-        {
-            const __m256i loaded = _mm256_maskz_loadu_epi32((__mmask8)import_lane_mask(n), table + first * 4);
-            lanes = _mm512_cvtepu32_epi64(_mm512_castsi512_si256(_mm512_shuffle_epi8(_mm512_castsi256_si512(loaded), reverse32)));
-        }
-        else
-        {
-            lanes = _mm512_shuffle_epi8(_mm512_maskz_loadu_epi64((__mmask8)import_lane_mask(n), table + first * 8), reverse64);
-        }
-        import_store64(offsets + first, lanes, n);
-    }
     // In archive order, and the indexed members: each offset where it changes, ranked by an expand of the changes and a
     // prefix maximum.
     const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
@@ -2615,7 +2594,16 @@ static bool import_archive_index_parse(ImportArchiveIndex* archive_index, String
     {
         const uint32_t n = (uint32_t)(count - first < BUSTER_IMPORT_BATCH ? count - first : BUSTER_IMPORT_BATCH);
         const __mmask8 loaded = (__mmask8)import_lane_mask(n);
-        const __m512i lanes = _mm512_maskz_loadu_epi64(loaded, offsets + first);
+        __m512i lanes;
+        if (width == 4)
+        {
+            const __m256i words = _mm256_maskz_loadu_epi32(loaded, table + first * 4);
+            lanes = _mm512_cvtepu32_epi64(_mm256_shuffle_epi8(words, reverse32));
+        }
+        else
+        {
+            lanes = _mm512_shuffle_epi8(_mm512_maskz_loadu_epi64(loaded, table + first * 8), reverse64);
+        }
         // Each lane against the one before it, the last batch's last for lane 0; the first offset has none before it.
         const __m512i before = _mm512_alignr_epi64(lanes, previous, 7);
         const uint32_t compared = loaded & (first == 0 ? 0xfe : 0xff);
@@ -2732,9 +2720,6 @@ static bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* 
 
 static ImportResult import_archive(ImportArchive* archive, String8 bytes, Arena* arena)
 {
-#if !BUSTER_HOST_VECTOR
-    return import_archive_scalar(archive, bytes, arena);
-#else
     const uint64_t length = arena->length;
     ImportResult result = { 0 };
     if (!import_archive_vector(archive, bytes, arena))
@@ -2743,7 +2728,6 @@ static ImportResult import_archive(ImportArchive* archive, String8 bytes, Arena*
         result = import_archive_scalar(archive, bytes, arena);
     }
     return result;
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2910,9 +2894,6 @@ static ImportResult import_archive_lazy_scalar(ImportArchiveIndex* index, String
 
 static ImportResult import_archive_lazy(ImportArchiveIndex* index, String8 bytes, Arena* arena)
 {
-#if !BUSTER_HOST_VECTOR
-    return import_archive_lazy_scalar(index, bytes, arena);
-#else
     const uint64_t length = arena->length;
     ImportResult result = { 0 };
     if (!import_archive_lazy_vector(index, bytes, arena))
@@ -2921,7 +2902,6 @@ static ImportResult import_archive_lazy(ImportArchiveIndex* index, String8 bytes
         result = import_archive_lazy_scalar(index, bytes, arena);
     }
     return result;
-#endif
 }
 
 static ImportResult import_archive_member(ImportMember* member, String8 bytes, const ImportArchiveIndex* index, uint32_t rank)
@@ -3559,9 +3539,6 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
 
 static ImportResult import_library(ImportLibrary* library, String8 bytes, Arena* arena)
 {
-#if !BUSTER_HOST_VECTOR
-    return import_library_scalar(library, bytes, arena);
-#else
     const uint64_t length = arena->length;
     ImportResult result = { 0 };
     if (!import_library_vector(library, bytes, arena))
@@ -3570,7 +3547,6 @@ static ImportResult import_library(ImportLibrary* library, String8 bytes, Arena*
         result = import_library_scalar(library, bytes, arena);
     }
     return result;
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

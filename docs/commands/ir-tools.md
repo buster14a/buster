@@ -20,7 +20,10 @@ requirements. [Command index](README.md).
   `test-interpreter`, `test-interpreter-native`, `test-interpreter-link`,
   `test-ir-interpreter`, `interpret-ir`, and `interpret-c`. The latter runs retained
   typed streams from separately prepared C units, resolving their functions and
-  data by name. `test-ssa-source --typed` adds that execution to the three IR
+  data by name. `test-interpreter-link` checks which definition supplies a
+  symbol's address and size, its relocations, and which reference or conflicting
+  definition is diagnosed first across input units.
+  `test-ssa-source --typed` adds that execution to the three IR
   forms' output/status comparison. [The tools guide](../../docs/ir-tools.md)
   records the API, text grammar and frontend-dependent acceptance. Run builds
   and tests through the approved 9700X's shared per-run lock.

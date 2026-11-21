@@ -119,34 +119,31 @@ static void tier1_cfg_test_spill_edges(Tier1CfgTestTally* tally, Arena* output, 
             };
             input.registers[class] = mask;
             tier1_cfg_test_case(tally, &input, output, scratch, "current slot on a critical loop edge", false, 0, 0, true);
-            for (uint32_t path = 0; path < 2; path += 1)
+            const uint64_t saved = output->length;
+            Tier1CfgAllocation result = { 0 };
+            const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+            tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "the current-slot loop allocates");
+            if (error == TIER1_CFG_OK)
             {
-                const uint64_t saved = output->length;
-                Tier1CfgAllocation result = { 0 };
-                const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
-                tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "the current-slot loop allocates on both paths");
-                if (error == TIER1_CFG_OK)
+                const uint32_t first = result.edge_move_offsets[1];
+                const uint32_t last = result.edge_move_offsets[2];
+                tier1_cfg_test_expect(tally, last - first == changed, "only a changed phi operand stores on the back edge");
+                tier1_cfg_test_expect(tally, result.edge_placements[1] == (changed != 0 ? TIER1_CFG_EDGE_SPLIT : TIER1_CFG_EDGE_EMPTY), "eliding the last move removes the critical edge's split");
+                tier1_cfg_test_expect(tally, result.edge_move_offsets[1] > result.edge_move_offsets[0], "the entry edge still initializes the phi slot");
+                if (changed != 0 && last - first == 1)
                 {
-                    const uint32_t first = result.edge_move_offsets[1];
-                    const uint32_t last = result.edge_move_offsets[2];
-                    tier1_cfg_test_expect(tally, last - first == changed, "only a changed phi operand stores on the back edge");
-                    tier1_cfg_test_expect(tally, result.edge_placements[1] == (changed != 0 ? TIER1_CFG_EDGE_SPLIT : TIER1_CFG_EDGE_EMPTY), "eliding the last move removes the critical edge's split");
-                    tier1_cfg_test_expect(tally, result.edge_move_offsets[1] > result.edge_move_offsets[0], "the entry edge still initializes the phi slot");
-                    if (changed != 0 && last - first == 1)
-                    {
-                        // Replace the required store with a register self-copy. Its shape is valid, but the phi's
-                        // slot retains the old value instead of this iteration's new operand.
-                        const uint32_t destination = result.move_destinations[first];
-                        tier1_cfg_test_expect(tally, destination == BUSTER_TIER1_CFG_SPILL + result.allocation.spill_ids[1] && result.move_values[first] == 2, "the changed phi writes its own slot with the new operand");
-                        result.move_destinations[first] = result.move_sources[first];
-                        Tier1CfgCheck check;
-                        tier1_cfg_test_expect(tally, !tier1_cfg_verify(&input, &result, scratch, &check), "the verifier rejects an omitted changed-phi store");
-                        tier1_cfg_test_expect(tally, !tier1_cfg_test_certify(tally, &input, &result, output, scratch, false), "the certificate rejects an omitted changed-phi store");
-                        result.move_destinations[first] = destination;
-                    }
+                    // Replace the required store with a register self-copy. Its shape is valid, but the phi's
+                    // slot retains the old value instead of this iteration's new operand.
+                    const uint32_t destination = result.move_destinations[first];
+                    tier1_cfg_test_expect(tally, destination == BUSTER_TIER1_CFG_SPILL + result.allocation.spill_ids[1] && result.move_values[first] == 2, "the changed phi writes its own slot with the new operand");
+                    result.move_destinations[first] = result.move_sources[first];
+                    Tier1CfgCheck check;
+                    tier1_cfg_test_expect(tally, !tier1_cfg_verify(&input, &result, scratch, &check), "the verifier rejects an omitted changed-phi store");
+                    tier1_cfg_test_expect(tally, !tier1_cfg_test_certify(tally, &input, &result, output, scratch, false), "the certificate rejects an omitted changed-phi store");
+                    result.move_destinations[first] = destination;
                 }
-                arena_pop_to(output, saved);
             }
+            arena_pop_to(output, saved);
         }
     }
 }
@@ -188,24 +185,21 @@ static void tier1_cfg_test_spill_pressure(Tier1CfgTestTally* tally, Arena* outpu
         if (built)
         {
             tier1_cfg_test_case(tally, &input, output, scratch, "current slot under register pressure", false, 0, 0, true);
-            for (uint32_t path = 0; path < 2; path += 1)
+            const uint64_t mark = output->length;
+            Tier1CfgAllocation result = { 0 };
+            const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+            tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "the spill-pressure loop allocates");
+            if (error == TIER1_CFG_OK)
             {
-                const uint64_t mark = output->length;
-                Tier1CfgAllocation result = { 0 };
-                const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
-                tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "the spill-pressure loop allocates on both paths");
-                if (error == TIER1_CFG_OK)
-                {
-                    uint32_t location = 0;
-                    uint8_t kind = 0;
-                    const bool spilled = tier1_cfg_entry_location(&result, first, input.block_starts[1], &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_SPILL;
-                    const bool reloaded = tier1_cfg_location(&result, first, input.block_starts[2] - 1, &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
-                    tier1_cfg_test_expect(tally, spilled && reloaded, "pressure spills the first phi at entry and reloads it before exit");
-                    tier1_cfg_test_expect(tally, result.edge_move_offsets[1] == result.edge_move_offsets[2] && result.edge_placements[1] == TIER1_CFG_EDGE_EMPTY, "the reloaded self-phi needs no back-edge store under pressure");
-                    tier1_cfg_test_expect(tally, result.split_count == 0, "the pressure case uses fragment transitions, not split pieces");
-                }
-                arena_pop_to(output, mark);
+                uint32_t location = 0;
+                uint8_t kind = 0;
+                const bool spilled = tier1_cfg_entry_location(&result, first, input.block_starts[1], &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_SPILL;
+                const bool reloaded = tier1_cfg_location(&result, first, input.block_starts[2] - 1, &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+                tier1_cfg_test_expect(tally, spilled && reloaded, "pressure spills the first phi at entry and reloads it before exit");
+                tier1_cfg_test_expect(tally, result.edge_move_offsets[1] == result.edge_move_offsets[2] && result.edge_placements[1] == TIER1_CFG_EDGE_EMPTY, "the reloaded self-phi needs no back-edge store under pressure");
+                tier1_cfg_test_expect(tally, result.split_count == 0, "the pressure case uses fragment transitions, not split pieces");
             }
+            arena_pop_to(output, mark);
         }
         arena_pop_to(output, saved);
     }
