@@ -4226,7 +4226,12 @@ What the lowering covers past scalars (#145's programs):
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
   `goto` that leaves the arrays' scope, restoring the outermost block it
-  leaves; a `return` needs none. The lowering keeps the saved position and each
+  leaves; a `return` needs none. Each array's object and each bound find their
+  statement, whose terminator lists them, by a walk up their parents that leaves
+  its answer at every token it passes, under the walk's body
+  (`check_program_statement`): a declarator's bounds (`a[n][n]...[n]`) and a
+  declaration's declarators (`a0[n], a1[n], ...`) walk the path they share
+  once, where each walked it whole (#2995). The lowering keeps the saved position and each
   array's address in locals of their own (Tier 0's `STACK_SAVE`, `ALLOCA` and
   `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
   set once where they were declared, times its constant dimensions and its
@@ -8660,6 +8665,19 @@ the reader's `postorder_positions` and shared `subtree_sizes`; it allocates no
 new token column and does not require the parser's optional size metadata. It
 uses strict region-boundary rules, including jumps out of nested regions and
 refusals when entering sibling regions.
+
+The control writer gives a GNU `break` or `continue` in a statement expression
+its nearest enclosing loop's or switch's label (`check_control_region_targets`):
+the nearest ancestor of the region's opening before it (or a `do` statement's)
+that has one, so that a loop's own controlling expression belongs to the loop
+around it. Since every subtree is a run of tokens, a token's answer is its
+parent's label, where the parent qualifies and has one, or else the parent's
+answer. Each token of the body keeps its answer once a walk passes it, and a
+region's walk stops at the first kept token: nested statement expressions, and
+many under one deep statement, walk each token once, where each region walked
+to the body (#2995). The regions are written in token order, outer ones first,
+and a region's statements set the labels of the loops inside it alone, which
+only a later region is inside, so a kept answer stays right.
 
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump
