@@ -7319,7 +7319,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
     static LowerSource source;
     lower_source_node_front = census->shadow != NULL ? census->shadow->front : 0;
     lower_source_node_reader = census->shadow != NULL ? census->shadow->reader : 0;
-    const bool valid = lower_source_open(&source, file, options, option_count);
+    const bool valid = lower_source_open(&source, file, options, option_count, false);
     lower_source_node_front = 0;
     lower_source_node_reader = 0;
     const bool prepared = source.prepared;

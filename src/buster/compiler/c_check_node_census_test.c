@@ -6113,8 +6113,79 @@ static bool node_front_test_builtins(const char* directory, uint8_t front, uint6
     return valid && same;
 }
 
+// Compile the source independently both ways. Change the retained first row after checking and lower it again:
+// only a lowering that actually splices the reader's tape can emit the changed value.
+static void node_window_test_compile(CheckTest* test)
+{
+    char file[PATH_MAX];
+    snprintf(file, sizeof(file), "%s/checker/node-window.c", check_test_fixture_root);
+    char* options[] = { "-nostdinc", "-Wall", "-Wextra" };
+    static LowerSource plain;
+    static LowerSource window;
+    const bool opened_plain = lower_source_open(&plain, file, options, BUSTER_ARRAY_LENGTH(options), false);
+    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), true);
+    const bool prepared = opened_plain && opened_window && plain.prepared && window.prepared;
+    check_test_expect(test, prepared, "node-window prepares its mixed ordinary and taken returns");
+    if (prepared)
+    {
+        const CheckInput* reference = &plain.path.input;
+        CheckInput* input = &window.path.input;
+        bool same = reference->window_count == 0 && input->window_count == 7 && input->window_nodes == 23 &&
+                    reference->graph.count == input->graph.count + input->window_nodes - input->window_count;
+        for (uint32_t i = 0; same && i < input->window_count; i += 1)
+        {
+            const CheckInputWindowEntry* row = input->window_entries + i;
+            const uint32_t node = row->node;
+            const uint32_t returned = node < input->graph.count ? input->graph.tokens[node] : BUSTER_CHECK_NONE;
+            const uint32_t other = returned < reference->token_count ? reference->token_nodes[returned] : BUSTER_CHECK_NONE;
+            if (other >= plain.path.stream.count)
+            {
+                same = false;
+                break;
+            }
+            const CheckValue value = check_stream_value(&window.path.stream, node);
+            const CheckValue regular = check_stream_value(&plain.path.stream, other);
+            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && value.type == regular.type &&
+                   value.category == regular.category && value.flags == regular.flags && value.constant_kind == regular.constant_kind &&
+                   value.integer == regular.integer && row->kind == BUSTER_TYPED_CONST && row->class == BUSTER_TYPED_CLASS_I32 &&
+                   row->value == (uint64_t)(int64_t)(int32_t)value.integer;
+        }
+        check_test_expect(test, same, "node-window replaces 23 ordinary nodes by seven checked roots with the exact return value and native row");
+        CheckProgramLowered original = { 0 };
+        CheckProgramLowered first = { 0 };
+        bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+                       check_program_lower(&first, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) && original.count == first.count;
+        for (uint32_t b = 0; lowered && b < first.count; b += 1)
+        {
+            lowered = check_test_program_function(original.functions + b, first.functions + b);
+        }
+        check_test_expect(test, lowered, "node-window mixed returns lower to the ordinary functions' native tapes");
+        bool replayed = false;
+        if (lowered && input->window_count != 0)
+        {
+            input->window_entries[0].value = 314159;
+            CheckProgramLowered changed = { 0 };
+            if (check_program_lower(&changed, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) && changed.count == first.count)
+            {
+                for (uint32_t b = 0; b < changed.count; b += 1)
+                {
+                    const Tier0Function* function = changed.functions + b;
+                    for (uint32_t e = 0; e < function->count; e += 1)
+                    {
+                        replayed |= function->kinds[e] == BUSTER_TYPED_CONST && function->values[e] == 314159;
+                    }
+                }
+            }
+        }
+        check_test_expect(test, replayed, "node-window lowering reads the retained native row independently of the checked summary");
+    }
+    lower_source_close(&window);
+    lower_source_close(&plain);
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
+    node_window_test_compile(test);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready, "node-census fixtures' directory is made");

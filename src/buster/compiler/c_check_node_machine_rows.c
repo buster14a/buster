@@ -1383,6 +1383,15 @@ static inline __attribute__((always_inline)) uint64_t node_rows_extend(uint64_t 
     return (class & 1u) != 0 ? (uint64_t)((int64_t)high >> shift) : high >> shift;
 }
 
+
+// The CONST row has no conversion or relocation: its payload is the sign-extended i32 the native tape uses.
+void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value)
+{
+    entry->kind = BUSTER_TYPED_CONST;
+    entry->class = BUSTER_TYPED_CLASS_I32;
+    entry->value = node_rows_extend(value, entry->class);
+}
+
 // A floating constant's CONST's value of class `class` (F32 or F64: C takes no other's, node_machine_constant_takes)
 // from its record's line: check_lower_float_bits' of its long double (node_machine_record_floating), whose significand
 // and whose sign and exponent the line has as its payload and its exponent where its standing says so. A zero's line

@@ -368,6 +368,8 @@ struct PPOptions
     // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
     // expression_timing.
     bool expression_numbering;
+    // --node-window takes eligible full expressions before the coded walk.
+    bool node_window;
     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in

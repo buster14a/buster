@@ -15708,7 +15708,17 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         else if (!discard)
         {
             const uint32_t before = writer->count;
-            check_lower_constant(writer, value);
+            const CheckInput* input = writer->program->input;
+            const uint32_t entry = input->window_count != 0 && op == CHECK_OP_VALUE ? graph->members[node] : 0;
+            if (__builtin_expect(entry != 0 && entry <= input->window_count && input->window_entries[entry - 1].node == node, 0))
+            {
+                const CheckInputWindowEntry row = input->window_entries[entry - 1];
+                check_lower_emit(writer, row.kind, row.class, row.value);
+            }
+            else
+            {
+                check_lower_constant(writer, value);
+            }
             // An integer constant's one CONST, into which its own conversion folds (check_lower_fold_conversion).
             if (value->constant_kind == CHECK_CONSTANT_INTEGER && writer->count == before + 1)
             {
