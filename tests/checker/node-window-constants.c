@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 
+#ifdef WINDOW_REMAPPED_SOURCE
+#pragma clang diagnostic ignored "-Wunused-variable"
+#endif
+
 #define MASK (0x20 | 7)
 enum { COUNT = 2 + 3 };
 _Static_assert(COUNT == 5, "constant");
