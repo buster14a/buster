@@ -7852,7 +7852,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             // (Only a root holding a modification can warn: the cheap tests first.)
             const uint32_t root_token = graph->tokens[node];
             const bool unsequenced_candidate = root && !planned && unsequenced_marks != NULL && node < graph->count &&
-                                               (unsequenced_marks[node] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0 && evaluated[node] != 0;
+                                               (unsequenced_marks[node] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0 && evaluated[node] != 0 &&
+                                               (facts->roots == NULL || !check_unseq_sole_modification(graph, unsequenced_marks, node));
             const bool unsequenced_dropped = unsequenced_candidate && program != NULL &&
                                              (facts->flushed == NULL || root_token >= parser->tokens.count || facts->flushed[root_token] == 0) &&
                                              root_token < parser->tokens.count && check_program_token_dropped(program, root_token);
