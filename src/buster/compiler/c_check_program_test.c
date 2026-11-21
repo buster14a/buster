@@ -4130,6 +4130,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_control_walks(test);
         check_test_program_addressed(test);
         check_test_program_lifetime_planning(test);
+        check_test_program_lifetime_jumps(test);
         check_test_program_scans(test);
         check_test_program_many_declarators(test, clang);
         check_test_program_source(test,

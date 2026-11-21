@@ -19,9 +19,11 @@
 // (CheckProgramAsm.reason, c_check_program_asm.c), and the part stands ready for when it takes one.
 //
 // Included by c_check_program.c. Only a program asked for them (CheckProgramOptions.lifetimes, the C driver's --tier1)
-// computes them, so a compile without --tier1 pays nothing for them. Local ownership and control capacity are linear
-// passes using memoized parent paths; goto/case bypasses still walk ancestors. The scratch column later used
-// for bypass stamps holds the planning passes' temporary facts (docs/tier1-frame.md's "Slot sharing between objects").
+// computes them, so a compile without --tier1 pays nothing for them. Every pass is linear in the tokens and the jumps
+// (#1355): local ownership and control capacity by memoized parent paths, the blocks a jump enters by their jumps'
+// sources folded up the blocks with locals and two sweeps of the tokens, and the writer's walks over the blocks with
+// lifetimes alone (check_control_lifetimes_left), along the chain check_program_lifetime_entered leaves in its first
+// column (docs/commands/tier1-frame.md's "Lifetime planning on deep trees").
 
 // Whether `token` is a local declaration of an object: the lowering's own test (check_lower_local_declaration), whose
 // locals the program's bodies allocate.
@@ -126,80 +128,133 @@ static uint64_t check_program_lifetime_blocks(const Parser* parser, const CheckI
     return room;
 }
 
-// Takes the lifetimes of the blocks between `token` (a label's or a case's) and the first ancestor stamped `epoch`, or
-// with `epoch` 0 every block around it: a jump enters them.
-static void check_program_lifetime_bypass(const Parser* parser, const uint32_t* stamps, uint32_t epoch, uint32_t token, uint32_t* first)
+// Each token's innermost block with locals above it, in `nearest` (a token's room and one more): its parent, where that
+// is a block whose `first` isn't BUSTER_CHECK_NONE, else its parent's own answer; `count` past the root, and with `bodies`
+// past a function's body too. Each path climbs to the first token whose answer is known or is its parent's own, then
+// retraces the tokens it climbed, each filled once, so the work is linear in the tokens (#1355), as
+// check_program_lifetime_blocks' passes are.
+static void check_program_lifetime_nearest(const Parser* parser, const uint32_t* first, uint32_t* nearest, bool bodies)
 {
     const uint32_t count = parser->tokens.count;
-    uint32_t ancestor = token < count ? parser->tree.parents[token] : count;
-    uint32_t steps = 0;
-    while (ancestor < count && steps < count && (epoch == 0 || stamps[ancestor] != epoch) && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_BODY)
+    const uint32_t* const parents = parser->tree.parents;
+    const uint8_t* const roles = parser->tree.roles;
+    memset(nearest, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+    for (uint32_t token = 0; token < count; token += 1)
     {
-        if (parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BLOCK)
+        uint32_t ancestor = token;
+        uint32_t answer = BUSTER_CHECK_NONE;
+        uint32_t steps = 0;
+        while (ancestor < count && nearest[ancestor] == BUSTER_CHECK_NONE && answer == BUSTER_CHECK_NONE && steps < count)
         {
-            first[ancestor] = BUSTER_CHECK_NONE;
+            const uint32_t parent = parents[ancestor];
+            const bool outside = parent >= count || (bodies && roles[parent] == PARSE_ROLE_CLOSE_BODY);
+            const bool held = !outside && roles[parent] == PARSE_ROLE_CLOSE_BLOCK && first[parent] != BUSTER_CHECK_NONE;
+            answer = outside ? count : held ? parent : BUSTER_CHECK_NONE;
+            ancestor = parent;
+            steps += 1;
         }
-        ancestor = parser->tree.parents[ancestor];
-        steps += 1;
+        answer = answer == BUSTER_CHECK_NONE && ancestor < count ? nearest[ancestor] : answer;
+        ancestor = token;
+        steps = 0;
+        while (ancestor < count && nearest[ancestor] == BUSTER_CHECK_NONE && steps < count)
+        {
+            nearest[ancestor] = answer;
+            const uint32_t parent = parents[ancestor];
+            const bool outside = parent >= count || (bodies && roles[parent] == PARSE_ROLE_CLOSE_BODY);
+            const bool held = !outside && roles[parent] == PARSE_ROLE_CLOSE_BLOCK && first[parent] != BUSTER_CHECK_NONE;
+            ancestor = outside || held ? count : parent;
+            steps += 1;
+        }
     }
 }
 
-// Stamps `token` and each of its ancestors with `epoch`.
-static void check_program_lifetime_stamp(const Parser* parser, uint32_t* stamps, uint32_t epoch, uint32_t token)
+// A jump from `source` to `target` folded into the innermost block with locals above the target (`nearest`, the sink
+// `count` for none): a forward one's source (before its target) as the least in `sources`, a backward one's, with
+// `backward`, as the greatest. A source at or past `count` is backward: it stamps no ancestor, as an addressed label's
+// jumps (BUSTER_CHECK_NONE) and a case without its switch do.
+static void check_program_lifetime_fold(const uint32_t* nearest, uint32_t* sources, uint32_t count, uint32_t source, uint32_t target, bool backward)
 {
-    const uint32_t count = parser->tokens.count;
-    uint32_t ancestor = token;
-    uint32_t steps = 0;
-    while (ancestor < count && steps <= count)
+    if (target < count && (source > target) == backward)
     {
-        stamps[ancestor] = epoch;
-        ancestor = parser->tree.parents[ancestor];
-        steps += 1;
+        const uint32_t block = nearest[target] < count ? nearest[target] : count;
+        const uint32_t held = sources[block];
+        sources[block] = backward ? (source > held ? source : held) : (source < held ? source : held);
     }
 }
 
-// Leaves out of `first` the blocks a jump enters other than through their opening brace, and the statement expressions'
-// blocks. `stamps` has a token's room, which this fills; `addressed` (null without a label whose address is taken) marks
-// those labels by token.
-static void check_program_lifetime_entered(const CheckProgram* program, const Parser* parser, const uint8_t* addressed, uint32_t* stamps, uint32_t* first)
+// Every jump into a token of the unit folded (check_program_lifetime_fold) with `backward`: a goto's (not a computed
+// one's) into its label, each label whose address is taken (`addressed`, null for none) from nowhere, a switch into each
+// of its cases, and an asm goto into each of its labels (unreached while the lowering refuses asm goto).
+static void check_program_lifetime_jumps(const CheckProgram* program, const Parser* parser, const uint8_t* addressed, const uint32_t* nearest, uint32_t* sources,
+                                         bool backward)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
-    memset(stamps, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-    uint32_t epoch = 0;
     for (uint32_t token = 0; token < count; token += 1)
     {
         const bool jump = parser->tree.roles[token] == PARSE_ROLE_RETURN && parser->tokens.kinds[token] == PARSE_KIND_GOTO && !check_input_indirect_goto(parser, token);
-        const uint32_t label = jump ? check_sparse_get(input->label_targets, token) : BUSTER_CHECK_NONE;
-        if (label < count)
+        if (jump)
         {
-            epoch += 1;
-            check_program_lifetime_stamp(parser, stamps, epoch, token);
-            check_program_lifetime_bypass(parser, stamps, epoch, label, first);
+            check_program_lifetime_fold(nearest, sources, count, token, check_sparse_get(input->label_targets, token), backward);
         }
         if (addressed != NULL && addressed[token] != 0)
         {
-            check_program_lifetime_bypass(parser, stamps, 0, token, first);
+            check_program_lifetime_fold(nearest, sources, count, BUSTER_CHECK_NONE, token, backward);
         }
     }
     for (uint32_t c = 0; c < program->case_count; c += 1)
     {
-        epoch += 1;
-        check_program_lifetime_stamp(parser, stamps, epoch, program->cases[c].owner);
-        check_program_lifetime_bypass(parser, stamps, epoch, program->cases[c].token, first);
+        check_program_lifetime_fold(nearest, sources, count, program->cases[c].owner, program->cases[c].token, backward);
     }
-    // An asm goto's labels, which its statement may jump to (unreached while the lowering refuses asm goto).
     for (uint32_t a = 0; a < input->asm_count; a += 1)
     {
         const CheckInputAsm* assembly = input->asm_statements + a;
-        if (assembly->label_count != 0 && assembly->statement < count)
+        for (uint32_t l = 0; assembly->statement < count && l < assembly->label_count; l += 1)
         {
-            epoch += 1;
-            check_program_lifetime_stamp(parser, stamps, epoch, assembly->statement);
-            for (uint32_t l = 0; l < assembly->label_count; l += 1)
-            {
-                check_program_lifetime_bypass(parser, stamps, epoch, assembly->labels[l].target, first);
-            }
+            check_program_lifetime_fold(nearest, sources, count, assembly->statement, assembly->labels[l].target, backward);
+        }
+    }
+}
+
+// Leaves out of `first` the blocks a jump enters other than through their opening brace, and the statement expressions'
+// blocks. A jump enters each block with locals around its target that doesn't hold its source too: the blocks between the
+// target and the innermost that holds both, below the target's function's body (a source past the unit's tokens holds
+// none). A block's tokens are a run from its opening brace to its closing one, so a source outside that run enters it.
+// Rather than a walk from each target (quadratic in an else-if chain's depth, #1355), each target's block with locals
+// takes its jumps' sources, and each block passes its own to the block with locals around it, from the inside out: a
+// sweep from the last token back takes each block at its opening brace, after the blocks inside it, and leaves out one
+// that a source before that brace enters (forward jumps, the least source); a sweep from the first token takes each at its
+// closing brace and leaves out one that a source after it enters (backward jumps, the greatest). `nearest` and `sources`
+// have a token's room and one more each; afterwards `nearest` holds each token's innermost block with lifetimes above it,
+// past function bodies, which the writer's walks follow (check_control_lifetimes_left).
+static void check_program_lifetime_entered(const CheckProgram* program, const Parser* parser, const uint8_t* addressed, uint32_t* nearest, uint32_t* sources, uint32_t* first)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    const uint32_t* const parents = parser->tree.parents;
+    const uint8_t* const roles = parser->tree.roles;
+    check_program_lifetime_nearest(parser, first, nearest, true);
+    memset(sources, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+    check_program_lifetime_jumps(program, parser, addressed, nearest, sources, false);
+    for (uint32_t opening = count; opening-- > 0;)
+    {
+        const uint32_t block = roles[opening] == PARSE_ROLE_OPEN_BLOCK ? parents[opening] : count;
+        if (block < count && roles[block] == PARSE_ROLE_CLOSE_BLOCK)
+        {
+            const uint32_t outer = nearest[block] < count ? nearest[block] : count;
+            sources[outer] = sources[block] < sources[outer] ? sources[block] : sources[outer];
+            first[block] = sources[block] < opening ? BUSTER_CHECK_NONE : first[block];
+        }
+    }
+    memset(sources, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+    check_program_lifetime_jumps(program, parser, addressed, nearest, sources, true);
+    for (uint32_t block = 0; block < count; block += 1)
+    {
+        if (roles[block] == PARSE_ROLE_CLOSE_BLOCK)
+        {
+            const uint32_t outer = nearest[block] < count ? nearest[block] : count;
+            sources[outer] = sources[block] > sources[outer] ? sources[block] : sources[outer];
+            first[block] = sources[block] > block ? BUSTER_CHECK_NONE : first[block];
         }
     }
     for (uint32_t r = 0; r < input->region_count; r += 1)
@@ -209,5 +264,5 @@ static void check_program_lifetime_entered(const CheckProgram* program, const Pa
             first[input->regions[r].block] = BUSTER_CHECK_NONE;
         }
     }
+    check_program_lifetime_nearest(parser, first, nearest, false);
 }
-
