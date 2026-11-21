@@ -1854,15 +1854,23 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
     uint32_t first = end;
     if (check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR)
     {
-        // A block statement only. A for clause is a different control, and the final value of a statement expression can escape.
-        const uint32_t block = parser->tree.parents[token];
-        if (parser->tokens.kinds[token] != PARSE_KIND_SEMI || parser->tree.roles[token] != PARSE_ROLE_TERMINATOR || reader->conditions[token] != 0 ||
-            block >= parser->tokens.count || (parser->tree.roles[block] != PARSE_ROLE_CLOSE_BLOCK && parser->tree.roles[block] != PARSE_ROLE_CLOSE_BODY))
+        const uint32_t parent = parser->tree.parents[token];
+        if (parser->tokens.kinds[token] != PARSE_KIND_SEMI || parser->tree.roles[token] != PARSE_ROLE_TERMINATOR ||
+            reader->conditions[token] != 0 || parent >= parser->tokens.count)
+        {
+            return end;
+        }
+        const bool block = parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BLOCK || parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY;
+        // A for initializer can discard a local assignment. Its condition and increment have different consumers.
+        const bool for_init = !block && token >= 5 && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR &&
+                              parser->tree.roles[token - 4] == PARSE_ROLE_OPEN_FOR && parser->tree.parents[token - 4] == parent &&
+                              parser->tokens.kinds[token - 5] == PARSE_KIND_FOR;
+        if (!block && !for_init)
         {
             return end;
         }
         const CheckInput* input = reader->output;
-        const uint32_t region = input->region_count != 0 ? input->expression_regions[block] : 0;
+        const uint32_t region = block && input->region_count != 0 ? input->expression_regions[parent] : 0;
         if (region != 0 && input->regions[region - 1].final_statement == token)
         {
             return end;
@@ -1876,7 +1884,7 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
         {
             first = end - 3;
         }
-        else
+        else if (block)
         {
             first = check_input_window_void_first(reader, tokens, classes, start, end);
         }
