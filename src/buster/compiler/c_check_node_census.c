@@ -3259,9 +3259,10 @@ static void node_census_mark_controls(NodeCensusScratch* s, const CheckProgramBo
     {
         const CheckControl* control = program->controls + c;
         const uint32_t value = mark ? c : BUSTER_CHECK_NONE;
-        if (control->node < count)
+        const uint32_t node = check_control_expression_node(control);
+        if (node < count)
         {
-            s->node_controls[control->node] = value;
+            s->node_controls[node] = value;
         }
         if (control->kind == CHECK_CONTROL_INITIALIZE && initializers != NULL && control->target < initializers->count)
         {
