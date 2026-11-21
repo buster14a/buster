@@ -146,14 +146,14 @@ requirements. [Command index](README.md).
   and the Tier 1 compiler uses one lane:
 
   ```sh
-  ./build/compiler measure-tier1-programs --sizes-only --check-code-size=lua --clang clang --sqlite /path/to/sqlite --lua /path/to/lua/src
+  ./build/compiler measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite /path/to/sqlite --lua /path/to/lua/src
   ```
 
   The regular program measurement reports the same sizes before timing, and
-  its existing 9700X CI step enforces the Lua bound. Hosted correctness uses
-  the same Lua gate, the existing compiler build and verified offline inputs;
-  SQLite and `test-c-testsuite --tier1 --code-size` report their current size
-  status without enforcing the threshold. It also checks the size reader and
+  its existing 9700X CI step enforces both bounds. Hosted correctness uses
+  the same gates, the existing compiler build and verified offline inputs, and
+  enforces c-testsuite's with `test-c-testsuite --tier1 --check-code-size`
+  (#2646). It also checks the size reader and
   command with original synthetic sources. PR and merge-queue hardware policy
   is unchanged. These deterministic size checks make no runtime-performance
   claim and require no 9700X run.
@@ -201,15 +201,18 @@ native output, and the counters with the policy on and off.
 ## Integer truth round trips (#1218)
 
 The C driver's Tier 1 path runs `ir_truth_simplify` after wide-integer splitting
-and before optimizer preparation. It rewrites an integer comparison's result,
-possibly copied or sign/zero-extended, tested equal or unequal to zero into the
-original comparison or its integer complement. Copies and extensions of the
-zero operand are recognized too. The bounded walks stop at truncations,
-nonzero constants and other producers; they never complement floating-point
-predicates. The pass changes only comparison operands and predicates in the
+and before optimizer preparation. An equality test against an integer
+comparison's true encoding reuses its predicate. Inequality uses its complement.
+Against zero the choices are reversed. Bounded walks through copies and integer
+extensions on either operand establish the encoding. For example, sign-extending
+i1 to i8 and then zero-extending to i64 gives 255 for true. Reversing the
+extension kinds gives 1. Truncations, other producers and mismatched constants
+end the match. The pass changes only comparison operands and predicates in the
 lane-owned IR, before use lists and verified-analysis revisions exist. The
 optimizer then removes dead chains and verifies the resulting SSA. Its
-64-byte opcode/type candidate scan has an exact scalar twin and masked tails.
+64-byte opcode/type candidate scan uses masked tails. The `truth-encoding` IR
+pair in `test-ir-optimize` checks both constant positions, mixed extensions
+through i128 and the comparisons that must survive.
 If-conversion (#1382) runs `ir_truth_simplify_values` on its own rounds'
 columns, which also turns a select of truth values tested against zero into an
 i1 select (`c && x` as `select c, x, c`), as
@@ -315,13 +318,13 @@ each removed where it is made:
   the entry or a label's block, and its chain has at most four operations, at
   most sixteen predecessors take copies, and the rewrite runs up to four rounds
   (`a && b && c`). A block no reachable predecessor reaches any more is left an
-  `unreachable` alone. Its candidate scan has a scalar twin. `test-ir-optimize`
+  `unreachable` alone. `test-ir-optimize`
   runs nine IR text fixtures (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's
   found flag, a value read past the test, a switch's kept edge with mapped
   successor phis, a collapse, `a && b && c`, a label's block and a self-loop.
-  Each runs through both paths, which must agree, and is verified as complete
-  SSA. Each is executed against its input before and after the truth rewrite
-  and the optimizer.
+  Each is verified as complete SSA, folded into a frozen digest (#2924), and
+  executed against its input after threading and after the truth rewrite and
+  the optimizer. The candidate scan is checked against its definition.
 - **Stored constants** (`tier1_select.c`, `tier1_select_burs.c`). A store of a
   constant is `mov $imm, mem` at its width, an 8-byte store's where the constant
   fits a sign-extended imm32, rather than the constant's register. The candidates
@@ -362,11 +365,21 @@ In #2745's objects that a 64-byte vector's value initializes whole (a struct's,
 a union's, a compound literal's, and a union's other member read back), no
 store of a zero immediate may be left; a volatile object and a union whose
 designator moves to another member after the vector's keep their eight. In
+#2922's selects of floating `==` and `!=` (one of each, a loop's sum of them
+and a running last match), a `cmov` of the parity flag and no `setcc` must be
+left, and in a conditional scale by `==` (`c = p[i] == t ? c * 3 : c + 1`),
+whose accumulator recurs through the select's values by an operation, the truth
+value's `setcc`s and no parity `cmov`. In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
+stored back into the memory the instruction before loaded it from:
 #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
-into the memory the instruction before loaded it from. #2870's
+into the memory the instruction before loaded it from. In #2843's conditional
+sums, `s += p[i] > 0 ? p[i] : 1` over an `int`, an `unsigned` and an
+`unsigned short` array, whose select reads the load's register for its
+extension, each must have a cmov and no register moved into another. #2870's
 `patterns_sector`, SQLite's `pagerWriteLargeSector` cut down, leaves out a
 store into a slot two blocks after its reload, which the code's certificate
 must prove from the run's entries:
+
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"
@@ -432,7 +445,14 @@ GOT and thread-pointer references resolved by the test, the comparisons'
 addends covering their immediates. Its repeated-access fixture (#2601) has the
 lowering's three symbol addresses and index extensions for three indexed
 accesses of one table in one block: every access reads the first of each, by
-both paths, and the code has one `lea` and runs natively. `tests/driver/tier1_symbols.c` is the
+both paths, and the code has one `lea` and runs natively; with the index's
+sign extensions, which the parameter's signed storage holds, every access
+reads the parameter itself (#2843). `tier1_extension_test.c` loads a byte, a
+word or a doubleword with two uses, a comparison and an extension to I64
+that a select reads, in one block and across a branch, by both paths: the
+select reads the load wherever its storage holds the extension, a word's
+sign extension stays its own, and a load the extension alone reads is its
+`movsx`'s operand; each runs natively against its oracle. `tests/driver/tier1_symbols.c` is the
 standalone native regression, run by `tools/ci/correctness.tests`: every
 width's loads, stores, comparisons with an immediate after the displacement
 field and branches on them, the operations that take a memory operand,

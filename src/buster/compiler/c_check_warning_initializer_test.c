@@ -87,7 +87,7 @@ static void check_test_warning_initializers(CheckTest* test)
             Arena scratch = arena_reserve(UINT64_C(1) << 26);
             const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .quiet = true };
             const ParseOptions parsing = { .extension_metadata = true, .scalar = scalar != 0 };
-            const CheckOptions checking = { .verify = true, .scalar = scalar != 0 };
+            const CheckOptions checking = { .verify = true };
             CheckInput input = { 0 };
             CheckStream stream = { 0 };
             CheckInitializers initializers = { 0 };

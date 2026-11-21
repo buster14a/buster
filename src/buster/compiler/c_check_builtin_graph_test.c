@@ -44,8 +44,8 @@ static void check_test_builtin_graph_values(CheckTest* test, TypeTable* table, A
         const uint32_t query = check_graph_add(&graph, CHECK_OP_SIZEOF, 19, second, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         graph.contexts[query] = BUSTER_CHECK_CONTEXT_ASSERT;
         CheckStream expected;
-        const CheckOptions scalar = { .scalar = true };
-        bool checked = check_graph_run(table, &graph, output, scratch, &scalar, &expected);
+        const CheckOptions node_order = { 0 };
+        bool checked = check_graph_run(table, &graph, output, scratch, &node_order, &expected);
         check_test_expect(test, checked && expected.report_count == 1 && expected.reports[0].node == invalid &&
                                expected.diagnostics[invalid] == CHECK_DIAG_UNSUPPORTED && expected.effect_count == 2,
                           "invalid builtin IDs produce one diagnostic and no extra store descriptor");
@@ -72,6 +72,7 @@ static void check_test_builtin_graph_values(CheckTest* test, TypeTable* table, A
                                    check_stream_value(&expected, query).integer == 1 && (check_stream_flags(&expected, query) & BUSTER_CHECK_SIDE_EFFECT) == 0,
                               "unselected and unevaluated overflow stores stay descriptors without becoming executed effects");
             const uint64_t comparison_mark = output->length;
+            check_test_expect(test, check_test_stream_recorded(&expected, &graph, graph.argument_count, "builtin-graphs"), "builtin-graphs: the reference stream is its recorded digest");
             for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 const CheckOptions vector = { .batch_size = batch, .regions = batch != 0 };
@@ -105,9 +106,9 @@ static void check_test_builtin_graph_typed(CheckTest* test, TypeTable* table, Ar
         const uint32_t overflow = check_test_builtin_node(&graph, CHECK_OP_BUILTIN_OVERFLOW, CBUILTIN_UMULL_OVERFLOW, maximum, two, pointer);
         const uint32_t qualified = check_test_leaf(&graph, 8, (CheckValue){ .type = type_pointer(table, BUSTER_TYPE_ULONG | BUSTER_TYPE_CONST), .object = 133902 });
         const uint32_t warning = check_test_builtin_node(&graph, CHECK_OP_BUILTIN_OVERFLOW, CBUILTIN_UMULL_OVERFLOW, two, two, qualified);
-        const CheckOptions scalar = { .scalar = true };
+        const CheckOptions node_order = { 0 };
         CheckStream expected;
-        const bool checked = check_graph_run(table, &graph, output, scratch, &scalar, &expected);
+        const bool checked = check_graph_run(table, &graph, output, scratch, &node_order, &expected);
         check_test_expect(test, checked && expected.report_count == 0 && expected.effect_count == 3,
                           "typed overflow accepts ordinary prototype conversions and qualified destination warnings");
         if (checked && expected.effect_count == 3)
@@ -125,6 +126,7 @@ static void check_test_builtin_graph_typed(CheckTest* test, TypeTable* table, Ar
                                    expected.effects[2].destination.type == type_pointer(table, BUSTER_TYPE_ULONG),
                               "typed overflow qualifier warnings stay distinct from errors and from its converted store destination");
             const uint64_t mark = output->length;
+            check_test_expect(test, check_test_stream_recorded(&expected, &graph, graph.argument_count, "builtin-graphs"), "builtin-graphs: the reference stream is its recorded digest");
             for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 const CheckOptions options = { .batch_size = batch, .regions = batch != 0 };
@@ -154,11 +156,10 @@ static void check_test_builtin_graph_bounds(CheckTest* test, TypeTable* table, A
         check_test_builtin_node(&graph, CHECK_OP_BUILTIN_OVERFLOW, CBUILTIN_MUL_OVERFLOW, a, b, p);
         _Alignas(16) uint8_t output_bytes[4096];
         _Alignas(16) uint8_t scratch_bytes[4096];
-        for (uint32_t path = 0; path < 2; path += 1)
         {
             Arena output = { .base = output_bytes, .length = 7, .capacity = sizeof(output_bytes) - 16 };
             Arena scratch = { .base = scratch_bytes, .length = 13, .capacity = sizeof(scratch_bytes) - 16 };
-            const CheckOptions options = { .scalar = path == 0 };
+            const CheckOptions options = { 0 };
             CheckStream stream;
             const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &stream);
             check_test_expect(test, checked && stream.effect_count == 1 && stream.effects[0].value.integer == 6,
@@ -214,9 +215,8 @@ static void check_test_builtin_graph_histories(CheckTest* test, TypeTable* table
         {
             graph.source_positions[i] = i == late ? 20 : 19;
         }
-        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const CheckOptions options = { .scalar = path == 0 };
+            const CheckOptions options = { 0 };
             CheckStream stream;
             const bool checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
             check_test_expect(test, checked && stream.report_count == 1 && stream.diagnostics[early] == CHECK_DIAG_INCOMPLETE &&
@@ -257,9 +257,8 @@ static void check_test_builtin_graph_guards(CheckTest* test, TypeTable* table, A
                 check_test_builtin_node(&graph, CHECK_OP_BUILTIN_OVERFLOW, CBUILTIN_MUL_OVERFLOW, a, b, p);
             }
         }
-        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const CheckOptions options = { .scalar = path == 0 };
+            const CheckOptions options = { 0 };
             CheckStream stream;
             const bool checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
             bool effects = checked && stream.report_count == 0 && stream.effect_count == count;

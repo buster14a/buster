@@ -205,16 +205,21 @@ static void oracle_test_sha(OracleTest* test)
 
 // --- Roots ---
 
+static OracleKey oracle_test_root_key(const OracleRoots* roots, const char* text)
+{
+    OracleHash hash;
+    oracle_sha256_begin(&hash);
+    oracle_hash_rooted(&hash, roots, text);
+    return oracle_hash_end(&hash);
+}
+
 // A key of `text` alone, its roots found in it.
 static OracleKey oracle_test_rooted(const char* text)
 {
     OracleRoots roots;
     oracle_roots_begin(&roots);
     oracle_roots_find(&roots, text);
-    OracleHash hash;
-    oracle_sha256_begin(&hash);
-    oracle_hash_rooted(&hash, &roots, text);
-    return oracle_hash_end(&hash);
+    return oracle_test_root_key(&roots, text);
 }
 
 static uint32_t oracle_test_root_count(const char* text)
@@ -223,6 +228,46 @@ static uint32_t oracle_test_root_count(const char* text)
     oracle_roots_begin(&roots);
     oracle_roots_find(&roots, text);
     return roots.count;
+}
+
+static void oracle_test_root_spans(OracleTest* test)
+{
+    // Frozen keys from the byte-at-a-time implementation, including its eight-byte little-endian length.
+    static const char text[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                               "/b/x-AAAAAA.c/b/y-BBBBBB|/b/x-AAAAAA_ /b/x-AAAAAA./b/x-AAAAAA";
+    OracleRoots roots = { .base_length = 2, .base = "/b" };
+    oracle_test_expect(test, oracle_test_hex(oracle_test_root_key(&roots, text), "2984f1a2c4c96dba23ba7a3f494d2564d577a746f1dae90271a3d7817a1ce04d"),
+                       "roots: literal bytes with no registered roots keep their key");
+    oracle_roots_find(&roots, "/b/x-AAAAAA /b/x-AAAAAA.c /b/y-BBBBBB");
+    oracle_test_expect(test, oracle_test_hex(oracle_test_root_key(&roots, text), "79e391fd1e271cf4fc487e3932bef483cc154aeb298d2d0353c5a0b374a7dd74"),
+                       "roots: adjacent matches, a suffix, rejected prefixes and a final match keep their key");
+    roots.count = 0;
+    oracle_roots_find(&roots, "/b/y-BBBBBB /b/x-AAAAAA.c /b/x-AAAAAA");
+    oracle_test_expect(test, oracle_test_hex(oracle_test_root_key(&roots, text), "2c288994f74a64d67a5c7d5500ce18acde31c806d141a3291a5c04d07b1add73"),
+                       "roots: the same spans with different root ordinals keep their distinct key");
+
+    OracleRoots next = { .base_length = 2, .base = "/b" };
+    oracle_roots_find(&next, "/b/y-222222 /b/x-111111.c /b/x-111111");
+    uint8_t bytes[] = "\xff\0/b/x-AAAAAA.c/b/y-BBBBBB\0/b/x-AAAAAAz:/b/x-AAAAAAZ";
+    static const uint8_t expected[] = "\xff\0/b/x-111111.c/b/y-222222\0/b/x-AAAAAAz:/b/x-111111Z";
+    // The final name character and the string terminator are outside the replayed slice.
+    oracle_roots_replace(roots.roots, next.roots, roots.count, bytes, sizeof(bytes) - 2);
+    oracle_test_expect(test, memcmp(bytes, expected, sizeof(bytes)) == 0, "roots: binary replay across NULs through the last byte of the slice");
+
+    // Stored names are length-delimited. Different initials and two whole matches at one position are both possible.
+    const OracleRoot old[] = {
+        { .name = "/AAAAAA", .length = 7 },
+        { .name = "/AAAAAA/BBBBBB", .length = 14 },
+        { .name = "rCCCCCC", .length = 7 },
+    };
+    const OracleRoot new[] = {
+        { .name = "/DDDDDD", .length = 7 },
+        { .name = "/EEEEEE/FFFFFF", .length = 14 },
+        { .name = "rGGGGGG", .length = 7 },
+    };
+    uint8_t mixed[] = "rCCCCCC\0/AAAAAA/BBBBBB";
+    oracle_roots_replace(old, new, BUSTER_ARRAY_LENGTH(old), mixed, sizeof(mixed) - 1);
+    oracle_test_expect(test, memcmp(mixed, "rGGGGGG\0/DDDDDD/BBBBBB", sizeof(mixed)) == 0, "roots: mixed stored initials retain first whole match");
 }
 
 static void oracle_test_roots(OracleTest* test)
@@ -4341,6 +4386,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
     {
         oracle_test_sha(&test);
         oracle_test_roots(&test);
+        oracle_test_root_spans(&test);
         oracle_test_trailing_root(&test);
         oracle_test_trailing_dependencies(&test);
         oracle_test_empty_path(&test);

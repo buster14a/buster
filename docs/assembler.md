@@ -1,8 +1,9 @@
 # Assembly frontend
 
 The frontend in [#222](https://github.com/buster14a/buster/issues/222)
-is a callable GNU-syntax assembler in the existing compiler executable. Its
-default host path uses AVX-512 and has an exact scalar twin. It selects the
+is a callable GNU-syntax assembler in the existing compiler executable. It uses
+AVX-512 throughout; only its layout's relaxation keeps a scalar twin
+(`AsmOptions.vectorized`), until #2924 decides between them. It selects the
 existing 16-byte `X86Instruction` records and emits the existing `Link` tables
 and ELF writer's output. The direct compiler path still emits records itself.
 No production command invokes another assembler or a C parser.
@@ -34,7 +35,8 @@ arena buffer in place. Input no longer has a 64 MiB ceiling (#1368).
 Default input syntax is AT&T; `--intel` selects Intel without register
 prefixes. `.intel_syntax noprefix` and `.att_syntax prefix` switch syntax in
 the source. The `prefix`/`noprefix` arguments control register spelling.
-`--scalar` selects the reference path, and `--timing` prints initialization,
+`--scalar` selects the relaxation's scalar arms and the `.S` preprocessing's
+scalar path, and `--timing` prints initialization,
 read, frontend phase, object/write and total times plus arena usage.
 
 Output feature admission uses the shared [target policy](x86-target.md), separate
@@ -589,13 +591,12 @@ It takes instructions, labels and the syntax directives, and refuses:
   column entry;
 - undefined numeric labels.
 
-Lexing, parsing and matching are `asm_assemble`'s, by `AsmOptions.vectorized`'s
-path. The parser's tables come from `scratch`, which is as it was after. The
-result comes from `output`, which a failure leaves as it was too.
-`test-assembler` checks it by both paths, which must give the same records,
-columns, references and diagnostics.
+Lexing, parsing and matching are `asm_assemble`'s. The parser's tables come
+from `scratch`, which is as it was after. The result comes from `output`, which
+a failure leaves as it was too. `test-assembler` folds its records, columns,
+references and diagnostics into its digest.
 
-## Data-parallel design and scalar twin
+## Data-parallel design
 
 `asm_assemble(source, index, options, arena)` returns `AsmResult`, containing a
 `Link`, a diagnostic byte offset/message and phase timings. Its `entry_atom` is
@@ -666,17 +667,18 @@ payload, with separate scratch for the largest understood initial CIE program.
 Unrelated source bytes do not inflate either buffer. A sparse-CFI stress case
 compares retained arena use with a 16-byte and a 1 MiB comment prefix.
 
-The vector path is selected explicitly, without host dispatch:
+Each step is vectorized:
 
 1. The lexer classifies 64 source bytes, computes word/token boundary masks,
    compresses starts/ends/kinds in registers and transposes them into 16-byte
    token records. Masked tails respect the logical slice. Long words and
-   comments/strings have bounded rare paths; the full scalar lexer is the oracle.
+   comments/strings have bounded rare paths, which the scalar lexer takes.
 2. Eight bounded register spellings are classified together and cached in the
    token's existing reserved field. Two 32-entry tables in ZMM registers resolve
    short names by hash and full-key comparison; vector arithmetic handles
-   numbered GPRs, XMM/YMM/ZMM and opmasks. The complete scalar spelling grammar
-   remains independent. Both paths accept mixed-case register names and leave
+   numbered GPRs, XMM/YMM/ZMM and opmasks. A word the cache doesn't hold goes to
+   the complete scalar spelling grammar, which the tests check the cache against.
+   Both accept mixed-case register names and leave
    noncanonical numbers such as `r08` and `xmm00` as symbols. Intel and AT&T
    register/address/decorator parsing reuse this cache. Common Intel statements
    still form batches of up to 16 instructions; their decimal operands reduce
@@ -688,11 +690,10 @@ The vector path is selected explicitly, without host dispatch:
    explicit alias predicates. Sixteen candidates compare
    operand kind/class/width, fixed registers, feature level, broadcasts and
    signed/unsigned immediate ranges in parallel. Only survivors construct
-   final records and run `x86_validate`; the scalar matcher independently
-   checks roles and values. Precomputed role/spelling columns eliminate repeated
-   string and syntax interpretation. A surviving vector candidate runs complete
-   validation once, then trusted scalar length encoding; the scalar oracle keeps
-   the public validating encoder call. Final resolved records are validated
+   final records and run `x86_validate`. Precomputed role/spelling columns
+   eliminate repeated string and syntax interpretation. A surviving candidate
+   runs complete validation once, then `encode_one` gives its length. Final
+   resolved records are validated
    separately as before. Encoder rows remain the encoding authority. This
    helper is the bounded shared slice of #221, not its IR semantics/effects work.
 4. Instruction-only layouts use the existing branch sizer after proving its
@@ -701,7 +702,7 @@ The vector path is selected explicitly, without host dispatch:
    section and prefix-scans 16 sizes between alignment operations. The exact
    path sums them individually. Scalar column loads/stores avoid Zen 5 gathers.
 5. Encoding batches up to 256 contiguous instructions through the existing
-   AVX-512 encoder, or its scalar twin. The section allocation includes the
+   AVX-512 encoder. The section allocation includes the
    encoder's required capacity and store padding beyond its logical size.
    Data and relocation fields are explicitly written after preceding batches.
 
@@ -760,8 +761,11 @@ There is no implicit expansion that changes flags or registers.
 
 ## Tests and measurements
 
-`test-assembler [--cross-check] [--keep] [--seed N] [--fuzz N]` checks complete
-scalar/vector token streams, diagnostics and byte-identical ELF output, valid
+`test-assembler [--cross-check] [--keep] [--seed N] [--fuzz N]` folds token
+streams, diagnostics, ELF output, matches and inline code into a digest, which
+with the default seed and fuzz count must be the one recorded where the scalar
+paths gave the same outputs (#2924), and that the relaxation's scalar arms give
+the same objects. It checks valid
 batches of 0..65 instructions at all 64 source misalignments, malformed text
 and binary bytes, and both ends of protected pages for lengths 0..1099.
 Fixtures cover immediate/operand boundaries, section changes, expressions,
@@ -788,8 +792,9 @@ four random records each of the encoder tests' generator, printed in Intel
 syntax by their GNU as printer without its pseudo-prefixes and in AT&T syntax by
 the test's own printer (reversed operands, `%`, `$`, `*` for an indirect
 branch, the destination's `{%kN}{z}` last, a suffix where the operands leave
-the width open, and GNU as's AT&T names). Each line must assemble by both paths
-into one record, both syntaxes into the same bytes, and that record must be the
+the width open, and GNU as's AT&T names). Each line must assemble into one
+record (which goes into the digest), both syntaxes into the same bytes, and that
+record must be the
 original instruction: its mnemonic, its operands in Intel order (the
 immediate's value at the operation's width), its decorations and broadcast, and
 the matcher's choice among its encodings (no higher rank, and of the original's
@@ -808,8 +813,9 @@ issue's 47 inline-assembly instructions and #1115's are fixtures of their own,
 compared with GNU as too, beside each diagnostic's message and name and the
 encoding choices above.
 
-The matcher tests also compare independent scalar and indexed-vector selection
-on every admitted catalogue row with 64 operand variations: range limits,
+The matcher tests also fold the selection into the digest on every admitted
+catalogue row with 64 operand variations, and check each match's length and
+bytes against the validated encoder: range limits,
 symbols, invalid registers, implicit accumulators with inconsistent class/width,
 memory widths, broadcasts and decorations. Register classification checks every
 two-byte key, every mixed-case three-letter key, and all case combinations of

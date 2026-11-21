@@ -1085,11 +1085,9 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
     }
     *mapped = (capacity + 4095) & ~UINT64_C(4095);
     uint8_t* machine = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint8_t* scalar = malloc(capacity);
     uint32_t* offsets = malloc(((uint64_t)maximum_records + 1) * sizeof(uint32_t));
     uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(maximum_references) * sizeof(uint32_t));
-    uint32_t* scalar_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(maximum_references) * sizeof(uint32_t));
-    ok = tier1_pipeline_expect(test, capacity < INT32_MAX && machine != MAP_FAILED && scalar != 0 && offsets != 0 && ends != 0 && scalar_ends != 0, "allocate native encoder and symbolic-fixup buffers") && ok;
+    ok = tier1_pipeline_expect(test, capacity < INT32_MAX && machine != MAP_FAILED && offsets != 0 && ends != 0, "allocate native encoder and symbolic-fixup buffers") && ok;
     for (uint32_t f = 0; ok && f < program->function_count; f += 1)
     {
         Tier1SelectCode* code = &emitted[f].code;
@@ -1124,8 +1122,7 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
         if (ok)
         {
             vector_size = x86_encode(code->records, code->count, machine + starts[f], capacities[f], 0, ends);
-            const int64_t scalar_size = x86_encode_scalar(code->records, code->count, scalar + starts[f], capacities[f], 0, scalar_ends);
-            ok = tier1_pipeline_expect(test, vector_size > 0 && (uint64_t)vector_size <= capacities[f] && vector_size == scalar_size && memcmp(machine + starts[f], scalar + starts[f], (uint64_t)vector_size) == 0 && memcmp(ends, scalar_ends, (uint64_t)marked * sizeof(uint32_t)) == 0, "scalar and vector encoders agree on bytes and symbolic field ends");
+            ok = tier1_pipeline_expect(test, vector_size > 0 && (uint64_t)vector_size <= capacities[f], "the function encodes within its capacity");
         }
         for (uint32_t reference = 0; ok && reference < marked; reference += 1)
         {
@@ -1142,7 +1139,6 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
                 {
                     const int32_t relative = (int32_t)displacement;
                     memcpy(machine + starts[f] + end - distance, &relative, sizeof(relative));
-                    memcpy(scalar + starts[f] + end - distance, &relative, sizeof(relative));
                     test->resolved_calls += 1;
                 }
             }
@@ -1152,10 +1148,8 @@ static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program*
     {
         ok = tier1_pipeline_expect(test, mprotect(machine, *mapped, PROT_READ | PROT_EXEC) == 0, "make generated code executable");
     }
-    free(scalar);
     free(offsets);
     free(ends);
-    free(scalar_ends);
     if (!ok && machine != MAP_FAILED)
     {
         munmap(machine, *mapped);

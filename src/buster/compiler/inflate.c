@@ -605,6 +605,7 @@ static InflateError inflate_zlib_stream(const uint8_t* input, uint64_t input_len
     // The two codes: a dynamic block's code length code is built in the literals' place, which it fills after.
     InflateCode literals;
     InflateCode distances;
+    bool have_fixed_codes = false;
     while (error == INFLATE_ERROR_NONE && !last)
     {
         uint32_t header = 0;
@@ -617,11 +618,16 @@ static InflateError inflate_zlib_stream(const uint8_t* input, uint64_t input_len
         }
         else if (error == INFLATE_ERROR_NONE && type == 1)
         {
-            inflate_fixed(&literals, &distances);
+            if (!have_fixed_codes)
+            {
+                inflate_fixed(&literals, &distances);
+                have_fixed_codes = true;
+            }
             error = inflate_symbols(&in, &literals, &distances, output, size, &at);
         }
         else if (error == INFLATE_ERROR_NONE && type == 2)
         {
+            have_fixed_codes = false;
             error = inflate_dynamic(&in, &literals, &distances);
             error = error == INFLATE_ERROR_NONE ? inflate_symbols(&in, &literals, &distances, output, size, &at) : error;
         }

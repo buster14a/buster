@@ -86,6 +86,7 @@ static const char* const bind_benchmark_kind_names[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "the static",
     [RUNTIME_KIND_STATIC_PIE] = "the static PIE's",
     [RUNTIME_KIND_SHARED] = "the shared library's",
+    [RUNTIME_KIND_NO_PIE] = "the position-dependent executable's",
 };
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -11,8 +11,8 @@
 // branch_sizing_validate accepts, as the code generator's are, and so must the branch columns' check
 // (branch_sizing_validate_branches). Sizing has one implementation, the vector one (#2924), so the oracles aren't a
 // second path. Where a function is sized successfully, the result must be the reference's, branch_sizing_test_reference (relaxation over the records, as an assembler does it,
-// with each record's length from x86_encode_scalar), and keep the properties branch_sizing_test_properties checks:
-// x86_validate passes, x86_encode_scalar's offsets and length are the result's, every branch's target worked out from
+// with each record's length from x86_encode), and keep the properties branch_sizing_test_properties checks:
+// x86_validate passes, x86_encode's offsets and length are the result's, every branch's target worked out from
 // the final offsets is its label's record, a branch is long exactly when its displacement is out of rel8's range, and
 // every other record and field is as it was. The checks, in this order:
 //   - Forms: every form number, with and without a segment override or the fixup flag, as a branch's record:
@@ -46,7 +46,7 @@
 //     failure must be BRANCH_SIZING_ERROR_MEMORY and leave the records and offsets as they were.
 //   - With --cross-check, GNU as: random functions, the boundaries' probes and chains printed as GNU as source in a
 //     section each, every branch to a label at its target record, which GNU as relaxes as sizing does (every branch
-//     short at first, growing those out of range until none is). Each section's bytes must be x86_encode_scalar's of
+//     short at first, growing those out of range until none is). Each section's bytes must be x86_encode's of
 //     the sized records, and an object that can't be read or a function left uncompared fails the check. The file and
 //     the object go in a directory under $TMPDIR (or /tmp), removed unless --keep or a failure.
 // The exit status is 1 if the arguments are invalid or a check fails.
@@ -179,11 +179,11 @@ static bool branch_sizing_test_same(const BranchSizingTestOutcome* a, const Bran
 // ---------------------------------------------------------------------------------------------------------------------
 // The reference and the properties
 
-// The reference: branch relaxation over the records, as an assembler does it. Each record's length is
-// x86_encode_scalar's, every branch short; then rounds compute every offset from the lengths and grow every short branch
-// whose displacement is out of range (to the form after its rel8 one, re-encoded for its length), until a round grows
-// none, which is the smallest fixpoint. Writes the records and offsets as sizing would, and returns the length (or -1
-// if x86_encode_scalar rejects the records).
+// The reference: branch relaxation over the records, as an assembler does it. Each record's length is x86_encode's,
+// every branch short; then rounds compute every offset from the lengths and grow every short branch whose displacement
+// is out of range (to the form after its rel8 one, re-encoded for its length), until a round grows none, which is the
+// smallest fixpoint. Writes the records and offsets as sizing would, and returns the length (or -1 if x86_validate
+// rejects the records).
 static int64_t branch_sizing_test_reference(Arena* arena, const BranchSizingTestFunction* function, X86Instruction* records, uint32_t* offsets)
 {
     const uint64_t count = function->count;
@@ -191,7 +191,7 @@ static int64_t branch_sizing_test_reference(Arena* arena, const BranchSizingTest
     uint8_t* bytes = arena_push(arena, BUSTER_X86_ENCODER_CAPACITY(count), 64);
     uint32_t* lengths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count + 1);
     memcpy(records, function->records, count * sizeof(X86Instruction));
-    int64_t result = x86_encode_scalar(records, count, bytes, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0);
+    int64_t result = x86_validate(records, count) == count ? x86_encode(records, count, bytes, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0) : -1;
     for (uint64_t i = 0; result >= 0 && i < count; i += 1)
     {
         lengths[i] = (i + 1 < count ? offsets[i + 1] : (uint32_t)result) - offsets[i];
@@ -217,7 +217,7 @@ static int64_t branch_sizing_test_reference(Arena* arena, const BranchSizingTest
             if (records[record].form == function->records[record].form && (displacement < -128 || displacement > 127))
             {
                 records[record].form += 1;
-                lengths[record] = (uint32_t)x86_encode_scalar(&records[record], 1, bytes, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
+                lengths[record] = (uint32_t)x86_encode(&records[record], 1, bytes, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
                 changed = true;
             }
         }
@@ -235,7 +235,7 @@ static int64_t branch_sizing_test_reference(Arena* arena, const BranchSizingTest
     return result;
 }
 
-// Checks a successful outcome's properties: x86_validate passes for the records; x86_encode_scalar's offsets and length
+// Checks a successful outcome's properties: x86_validate passes for the records; x86_encode's offsets and length
 // are the outcome's; every record but the branches is as it was, and every branch's record but its form, the rel8 one
 // or the one after it, and its displacement; every branch's end plus its displacement is its target's offset; a branch
 // is long exactly when its displacement is out of rel8's range; and the long branches are counted.
@@ -250,9 +250,9 @@ static void branch_sizing_test_properties(BranchSizingTestTally* tally, Arena* a
     if (outcome->result.error == BRANCH_SIZING_OK)
     {
         branch_sizing_test_expect(tally, x86_validate(outcome->records, count) == count, "x86_validate passes", index);
-        const int64_t length = x86_encode_scalar(outcome->records, count, bytes, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0);
-        branch_sizing_test_expect(tally, length >= 0 && (uint64_t)length == outcome->result.length, "the length is x86_encode_scalar's", index);
-        branch_sizing_test_expect(tally, memcmp(offsets, outcome->offsets, count * sizeof(uint32_t)) == 0, "the offsets are x86_encode_scalar's", index);
+        const int64_t length = x86_encode(outcome->records, count, bytes, BUSTER_X86_ENCODER_CAPACITY(count), offsets, 0);
+        branch_sizing_test_expect(tally, length >= 0 && (uint64_t)length == outcome->result.length, "the length is x86_encode's", index);
+        branch_sizing_test_expect(tally, memcmp(offsets, outcome->offsets, count * sizeof(uint32_t)) == 0, "the offsets are x86_encode's", index);
         bool same = true;
         uint64_t k = 0;
         for (uint64_t i = 0; i < count; i += 1)
@@ -1312,7 +1312,7 @@ static bool branch_sizing_test_assembler(Arena* arena, uint64_t seed, const char
             const Elf64_Shdr* header = 0;
             const uint8_t* section = x86_elf_section(bytes, object_length, SHT_PROGBITS, name, &header);
             const int64_t encoded_length =
-                outcome.result.error == BRANCH_SIZING_OK ? x86_encode_scalar(outcome.records, function.count, encoded, BUSTER_X86_ENCODER_CAPACITY(function.count), 0, 0) : -1;
+                outcome.result.error == BRANCH_SIZING_OK ? x86_encode(outcome.records, function.count, encoded, BUSTER_X86_ENCODER_CAPACITY(function.count), 0, 0) : -1;
             const bool same = section != 0 && encoded_length >= 0 && header->sh_size == (uint64_t)encoded_length && memcmp(section, encoded, header->sh_size) == 0;
             branch_sizing_test_expect(&tally, same, "the function's bytes are GNU as's", number);
             if (!same && section != 0 && encoded_length >= 0 && tally.failures <= BUSTER_BRANCH_SIZING_TEST_REPORTED)

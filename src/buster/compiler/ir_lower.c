@@ -126,9 +126,6 @@ struct IrTypedPlan
     uint32_t indirect;
     // Whether a call argument is one the convention ignores (#141, ir_typed_ignored_arguments).
     bool ignored_arguments;
-    // Whether a call passes the function's own hidden pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN): its result goes to
-    // a slot of its own, after the dispatch slot (IrTypedSink.forward_slot), then where parameter 0 points.
-    bool forwarded;
     // The vectors' widths a whole-vector aggregate parameter's entry copy may take (#1282, ir_typed_vector_whole): bit 0
     // 16 bytes, bit 1 32, bit 2 64; none in a function without vectors, or for a target without AVX-512.
     uint8_t vector_copies;
@@ -264,10 +261,6 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
         {
             const uint32_t bytes = input->classes[i] == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_bytes(input, i) : tier0_class_memory(input->classes[i]) ? 16 : 8;
             plan.spill_bytes = bytes > plan.spill_bytes ? bytes : plan.spill_bytes;
-        }
-        for (uint32_t c = 0; input->call_result_objects != 0 && c < input->call_count; c += 1)
-        {
-            plan.forwarded |= input->call_result_objects[c] == BUSTER_TIER0_RESULT_HIDDEN;
         }
         for (uint32_t i = 0; i <= count && ok; i += 1)
         {
@@ -623,8 +616,6 @@ struct IrTypedSink
     IrSizes sizes;
     // The plan's ignored_arguments: whether a call's arguments' locations need reading (ir_typed_aggregate_call).
     bool ignored_arguments;
-    // The slot a call that passes the function's own hidden pointer on returns into (#2684, IrTypedPlan.forwarded).
-    uint32_t forward_slot;
 };
 
 // Keep constructor updates visible in both replay instantiations: count erases column writes and fill erases null
@@ -2531,58 +2522,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
     return ir_typed_emit(sink, IR_CALL, IR_VOID, 0, descriptor, BUSTER_IR_NONE, 0);
 }
 
-// The copy of a forwarded call's result (#2684) from the forwarding slot `source` to where the hidden pointer points
-// (`destination`, a ptr): past BUSTER_TIER0_MAX_COPY_BYTES a call of the front end's memmove (Tier0Function.hidden_copy,
-// its arguments the two pointers and the size, its result the destination, a ptr nothing reads, as the interpreters'
-// memmove binding has it), as the lowering's copy of a call's object calls it; else the pieces of a typed COPY of a
-// local source, 8 bytes at a time (#2693): the callee's stores built the slot's bytes just before it, as they build a
-// call object's.
-static __attribute__((always_inline)) inline void ir_typed_forward_copy(IrTypedSink* sink, const Tier0Function* input, uint32_t destination, uint32_t source)
-{
-    const uint64_t bytes = input->hidden_size;
-    if (bytes > BUSTER_TIER0_MAX_COPY_BYTES && input->hidden_copy != 0)
-    {
-        const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
-        const uint32_t first = (uint32_t)sink->sizes.extra_count;
-        const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
-        const uint32_t size = ir_typed_constant(sink, IR_I64, bytes);
-        if (sink->output != 0)
-        {
-            IrFunction* output = sink->output;
-            output->calls[descriptor] = (IrCall){
-                .argument_first = first,
-                .argument_count = 3,
-                .type_first = type_first,
-                .parameter_count = 3,
-                .result_type = IR_PTR,
-            };
-            output->extra[first] = destination;
-            output->extra[first + 1] = source;
-            output->extra[first + 2] = size;
-            output->call_types[type_first] = IR_PTR;
-            output->call_types[type_first + 1] = IR_PTR;
-            output->call_types[type_first + 2] = IR_I64;
-        }
-        sink->sizes.call_count += 1;
-        sink->sizes.extra_count += 3;
-        sink->sizes.call_type_count += 3;
-        ir_typed_emit(sink, IR_CALL, IR_PTR, input->hidden_copy, descriptor, BUSTER_IR_NONE, 0);
-    }
-    else
-    {
-        ir_typed_copy_pointers(sink, destination, source, bytes, false);
-    }
-}
-
 // Call `call` of the calls table: a direct one of its target's symbol, or with `callee` a pointer value (not
 // BUSTER_IR_NONE) an indirect one through it. An aggregate argument (its address on the stack) is a ptr, converted in
 // place in `arguments` (the stack's, which the call pops), and a call that passes or returns an aggregate has its ABI
 // records: each argument's location and size, the call's totals and result, and its result object's slot address as the
 // destination (c) of an aggregate result, its bytes the object's. A call that passes the function's own hidden pointer
-// on (#2684, BUSTER_TIER0_RESULT_HIDDEN) returns into the function's forwarding slot (IrTypedSink.forward_slot), of the
-// function's result's bytes (Tier0Function.hidden_size), which are then copied where parameter 0 points, as the lowering's
-// copy of a result object would (ir_typed_forward_copy): Tier 1 takes a call's destination as a frame object's address
-// alone (tier1_select_call_abi), so its code keeps the copy that Tier 0's and the interpreter's leave out.
+// on (#2684, BUSTER_TIER0_RESULT_HIDDEN) returns where parameter 0 points, of the function's result's bytes
+// (Tier0Function.hidden_size): its destination is that pointer, as Tier 0's and the interpreter's is, and Tier 1 moves
+// it into rdi with the call's arguments (#2820, tier1_select_call_abi).
 static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, uint32_t* arguments, uint32_t callee)
 {
     const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
@@ -2594,7 +2541,13 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     const uint32_t passed = (uint32_t)sink->sizes.passed_count;
     const uint32_t object = input->call_result_objects != 0 ? input->call_result_objects[call] : 0;
     const bool forwarded = object == BUSTER_TIER0_RESULT_HIDDEN;
-    const uint32_t into = forwarded ? sink->forward_slot : object != 0 ? object - 1 : BUSTER_IR_NONE;
+    // Parameter 0, the hidden pointer, is a U64 local's value: its slot's, loaded before the arguments are converted.
+    uint32_t into = object != 0 && !forwarded ? object - 1 : BUSTER_IR_NONE;
+    if (forwarded)
+    {
+        const uint32_t hidden = ir_typed_emit(sink, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
+        into = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, hidden, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
     // An aggregate's argument is its address; a narrow one is extended to 32 bits by its class (ir_typed_narrow).
     for (uint32_t a = 0; a < count; a += 1)
     {
@@ -2649,17 +2602,8 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     sink->sizes.call_type_count += count;
     sink->sizes.abi_call_count += aggregate;
     sink->sizes.passed_count += aggregate ? count : 0;
-    // The result object's slot address is its local's preheader instruction, as the forwarding slot's is.
-    const uint32_t result = ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee,
-                                          descriptor, into, 0);
-    if (forwarded)
-    {
-        // Parameter 0, the hidden pointer, is a U64 local's value: its slot's.
-        const uint32_t hidden = ir_typed_emit(sink, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
-        const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, hidden, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_forward_copy(sink, input, destination, into);
-    }
-    return result;
+    // The result object's slot address is its local's preheader instruction.
+    return ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee, descriptor, into, 0);
 }
 
 // A br_indirect's labels (#785), into extra: jump table t's for `owner` 1 + t, or with 0 those of no table; the count. A
@@ -3215,11 +3159,6 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         {
             check.error = IR_ERROR_STRUCTURE;
             check.instruction = typed.node;
-        }
-        else if (input->hidden_copy >= symbol_count)
-        {
-            // The memmove of a forwarded result's copy (#2684, ir_typed_forward_copy), a call's symbol as any other's.
-            check.error = IR_ERROR_OPERAND;
         }
     }
     IrSimdTypedOperation* operations = 0;

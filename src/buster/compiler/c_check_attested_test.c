@@ -1107,8 +1107,6 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "last_value", CHECK_ATTESTED_FIELD_OWN },
     { "value_counts", CHECK_ATTESTED_FIELD_OWN },
     { "value_next", CHECK_ATTESTED_FIELD_OWN },
-    { "walk_ends", CHECK_ATTESTED_FIELD_OWN },
-    { "walk_counts", CHECK_ATTESTED_FIELD_OWN },
     { "expression_declined", CHECK_ATTESTED_FIELD_OWN },
     { "scope_marks", CHECK_ATTESTED_FIELD_OWN },
     { "scope_ends", CHECK_ATTESTED_FIELD_OWN },

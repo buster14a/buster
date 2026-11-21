@@ -869,17 +869,17 @@ static bool check_deferred_test_lane_names(void)
 }
 
 // The merge's scans of a column's tokens (check_deferred_entries, check_deferred_entries64 and check_deferred_count_bytes)
-// against their scalar twins, on ranges of every length to 300 from five starts, of columns that end at a PROT_NONE page,
+// against their definitions, on ranges of every length to 300 from five starts, of columns that end at a PROT_NONE page,
 // with entries at random tokens at four densities: of 32-bit values whose none is 0 or BUSTER_CHECK_NONE, of 64-bit ones
-// and of bytes. The same positions in order, each in the range, the same counts, and no read past a column, which
-// faults.
+// and of bytes. The positions are the range's tokens whose value isn't none (zero for the 64-bit and byte columns), in
+// order, and the counts theirs; no scan reads past a column, which faults.
 static bool check_deferred_test_entries(void)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* mapping = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     bool valid = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
-    uint32_t vector_positions[301];
-    uint32_t scalar_positions[301];
+    uint32_t positions[301];
+    uint32_t expected_positions[301];
     uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
     // Entries per 64 tokens, and the ranges' starts.
     const uint32_t densities[] = { 0, 3, 32, 64 };
@@ -893,8 +893,8 @@ static bool check_deferred_test_entries(void)
             {
                 for (uint32_t kind = 0; valid && kind < 4; kind += 1)
                 {
-                    uint32_t vector_count = 0;
-                    uint32_t scalar_count = 0;
+                    uint32_t found = 0;
+                    uint32_t expected = 0;
                     if (kind < 2)
                     {
                         uint32_t* column = (uint32_t*)(mapping + page) - end;
@@ -904,8 +904,12 @@ static bool check_deferred_test_entries(void)
                             state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
                             column[i] = (uint32_t)(state >> 58) < densities[d] ? (uint32_t)(state >> 16) % 1000 + 1 : none;
                         }
-                        vector_count = check_deferred_entries(column, begin, end, none, true, vector_positions);
-                        scalar_count = check_deferred_entries(column, begin, end, none, false, scalar_positions);
+                        for (uint32_t i = begin; i < end; i += 1)
+                        {
+                            expected_positions[expected] = i;
+                            expected += column[i] != none ? 1u : 0u;
+                        }
+                        found = check_deferred_entries(column, begin, end, none, positions);
                     }
                     else if (kind == 2)
                     {
@@ -915,8 +919,12 @@ static bool check_deferred_test_entries(void)
                             state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
                             column[i] = (uint32_t)(state >> 58) < densities[d] ? state | 1 : 0;
                         }
-                        vector_count = check_deferred_entries64(column, begin, end, true, vector_positions);
-                        scalar_count = check_deferred_entries64(column, begin, end, false, scalar_positions);
+                        for (uint32_t i = begin; i < end; i += 1)
+                        {
+                            expected_positions[expected] = i;
+                            expected += column[i] != 0 ? 1u : 0u;
+                        }
+                        found = check_deferred_entries64(column, begin, end, positions);
                     }
                     else
                     {
@@ -926,15 +934,14 @@ static bool check_deferred_test_entries(void)
                             state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
                             column[i] = (uint32_t)(state >> 58) < densities[d] ? (uint8_t)(state >> 24 | 1) : 0;
                         }
-                        vector_count = check_deferred_count_bytes(column, begin, end, true);
-                        scalar_count = check_deferred_count_bytes(column, begin, end, false);
+                        for (uint32_t i = begin; i < end; i += 1)
+                        {
+                            expected += column[i] != 0 ? 1u : 0u;
+                        }
+                        found = check_deferred_count_bytes(column, begin, end);
                     }
-                    const uint32_t listed = kind < 3 ? vector_count : 0;
-                    valid = vector_count == scalar_count && memcmp(vector_positions, scalar_positions, (uint64_t)listed * sizeof(uint32_t)) == 0;
-                    for (uint32_t e = 0; valid && e < listed; e += 1)
-                    {
-                        valid = begin <= vector_positions[e] && vector_positions[e] < end && (e == 0 || vector_positions[e - 1] < vector_positions[e]);
-                    }
+                    const uint32_t listed = kind < 3 ? found : 0;
+                    valid = found == expected && memcmp(positions, expected_positions, (uint64_t)listed * sizeof(uint32_t)) == 0;
                 }
             }
         }
@@ -972,11 +979,7 @@ static bool check_deferred_test_empty_pass(void)
         CheckDeferred deferred = { .cuts = cuts, .body_count = BODIES };
         uint32_t position = UINT32_MAX;
         CheckDeferredPass pass = { .deferred = &deferred, .reader = &reader, .positions = &position };
-        for (uint32_t vector = 0; valid && vector < 2; vector += 1)
-        {
-            pass.vector = vector != 0;
-            valid = check_deferred_pass_items(&pass, (uint32_t)range.begin, (uint32_t)range.end) == 0 && position == UINT32_MAX;
-        }
+        valid = valid && check_deferred_pass_items(&pass, (uint32_t)range.begin, (uint32_t)range.end) == 0 && position == UINT32_MAX;
     }
     if (mapping != MAP_FAILED)
     {
@@ -985,7 +988,7 @@ static bool check_deferred_test_empty_pass(void)
     return valid;
 }
 
-// The merge's explicit scalar twin survives the state's reset, including alternation and poisoned reused storage.
+// The merge's state survives its reset, across readings of poisoned reused storage.
 static bool check_deferred_test_merge_modes(void)
 {
     static InternTable names;
@@ -998,17 +1001,15 @@ static bool check_deferred_test_merge_modes(void)
     bool valid = intern_initialize(&names) && pp_initialize(&pp, &options, &names) &&
                  pp_run_source(&pp, "merge-modes.c", (const uint8_t*)source, sizeof(source) - 1) &&
                  parse_initialize(&parser, &parsing, options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
-    const bool modes[] = { true, false, true };
-    for (uint32_t m = 0; valid && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    for (uint32_t m = 0; valid && m < 3; m += 1)
     {
         CheckTestTypes types = { 0 };
         CheckInput input = { 0 };
         Arena output = arena_reserve(UINT64_C(1) << 27);
         Arena scratch = arena_reserve(UINT64_C(1) << 27);
-        deferred.scalar_merge = modes[m];
         valid = output.base != NULL && scratch.base != NULL && check_test_types_open(&types) &&
                 check_input_deferred(&deferred, &input, &parser, &pp, &types.table, &output, &scratch, 1, CHECK_INPUT_BINDINGS_DEFAULT) &&
-                !deferred.unsupported && deferred.scalar_merge == modes[m];
+                !deferred.unsupported;
         check_test_types_close(&types);
         arena_release(&scratch);
         arena_release(&output);
@@ -1488,25 +1489,6 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on 8 lanes with the first taking every part: %s\n", name,
                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" : "a lane without a part copied the reader");
-            }
-        }
-        // A unit that merges, with its merge finding the columns' entries by the scalar twin: the same result.
-        for (uint32_t l = 0; valid && expected && size == 0 && l < 2; l += 1)
-        {
-            check_corpus_deferred_lanes = l == 0 ? 1 : 8;
-            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
-            check_corpus_deferred_scalar_merge = true;
-            CheckCorpusOutcome outcome;
-            check_corpus_measure(path, &options, false, true, &outcome);
-            check_corpus_deferred_scalar_merge = false;
-            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred;
-            checks += 1;
-            failures += !passed;
-            if (!passed)
-            {
-                fprintf(stderr, "test-checker-deferred: %s on %u lanes with the merge's scalar twin: %s\n", name, check_corpus_deferred_lanes,
-                        !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
-                        !outcome.equal ? "the scalar and vector paths differ" : "not merged");
             }
         }
         // A unit that merges, with its merge failing after the replay into the caller's table: source order's result,

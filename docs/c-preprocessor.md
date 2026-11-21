@@ -20,7 +20,7 @@ unchanged. The [build guide](commands/build.md#production-parsing-and-implementa
 describes the dependency boundary.
 
 The [2026-10-23 acceptance refresh](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-117-2026-10-23/README.md)
-records frozen source and corpus identities, the independent scalar reference,
+records frozen source and corpus identities, the independent scalar reference (deleted with #2924),
 lookup and final-output accounting, and the evidence for #118 through #124.
 The earlier results below retain their original revisions and input scope.
 
@@ -350,14 +350,16 @@ the same input list and preprocessing flags.
 ### What is data-parallel, and what is ordered
 
 Each piece is designed vectorized and branch-free first, with an exact scalar
-path for its rare cases and a scalar twin (`--scalar`, `PPOptions.scalar`) that
-`test-preprocessor` runs on every case and file. The ordered part is C's macro
+path for its rare cases. Each had a scalar twin (`--scalar`, `PPOptions.scalar`)
+that `test-preprocessor` compared on every case and file, until #2924 deleted
+them; `pp_define`'s body scan keeps its twin for now ("Vectorized kernels",
+below). The ordered part is C's macro
 state: definitions, the disabled macros, and the invocations in progress.
 That part steps from one event to the next (a macro name, a directive, the end
 of a buffer), never from one token to the next. On `sqlite3.c` it handles
 176,000 events for 707,153 output tokens. "Data-parallel design, piece by
-piece" below gives each piece's design, its scalar twin and its 9700X
-comparison.
+piece" below gives each piece's design, its rare cases and its 9700X
+comparison against the scalar twin it had.
 
 ### Files
 
@@ -427,11 +429,11 @@ makes its own; with one, the units and lanes that share it read each file once
   - `pp_remove_splices` copies a spelling only when the printer's rule
     (`pp_print_unspliced`, below) says it may hold a splice: a backslash
     before a byte up to `' '` or at its end, or with trigraphs any `?`
-    (`pp_splice_possible_vector`, 64 bytes at a time, or its scalar twin with
-    `--scalar`). The scalar lexer's characters give any other backslash back
-    as written, so a literal with escapes keeps its bytes rather than a copy
-    (#1388). `test-preprocessor` checks both against each other, and the
-    cleaning against the bytes wherever the rule finds no splice, on 40,000
+    (`pp_splice_possible_vector`, 64 bytes at a time). The scalar lexer's
+    characters give any other backslash back as written, so a literal with
+    escapes keeps its bytes rather than a copy (#1388). `test-preprocessor`
+    checks the rule against a count of its splices, and the cleaning against
+    the bytes wherever the rule finds no splice, on 40,000
     random spellings ending at a `PROT_NONE` page.
 
 - **Directive tables** (#118). A vectorized scan (`pp_scan_directives_vector`)
@@ -449,8 +451,7 @@ makes its own; with one, the units and lanes that share it read each file once
   `pp_report_skipped`). The vectorized pairing tells whether a file has any
   (a group whose `#else` isn't last or whose answer is missing), and only then
   are they built: none of the C library corpus's 8,983 files has any, and a
-  skip over a file without notes checks one count. The scalar kernels build
-  them for every file.
+  skip over a file without notes checks one count.
 - **Include guards and `#pragma once`** (#120). A file's guard is the one
   clang's multiple-include optimization finds (`pp_find_guard`). The file is
   null directives (`#` alone), then `#ifndef X`, with extra tokens or not, or a
@@ -584,10 +585,9 @@ makes its own; with one, the units and lanes that share it read each file once
 ### Macros
 
 The macro table is indexed by `IdentId` (`macro_of`). The vectorized main loop
-tests a bitset of the names that have macro records (`is_macro`); the scalar
-reference tests `macro_of` directly. Both include the sentinel records for
-poisoned names and `defined`, which must stop a run even though `#ifdef` does
-not consider them definitions. A definition records
+tests a bitset of the names that have macro records (`is_macro`). It includes
+the sentinel records for poisoned names and `defined`, which must stop a run
+even though `#ifdef` does not consider them definitions. A definition records
 where its replacement list is in the defining file's tokens, and nothing is
 copied (#121). A redefinition that differs (C 6.10.4p2: the same form,
 parameters, replacement list, and whitespace in the same places) is diagnosed,
@@ -613,7 +613,7 @@ expanded.
 
 That first expansion stores the parameter ids as before. Small lists look
 them up in place through a cached id view and count: 0--4 names use a bounded
-scalar lookup, and 5--16 a masked AVX-512 comparison with its scalar twin.
+scalar lookup, and 5--16 a masked AVX-512 comparison.
 Larger lists rebuild the temporary
 index to resolve replacement identifiers and stringizing operands. The
 implicit `__VA_ARGS__` keeps an earlier explicit parameter's ordinal;
@@ -701,11 +701,11 @@ macro's expansion, an argument being expanded, or a directive's line):
   no macro is defined or undefined (`Preprocessor.macro_epoch`) and the names'
   macros stay enabled (`pp_template_names`). A plan with a painted name isn't
   kept, since it depends on the expansions under way. An expansion's size comes
-  from the template and its arguments' lengths (`pp_template_size`). The scalar
-  twins and a run that records the history go item by item as before, and make
-  no templates: that path is the templates' twin. `test-preprocessor` compares
+  from the template and its arguments' lengths (`pp_template_size`). A run
+  that records the history goes item by item as before, and makes no
+  templates: that path is the templates' twin. `test-preprocessor` compares
   each case's deferred run with its recorded one, and each fuzz case's deferred
-  run with its scalar twins' runs.
+  run with its recorded runs.
 - **Templates with `##` and `#`** (#117). A function-like macro of at most 16
   items of tokens, parameters, `##` and `#`, without `__VA_OPT__`, each `##`
   between a token or a parameter and not before the variadic parameter (GNU's
@@ -749,9 +749,7 @@ macro's expansion, an argument being expanded, or a directive's line):
   starts and after each name or invocation it expands, while tokens are left.
   An argument without room to expand in (its tokens, or its origins as the
   history records them) is a fatal error that ends the run before anything is
-  substituted, as the main loop stops before it substitutes. Only vectorized
-  runs take this path, with the history deferred or recorded, so the scalar
-  twins' general path is its twin.
+  substituted, as the main loop stops before it substitutes.
 
   An invocation in such an argument (`pp_nested_invocation`) is taken in a run
   with templates (its history deferred) when its macro has one, simple or with
@@ -808,7 +806,7 @@ macro's expansion, an argument being expanded, or a directive's line):
 
   At 128 remaining tokens, `pp_index_arguments` lazily reserves one 32-bit
   delimiter-link column. It classifies 64 kinds with bounded masked loads
-  (one-at-a-time classification in the scalar twin). Openers and commas form
+  Openers and commas form
   an explicit stack within that column; closing a level reverses its comma
   links once, recording its closer and separators. Each newly appended token
   is indexed once. Writes after a stack rewind invalidate the overwritten
@@ -1279,10 +1277,10 @@ sequences need a separate compact conversion representation.
     per 8 bytes;
   - the slots' nonzero bytes packed by `vpcompressb`, and stored whole.
 
-  `pp_embed_text_scalar`, its twin, formats a byte at a time.
-  `test-preprocessor` checks both against `snprintf` on every count to 300,
-  random and every value in turn, at the end of a readable page before a
-  `PROT_NONE` one. `benchmark-preprocessor --embed N` times them (see below).
+  `pp_embed_text_scalar`, its twin until #2924, formatted a byte at a time.
+  `test-preprocessor` checks the kernel against `snprintf` on every count to
+  300, random and every value in turn, at the end of a readable page before a
+  `PROT_NONE` one. `benchmark-preprocessor --embed N` times it (see below).
   The text is the only part of `#embed` that grows with the file. The rest is
   scalar: reading the parameters, looking up the file and the join's scan of the
   bytes after the line. It costs a line's worth of work once per directive.
@@ -1337,7 +1335,9 @@ as clang's is.
 
 `SOURCE_DATE_EPOCH` must contain only decimal digits and fit a nonnegative
 signed 64-bit value; signs, whitespace, empty values and suffixes are fatal
-errors. Its time is UTC. All three macros require a successful libc calendar
+errors, a unit's only error at `-c` and `-fsyntax-only` too, where the checker
+reports no memory failure after a preprocessor that refused to start (#2996).
+Its time is UTC. All three macros require a successful libc calendar
 conversion and a year from 0000 through 9999, so their fixed spellings fit
 without truncation. Unrepresentable `time_t` values, a failed current-time read,
 failed calendar conversions and out-of-range calendar fields produce fatal
@@ -1780,16 +1780,16 @@ decides after every argument:
     punctuation in C, as it is in assembly, and `-fdollars-in-identifiers` gives
     assembly's identifiers it back (`pp_dollar_punctuation`, which the file
     cache and pasting follow). The scalar lexer lexes `$` as punctuation itself
-    (`C_TOKENIZER_NO_DOLLARS`), which the scalar kernels and pastes use. The
-    vectorized lexer takes it into identifiers and pp-numbers, so
-    `pp_split_dollars` lexes again, with the scalar lexer, each run of tokens
-    that holds one (tokens with nothing but line splices between them): what
-    follows a `$` then joins the tokens after it as in clang (`$L"x"` is `$` and
-    a wide string literal, and `x$1.5` is `x`, `$` and `1.5`). A run that ends in
-    an unknown token other than `$` (an unterminated literal: C23's digit
-    separators can free a quote, as in `$1'2'`) has the whole file lexed so
-    instead, since the literal takes the rest of the line. The literal prefixes
-    the mode doesn't have are split after that.
+    (`C_TOKENIZER_NO_DOLLARS`), which pastes use. The vectorized lexer takes it
+    into identifiers and pp-numbers, so `pp_split_dollars` lexes again, with the
+    scalar lexer, each run of tokens that holds one (tokens with nothing but
+    line splices between them): what follows a `$` then joins the tokens after
+    it as in clang (`$L"x"` is `$` and a wide string literal, and `x$1.5` is
+    `x`, `$` and `1.5`). A run that ends in an unknown token other than `$` (an
+    unterminated literal: C23's digit separators can free a quote, as in
+    `$1'2'`) has the whole file lexed so instead, since the literal takes the
+    rest of the line. The literal prefixes the mode doesn't have are split after
+    that.
   - Digraphs follow the last of `-fdigraphs` and `-fno-digraphs`, or else the
     mode, which has them but in `c89` (#288). So `-std=c89 -fdigraphs` is C94,
     whose `__STDC_VERSION__` is `199409L` (clang's `LangOptions::getCLangStd`
@@ -1847,13 +1847,13 @@ stringizing and the builtins make (`PPRange`), so any token's spelling is the
 bytes from its location to its end. A pp-number stays a pp-number:
 `int x = 1e+;` inside `#if 0` is fine.
 
-At the end, `pp_resolve_keywords_vector` gives identifiers their keyword kinds
+At the end, `pp_resolve_keywords_range` gives identifiers their keyword kinds
 for the language mode, 64 tokens at a time. A keyword stayed an identifier
 until then, because it can be a macro name.
 
 `pp_print` writes `-E`'s text. A token gets a space where whitespace was before
 it, or where it would otherwise lex together with the token before
-(`pp_needs_separation`). Each source line goes on a line of its own, and
+(`pp_separation_table`). Each source line goes on a line of its own, and
 pragmas on lines of their own.
 
 Unless `-P`, line markers give every line its presumed position, as clang's
@@ -1919,10 +1919,9 @@ keeps sorted, maximal eight-byte `(token index, origin)` runs. Ordinary file
 copies write no history; the preceding expansion records its closing boundary.
 Buffer copies build the runs outside their token-copy loop, comparing adjacent
 origins in groups of eight and compressing packed run records directly into the
-table (register compression, then a masked store). There is an exact
-scalar builder. `pp_history_at` finds one token's origin; `pp_history_lookup`
-runs 16 binary searches together, with scalar record loads to avoid Zen 5's
-expensive gathers, and has a scalar twin.
+table (register compression, then a masked store). `pp_history_at` finds one
+token's origin; `pp_history_lookup` runs 16 binary searches together, with
+scalar record loads to avoid Zen 5's expensive gathers.
 
 The append-only tables belong to the translation unit:
 
@@ -1958,7 +1957,7 @@ and expansion notes from outermost to innermost. Plain argument forwarding
 points through to the argument; a macro name expanded after substitution also
 shows the parameter it passed through, matching Clang. Generated spellings get
 an additional scratch-space note. Per-file physical line tables are built only
-when a diagnostic needs them, with scalar/vector builders; `#line` remains
+when a diagnostic needs them, 64 bytes at a time; `#line` remains
 scoped to each inclusion. Source bytes, definition locations and scratch
 spellings remain alive for the whole unit. Source excerpts and carets are not
 implemented.
@@ -2005,8 +2004,8 @@ a path, and the depth limit's error, at a name a macro made too. Each
 fixture's directory is an `-I` directory as well. Only scratch-buffer line
 numbers are normalized, since they depend on each compiler's allocation order.
 Real and presumed locations, columns, note order and text are compared
-exactly. Every existing case and corpus comparison also compares the complete
-scalar/vector history tables.
+exactly. Every built-in case's comparison also checks the complete history
+tables against their recorded digest.
 Separate checks cover guarded input tails, maximal runs across split copies,
 batched lookups, generated-input lifetimes, growth of all eight initial slices,
 and recording-on/off token equality.
@@ -2182,7 +2181,8 @@ the printed diagnostics must be the recording run's, byte for byte; once
 `pp_history_ensure` records the history, it must be the recording run's too,
 with nothing more printed. In the fuzz batch, the vectorized run as a compile
 runs it defers its history, which `pp_fuzz_kernels` records through
-`pp_run_source`'s replay and compares with the scalar twins' history.
+`pp_run_source`'s replay and compares with the history of the batch's
+recording run.
 `test-parser`'s driver checks fail every reservation of `parse` and of `-E`
 in turn on two files with a warning, whose replays print it: one with code,
 and one of directives alone, whose output is empty, where the replay's history
@@ -2259,15 +2259,17 @@ accepts without a diagnostic:
   #412's 5.817-5.865 ms, with 118.16 instructions per input token where
   #412 has 118.21.
 
-### Vectorized kernels and their scalar twins
+### Vectorized kernels
 
-`PPOptions.scalar` selects the scalar twin of each vectorized kernel:
+Every kernel below had a scalar twin that `PPOptions.scalar` selected, and
+`test-preprocessor` required the two to give the same stream, token for token
+(kind, flags, value and location), the same history and directive tables, and
+the same printed bytes:
 
 - refinement;
 - the directive scan, and the conditionals' pairing;
 - the file and buffer runs;
-- macro-name lookup, directly through `macro_of` instead of the cached name
-  bitset;
+- macro-name lookup, through `macro_of` instead of the cached name bitset;
 - the bulk copies (arguments, body runs, object-like bodies), and the
   argument scan;
 - temporary expansion-origin copies and output-history compression;
@@ -2275,21 +2277,25 @@ accepts without a diagnostic:
 - the keyword pass;
 - the printer.
 
-`test-preprocessor` requires the two to produce the same stream, token for
-token (kind, flags, value and location), and the same directive tables.
-Both printers must give the same bytes, with line markers and without.
+#2924 deleted the twins, but refinement's (`refine_tokens_scalar`, which
+`test-refinement` and its benchmark still run) and the keyword pass's (the
+parser's handoff test runs it). Each vectorized kernel is its piece's one
+implementation, and preparation always runs them. `test-preprocessor` checks
+their outputs against digests recorded where the twins gave the same outputs
+(`tests/preprocessor-kernels/digests.tsv`, `pp_kernel_digest`): every
+comparison of a built-in case, the fuzz batch's sum, and the text `-E -P`
+prints. Clang checks the printed text and the expected spellings, and the
+printed text must lex back into the stream.
 
-Scalar preprocessing copies token columns and temporary origins one element
-at a time. Its macro eligibility checks, including those inside shared
-expansion and directive helpers, use `macro_of[id] != 0`. The vector run
-loops still call their bitset lookup directly. Macro updates keep both tables
-current, allowing the definition benchmark to change kernels on one state;
-`-dM` also enumerates the bitset. Neither is part of scalar expansion lookup.
-The scalar-reference regression deliberately makes every known identifier's
-cached bit disagree with its macro record before use, including after an
-undefine/redefine phase. It compares explicit expected tokens and diagnostics
-with the vector run's full stream, history and directive tables. Separate
-history-copy cases cover both overlap directions and empty copies.
+`PPOptions.scalar` (`--scalar`) now selects one scalar twin: `pp_define`'s
+scan of a body for `##`, `#` and `__VA_OPT__` (`pp_scan_body_scalar`). Its
+vector arm loses to it on musl's headers, mostly short constant definitions,
+and wins on `sqlite3.c` (#2924's preprocessor gate). The tests' runs that set
+`PPOptions.scalar` compare the two arms.
+
+Macro updates keep `macro_of` and the cached name bitset current; `-dM`
+enumerates the bitset. Separate history-copy cases cover both overlap
+directions and empty copies.
 
 ## Data-parallel design, piece by piece
 
@@ -2297,7 +2303,7 @@ Measured on the 9700X as in "Results". An A/B ran each pair of builds by
 turns, four rounds of 21 passes each, because two builds of the same code
 differ by up to 1% from code placement alone.
 
-| Piece | Vectorized design | Scalar twin and rare cases | 9700X comparison |
+| Piece | Vectorized design | Scalar twin (deleted by #2924 but where named) and rare cases | 9700X comparison |
 | --- | --- | --- | --- |
 | Refinement (#116) | Pass A per 64 tokens; pass B batches of 64 identifiers (`docs/c-refinement.md`) | `refine_tokens_scalar`; spliced, UCN and long identifiers | 6.2 times the scalar twin on `sqlite3.c` (4.2 before #116's budget work) |
 | Directive scan (#118) | A compare of 64 kinds with `#` and the start-of-line bit | Token at a time | Part of the directive tables' 1.9%; 0.62 cycles per token on the C library corpus, against 3.99 |
@@ -2531,8 +2537,9 @@ retrospective interference audit excludes the extra reversed main phase pair.
 
 Line markers count lines from the last marked token in the same file
 (`pp_print_line`), not through `pp_line_of`'s per-file cursor and column scan.
-The scalar printer, `pp_print_scalar`, writes a token at a time through stdio.
-The two give the same bytes on every test. Before #649's spellings, step 1 was
+The scalar printer, `pp_print_scalar`, wrote a token at a time through stdio
+until #2924 deleted it, where the two gave the same bytes on every test.
+Before #649's spellings, step 1 was
 a loop over the tokens with a branch on each one's kind and a directory lookup
 for each token that isn't an identifier. A variant without the branch (it
 looked up both spellings and picked one) was 1–2% slower in an A/B on the
@@ -2693,8 +2700,8 @@ was left out.
 gap and output tails, arbitrary inactive gap bits, gaps of a byte and of counts
 0 to 8 with the bits, and zero/64/65/large lengths. Full
 printer fixtures move a pragma end through all 64 alignments, continue into
-ordinary batches, cross the 1 MiB output buffer, and compare marker and `-P`
-bytes with the independent scalar printer. Long literals, line splices,
+ordinary batches, cross the 1 MiB output buffer, and check the marker text
+and the `-P` text's recorded digest. Long literals, line splices,
 trigraphs, UCNs, generated numbers and embeds cover the exceptional handoffs.
 
 `pp_print_spellings` is checked against a reference of its own (a linear
@@ -3385,8 +3392,7 @@ The boundary is `pp_dollar_punctuation`'s, so C with
 
 The vector printer clears `$`'s entry in both byte-class tables once per
 call, and applies the same classification to the token carried between
-64-token chunks. Its scalar twin's word-character test takes the same
-boundary. `test-preprocessor` checks exact output bytes, including assembly macro
+64-token chunks. `test-preprocessor` checks exact output bytes, including assembly macro
 arguments, explicit whitespace, and the chunk boundary; comparing token
 spellings alone would miss this change (#272).
 
@@ -3473,8 +3479,7 @@ spellings alone would miss this change (#272).
   followed by `N`, or by a line splice) in the 64-byte chunks that
   refinement's scan marks as holding a backslash (`refine_tokens_chunks`,
   `pp_scan_named_ucn_chunks`), while they are in the caches, so that a chunk
-  without one costs nothing more; the scalar kernels' twin reads every byte
-  (`pp_scan_named_ucns`). Only a file with a candidate reads its bytes again
+  without one costs nothing more. Only a file with a candidate reads its bytes again
   and records the errors with its raw string literals' (`pp_record_named_ucns`).
   A first version, a scan of every byte of its own, added about 1 ms (3%) to
   `main.c`'s preprocessing on the 9700X (the refine phase 5.5 to 6.5 ms).
