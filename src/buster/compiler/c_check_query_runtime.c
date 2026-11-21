@@ -677,10 +677,8 @@ static bool check_query_published(const CheckGraph* graph, const CheckStream* st
 
 // `replay`: replay every node whatever the queries' results (CheckOptions.replay_queries).
 static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph, CheckStream* stream, Arena* scratch,
-                                      uint8_t* marked, uint32_t* indices, CheckValue* arguments, uint32_t maximum_arguments, bool scalar, bool replay)
+                                      uint8_t* marked, uint32_t* indices, CheckValue* arguments, uint32_t maximum_arguments, bool replay)
 {
-    (void)scalar;
-
     bool needed = false;
     for (uint32_t i = 0; i < stream->query_count; i += 1)
     {
@@ -837,7 +835,7 @@ static bool check_graph_query_runtime(TypeTable* types, const CheckGraph* graph,
     stream->overload_address_count = 0;
     for (uint32_t node = 0; node < graph->count; node += 1)
     {
-        check_graph_scalar_node(types, graph, stream, node, arguments, scratch, BUSTER_SCALAR_PATH(scalar));
+        check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
         if (marked[node] != 0)
         {
             stream->warnings[node] |= proofs[indices[node]].source_warnings;

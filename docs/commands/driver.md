@@ -456,3 +456,93 @@ in `test-checker-driver`: own/Clang objects, object-only links, lazy archives,
 shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
 `.S`, positional languages, stdin, compile-only output and failure preservation.
 
+
+## The assembly sink (#1362)
+
+`src/buster/compiler/assembly_output.c` prints a unit of the link
+representation as GNU as's AT&T assembly: the text `-S` is to write (stage 2 of
+[the design](https://github.com/buster14a/buster/issues/1362#issuecomment-6721142506)),
+which describes the object `-c` writes. It prints from the symbolic emission
+view (`AssemblyView`), never from the object: the link's atoms, symbols and
+fixups, which hold every relocation's target and addend, and each `TEXT` atom's
+instruction records as the emission sized and encoded them, with their branch
+columns (`AssemblyCode`). It reads the encoder's form table, the matcher's suffix
+widths and the disassembler's register names, and changes none of them.
+
+The form contract, which its tests hold GNU as to:
+
+- **Instructions.** Each record in AT&T syntax, with the pseudo-prefixes GNU as
+  takes to keep the record's own encoding where its default is another one:
+  `{load}` on the integer instructions' load direction between registers (03,
+  0B ... 3B, 8A and 8B) and `{load}` or `{store}` on the vector moves', `{evex}`
+  where a VEX encoding would do, `{vex}` where an EVEX one would be GNU as's
+  choice, and `{disp32}` on a rel32 jmp or jcc to a label. A size suffix only
+  where the operands leave the width open (another form of the mnemonic reads
+  the same registers but memory or an immediate of another width: `movl $1,
+  8(%rsp)`, `fldt`, `cvtsi2sdl`, `vfpclasspdz`), as objdump prints them. A
+  record GNU as encodes otherwise whatever it is written as
+  (`assembly_escaped`: the encoder tests' `x86_assembler_prefers_another_form`
+  in 64-bit mode, such as `81 /0` with an immediate an imm8 holds) is its bytes,
+  `.byte`, after a comment naming it; never another encoding.
+- **Relocations.** A fixup is its target's name and its addend as the source
+  writes it, never a field's bytes: a PC-relative field's addend is the link's
+  plus the distance from the field to the instruction's end
+  (`x86_fixup_distance`), which the assembler takes off again. A call is
+  `name@PLT`, a GOT slot `name@GOTPCREL(%rip)`, an absolute immediate `$name`
+  (R_X86_64_32, 32S or 64 by the instruction's field), an absolute displacement
+  `name(%base,%index,scale)` (32S), and data `.quad name`, `.long name`, `.long
+  name-.`, `.quad name-.` and `@SIZE`.
+- **Labels and names.** A symbol's label at its offset, under its own name
+  (quoted where GNU as's plain names don't spell it), but an unnamed or
+  temporary symbol's and each branch target's under a local `.Lbuster.` name,
+  which no object keeps; a link with a name of that prefix, or two symbols of
+  one name, is refused.
+- **Data and sections.** Each atom in its section (its descriptor's, or its
+  class's object section, `object_class_sections`), in atom order, after
+  `.p2align` with int3 in code and zeros elsewhere, as the object writer fills
+  its gaps; rows of `.byte`, `.zero` for runs of zeros and for zero-fill
+  sections, and `.string` and `.ascii` in string pools.
+
+What the sink doesn't print yet it refuses with the reason naming it
+(`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, linked-order
+sections, common and unique symbols, code without records (inline assembly's),
+the C runtime's `.init` and `.fini` fragments, and fixups GNU as can't spell
+where they are. A view that contradicts itself (records that don't encode to
+their atom's bytes, a symbol inside an instruction, a branch without a target, a
+fixup off every field) is `ASSEMBLY_INVALID`, an internal error. An arena too
+small for the text or the tables is `ASSEMBLY_FULL`; each failure leaves both
+arenas as they were.
+
+Per record and per symbol the writer is scalar: formatting is variable-length
+text, and only `-S` runs it. Data's rows of sixteen bytes, the bulk of a large
+unit's text, go through an AVX-512 VBMI kernel (`assembly_byte_row`: the
+nibbles' digits by `vpermb`, the line's 80 bytes gathered by two more). Its
+throughput has not been measured on the 9700X.
+
+```sh
+./build/compiler test-assembly-output [--cross-check] [--keep]
+```
+
+`test-assembly-output` (`assembly_output_test.c`, the assembler's unit) builds
+units the way the emission does, from the assembler's matcher's records of Intel
+text (independent of the sink's printer), sized by branch sizing and encoded by
+the encoder: a unit of every piece the contract lists, compared piece by piece
+with its expected spellings, and a small unit compared whole; each refusal and
+invalid view by its reason; output arenas short of the text at lengths across
+it, and scratch arenas short of the tables up to the first that holds them,
+which must print the same text; and the data rows' kernel against libc's
+formatting of random rows. With `--cross-check`, GNU as assembles each printed
+unit, and its object must be `object_build`'s object of the unit by the
+assembler tests' comparator (`object_test_same_as`) after two normalizations of
+the form contract: an assembler resolves a PC-relative reference to a local
+symbol of the field's own section itself (`call helper@PLT` to a static
+function), where the object writer leaves a relocation, so the comparison applies
+those relocations to our object first; and GNU as lists an undefined
+`_GLOBAL_OFFSET_TABLE_` in an object with a GOT reference, which the comparison
+skips. Then the form sweep: every form the matcher admits for a target of every
+feature but the branches (whose targets are labels, the program fixture's), two
+random records each, printed and assembled each in a 16-byte slot of its own,
+must be the encoder's bytes; a form the installed GNU as doesn't know is counted
+as skipped, and any other message of GNU as's fails its form. With binutils
+2.42, all 4,474 forms' 8,948 records match (175 of them escaped), none skipped.
+`--keep` keeps the sources and objects and prints the program's text.

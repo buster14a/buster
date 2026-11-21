@@ -45,7 +45,10 @@ requirements. [Command index](README.md).
   fixture (#2963) keeps a value in its call-save row across an asm body's `lock
   or dword [rsp], 0`, and must be certified; the barrier aimed at that row, its
   writes that leave the row as it was must be certified and those that change
-  it refused. `test-tier1-masks` corrupts machine rows and wide vectors'
+  it refused. Its forwarded-destination fixtures (#2820) run a call whose
+  aggregate result goes through the hidden pointer to a pointer value, which
+  the call's moves put in rdi in place of a frame object's `lea`, natively and
+  certified, and refuse that move into rdi left out. `test-tier1-masks` corrupts machine rows and wide vectors'
   moves: borrowed masks' reloads left out, staging copies onto live registers,
   claimed placements of roles sharing a register while both hold values, of k0
   for a numbered opmask register or of a corrupted split (#1283's early

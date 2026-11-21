@@ -21,7 +21,7 @@ static void check_test_region_proof(CheckTest* test, const char* source, const c
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         parser.options.scalar = path == 0;
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         bool ready = output.base != NULL && scratch.base != NULL && check_test_types_open(&types) &&
                      check_input(&input, &parser, &pp, &types.table, &output, &scratch) &&
                      check_graph_run(&types.table, &input.graph, &output, &scratch, &checking, &stream) && stream.report_count == 0;
