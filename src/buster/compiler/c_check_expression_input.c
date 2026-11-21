@@ -2036,7 +2036,9 @@ static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch*
 static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments)
 {
     uint32_t candidates = 0;
-    __m512i previous = _mm512_setzero_si512();
+    uint32_t previous_names = 0;
+    uint32_t previous_rhs = 0;
+    uint32_t previous_binary = 0;
     for (uint32_t i = 0; i < acting; i += 16)
     {
         const uint32_t run = acting - i < 16 ? acting - i : 16;
@@ -2046,10 +2048,15 @@ static inline __attribute__((always_inline)) uint32_t check_input_window_ends(ui
         __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
         if (assignments)
         {
-            const __m512i before = _mm512_alignr_epi32(codes, previous, 15);
-            const __mmask16 terminated = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
-            found |= _mm512_mask_cmpeq_epi32_mask(terminated, before, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
-            previous = codes;
+            // Match the four postorder actions even when they straddle adjacent groups of 16.
+            const uint32_t names = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_IDENTIFIER << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            const uint32_t rhs = names | _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            const uint32_t binary = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            const uint32_t ended = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+            found |= ended & (((names << 16) | previous_names) >> 13) & (((rhs << 16) | previous_rhs) >> 14) & (((binary << 16) | previous_binary) >> 15);
+            previous_names = names;
+            previous_rhs = rhs;
+            previous_binary = binary;
         }
         for (uint32_t bits = found; bits != 0; bits &= bits - 1)
         {
