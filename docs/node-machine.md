@@ -6989,9 +6989,12 @@ walk and the root's value could disagree:
   (`check_action_logic`), so only a cast passes one. On the four inputs it
   listed no expression: the specification did not have this case, and a
   one-statement program found it (below).
-  With #3204 a cast of unknown value can propagate a logical result of
-  zero or one, but cannot propagate the truth of a raw constant operand.
-  The window therefore no longer needs this cast exclusion.
+  With #3204 a cast of unknown value can propagate an inferred logical
+  result. A symbolic address or the runtime result of a builtin query can
+  no longer decide a branch when the converted value is unknown. Numeric
+  conversions retain their existing treatment, including under
+  `FENV_ACCESS`. The type machine already lists that context, so the
+  window no longer needs the separate cast exclusion.
 
 The controls' fold does not fold a comma whose left operand is no constant,
 and C lists a folded comma: every taken root with an integer constant folds

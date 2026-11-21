@@ -1189,6 +1189,19 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     return known;
 }
 
+// When a cast did not produce a constant, the nonzero address of a symbol cannot
+// decide the converted value. A builtin query also has its own runtime result, which
+// can differ from its source value. Neither operand proves the truth after the cast.
+static bool check_program_branch_cast(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t operand = graph->operand0[node];
+    const bool unproved = check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE && operand < graph->count &&
+                          (check_stream_constant_kind(stream, operand) == CHECK_CONSTANT_ADDRESS || graph->ops[operand] == CHECK_OP_BUILTIN_QUERY);
+    return !unproved;
+}
+
 // A branch condition's truth as clang's CFG builder prunes its edges (#1447, CFGBuilder::tryEvaluateBool, whose
 // EvaluateAsBooleanCondition ignores side effects), which the -Wreturn-type walk and the runtime warnings' reachability
 // (check_common_body_reached) model: a known value's (check_program_runtime_truth), and a logical operator's that one
@@ -1196,7 +1209,7 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
 // or both together, through the condition's own node, conversions, casts and `!`. A conversion keeps the truth of the
 // 0 or 1 such an operator gives, the one value it isn't already known for. A post-order walk on an explicit stack (the
 // call graph's no-recursion rule), BUSTER_CHECK_BRANCH_TRUTH_DEPTH operands deep at most: each frame's node, its depth and
-// how to visit it or combine its operands, and each value 0 (false), 1 (true) or 2 (unknown), the left operand's first.
+// whether its operands are pushed, and each value 0 (false), 1 (true) or 2 (unknown), the left operand's first.
 #define BUSTER_CHECK_BRANCH_TRUTH_DEPTH 64u
 #define BUSTER_CHECK_BRANCH_TRUTH_FRAMES (2u * BUSTER_CHECK_BRANCH_TRUTH_DEPTH + 2u)
 static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
@@ -1204,53 +1217,44 @@ static bool check_program_branch_truth(const CheckProgram* program, uint32_t nod
     const CheckGraph* graph = &program->input->graph;
     uint32_t frames[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
     uint8_t levels[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
-    enum
-    {
-        VISIT,
-        CAST_OPERAND,
-        COMBINE,
-    };
-    uint8_t state[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    uint8_t expanded[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
     uint8_t values[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
     uint32_t top = 1;
     uint32_t count = 0;
     frames[0] = condition;
     levels[0] = 0;
-    state[0] = VISIT;
+    expanded[0] = 0;
     while (top != 0)
     {
         const uint32_t at = frames[top - 1];
         const uint8_t level = levels[top - 1];
         const CheckOp op = at < graph->count ? graph->ops[at] : CHECK_OP_COUNT;
         const bool cast = op == CHECK_OP_CONVERT || op == CHECK_OP_CAST;
-        const bool unary = op == CHECK_OP_CONDITION || op == CHECK_OP_NOT || cast;
+        const bool unary = op == CHECK_OP_CONDITION || cast || op == CHECK_OP_NOT;
         const bool binary = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
-        if (state[top - 1] != COMBINE)
+        if (expanded[top - 1] == 0)
         {
             bool value = false;
             const bool known = at < graph->count && check_program_runtime_truth(program, node, at, &value);
-            if (!known && level < BUSTER_CHECK_BRANCH_TRUTH_DEPTH && (unary || binary))
+            if (!known && level < BUSTER_CHECK_BRANCH_TRUTH_DEPTH && (unary || binary) && (!cast || check_program_branch_cast(program, at)))
             {
                 // Its operands, the left one on top.
-                state[top - 1] = COMBINE;
+                expanded[top - 1] = 1;
                 if (binary)
                 {
                     frames[top] = graph->operand1[at];
                     levels[top] = (uint8_t)(level + 1);
-                    state[top] = VISIT;
+                    expanded[top] = 0;
                     top += 1;
                 }
                 frames[top] = graph->operand0[at];
                 levels[top] = (uint8_t)(level + 1);
-                state[top] = cast ? CAST_OPERAND : VISIT;
+                expanded[top] = 0;
                 top += 1;
             }
             else
             {
-                // The cast's own value had no known truth. A raw operand's truth does not survive
-                // that conversion (e.g. an address truncated to char). A logical result inferred
-                // below the operand is already 0 or 1 and takes the COMBINE path instead.
-                values[count] = known && state[top - 1] != CAST_OPERAND ? (uint8_t)value : 2u;
+                values[count] = known ? (uint8_t)value : 2u;
                 count += 1;
                 top -= 1;
             }

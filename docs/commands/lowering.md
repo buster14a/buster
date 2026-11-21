@@ -2445,7 +2445,9 @@ survey of those passes, what it measured and its gates.
   second operand has a known truth (`node_rows_window_decided`, reason
   `branches`). A cast with no known value can pass an inferred logical
   result of 0 or 1. It cannot inherit the truth of an address before
-  truncation. Such a cast needs no separate refusal (#3204).
+  truncation. The branch walk retains its handling of numeric conversions
+  under `FENV_ACCESS`. The type machine already lists that context. The
+  window needs no separate cast refusal (#3204).
 
   The controls' fold (`check_control_fold_truth`) does not fold a comma
   whose left operand is no constant: C lists a folded comma.
