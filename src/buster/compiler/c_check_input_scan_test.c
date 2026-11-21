@@ -1107,7 +1107,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint8_t classes = check_test_expression_class(&reader, i);
-            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
+            const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 || code == CHECK_INPUT_CODE_DROP ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
             class_differences += visits[i] != classes || reader.first_value[i] != first_value;
             expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
         }
@@ -1131,7 +1132,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint8_t classes = expected_empty[i];
-            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
+            const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 || code == CHECK_INPUT_CODE_DROP ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
             class_differences += visits[i] != classes || reader.first_value[i] != first_value;
             class_differences += check_input_asm_id(&input, i) != 0;
             expected_empty_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;

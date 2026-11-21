@@ -15375,8 +15375,6 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         codes = _mm512_mask_mov_epi8(codes, other & refused, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
         codes = _mm512_mask_mov_epi8(codes, skipped & ~list, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
         codes = _mm512_mask_mov_epi8(codes, skipped & list, _mm512_set1_epi8(CHECK_INPUT_CODE_LIST));
-        // The compacted coded walk skips DROP actions. Their parents still read their empty chains.
-        const __mmask64 dropped = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
         // The folds (check_input_expression_fold): comma operators' separators, initializers' assignments, builtins'
         // tokens and intrinsics' calls, from the columns the reader wrote before the walk.
         const __mmask32 low = (__mmask32)lanes;
@@ -15396,7 +15394,6 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             const uint32_t at = token + part;
             const __mmask16 children = _mm512_mask_cmpneq_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->first_child + at), none);
             const __mmask16 part_acts = (__mmask16)((children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part)) & ~(__mmask16)(passed >> part));
-            _mm512_mask_storeu_epi32(reader->first_value + at, parts & ((__mmask16)~part_acts | (__mmask16)(dropped >> part)), none);
             // The type queries that finish at the tokens, 8 pointers at a time.
             const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, check_input_rare_line(reader, reader->specifier_finishes + at));
             const __m512i jobs_high = _mm512_maskz_loadu_epi64((__mmask8)(parts >> 8), check_input_rare_line(reader, reader->specifier_finishes + at + 8));
@@ -15418,6 +15415,13 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         const uint64_t declined = _mm512_test_epi8_mask(declines, declines) & builtin;
         const uint64_t called = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_CALL)) & intrinsic;
         codes = _mm512_mask_mov_epi8(codes, grouped | declined | called | sparse | specified, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
+        // Only inactive tokens and final DROP actions go unvisited. Give their parents an empty chain
+        // even when the page contains old scratch data. All other actions write their own heads.
+        const uint64_t empty = lanes & (~acts | _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP)));
+        for (uint32_t part = 0; part < length; part += 16)
+        {
+            _mm512_mask_storeu_epi32(reader->first_value + token + part, (__mmask16)(empty >> part), none);
+        }
         // Every class is below 32, so each byte's shift stays in its byte.
         const __m512i classes = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(acts, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_ACTS)),
                                                                 _mm512_maskz_mov_epi8(sparse, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_SPARSE))),
