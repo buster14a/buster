@@ -347,7 +347,10 @@ static bool check_control_switch_prune(CheckControlWriter* writer, uint32_t keyw
 // Keep the unfolder's dispatch unchanged: the same case controls, fallback edge and jump-table admission.
 static void check_control_switch(CheckControlWriter* writer, uint32_t keyword, uint32_t token, uint32_t body, uint32_t condition, uint32_t end, uint32_t repeat)
 {
-    writer->stops[token] = end;
+    if (writer->loop_targets)
+    {
+        writer->stops[token] = end;
+    }
     if (!check_program_switch_type(writer->program->types, check_stream_type(writer->program->stream, condition)))
     {
         check_program_fail(writer->program, CHECK_PROGRAM_INVALID, token);
