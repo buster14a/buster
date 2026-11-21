@@ -97,10 +97,35 @@ place: the guard (G), reached from the preheader instead of the header; the
 vector loop (VB); and its exit (VX), which reduces each accumulator (`reduce`,
 then `lane_extract` of lane 0), combines it with the initial value and enters
 the original header, whose phis take G's start or VX's results. The original
-loop is the remainder and the fallback at every target; the AVX-512 masked
-remainder is not implemented. The vector loop's induction is lane 0's, the
-original's type, stepping by the lanes to `start + vector_n` by the original's
-predicate.
+loop is the remainder and the fallback. The vector loop's induction is lane
+0's, the original's type, stepping by the lanes to `start + vector_n` by the
+original's predicate.
+
+**The masked remainder (#2807).** Where the target makes the lanes' mask from
+a general register (`IrVectorizeTarget.mask`: Tier 1's `kmov` of the mask's
+bytes, `kmovb`, AVX512DQ's, for 8 lanes or fewer), has masked moves of each
+vector load's and store's lanes (`IrVectorizeTarget.masked`: `vmovdqu8` to
+`vmovdqu64`, EVEX's alone) and the loop's vector rows compute no floating
+value, the remainder is one masked vector iteration instead
+(`ir_vectorize_masked_legal`). A loop with no vector load or store, a
+reduction of a uniform, needs the mask too. A floating loop keeps the scalar remainder: its
+inactive lanes would raise flags the scalar loop never raises. The rewrite then
+appends G, P, VB, T, TM and TX:
+
+- G's overlap tests cover the whole trip count, and G enters P where it is
+  nonzero.
+- P enters VB where a whole vector is, else T: a loop shorter than a vector runs
+  in the tail alone.
+- T, after VB, enters TM where the trip count has a remainder of the lanes,
+  else TX.
+- TM makes the mask, `(1 << remainder) - 1` at the mask's type. Under it come
+  masked loads (zeros in the inactive lanes) and masked stores, and each
+  reduction's update is selected by the mask, so that its inactive lanes keep
+  the accumulator.
+- TX joins the accumulators, reduces as VX does and enters the original header
+  at the trip's end, whose exit test fails at once.
+
+`IrVectorizeResult.masked` counts these loops (`test-ir-vectorize` checks it).
 
 **Widths.** The lanes per iteration are the widest whose vectors are all 16 to
 64 bytes and at which every row's operation is the target's.
@@ -487,8 +512,8 @@ which loops improve.
    remainder at all four targets, then integer reductions covered directly by
    `reduce`.
 3. **Coverage:** proven narrow reductions and conversions, followed by the
-   AVX-512 masked remainder. Each addition keeps the same oracle and target
-   matrix.
+   AVX-512 masked remainder (#2807, "The masked remainder" above). Each
+   addition keeps the same oracle and target matrix.
 4. **Default and follow-ups:** enable only with the full 9700X result and
    compile-cost record. Design unrolling on the resulting vector loops
    separately (#2755). Keep #1344, #2676, #2718 and #2719 with their existing owners,

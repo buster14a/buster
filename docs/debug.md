@@ -109,7 +109,17 @@ Tier 0's `.debug_loclists` restrict a home to encoded source-entry ranges after 
 prologue and within the declaration's lexical scope. Shared epilogues and
 whole tail-call entries are omitted: those can restore registers or destroy a
 frame base. Lexical blocks use corresponding `.debug_rnglists` entries, so
-nested shadowed names stop being visible on leaving their scope. The ranges
+nested shadowed names stop being visible on leaving their scope. Only a scope
+that declares an object or a typedef of its own has a block, as clang's do:
+LLVM drops a scope without children and gives the children of one that holds
+only scopes to its parent, and so does `check_debug_value_own_blocks` (#2543),
+which marks those blocks once per function before the writer's two passes. A
+block that declared nothing cost a DIE, a range list and an object's relocation
+and told a debugger nothing: `-c -g sqlite3.c` wrote 24,839 blocks and now
+writes 2,139 (clang -O0's 2,120), its object 20% smaller, with 17,397
+relocations of `.debug_info` for 40,097, and on the 9700X its `debug` stage
+takes 10.5% less and the compile 2.3% fewer cycles ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/lexical-blocks-2543-2026-11-19)). The ranges
 use the existing function address table. They are derived after branch sizing,
 not from estimated instruction lengths.
 
@@ -525,12 +535,15 @@ pass; focused ASan/UBSan, guarded-capacity and deliberate-fault checks pass too.
 
 ## Row emission and measurement
 
-The vector path forms four address and line deltas together. Leading-zero
-counts determine their LEB128 byte counts. `vpmultishiftqb` spreads the
-seven-bit groups, a byte permutation inserts the three standard line opcodes,
-and `vpcompressb` packs the valid bytes directly into the final line program.
-The store is masked to exactly the byte count. The scalar twin writes each
-opcode and LEB128 value independently and handles partial groups.
+The header's line base is −5, its line range is 14 and its opcode base is 13.
+A row with line delta −5 through +8 uses one special opcode when
+`13 + 14 * address_delta + (line_delta + 5)` fits in a byte. The vector
+writer can emit four such rows in one four-byte store. In a mixed group,
+leading-zero counts determine the remaining rows' LEB128 lengths,
+`vpmultishiftqb` spreads their seven-bit groups and `vpcompressb` packs
+the selected bytes of all four rows. The store writes exactly that count.
+The scalar writer uses the same encoding for partial groups, file changes
+and rows marked with `DW_LNS_set_prologue_end`.
 
 `benchmark-debug [--functions N] [--rows N] [--only scalar|vector]
 [--after-scalar MS]` measures validation, size calculation, all five section

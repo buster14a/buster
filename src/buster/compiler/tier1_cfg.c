@@ -29,7 +29,8 @@
 //    every such value is live out at once; each phi to its operand's at the exit of a chosen predecessor; and a value
 //    that a phi takes, to the first register of the phi, or of the next phi along, that has one before it. A range of a
 //    loop's body laid out before its header, with no anchor, takes the hint of its phi's at the header, back to the first
-//    range of another value before it (tier1_cfg_body_hints, #2784). Each value then stays where control from its
+//    range of another value before it (tier1_cfg_body_hints, #2784), and a phi's first range there that the chain leaves
+//    unhinted takes an operand's register at the loop's entry (#2834). Each value then stays where control from its
 //    definition brings it, and an edge moves what its own source block changed. A range live out of its block names the
 //    range whose opening is the value's place at its first successor's entry, where that one comes first (#2774): a
 //    value whose place there is its slot is the first the allocator evicts.
@@ -133,6 +134,10 @@ struct Tier1CfgInput
     const uint32_t* use_offsets;
     const uint32_t* use_positions;
     const uint8_t* use_required;
+    // Optional, per use (#2646): the register of its value's class that the use reads it in, or UINT8_MAX: a call's
+    // register argument's. An interval whose last use names one takes it where no value hint names another and it is
+    // free (Tier1AllocationInput.register_hints).
+    const uint8_t* use_registers;
     // Block b's phis are phi_values[phi_offsets[b] .. phi_offsets[b + 1]); phi k's operand from its block's j-th
     // predecessor is phi_operands[phi_operand_offsets[k] + j], or BUSTER_TIER1_CFG_NONE for an undefined one (the IR's
     // undef): any value is the phi's along that edge, so the edge moves nothing for it and nothing is live for it there.
@@ -1326,6 +1331,15 @@ static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, 
 // them through the scratch register twice on its loop's path for a plain character. A hint back to the value's own
 // earlier range adds nothing to the register it follows anyway; and one to an exit in a slot never makes the range wait
 // in its own (tier1_allocate_scan_uses).
+//
+// Where the chain reaches no such range (#2834), a phi's first range in layout takes an operand's register at the exit
+// of a predecessor of the phi's block, the nearest in layout that ends before the range: the loop's entry, where the
+// value comes in. patterns_gsub's latch, whose join's ranges are their values' first, is laid out between the body and
+// the header, so that the chain led back to the body's own range, which then took the lowest free register and swapped
+// two values with the header's on every iteration. The value's later ranges keep its own last place: a phi of
+// sqlite3VdbeExec's opcode loop that rested in its slot through the handlers took its entry's register in each of them
+// instead, and the dispatch, short of one, stored the step counter on every opcode. A recipe's exit without a register
+// names no place (tier1_allocation_valued_hint).
 static void tier1_cfg_body_hints(const Tier1CfgInput* input, const uint32_t* offsets, Tier1CfgPieces* pieces)
 {
     for (uint32_t v = 0; v < input->value_count; v += 1)
@@ -1346,6 +1360,30 @@ static void tier1_cfg_body_hints(const Tier1CfgInput* input, const uint32_t* off
             if (before && pieces->values[earlier] != v && pieces->classes[earlier] == pieces->classes[i])
             {
                 pieces->hint_intervals[i] = named;
+            }
+        }
+    }
+    for (uint32_t b = 0; b < input->block_count; b += 1)
+    {
+        const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
+        for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
+        {
+            const uint32_t v = input->phi_values[k];
+            const uint32_t first = offsets[v];
+            const bool open = first != offsets[v + 1] && pieces->starts[first] < input->definitions[v] && pieces->hint_intervals[first] == BUSTER_TIER1_CFG_NONE && pieces->hints[first] == v;
+            uint32_t nearest = BUSTER_TIER1_CFG_NONE;
+            for (uint32_t j = 0; open && j < degree; j += 1)
+            {
+                const uint32_t predecessor = input->predecessors[input->predecessor_offsets[b] + j];
+                const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
+                const uint32_t exit = input->block_starts[predecessor + 1] - 1;
+                const uint32_t taken = operand != BUSTER_TIER1_CFG_NONE && operand != v ? tier1_cfg_piece_at(pieces, offsets[operand], offsets[operand + 1], exit) : BUSTER_TIER1_CFG_NONE;
+                const bool fits = taken != BUSTER_TIER1_CFG_NONE && pieces->ends[taken] <= pieces->starts[first] && pieces->classes[taken] == pieces->classes[first];
+                nearest = fits && (nearest == BUSTER_TIER1_CFG_NONE || pieces->ends[taken] > pieces->ends[nearest]) ? taken : nearest;
+            }
+            if (nearest != BUSTER_TIER1_CFG_NONE)
+            {
+                pieces->hint_intervals[first] = nearest | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
             }
         }
     }
@@ -2512,6 +2550,15 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     }
                 }
                 use_offsets[count] = input->use_count;
+                // Each interval whose last use reads its value in a named register, at the interval's end (#2646).
+                uint8_t* register_hints = input->use_registers != 0 ? arena_push(output, (uint64_t)count + 1, 1) : 0;
+                ready = input->use_registers == 0 || register_hints != 0;
+                for (uint32_t i = 0; register_hints != 0 && i < count; i += 1)
+                {
+                    const uint32_t end = use_offsets[i + 1];
+                    const bool used = end > use_offsets[i] && input->use_positions[end - 1] + 1 == pieces.ends[i];
+                    register_hints[i] = used ? input->use_registers[end - 1] : UINT8_MAX;
+                }
                 tier1_cfg_phi_exits(input, chosen, ups, firsts, dispatchers, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
@@ -2528,6 +2575,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     .alternate_intervals = pieces.alternates,
                     .continuation_intervals = pieces.continuations,
                     .hint_intervals = pieces.hint_intervals,
+                    .register_hints = register_hints,
                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
                     .use_offsets = use_offsets,
                     .use_positions = input->use_positions,
@@ -3191,7 +3239,8 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
     differs = same || differs != 0 ? differs : 2;
     same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
            tier1_cfg_same_column(a->alternate_intervals, b->alternate_intervals, count * 4) && tier1_cfg_same_column(a->continuation_intervals, b->continuation_intervals, count * 4) &&
-           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count);
+           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count) &&
+           tier1_cfg_same_column(a->register_hints, b->register_hints, count);
     differs = same || differs != 0 ? differs : 3;
     same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;
     differs = same || differs != 0 ? differs : 4;

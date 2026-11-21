@@ -247,8 +247,82 @@ static void asm_test_group_section_attributes(AsmTest* test)
     }
 }
 
+static bool asm_test_partition_matches(const AsmParser* parser, const uint32_t* expected, uint32_t count)
+{
+    bool match = parser->result.error == 0 && parser->fragment_count == count && memcmp(parser->fragment_order, expected, count * sizeof(uint32_t)) == 0;
+    uint32_t position = 0;
+    for (uint32_t s = 0; match && s < parser->section_count; s += 1)
+    {
+        match = parser->fragment_begin[s] == position;
+        while (position < count && parser->fragments[expected[position]].section == s)
+        {
+            position += 1;
+        }
+    }
+    return match && position == count && parser->fragment_begin[parser->section_count] == count;
+}
+
+static void asm_test_partition_fragments(AsmTest* test)
+{
+    enum { section_count = 257 };
+    AsmFragment fragments[] = {
+        { .section = section_count - 1 },
+        { .section = BUSTER_LINK_CLASS_EH_FRAME },
+        { .section = 1 },
+        { .section = section_count - 1 },
+        { .section = 1 },
+        { .section = BUSTER_LINK_CLASS_EH_FRAME },
+        {0},
+    };
+    static const uint32_t ordered[] = {2, 4, 1, 5, 0, 3};
+    static const uint32_t appended[] = {2, 4, 1, 5, 6, 0, 3};
+    uint32_t storage[BUSTER_ARRAY_LENGTH(fragments) + section_count + 1];
+    Arena arena = { .base = (uint8_t*)storage, .capacity = sizeof(storage) };
+    AsmParser parser = {
+        .arena = &arena,
+        .fragments = fragments,
+        .capacity = BUSTER_ARRAY_LENGTH(fragments),
+        .section = BUSTER_LINK_CLASS_EH_FRAME,
+        .section_count = section_count,
+    };
+
+    memset(storage, 0xa5, sizeof(storage));
+    asm_partition_fragments(&parser);
+    asm_test_check(test, asm_test_partition_matches(&parser, ordered, 0), "empty fragment ranges and sentinel", parser.result.error);
+
+    arena.length = 0;
+    parser.fragment_count = BUSTER_ARRAY_LENGTH(ordered);
+    // Only the two permanent arrays fit, including the spare order entry. The scratch arena has no free bytes.
+    Scratch scratch = scratch_begin(&arena);
+    const uint64_t capacity = scratch.arena->capacity;
+    scratch.arena->capacity = scratch.length;
+    asm_partition_fragments(&parser);
+    scratch.arena->capacity = capacity;
+    scratch_end(scratch);
+    asm_test_check(test, asm_test_partition_matches(&parser, ordered, BUSTER_ARRAY_LENGTH(ordered)), "interleaved source IDs and sparse section boundaries", parser.result.error);
+    if (parser.result.error == 0)
+    {
+        const uint32_t id = asm_fragment(&parser, ASM_BYTES, 0);
+        asm_partition_append(&parser, id);
+        asm_test_check(test, asm_test_partition_matches(&parser, appended, BUSTER_ARRAY_LENGTH(appended)), "post-layout CFI insertion shifts later IDs and boundaries", parser.result.error);
+    }
+
+    const uint64_t short_capacity[] = {sizeof(ordered), sizeof(storage) - 1};
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(short_capacity); i += 1)
+    {
+        arena.length = 0;
+        arena.capacity = short_capacity[i];
+        parser.fragment_count = BUSTER_ARRAY_LENGTH(ordered);
+        parser.result = (AsmResult){0};
+        asm_partition_fragments(&parser);
+        asm_test_check(test, parser.result.error != 0 && strcmp(parser.result.error, "arena exhausted partitioning section fragments") == 0 &&
+                       parser.result.location == 0, "fragment partition order or boundary allocation fails", parser.result.error);
+    }
+}
+
 static void asm_test_groups(AsmTest* test, const char* directory, bool cross_check)
 {
+    asm_test_partition_fragments(test);
     asm_test_group_section_attributes(test);
     asm_test_group_section_names(test, directory, cross_check);
     // One grouped section with a unique name is unambiguous, including a reference before its declaration.
