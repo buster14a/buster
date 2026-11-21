@@ -2764,3 +2764,25 @@ the summaries and the resulting graph size per unit. The
 with the ordinary compile, then change a retained row to exercise the splice.
 The checker driver also checks warning policy, diagnostic order and object bytes
 for a unit containing both taken and refused expressions.
+
+
+#### Integer arithmetic inside an ordinary expression
+
+`./build/compiler --node-window-constants -g -c file.c -o file.o` enables
+a separate window for arithmetic on integer literals of type `int`. For
+example, in `return x + (0x20 | 7);` the reader can replace the inner
+bitwise OR and its literals with one checked value of 39 at the `|` token.
+The ordinary checker handles the addition and return, and ordinary lowering
+supplies their native entries and debug positions.
+
+The complete operand must fit in one coded postorder chunk. The shared
+integer rules preserve its type, value and integer-constant-expression
+status. Faulting arithmetic and operands whose written shape the shift,
+multiplicative, conditional or static-assert diagnostics inspect take the
+ordinary path. `--time-stages` reports the number of accepted roots, the
+nodes removed directly inside their spans and the final graph size. A
+builtin that receives a checked immediate can also avoid copying its value.
+
+The measured single-lane workload with a consistent wall-time gain was
+Buster compiling its own source. SQLite timing was inconclusive, and Lua
+and musl took longer with this option. [Four-corpus object-compile measurements](https://github.com/buster14a/buster-performance/tree/13fa6988bb35461f169986df1b2eecf69cf563ac/docs/measurements/window-compile-2850-2026-11-21/a60859270)
