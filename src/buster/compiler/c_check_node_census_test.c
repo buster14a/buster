@@ -6898,6 +6898,22 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         }
     }
     check_test_expect(test, unclassified == 0, "node-census classifies every warning: a test stands for it, or it is no expression's");
+    // A hardware-independent check of the two denominators. Two runs over two different-sized chunks
+    // contribute both deltas but count each chunk and its records once.
+    NodeWindowCounter counter = { .descriptor = -1 };
+    const uint64_t first[] = { 80, 100, 107 };
+    const uint64_t second[] = { 160, 170, 173 };
+    for (uint32_t size = 3; size <= 9; size += 6)
+    {
+        node_window_collect(&counter, 0, first, 2, size);
+        node_window_collect(&counter, 1, second, 2, size);
+    }
+    check_test_expect(test, !counter.failed && counter.chunks == 2 && counter.records == 12 && counter.sums[0][0] == 40 && counter.sums[0][1] == 14 &&
+                      counter.sums[1][0] == 20 && counter.sums[1][1] == 6, "window counter sums each sweep over both sizes and each run");
+    node_window_collect(&counter, 0, (const uint64_t[]){ 20, 19 }, 1, 3);
+    check_test_expect(test, counter.failed && node_window_select(&counter, "rows", "cycles") && !node_window_select(&counter, "rows", "missing") &&
+                      !node_window_select(&counter, "missing", "cycles"), "window counter rejects a reversed interval and unknown event or family");
+
     // The command refuses a run without a file.
     char* missing[] = { "--list", "1" };
     fflush(stdout);
