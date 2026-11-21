@@ -968,7 +968,6 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "function_name_ids", CHECK_ATTESTED_FIELD_AMBIENT },
     { "file_function_name_ids", CHECK_ATTESTED_FIELD_AMBIENT },
     { "function_name_body", CHECK_ATTESTED_FIELD_TRANSIENT },
-    { "return_types", CHECK_ATTESTED_FIELD_OWN },
     { "declaration_kinds", CHECK_ATTESTED_FIELD_OWN },
     { "declaration_bits", CHECK_ATTESTED_FIELD_OWN },
     { "definition_origins", CHECK_ATTESTED_FIELD_OWN },

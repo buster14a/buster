@@ -960,6 +960,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             expected.asm_groups += roles[i] == PARSE_ROLE_OPEN_ASM;
             expected.size_queries += kinds[i] == PARSE_KIND_SIZEOF;
             expected.vector_members += kinds[i] == PARSE_KIND_PERIOD && roles[i] == PARSE_ROLE_MEMBER_OPERATOR;
+            expected.pretty_function_name |= names[i] == C_NAME_PRETTY_FUNCTION;
             expected.operands += roles[i] == PARSE_ROLE_OPERAND;
             expected.calls += roles[i] == PARSE_ROLE_CLOSE_CALL || roles[i] == PARSE_ROLE_CLOSE_FUNCTION;
             // The place's and the type queries' builtins are counted in the first group, the constants', by their span of
@@ -984,7 +985,11 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         snprintf(description, sizeof(description), "token counts of %u tokens: subscripts %u (%u), operands %u (%u), group 0 %u (%u), group 3 %u (%u)",
                  count, counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
                  expected.groups[0], counts.groups[3], expected.groups[3]);
-        check_test_expect(test, memcmp(&counts, &expected, sizeof(counts)) == 0, description);
+        const bool same = counts.subscripts == expected.subscripts && counts.asms == expected.asms && counts.asm_groups == expected.asm_groups &&
+                          counts.size_queries == expected.size_queries && counts.vector_members == expected.vector_members &&
+                          counts.pretty_function_name == expected.pretty_function_name && counts.operands == expected.operands &&
+                          counts.calls == expected.calls && memcmp(counts.groups, expected.groups, sizeof(counts.groups)) == 0;
+        check_test_expect(test, same, description);
         // Each token's syntax bits, as the test reads its kind, its successor's and its name, and its mark.
         for (uint32_t i = 0; i < count; i += 1)
         {

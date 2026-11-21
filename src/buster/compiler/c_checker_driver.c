@@ -14798,6 +14798,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler's build can't be identified\n");
     }
+    options.published_unused_only = (emit_object || link) && !dump && !dump_static && attested_memo == NULL && attested != CHECK_ATTESTED_MODE_VERIFY;
     const CheckDriverCommand command = {
         .options = options,
         .scalar = scalar,
