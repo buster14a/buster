@@ -59,18 +59,17 @@ static void check_test_driver_failed_comparisons(CheckTest* test, const char* cl
         const int oracle = check_test_driver_spawn(arguments, &expected);
         check_test_expect(test, oracle == 1 && check_test_driver_failed_comparison_output(expected),
                           "independent Clang oracle rejects failed comparison assertions without assignment notes");
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        for (uint32_t lanes = 0; lanes < 2; lanes += 1)
         {
             arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");
             arguments[count] = "--lanes";
-            arguments[count + 1] = scalar != 0 ? "3" : "1";
-            arguments[count + 2] = scalar != 0 ? "--scalar" : NULL;
-            arguments[count + 3] = NULL;
+            arguments[count + 1] = lanes != 0 ? "3" : "1";
+            arguments[count + 2] = NULL;
             char* actual = NULL;
             const int status = check_test_driver_spawn(arguments, &actual);
             char description[160];
-            snprintf(description, sizeof(description), "failed comparison assertions policy=%u %s: errors retained without assignment notes",
-                     policy, scalar != 0 ? "scalar" : "vector");
+            snprintf(description, sizeof(description), "failed comparison assertions policy=%u, %s lanes: errors retained without assignment notes",
+                     policy, lanes != 0 ? "3" : "1");
             check_test_expect(test, oracle == 1 && status == 1 && check_test_driver_failed_comparison_output(actual), description);
             free(actual);
         }
