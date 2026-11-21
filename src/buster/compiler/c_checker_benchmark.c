@@ -200,7 +200,7 @@ static bool check_benchmark_generate(CheckGraph* graph, bool chain)
 int run_checker_benchmark(int argc, char** argv)
 {
     uint32_t nodes = 65535;
-    uint32_t after_scalar = 0;
+    uint32_t after_node = 0;
     uint32_t only = 2;
     bool chain = false;
     bool valid = true;
@@ -209,7 +209,7 @@ int run_checker_benchmark(int argc, char** argv)
         if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             i += 1;
-            only = strcmp(argv[i], "scalar") == 0 ? 0 : strcmp(argv[i], "vector") == 0 ? 1 : 2;
+            only = strcmp(argv[i], "node") == 0 ? 0 : strcmp(argv[i], "regions") == 0 ? 1 : 2;
             valid = only != 2;
         }
         else if (strcmp(argv[i], "--shape") == 0 && i + 1 < argc)
@@ -218,7 +218,7 @@ int run_checker_benchmark(int argc, char** argv)
             chain = strcmp(argv[i], "chain") == 0;
             valid = chain || strcmp(argv[i], "wide") == 0;
         }
-        else if ((strcmp(argv[i], "--nodes") == 0 || strcmp(argv[i], "--after-scalar") == 0) && i + 1 < argc)
+        else if ((strcmp(argv[i], "--nodes") == 0 || strcmp(argv[i], "--after-node") == 0) && i + 1 < argc)
         {
             const bool size = strcmp(argv[i], "--nodes") == 0;
             char* end = 0;
@@ -232,7 +232,7 @@ int run_checker_benchmark(int argc, char** argv)
             }
             else
             {
-                after_scalar = (uint32_t)value;
+                after_node = (uint32_t)value;
             }
         }
         else
@@ -254,15 +254,14 @@ int run_checker_benchmark(int argc, char** argv)
     TypeTable types = { 0 };
     CheckGraph graph = { 0 };
     CheckStream expected = { 0 };
-    const CheckOptions scalar = {
-        .scalar = true
-    };
-    // The vector path's batches, the integer folds 8 lanes at a time, which these graphs' independent operators fill.
-    const CheckOptions vector = {
+    // Node order, the checker's default (#2924 removed its scalar schedule), and its regions' batches, the integer folds 8
+    // lanes at a time, which these graphs' independent operators fill.
+    const CheckOptions node = { 0 };
+    const CheckOptions regions = {
         .regions = true
     };
     valid = valid && type_initialize(&types, &type_storage, &type_index, capacity) && check_graph_initialize(&graph, &storage, nodes, 0) &&
-            check_benchmark_generate(&graph, chain) && check_graph_run(&types, &graph, &output, &scratch, &scalar, &expected);
+            check_benchmark_generate(&graph, chain) && check_graph_run(&types, &graph, &output, &scratch, &node, &expected);
     const uint64_t expected_end = output.length;
     CheckBenchmarkSample samples[2][BUSTER_CHECK_BENCHMARK_PASSES] = { 0 };
     CheckStatistics statistics[2] = { 0 };
@@ -281,13 +280,13 @@ int run_checker_benchmark(int argc, char** argv)
             const uint32_t path = (pass + step) & 1;
             if (only == 2 || only == path)
             {
-                if (path == 1 && after_scalar != 0)
+                if (path == 1 && after_node != 0)
                 {
-                    const uint64_t until = check_benchmark_time() + (uint64_t)after_scalar * 1000000;
+                    const uint64_t until = check_benchmark_time() + (uint64_t)after_node * 1000000;
                     while (valid && check_benchmark_time() < until)
                     {
                         CheckStream conditioning;
-                        valid = check_graph_run(&types, &graph, &output, &scratch, &scalar, &conditioning);
+                        valid = check_graph_run(&types, &graph, &output, &scratch, &node, &conditioning);
                         __asm__ volatile("" : : "r"(conditioning.value_types) : "memory");
                         arena_pop_to(&output, expected_end);
                     }
@@ -301,7 +300,7 @@ int run_checker_benchmark(int argc, char** argv)
                 }
                 CheckStream actual;
                 const uint64_t begin = check_benchmark_time();
-                const bool checked = check_graph_run(&types, &graph, &output, &scratch, path == 0 ? &scalar : &vector, &actual);
+                const bool checked = check_graph_run(&types, &graph, &output, &scratch, path == 0 ? &node : &regions, &actual);
                 const uint64_t elapsed = check_benchmark_time() - begin;
                 uint64_t counts[2][3] = { 0 };
                 for (uint32_t counter = 0; counter < 2; counter += 1)
@@ -332,14 +331,14 @@ int run_checker_benchmark(int argc, char** argv)
     }
     if (valid)
     {
-        printf("checker synthetic %s graph: %u nodes, %u %s passes, after-scalar %u ms; outputs identical\n",
-               chain ? "chain" : "wide", nodes, BUSTER_CHECK_BENCHMARK_PASSES, only == 2 ? "interleaved" : "isolated", after_scalar);
+        printf("checker synthetic %s graph: %u nodes, %u %s passes, after-node %u ms; outputs identical\n",
+               chain ? "chain" : "wide", nodes, BUSTER_CHECK_BENCHMARK_PASSES, only == 2 ? "interleaved" : "isolated", after_node);
         for (uint32_t path = 0; path < 2; path += 1)
         {
             if (only == 2 || only == path)
             {
                 const uint64_t ns = check_benchmark_median(samples[path], 0);
-                printf("  %s: %.3f ns/node, %.3f million nodes/s", path == 0 ? "scalar" : "vector", (double)ns / nodes, (double)nodes * 1000.0 / ns);
+                printf("  %s: %.3f ns/node, %.3f million nodes/s", path == 0 ? "node order" : "regions", (double)ns / nodes, (double)nodes * 1000.0 / ns);
                 if (available[0])
                 {
                     printf(", %.3f cycles/node", (double)check_benchmark_median(samples[path], 1) / nodes);
@@ -365,7 +364,7 @@ int run_checker_benchmark(int argc, char** argv)
     else
     {
         fprintf(stderr, "benchmark-checker: invalid arguments, allocation failure or unequal outputs\n"
-                        "usage: benchmark-checker [--nodes 1..1000000] [--shape wide|chain] [--only scalar|vector] [--after-scalar 0..1000]\n");
+                        "usage: benchmark-checker [--nodes 1..1000000] [--shape wide|chain] [--only node|regions] [--after-node 0..1000]\n");
     }
     for (uint32_t counter = 0; counter < 2; counter += 1)
     {

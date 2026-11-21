@@ -514,28 +514,35 @@ static void ir_reduce_test_cache(IrReduceTest* test)
     work.context = &mode;
     work.started = ir_reduce_milliseconds();
     IrFunction source = { 0 };
-    bool valid = ir_reduce_test_parse(ir_reduce_test_call, &input, &work.scratch, &source);
-    uint64_t length = 0;
-    uint64_t hash = 0;
-    uint8_t* key = valid ? ir_reduce_key(&source, &work.scratch, &length, &hash) : NULL;
-    uint8_t* forged = key != NULL ? arena_push(&work.cache, length, 1) : NULL;
-    valid = forged != NULL && length != 0;
-    IrReduceCache collision = { 0 };
+    IrReduceObservation observed = { 0 };
+    bool valid = ir_reduce_test_parse(ir_reduce_test_call, &input, &work.scratch, &source) &&
+                 ir_reduce_observe(&work, &source, &observed) && observed.status == IR_REDUCE_OBSERVED;
     if (valid)
     {
-        memcpy(forged, key, length);
-        forged[length - 1] ^= 1;
-        collision = (IrReduceCache){ .bytes = forged, .length = length, .hash = hash,
-            .observation = { .status = IR_REDUCE_OBSERVED, .failure = { .kind = 999 } } };
-        work.first = &collision;
-        arena_pop_to(&work.scratch, 0);
-        IrReduceObservation observed;
+        IrReduceCache* collision = work.root;
+        collision->bytes[collision->length - 1] ^= 1;
+        collision->observation.failure.kind = 999;
+        // Freeze the original cache budget: two 48-byte headers plus their keys, with the second header aligned.
+        const uint64_t capacity = work.cache.capacity;
+        const uint64_t first = 48 + collision->length;
+        const uint64_t alignment = _Alignof(IrReduceCache);
+        const uint64_t end = ((first + alignment - 1) & ~(alignment - 1)) + first;
+        work.cache.capacity = end - 1;
+        observed.failure.kind = 123;
+        valid = !ir_reduce_observe(&work, &source, &observed) && work.result.status == IR_REDUCE_CACHE_LIMIT &&
+                observed.failure.kind == 123 && work.result.predicates == 1 && work.cache.length == first && work.scratch.length == 0;
+        ir_reduce_test_expect(test, valid, "one byte short on a colliding key preserves the cache, scratch and observation");
+
+        work.cache.capacity = end;
+        work.result.status = IR_REDUCE_COMPLETE;
         valid = ir_reduce_observe(&work, &source, &observed) && observed.status == IR_REDUCE_OBSERVED &&
-                observed.failure.kind == 71 && work.result.predicates == 1 && work.result.cache_hits == 0;
+                observed.failure.kind == 71 && work.result.predicates == 2 && work.result.cache_hits == 0 && work.cache.length == end;
         ir_reduce_test_expect(test, valid, "a forced equal-hash/equal-length collision requires exact field bytes, not a hash alone");
-        valid = ir_reduce_observe(&work, &source, &observed) && observed.failure.kind == 71 &&
-                work.result.predicates == 1 && work.result.cache_hits == 1 && work.scratch.length == 0;
-        ir_reduce_test_expect(test, valid, "an exactly repeated candidate reuses its classified observation without another callback");
+        mode = 1;
+        valid = ir_reduce_observe(&work, &source, &observed) && observed.status == IR_REDUCE_OBSERVED && observed.failure.kind == 71 &&
+                work.result.predicates == 2 && work.result.cache_hits == 1 && work.cache.length == end && work.scratch.length == 0;
+        ir_reduce_test_expect(test, valid, "an exact hit beyond a collision uses the saved observation even in a full cache");
+        work.cache.capacity = capacity;
     }
     else
     {

@@ -9,30 +9,59 @@ static unsigned __int128 interpreter_value_integer(InterpreterValue value)
     return ((unsigned __int128)value.high << 64) | value.low;
 }
 
+// Each IR type's value bits as a value's two words, ir_type_bits' low bits (all of them from 128 up: a vector's lanes
+// are kept elsewhere). The interpreters mask every value they make: a table's two words rather than a 128-bit shift
+// and its compare, which a sanitizer's build instruments word by word at every step (#2758). ir_interpreter_test.c
+// checks each row against ir_type_bits.
+static const InterpreterValue interpreter_value_masks[IR_TYPE_COUNT] = {
+    [IR_VOID] = { .low = 0 },
+    [IR_I1] = { .low = 1 },
+    [IR_I8] = { .low = UINT8_MAX },
+    [IR_I16] = { .low = UINT16_MAX },
+    [IR_I32] = { .low = UINT32_MAX },
+    [IR_I64] = { .low = UINT64_MAX },
+    [IR_I128] = { .low = UINT64_MAX, .high = UINT64_MAX },
+    [IR_F32] = { .low = UINT32_MAX },
+    [IR_F64] = { .low = UINT64_MAX },
+    [IR_F80] = { .low = UINT64_MAX, .high = UINT16_MAX },
+    [IR_PTR] = { .low = UINT64_MAX },
+    [IR_V4I32] = { .low = UINT64_MAX, .high = UINT64_MAX },
+    [IR_V8I32] = { .low = UINT64_MAX, .high = UINT64_MAX },
+    [IR_V16I32] = { .low = UINT64_MAX, .high = UINT64_MAX },
+    [IR_M8] = { .low = UINT8_MAX },
+    [IR_M16] = { .low = UINT16_MAX },
+    [IR_M32] = { .low = UINT32_MAX },
+    [IR_M64] = { .low = UINT64_MAX },
+};
+_Static_assert(IR_TYPE_COUNT == 18, "interpreter_value_masks has a row for each IR type");
+
 static unsigned __int128 interpreter_value_mask(uint8_t type)
 {
-    const uint32_t bits = ir_type_bits[type];
-    return bits == 128 ? ~(unsigned __int128)0 : (((unsigned __int128)1 << bits) - 1);
+    return interpreter_value_integer(interpreter_value_masks[type]);
 }
 
 static InterpreterValue interpreter_value_from_integer(unsigned __int128 bits, uint8_t type)
 {
-    bits &= interpreter_value_mask(type);
+    const InterpreterValue mask = interpreter_value_masks[type];
     const InterpreterValue result = {
-        .low = (uint64_t)bits,
-        .high = (uint64_t)(bits >> 64),
+        .low = (uint64_t)bits & mask.low,
+        .high = (uint64_t)(bits >> 64) & mask.high,
     };
     return result;
 }
 
-static __int128 interpreter_value_signed(InterpreterValue value, uint8_t type)
+// A value of `type`, its bits past the type's sign-extended (none past 128), word by word (interpreter_value_masks'
+// reason); inlined, as a signed comparison's step takes two.
+static inline __attribute__((always_inline)) __int128 interpreter_value_signed(InterpreterValue value, uint8_t type)
 {
     const uint32_t bits = ir_type_bits[type];
-    unsigned __int128 raw = interpreter_value_integer(value) & interpreter_value_mask(type);
-    if (bits < 128 && (raw & ((unsigned __int128)1 << (bits - 1))) != 0)
-    {
-        raw |= ~interpreter_value_mask(type);
-    }
+    const InterpreterValue mask = interpreter_value_masks[type];
+    uint64_t low = value.low & mask.low;
+    uint64_t high = value.high & mask.high;
+    const uint64_t sign = bits == 0 || bits >= 128 ? 0 : bits <= 64 ? (low >> (bits - 1)) & 1 : (high >> (bits - 65)) & 1;
+    low |= sign != 0 ? ~mask.low : 0;
+    high |= sign != 0 ? ~mask.high : 0;
+    const unsigned __int128 raw = ((unsigned __int128)high << 64) | low;
     __int128 result = 0;
     memcpy(&result, &raw, sizeof(result));
     return result;

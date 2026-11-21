@@ -339,8 +339,7 @@ static bool check_deferred_constant_contexts(CheckDeferred* deferred, CheckInput
             // No per-token worker writes were counted, and the index may summarize the pre-round warning bits.
             // Rebuild once with the existing SIMD/scalar byte counter, before the ordered top-level gaps run.
             reader->output->constant_warning_count = reader->output->constant_warnings != NULL ?
-                check_deferred_count_bytes(reader->output->constant_warnings, 0, reader->parser->tokens.count,
-                                           !BUSTER_SCALAR_PATH(reader->parser->options.scalar)) : 0;
+                check_deferred_count_bytes(reader->output->constant_warnings, 0, reader->parser->tokens.count) : 0;
             if (reader->warning_index_ready)
             {
                 memset(reader->warning_index, 0xff, (uint64_t)reader->warning_index_base * 2 * sizeof(uint16_t));
@@ -550,9 +549,6 @@ static void check_deferred_expression_lane(void* argument)
                 input.graph = part->graph;
                 input.graph.const_values = &input.const_values;
                 reader.value_next = part->next;
-                // The part's nodes are its own, numbered apart from the top level's hops (CheckInputReader.walk_ends).
-                reader.walk_ends = NULL;
-                reader.walk_counts = NULL;
                 check_input_expressions_coded_range(&reader, part->begin, part->end);
                 if (!input.resource)
                 {
@@ -603,7 +599,7 @@ static uint32_t check_deferred_expression_node(uint32_t node, uint32_t base)
 
 // Source-order publication. The hot columns are copied in contiguous slices; only node-bearing fields are relocated.
 // None of the local graph's allocation capacities or scheduling choices enters the published representation.
-static bool check_deferred_expression_append(CheckInputReader* reader, const CheckDeferredExpressionPart* part, bool vector)
+static bool check_deferred_expression_append(CheckInputReader* reader, const CheckDeferredExpressionPart* part)
 {
     CheckGraph* to = &reader->output->graph;
     const CheckGraph* from = &part->graph;
@@ -636,8 +632,7 @@ static bool check_deferred_expression_append(CheckInputReader* reader, const Che
         }
 #undef BUSTER_CHECK_EXPRESSION_COPY
         check_deferred_expression_leaves(to, from, leaves);
-        uint32_t n = 0;
-        for (; !BUSTER_SCALAR_PATH(!vector) && n < from->count; n += 16)
+        for (uint32_t n = 0; n < from->count; n += 16)
         {
             const uint32_t length = from->count - n < 16 ? from->count - n : 16;
             const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, length);
@@ -658,24 +653,14 @@ static bool check_deferred_expression_append(CheckInputReader* reader, const Che
             const __m512i relative = _mm512_sub_epi32(op, _mm512_set1_epi32(CHECK_OP_CALL));
             const __m512i low = _mm512_srlv_epi32(_mm512_set1_epi32((int32_t)check_graph_argument_operators), relative);
             const __m512i high = _mm512_srlv_epi32(_mm512_set1_epi32((int32_t)(check_graph_argument_operators >> 32)), _mm512_sub_epi32(relative, _mm512_set1_epi32(32)));
-            const __mmask16 varargs = _mm512_mask_cmpeq_epi32_mask(lanes, op, _mm512_set1_epi32(CHECK_OP_VARARGS));
-            const __mmask16 arguments = _mm512_mask_test_epi32_mask(lanes, _mm512_or_si512(low, high), _mm512_set1_epi32(1)) | varargs;
-            const __m512i delta = _mm512_mask_mov_epi32(_mm512_set1_epi32((int32_t)to->argument_count), varargs, _mm512_set1_epi32((int32_t)to->varargs_count));
+            // (No part holds a varargs builtin's node: a token with a varargs call is no part's, and a part's graph has no
+            // varargs records, so its offsets are all into the arguments.)
+            const __mmask16 arguments = _mm512_mask_test_epi32_mask(lanes, _mm512_or_si512(low, high), _mm512_set1_epi32(1));
+            const __m512i delta = _mm512_set1_epi32((int32_t)to->argument_count);
             const __m512i offsets = _mm512_maskz_loadu_epi32(lanes, from->argument_offsets + n);
             const __m512i counts = _mm512_maskz_loadu_epi32(lanes, from->argument_counts + n);
             _mm512_mask_storeu_epi32(to->argument_offsets + base + n, lanes, _mm512_mask_add_epi32(offsets, arguments, offsets, delta));
             _mm512_mask_storeu_epi32(to->argument_counts + base + n, lanes, counts);
-        }
-        for (; n < from->count; n += 1)
-        {
-            to->operand0[base + n] = check_deferred_expression_node(from->operand0[n], base);
-            to->operand1[base + n] = check_deferred_expression_node(from->operand1[n], base);
-            to->operand2[base + n] = check_deferred_expression_node(from->operand2[n], base);
-            to->leaf_slots[base + n] = check_deferred_expression_node(from->leaf_slots[n], leaves);
-            to->argument_counts[base + n] = from->argument_counts[n];
-            const CheckOp op = to->ops[base + n];
-            const uint32_t offset = op == CHECK_OP_VARARGS ? to->varargs_count : to->argument_count;
-            to->argument_offsets[base + n] = from->argument_offsets[n] + (from->argument_counts[n] != 0 || op == CHECK_OP_VARARGS || check_graph_has_arguments(op) ? offset : 0);
         }
         for (uint32_t a = 0; a < from->argument_count; a += 1)
         {
@@ -889,7 +874,7 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
             deferred->expression_parallel_tokens += part->end - part->begin;
             deferred->expression_worker_mask |= UINT64_C(1) << part->lane;
             part->base = input->graph.count;
-            valid = part->valid && check_deferred_expression_append(reader, part, !deferred->scalar_merge);
+            valid = part->valid && check_deferred_expression_append(reader, part);
             input->constant_warning_count += part->constant_warnings;
             for (uint32_t i = 1; i < BUSTER_CHECK_EXPRESSION_PARTS; i += 1)
             {
@@ -903,7 +888,7 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
             // Value chains, first/last_value, region_roots and vla_sizes have no consumer after this boundary.
             // Only the retained token roots and sparse receipts need final node identities.
             uint32_t t = part->first_token;
-            for (; valid && !BUSTER_SCALAR_PATH(deferred->scalar_merge) && t < part->end_token; t += 16)
+            for (; valid && t < part->end_token; t += 16)
             {
                 const uint32_t length = part->end_token - t < 16 ? part->end_token - t : 16;
                 const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, length);
@@ -911,17 +896,13 @@ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader
                 const __mmask16 present = _mm512_mask_cmpneq_epu32_mask(lanes, old, _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE));
                 _mm512_mask_storeu_epi32(input->token_nodes + t, present, _mm512_add_epi32(old, _mm512_set1_epi32((int32_t)part->base)));
             }
-            for (; valid && t < part->end_token; t += 1)
-            {
-                input->token_nodes[t] = check_deferred_expression_node(input->token_nodes[t], part->base);
-            }
             const uint64_t mark = reader->scratch->length;
             uint32_t* positions = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)part->end_token - part->first_token);
             valid &= positions != NULL;
             CheckSparseColumn columns[] = { input->initializer_nodes, input->evaluation_nodes, input->case_ranges };
             for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
             {
-                const uint32_t entries = check_sparse_entries(columns[c], part->first_token, part->end_token, !BUSTER_SCALAR_PATH(deferred->scalar_merge), positions);
+                const uint32_t entries = check_sparse_entries(columns[c], part->first_token, part->end_token, positions);
                 for (uint32_t e = 0; e < entries; e += 1)
                 {
                     const uint32_t token = positions[e];

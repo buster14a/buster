@@ -124,9 +124,9 @@ static uint32_t check_program_select_bounds(const CheckProgram* full, uint32_t o
     for (uint32_t pass = 0; valid && pass < 2; pass += 1)
     {
         label_count = 0;
-        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
+        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
         {
-            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
                 const uint32_t object = input->objects[token];

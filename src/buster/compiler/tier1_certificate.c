@@ -1160,6 +1160,8 @@ static Tier1CertError tier1_certificate_check(const Tier1CertProgram* program, v
             valid = valid && tier1_cert_prove(&state, program->blocks[0].certificate, program->blocks[0].certificate_count, false);
             result.error = TIER1_CERT_ENTRY;
         }
+        // All sinks share the exit spans. Check them at the first sink so earlier failures keep their place.
+        bool exit_shape_valid = program->exit_count == 0;
         for (uint32_t b = 0; valid && b < blocks; b += 1)
         {
             const Tier1CertBlock block = program->blocks[b];
@@ -1171,8 +1173,8 @@ static Tier1CertError tier1_certificate_check(const Tier1CertProgram* program, v
             valid = valid && tier1_cert_stream(&state, block.source, block.source_count, block.code, block.code_count);
             if (valid && block.edge_count == 0)
             {
-                valid = tier1_cert_exit_shape(&state);
-                valid = valid && tier1_cert_prove(&state, program->exit, program->exit_count, false);
+                exit_shape_valid = exit_shape_valid || tier1_cert_exit_shape(&state);
+                valid = exit_shape_valid && tier1_cert_prove(&state, program->exit, program->exit_count, false);
                 result.error = TIER1_CERT_VALUE;
             }
             for (uint32_t e = 0; valid && e < block.edge_count; e += 1)

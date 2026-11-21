@@ -546,8 +546,7 @@ static bool tier0_vf_image(Tier0VfTally* tally, const Tier0Code* code, uint32_t 
         const BranchSizing sized = size_branches(records, code->count, code->branches, code->targets, code->branch_count, offsets);
         uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
         const bool sized_valid = sized.error == BRANCH_SIZING_OK && x86_target_validate(allowed, records, code->count) == code->count;
-        const int64_t length = !sized_valid ? -1 : encoder == 0 ? x86_encode_scalar(records, code->count, image->bytes, capacity, NULL, ends)
-                                                                                               : x86_encode(records, code->count, image->bytes, capacity, NULL, ends);
+        const int64_t length = !sized_valid ? -1 : x86_encode(records, code->count, image->bytes, capacity, NULL, ends);
         ready = tier0_vf_expect(tally, length > 0 && (uint64_t)length <= capacity, "size branches and encode actual variadic callee", encoder);
         if (ready)
         {
@@ -581,8 +580,7 @@ static bool tier0_vf_image(Tier0VfTally* tally, const Tier0Code* code, uint32_t 
                 .rm = X86_REGISTER_RAX,
             },
         };
-        const int64_t length = encoder == 0 ? x86_encode_scalar(jump, 2, image->bytes + trampoline, trampoline_capacity, NULL, NULL)
-                                            : x86_encode(jump, 2, image->bytes + trampoline, trampoline_capacity, NULL, NULL);
+        const int64_t length = x86_encode(jump, 2, image->bytes + trampoline, trampoline_capacity, NULL, NULL);
         ready = tier0_vf_expect(tally, x86_validate(jump, 2) == 2 && x86_target_validate(allowed, jump, 2) == 2 && length > 0 && (uint64_t)length <= trampoline_capacity &&
             mprotect(image->bytes, pages, PROT_READ | PROT_EXEC) == 0 && mprotect(image->bytes + pages, BUSTER_TIER0_VF_PAGE, PROT_NONE) == 0,
             "encode nearby trampoline and publish guarded RX native image", encoder);
@@ -949,7 +947,7 @@ static void tier0_vf_null(Tier0VfTally* tally, Arena* arena)
     if (ready)
     {
         uint8_t bytes[2][BUSTER_X86_ENCODER_CAPACITY(1)] = { 0 };
-        const int64_t a = x86_encode_scalar(scalar.records, 1, bytes[0], sizeof(bytes[0]), NULL, NULL);
+        const int64_t a = x86_encode(scalar.records, 1, bytes[0], sizeof(bytes[0]), NULL, NULL);
         const int64_t b = x86_encode(vector.records, 1, bytes[1], sizeof(bytes[1]), NULL, NULL);
         tier0_vf_expect(tally, a == 1 && b == 1 && bytes[0][0] == 0xc3 && bytes[1][0] == 0xc3,
             "default ordinary frame remains exactly its independent original C3 byte", 0);
@@ -1026,7 +1024,7 @@ static void tier0_vf_null(Tier0VfTally* tally, Arena* arena)
     if (ready)
     {
         uint8_t bytes[2][BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(frame_records))] = { 0 };
-        const int64_t a = x86_encode_scalar(ordinary_scalar.records, ordinary_scalar.count, bytes[0], sizeof(bytes[0]), NULL, NULL);
+        const int64_t a = x86_encode(ordinary_scalar.records, ordinary_scalar.count, bytes[0], sizeof(bytes[0]), NULL, NULL);
         const int64_t b = x86_encode(ordinary_vector.records, ordinary_vector.count, bytes[1], sizeof(bytes[1]), NULL, NULL);
         tier0_vf_expect(tally, a == sizeof(frame_bytes) && b == sizeof(frame_bytes) &&
             memcmp(bytes[0], frame_bytes, sizeof(frame_bytes)) == 0 && memcmp(bytes[1], frame_bytes, sizeof(frame_bytes)) == 0,

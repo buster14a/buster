@@ -66,6 +66,7 @@ struct CheckUnitsUnit
     const char* path;
     CheckDriverInputKind kind;
     bool preprocessed;
+    bool probed;
     uint64_t bytes;
     const char* object;
     int status;
@@ -154,6 +155,7 @@ typedef struct CheckUnitsRun CheckUnitsRun;
 struct CheckUnitsRun
 {
     const CheckDriverCommand* command;
+    const PPSearchDirectories* search;
     CheckUnitsUnit* units;
     uint32_t count;
     // The units' indices, costliest first.
@@ -2297,6 +2299,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
     {
         PPOptions options = command->options;
         options.files = &lane->cache;
+        options.search = run->search;
+        options.probed_input = unit->probed ? unit->path : NULL;
         options.diagnostics = errors;
         options.preprocessed = unit->preprocessed;
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
@@ -2643,14 +2647,25 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         // The units in the command line's order, and their costs, their sizes: each a key whose high half is its cost
         // inverted, so that the stable sort puts the costliest first, the command line's order among equals.
         memset(units, 0, (uint64_t)count * sizeof(*units));
+        uint32_t preprocessing_units = 0;
         for (uint32_t u = 0; u < count; u += 1)
         {
-            struct stat status;
-            const uint64_t size = stat(inputs[u], &status) == 0 && status.st_size > 0 ? (uint64_t)status.st_size : 0;
+            uint64_t size;
+            if (command->inputs != NULL && command->inputs[u].probed)
+            {
+                size = command->inputs[u].size;
+                units[u].probed = true;
+            }
+            else
+            {
+                struct stat status;
+                size = stat(inputs[u], &status) == 0 && status.st_size > 0 ? (uint64_t)status.st_size : 0;
+            }
             const uint32_t cost = size < UINT32_MAX ? (uint32_t)size : UINT32_MAX - 1;
             units[u].path = inputs[u];
             units[u].kind = command->inputs != NULL ? command->inputs[u].kind : CHECK_DRIVER_INPUT_C;
             units[u].preprocessed = command->inputs != NULL && command->inputs[u].preprocessed;
+            preprocessing_units += units[u].kind == CHECK_DRIVER_INPUT_C || units[u].kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP;
             units[u].bytes = units[u].kind != CHECK_DRIVER_INPUT_LINK ? size : 0;
             keys[u] = (uint64_t)(UINT32_MAX - cost) << 32 | u;
         }
@@ -2746,8 +2761,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             CheckUnitsMemory memory = {
                 .limit = command->units_memory != 0 ? command->units_memory : available / 8 * BUSTER_CHECK_UNITS_MEMORY_EIGHTHS,
             };
+            PPSearchDirectories search = { 0 };
             CheckUnitsRun run = {
                 .command = command,
+                .search = preprocessing_units > 1 && pp_prepare_search(&search, &arena, &command->options) ? &search : NULL,
                 .units = units,
                 .count = count,
                 .order = order,

@@ -454,6 +454,13 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
 #include "buster/compiler/assembler_benchmark.c"
 #endif
+// The assembly sink (#1362): a unit of the link representation as GNU as's AT&T source, from the emission's symbolic view
+// (the link and each function's sized records), and its tests, for the test-assembly-output command, which take the
+// assembler's matcher for their fixtures' records and its tests' GNU as comparison.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
+#include "buster/compiler/assembly_output.c"
+#include "buster/compiler/assembly_output_test.c"
+#endif
 
 #include "buster/compiler/x86_semantics_test.c"
 // The Zen 5 model's harness and tests (#181), whose fixtures come from the form table and the effects tables, and
@@ -712,6 +719,10 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_node_machine_facts.c"
 // #2850's step 2's second piece: what reads T's record, counted in the shadow (measure-node-machine --shadow --facts-reads).
 #include "buster/compiler/c_check_node_machine_reads.c"
+// #2850's step 2, C on the window: C's answers from the window's bytes, 64 records a step (--shadow --window-contexts).
+#include "buster/compiler/c_check_node_machine_window.c"
+// #2850's step 2, X's rows on the window: the kinds and classes of X's entries from C's answers there (--shadow --window-rows).
+#include "buster/compiler/c_check_node_machine_rows.c"
 #endif
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).
@@ -1448,6 +1459,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
     {
         result = run_assembler_benchmark(argc - 2, argv + 2);
+    }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "test-assembly-output") == 0)
+    {
+        result = run_assembly_output_tests(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)

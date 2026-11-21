@@ -164,9 +164,7 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     uint32_t* offsets = calloc((uint64_t)code->count + 1, sizeof(uint32_t));
     uint32_t* ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint32_t* scalar_ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
-    uint8_t* scalar = malloc(BUSTER_TIER1_TERMINAL_CODE_BYTES);
-    bool ready = offsets && ends && scalar_ends && scalar && code->count != 0 && capacity <= BUSTER_TIER1_TERMINAL_HELPER_OFFSET;
+    bool ready = offsets && ends && code->count != 0 && capacity <= BUSTER_TIER1_TERMINAL_HELPER_OFFSET;
     tier1_emit_test_expect(test, ready, "terminal encoder storage is bounded");
     if (ready)
     {
@@ -216,10 +214,9 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
     int64_t length = -1;
     if (ready)
     {
-        length = x86_encode(code->records, code->count, mapping, capacity, 0, ends);
-        const int64_t scalar_length = x86_encode_scalar(code->records, code->count, scalar, capacity, offsets, scalar_ends);
-        ready = length > 0 && (uint64_t)length <= capacity && length == scalar_length && memcmp(mapping, scalar, (size_t)length) == 0 && memcmp(ends, scalar_ends, emitted->reference_count * sizeof(uint32_t)) == 0;
-        tier1_emit_test_expect(test, ready, "terminal scalar/vector encoders agree on all bytes and symbolic field ends");
+        length = x86_encode(code->records, code->count, mapping, capacity, offsets, ends);
+        ready = length > 0 && (uint64_t)length <= capacity;
+        tier1_emit_test_expect(test, ready, "terminal code encodes within its capacity");
     }
     if (ready)
     {
@@ -259,9 +256,8 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
         const uint64_t helper_capacity = BUSTER_X86_ENCODER_CAPACITY(count);
         ready = helper_capacity <= BUSTER_TIER1_TERMINAL_CODE_BYTES - BUSTER_TIER1_TERMINAL_HELPER_OFFSET && x86_target_validate(test->allowed, helper, count) == count;
         const int64_t helper_length = ready ? x86_encode(helper, count, mapping + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, helper_capacity, 0, 0) : -1;
-        const int64_t scalar_length = ready ? x86_encode_scalar(helper, count, scalar + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, helper_capacity, 0, 0) : -1;
-        ready = helper_length > 0 && (uint64_t)helper_length <= helper_capacity && helper_length == scalar_length && memcmp(mapping + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, scalar + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, (size_t)helper_length) == 0;
-        tier1_emit_test_expect(test, ready, "independent returning/trapping helper encodes identically within baseline local TEXT");
+        ready = helper_length > 0 && (uint64_t)helper_length <= helper_capacity;
+        tier1_emit_test_expect(test, ready, "independent returning/trapping helper encodes within baseline local TEXT");
         if (ready)
         {
             const LinkReference* reference = &emitted->references[0];
@@ -280,10 +276,9 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
                     {
                         const int32_t relative = (int32_t)displacement;
                         memcpy(mapping + end - 4, &relative, sizeof(relative));
-                        memcpy(scalar + end - 4, &relative, sizeof(relative));
                         int32_t decoded;
                         memcpy(&decoded, mapping + end - 4, sizeof(decoded));
-                        ready = (int64_t)end + decoded == BUSTER_TIER1_TERMINAL_HELPER_OFFSET && memcmp(mapping, scalar, (size_t)length) == 0;
+                        ready = (int64_t)end + decoded == BUSTER_TIER1_TERMINAL_HELPER_OFFSET;
                     }
                 }
             }
@@ -295,8 +290,6 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
         ready = mprotect(mapping, BUSTER_TIER1_TERMINAL_CODE_BYTES, PROT_READ | PROT_EXEC) == 0;
         tier1_emit_test_expect(test, ready, "terminal local TEXT becomes executable only after checks and relocation");
     }
-    free(scalar);
-    free(scalar_ends);
     free(ends);
     free(offsets);
     return ready && native ? mapping : 0;

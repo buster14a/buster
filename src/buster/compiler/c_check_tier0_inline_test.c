@@ -13,6 +13,8 @@
 // (check_test_tier0_inline_source) at x86-64-v4, whose spliced streams, every column and the starts, must fold to the
 // frozen digest of their run (with and without the shapes). --tier0-inline-shapes splices callees with several returns or
 // a result in memory too, as -c's option does (#1398 step 5). The driver fixture (test-checker-driver) runs the programs.
+// Before the files, the splice's fills and the unit stage's scan for the candidates whose address code takes are checked
+// against their definitions on random columns (tier0_inline_test_fills, tier0_inline_test_addressed).
 
 typedef struct Tier0InlineTestTally Tier0InlineTestTally;
 struct Tier0InlineTestTally
@@ -302,6 +304,72 @@ static void tier0_inline_test_fills(Tier0InlineTestTally* tally)
            remapped, clamped, rewritten, constants[0], constants[1]);
 }
 
+// The unit stage's scan for the candidates whose address code takes (check_tier1_inline_addressed_entries, #2541 step 2)
+// against its definition (#2924), at every count to 200: each entry of kind BUSTER_TYPED_GLOBAL_ADDRESS marks the candidate
+// its value names, or the byte past the bodies where it names none (0, a symbol past the table's, or one that is no
+// candidate). Each count runs its random kinds, then its last entry alone an address, then each full batch's last lane
+// alone one; the scan writes no byte but its marks.
+static void tier0_inline_test_addressed(Tier0InlineTestTally* tally)
+{
+    enum
+    {
+        CAPACITY = 200,
+        SYMBOLS = 40,
+        BODIES = 24,
+        GUARD = 16,
+    };
+    uint64_t random = UINT64_C(0x2545f4914f6cdd1d);
+    uint8_t kinds[CAPACITY];
+    uint64_t values[CAPACITY];
+    uint32_t candidates[SYMBOLS];
+    uint8_t addressed[BODIES + 1 + GUARD];
+    uint8_t expected[BODIES + 1 + GUARD];
+    bool same = true;
+    uint64_t marks = 0;
+    uint64_t others = 0;
+    uint64_t lasts = 0;
+    for (uint32_t count = 0; count <= CAPACITY; count += 1)
+    {
+        for (uint32_t shape = 0; shape < 2 + count / 64; shape += 1)
+        {
+            for (uint32_t s = 0; s < SYMBOLS; s += 1)
+            {
+                const uint64_t pick = tier0_inline_test_random(&random);
+                candidates[s] = pick % 4 == 0 ? 0 : 1 + (uint32_t)((pick >> 2) % BODIES);
+            }
+            for (uint32_t e = 0; e < count; e += 1)
+            {
+                const uint64_t pick = tier0_inline_test_random(&random);
+                // Shape 0, random kinds; shape 1, the last entry alone an address; shape 2 + k, batch k's last lane alone.
+                const bool address = shape == 0 ? pick % 8 == 0 : shape == 1 ? e + 1 == count : e == (shape - 2) * 64 + 63;
+                const uint8_t other = (uint8_t)((pick >> 3) % BUSTER_TYPED_KIND_LIMIT);
+                kinds[e] = address ? BUSTER_TYPED_GLOBAL_ADDRESS : other == BUSTER_TYPED_GLOBAL_ADDRESS ? (uint8_t)((other + 1) % BUSTER_TYPED_KIND_LIMIT) : other;
+                // Mostly a symbol of the table (0 among them), sometimes one past it, sometimes any 64-bit value.
+                values[e] = pick % 16 == 0 ? pick : (pick >> 8) % (SYMBOLS + 4);
+            }
+            memset(addressed, 0, BODIES + 1);
+            memset(addressed + BODIES + 1, 0xa5, GUARD);
+            memcpy(expected, addressed, sizeof(expected));
+            for (uint32_t e = 0; e < count; e += 1)
+            {
+                if (kinds[e] == BUSTER_TYPED_GLOBAL_ADDRESS)
+                {
+                    const uint32_t candidate = values[e] != 0 && values[e] < SYMBOLS ? candidates[values[e]] : 0;
+                    expected[candidate != 0 ? candidate - 1 : BODIES] = 1;
+                    marks += candidate != 0 ? 1u : 0u;
+                    others += candidate == 0 ? 1u : 0u;
+                    lasts += shape != 0 ? 1u : 0u;
+                }
+            }
+            check_tier1_inline_addressed_entries(kinds, values, count, candidates, SYMBOLS, BODIES, addressed);
+            same = same && memcmp(addressed, expected, sizeof(expected)) == 0;
+        }
+    }
+    tier0_inline_test_expect(tally, same, "addressed", 0, "the scan marks each address's candidate, or the byte past the bodies, at every count and lane, and writes nothing else");
+    tier0_inline_test_expect(tally, marks != 0 && others != 0 && lasts != 0, "addressed", 1, "the random columns reach candidates, other symbols and the lone last entries");
+    printf("test-tier0-inline: addressed: %" PRIu64 " candidates marked, %" PRIu64 " other symbols, %" PRIu64 " lone last entries\n", marks, others, lasts);
+}
+
 static int run_tier0_inline_tests(int count, char** arguments)
 {
     char** options = calloc((size_t)count + 2, sizeof(char*));
@@ -349,6 +417,7 @@ static int run_tier0_inline_tests(int count, char** arguments)
     if (valid)
     {
         tier0_inline_test_fills(&tally);
+        tier0_inline_test_addressed(&tally);
     }
     for (uint32_t f = 0; valid && f < file_count; f += 1)
     {

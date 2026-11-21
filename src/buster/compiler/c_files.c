@@ -703,9 +703,7 @@ static void files_take_ids(FilesRun* run, FilesLane* mine)
 
 // Step 6: a prepared file's identifiers (and its guard) from the lane's ids to the shared table's, 64 tokens at a time:
 // one compare finds the identifiers, and those that aren't predefined names (whose ids every table shares) take their
-// shared ids, 16 at a time by a gather. files_remap_scalar is its twin, a token at a time.
-static void files_remap_scalar(PPFileData* data, const IdentId* shared);
-
+// shared ids, 16 at a time by a gather.
 static void files_remap(PPFileData* data, const IdentId* shared)
 {
     for (uint32_t i = 0; i < data->token_count; i += 64)
@@ -722,16 +720,6 @@ static void files_remap(PPFileData* data, const IdentId* shared)
             const __mmask16 local = _mm512_mask_cmpge_epu32_mask(named, ids, _mm512_set1_epi32(C_NAME_COUNT));
             _mm512_mask_storeu_epi32(values, local, _mm512_mask_i32gather_epi32(ids, local, ids, shared, sizeof(IdentId)));
         }
-    }
-    data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
-}
-
-static void files_remap_scalar(PPFileData* data, const IdentId* shared)
-{
-    for (uint32_t t = 0; t < data->token_count; t += 1)
-    {
-        const IdentId id = data->values[t];
-        data->values[t] = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && id >= C_NAME_COUNT ? shared[id] : id;
     }
     data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
 }
@@ -963,14 +951,7 @@ static void files_prepare(FilesRun* run)
             PPFileData* data = &cache->records[run->records[file]];
             if (run->file_status[file] == PP_PREPARE_DONE && room)
             {
-                if (BUSTER_VECTOR_PATH(cache->prepare.vectorized))
-                {
-                    files_remap(data, mine->shared);
-                }
-                else
-                {
-                    files_remap_scalar(data, mine->shared);
-                }
+                files_remap(data, mine->shared);
                 mine->prepared += 1;
                 mine->tokens += data->token_count;
             }
@@ -1069,7 +1050,7 @@ static uint32_t files_search_key(const FilesRun* run, const FilesRequest* reques
     const bool absolute = request->item == BUSTER_PP_NONE || (request->length != 0 && request->name[0] == '/');
     const bool resumes = request->next && search != BUSTER_PP_NONE;
     const bool local = !absolute && !resumes && !request->angled;
-    const uint32_t start = absolute ? UINT32_MAX : resumes ? search + 1 : request->angled ? run->search->angled_first : 0;
+    const uint32_t start = absolute ? UINT32_MAX : resumes ? search + 1 : request->angled ? run->search->search.angled_first : 0;
     uint32_t length = 0;
     memcpy(key, &start, sizeof(start));
     length += sizeof(start);
@@ -1204,7 +1185,7 @@ static PPCandidate files_candidate(const FilesRun* run, const FilesSearch* searc
                                       index, path, path_length, &system, directory);
         const bool absolute = request->length != 0 && request->name[0] == '/';
         const uint32_t own = includer.directory_length != BUSTER_PP_NONE ? includer.directory_length : 1;
-        *directory_length = absolute ? BUSTER_PP_NONE : *directory != BUSTER_PP_NONE ? run->search->directory_lengths[*directory] : own;
+        *directory_length = absolute ? BUSTER_PP_NONE : *directory != BUSTER_PP_NONE ? run->search->search.directory_lengths[*directory] : own;
     }
     return result;
 }

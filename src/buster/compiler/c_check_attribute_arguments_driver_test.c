@@ -1341,6 +1341,39 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "void f(int x) { [[clang::nomerge]] { typeof(f(1)) *p = 0; (void)p; } }\n",
         "void f(int x) { [[clang::nomerge]] { int g(int); } }\n",
         "void f(int x) { [[clang::nomerge]] x = __builtin_expect(x, 1); }\n",
+        // A statement attribute's error drops it, not the statement nor the statement's other attributes (#1844): each one's
+        // error, after the statement's own, an inner statement's first, a later statement's too, and clang's analysis,
+        // which reports a misplaced fallthrough, run for no function that ends after one.
+        "void h(void); void f(void) { [[clang::nomerge(1)]] h(); [[clang::nomerge(2)]] h(); }\n",
+        "void h(void); void f(void) { __attribute__((nomerge(1, 2))) h(); __attribute__((nomerge(1))) h(); [[gnu::nomerge(\"a\")]] h(); }\n",
+        "void h(void); void f(void) { [[clang::nomerge(1)]] if (1) h(); { [[clang::nomerge(2)]] h(); } [[clang::likely(3)]] h(); }\n",
+        "int q; void h(void); void f(void) { [[clang::nomerge(1)]] q = 1; [[clang::musttail]] h(); q = undeclared; } int g(void) { return missing; }\n",
+        "void h(void); void f(void) { [[clang::nomerge(1)]] ; [[clang::nomerge(2)]] h(); [[clang::nomerge(3)]] {} }\n",
+        "void h(void); void f(int x) { switch (x) { case 0: [[clang::nomerge(1)]] h(); [[fallthrough]]; case 1: [[clang::nomerge(2)]] h(); } }\n",
+        "int x; void g(void) { [[clang::nomerge(1), clang::likely(2)]] x = 1; [[clang::nomerge(1)]] [[clang::likely(2)]] ; }\n",
+        "int x; void g(void) { __attribute__((nomerge(1), nomerge(2))) x = 1; }\n",
+        "int x; void g(void) { [[clang::likely(1), clang::unlikely]] x = 1; [[clang::unlikely, clang::likely]] x = 2; }\n",
+        "void h(void); void f(int c) { [[clang::code_align(3), clang::code_align(8)]] for (;;) h(); }\n",
+        "int g(int); int f(int c) { [[clang::nomerge(1), clang::musttail]] return g(c); }\n",
+        "void h(void); void f(int c) { [[fallthrough, clang::nomerge(1)]]; }\n",
+        "void h(int); int x; void g(void) { [[clang::nomerge(1)]] h(missing); [[clang::nomerge(2)]] { x = other; } }\n",
+        "int x; void g(void) { [[clang::nomerge(1)]] if (missing) x = 1; else [[clang::nomerge(2)]] x = other; }\n",
+        "int x; void g(void) { [[clang::nomerge(1)]] while (missing) [[clang::likely(2)]] x = 1; }\n",
+        "int x; void g(void) { [[clang::nomerge(1)]] for (;;) [[clang::nomerge(2)]] { [[clang::nomerge(3)]] x = m; } }\n",
+        "int x; void g(void) { [[clang::nomerge(1)]] do x = missing; while (0); L: [[clang::nomerge(2)]] x = 2; }\n",
+        "void h(void); void g(void) { [[clang::nomerge(1)]] h(); } void f(int c) { switch (c) { case 0: [[fallthrough]]; c++; case 1: ; } }\n",
+        "void h(void); void f(int c) { switch (c) { case 0: [[fallthrough]]; c++; case 1: [[clang::nomerge(1)]] h(); } }\n",
+        "int x __attribute__((aligned(3))); void f(int c) { switch (c) { case 0: [[fallthrough]]; c++; case 1: ; } }\n",
+        "void f(int c) { switch (c) { case 0: [[fallthrough]]; c++; case 1: ; } } int x __attribute__((aligned(3)));\n",
+        // A statement's attributes don't hide its keyword (#1844): an attributed loop's and switch's breaks, continues and
+        // labels are theirs.
+        "int g(int x) { [[clang::likely]] switch (x) { case 1: x++; [[fallthrough]]; case 2: break; default: break; } return x; }\n",
+        "int g(int x) { [[clang::likely]] while (x) { if (x > 3) continue; break; } __attribute__((nomerge)) while (x) { x = g(x); break; } return x; }\n",
+        "int g(int x) { L: [[clang::likely]] while (x) { break; } if (x) [[clang::likely]] while (x) { break; } goto L; }\n",
+        "int g(int x) { __attribute__((weak)) switch (x) { default: break; } return x; }\n",
+        "int g(int x) { [[clang::likely]] for (;;) { [[clang::unlikely]] switch (x) { case 0: [[fallthrough]]; case 1: continue; } break; } return x; }\n",
+        "int g(int x) { [[clang::likely]] switch (x) { case 0: x++; [[fallthrough]]; x--; case 1: ; } return x; }\n",
+        "int g(int x) { for (;;) { [[clang::likely]] break; __attribute__((nomerge)) continue; } return x; }\n",
         "void f(int x) { [[clang::nomerge]] do x++; while (x < 3); }\n",
         "void f(int x) { [[clang::nomerge]] asm(\"\"); }\n",
         "void f(int x) { [[x, y::z(1, 2), , __gnu__::__unused__]] [[w]] asm(\"\"); }\n",
@@ -1568,6 +1601,16 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "_Static_assert(__builtin_types_compatible_p(__typeof__(g), N), \"the typedef's hidden\");\n",
         "__attribute__((intel_ocl_bicc, no_caller_saved_registers)) long f(long a) { return a; } __attribute__((no_caller_saved_registers)) long h(long a) "
         "__attribute__((preserve_all)) { return f(a); }\n",
+        // Runs of GNU groups after a declarator: each group of a run before a body gives -Wgcc-compat, which the first
+        // group's scan of the run decides for the rest of it (#2995), and a keyword or a C23 list within a run.
+        "int f(void) __attribute__((noinline)) __attribute__((cold)) __attribute__((used)) { return 0; }\n"
+        "int g(void) __attribute__((cold)) __attribute__((unused)) __attribute__((noinline));\n",
+        "int f(void) __attribute__((noinline)) __attribute__((cold)) __attribute__((used)), g(void) __attribute__((cold)) __attribute__((unused));\n"
+        "int h(void) __attribute__((noinline)) __attribute__((unused)) { return 0; }\n",
+        "int f(void) __attribute__((noinline)) _Alignas(8) __attribute__((cold)) { return 1; }\n",
+        "int f(void) __attribute__((noinline)) [[gnu::cold]] __attribute__((used)) { return 2; }\n",
+        // A declarator that a later group's arguments keep from completing: each group's warning is the run's reading's.
+        "int f(void) __attribute__((noinline)) __attribute__((cold)) __attribute__((used)) __attribute__((regparm(9))) { return 0; }\n",
         // target diagnostics name the decoded unsupported fragment, including permitted escapes.
         "int f(void) __attribute__((target(\"bo\\\\gus\")));\n",
         "int f(void) __attribute__((target(\"bo\\tgus\")));\n",
