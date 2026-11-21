@@ -567,7 +567,11 @@ The decoding:
   which name registers below 16 alone: a vector's `vmovdqa` and `vmovdqu` of 16
   and 32 bytes, and a carrier's VEX `vmovq` and `vinsertps`. A recomputation is a constant's edit only where
   `tier1_rematerialize` writes exactly that record, with its reference, for the
-  value its origin names.
+  value its origin names. A frame address at the frame base register itself is
+  that register's 64-bit copy (`mov r64, rsp` where rsp is the base, #3149),
+  which is tried as a recomputation first (`tier1_cert_emitted_recomputed`);
+  only otherwise is it a move, of a register no value is in, which the check
+  then refuses.
 - **Nodes.** Each node's records are regenerated from the allocation's
   registers at its use phase and must equal the emitted ones byte for byte. They
   are one instruction: its operands read where the allocation has them, every

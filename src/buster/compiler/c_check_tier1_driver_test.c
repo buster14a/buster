@@ -8,8 +8,9 @@
 // stream converts (its pointers are 64-bit integers). Its statics are indexed by the loop's k: an access at a constant
 // offset takes its symbol rip-relative (#2573), which leaves no address live. A second fixture's loop divides by
 // constants and by a register while such values stay live across the divisions, whose sequences take rax and rdx
-// (#141). Clang's build of the same source is each one's oracle. Included by c_checker_driver_test.c after its ELF
-// readers.
+// (#141). A third keeps a local array's address at rsp itself live across calls past the callee-saved registers, so that
+// it is recomputed by rsp's register copy (#3149). Clang's build of the same source is each one's oracle. Included by
+// c_checker_driver_test.c after its ELF readers.
 
 // The fixture: tier1_remat is the function under test, main prints its results.
 static const char check_test_tier1_remat_source[] =
@@ -54,6 +55,73 @@ static const char check_test_tier1_remat_source[] =
     "int main(void)\n"
     "{\n"
     "    printf(\"%ld %ld %ld\\n\", tier1_remat(0), tier1_remat(7), tier1_remat(1000));\n"
+    "    return 0;\n"
+    "}\n";
+
+// #3149's fixture: four functions keep seven pointers to consecutive elements of a local array across fourteen calls to
+// tier1_take, each in its own order, more than the six callee-saved registers hold, so that the first element's address,
+// at rsp itself, is recomputed after a call (into rbx, rbp, r12 and r13 in turn at the time of writing). tier1_take
+// writes each element it is given, by its distance from the first one it was given and its call's count, so a wrong
+// address or a lost one changes what main prints. tier1_take is noinline, so that --tier1's inlining keeps the calls.
+static const char check_test_tier1_frame_source[] =
+    "#include <stdio.h>\n"
+    "static long calls;\n"
+    "static long* first;\n"
+    "__attribute__((noinline)) void tier1_take(long* p)\n"
+    "{\n"
+    "    calls += 1;\n"
+    "    first = first == 0 ? p : first;\n"
+    "    *p = (p - first) * 100 + calls;\n"
+    "}\n"
+    "long tier1_frame_rbx(long x)\n"
+    "{\n"
+    "    long a[8];\n"
+    "    long *p0 = &a[0], *p1 = &a[1], *p2 = &a[2], *p3 = &a[3], *p4 = &a[4], *p5 = &a[5], *p6 = &a[6];\n"
+    "    *p0 = x;\n"
+    "    tier1_take(p0); tier1_take(p1); tier1_take(p2); tier1_take(p3); tier1_take(p4); tier1_take(p5); tier1_take(p6);\n"
+    "    tier1_take(p6); tier1_take(p5); tier1_take(p4); tier1_take(p3); tier1_take(p2); tier1_take(p1); tier1_take(p0);\n"
+    "    return x + *p0 + *p1 * 3 + *p2 * 5 + *p3 * 7 + *p4 * 11 + *p5 * 13 + *p6 * 17;\n"
+    "}\n"
+    "long tier1_frame_rbp(long x)\n"
+    "{\n"
+    "    long a[8];\n"
+    "    long *p0 = &a[0], *p1 = &a[1], *p2 = &a[2], *p3 = &a[3], *p4 = &a[4], *p5 = &a[5], *p6 = &a[6];\n"
+    "    *p0 = x;\n"
+    "    tier1_take(p1); tier1_take(p2); tier1_take(p3); tier1_take(p4); tier1_take(p5); tier1_take(p6); tier1_take(p0);\n"
+    "    tier1_take(p0); tier1_take(p6); tier1_take(p5); tier1_take(p4); tier1_take(p3); tier1_take(p2); tier1_take(p1);\n"
+    "    return x + *p0 + *p1 * 3 + *p2 * 5 + *p3 * 7 + *p4 * 11 + *p5 * 13 + *p6 * 17;\n"
+    "}\n"
+    "long tier1_frame_r12(long x)\n"
+    "{\n"
+    "    long a[8];\n"
+    "    long *p0 = &a[0], *p1 = &a[1], *p2 = &a[2], *p3 = &a[3], *p4 = &a[4], *p5 = &a[5], *p6 = &a[6];\n"
+    "    *p0 = x;\n"
+    "    tier1_take(p5); tier1_take(p2); tier1_take(p3); tier1_take(p1); tier1_take(p4); tier1_take(p0); tier1_take(p6);\n"
+    "    tier1_take(p1); tier1_take(p6); tier1_take(p4); tier1_take(p5); tier1_take(p3); tier1_take(p2); tier1_take(p0);\n"
+    "    return x + *p0 + *p1 * 3 + *p2 * 5 + *p3 * 7 + *p4 * 11 + *p5 * 13 + *p6 * 17;\n"
+    "}\n"
+    "long tier1_frame_r13(long x)\n"
+    "{\n"
+    "    long a[8];\n"
+    "    long *p0 = &a[0], *p1 = &a[1], *p2 = &a[2], *p3 = &a[3], *p4 = &a[4], *p5 = &a[5], *p6 = &a[6];\n"
+    "    *p0 = x;\n"
+    "    tier1_take(p1); tier1_take(p2); tier1_take(p3); tier1_take(p4); tier1_take(p5); tier1_take(p0); tier1_take(p6);\n"
+    "    tier1_take(p1); tier1_take(p6); tier1_take(p4); tier1_take(p5); tier1_take(p2); tier1_take(p3); tier1_take(p0);\n"
+    "    return x + *p0 + *p1 * 3 + *p2 * 5 + *p3 * 7 + *p4 * 11 + *p5 * 13 + *p6 * 17;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    long (*const functions[4])(long) = { tier1_frame_rbx, tier1_frame_rbp, tier1_frame_r12, tier1_frame_r13 };\n"
+    "    for (long x = 0; x < 3; x += 1)\n"
+    "    {\n"
+    "        for (int f = 0; f < 4; f += 1)\n"
+    "        {\n"
+    "            calls = x;\n"
+    "            first = 0;\n"
+    "            printf(\"%ld \", functions[f](x));\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"\\n\");\n"
     "    return 0;\n"
     "}\n";
 
@@ -1557,7 +1625,9 @@ static bool check_test_tier1_code(CheckTest* test, const char* object, uint32_t*
     {
         const X86Instruction* instruction = &records[i].instruction;
         const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
-        const bool frame = instruction->mode == BUSTER_X86_MEMORY_BASE && instruction->rm == X86_REGISTER_RSP && form == X86_FORM_LEA_R64_M;
+        // A frame address: a lea from rsp, or at rsp itself, rsp's register copy (#3149).
+        const bool frame = instruction->rm == X86_REGISTER_RSP && ((instruction->mode == BUSTER_X86_MEMORY_BASE && form == X86_FORM_LEA_R64_M) ||
+                                                                   (instruction->mode == BUSTER_X86_REGISTER_DIRECT && form == X86_FORM_MOV_R64_RM64));
         addressed += from_rip[i] != 0 || frame;
     }
     check_test_expect(test, count == 0 || (zeroing != 0 && safe), "every zeroing xor of Tier 1's code leaves no flag live, and the fixture has one");
@@ -1638,6 +1708,102 @@ static void check_test_driver_tier1_rematerialization(CheckTest* test, const cha
                " (%" PRIu64 "); %" PRIu64 " recomputed, %" PRIu64 " definitions left out, %u addresses recomputed in the loop, %u zeroing xors\n",
                path == 0 ? "vector" : "scalar", with->stores, without->stores, with->loads, without->loads, with->slots, without->slots, with->frame, without->frame,
                with->rematerializations, with->dropped, addresses[1][path], zeroing[1][path]);
+    }
+    unlink(source);
+    unlink(reference);
+}
+
+// In `object`, function `name`'s frame addresses at rsp itself: into *copies, its records that are rsp's register copy
+// (`mov r64, rsp`, 3 bytes); into *leas, its `lea r64, [rsp]`s. Whether the function decodes.
+static bool check_test_tier1_frame_copies(const char* object, const char* name, uint32_t* copies, uint32_t* leas)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_FRAME_RECORDS = 512,
+    };
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_FRAME_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_FRAME_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_FRAME_RECORDS, sizeof(uint32_t));
+    uint32_t relocations = 0;
+    const uint32_t count = records != NULL && offsets != NULL && types != NULL ? check_test_tier1_function(object, name, records, CHECK_TEST_TIER1_FRAME_RECORDS, offsets, types, &relocations) : 0;
+    *copies = 0;
+    *leas = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const X86Instruction* instruction = &records[i].instruction;
+        const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+        const bool at = instruction->rm == X86_REGISTER_RSP && instruction->displacement == 0 && instruction->index == 0;
+        *copies += at && form == X86_FORM_MOV_R64_RM64 && instruction->mode == BUSTER_X86_REGISTER_DIRECT && records[i].length == 3;
+        *leas += at && form == X86_FORM_LEA_R64_M && instruction->mode == BUSTER_X86_MEMORY_BASE;
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    return count != 0;
+}
+
+// #3149's fixture (check_test_tier1_frame_source), compiled by --tier1 --verify with and without rematerialization, into
+// an executable and into an object that cc links: each prints clang's build's output, and every function's code is
+// certified. With rematerialization each function under test recomputes its array's address at rsp by rsp's register
+// copy, 3 bytes, where a lea from rsp takes 4, and has no more `lea r64, [rsp]`s than without it (its definitions'
+// own); without it, it has no register copy of rsp.
+static void check_test_driver_tier1_frame(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const names[] = { "tier1_frame_rbx", "tier1_frame_rbp", "tier1_frame_r12", "tier1_frame_r13" };
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-frame.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-frame-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_frame_source, sizeof(check_test_tier1_frame_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[512] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the frame-address fixture runs");
+    CheckTestTier1Build builds[2] = { { 0 } };
+    uint32_t copies[2][4] = { { 0 } };
+    uint32_t leas[2][4] = { { 0 } };
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        char output[512];
+        char object[512];
+        char linked[512];
+        snprintf(output, sizeof(output), "%s/tier1-frame-%u", directory, rematerialize);
+        snprintf(object, sizeof(object), "%s/tier1-frame-%u.o", directory, rematerialize);
+        snprintf(linked, sizeof(linked), "%s/tier1-frame-%u-cc", directory, rematerialize);
+        CheckTestTier1Build object_build;
+        const bool built = check_test_tier1_build(executable, source, "", output, rematerialize != 0, false, false, false, NULL, &builds[rematerialize]);
+        const bool compiled = check_test_tier1_build(executable, source, "", object, rematerialize != 0, false, true, false, NULL, &object_build);
+        check_test_expect(test, built && compiled, "the frame-address fixture compiles by --tier1 --verify, every function Tier 1's");
+        check_test_expect(test, built && compiled && builds[rematerialize].code_certified != 0 && builds[rematerialize].code_uncertified == 0 && object_build.code_certified != 0 &&
+                                    object_build.code_uncertified == 0,
+                          "every function of the frame-address fixture has its code certified");
+        char* cc_arguments[] = { "cc", "-o", linked, object, NULL };
+        char* cc_text = NULL;
+        const bool cc_linked = compiled && check_test_driver_spawn(cc_arguments, &cc_text) == 0;
+        free(cc_text);
+        char actual[512] = { 0 };
+        char from_object[512] = { 0 };
+        check_test_expect(test, built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0, "the frame-address fixture's executable prints clang's build's output");
+        check_test_expect(test, cc_linked && check_test_driver_capture(linked, from_object, sizeof(from_object)) && strcmp(from_object, expected) == 0,
+                          "the frame-address fixture's object, linked by cc, prints clang's build's output");
+        for (uint32_t f = 0; compiled && f < BUSTER_ARRAY_LENGTH(names); f += 1)
+        {
+            check_test_expect(test, check_test_tier1_frame_copies(object, names[f], &copies[rematerialize][f], &leas[rematerialize][f]), "each function of the frame-address fixture decodes");
+        }
+        unlink(output);
+        unlink(object);
+        unlink(linked);
+    }
+    check_test_expect(test, !ran || (builds[1].rematerializations != 0 && builds[0].rematerializations == 0), "the frame-address fixture recomputes values only with rematerialization");
+    for (uint32_t f = 0; ran && f < BUSTER_ARRAY_LENGTH(names); f += 1)
+    {
+        check_test_expect(test, copies[1][f] != 0 && copies[0][f] == 0, "with rematerialization alone, each function recomputes its array's address at rsp by rsp's 3-byte register copy");
+        check_test_expect(test, leas[1][f] <= leas[0][f], "rematerialization adds no lea from rsp at rsp itself");
+        printf("  Tier 1's frame addresses at rsp (#3149), %s: %u register copies of rsp and %u leas of it (%u leas without rematerialization)\n", names[f], copies[1][f], leas[1][f],
+               leas[0][f]);
     }
     unlink(source);
     unlink(reference);
