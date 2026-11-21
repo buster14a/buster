@@ -614,6 +614,7 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
             .previous = body_columns + slots * 3,
             .case_map = case_map,
             .source_labels = body_columns + slots * 4,
+            .all_loop_targets = true,
             .stops = body_columns + slots * 5,
             .repeats = body_columns + slots * 6,
             .labels = body_columns + slots * 7,
@@ -626,6 +627,9 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
             if (roles[opening] == PARSE_ROLE_OPEN_BODY && closing < count && closing > opening)
             {
                 writer.label_count = 0;
+                writer.opening = opening;
+                writer.closing = closing;
+                writer.scalar_children = (bodies & 1) != 0;
                 check_control_children(&writer, opening, closing);
                 bodies += 1;
                 uint32_t label = 0;
@@ -652,7 +656,9 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
                     }
                     const bool labeled = token != opening && token != closing && (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE);
                     const uint32_t expected_label = labeled ? label : BUSTER_CHECK_NONE;
-                    equal = equal && writer.source_labels[token] == expected_label && writer.stops[token] == BUSTER_CHECK_NONE &&
+                    equal = equal && (labeled ? writer.source_labels[token] == expected_label : writer.source_labels[token] == UINT32_C(0xa5a5a5a5)) &&
+                            check_control_named_target(&writer, token) == (roles[token] == PARSE_ROLE_LABEL ? expected_label : BUSTER_CHECK_NONE) &&
+                            writer.stops[token] == BUSTER_CHECK_NONE &&
                             writer.repeats[token] == BUSTER_CHECK_NONE;
                     if (labeled && roles[token] == PARSE_ROLE_CLOSE_CASE)
                     {
@@ -665,6 +671,26 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
                 }
                 equal = equal && writer.label_count == label && writer.case_start == case_start && writer.case_end == case_end &&
                         program.status == CHECK_PROGRAM_OK;
+                // Exercise the other label scan with the same body. No consumer requested loop targets, so keep
+                // their poisoned entries. The relative numbers of every source label and case stay the same.
+                writer.scalar_children = !writer.scalar_children;
+                writer.all_loop_targets = false;
+                writer.stops[opening] = UINT32_C(0xa5a5a5a5);
+                writer.repeats[opening] = UINT32_C(0x5a5a5a5a);
+                writer.label_count = 0;
+                check_control_children(&writer, opening, closing);
+                uint32_t again = 0;
+                for (uint32_t token = opening + 1; token < closing; token += 1)
+                {
+                    if (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE)
+                    {
+                        equal = equal && writer.source_labels[token] == again;
+                        again += 1;
+                    }
+                }
+                equal = equal && again == label && writer.label_count == label && writer.case_start == case_start && writer.case_end == case_end &&
+                        writer.stops[opening] == UINT32_C(0xa5a5a5a5) && writer.repeats[opening] == UINT32_C(0x5a5a5a5a);
+                writer.all_loop_targets = true;
                 labels_seen += label;
             }
         }
