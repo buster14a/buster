@@ -2072,7 +2072,7 @@ static inline __attribute__((always_inline)) bool node_facts_fold(NodeFactsRecor
 
 // The first production window admits only unqualified int operands. The fold above reads signedness and the
 // result's carried word from these type rows. Its result is immediately published as a leaf, so no next rule
-// reads its word. Refuse an unbaked table; readers on other lanes never initialize shared data.
+// reads its word. The reader prepares the shared transition table once before admitting any windows.
 bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result)
 {
     static const NodeFactsRow rows[BUSTER_TYPE_CODE_INT + 1] = { [BUSTER_TYPE_CODE_INT] = { .flags = BUSTER_NODE_FACTS_SIGNED } };

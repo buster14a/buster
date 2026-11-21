@@ -509,7 +509,7 @@ static void node_machine_forget(NodeMachine* machine)
 
 // The sweeps' files' functions that this file calls: T's table, its types' completion positions and its operands' records
 // (c_check_node_machine_type.c), and the three sweeps.
-static bool node_machine_tables_initialize(void);
+bool check_node_window_prepare(void);
 static uint32_t node_machine_complete_at(const TypeTable* types, const CheckGraph* graph, TypeId type);
 static void node_machine_settle(NodeMachine* machine);
 static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_t r, uint32_t node);
@@ -603,7 +603,7 @@ static bool node_machine_setup(NodeMachine* machine, TypeTable* types, const Che
             machine->type_complete_at[index] = (word & BUSTER_NODE_MACHINE_WORD_VALID) != 0 ? node_machine_complete_at(types, graph, type) : UINT32_MAX;
         }
     }
-    return room && node_machine_tables_initialize();
+    return room && check_node_window_prepare();
 }
 
 // Whether the unit whose input is `input` and whose graph is `graph` has an overload's candidates, or will have

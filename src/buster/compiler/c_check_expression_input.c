@@ -1804,6 +1804,7 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
 // relocations. Admit them from the chunk's coded postorder and the reader's int literals, before the walk numbers
 // any of their nodes. Their return type is already bound. For other spellings or a fault the walk sees the
 // original tokens, including the original literal cursor. The node machine's fold lives in the checker unit.
+bool check_node_window_prepare(void);
 bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result);
 void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value);
 
@@ -2041,7 +2042,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     // Deferred parts publish their graphs separately; they do not own a unit's tape. A musttail check needs the
     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
     const bool window = reader->pp->options.node_window && coded && begin == 0 && stop == count && !timed && front == NULL &&
-                        reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0;
+                        reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
