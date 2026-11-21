@@ -91,8 +91,11 @@ through `testfixture` (below).
   each in a directory of its own: by clang -O0, Tier 0 and `--tier1`.
   `--tree` is `fetch-sqlite.sh`'s tree and `--tcl` the directory of Tcl 8.6's
   `tclConfig.sh` (`tools/ci/tcl-config.sh` finds it). The Makefile's
-  `CFLAGS.core=` drops `-fPIC`, which the driver refuses (#2101); its
-  `-rpath DIR` is accepted since #1854. With `--amalgamation`, each build's
+  `CFLAGS.core=` drops `-fPIC`, which the driver refused until #2101:
+  `make testfixture` is one link of the sources (`main.mk`'s
+  `T.link.tcl`), which takes `-fPIC` since, but the override stays until a
+  run with Tcl builds testfixture without it. Its `-rpath DIR` is accepted
+  since #1854. With `--amalgamation`, each build's
   generated `sqlite3.c` must be that file (the frozen corpus's is). Each
   build then runs `testfixture test/testrunner.tcl --jobs N full` in an empty
   directory: SQLite's `full` permutation is every Tcl script of `test/` and

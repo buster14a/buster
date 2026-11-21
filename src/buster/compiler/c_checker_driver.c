@@ -14840,8 +14840,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
     // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested, else,
     // where it emits code, the object and linkage options its producer doesn't implement (#1124: a command line's
-    // default visibility, per-definition sections), before any input or output is opened.
-    const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, emit_object || link);
+    // default visibility, per-definition sections), before any input or output is opened. -c's code goes into an object
+    // another link may take; a link's into its executable alone, which takes -fPIC and -fpic (#2101).
+    const CheckRequestCode request_code = link ? CHECK_REQUEST_CODE_EXECUTABLE : emit_object ? CHECK_REQUEST_CODE_OBJECT : CHECK_REQUEST_CODE_NONE;
+    const CheckRequestRefusal codegen = check_request_refusal(&request, NULL, request_code);
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
     PPOptions options = { 0 };
     const char* path = 0;
@@ -14872,7 +14874,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     parsed = parsed && dependency_check_destinations(&options.dependencies, inputs, input_count, output, emit_object, link, &arena);
     // Resolve the remaining request refusals before the archive probe or any source stream is opened: PIC/PIE,
     // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
-    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
+    const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, request_code) : codegen;
     const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
                                                tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || lanes->tier1_no_hold || tier1_schedule_seen || tier1_passes_seen);
     const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
@@ -15014,8 +15016,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
     // opened: the instrumentation's, decided from the resolved predefines rather than from an enabling option, which a
-    // later -fno-sanitize= or -fno-openmp may have cancelled, then position-independent code, the layouts and the
-    // language and target.
+    // later -fno-sanitize= or -fno-openmp may have cancelled, then position-independent code (but in a link's
+    // executable, #2101), the layouts and the language and target.
     else if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");
