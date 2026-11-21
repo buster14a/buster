@@ -9181,7 +9181,12 @@ static void check_common_switches(const Parser* parser, Preprocessor* pp, const 
         const uint32_t closer = check_common_parent(parser, token);
         const uint32_t opener = check_common_opener(parser, closer);
         const uint32_t selector = opener != BUSTER_CHECK_NONE && opener + 1 < count ? opener + 1 : BUSTER_CHECK_NONE;
-        uint32_t selector_node = input->token_nodes != NULL && selector < input->token_count ? input->token_nodes[selector] : BUSTER_CHECK_NONE;
+        // The selector's value is the operand of the condition's promotion, the POSITIVE the reader records at the
+        // condition's `)` (check_input_expression_condition), not the node of its first token: that is the selector's
+        // only where its first token is its root's, and not for `s->kind`, `e[0]`, `get()` or `(e)` (#3200). The
+        // warning stays at the first token, where clang puts it.
+        const uint32_t condition = input->token_nodes != NULL && closer < input->token_count ? input->token_nodes[closer] : BUSTER_CHECK_NONE;
+        uint32_t selector_node = condition < stream->count && stream->graph->ops[condition] == CHECK_OP_POSITIVE ? stream->graph->operand0[condition] : BUSTER_CHECK_NONE;
         // Unary +, - and ~ apply the integer promotions, so their selector operand is never the
         // enum expression Clang analyzes: only an implicit enum-to-int conversion unwraps to it.
         for (uint32_t steps = 0; selector_node < stream->count && steps < stream->count; steps += 1)

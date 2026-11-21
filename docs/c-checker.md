@@ -6972,8 +6972,11 @@ and check that file-spelled candidates and suppressed warnings do not replay his
 `while` or `?:` condition; a write in that condition is a use of the parameter,
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
-another scope resolve correctly. The return-flow walk runs for non-aggregate
-functions only where `-Wreturn-type` is enabled, or for a `noreturn` function's
+another scope resolve correctly. The selector is the operand of the condition's
+promotion (the POSITIVE at the condition's `)`), not the node of its first
+token, so `s->kind`, `e[0]`, `get()` and `(e)` warn as in clang; the warning
+stays at the first token, where clang puts it (#3200). The return-flow walk
+runs for non-aggregate functions only where `-Wreturn-type` is enabled, or for a `noreturn` function's
 independent `-Winvalid-noreturn` fall-off warning, and for them takes only the
 warning's walk: the first walk is an aggregate return's alone, whose lowering
 reads its result (#1340). The walk's per-node facts, whether an expression
