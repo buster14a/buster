@@ -4741,6 +4741,11 @@ static uint32_t check_common_scan_listed(CheckCommonScan* scan, uint32_t count)
 }
 
 // Appends the items of `selected` from `first` (16 lanes) to the scan's list.
+// Clang's MemorySanitizer expands the compress store with a temporary stack allocation.
+// Release that allocation when the store returns, even during long runs with no matches.
+#if __has_feature(memory_sanitizer)
+__attribute__((noinline))
+#endif
 static void check_common_scan_list(CheckCommonScan* scan, uint32_t first, __mmask16 selected)
 {
     const __m512i items = _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
