@@ -1502,6 +1502,11 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 1,
     },
     {
+        .name = "noreturn call when return-type warnings are disabled",
+        .source = "_Noreturn void g(void);_Noreturn void f(void){g();}\n",
+        .options = { "-Wno-return-type" },
+    },
+    {
         .name = "noreturn group disabled",
         .source = "_Noreturn void f(void){return;}\n",
         .options = { "-Wno-invalid-noreturn" },
