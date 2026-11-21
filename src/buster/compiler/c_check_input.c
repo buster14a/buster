@@ -16663,7 +16663,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                                                                               uint32_t name_count, uint8_t* syntax, uint8_t* visits)
 {
     // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
-    // __PRETTY_FUNCTION__ also sets _STRING; its comparison below gates the declaration-specifier column.
+    // The last name also gates the declaration-specifier column. Keep it in the filter of possible names.
     static const uint32_t syntax_names[] =
     {
         C_NAME_BUILTIN_VA_ARG,
@@ -16680,6 +16680,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         C_NAME_NULL_UNSPECIFIED,
         C_NAME_FUNC,
         C_NAME_FUNCTION,
+        C_NAME_PRETTY_FUNCTION,
     };
     CheckInputTokenCounts result = { 0 };
     const uint32_t count = parser->tokens.count;
@@ -16744,7 +16745,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                 {
                     matched[groups[i]] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)names[i]));
                 }
-                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
+                for (uint32_t i = 0; i + 1 < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
                 {
                     syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
                 }
