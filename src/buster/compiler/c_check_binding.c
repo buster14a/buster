@@ -279,6 +279,9 @@ static uint32_t check_input_use_events(const CBindings* events, uint32_t* list, 
     return found;
 }
 
+// Defined with the command-line mapping and diagnostic-pragma history in c_check_diagnostic.c.
+static bool check_input_unused_may_report(const Preprocessor* pp, const CheckInput* input);
+
 // -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
 // no use names. Its lexical scope decides completion; a for initializer's scope includes the entire loop statement.
 // Its three passes act at declare events alone, and read the chains' columns only at them: the vector path visits the
@@ -666,7 +669,8 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     {
         quiet_only = output->reports[r].message == CHECK_INPUT_INVALID_USE;
     }
-    if (valid && unused_columns && quiet_only && events->count != 0)
+    if (valid && unused_columns && quiet_only && events->count != 0 &&
+        (reader->pp == NULL || !reader->pp->options.published_unused_only || check_input_unused_may_report(reader->pp, output)))
     {
         uint8_t* used = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
         uint8_t* used_tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
