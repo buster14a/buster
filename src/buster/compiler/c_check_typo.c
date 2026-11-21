@@ -428,7 +428,7 @@ static uint32_t check_typo_probe_end(CheckInputReader* reader, const CheckTypoSc
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const bool synthetic = token != 0 && token + 1 < count && parser->tokens.names[token] == 0 && parser->tokens.sources != NULL &&
-                           parser->tokens.sources[token] == parser->tokens.sources[token + 1];
+                           parse_source_index(&parser->tokens, token) == parse_source_index(&parser->tokens, token + 1);
     uint32_t name_token = synthetic && parser->tokens.kinds[token - 1] == PARSE_KIND_IDENTIFIER ? token - 1 : BUSTER_CHECK_NONE;
     if (synthetic && parser->tokens.kinds[token - 1] == PARSE_KIND_R_PAREN)
     {
@@ -740,7 +740,7 @@ static CheckTypoPlace check_typo_place(const CheckInputReader* reader, uint32_t 
     // which gives it its next token's source), as after `retrn x` (ParseDiagnostic.probe).
     const uint32_t count = parser->tokens.count;
     const bool synthetic = token + 2 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_SEMI && parser->tokens.names[token + 1] == 0 &&
-                           parser->tokens.sources[token + 1] == parser->tokens.sources[token + 2];
+                           parse_source_index(&parser->tokens, token + 1) == parse_source_index(&parser->tokens, token + 2);
     const uint8_t next = token + 1 < count ? parser->tokens.kinds[token + 1 + (synthetic ? 1u : 0u)] : PARSE_KIND_END;
     const uint8_t before = token != 0 ? parser->tree.roles[token - 1] : PARSE_ROLE_COUNT;
     const bool statement = check_typo_statement_start(parser, token);
@@ -918,7 +918,7 @@ static bool check_typo_ready(CheckInputReader* reader)
 // even after rereading it as a valid builtin, keyword or type. A correction at this source is not an earlier search.
 static uint32_t check_typo_prior_searches(const Parser* parser, uint32_t token)
 {
-    const uint32_t source = parser->tokens.sources != NULL && token < parser->tokens.count ? parser->tokens.sources[token] : 0;
+    const uint32_t source = parser->tokens.sources != NULL && token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : 0;
     uint32_t begin = 0;
     uint32_t end = parser->typo_sources != NULL ? parser->typo_count : 0;
     while (begin < end)

@@ -435,7 +435,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
 - `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
 - `test-emitted-code` — `emitted_code.c` — [guide](docs/commands/emission.md).
-- `-E, parse, -fsyntax-only, -c, test-assembly-output` — `main.c` — [guide](docs/commands/driver.md).
+- `-E, parse, -fsyntax-only, -c, -S, test-assembly-output` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
 - `benchmark-floors, test-floors-input` — [guide](docs/commands/floors.md).
@@ -462,7 +462,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-oracle-cache, BUSTER_ORACLE_CACHE` — `oracle_cache.c` — [guide](docs/commands/oracle-cache.md).
 - `parallel, test-parallel, test-tool` — `parallel.c`, `test_tool.c` — [guide](docs/commands/parallel.md).
 - `test-parser, benchmark-parser` — `c_parser.c` — [guide](docs/commands/parser.md).
-- `test-preprocessor, benchmark-preprocessor` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
+- `{test,benchmark}-preprocessor, test-carets` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
 - `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` — `preprocessor_fuzz.c` — [guide](docs/commands/preprocessor-fuzz.md).
 - `ab, time-runs, test-profile` — `profile.c` — [guide](docs/commands/profiling.md).
 - `test-refinement, benchmark-refinement` — `c_intern.c` — [guide](docs/commands/refinement.md).

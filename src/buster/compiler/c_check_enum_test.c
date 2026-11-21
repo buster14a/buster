@@ -57,7 +57,7 @@ static void check_test_enum_metadata(CheckTest* test)
                 if (identifier)
                 {
                     uint8_t buffer[32];
-                    const uint32_t source = parser.tokens.sources[token];
+                    const uint32_t source = parse_source_index(&parser.tokens, token);
                     length = pp_spelling(&pp, pp.output.kinds[source], pp.output.values[source], pp.output.locations[source], buffer, &spelling);
                 }
                 if ((input.constant_warnings[token] & CHECK_WARNING_ENUM_TOO_LARGE) != 0)

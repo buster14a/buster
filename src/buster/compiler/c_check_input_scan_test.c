@@ -658,7 +658,8 @@ static void check_test_declaration_starts(CheckTest* test)
     uint8_t roles[MAXIMUM];
     uint8_t opens[MAXIMUM];
     uint32_t expected[MAXIMUM + 1];
-    uint32_t column[MAXIMUM + 1];
+    CheckDeclarationStarts column[(MAXIMUM >> 6) + 1];
+    static const uint32_t edges[] = { 0, 1, 63, 64, 65, 127, 128, 129 };
     uint32_t stack[MAXIMUM + 1];
     uint32_t differences = 0;
     // This test's own generator, so that its draws leave the default run's seed for the fixtures after it unchanged.
@@ -666,7 +667,7 @@ static void check_test_declaration_starts(CheckTest* test)
     for (uint32_t round = 0; round < 400; round += 1)
     {
         state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
-        const uint32_t count = (uint32_t)(state >> 32) % MAXIMUM;
+        const uint32_t count = round < BUSTER_ARRAY_LENGTH(edges) ? edges[round] : (uint32_t)(state >> 32) % MAXIMUM;
         uint32_t depth = 0;
         // A struct or enum body's opener follows its keyword, as every parse tree's does: no boundary is ever directly
         // followed by an opener.
@@ -709,7 +710,7 @@ static void check_test_declaration_starts(CheckTest* test)
         for (uint32_t token = 0; token <= count; token += 1)
         {
             expected[token] = check_input_declaration_begin(&parser, token);
-            differences += column[token] != expected[token];
+            differences += check_input_declaration_start_at(column, token) != expected[token];
         }
     }
     check_test_expect(test, differences == 0, "the declaration-start column gives the walk's start for every random role");
@@ -959,6 +960,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             expected.asm_groups += roles[i] == PARSE_ROLE_OPEN_ASM;
             expected.size_queries += kinds[i] == PARSE_KIND_SIZEOF;
             expected.vector_members += kinds[i] == PARSE_KIND_PERIOD && roles[i] == PARSE_ROLE_MEMBER_OPERATOR;
+            expected.pretty_function_name |= names[i] == C_NAME_PRETTY_FUNCTION;
             expected.operands += roles[i] == PARSE_ROLE_OPERAND;
             expected.calls += roles[i] == PARSE_ROLE_CLOSE_CALL || roles[i] == PARSE_ROLE_CLOSE_FUNCTION;
             // The place's and the type queries' builtins are counted in the first group, the constants', by their span of
@@ -983,7 +985,11 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         snprintf(description, sizeof(description), "token counts of %u tokens: subscripts %u (%u), operands %u (%u), group 0 %u (%u), group 3 %u (%u)",
                  count, counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
                  expected.groups[0], counts.groups[3], expected.groups[3]);
-        check_test_expect(test, memcmp(&counts, &expected, sizeof(counts)) == 0, description);
+        const bool same = counts.subscripts == expected.subscripts && counts.asms == expected.asms && counts.asm_groups == expected.asm_groups &&
+                          counts.size_queries == expected.size_queries && counts.vector_members == expected.vector_members &&
+                          counts.pretty_function_name == expected.pretty_function_name && counts.operands == expected.operands &&
+                          counts.calls == expected.calls && memcmp(counts.groups, expected.groups, sizeof(counts.groups)) == 0;
+        check_test_expect(test, same, description);
         // Each token's syntax bits, as the test reads its kind, its successor's and its name, and its mark.
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -1456,7 +1462,7 @@ static __attribute__((noinline)) void check_test_literal_values(CheckTest* test)
                 const uint32_t value = results[0].values[at];
                 // The literals' parser on the token's spelling, as check_input_literal spells it.
                 const uint32_t token = tokens[i];
-                const uint32_t source = parser.tokens.sources[token];
+                const uint32_t source = parse_source_index(&parser.tokens, token);
                 const uint8_t kind = kinds[source];
                 uint8_t spelled[24];
                 uint32_t length = 0;
