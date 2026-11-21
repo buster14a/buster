@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Original real-driver regressions for unknown warning options (#1467). Every diagnostic has an independent
-// expected name, severity and count, and Clang checks the complete text except its optional spelling suggestion.
+// Original real-driver regressions for unknown warning names (#1467) and missing capabilities (#1365). Unknown-name
+// diagnostics have independent names, severities and counts and a Clang text oracle, excluding its optional hint.
+// Capability errors have Buster's explicit refusal contract rather than an invented Clang counterpart.
 // This file is included after the CC compatibility process helpers; no production option classifier is its oracle.
 
 typedef struct CCWarningOptionCase CCWarningOptionCase;
@@ -13,6 +14,14 @@ struct CCWarningOptionCase
     uint32_t warnings;
     uint32_t errors;
     bool fatal;
+};
+
+typedef struct CCWarningCapabilityCase CCWarningCapabilityCase;
+struct CCWarningCapabilityCase
+{
+    const char* arguments[6];
+    const char* refused;
+    const char* family;
 };
 
 // Only Clang's optional hint on an unknown-option line is omitted. Keep every other byte, including the diagnosed
@@ -99,11 +108,188 @@ static void cc_warning_option_run(CCCompatibilityTest* test, const char* name, c
     }
 }
 
+// Capability errors are Buster's explicit contract, not invented Clang diagnostics. Independent spellings and
+// expected families below keep recognition and implementation separate; even a clean input must refuse a request.
+static void cc_warning_capability_run(CCCompatibilityTest* test, const char* const* options, const char* refused, const char* family)
+{
+    static const char* const actions[] =
+    {
+        "-E",
+        "-fsyntax-only",
+        "-c",
+    };
+    char expected[512] = { 0 };
+    if (refused != NULL)
+    {
+        snprintf(expected, sizeof(expected), "error: unsupported warning option '%s' (warning family '%s' is not fully implemented)\n", refused, family);
+    }
+    const size_t length = strlen(expected);
+    for (uint32_t action = 0; action < sizeof(actions) / sizeof(actions[0]); action += 1)
+    {
+        const bool kept = cc_compat_write(test, "warning-capability.out", "previous output\n") &&
+                          cc_compat_write(test, "warning-capability.d", "previous dependencies\n");
+        const char* arguments[32] =
+        {
+            actions[action],
+            "-MD",
+            "-MF",
+            "warning-capability.d",
+            "-o",
+            "warning-capability.out",
+            "-pipe",
+        };
+        uint32_t count = 7;
+        for (uint32_t i = 0; options[i] != NULL; i += 1)
+        {
+            arguments[count++] = options[i];
+        }
+        arguments[count++] = "warning-capabilities.c";
+        arguments[count] = NULL;
+        CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, arguments);
+        bool good = kept && run.errors != NULL && run.status == (refused != NULL);
+        if (refused != NULL)
+        {
+            char* output = cc_compat_read(test, "warning-capability.out");
+            char* dependencies = cc_compat_read(test, "warning-capability.d");
+            good = good && strncmp(run.errors, expected, length) == 0 && strncmp(run.errors + length, "usage: compiler ", 16) == 0 &&
+                   run.output != NULL && run.output[0] == 0 && output != NULL && strcmp(output, "previous output\n") == 0 &&
+                   dependencies != NULL && strcmp(dependencies, "previous dependencies\n") == 0;
+            free(output);
+            free(dependencies);
+        }
+        else
+        {
+            good = good && run.errors[0] == 0;
+        }
+        char description[256];
+        snprintf(description, sizeof(description), "warning capability %s, %s: status, diagnostic and preserved outputs", options[0], actions[action]);
+        cc_compat_expect(test, good, description);
+        if (!good)
+        {
+            fprintf(stderr, "  Buster status %d; expected prefix: %s  actual:\n%s", run.status, refused != NULL ? expected : "(silent success)\n", run.errors != NULL ? run.errors : "(missing)\n");
+        }
+        cc_compat_release(&run);
+    }
+}
+
+static void cc_compat_warning_capabilities(CCCompatibilityTest* test)
+{
+    static const char* const families[] =
+    {
+        "shadow",
+        "conversion",
+        "sign-conversion",
+        "unused-macros",
+        "missing-prototypes",
+        "missing-variable-declarations",
+        "strict-prototypes",
+        "undef",
+        "cast-qual",
+        "pointer-arith",
+        "switch-enum",
+        "vla",
+        "implicit-fallthrough",
+        "comma",
+        "float-equal",
+        "redundant-decls",
+        "nested-externs",
+    };
+    const bool written = cc_compat_write(test, "warning-capabilities.c", "int warning_capabilities(void);\nint warning_capabilities(void) { return 0; }\n");
+    cc_compat_expect(test, written, "write warning capability source");
+    if (written)
+    {
+        for (uint32_t f = 0; f < sizeof(families) / sizeof(families[0]); f += 1)
+        {
+            char enable[128];
+            char disable[128];
+            char error[128];
+            char demote[128];
+            snprintf(enable, sizeof(enable), "-W%s", families[f]);
+            snprintf(disable, sizeof(disable), "-Wno-%s", families[f]);
+            snprintf(error, sizeof(error), "-Werror=%s", families[f]);
+            snprintf(demote, sizeof(demote), "-Wno-error=%s", families[f]);
+            const char* positive[] = { enable, NULL };
+            const char* promoted[] = { error, NULL };
+            const char* negative[] = { disable, NULL };
+            const char* cancelled[] = { enable, disable, "-Werror", NULL };
+            const char* demoted[] = { demote, "-Werror", NULL };
+            cc_warning_capability_run(test, positive, enable, families[f]);
+            cc_warning_capability_run(test, promoted, error, families[f]);
+            cc_warning_capability_run(test, negative, NULL, NULL);
+            cc_warning_capability_run(test, cancelled, NULL, NULL);
+            cc_warning_capability_run(test, demoted, NULL, NULL);
+        }
+        static const CCWarningCapabilityCase policies[] =
+        {
+            { { "-Wshadow", "-Werror" }, "-Wshadow", "shadow" },
+            { { "-Wshadow", "-w" }, "-Wshadow", "shadow" },
+            { { "-w", "-Wshadow" }, "-Wshadow", "shadow" },
+            { { "-Wshadow", "-Wno-unknown-warning-option" }, "-Wshadow", "shadow" },
+            { { "-Wshadow", "-Wno-error=shadow" }, "-Wshadow", "shadow" },
+            { { "-Wno-shadow", "-Werror=shadow" }, "-Werror=shadow", "shadow" },
+            { { "-Werror=shadow", "-Wno-shadow" }, NULL, NULL },
+            { { "-Wfatal-errors=shadow" }, "-Wfatal-errors=shadow", "shadow" },
+            { { "-Wno-fatal-errors=shadow" }, NULL, NULL },
+            { { "-Wshadow", "-Wshadow" }, "-Wshadow", "shadow" },
+            { { "-Wshadow", "-Wno-shadow", "-Wshadow" }, "-Wshadow", "shadow" },
+            { { "-Wshadow", "-Wno-shadow-all" }, NULL, NULL },
+            { { "-Wsign-conversion", "-Wno-conversion" }, NULL, NULL },
+            { { "-Wconversion", "-Wno-sign-conversion" }, "-Wconversion", "conversion" },
+            { { "-Wshadow", "-Wconversion", "-Wno-shadow" }, "-Wconversion", "conversion" },
+            { { "-Wvla", "-Wshadow" }, "-Wvla", "vla" },
+            { { "-Wshadow", "-Wno-everything", "-Wall", "-Wextra" }, NULL, NULL },
+            { { "-Wno-everything", "-Wshadow" }, "-Wshadow", "shadow" },
+            { { "-Wall", "-Wextra", "-Werror" }, NULL, NULL },
+            { { "-I", "-Wshadow", "-Werror" }, NULL, NULL },
+            { { "-Wp,-Wshadow" }, NULL, NULL },
+            { { "-Wshadow", "-M" }, "-Wshadow", "shadow" },
+        };
+        for (uint32_t p = 0; p < sizeof(policies) / sizeof(policies[0]); p += 1)
+        {
+            cc_warning_capability_run(test, policies[p].arguments, policies[p].refused, policies[p].family);
+        }
+        // Recognition remains a separate feature query. Source mappings cannot satisfy a missing CLI capability.
+        const bool pragma = cc_compat_write(test, "warning-capabilities.c", "#pragma clang diagnostic ignored \"-Wshadow\"\n#if !__has_warning(\"-Wshadow\")\n#error lost warning recognition\n#endif\nint warning_capabilities(void);\nint warning_capabilities(void) { return 0; }\n");
+        cc_compat_expect(test, pragma, "write capability pragma and recognition source");
+        const char* ignored[] = { "-Wshadow", NULL };
+        const char* queried[] = { "-Wno-shadow", NULL };
+        cc_warning_capability_run(test, ignored, "-Wshadow", "shadow");
+        cc_warning_capability_run(test, queried, NULL, NULL);
+        const bool dash = cc_compat_write(test, "-Wshadow", "int after_dash(void);\nint after_dash(void) { return 0; }\n");
+        const char* path[] = { "-fsyntax-only", "-Werror", "-x", "c", "--", "-Wshadow", NULL };
+        CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, path);
+        cc_compat_expect(test, dash && run.status == 0 && run.errors != NULL && run.errors[0] == 0, "a post-double-dash warning spelling remains an input path");
+        cc_compat_release(&run);
+        const char* stdin_arguments[] = { "-fsyntax-only", "-Wshadow", "-x", "c", "-", NULL };
+        const bool stdin_written = cc_compat_write(test, "warning-capability-stdin.c", "#error source must not be checked\n");
+        run = cc_compat_run(test, test->compiler, "warning-capability-stdin.c", stdin_arguments);
+        cc_compat_expect(test, stdin_written && run.status != 0 && run.errors != NULL && strstr(run.errors, "unsupported warning option '-Wshadow'") != NULL &&
+                         strstr(run.errors, "source must not be checked") == NULL, "an unsupported warning request refuses stdin before source checking");
+        cc_compat_release(&run);
+        const char* deferred[] = { "-fsyntax-only", "--lanes", "2", "--deferred-bodies", "-Wshadow", "warning-capabilities.c", NULL };
+        run = cc_compat_run(test, test->compiler, NULL, deferred);
+        cc_compat_expect(test, run.status != 0 && run.errors != NULL && strstr(run.errors, "unsupported warning option '-Wshadow'") != NULL,
+                         "a deferred multi-lane command refuses an unsupported warning before scheduling");
+        cc_compat_release(&run);
+        const char* missing[] = { "-c", "-Wvla", "warning-capability-missing.c", "-o", "warning-capability-new.o", "-MD", NULL };
+        run = cc_compat_run(test, test->compiler, NULL, missing);
+        char object_path[PATH_MAX];
+        char dependency_path[PATH_MAX];
+        snprintf(object_path, sizeof(object_path), "%s/warning-capability-new.o", test->directory);
+        snprintf(dependency_path, sizeof(dependency_path), "%s/warning-capability-new.d", test->directory);
+        cc_compat_expect(test, run.status != 0 && run.errors != NULL && strstr(run.errors, "unsupported warning option '-Wvla'") != NULL &&
+                         access(object_path, F_OK) != 0 && access(dependency_path, F_OK) != 0,
+                         "a capability refusal precedes input access and publishes no new object or dependencies");
+        cc_compat_release(&run);
+    }
+}
+
 static void cc_compat_warning_options(CCCompatibilityTest* test)
 {
     static const char source[] = "int warning_options(void);\nint warning_options(void) { return 0; }\n";
     const bool written = cc_compat_write(test, "warning-options.c", source);
     cc_compat_expect(test, written, "write warning option fixture");
+    cc_compat_warning_capabilities(test);
     if (written)
     {
         static const CCWarningOptionCase unknown[] =
@@ -448,16 +634,16 @@ static void cc_compat_warning_options(CCCompatibilityTest* test)
                 cc_warning_option_run(test, name, arguments, "unknown warning option '-Wbuster-unknown-1467'", entry->warnings, entry->errors, entry->fatal);
             }
         }
-        // Known-but-unimplemented warnings (#1365), numerical driver spellings and compatibility aliases remain
-        // distinct from unknown names. All are clean on this source, including with -Werror.
+        // Disabling/demotion controls for recognized-only families remain distinct from unknown names (#1365).
+        // The capability tests separately require explicit refusal for their positive requests.
         const char* known[] =
         {
             "-Werror",
-            "-Wshadow",
-            "-Wconversion",
-            "-Wvla",
-            "-Wimplicit-fallthrough",
-            "-Werror=shadow",
+            "-Wno-shadow",
+            "-Wno-conversion",
+            "-Wno-vla",
+            "-Wno-implicit-fallthrough",
+            "-Wno-error=shadow",
             "-Wno-error=conversion",
             "-Wlarger-than=42",
             "-Wlarger-than-42",

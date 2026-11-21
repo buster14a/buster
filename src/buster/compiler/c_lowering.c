@@ -296,9 +296,6 @@ static CLoweringStatus c_lowering_scalar(CLowering* plan, CLoweringMode mode);
 
 static CLoweringStatus c_lowering_vector(CLowering* plan, CLoweringMode mode)
 {
-#if !BUSTER_HOST_VECTOR
-    return c_lowering_scalar(plan, mode);
-#else
     CLoweringStatus status = C_LOWERING_INVALID;
     if (plan != 0 && plan->prepared && (mode == C_LOWERING_REACHABLE || mode == C_LOWERING_ALL))
     {
@@ -373,7 +370,6 @@ static CLoweringStatus c_lowering_vector(CLowering* plan, CLoweringMode mode)
         status = C_LOWERING_OK;
     }
     return status;
-#endif
 }
 
 static CLoweringStatus c_lowering_scalar(CLowering* plan, CLoweringMode mode)

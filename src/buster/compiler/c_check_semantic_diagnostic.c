@@ -433,6 +433,20 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
             "variable '%.*s' with type %.*s has incompatible initializer of type %.*s", (int)name.length, name.pointer,
             (int)type.length, type.pointer, (int)initializer.length, initializer.pointer);
     }
+    else if ((report->message == CHECK_INPUT_AUTO_TYPE_MISMATCH || report->message == CHECK_INPUT_AUTO_DEDUCED_MISMATCH) && report->type != 0 &&
+             report->subject != 0 && report->subject - 1 < count && report->detail < count)
+    {
+        // Two declarators' deductions that differ (#1844), each type as its initializer spells it, each declarator named.
+        const String8 first = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+        const String8 second = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, (uint32_t)(report->value >> 32));
+        const String8 first_name = check_semantic_name(parser, pp, report->subject - 1);
+        const String8 second_name = check_semantic_name(parser, pp, report->detail);
+        result = first.length == 0 || second.length == 0 || first_name.length == 0 || second_name.length == 0 ? NULL :
+                 check_warning_text(scratch, "'%s' deduced as %.*s in declaration of '%.*s' and deduced as %.*s in declaration of '%.*s'",
+                                    report->message == CHECK_INPUT_AUTO_TYPE_MISMATCH ? "__auto_type" : "auto", (int)first.length, first.pointer,
+                                    (int)first_name.length, first_name.pointer, (int)second.length, second.pointer, (int)second_name.length,
+                                    second_name.pointer);
+    }
     else if (report->message == CHECK_INPUT_AUTO_TYPE_INITIALIZER && report->type != 0 && name.length != 0)
     {
         const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, token, scratch);
@@ -930,8 +944,9 @@ static const char* check_semantic_escape(uint32_t unit)
 
 // A token's replacement as clang's StmtPrinter prints its node (#1447): an integer literal's value in decimal with its
 // type's suffix, a floating one's APFloat digits with a `.` where they have none and its type's suffix, a character
-// one's prefix and its value, escaped; a sizeof's or an alignof's keyword. NULL keeps the token as written (true, false,
-// an imaginary literal).
+// one's prefix and its value, escaped; a sizeof's or an alignof's keyword; an imaginary literal's imaginary part printed
+// so, then `i` (#2219: 5iwb is 5wbi, 0x10i is 16i), as ImaginaryLiteral prints its subexpression. NULL keeps the token as
+// written (true, false, a literal past 128 bits).
 static const char* check_semantic_literal_spelling(const Parser* parser, Preprocessor* pp, const TypeTable* types, const CheckGraph* graph,
                                                    const CheckStream* stream, uint32_t node, Arena* scratch)
 {
@@ -939,7 +954,10 @@ static const char* check_semantic_literal_spelling(const Parser* parser, Preproc
     const uint8_t kind = parser->tokens.kinds[token];
     const CheckOp op = graph->ops[node];
     const bool query = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF;
-    const CheckValue value = check_stream_value(stream, node);
+    const CheckValue literal = check_stream_value(stream, node);
+    const bool imaginary = kind == PARSE_KIND_NUMBER && literal.constant_kind == CHECK_CONSTANT_COMPLEX && type_is_valid(types, literal.type);
+    const CheckValue value = imaginary ? check_complex_component(types, &literal, true) : literal;
+    const char* unit = imaginary ? "i" : "";
     const TypeId type = value.type != 0 ? type_unqualified(type_strip_aligned(types, value.type)) : 0;
     uint32_t width = 0;
     bool is_signed = false;
@@ -967,7 +985,7 @@ static const char* check_semantic_literal_spelling(const Parser* parser, Preproc
         if (suffix != NULL && width <= 128)
         {
             check_common_number(text, sizeof(text), negative ? (__int128)(bits | ~mask) : (__int128)bits);
-            result = check_warning_text(scratch, "%s%s", text, suffix);
+            result = check_warning_text(scratch, "%s%s%s", text, suffix, unit);
         }
     }
     else if (kind == PARSE_KIND_NUMBER && check_semantic_floating_text(text, sizeof(text), type, &value))
@@ -975,7 +993,7 @@ static const char* check_semantic_literal_spelling(const Parser* parser, Preproc
         const char* suffix = type == BUSTER_TYPE_FLOAT ? "F" : type == BUSTER_TYPE_LONG_DOUBLE ? "L" : type == BUSTER_TYPE_FLOAT128 ? "Q" :
                              type == BUSTER_TYPE_FLOAT16 ? "F16" : "";
         const bool digits = strspn(text, "-0123456789") == strlen(text);
-        result = check_warning_text(scratch, "%s%s%s", text, digits ? "." : "", suffix);
+        result = check_warning_text(scratch, "%s%s%s%s", text, digits ? "." : "", suffix, unit);
     }
     else if (kind == PARSE_KIND_CHARACTER && integer)
     {
@@ -1630,6 +1648,59 @@ static uint32_t check_semantic_member_token(const Parser* parser, const CheckInp
                  input->declaration_kinds[t] == C_BINDING_TYPEDEF ? t : BUSTER_CHECK_NONE;
     }
     return result;
+}
+
+// The member an initializer's subobject of type `target` at bit `offset` of an `object` is, where it is one (#1842's 3c:
+// a counted_by family member's sugar), as check_semantic_subobject_spelling walks to it; 0 for an element or none.
+static uint32_t check_semantic_subobject_member(const TypeTable* types, TypeId object, uint64_t offset, TypeId target)
+{
+    const TypeId wanted = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
+    TypeId level = object;
+    uint32_t member = 0;
+    bool reached = false;
+    bool walking = wanted != 0 && type_is_valid(types, object);
+    for (uint32_t depth = 0; walking && depth < 32; depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        reached = bare == wanted && offset == 0;
+        walking = !reached;
+        if (walking && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY))
+        {
+            const TypeId element = type_element(types, bare);
+            const uint64_t bits = type_size(types, element) * 8;
+            walking = bits != 0;
+            offset = bits != 0 ? offset % bits : offset;
+            level = element;
+            member = 0;
+        }
+        else if (walking && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
+        {
+            const uint32_t tag = types->types.index[type_index(bare)];
+            const uint32_t begin = tag < types->tags.count ? types->tags.member_begin[tag] : 0;
+            const uint32_t count = tag < types->tags.count ? types->tags.member_count[tag] : 0;
+            uint32_t found = 0;
+            for (uint32_t m = begin; m < begin + count; m += 1)
+            {
+                const TypeId member_type = types->members.type[m];
+                const uint64_t start = types->members.offset[m];
+                const uint64_t width = (types->members.flags[m] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 ? types->members.bit_width[m] : type_size(types, member_type) * 8;
+                const bool holds = start <= offset && offset - start < (width != 0 ? width : 1);
+                const bool exact = holds && type_unqualified(type_strip_aligned(types, member_type)) == wanted && offset == start;
+                found = found == 0 && holds && (kind == BUSTER_TYPE_KIND_STRUCT || exact) ? m : found;
+                found = kind == BUSTER_TYPE_KIND_UNION && exact && found == 0 ? m : found;
+            }
+            walking = found != 0;
+            offset -= found != 0 ? types->members.offset[found] : 0;
+            level = found != 0 ? types->members.type[found] : level;
+            member = found;
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    return reached ? member : 0;
 }
 
 // The typedef that spells the subobject an initializer's value converts to (#1447): from the initialized object's type
@@ -2615,6 +2686,103 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     return result;
 }
 
+// Record `record`'s name as clang qualifies a member with it (#1842's 3d, 'B::p'): its tag's, or, for an anonymous record,
+// the name of the typedef that names it (its name for linkage purposes); empty for none.
+static String8 check_semantic_record_name(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, TypeId record)
+{
+    const TypeId bare = record != 0 ? type_unqualified(type_strip_aligned(types, record)) : 0;
+    const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+    const uint32_t tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ? types->types.index[type_index(bare)] : types->tags.count;
+    uint32_t name = tag < types->tags.count ? types->tags.name[tag] : 0;
+    for (uint32_t t = 0; tag < types->tags.count && name == 0 && t < input->token_count; t += 1)
+    {
+        name = input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_TYPEDEF && type_unqualified(input->declared_types[t]) == bare ?
+               parser->tokens.names[t] : 0;
+    }
+    return name != 0 ? check_driver_warning_name(pp, name) : (String8){ 0 };
+}
+
+// The notes of clang's errors for counted_by or counted_by_or_null (`kind`) pointer member `member` whose pointee
+// `pointee` (spelled `incomplete`) is incomplete (#1842's 3d): "consider providing a complete definition for 'struct Inc'"
+// at the pointee's forward declaration's keyword, and "consider using '__sized_by' instead of '__counted_by'" at the
+// count's name in the member's attribute.
+static void check_semantic_counted_notes(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, uint32_t member, uint32_t kind,
+                                         TypeId pointee, String8 incomplete, PPOutputDiagnosticNote* note, uint32_t* note_count, Arena* scratch)
+{
+    const char* name = kind == BUSTER_TYPE_COUNTED_BY ? "counted_by" : "counted_by_or_null";
+    const TypeId bare = type_unqualified(type_strip_aligned(types, pointee));
+    const uint8_t bare_kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+    const uint32_t bare_tag = bare_kind == BUSTER_TYPE_KIND_STRUCT || bare_kind == BUSTER_TYPE_KIND_UNION ? types->types.index[type_index(bare)] : types->tags.count;
+    const uint32_t bare_name = bare_tag < types->tags.count ? types->tags.name[bare_tag] : 0;
+    uint32_t declared = BUSTER_CHECK_NONE;
+    for (uint32_t t = 0; bare_name != 0 && declared == BUSTER_CHECK_NONE && t < input->token_count; t += 1)
+    {
+        declared = parser->tokens.names[t] == bare_name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_TAG_KIND &&
+                   type_unqualified(input->declared_types[t]) == bare ? t : BUSTER_CHECK_NONE;
+    }
+    const uint32_t keyword = declared != BUSTER_CHECK_NONE && declared > 0 && parser->tokens.kinds[declared - 1] == PARSE_KIND_STRUCT ? declared - 1 : declared;
+    if (keyword != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
+    {
+        note[(*note_count)++] = (PPOutputDiagnosticNote){
+            .token = parser->tokens.sources[keyword],
+            .message = check_warning_text(scratch, "consider providing a complete definition for %.*s", (int)incomplete.length, incomplete.pointer),
+        };
+    }
+    const uint32_t declarator = check_semantic_member_token(parser, input, types, member);
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    if (declarator < parser->tokens.count)
+    {
+        check_driver_place_extent(parser, declarator, &begin, &end);
+    }
+    uint32_t count = BUSTER_CHECK_NONE;
+    for (uint32_t t = begin; count == BUSTER_CHECK_NONE && t + 3 < end; t += 1)
+    {
+        String8 spelled = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[t]) : (String8){ 0 };
+        const bool underscored = spelled.length > 4 && memcmp(spelled.pointer, "__", 2) == 0 && memcmp(spelled.pointer + spelled.length - 2, "__", 2) == 0;
+        spelled = underscored ? (String8){ .pointer = spelled.pointer + 2, .length = spelled.length - 4 } : spelled;
+        const bool attribute = spelled.length == strlen(name) && memcmp(spelled.pointer, name, spelled.length) == 0 && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN;
+        count = attribute ? t + 2 : BUSTER_CHECK_NONE;
+    }
+    if (count != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
+    {
+        note[(*note_count)++] = (PPOutputDiagnosticNote){
+            .token = parser->tokens.sources[count],
+            .message = check_warning_text(scratch, "consider using '__%s' instead of '__%s'", kind == BUSTER_TYPE_COUNTED_BY ? "sized_by" : "sized_by_or_null", name),
+        };
+    }
+}
+
+// clang's error for an initialization of counted_by or counted_by_or_null pointer member `member` of record `record`
+// whose pointee is incomplete (#1842's 3d, CheckInitCountedError, BoundsSafetyCheckInitialization's): "cannot initialize
+// 'B::p' with '__counted_by' attributed type 'struct Inc * __counted_by(n)' (aka 'struct Inc *') because the pointee type
+// 'struct Inc' is incomplete" at a value it takes, "cannot implicitly initialize ..." where its list leaves it out, with
+// check_semantic_counted_notes' notes. NULL where the member can't be spelled.
+static const char* check_semantic_counted_initialization(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                         CheckWarningSpelling* spell, uint32_t member, TypeId record, bool implicit, PPOutputDiagnosticNote* note,
+                                                         uint32_t* note_count, Arena* scratch)
+{
+    const uint32_t kind = member != 0 && member < types->members.count ?
+                          (types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) >> BUSTER_TYPE_MEMBER_COUNT_SHIFT : BUSTER_TYPE_COUNT_NONE;
+    const bool counted = kind == BUSTER_TYPE_COUNTED_BY || kind == BUSTER_TYPE_COUNTED_BY_OR_NULL;
+    const TypeId pointer = counted ? type_strip_aligned(types, types->members.type[member]) : 0;
+    const TypeId pointee = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_element(types, pointer) : 0;
+    const String8 written = pointee != 0 ? check_driver_counted_member_type(parser, pp, input, types, spell, scratch, member, 0, pointer) : (String8){ 0 };
+    const String8 incomplete = written.length != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, 0) : (String8){ 0 };
+    const String8 record_name = written.length != 0 ? check_semantic_record_name(parser, pp, input, types, record) : (String8){ 0 };
+    const String8 member_name = counted ? check_driver_warning_name(pp, types->members.name[member]) : (String8){ 0 };
+    const char* result = NULL;
+    if (written.length != 0 && incomplete.length != 0 && record_name.length != 0 && member_name.length != 0)
+    {
+        result = check_warning_text(scratch, "cannot %sinitialize '%.*s::%.*s' with '__%s' attributed type %.*s because the pointee type %.*s is incomplete",
+                                    implicit ? "implicitly " : "", (int)record_name.length, record_name.pointer, (int)member_name.length, member_name.pointer,
+                                    kind == BUSTER_TYPE_COUNTED_BY ? "counted_by" : "counted_by_or_null", (int)written.length, written.pointer, (int)incomplete.length,
+                                    incomplete.pointer);
+        check_semantic_counted_notes(parser, pp, input, types, member, kind, pointee, incomplete, note, note_count, scratch);
+    }
+    return result;
+}
+
 // A use of a counted_by or counted_by_or_null pointer member whose pointee type is incomplete (#1842's 3d,
 // CHECK_DIAG_COUNTED_INCOMPLETE), worded and placed as clang's: "cannot use 'b->p' with '__counted_by' attributed type
 // 'struct Inc * __counted_by(n)' (aka 'struct Inc *') because the pointee type 'struct Inc' is incomplete" at the member's
@@ -2643,9 +2811,7 @@ static const char* check_semantic_counted_incomplete(const Parser* parser, Prepr
     const char* used = written.length != 0 && !assigned ? check_semantic_requirement(parser, pp, first, last + 1, NULL, scratch) : NULL;
     const TypeId record = assigned && written.length != 0 ? type_unqualified(type_strip_aligned(types, graph->ops[node] == CHECK_OP_ARROW ?
                           type_element(types, type_strip_aligned(types, check_stream_type(stream, graph->operand0[node]))) : check_stream_type(stream, graph->operand0[node]))) : 0;
-    const uint32_t tag = record != 0 ? types->types.index[type_index(record)] : 0;
-    const uint32_t tag_name = record != 0 && tag < types->tags.count ? types->tags.name[tag] : 0;
-    const String8 record_name = tag_name != 0 ? check_driver_warning_name(pp, tag_name) : (String8){ 0 };
+    const String8 record_name = record != 0 ? check_semantic_record_name(parser, pp, input, types, record) : (String8){ 0 };
     const String8 member_name = member != 0 ? check_driver_warning_name(pp, types->members.name[member]) : (String8){ 0 };
     if (used != NULL)
     {
@@ -2660,47 +2826,9 @@ static const char* check_semantic_counted_incomplete(const Parser* parser, Prepr
                                     (int)incomplete.length, incomplete.pointer);
         *location = report->token;
     }
-    // The notes: the pointee's forward declaration's keyword, and the count's name in the member's attribute.
-    const TypeId bare = result != NULL ? type_unqualified(type_strip_aligned(types, pointee)) : 0;
-    const uint8_t bare_kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
-    const uint32_t bare_tag = bare_kind == BUSTER_TYPE_KIND_STRUCT || bare_kind == BUSTER_TYPE_KIND_UNION ? types->types.index[type_index(bare)] : types->tags.count;
-    const uint32_t bare_name = bare_tag < types->tags.count ? types->tags.name[bare_tag] : 0;
-    uint32_t declared = BUSTER_CHECK_NONE;
-    for (uint32_t t = 0; bare_name != 0 && declared == BUSTER_CHECK_NONE && t < input->token_count; t += 1)
+    if (result != NULL)
     {
-        declared = parser->tokens.names[t] == bare_name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_TAG_KIND &&
-                   type_unqualified(input->declared_types[t]) == bare ? t : BUSTER_CHECK_NONE;
-    }
-    const uint32_t keyword = declared != BUSTER_CHECK_NONE && declared > 0 && parser->tokens.kinds[declared - 1] == PARSE_KIND_STRUCT ? declared - 1 : declared;
-    if (keyword != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
-    {
-        note[(*note_count)++] = (PPOutputDiagnosticNote){
-            .token = parser->tokens.sources[keyword],
-            .message = check_warning_text(scratch, "consider providing a complete definition for %.*s", (int)incomplete.length, incomplete.pointer),
-        };
-    }
-    const uint32_t declarator = result != NULL ? check_semantic_member_token(parser, input, types, member) : BUSTER_CHECK_NONE;
-    uint32_t begin = 0;
-    uint32_t end = 0;
-    if (declarator < parser->tokens.count)
-    {
-        check_driver_place_extent(parser, declarator, &begin, &end);
-    }
-    uint32_t count = BUSTER_CHECK_NONE;
-    for (uint32_t t = begin; count == BUSTER_CHECK_NONE && t + 3 < end; t += 1)
-    {
-        String8 spelled = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[t]) : (String8){ 0 };
-        const bool underscored = spelled.length > 4 && memcmp(spelled.pointer, "__", 2) == 0 && memcmp(spelled.pointer + spelled.length - 2, "__", 2) == 0;
-        spelled = underscored ? (String8){ .pointer = spelled.pointer + 2, .length = spelled.length - 4 } : spelled;
-        const bool attribute = spelled.length == strlen(name) && memcmp(spelled.pointer, name, spelled.length) == 0 && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN;
-        count = attribute ? t + 2 : BUSTER_CHECK_NONE;
-    }
-    if (count != BUSTER_CHECK_NONE && *note_count < BUSTER_CHECK_SEMANTIC_NOTES)
-    {
-        note[(*note_count)++] = (PPOutputDiagnosticNote){
-            .token = parser->tokens.sources[count],
-            .message = check_warning_text(scratch, "consider using '__%s' instead of '__%s'", kind == BUSTER_TYPE_COUNTED_BY ? "sized_by" : "sized_by_or_null", name),
-        };
+        check_semantic_counted_notes(parser, pp, input, types, member, kind, pointee, incomplete, note, note_count, scratch);
     }
     return result;
 }
@@ -3008,7 +3136,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                                     check_graph_context_value(types, graph, stream, node) : (CheckValue){ 0 };
         if (asserted.type != 0 && !check_graph_constant_type(types, BUSTER_CHECK_CONTEXT_ASSERT, asserted.type))
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, asserted.type,
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, asserted.type, node,
                                                            check_semantic_operator_spelling(parser, input, stream, types, node));
             result = type.length != 0 ? check_warning_text(scratch, "value of type %.*s is not contextually convertible to 'bool'", (int)type.length, type.pointer) : NULL;
             const uint32_t keyword = check_semantic_assertion_keyword(parser, graph->tokens[node]);
@@ -3062,7 +3190,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool suggestion = pointee == BUSTER_TYPE_KIND_STRUCT || pointee == BUSTER_TYPE_KIND_UNION;
             const uint32_t direct = op == CHECK_OP_MEMBER && !aggregate ? check_input_operand_type_spelling(input, parser, operand) : 0;
             const uint32_t spelling = direct != 0 ? direct : !aggregate ? check_semantic_operand_spelling(parser, input, stream, types, operand) : 0;
-            const String8 type = check_semantic_vector_type(parser, pp, input, stream, types, spell, scratch, aggregate ? type_unqualified(record) : record, spelling, operand);
+            // A `.` of a counted_by family member keeps its sugar (#1842's 3c).
+            const String8 counted = op == CHECK_OP_MEMBER && !aggregate ? check_driver_counted_operand_type(parser, pp, input, stream, types, spell, scratch, record, operand) :
+                                    (String8){ 0 };
+            const String8 type = counted.length != 0 ? counted :
+                                 check_semantic_vector_type(parser, pp, input, stream, types, spell, scratch, aggregate ? type_unqualified(record) : record, spelling, operand);
             *location = aggregate ? token + 1 : token;
             result = type.length == 0 ? NULL :
                      aggregate ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) :
@@ -3109,7 +3241,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         {
             // A switch's condition of no arithmetic type, which its promotion (a unary plus) refuses: clang's
             // err_typecheck_statement_requires_integer at the switch (#1447), as check_semantic_constraint's.
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_value_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             *location = check_semantic_switch(parser, graph->tokens[node]);
             result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of integer type (%.*s invalid)", (int)type.length, type.pointer) :
@@ -3118,20 +3250,20 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         else if ((report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED ||
                   report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED) && op >= CHECK_OP_POSITIVE && op <= CHECK_OP_BIT_NOT && operand_type != 0)
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_value_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "invalid argument type %.*s to unary expression", (int)type.length, type.pointer) : NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED && op == CHECK_OP_CONDITION && operand_type != 0)
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_value_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of scalar type (%.*s invalid)", (int)type.length, type.pointer) : NULL;
             *location = check_semantic_condition_keyword(parser, graph->tokens[node]);
         }
         else if (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED && op == CHECK_OP_CONDITIONAL && operand_type != 0)
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_value_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "used type %.*s where arithmetic or pointer type is required", (int)type.length, type.pointer) : NULL;
             *location = check_semantic_conditional_question(parser, graph->tokens[node]);
@@ -3141,11 +3273,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         {
             const uint32_t first = graph->operand1[node];
             const uint32_t second = graph->operand2[node];
-            const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch,
-                                                           check_semantic_operand_value_type(types, stream, node, 1, check_stream_type(stream, first)),
+            const String8 left = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch,
+                                                           check_semantic_operand_value_type(types, stream, node, 1, check_stream_type(stream, first)), first,
                                                            check_semantic_operator_spelling(parser, input, stream, types, first));
-            const String8 right = check_driver_warning_type(parser, pp, input, types, spell, scratch,
-                                                            check_semantic_operand_value_type(types, stream, node, 2, check_stream_type(stream, second)),
+            const String8 right = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch,
+                                                            check_semantic_operand_value_type(types, stream, node, 2, check_stream_type(stream, second)), second,
                                                             check_semantic_operator_spelling(parser, input, stream, types, second));
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "incompatible operand types (%.*s and %.*s)",
                                                                                (int)left.length, left.pointer, (int)right.length, right.pointer) : NULL;
@@ -3163,11 +3295,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             // their conversions (an array's, a qualified lvalue's, a typedef's), at the operator, the report's token. A
             // vector's operands have clang's vector errors.
             const uint32_t second = graph->operand1[node];
-            const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
+            const String8 left = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             const String8 right = check_semantic_repeated_type(operand_type, left, check_stream_type(stream, second),
-                                                              check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, second),
-                                                                                        check_semantic_operator_spelling(parser, input, stream, types, second)));
+                                                              check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, check_stream_type(stream, second),
+                                                                                        second, check_semantic_operator_spelling(parser, input, stream, types, second)));
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "invalid operands to binary expression (%.*s and %.*s)", (int)left.length,
                                                                                 left.pointer, (int)right.length, right.pointer) : NULL;
         }
@@ -3215,9 +3347,9 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         {
             // clang's err_typecheck_sub_ptr_compatible (#1872): two pointers to incompatible types, as written.
             const uint32_t second = graph->operand1[node];
-            const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
+            const String8 left = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_type, operand,
                                                            check_semantic_operand_spelling(parser, input, stream, types, operand));
-            const String8 right = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, second),
+            const String8 right = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, check_stream_type(stream, second), second,
                                                             check_semantic_operand_spelling(parser, input, stream, types, second));
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "%.*s and %.*s are not pointers to compatible types", (int)left.length,
                                                                                 left.pointer, (int)right.length, right.pointer) : NULL;
@@ -3229,7 +3361,8 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             // an _Atomic one's value type.
             const TypeId stripped = type_strip_aligned(types, operand_type);
             const TypeId value = type_kind(types, stripped) == BUSTER_TYPE_KIND_ATOMIC ? types->types.base[type_index(stripped)] : operand_type;
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, check_semantic_operand_spelling(parser, input, stream, types, operand));
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, value, operand,
+                                                           check_semantic_operand_spelling(parser, input, stream, types, operand));
             const bool up = op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT;
             result = type.length != 0 ? check_warning_text(scratch, "cannot %s value of type %.*s", up ? "increment" : "decrement", (int)type.length, type.pointer) : NULL;
         }
@@ -3279,7 +3412,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         }
         else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_DEREFERENCE && operand_type != 0)
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_value_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "indirection requires pointer operand (%.*s invalid)", (int)type.length, type.pointer) : NULL;
         }
@@ -3318,7 +3451,8 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[type_name] : 0;
                 spelling = resolved != 0 && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF ? resolved : 0;
             }
-            const String8 type = named != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, named, spelling) : (String8){ "", 0 };
+            const String8 type = named != 0 ? check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, named, expression ? operand : BUSTER_CHECK_NONE,
+                                                                        spelling) : (String8){ "", 0 };
             const uint32_t keyword = parser->tokens.names[token];
             const char* word = op == CHECK_OP_SIZEOF ? "sizeof" : keyword == C_NAME_ALIGNOF_C11 || keyword == C_NAME_ALIGNOF ? "alignof" : "__alignof";
             if (type.length != 0)
@@ -3338,7 +3472,8 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool decays = type_kind_is_array(callee_kind) || callee_kind == BUSTER_TYPE_KIND_FUNCTION;
             const TypeId plain = decays ? operand_type : type_unqualified(operand_type);
             const TypeId loaded = !decays && type_kind(types, plain) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(types->types.base[type_index(plain)]) : plain;
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, loaded, check_semantic_operand_spelling(parser, input, stream, types, operand));
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, loaded, operand,
+                                                           check_semantic_operand_spelling(parser, input, stream, types, operand));
             uint32_t open = token;
             while (open != 0 && open < parser->tokens.count && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
             {
@@ -3373,7 +3508,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         }
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED && op == CHECK_OP_ADDRESS && operand_type != 0)
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_type, operand,
                                                            check_semantic_operator_spelling(parser, input, stream, types, operand));
             result = type.length != 0 ? check_warning_text(scratch, "cannot take the address of an rvalue of type %.*s", (int)type.length, type.pointer) : NULL;
         }
@@ -3401,7 +3536,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         }
         else if (report->diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED && operand_type != 0)
         {
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type, 0);
+            const String8 type = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, operand_type, operand, 0);
             const uint8_t kind = check_action_kind(types, operand_type);
             if (type_kind_is_array(kind))
             {

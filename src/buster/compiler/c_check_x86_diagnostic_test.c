@@ -1233,39 +1233,59 @@ static void check_test_x86_diagnostics(CheckTest* test, TypeTable* types, const 
     const char prefix[] = "typedef char V __attribute__((vector_size(16)));\n"
                           "typedef char W __attribute__((vector_size(64)));\n"
                           "#define BAD __builtin_ia32_cmpb128_mask(a,a,8,65535)\n";
+    // A selection's token at every lane of the reader's 16-token scans (check_input_x86_contexts, #2924): these fixtures
+    // again with 1 to 15 empty statements opening the body. None has a hard column.
+    static const char* const swept[] = { "dead unselected choose", "unselected choose after return", "dead sizeof unselected choose",
+                                         "typeof unselected choose", "unselected generic association" };
+    uint32_t sweeps = 0;
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
-        char source[2048];
-        const int length = snprintf(source, sizeof(source), "%s%s\n", prefix, fixtures[i].source);
-        const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
-        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", fixtures[i].quiet ? "-w" : "-fsyntax-only", path, NULL };
-        const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
-        const CheckX86TestDiagnostic oracle = check_test_x86_diagnostic_read(errors, true);
-        char description[512];
-        snprintf(description, sizeof(description), "x86 %s: Clang status %d/ranges %u, expected %u/%u", fixtures[i].name,
-                 oracle_status, oracle.count, fixtures[i].rejected, fixtures[i].diagnostics);
-        check_test_expect(test, oracle_status == (fixtures[i].rejected ? 1 : 0) && oracle.count == fixtures[i].diagnostics, description);
-        if (fixtures[i].hard_column != 0)
+        bool sweep = false;
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(swept); s += 1)
         {
-            check_test_x86_hard_diagnostic(test, errors, fixtures[i].name, "Clang", fixtures[i].hard_column);
+            sweep |= strcmp(fixtures[i].name, swept[s]) == 0;
         }
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        sweeps += sweep;
+        const char* body = strchr(fixtures[i].source, '{');
+        const int opening = body != NULL ? (int)(body - fixtures[i].source) + 1 : (int)strlen(fixtures[i].source);
+        for (uint32_t pad = 0; pad < (sweep ? 16u : 1u); pad += 1)
         {
-            const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].quiet ? "-w" : NULL) : -1;
-            const CheckX86TestDiagnostic actual = check_test_x86_diagnostic_read(errors, true);
-            const bool same = status == oracle_status && actual.count == oracle.count &&
-                              (actual.count == 0 || (actual.line == oracle.line && actual.column == oracle.column &&
-                               actual.error == oracle.error && strcmp(actual.message, oracle.message) == 0));
-            snprintf(description, sizeof(description), "x86 %s, scalar %u: status %d/ranges %u at %u:%u, Clang %d/%u at %u:%u: %.200s",
-                     fixtures[i].name, scalar, status, actual.count, actual.line, actual.column, oracle_status, oracle.count,
-                     oracle.line, oracle.column, actual.message);
-            check_test_expect(test, same, description);
+            char name[192];
+            snprintf(name, sizeof(name), pad != 0 ? "%s, %u empty statements first" : "%s", fixtures[i].name, pad);
+            char source[2048];
+            const int length = snprintf(source, sizeof(source), "%s%.*s%.*s%s\n", prefix, opening, fixtures[i].source, (int)pad, ";;;;;;;;;;;;;;;",
+                                        fixtures[i].source + opening);
+            const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
+            char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", fixtures[i].quiet ? "-w" : "-fsyntax-only", path, NULL };
+            const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
+            const CheckX86TestDiagnostic oracle = check_test_x86_diagnostic_read(errors, true);
+            char description[512];
+            snprintf(description, sizeof(description), "x86 %s: Clang status %d/ranges %u, expected %u/%u", name,
+                     oracle_status, oracle.count, fixtures[i].rejected, fixtures[i].diagnostics);
+            check_test_expect(test, oracle_status == (fixtures[i].rejected ? 1 : 0) && oracle.count == fixtures[i].diagnostics, description);
             if (fixtures[i].hard_column != 0)
             {
-                check_test_x86_hard_diagnostic(test, errors, fixtures[i].name, scalar ? "scalar" : "vector", fixtures[i].hard_column);
+                check_test_x86_hard_diagnostic(test, errors, name, "Clang", fixtures[i].hard_column);
+            }
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].quiet ? "-w" : NULL) : -1;
+                const CheckX86TestDiagnostic actual = check_test_x86_diagnostic_read(errors, true);
+                const bool same = status == oracle_status && actual.count == oracle.count &&
+                                  (actual.count == 0 || (actual.line == oracle.line && actual.column == oracle.column &&
+                                   actual.error == oracle.error && strcmp(actual.message, oracle.message) == 0));
+                snprintf(description, sizeof(description), "x86 %s, scalar %u: status %d/ranges %u at %u:%u, Clang %d/%u at %u:%u: %.200s",
+                         name, scalar, status, actual.count, actual.line, actual.column, oracle_status, oracle.count,
+                         oracle.line, oracle.column, actual.message);
+                check_test_expect(test, same, description);
+                if (fixtures[i].hard_column != 0)
+                {
+                    check_test_x86_hard_diagnostic(test, errors, name, scalar ? "scalar" : "vector", fixtures[i].hard_column);
+                }
             }
         }
     }
+    check_test_expect(test, sweeps == BUSTER_ARRAY_LENGTH(swept), "x86 contexts: every swept fixture is in the table");
     check_test_x86_command_line_mappings(test, clang, path, output, errors, ready);
     if (ready)
     {

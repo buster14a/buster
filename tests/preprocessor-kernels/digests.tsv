@@ -1,0 +1,1874 @@
+# The vectorized kernels' outputs, a digest per kernel comparison of test-preprocessor and of test-x86-target's
+# preprocessor cases (c_preprocessor_test.c, pp_kernel_digest), recorded with BUSTER_PP_RECORD_DIGESTS where the
+# scalar twins gave the same outputs (#2924).
+# Each line is a key (the comparison's site, '/', the case), a tab and the digest; lines without a tab are comments.
+# A digest of '-' matches any: the case's output holds its temporary directory's name, or follows the host's CPU (native).
+# The print/ keys are the digest of the text -E prints without line markers (pp_test_printed), recorded where both printers gave it.
+assembly/0 assembly immediates and dollar symbols	b44bc27f8a588a28
+assembly/1 assembly macro arguments separated by whitespace	76d86d1c88a1812e
+assembly/10 assembly dollars at token boundaries	60a280b9ada15085
+assembly/11 assembly dollars at token boundaries	aab1d738c0244bc4
+assembly/12 assembly dollars at token boundaries	fa704df792d29ccf
+assembly/13 assembly dollars at token boundaries	68fd92678adcddc5
+assembly/14 assembly dollars at token boundaries	c48291408fa10604
+assembly/15 assembly dollars at token boundaries	81d225087b0fa00f
+assembly/2 assembly explicit whitespace around dollars	2ce8331f617c2b78
+assembly/3 assembly dollar adjacency after macro expansion	58b7a16ee33809a4
+assembly/4 C dollar tokens still need separation	49f1c350a9fc8dd5
+assembly/5 C with '$' as punctuation prints it as assembly	52de8aaf31fb1742
+assembly/6 assembly with '$' in identifiers separates it as C	597b839107067985
+assembly/7 C pragma identifiers stop at dollar punctuation	3bf88b3a5646a8bb
+assembly/8 assembly pragma identifiers stop at dollar punctuation	4ba1ea4f87f2a676
+assembly/9 assembly dollars at token boundaries	09dbceca6a314b8f
+case/# and ## with indirection #4a3f692e87e410de	03d076c9b8ee8262
+case/#119: #include_next through three directories #06fbe989ed8dc827	68622e3086073dfd
+case/#119: an inactive group's includes aren't looked for #21797a86395ef21d	df9214d58bdcb6d8
+case/#119: an include cycle stops at clang's depth limit #a50b1f3c2c4a6fc9	5d363efc6e5fba02
+case/#119: an include's diagnostics, at clang's places #5c42191bed773f12	7081b5ca50c5ea70
+case/#119: clang's recoveries from a name not found #90a48224840fc757	d3403395f1e3db42
+case/#119: computed names, joined as clang joins them #3f2ee4d8bb8477ab	2ab21c9007ebe745
+case/#119: header names written out, a comment that runs on to the next line among them #ad72af5b74633e9d	72452f508597fd0d
+case/#119: one file through a symbolic link and a hard link #4adfcab6f366c124	4db8b652cfac2a07
+case/#252's review: __has_embed of files it only looks at #aa0be917eeec2922	69f33ecf1c7be8ae
+case/#252's review: a token an #embed name's '>' starts #7ed1347cabba08bd	7cc6ad9160ee68e4
+case/#252's review: an #embed after #pragma GCC system_header #275051fe4473c10a	c58f9679962a2556
+case/#252's review: an #embed's parameters past an angled name with "//" #2aa4214b3fad8f3b	ab4f35e377941045
+case/#252's review: an empty --embed-dir= is the working directory #299dfcd011678d50	da74532b715aac41
+case/#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment #60b96bb0253ebb3b	85eb9e9da4150eb0
+case/#252's second review: an #embed after #pragma GCC system_header, indented or after a blank line #9f2d2e2dc2c4a4fa	c1d03436a7248f36
+case/#252's second review: an #embed's line past a "//" name, through a block comment's newlines #4b85a76114e0a67f	12aab9c346f5b601
+case/#252's third review: a block comment right after an #embed's "//" name #c46058b9d71ef8e8	f9a361cacb985d30
+case/#252's third review: an unterminated block comment in an #embed's line lexed again #8eb5759290f8786d	63a19b1410cfcdaf
+case/#252's third review: comments that end and begin again in an #embed's line lexed again #b42524cbfde97e95	9aff986392f4a2ba
+case/#252's third review: directives hidden in an #embed's line lexed again #fc52fba96fefa9c7	be85dd34f9736692
+case/#252's third review: poisoned names in an #embed's line lexed again #67eac9a478b66db0	296a429eba841527
+case/#252's third review: poisoned names in comments of an #embed's line lexed again #b8420a0514326523	0ffe35ebfbe85355
+case/#252's third review: the token after an #embed's line lexed again #18c70fc464d2e917	f24093330400a58b
+case/#254's review: __has_include's and __has_embed's operands as their line writes them, "  x.h" alone #b7b2f29ae2ad947c	2be8cd8b7ff6e86f
+case/#254's review: __has_include's and __has_embed's operands as their line writes them, " x.h" alone #00e43f35cae03807	652873aa19290ee6
+case/#254's review: a header name written out, too long for a path #b74d6649bf76a424	eb377494516efec5
+case/#254's review: a header refused at the depth limit is included #26ba3c9cdd7eea6c	1016677cf8c17bf5
+case/#254's review: an #embed name written out, longer than its buffer #7f2da942cdb2e1ce	cc496d9925a03abc
+case/#254's second review: a "//" name's line, through a block comment's newlines #73978cb246e7f3fa	4ead65598704f75b
+case/#254's second review: a backslash in a header name written out escapes its '>' #32bdf74df9b1fcd6	362959075855be81
+case/#254's second review: a token a header query's '>' starts stays in its operand #85eace3d730fe1fe	6e4a54a577cca6d0
+case/#254's second review: the rest of a line past a header name with "//" #284b43c90c3e0fdb	9adf61f58edd3fc5
+case/#254's third review: condition links ignore directives hidden by a raw query's comment #a03a1e56e75624a8	02431a9a7cf9ba96
+case/#254's third review: later queries retain raw names in a re-lexed suffix #73e6e5b27008fadc	6351985cd268b89c
+case/#__VA_ARGS__ in a named variadic macro #dabd8f99b67a5a56	995ccd07ecd260e9
+case/#__VA_OPT__ after empty arguments #6cc079ff8daaf613	3864fc21373e1473
+case/#elif chains and nesting #6a14eab1311d7546	b5a8924ee2e8535b
+case/#elifdef without a name #94cb9e45d6e24543	c1d539e1c554d0fa
+case/#embed before C23, an extension #c8cef99e42cf9069	880c3e75a2e6c87a
+case/#embed in a skipped group #80ddd63899bc5b8e	ddd901324d7eae1b
+case/#embed: --embed-dir, angled names and the including file's directory #912b15d40bcd04e1	d1179e1dea1dc847
+case/#embed: a file change before it starts a line #b14b6dbf7586edd8	47b1e1a9e251abcc
+case/#embed: a file that isn't there #c7653bb5a75cfb50	7dd8042b100aeb90
+case/#embed: an angled name without --embed-dir #2e3cb2867403e6eb	f390511b874ff2c4
+case/#embed: computed names and macros among the parameters #fd4d781582ee6f62	67df88a61f527ec2
+case/#embed: data, limit, clang::offset, prefix, suffix and if_empty #f3bb356316be412e	b305d7db81131f58
+case/#embed: every byte's value, in pieces of every length #fede9132e0996d4a	f66653b956c91cca
+case/#embed: the next token joins the data's line #3bf6c9a423957bfb	6a878b6ae72ad929
+case/#embed: the parameters' errors drop the directive #058ffefad4c16cdf	4ba99aa2cd63dca9
+case/#ident among a macro's arguments, unexpanded #103340dba7ca461d	7ed66a3312d820b8
+case/#ident and #sccs #a0cb6395678c8973	f14f4a78bdc8475b
+case/#ident malformed #80fe4d8082e8b3a8	2b4b7dca998c19f2
+case/#ident's string read expanded, and the rest as it is #f27269cd15043540	5057c28db38b0b77
+case/#if arithmetic #a5eaf7ebe17d437c	22e8e94ccc279f2a
+case/#if conditional common type without a conversion warning #70df92191393de8b	951a992d9d2707c7
+case/#if conversion liveness restored across precedence and conditional nesting #2960aa1822c80402	1409a30f5674bcbf
+case/#if conversion macros and evaluated #elif #d3b1cba4f3d7aa86	8c00b04cc991a995
+case/#if conversions in unevaluated operands stay silent #0044cf3b93945e67	e32d27249519b85b
+case/#if dead conversion operand still checks syntax #6bea3c20b4ac2116	5494894677edf03b
+case/#if lines of macros without a body of one token #4808b1ffc0bc1542	735f6fec37305dc6
+case/#if lines without a capture #1edb5d24f0d7c630	4628dbfd97ea674b
+case/#if negative conversion warnings are suppressed by -w #78cb956414c7cc45	f4191ce7c63b93bb
+case/#if negative conversion warnings can be demoted #5781d8747091380f	b7cba83dc24d8da9
+case/#if negative conversions are not sign-compare warnings #578d6a5da765d7ac	b7cba83dc24d8da9
+case/#if negative conversions become errors #30e2013ebfb39ada	fd56dead03f16349
+case/#if negative conversions for each arithmetic, comparison and bitwise operator #d3f74097082e0e90	9bcf6bb19990d685
+case/#if of an empty macro #b31c11e032ac4f29	84286cae782f0060
+case/#if promoted conversion in a system header is suppressed #adebafe44f268d67	a4fd27af1c9dd1df
+case/#if promoted conversion with system warnings enabled #4f003ded15defa52	e8aa15ee07dfb826
+case/#if signed, nonnegative and already unsigned controls #8d3173bb109a056d	5e1a5d88e4ebffee
+case/#ifdef defined #98e0d12074d48c6f	0895f9637019e087
+case/#include among a macro's arguments #e93b435fb95a61c1	51f9abe53948ec49
+case/#include of a missing absolute path #5c978b572fbd6861	ba4221c114558a25
+case/#include with extra tokens #f1924560bd48a9df	699980f916459d4b
+case/#include_next through -iquote and -I #a8ae26b8772125a6	29a6e057461d4174
+case/#line among a macro's arguments #b335c6f9f26f56de	dc44bdd2302e4570
+case/#line among a macro's arguments, unexpanded #2afbce445e225979	314b6d12b127290e
+case/#line continued on the next line #319f486ba2ce8d64	7ebf52e0fa185667
+case/#line continued, its number indented #3bcd872d95d3183b	3e09f330fdf6fdb5
+case/#line with a numeric escape in its file name #04201bd93828a617	-
+case/#line with digit separators #47584f0f056cb46c	1b537859190091ea
+case/#line without a file name #94237a1c66459f52	2851a7eaba2cd610
+case/#line's number after a _Pragma and an empty macro #a848714b783424f2	a7147ff404deba4a
+case/#line's operands as phase 2 leaves them #5faaea5d405d6f1f	af486985d8910582
+case/#line's operands read expanded, and the rest as it is #3f366b84305a3d53	0c4011d6eea0486f
+case/#pragma GCC error #6191c7a945619295	78cd56828d2674e6
+case/#pragma GCC poison's uses #c585128431862616	ea969c12eb3915f7
+case/#pragma among a macro's arguments #46722404413d6822	75b09d15fdc0318a
+case/#pragma lines among a macro's arguments after an invocation in a #if #fd752cb39c1f612e	f701b496b82ae82f
+case/#pragma message's forms #43de80b0308e0c10	ccef2a094a41f122
+case/#pragma once with extra tokens #1e5b6a78abb3b5e6	049033e05c2c3dad
+case/'$' before a prefixed literal across a line splice #bccc54e5878bc7c7	f313e0cbe2b3405b
+case/'$' before a prefixed literal across a line splice in assembly #34271759b5c88d0b	0ac0aa83b322caed
+case/'$' before prefixed literals and pp-numbers #bee978f6a46ac2f7	c150e0a760458388
+case/'$' before prefixed literals in C23 #d2d6504a53dad6fc	80e64d163db41fac
+case/'$' before prefixed literals in assembly #0fdab3d114496c3b	eea4be62f9372944
+case/-fasm in c89 #9f5a8a8e4c20ec1d	066c04194fb05a2a
+case/-fdigraphs in c89 #199c92f8529a2a4c	02b65023d5da335f
+case/-fdollars-in-identifiers in assembly #f5fb35f55ce5b3b8	1f2786499529f790
+case/-fgnu-keywords before -fno-asm #7e7e689f48a8468e	be0b55b4539bd48a
+case/-fno-digraphs #215ded70af2f8876	538e9e2bbbecc110
+case/-fno-digraphs in C94 #8934e5313116efa3	85b8a1c60b0f1390
+case/-fno-digraphs in gnu89 #a78ff52e2ee685ae	d98d9da00f1a3ae7
+case/-fno-dollars-in-identifiers #d22c32993e4723cc	76569dbd6671d7da
+case/-fno-gnu-keywords #7e9f3320200ba1ae	4fba8415cc4e887a
+case/-fno-gnu-keywords in C23 #317d1f918dc1b279	6f7030e797f10df8
+case/-fno-raw-string-literals in a GNU mode #3bb9212b8beab29b	f297e097a727cadc
+case/-fraw-string-literals in an ISO mode #8730f705b9fe7e9f	800cab5a545b8a3e
+case/-funsigned-char in #if #a2cd6adce76578a8	694f20dd1e3b9c90
+case/-include of a missing absolute path #27a75e10a4770ec1	ba4221c114558a25
+case/-municode is a joined option, and a -U before it undefines its UNICODE #42cb2af31cda3d97	637b4a338d01b878
+case/-municode's UNICODE is <command line>'s first macro, before -D and -U #c976c2cd823c7b39	847f54275d89298e
+case/-undef #4d26b1b32a2bfb99	d9a72ac96d585b1d
+case/-undef in assembly #c44c1bb25ef30790	dd9b4fafe65efbf2
+case/70 arguments #24565a13b6907b6b	9fd2164b2579238d
+case/C23 keyword spellings before parentheses are undefined macro calls #c3960978e867d7e5	b5892a1ef2358918
+case/C94's digraphs without // comments #99d80eb30ab1f576	3542edc80aa8cac8
+case/GCC dependency #b15cccb2090957ab	81cf8bb4ab8a92f7
+case/GCC dependency missing #2cb9e1a648cb3913	9930e62d6a8e3a35
+case/GCC poison #f8998f9114fc2648	d7b781a1ba1e37bd
+case/GCC poison used #37c6aee1757cb667	8995a8d07b0d5a7d
+case/GNU comma and __VA_OPT__ #e9081d51439851cc	0f46a1b455ffe565
+case/GNU's comma before __VA_OPT__ past empty arguments #d3c5769878549354	8ea39db15182940c
+case/GNU's comma before __VA_OPT__ past empty arguments, stringized #32db68a0f3a4f085	eb22c2aaf02c1f58
+case/GNU's comma paste after an argument #bda2125ab2fa37de	9860fa83a4ec40e2
+case/GNU's comma paste with ## after __VA_ARGS__ #5f5b30f9849ed9c0	c8fe40df77189d8c
+case/GNU's comma paste's spaces and placemarkers #3042fb116e34b205	052f2dd82fca34d7
+case/UCN identifiers stringized #afd1ab4e9971f5d2	c77e54b0d27dc68b
+case/UCNs in pragma lines #995d1055af586fcd	933c26025c78980d
+case/UCNs of basic characters in C23 character constants #6caa2299ccc15349	749ae832119085f0
+case/UCNs pasted and stringized #e0c04e3da6a5eca5	ee6a3437c5f4ac77
+case/UTF-16, UTF-32 and wide character constants' signedness in #if #b4fd86ce38f232d2	dba0ae609e87846a
+case/UTF-8 character constants' signedness in #if (C23) #773bd844d4f47c78	e097e16f378da203
+case/_Pragma in an expanded argument #e719296f4e4c25a3	262f260385c47200
+case/_Pragma in directives' lines #a48a8c053dac6044	67ab94c3711dd34a
+case/_Pragma of a macro #4d6bf19bf955ee4e	5a0954cbffbd5bb9
+case/_Pragma without its operand #1bf95486f3198b0b	143c5dc60936e4c9
+case/_Pragma's operand read expanded #01c28528bb7a46f9	1c1209ccd3af41d9
+case/__BASE_FILE__ after #line #cb97fcbdc83f7ced	ae509db16d4a0c6c
+case/__BASE_FILE__ in a forced include #49a531907b0802fc	-
+case/__LINE__ at a ')' that starts at a line splice #12dd8dce60af77da	bc3a3d08b1b3ac17
+case/__LINE__ at a ')' that starts at a trigraph's line splice #405acb21ab3465cb	aa39e251a6119704
+case/__VA_ARGS__ as a parameter #cf6d4ee61e5c35ad	b806832c0832b35c
+case/__VA_OPT__ in a macro without parameters #015e1d5615668875	aae312f16d6f6c66
+case/__VA_OPT__ next to ## #bf5678e21da46133	e282e420990352be
+case/__VA_OPT__ of an argument that expands to nothing #db3c7481be96b215	18b7187dc5671a5d
+case/__VA_OPT__ without variadic parameters #4cc49d8c768f3276	7223cefc090b8229
+case/__VA_OPT__'s content pasted left to right #46f397ac3fc03dfc	e89442b7d4145511
+case/__has_constexpr_builtin's name is raw, a macro's too #b87f855d5a01fad3	2085e0e88a068200
+case/__has_embed #a2382b74df73402e	ecdf9369e691357d
+case/__has_embed outside #if #93bd7884ed4aba83	9d33577f75c089c0
+case/__has_embed: clang's limit and clang::offset #8566d367594b43e2	7a81a3226a7cfa99
+case/__has_include in a macro's argument in #if #11845681853373e8	a0fa85b0e17df046
+case/__has_warning #e931d1895881db62	9877f01ec12e845d
+case/__is_identifier #e8d455ba4fe0e41a	8c9ed281f716dfe1
+case/__is_identifier in C23 #8d4982c9f489fa03	1965a29a4016f701
+case/a UCN of a basic character before C23 #2d400176c1714c63	a4d57b48161bafe9
+case/a _Pragma's text that ends in a backslash #f6a141740a73462c	85fc5abe03162b44
+case/a _Pragma's unterminated comment #104884e4fd18cdd1	73406787aee6ded9
+case/a basic character's named UCN in #if's character constant #4ce909f57cf5e83c	ccf679f20dfd1f83
+case/a basic character's named UCN in C23's #if #8e21409bcf16de4b	33e8a28cec97bc20
+case/a character constant's UCN past ASCII #2bec821ed0f9d2cb	4f85c36bb0754637
+case/a comma in #if #65d5639bc8333fa3	fdbb998cedbcfbdc
+case/a computed #include's name read expanded, and the rest as it is #88447120be7aa077	50ce83aa15cedb2c
+case/a dead arm's division isn't evaluated #888a20100a8bce41	cc90fb65959f0ec8
+case/a dead arm's division skips an #error #b27e3f4905530cc4	701a5be743915042
+case/a dead arm's macros still expand #a5007a07d189b762	77822e4f6bbb0609
+case/a disabled macro's last token #6e0a558d4ed344cc	8c7faea390f41b06
+case/a disabled macro's name among its arguments #b9dfcf37217ade94	1f25d11229e533b5
+case/a file twice by #include among a macro's arguments #185c6d203988379b	8cba9ff9f1cf2268
+case/a function-like name without arguments #1cff526e5382d5c4	c14faa8236f51da4
+case/a group around 50 others #5c79c7a61e6e6c93	79d935029fcb6d17
+case/a line marker's flag 2 without 1 #5b9f6ffb0da9a327	fc8c2e13cd8337b5
+case/a line marker's invalid flags #c8da3c5eae9f472e	5336527a4ad975a2
+case/a line marker's name and flags from macros #9e809ffbb16a9e19	69775aaaeb6f900e
+case/a line splice before the quote of a split literal #df0dc24d3450f274	3041430ddcc625af
+case/a line splice before the quote of u8'a' before C23 #d74f31f26a721a5c	193f347cd4fdb0e2
+case/a macro after __has_c_attribute's name #2804a0ee944e03f8	4d235b3fb7e04db9
+case/a macro-named raw embed query restores later source #bfdf9f17f71ad899	cc6b6a0eb7cba65e
+case/a macro-named raw header query restores later source #e5b4c770219dd0a5	34c102e4d8e4ba14
+case/a malformed raw-looking active diagnostic is opaque #63e9a434dde63084	a8baef0b8d5ba805
+case/a malformed raw-looking excluded diagnostic stays ordinary text #e1426e815bf43ecf	e751d229283fb76e
+case/a missing absolute header #bdc72017faa3f411	a6b5776bfe035033
+case/a misspelled named UCN in #if's character constant #4baf06fd37361858	a70f031227eba3ef
+case/a multiline raw macro argument remains opaque #36c425767c11f91d	f17aaeb6f0bdaf7e
+case/a name painted while its macro is disabled, then expanded #8347f4bd709fca55	4cea8660da5bba9e
+case/a named UCN in #if #e1dc8366b5fe7ab6	df07959734ab7968
+case/a named UCN in #if's character constant #ae0689c6e34a7b9a	97f36872452b557c
+case/a named UCN in a macro #335e638de50b4696	c8f74f18d58bc703
+case/a named UCN in an identifier #5fb4c482141b14a0	79aa499a1989579a
+case/a named UCN in an unused macro argument #3cb01770a3f950df	464f6d6958d6f608
+case/a named UCN names a macro #1aa43471fe890656	dad1c567db121bdf
+case/a paste that forms u8'a' before C23 #61467162d6fce12e	377b48a145c45ed6
+case/a poisoned name among arguments #3901ab9d135c8b2e	199e1a348d85b867
+case/a poisoned name from a paste #da9996215ef708a9	c2dbcd4327b7e08e
+case/a poisoned name in #ifdef #85c65f66260d377b	9e6bc1197bef0598
+case/a poisoned name in _Pragma's text #1ec9d0e67de5929f	267f46594907748c
+case/a poisoned name read from the file #37c6aee1757cb667	8995a8d07b0d5a7d
+case/a pp-number before a + or - that an exponent would take #5c46c9472ba74da5	83037cef319bd13a
+case/a pp-number without exponent digits #386fc382a277b07e	ebd55539b12f6018
+case/a pp-number without exponent digits in a skipped group #33225d62e2b71552	6555b7bdb055c238
+case/a pragma line among a macro's arguments while a _Pragma waits #cdb249b0b6761128	613fb1e00eb23397
+case/a prefix pasted onto an empty character constant before C23 #d8e9365ee6ea079e	963b16af5690e683
+case/a prefix pasted onto an empty character constant in C23 #ba03c42ab5179a92	3f3f87e64603ff94
+case/a quote after '$' that a digit separator frees #648e77562fbd0663	a02ddf0cb80c9cd2
+case/a raw header query with a splice #18314c53e56facee	52a53b2eeca6a4f5
+case/a raw string literal isn't a header name #31408d7b8381fc05	2249a1d6455d423f
+case/a raw string literal isn't an #include's header name #e4dfb3ae09235966	7572e45299add087
+case/a repeated -I and #include_next #80927789f61caf7e	fc692ec9e372dc24
+case/a scope only in __has_c_attribute #cefa4883f43a63eb	16f379a608bc58a2
+case/a scoped attribute query's operand at the end of the file #afbe10557c9b9957	52d47da4898dc5b9
+case/a skipped error is still lexed raw #e85b891fb953c148	9a72e1bb53a8baf8
+case/a skipped warning is still lexed raw #b28cda153b26a886	840ccb02e1562131
+case/a stringized argument isn't expanded #c3802c5f07c7fe8f	cfe97b4c787c44c3
+case/a stringized trailing backslash #ec0ce846be2b794e	e8fc32dc2d83d562
+case/a template's names across #define, #undef, push_macro and pop_macro #18dff0bcb1fab124	caf4d0403708d57a
+case/a trigraph that a stringized argument spells, and one a paste forms #680ca474423297c9	a43bd266185b09f6
+case/a warning in a repeated include #8484386e6e44d93e	b08bd622fe979014
+case/a warning preserves macro snapshots #5cec41b0c86450ae	10b29c73be7f7d44
+case/a warning's comment ends at its logical newline #78956ee41921e5c4	d45d79bfc81af77f
+case/a warning's comment text preserves following source #09d890854ddaa437	3ccdca0dbae34373
+case/a warning's quote is text #3b26b445553c5897	f6aece979b9c0e7a
+case/a warning's spliced name and text #efb39c3e3a53e7ed	f933bf70d8e75b0f
+case/adjacent tokens don't paste #12fa3d04d6a2313e	01d39bf94cccb4b3
+case/an #elif after #else #36cc8856a2465ee6	b8b607e8d848141c
+case/an #endif too many #3d2f73c8d8cf4007	f8129089eec3bf74
+case/an alias's invocation #d0383a219e87d4af	4324a0a281439031
+case/an argument across blocks #5118256243f0627b	7012f1998d026af8
+case/an assume_nonnull region left open #193c910cc8121bcf	38b36faa49b8c577
+case/an attribute query's operand across a directive #38acf06eaaf7d221	ac1cede178977b62
+case/an attribute query's operand nested #3487ee6fbb6fa469	42202beabd796d41
+case/an attribute query's operand read expanded #6a49947e50459274	f139ee0c29d4539d
+case/an attribute query's operand unterminated #0e017167bfd4caf2	463dfcdd7383ac7e
+case/an empty __VA_OPT__ expands nothing #bed870645ec28e6b	d3e5f71e1ee3ae7a
+case/an empty expansion's spaces #85e273402381d052	83d374fbde41dd33
+case/an error's comment text preserves following source #76825b86e34ac795	f2ffb05436c204b7
+case/an excluded raw-looking diagnostic stays ordinary text #95bd9cd93727d9f4	a2fa31ab8f5a16e7
+case/an excluded raw-looking direct header stays ordinary text #cb29c0eb4a2edade	9fb28bbf4e36a1d7
+case/an expansion of a template with ## past 16 tokens #07157dc69567d7be	20ebb3fe92b90a21
+case/an inactive __VA_OPT__'s spacing #d755ae92d35ea826	69f9c1cefa6e2822
+case/an invocation in a #if among a macro's arguments clears clang's flag #437cc23db771c92c	388fd2cedb31eba7
+case/an object-like macro in a #if among a macro's arguments keeps clang's flag #8f83669c604821c6	3d30f20dd797396b
+case/an octal escape out of range #9d616fe2ad4a9a76	e9aa44b635ee804e
+case/an untaken elif still diagnoses invalid raw literals #c857292cabe7ee48	1859ebe81411e049
+case/an unterminated comment #5a9e8472ed18a0ce	40754bf91df4f896
+case/an unterminated group #b28720b9a318b2a6	2f51d1b583b0b1bb
+case/an unused argument isn't expanded #db52829fb6309712	66d90e06ba628322
+case/an unused definition whose # names no parameter #953dea8ba7a1861c	631625c5eea9db69
+case/arguments expanded in order of use #073c3136a26f7e7c	f4c55a44902eaf82
+case/arguments of direct objects beside a disabled macro's name #44ebba77621ac915	e7331820deb8c49c
+case/arguments of direct objects on new lines #2286ca64f3c8b064	094057dce676338a
+case/arguments of direct objects used twice #db3d72584dc4c6fe	55885c246846bbe7
+case/arguments of direct objects, expanded in place #4103219c16b25248	b63b06073b597d97
+case/assume_nonnull end after a presumed-file change #357410f6f68f6de5	28902bbd22a8dcf6
+case/assume_nonnull end uses the printer's current line #51d4fe4975096d42	ae2dc47ef157aa97
+case/assume_nonnull regions #526aac4f94969ef8	6abba2d1541c082a
+case/builtin and feature names are raw, attribute names may expand #8caea279db4d0b4a	1d4d5b1bc4f08897
+case/builtins #916248f799bdb847	190e0df8f3abea59
+case/builtins' operands, a computed #include and #line #6fda186fdbccb200	b2e56e045fd3c93d
+case/c89 without digraphs or // comments #2ff2f43e34100dc7	39af272b7a85ca74
+case/character constants' values #7db342ec2e6ed588	0112bc6088f6be26
+case/comma elision with an omitted sole variadic argument (C17) #fc071f3e75c5cff5	0912a1f62eff882b
+case/comma elision with an omitted sole variadic argument (GNU) #3af37aa4a75587ea	9e5b61c6ab3f259a
+case/comment makes an object-like macro #410d91e578b9b494	6f9230605e763e56
+case/computed header names with line splices #61252a5385bee036	40bebf6e98fe8288
+case/conditionals nested 40 deep #74b0765823433137	8e1ec9be583b913b
+case/default wchar after short wchar in #if #15cb9368ef21ac03	5973895711f36bb4
+case/defined from an argument that expands #ae28c2e260560b07	9e59ddcfa6cc578f
+case/defined from macros in #if #0a03449f1058cef8	389ed10065b6fff3
+case/defined function-like and bare names in conditions #49b2950dff72d01f	321f6ed3c5371577
+case/diagnostic pragmas #89c732f08132cdc6	55a3b7adee4f6c30
+case/digit separators before C23 #24157b0b0c1565cc	dea95450b94be928
+case/digit separators in C23 #4f38489f969fc6cf	cd0e68e8302150d6
+case/directives among a macro's arguments #eb9ead15617645cb	81e88c34c5f57d5e
+case/embed limit diagnoses an undefined function-like name #9378c6814a09dafe	b1d41c012d92786d
+case/empty and adjacent invocations in arguments #d249de93682445e0	424394a402526220
+case/escaped greater in a raw-looking direct header #08ce9be46ff95237	f288dd28a5052821
+case/expansions past a template's tokens #ad39a6a939c150bf	f97db26a91bcd956
+case/extra tokens after directives #f9df3e18adeae396	dd6acbc3e6b24f8d
+case/feature answers' spelling #ca4ae8c15a19024b	9c3517e1f87aa55e
+case/floating evaluation macro preprocessing control #2a3ba79add909990	2862f4491c566bad
+case/floating evaluation macro preprocessing control #49f3465466f5ac22	e89e8bdff9f0b022
+case/floating evaluation macro preprocessing control #5bccd5bd7862da3e	e8609c880171ac6c
+case/floating evaluation macro preprocessing control #9767c9b792756d4a	25940591f14ebfce
+case/floating evaluation macro preprocessing control #b2172270f607f946	5020ebff476d8f9c
+case/fuzzing, seed 2106 case 190642: #pragma among arguments after an invocation in a #elif #e6aa6364d51a1c46	7b8a61fd36e239b0
+case/header names with line splices #e1f4821f82e41cdb	787a6250469c2b99
+case/header-query continuation retains dollar punctuation and wide literal prefixes #ca95e862b834a6fd	9958e2651e7389b0
+case/identifiers written with UCNs and splices #ede5cf5ea5ec1a2d	5138f58a206c56d6
+case/include guard and #pragma once #812808c6e2ace0a2	7b0470286066f047
+case/indexed parameters: #, ##, variadics and __VA_OPT__ #a5a596dcda540712	5c1fc40411d2f51d
+case/indexed parameters: every # in an unused definition #41e25431f86ccac1	6ebabe9999e875c7
+case/invalid raw delimiter keeps its line splice #88e1e9dc1dacf30b	10681ff1136d033e
+case/invalid raw delimiters at active file scope #ae9a576d2f8bdb2f	f6777a6d43802690
+case/invalid raw in a condition diagnoses after expansion #81fb7582640729b5	46c337528618fe73
+case/invalid raw prefix with phase two splice #c51dad81391a00df	29abb9c5929562e4
+case/invalid raw syntax in assembly #edc64dc7cccd7395	a066db080cd9f91c
+case/invalid raw syntax is ordinary text with raw disabled #b82755a1253e6d1c	5055b4e2adf71619
+case/invalid raw syntax with forced C89 raw literals #b210ea462c1016df	4f13fb0b7f63345f
+case/invocations in arguments beside painted names #646955967d79269d	f3d16addac03238d
+case/invocations in arguments leave expanding body names to rescan #da907bd907d55e1b	7559aa3b59a510c2
+case/invocations in arguments on new lines #7bff338a67541794	e33278dd6a091a79
+case/invocations in arguments pass pending space to an intervening run #dc6bab291966f54f	3b646b0c4102b5dd
+case/invocations in arguments past the plans kept #8a9815897125f9a2	25037d6a095d21db
+case/invocations in arguments retain paint through outer rescan #d7085ac67e7a88fb	0e8d2b9a5ec75c0c
+case/invocations in arguments, expanded in place #b0902f7bb4979325	34a36b3b237535e8
+case/last march and independent tune #7c5512fc3f9a1ba0	d30faaa29c6fd0eb
+case/line breaks in an unknown token and in a raw string literal #9b43e32b48157beb	a0c370ceff7b2d56
+case/line marker flags #244e5075417e1505	8bfff6b89f4f9070
+case/line markers: #line in the main file and in an included one #392b3cbedb526602	02388c93593dfb79
+case/line markers: a crossed invocation spans printer batches #e74fe03461c02ada	9bfdac3c3fd9ff9e
+case/line markers: a line among a macro's arguments #e7857f6faca432bd	06b25c8cc278c9af
+case/line markers: a paste of a line among a macro's arguments #c911b03fe41eb784	4bb57491a1ac0644
+case/line markers: a system include ends while collecting arguments #68aa29dbbd51cac6	d22b9bfe5083e932
+case/line markers: an empty expansion crosses an included file's end #09accabe3333f7da	6d10ae5be71f877b
+case/line markers: an empty expansion crossing an include leaves no output #c7908ca9314a85e6	6e93784bb3934f24
+case/line markers: an invocation after output crosses an included file's end #4db349ea3070a50d	09d23222f3c3c112
+case/line markers: an invocation crosses an included file's end #267e8a2541a000fb	a5d50ebb96b706be
+case/line markers: argument collection exits two included files #911fc6093e53bdcc	cb506edc0d6c58b6
+case/line markers: argument collection returns to an included file #c4c064c56dc99cd1	abf7604ebf64f9de
+case/line markers: crossed files keep builtin and presumed locations #1072ceb56a870deb	c9989e5141a429ef
+case/line markers: lines that start with macros, and the line after _Pragma #9ac94b4fba7cf968	40b67934e4a647d3
+case/line markers: moved argument tokens after empty paste operands #d0e2c8bf8504dd02	63b027ae43a7ade8
+case/line markers: the include stack, system headers and escaped names #eb88e77cf8501502	76a41ba63b75d4a2
+case/literal prefixes before C11 #2ad52729668ad5a2	50757ee576a6532c
+case/literal prefixes in C23 #3638b2ead9a27615	4e30a4c63d86eb81
+case/long literal macro batches #b950c589e3efdc40	bdef5912ffaedbb7
+case/macro batch boundaries #db1fde4ac2819708	6685d03d757d876f
+case/macro notes #6a2d82feaf541d30	ed0622cd336baf35
+case/macro notes malformed #ae7d14042945d154	aa920ca0be3212cf
+case/many macro parameters: reversed replacement and unused definition #3275f7657a4f16ff	4802fc0cce6e8064
+case/many macro parameters: reversed replacement and unused definition #327cc541bdbbbb4b	7c3dc82f2eef8afa
+case/many macro parameters: reversed replacement and unused definition #34c0034bb5311147	fd7f893feb225552
+case/many macro parameters: reversed replacement and unused definition #3c9127d7cb51136f	acde73e3f2dca233
+case/many macro parameters: reversed replacement and unused definition #428eb4a2590d087f	27ef6994cccecafe
+case/many macro parameters: reversed replacement and unused definition #668dacf1480d11e9	ce5e2c1261b082d3
+case/many macro parameters: reversed replacement and unused definition #688604502588dc35	fd850592855216e0
+case/many macro parameters: reversed replacement and unused definition #74f280657be405eb	51f9b3da20b4b1e2
+case/many macro parameters: reversed replacement and unused definition #873fa0c3cd210e89	ad4152aa9911293f
+case/many macro parameters: reversed replacement and unused definition #8a3047168f471905	fcf2907d25b1574b
+case/many macro parameters: reversed replacement and unused definition #949f9e4d90a97cb7	a597a5f6e1342982
+case/many macro parameters: reversed replacement and unused definition #9885220c40d7b18b	3306d51ab90f4590
+case/many macro parameters: reversed replacement and unused definition #ac5e94619465b11d	7a47be02e4326737
+case/many macro parameters: reversed replacement and unused definition #c7adf5d800e0f3db	b3c9a65274d2b353
+case/many macro parameters: reversed replacement and unused definition #cc15859f9a2d8a41	e1755088b3e5a63d
+case/many macro parameters: reversed replacement and unused definition #f0ea0e73da511be7	193abd8bbebf03da
+case/many macro parameters: reversed replacement and unused definition #fad233312bccebd5	ee17aa60d6e2e343
+case/named UCNs a line splice splits #9cd3cd62094ed727	321c33530cb0e5a4
+case/named UCNs in skipped groups, literals and comments #dfb54ec4f017835e	b3a6f2b555f90433
+case/named UCNs of aliases and names made by rule #9b5995c93bd9be5a	b7730d272ed71f38
+case/names no character has #0e8f7c7b4fd9ba61	213655482cb28701
+case/native #694e834877600bf1	-
+case/no raw string literals in an ISO mode #cc089e56c7fb472d	a6ebc0fe2e4707f3
+case/omp pragmas expand #e2b62f2bb6181d7f	bc0b39b37234064c
+case/opaque header: a real unclosed comment after an opaque name #412e2ead411417c9	53989eec4330a572
+case/opaque header: an unclosed comment delimiter in a query name #23510fe07b05f24d	5a555cce8e389edb
+case/opaque header: an unclosed comment delimiter in an embed name #0e6076865638a7aa	8fe67ff68e4fd277
+case/opaque header: an unclosed comment delimiter in an include name #8ff67964c6cf5e30	c96e86255ad6a498
+case/opaque raw-looking query with no lexical overlap #a3c467a1ae4be8fe	01719a92661498d3
+case/parentheses nested 70 deep #c1145a3cc16d6231	a60a16e77c72ee5c
+case/pasted names that expand, painted and rescanned #bcb451016a93f466	d15d9e2775ade945
+case/pastes #27abdff220b8dc19	3d0b1860ad199c57
+case/pastes from a template in a file's text and collected #a31495effde8cc26	9e068d3df13ced46
+case/pastes of a variadic argument and without parameters #2126c797567d6e0b	35825b974d11bbb3
+case/pastes of numbers #b883f4957740c0ee	baab4a7eeba4383b
+case/pastes on new lines #30ee7a699c5057bb	7276c09e7fa13642
+case/pastes that make nothing among other tokens #cd1b650747ab53d0	0ae76e0144afc3b5
+case/pastes the templates leave to pp_substitute #e63de2163004baea	93e56feaf1f910f1
+case/pastes with body tokens and other items #2043d738261bfe25	24de1784dc512ff0
+case/pasting %: and %: in c89 #62c8bd33cfb9418a	9143b29f1d5aae11
+case/pasting '$' as punctuation #166e7b6ab14844e3	762d5a383cebb7f6
+case/pasting // in c89 #beab7c2a1ca6ccb4	a43ac441ff522c32
+case/pasting a comment's start #907fc8a6db98e1ea	0eb4fcc8c02b736f
+case/pasting a digraph's characters in c89 #ab4e1d980676a7d4	03dfd66a4c8e9b60
+case/placemarkers #ca62f711cb84f866	0e7fd5b9a8590ce6
+case/poisoned names a template pastes #6a8903bb9cfcc94a	bb804c5eb6a1ad5a
+case/poisoning a macro #facd539c873a9bf9	74b6fa5c281a55df
+case/poisoning defined #570d8c99e9c33707	baa7297fa21d289c
+case/pragmas #df44472e3ab619d3	78bfc5f697639aca
+case/push_macro allows a redefinition #8e29c8b524afd55a	09d0d99ce6b79674
+case/push_macro and pop_macro #532969c184eb0b83	7973cc9dbeec0fa3
+case/push_macro malformed #e2f04b5eff13fa7c	c124c0d3fba893bc
+case/push_macro's and pop_macro's operands read expanded, and the rest as it is #80c493a16cc8d3a2	97d471f0f5e01402
+case/raw query private views preserve recursive macro snapshots #e9977f8e16170bdd	4badd5095439fcf1
+case/raw query private views retain once, import and guard identity #7fe76415ae82f813	d96f5894f706e6af
+case/raw semantic-pragma control #1270dfe82de77017	13aac764bdfdf81a
+case/raw semantic-pragma control #43951106b6169fc7	702832509729c6d6
+case/raw semantic-pragma control #56fad0e1f44ab7fa	279bbf9c97b1b831
+case/raw semantic-pragma control #91546859558e3a95	6675779d89805d71
+case/raw semantic-pragma control #a55f26923a1d5a51	a8042d9afeef0d35
+case/raw semantic-pragma control #bf8efb10dde963f4	07913e14eadc0ca4
+case/raw semantic-pragma control #cbc6aa00caedca6c	4d79cdc060fe9ea3
+case/raw semantic-pragma control #d8fcfcb546bff6b5	16da171ea3187875
+case/raw semantic-pragma control #df55dc59314041b6	57e6f785027dab74
+case/raw semantic-pragma control #e5e5ccc416f0ddf3	b7fc51e98bda405a
+case/raw string literals after '$' as punctuation #a5399ef315eb1796	76191d5941506569
+case/raw string literals after '$' in assembly #07b2e268b34f8fa4	34957783d6f9cbce
+case/raw string literals in _Pragma, #line and a line marker #2fe2cdbb9548986f	9c3629bd259bf455
+case/raw string literals in __has_warning #445318607763ee4b	3d4e6105208532db
+case/raw string literals in a GNU mode #c47e5fb316bf5b90	1cb3bddd84e03c69
+case/raw string literals in gnu99 #085550f1f71be27e	332ee3d2479c3a9f
+case/raw string literals keep their splices and trigraphs #cdebe0bbb291968c	b4ba862f6de6ffb4
+case/raw string literals over lines and directives #a84eecc603056276	967cff062b2438a7
+case/raw string literals pasted and stringized #3abbfb60cf138422	4a55434073961e96
+case/raw strings resume after an opaque direct header #c507c97795379bf9	d6fb780e24a6cfb4
+case/raw-looking direct angle header preserves following source #e9636417566f5df0	d12bd3aefe8a5a44
+case/raw-looking error text preserves following source #588112f8f182d257	0533eae41106ded4
+case/raw-looking warning text preserves following source #860ea692a112c309	afc67a5a64bab316
+case/redefinition with other spacing #ba7f36097cf07d8c	a3d018e781ecd06f
+case/redefinitions with other spellings #1db2b96934a09117	abd2cc4f104e9038
+case/repeated raw-looking direct headers use one recovery #6dcebcfd07ece9c0	3459db9d5d09cea0
+case/rescanning, redefinitions and painting #a1e8f9a146f1f303	a4c16ef840e08c6e
+case/right shifts in #if #8c3c15c14ff8e909	79747021577353a8
+case/several characters in a wide character constant #8e0d7f27358543f3	4f85c36bb0754637
+case/short wchar in #if #310ffbfa40f19291	15ab520fce90c6b1
+case/signed char in #if #ff7cfa6301b73767	a338d4e35cf3a704
+case/silent pragmas #93053c4dff8a2880	c5935f873e59aba3
+case/skipped invalid raw literals suppress diagnostics #32e0d5457aec6820	84d75e18b4371ae6
+case/slice context boundary #67670722972540eb	e4559d5465ff0665
+case/slice disabled indirect #fc294ad40739cac1	924ef46ac0c9695e
+case/slice disabled self #0e1a5299b1b1d744	c2d134f84d55fc7d
+case/slice empty arguments #1501be787f7d60a8	a4f338380179c32f
+case/slice expansion order #d24a3350859e904c	7d027162c512a95c
+case/slice omitted variadic #3351adacef21d002	49a76daaed9117cb
+case/slice pragma capture #157a392a93cf47b8	8840a2e81ff6949b
+case/slice raw and expanded #92725b8209fda294	f2181a031de7ff01
+case/slice source location #740107ef34c1853c	c53926cc47d74731
+case/slice too few arguments #2e9908301800cf90	6768b28a890ec966
+case/slice too many arguments #43e1ab2f9e1d84ae	d50ba0d27f2a62a8
+case/slice variadic commas #29e2989e3ba3314d	23e0adc4b1a9373d
+case/slice whitespace #30d1de253a9a5354	8c7b9e76839cac54
+case/spaces after invocations in a file's text #4facfab38d0b5e8f	d646939a95ce0256
+case/spaces around __VA_OPT__ #a75d02215c7d51ce	011c2ae7f92bcb7e
+case/spaces through empty expansions #6f892be0bfae9da5	549bbfc018006e2d
+case/splice makes a function-like macro #46bbc6be234ddc2c	4d9bafb5f05d2b4a
+case/spliced raw-looking direct angle header #9cdf87a1dc287606	4b6f5eb659d7afe8
+case/standard features in C23 #6a0abdd2659964ce	b7eaa87fec6c1ee9
+case/standard features in C99 #e81f4982eccee4c5	520756760485ac57
+case/standard features in GNU17 #8f48d0a39ce39c0c	5e0a2abed7f7c83b
+case/stringize across a splice and a comment #ef910132e9af1cc3	cf043f800e2332a6
+case/stringize spacing and escapes #fc43e118f876c42b	a7573000a3ded8ff
+case/stringizing from a template #cf4972bad64eeaeb	72726b63ff4f1791
+case/successive raw header queries in one condition #cad765ff8f41d2ec	43d8585614adca82
+case/target queries #12f3b93d8835763c	2d439f8770b4ac9e
+case/the oracle recognizes ext_vector_type with either attribute spelling #b6f0db33d5c3f65c	f11cd49089db24b2
+case/the space before a stringized __VA_OPT__ #aad4d814524ac35a	f9653551e5b166ad
+case/the token after a _Pragma that prints nothing #33d5f1bbd814cc4d	a28ca28afc03b22d
+case/trigraphs ignored in the GNU modes #75bba0845177ed3f	b590475cb65c7f40
+case/trigraphs in the ISO modes before C23 #43c57fedff147e84	308187cc3df8ea51
+case/true in C17 #24a5ed82b0449829	dab9145f8d28c426
+case/true in C23 #d6cb263dbfaf9ea8	468ec0d5b73969f1
+case/true in C99 #157af05336e3c95f	dab9145f8d28c426
+case/two ## and an empty argument #0d8087d2dee26956	bd6ab42802ea4938
+case/two ## in a row #a89ff6731b4f8850	ddb491e6efee8906
+case/u8 character constants before C23 #c6f012ffe04a05af	2e1ce7f0ad6c9701
+case/undefined calls in skipped conditional groups remain skipped #4ad78d1c72c11f30	b2b7c339a6a8ff67
+case/unknown target vendor #8bc4ba3add08c1a3	0d0fc9a440bed4d4
+case/unknown tokens that a prefix C99 doesn't have starts #e6f2d94c0574c3cf	e46cffa09b791f60
+case/unknown tokens that u8 starts before C23 #bb492c4d0fac90a9	60dc65d14dd09563
+case/unlimited opaque recovery #0f1ceb506870ed03	85c2cf78c95286f9
+case/unlimited opaque recovery #465f655cc90a498b	0f05fc95dade939c
+case/unlimited opaque recovery #4677d0928bedfd02	97aa654235487051
+case/unlimited opaque recovery #47e1249872a7fc47	4b7c8e77c82f8588
+case/unlimited opaque recovery #551bc280d1a3308f	a6c8d1b555822843
+case/unlimited opaque recovery #88afb5fd2401ffd3	7512b20d77b5c9db
+case/unlimited opaque recovery #b0e6cf348ee3d4f0	ee8905d66228465f
+case/unlimited opaque recovery #b0ffd5886098e8de	ce0709d4620126e2
+case/unlimited opaque recovery #b3b4a50ac1f6937f	6b835f14c13450a6
+case/unlimited opaque recovery #e13438e1f07934f3	ff8f791b1c415339
+case/unterminated invocation #0f23e55d3cc56463	ab0616548a4c7a26
+case/unterminated raw literal #87a5a152e9853a15	0442635dce553420
+case/unused invalid raw macro argument diagnoses #7119490fc1e223d1	0e3da93272da8b68
+case/unused invalid raw macro diagnoses once #fd1825b15f1ae2c4	4db2a21503d41ecf
+case/variadic macros #addd16154425ba9f	0eb42c241986eb28
+case/x86-64 #79d8e0eb17c519b5	4508bc376106f445
+case/x86-64-v2 #e3bcc4268dcc0470	e271d5344a3e22c5
+case/x86-64-v3 #1476261eaef6467b	1e053f3425f9d8ef
+case/x86-64-v4 #08150ff754c990b2	dada76c15311a303
+case/znver5 #ff192039a772ff56	b1119ab57d87a08b
+compile/# and ## with indirection #4a3f692e87e410de	c5e488c7b67eda62
+compile/#119: #include_next through three directories #06fbe989ed8dc827	68622e3086073dfd
+compile/#119: an inactive group's includes aren't looked for #21797a86395ef21d	df9214d58bdcb6d8
+compile/#119: an include cycle stops at clang's depth limit #a50b1f3c2c4a6fc9	5d363efc6e5fba02
+compile/#119: an include's diagnostics, at clang's places #5c42191bed773f12	7081b5ca50c5ea70
+compile/#119: clang's recoveries from a name not found #90a48224840fc757	d3403395f1e3db42
+compile/#119: computed names, joined as clang joins them #3f2ee4d8bb8477ab	2ab21c9007ebe745
+compile/#119: header names written out, a comment that runs on to the next line among them #ad72af5b74633e9d	72452f508597fd0d
+compile/#119: one file through a symbolic link and a hard link #4adfcab6f366c124	4db8b652cfac2a07
+compile/#252's review: __has_embed of files it only looks at #aa0be917eeec2922	69f33ecf1c7be8ae
+compile/#252's review: a token an #embed name's '>' starts #7ed1347cabba08bd	7cc6ad9160ee68e4
+compile/#252's review: an #embed after #pragma GCC system_header #275051fe4473c10a	c58f9679962a2556
+compile/#252's review: an #embed's parameters past an angled name with "//" #2aa4214b3fad8f3b	ab4f35e377941045
+compile/#252's review: an empty --embed-dir= is the working directory #299dfcd011678d50	da74532b715aac41
+compile/#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment #60b96bb0253ebb3b	85eb9e9da4150eb0
+compile/#252's second review: an #embed after #pragma GCC system_header, indented or after a blank line #9f2d2e2dc2c4a4fa	c1d03436a7248f36
+compile/#252's second review: an #embed's line past a "//" name, through a block comment's newlines #4b85a76114e0a67f	12aab9c346f5b601
+compile/#252's third review: a block comment right after an #embed's "//" name #c46058b9d71ef8e8	f9a361cacb985d30
+compile/#252's third review: an unterminated block comment in an #embed's line lexed again #8eb5759290f8786d	63a19b1410cfcdaf
+compile/#252's third review: comments that end and begin again in an #embed's line lexed again #b42524cbfde97e95	9aff986392f4a2ba
+compile/#252's third review: directives hidden in an #embed's line lexed again #fc52fba96fefa9c7	be85dd34f9736692
+compile/#252's third review: poisoned names in an #embed's line lexed again #67eac9a478b66db0	296a429eba841527
+compile/#252's third review: poisoned names in comments of an #embed's line lexed again #b8420a0514326523	0ffe35ebfbe85355
+compile/#252's third review: the token after an #embed's line lexed again #18c70fc464d2e917	f24093330400a58b
+compile/#254's review: __has_include's and __has_embed's operands as their line writes them, "  x.h" alone #b7b2f29ae2ad947c	2be8cd8b7ff6e86f
+compile/#254's review: __has_include's and __has_embed's operands as their line writes them, " x.h" alone #00e43f35cae03807	652873aa19290ee6
+compile/#254's review: a header name written out, too long for a path #b74d6649bf76a424	eb377494516efec5
+compile/#254's review: a header refused at the depth limit is included #26ba3c9cdd7eea6c	1016677cf8c17bf5
+compile/#254's review: an #embed name written out, longer than its buffer #7f2da942cdb2e1ce	cc496d9925a03abc
+compile/#254's second review: a "//" name's line, through a block comment's newlines #73978cb246e7f3fa	4ead65598704f75b
+compile/#254's second review: a backslash in a header name written out escapes its '>' #32bdf74df9b1fcd6	362959075855be81
+compile/#254's second review: a token a header query's '>' starts stays in its operand #85eace3d730fe1fe	6e4a54a577cca6d0
+compile/#254's second review: the rest of a line past a header name with "//" #284b43c90c3e0fdb	9adf61f58edd3fc5
+compile/#254's third review: condition links ignore directives hidden by a raw query's comment #a03a1e56e75624a8	02431a9a7cf9ba96
+compile/#254's third review: later queries retain raw names in a re-lexed suffix #73e6e5b27008fadc	6351985cd268b89c
+compile/#__VA_ARGS__ in a named variadic macro #dabd8f99b67a5a56	995ccd07ecd260e9
+compile/#__VA_OPT__ after empty arguments #6cc079ff8daaf613	5258b5a3cd3a49b3
+compile/#elif chains and nesting #6a14eab1311d7546	b5a8924ee2e8535b
+compile/#elifdef without a name #94cb9e45d6e24543	c1d539e1c554d0fa
+compile/#embed before C23, an extension #c8cef99e42cf9069	880c3e75a2e6c87a
+compile/#embed in a skipped group #80ddd63899bc5b8e	ddd901324d7eae1b
+compile/#embed: --embed-dir, angled names and the including file's directory #912b15d40bcd04e1	d1179e1dea1dc847
+compile/#embed: a file change before it starts a line #b14b6dbf7586edd8	47b1e1a9e251abcc
+compile/#embed: a file that isn't there #c7653bb5a75cfb50	7dd8042b100aeb90
+compile/#embed: an angled name without --embed-dir #2e3cb2867403e6eb	f390511b874ff2c4
+compile/#embed: computed names and macros among the parameters #fd4d781582ee6f62	67df88a61f527ec2
+compile/#embed: data, limit, clang::offset, prefix, suffix and if_empty #f3bb356316be412e	b305d7db81131f58
+compile/#embed: every byte's value, in pieces of every length #fede9132e0996d4a	f66653b956c91cca
+compile/#embed: the next token joins the data's line #3bf6c9a423957bfb	6a878b6ae72ad929
+compile/#embed: the parameters' errors drop the directive #058ffefad4c16cdf	4ba99aa2cd63dca9
+compile/#ident among a macro's arguments, unexpanded #103340dba7ca461d	f7d722f07a597f78
+compile/#ident and #sccs #a0cb6395678c8973	f14f4a78bdc8475b
+compile/#ident malformed #80fe4d8082e8b3a8	2b4b7dca998c19f2
+compile/#ident's string read expanded, and the rest as it is #f27269cd15043540	fef727f649f88d37
+compile/#if arithmetic #a5eaf7ebe17d437c	22e8e94ccc279f2a
+compile/#if conditional common type without a conversion warning #70df92191393de8b	951a992d9d2707c7
+compile/#if conversion liveness restored across precedence and conditional nesting #2960aa1822c80402	1409a30f5674bcbf
+compile/#if conversion macros and evaluated #elif #d3b1cba4f3d7aa86	8c00b04cc991a995
+compile/#if conversions in unevaluated operands stay silent #0044cf3b93945e67	e32d27249519b85b
+compile/#if dead conversion operand still checks syntax #6bea3c20b4ac2116	5494894677edf03b
+compile/#if lines of macros without a body of one token #4808b1ffc0bc1542	735f6fec37305dc6
+compile/#if lines without a capture #1edb5d24f0d7c630	4628dbfd97ea674b
+compile/#if negative conversion warnings are suppressed by -w #78cb956414c7cc45	f4191ce7c63b93bb
+compile/#if negative conversion warnings can be demoted #5781d8747091380f	b7cba83dc24d8da9
+compile/#if negative conversions are not sign-compare warnings #578d6a5da765d7ac	b7cba83dc24d8da9
+compile/#if negative conversions become errors #30e2013ebfb39ada	fd56dead03f16349
+compile/#if negative conversions for each arithmetic, comparison and bitwise operator #d3f74097082e0e90	9bcf6bb19990d685
+compile/#if of an empty macro #b31c11e032ac4f29	84286cae782f0060
+compile/#if promoted conversion in a system header is suppressed #adebafe44f268d67	a4fd27af1c9dd1df
+compile/#if promoted conversion with system warnings enabled #4f003ded15defa52	e8aa15ee07dfb826
+compile/#if signed, nonnegative and already unsigned controls #8d3173bb109a056d	5e1a5d88e4ebffee
+compile/#ifdef defined #98e0d12074d48c6f	0895f9637019e087
+compile/#include among a macro's arguments #e93b435fb95a61c1	a13330df263b0889
+compile/#include of a missing absolute path #5c978b572fbd6861	ba4221c114558a25
+compile/#include with extra tokens #f1924560bd48a9df	699980f916459d4b
+compile/#include_next through -iquote and -I #a8ae26b8772125a6	29a6e057461d4174
+compile/#line among a macro's arguments #b335c6f9f26f56de	cd598ce0b482a6b0
+compile/#line among a macro's arguments, unexpanded #2afbce445e225979	848b3ea5b8425c4e
+compile/#line continued on the next line #319f486ba2ce8d64	4760cd19fa57eba7
+compile/#line continued, its number indented #3bcd872d95d3183b	0a6a526e27a29635
+compile/#line with a numeric escape in its file name #04201bd93828a617	-
+compile/#line with digit separators #47584f0f056cb46c	f922e92ab003352a
+compile/#line without a file name #94237a1c66459f52	88435ea893894010
+compile/#line's number after a _Pragma and an empty macro #a848714b783424f2	ab15be521501b70a
+compile/#line's operands as phase 2 leaves them #5faaea5d405d6f1f	9e217e1259adf542
+compile/#line's operands read expanded, and the rest as it is #3f366b84305a3d53	8971687b155cfb6f
+compile/#pragma GCC error #6191c7a945619295	78cd56828d2674e6
+compile/#pragma GCC poison's uses #c585128431862616	eeddbd6ed2a674b7
+compile/#pragma among a macro's arguments #46722404413d6822	8a91ce3ca6f9cbca
+compile/#pragma lines among a macro's arguments after an invocation in a #if #fd752cb39c1f612e	7d837af49159790f
+compile/#pragma message's forms #43de80b0308e0c10	ccef2a094a41f122
+compile/#pragma once with extra tokens #1e5b6a78abb3b5e6	049033e05c2c3dad
+compile/'$' before a prefixed literal across a line splice #bccc54e5878bc7c7	65260acba69e459b
+compile/'$' before a prefixed literal across a line splice in assembly #34271759b5c88d0b	dc7f4b41a41cd22d
+compile/'$' before prefixed literals and pp-numbers #bee978f6a46ac2f7	2421a9d25e388248
+compile/'$' before prefixed literals in C23 #d2d6504a53dad6fc	d436f062a64a066c
+compile/'$' before prefixed literals in assembly #0fdab3d114496c3b	8cfbba80cee69584
+compile/-fasm in c89 #9f5a8a8e4c20ec1d	3553cf7a0efa66ea
+compile/-fdigraphs in c89 #199c92f8529a2a4c	28d5b8c45cfa2f9f
+compile/-fdollars-in-identifiers in assembly #f5fb35f55ce5b3b8	1f2786499529f790
+compile/-fgnu-keywords before -fno-asm #7e7e689f48a8468e	3ff761252b273aca
+compile/-fno-digraphs #215ded70af2f8876	538e9e2bbbecc110
+compile/-fno-digraphs in C94 #8934e5313116efa3	85b8a1c60b0f1390
+compile/-fno-digraphs in gnu89 #a78ff52e2ee685ae	d98d9da00f1a3ae7
+compile/-fno-dollars-in-identifiers #d22c32993e4723cc	76569dbd6671d7da
+compile/-fno-gnu-keywords #7e9f3320200ba1ae	e0a8cc15b83c18ba
+compile/-fno-gnu-keywords in C23 #317d1f918dc1b279	dcf9aa7f8dfa0eb8
+compile/-fno-raw-string-literals in a GNU mode #3bb9212b8beab29b	a0c8bdc7e098b69c
+compile/-fraw-string-literals in an ISO mode #8730f705b9fe7e9f	800cab5a545b8a3e
+compile/-funsigned-char in #if #a2cd6adce76578a8	694f20dd1e3b9c90
+compile/-include of a missing absolute path #27a75e10a4770ec1	ba4221c114558a25
+compile/-municode is a joined option, and a -U before it undefines its UNICODE #42cb2af31cda3d97	637b4a338d01b878
+compile/-municode's UNICODE is <command line>'s first macro, before -D and -U #c976c2cd823c7b39	c38c5a1d916da3ce
+compile/-undef #4d26b1b32a2bfb99	7d5f3d5e8f1e821d
+compile/-undef in assembly #c44c1bb25ef30790	818670033b92b1b2
+compile/70 arguments #24565a13b6907b6b	ab9d31ac0303a18d
+compile/C23 keyword spellings before parentheses are undefined macro calls #c3960978e867d7e5	b5892a1ef2358918
+compile/C94's digraphs without // comments #99d80eb30ab1f576	00225a2d312a2648
+compile/GCC dependency #b15cccb2090957ab	81cf8bb4ab8a92f7
+compile/GCC dependency missing #2cb9e1a648cb3913	9930e62d6a8e3a35
+compile/GCC poison #f8998f9114fc2648	d7b781a1ba1e37bd
+compile/GCC poison used #37c6aee1757cb667	8995a8d07b0d5a7d
+compile/GNU comma and __VA_OPT__ #e9081d51439851cc	74d32095c47ba3e5
+compile/GNU's comma before __VA_OPT__ past empty arguments #d3c5769878549354	bb5cfe5b92b14a0c
+compile/GNU's comma before __VA_OPT__ past empty arguments, stringized #32db68a0f3a4f085	c04a6c023cd32e58
+compile/GNU's comma paste after an argument #bda2125ab2fa37de	fc898b7b58f1cee2
+compile/GNU's comma paste with ## after __VA_ARGS__ #5f5b30f9849ed9c0	f8f4fb5f1166f44c
+compile/GNU's comma paste's spaces and placemarkers #3042fb116e34b205	4e08f35f56953797
+compile/UCN identifiers stringized #afd1ab4e9971f5d2	3b0df04e78437f4b
+compile/UCNs in pragma lines #995d1055af586fcd	933c26025c78980d
+compile/UCNs of basic characters in C23 character constants #6caa2299ccc15349	749ae832119085f0
+compile/UCNs pasted and stringized #e0c04e3da6a5eca5	85c8238ad6ddfd37
+compile/UTF-16, UTF-32 and wide character constants' signedness in #if #b4fd86ce38f232d2	dba0ae609e87846a
+compile/UTF-8 character constants' signedness in #if (C23) #773bd844d4f47c78	e097e16f378da203
+compile/_Pragma in an expanded argument #e719296f4e4c25a3	849879d2c6e43e80
+compile/_Pragma in directives' lines #a48a8c053dac6044	81a3fecb962ca54a
+compile/_Pragma of a macro #4d6bf19bf955ee4e	5a0954cbffbd5bb9
+compile/_Pragma without its operand #1bf95486f3198b0b	143c5dc60936e4c9
+compile/_Pragma's operand read expanded #01c28528bb7a46f9	1c1209ccd3af41d9
+compile/__BASE_FILE__ after #line #cb97fcbdc83f7ced	09ea8de1c4a7c4ec
+compile/__BASE_FILE__ in a forced include #49a531907b0802fc	-
+compile/__LINE__ at a ')' that starts at a line splice #12dd8dce60af77da	146cf4d0df226797
+compile/__LINE__ at a ')' that starts at a trigraph's line splice #405acb21ab3465cb	321fce1aea023d44
+compile/__VA_ARGS__ as a parameter #cf6d4ee61e5c35ad	6a088bedea357bdc
+compile/__VA_OPT__ in a macro without parameters #015e1d5615668875	cbc5b05ee825b4e6
+compile/__VA_OPT__ next to ## #bf5678e21da46133	0b1a3f19b6daf9fe
+compile/__VA_OPT__ of an argument that expands to nothing #db3c7481be96b215	8036cb38c496c71d
+compile/__VA_OPT__ without variadic parameters #4cc49d8c768f3276	bc54d256b321a969
+compile/__VA_OPT__'s content pasted left to right #46f397ac3fc03dfc	bfe78eb5fe6b4211
+compile/__has_constexpr_builtin's name is raw, a macro's too #b87f855d5a01fad3	ff603984f2aeb6c0
+compile/__has_embed #a2382b74df73402e	ecdf9369e691357d
+compile/__has_embed outside #if #93bd7884ed4aba83	bd01216a0bb01700
+compile/__has_embed: clang's limit and clang::offset #8566d367594b43e2	7a81a3226a7cfa99
+compile/__has_include in a macro's argument in #if #11845681853373e8	a0fa85b0e17df046
+compile/__has_warning #e931d1895881db62	9958fd96185e661d
+compile/__is_identifier #e8d455ba4fe0e41a	e42e8ba8b50ed621
+compile/__is_identifier in C23 #8d4982c9f489fa03	a4830e1f91fd41c1
+compile/a UCN of a basic character before C23 #2d400176c1714c63	a4d57b48161bafe9
+compile/a _Pragma's text that ends in a backslash #f6a141740a73462c	85fc5abe03162b44
+compile/a _Pragma's unterminated comment #104884e4fd18cdd1	73406787aee6ded9
+compile/a basic character's named UCN in #if's character constant #4ce909f57cf5e83c	ccf679f20dfd1f83
+compile/a basic character's named UCN in C23's #if #8e21409bcf16de4b	33e8a28cec97bc20
+compile/a character constant's UCN past ASCII #2bec821ed0f9d2cb	4f85c36bb0754637
+compile/a comma in #if #65d5639bc8333fa3	fdbb998cedbcfbdc
+compile/a computed #include's name read expanded, and the rest as it is #88447120be7aa077	50ce83aa15cedb2c
+compile/a dead arm's division isn't evaluated #888a20100a8bce41	cc90fb65959f0ec8
+compile/a dead arm's division skips an #error #b27e3f4905530cc4	701a5be743915042
+compile/a dead arm's macros still expand #a5007a07d189b762	77822e4f6bbb0609
+compile/a disabled macro's last token #6e0a558d4ed344cc	71834cb0a3521ac6
+compile/a disabled macro's name among its arguments #b9dfcf37217ade94	065328891f2de335
+compile/a file twice by #include among a macro's arguments #185c6d203988379b	a7d5b6b0a6c415a8
+compile/a function-like name without arguments #1cff526e5382d5c4	39edc7d9ed3bed64
+compile/a group around 50 others #5c79c7a61e6e6c93	79d935029fcb6d17
+compile/a line marker's flag 2 without 1 #5b9f6ffb0da9a327	fc8c2e13cd8337b5
+compile/a line marker's invalid flags #c8da3c5eae9f472e	5336527a4ad975a2
+compile/a line marker's name and flags from macros #9e809ffbb16a9e19	12b4f0723a57ba0e
+compile/a line splice before the quote of a split literal #df0dc24d3450f274	50ded020fadc4b2f
+compile/a line splice before the quote of u8'a' before C23 #d74f31f26a721a5c	e3abce07ca471e62
+compile/a macro after __has_c_attribute's name #2804a0ee944e03f8	e00ef09eab9ceff9
+compile/a macro-named raw embed query restores later source #bfdf9f17f71ad899	cc6b6a0eb7cba65e
+compile/a macro-named raw header query restores later source #e5b4c770219dd0a5	a024d79e81fc8754
+compile/a malformed raw-looking active diagnostic is opaque #63e9a434dde63084	a8baef0b8d5ba805
+compile/a malformed raw-looking excluded diagnostic stays ordinary text #e1426e815bf43ecf	e751d229283fb76e
+compile/a missing absolute header #bdc72017faa3f411	a6b5776bfe035033
+compile/a misspelled named UCN in #if's character constant #4baf06fd37361858	a70f031227eba3ef
+compile/a multiline raw macro argument remains opaque #36c425767c11f91d	f17aaeb6f0bdaf7e
+compile/a name painted while its macro is disabled, then expanded #8347f4bd709fca55	87d62f7db440e41e
+compile/a named UCN in #if #e1dc8366b5fe7ab6	df07959734ab7968
+compile/a named UCN in #if's character constant #ae0689c6e34a7b9a	97f36872452b557c
+compile/a named UCN in a macro #335e638de50b4696	e17d213edd1d7e43
+compile/a named UCN in an identifier #5fb4c482141b14a0	79aa499a1989579a
+compile/a named UCN in an unused macro argument #3cb01770a3f950df	74898f7658cd05c8
+compile/a named UCN names a macro #1aa43471fe890656	352bf68efb0c881f
+compile/a paste that forms u8'a' before C23 #61467162d6fce12e	d64ee98e7a12b216
+compile/a poisoned name among arguments #3901ab9d135c8b2e	31cd446e97580ba7
+compile/a poisoned name from a paste #da9996215ef708a9	e180cbd9cf042dce
+compile/a poisoned name in #ifdef #85c65f66260d377b	9e6bc1197bef0598
+compile/a poisoned name in _Pragma's text #1ec9d0e67de5929f	267f46594907748c
+compile/a poisoned name read from the file #37c6aee1757cb667	8995a8d07b0d5a7d
+compile/a pp-number before a + or - that an exponent would take #5c46c9472ba74da5	12c51c4e5d19997a
+compile/a pp-number without exponent digits #386fc382a277b07e	ebd55539b12f6018
+compile/a pp-number without exponent digits in a skipped group #33225d62e2b71552	6555b7bdb055c238
+compile/a pragma line among a macro's arguments while a _Pragma waits #cdb249b0b6761128	613fb1e00eb23397
+compile/a prefix pasted onto an empty character constant before C23 #d8e9365ee6ea079e	b11a0317999b5bc3
+compile/a prefix pasted onto an empty character constant in C23 #ba03c42ab5179a92	7b94b52f445147d4
+compile/a quote after '$' that a digit separator frees #648e77562fbd0663	a02ddf0cb80c9cd2
+compile/a raw header query with a splice #18314c53e56facee	52a53b2eeca6a4f5
+compile/a raw string literal isn't a header name #31408d7b8381fc05	2249a1d6455d423f
+compile/a raw string literal isn't an #include's header name #e4dfb3ae09235966	7572e45299add087
+compile/a repeated -I and #include_next #80927789f61caf7e	fc692ec9e372dc24
+compile/a scope only in __has_c_attribute #cefa4883f43a63eb	32caa7bd0ea85a62
+compile/a scoped attribute query's operand at the end of the file #afbe10557c9b9957	52d47da4898dc5b9
+compile/a skipped error is still lexed raw #e85b891fb953c148	9a72e1bb53a8baf8
+compile/a skipped warning is still lexed raw #b28cda153b26a886	840ccb02e1562131
+compile/a stringized argument isn't expanded #c3802c5f07c7fe8f	d27f53a6fb1bc483
+compile/a stringized trailing backslash #ec0ce846be2b794e	3330bf3396e7ff22
+compile/a template's names across #define, #undef, push_macro and pop_macro #18dff0bcb1fab124	2ded444f7bd7d1ba
+compile/a trigraph that a stringized argument spells, and one a paste forms #680ca474423297c9	5d1b76ae93b83076
+compile/a warning in a repeated include #8484386e6e44d93e	b08bd622fe979014
+compile/a warning preserves macro snapshots #5cec41b0c86450ae	cd62b3af6f546204
+compile/a warning's comment ends at its logical newline #78956ee41921e5c4	d45d79bfc81af77f
+compile/a warning's comment text preserves following source #09d890854ddaa437	3ccdca0dbae34373
+compile/a warning's quote is text #3b26b445553c5897	f6aece979b9c0e7a
+compile/a warning's spliced name and text #efb39c3e3a53e7ed	f933bf70d8e75b0f
+compile/adjacent tokens don't paste #12fa3d04d6a2313e	01d39bf94cccb4b3
+compile/an #elif after #else #36cc8856a2465ee6	b8b607e8d848141c
+compile/an #endif too many #3d2f73c8d8cf4007	f8129089eec3bf74
+compile/an alias's invocation #d0383a219e87d4af	6badf0efc18b1a71
+compile/an argument across blocks #5118256243f0627b	b2bb0ce05d1c09f8
+compile/an assume_nonnull region left open #193c910cc8121bcf	38b36faa49b8c577
+compile/an attribute query's operand across a directive #38acf06eaaf7d221	304d6c3664181d62
+compile/an attribute query's operand nested #3487ee6fbb6fa469	f6ce387daece2501
+compile/an attribute query's operand read expanded #6a49947e50459274	fd8ece1db29e07dd
+compile/an attribute query's operand unterminated #0e017167bfd4caf2	463dfcdd7383ac7e
+compile/an empty __VA_OPT__ expands nothing #bed870645ec28e6b	d3e5f71e1ee3ae7a
+compile/an empty expansion's spaces #85e273402381d052	83d374fbde41dd33
+compile/an error's comment text preserves following source #76825b86e34ac795	f2ffb05436c204b7
+compile/an excluded raw-looking diagnostic stays ordinary text #95bd9cd93727d9f4	a2fa31ab8f5a16e7
+compile/an excluded raw-looking direct header stays ordinary text #cb29c0eb4a2edade	9fb28bbf4e36a1d7
+compile/an expansion of a template with ## past 16 tokens #07157dc69567d7be	22d770665f3052e1
+compile/an inactive __VA_OPT__'s spacing #d755ae92d35ea826	a0dc2d95620d8f22
+compile/an invocation in a #if among a macro's arguments clears clang's flag #437cc23db771c92c	c8a04520ac2843e7
+compile/an object-like macro in a #if among a macro's arguments keeps clang's flag #8f83669c604821c6	e22e86a1de9d73ab
+compile/an octal escape out of range #9d616fe2ad4a9a76	e9aa44b635ee804e
+compile/an untaken elif still diagnoses invalid raw literals #c857292cabe7ee48	1859ebe81411e049
+compile/an unterminated comment #5a9e8472ed18a0ce	40754bf91df4f896
+compile/an unterminated group #b28720b9a318b2a6	2f51d1b583b0b1bb
+compile/an unused argument isn't expanded #db52829fb6309712	cdfa7a305c5a5be2
+compile/an unused definition whose # names no parameter #953dea8ba7a1861c	631625c5eea9db69
+compile/arguments expanded in order of use #073c3136a26f7e7c	ec3539dad2f465c2
+compile/arguments of direct objects beside a disabled macro's name #44ebba77621ac915	75fd3c1ac748255c
+compile/arguments of direct objects on new lines #2286ca64f3c8b064	bfa23efe6bdb7d8a
+compile/arguments of direct objects used twice #db3d72584dc4c6fe	fe17e2102fecc2a7
+compile/arguments of direct objects, expanded in place #4103219c16b25248	381b69e492dd81d7
+compile/assume_nonnull end after a presumed-file change #357410f6f68f6de5	28902bbd22a8dcf6
+compile/assume_nonnull end uses the printer's current line #51d4fe4975096d42	ae2dc47ef157aa97
+compile/assume_nonnull regions #526aac4f94969ef8	6abba2d1541c082a
+compile/builtin and feature names are raw, attribute names may expand #8caea279db4d0b4a	1d4d5b1bc4f08897
+compile/builtins #916248f799bdb847	190e0df8f3abea59
+compile/builtins' operands, a computed #include and #line #6fda186fdbccb200	b2e56e045fd3c93d
+compile/c89 without digraphs or // comments #2ff2f43e34100dc7	11036e2b1d154cb4
+compile/character constants' values #7db342ec2e6ed588	0112bc6088f6be26
+compile/comma elision with an omitted sole variadic argument (C17) #fc071f3e75c5cff5	8f59cfd9865cd36b
+compile/comma elision with an omitted sole variadic argument (GNU) #3af37aa4a75587ea	24d483f4682a5a5a
+compile/comment makes an object-like macro #410d91e578b9b494	752820d49639a416
+compile/computed header names with line splices #61252a5385bee036	40bebf6e98fe8288
+compile/conditionals nested 40 deep #74b0765823433137	8e1ec9be583b913b
+compile/default wchar after short wchar in #if #15cb9368ef21ac03	5973895711f36bb4
+compile/defined from an argument that expands #ae28c2e260560b07	9e59ddcfa6cc578f
+compile/defined from macros in #if #0a03449f1058cef8	389ed10065b6fff3
+compile/defined function-like and bare names in conditions #49b2950dff72d01f	321f6ed3c5371577
+compile/diagnostic pragmas #89c732f08132cdc6	55a3b7adee4f6c30
+compile/digit separators before C23 #24157b0b0c1565cc	dea95450b94be928
+compile/digit separators in C23 #4f38489f969fc6cf	cd0e68e8302150d6
+compile/directives among a macro's arguments #eb9ead15617645cb	036f6de36f151b9e
+compile/embed limit diagnoses an undefined function-like name #9378c6814a09dafe	b1d41c012d92786d
+compile/empty and adjacent invocations in arguments #d249de93682445e0	f0313d8c6dcf40e0
+compile/escaped greater in a raw-looking direct header #08ce9be46ff95237	f288dd28a5052821
+compile/expansions past a template's tokens #ad39a6a939c150bf	365591c38054ba16
+compile/extra tokens after directives #f9df3e18adeae396	dd6acbc3e6b24f8d
+compile/feature answers' spelling #ca4ae8c15a19024b	509572d32205215e
+compile/floating evaluation macro preprocessing control #2a3ba79add909990	2862f4491c566bad
+compile/floating evaluation macro preprocessing control #49f3465466f5ac22	e89e8bdff9f0b022
+compile/floating evaluation macro preprocessing control #5bccd5bd7862da3e	e8609c880171ac6c
+compile/floating evaluation macro preprocessing control #9767c9b792756d4a	25940591f14ebfce
+compile/floating evaluation macro preprocessing control #b2172270f607f946	5020ebff476d8f9c
+compile/fuzzing, seed 2106 case 190642: #pragma among arguments after an invocation in a #elif #e6aa6364d51a1c46	7b8a61fd36e239b0
+compile/header names with line splices #e1f4821f82e41cdb	787a6250469c2b99
+compile/header-query continuation retains dollar punctuation and wide literal prefixes #ca95e862b834a6fd	9958e2651e7389b0
+compile/identifiers written with UCNs and splices #ede5cf5ea5ec1a2d	5138f58a206c56d6
+compile/include guard and #pragma once #812808c6e2ace0a2	7b0470286066f047
+compile/indexed parameters: #, ##, variadics and __VA_OPT__ #a5a596dcda540712	76a567e00e2d5d9d
+compile/indexed parameters: every # in an unused definition #41e25431f86ccac1	6ebabe9999e875c7
+compile/invalid raw delimiter keeps its line splice #88e1e9dc1dacf30b	10681ff1136d033e
+compile/invalid raw delimiters at active file scope #ae9a576d2f8bdb2f	f6777a6d43802690
+compile/invalid raw in a condition diagnoses after expansion #81fb7582640729b5	46c337528618fe73
+compile/invalid raw prefix with phase two splice #c51dad81391a00df	29abb9c5929562e4
+compile/invalid raw syntax in assembly #edc64dc7cccd7395	a066db080cd9f91c
+compile/invalid raw syntax is ordinary text with raw disabled #b82755a1253e6d1c	5055b4e2adf71619
+compile/invalid raw syntax with forced C89 raw literals #b210ea462c1016df	4f13fb0b7f63345f
+compile/invocations in arguments beside painted names #646955967d79269d	55120e815a974f4d
+compile/invocations in arguments leave expanding body names to rescan #da907bd907d55e1b	8cb57a6858c28f02
+compile/invocations in arguments on new lines #7bff338a67541794	1aa180f5a6d4f079
+compile/invocations in arguments pass pending space to an intervening run #dc6bab291966f54f	70c7d30b72f0741d
+compile/invocations in arguments past the plans kept #8a9815897125f9a2	66388d3c862a7a1b
+compile/invocations in arguments retain paint through outer rescan #d7085ac67e7a88fb	f8f4c3f9346ad14c
+compile/invocations in arguments, expanded in place #b0902f7bb4979325	753d1c1a80ede4a8
+compile/last march and independent tune #7c5512fc3f9a1ba0	d30faaa29c6fd0eb
+compile/line breaks in an unknown token and in a raw string literal #9b43e32b48157beb	a0c370ceff7b2d56
+compile/line marker flags #244e5075417e1505	d57aa78aa1b90b30
+compile/line markers: #line in the main file and in an included one #392b3cbedb526602	02388c93593dfb79
+compile/line markers: a crossed invocation spans printer batches #e74fe03461c02ada	374af48e4fd0355e
+compile/line markers: a line among a macro's arguments #e7857f6faca432bd	06b25c8cc278c9af
+compile/line markers: a paste of a line among a macro's arguments #c911b03fe41eb784	4bb57491a1ac0644
+compile/line markers: a system include ends while collecting arguments #68aa29dbbd51cac6	10029c9d9de50af2
+compile/line markers: an empty expansion crosses an included file's end #09accabe3333f7da	6d10ae5be71f877b
+compile/line markers: an empty expansion crossing an include leaves no output #c7908ca9314a85e6	6e93784bb3934f24
+compile/line markers: an invocation after output crosses an included file's end #4db349ea3070a50d	09d23222f3c3c112
+compile/line markers: an invocation crosses an included file's end #267e8a2541a000fb	8a31938d0e1cfd7e
+compile/line markers: argument collection exits two included files #911fc6093e53bdcc	ed04e3aa1cc9f076
+compile/line markers: argument collection returns to an included file #c4c064c56dc99cd1	b95d77fa511c871e
+compile/line markers: crossed files keep builtin and presumed locations #1072ceb56a870deb	81d8f4c214fc4c6f
+compile/line markers: lines that start with macros, and the line after _Pragma #9ac94b4fba7cf968	3f014b2de9f2eb13
+compile/line markers: moved argument tokens after empty paste operands #d0e2c8bf8504dd02	85c2b17cec29aaa8
+compile/line markers: the include stack, system headers and escaped names #eb88e77cf8501502	76a41ba63b75d4a2
+compile/literal prefixes before C11 #2ad52729668ad5a2	aa2a195e6d60006c
+compile/literal prefixes in C23 #3638b2ead9a27615	4e30a4c63d86eb81
+compile/long literal macro batches #b950c589e3efdc40	ebef759df8563fb7
+compile/macro batch boundaries #db1fde4ac2819708	aa538c85c76f52af
+compile/macro notes #6a2d82feaf541d30	bc317c8ace8fa4f5
+compile/macro notes malformed #ae7d14042945d154	aa920ca0be3212cf
+compile/many macro parameters: reversed replacement and unused definition #3275f7657a4f16ff	6b7ed4033bb4c0e4
+compile/many macro parameters: reversed replacement and unused definition #327cc541bdbbbb4b	d0ee127bb4a481fa
+compile/many macro parameters: reversed replacement and unused definition #34c0034bb5311147	42ad2562ee368cd2
+compile/many macro parameters: reversed replacement and unused definition #3c9127d7cb51136f	5bc28a7c3b9aa3b3
+compile/many macro parameters: reversed replacement and unused definition #428eb4a2590d087f	fb8c97381bdea27e
+compile/many macro parameters: reversed replacement and unused definition #668dacf1480d11e9	e86fc1f75c911153
+compile/many macro parameters: reversed replacement and unused definition #688604502588dc35	c548c725a482c0e0
+compile/many macro parameters: reversed replacement and unused definition #74f280657be405eb	e9a0cb9e1f7080e2
+compile/many macro parameters: reversed replacement and unused definition #873fa0c3cd210e89	588d0524b701f2bf
+compile/many macro parameters: reversed replacement and unused definition #8a3047168f471905	491d710f391e774b
+compile/many macro parameters: reversed replacement and unused definition #949f9e4d90a97cb7	bfc623f92a14d882
+compile/many macro parameters: reversed replacement and unused definition #9885220c40d7b18b	6cbb84168e3e4610
+compile/many macro parameters: reversed replacement and unused definition #ac5e94619465b11d	e5ee0aa8f11ef137
+compile/many macro parameters: reversed replacement and unused definition #c7adf5d800e0f3db	e2f88981da836253
+compile/many macro parameters: reversed replacement and unused definition #cc15859f9a2d8a41	a948c7101028ddbd
+compile/many macro parameters: reversed replacement and unused definition #f0ea0e73da511be7	0e42f2e019bd9ada
+compile/many macro parameters: reversed replacement and unused definition #fad233312bccebd5	06d7bbdcfaff0ac3
+compile/named UCNs a line splice splits #9cd3cd62094ed727	321c33530cb0e5a4
+compile/named UCNs in skipped groups, literals and comments #dfb54ec4f017835e	b3a6f2b555f90433
+compile/named UCNs of aliases and names made by rule #9b5995c93bd9be5a	b7730d272ed71f38
+compile/names no character has #0e8f7c7b4fd9ba61	213655482cb28701
+compile/native #694e834877600bf1	-
+compile/no raw string literals in an ISO mode #cc089e56c7fb472d	7e5da621ad8a15b3
+compile/omp pragmas expand #e2b62f2bb6181d7f	bc0b39b37234064c
+compile/opaque header: a real unclosed comment after an opaque name #412e2ead411417c9	53989eec4330a572
+compile/opaque header: an unclosed comment delimiter in a query name #23510fe07b05f24d	5a555cce8e389edb
+compile/opaque header: an unclosed comment delimiter in an embed name #0e6076865638a7aa	8fe67ff68e4fd277
+compile/opaque header: an unclosed comment delimiter in an include name #8ff67964c6cf5e30	c96e86255ad6a498
+compile/opaque raw-looking query with no lexical overlap #a3c467a1ae4be8fe	01719a92661498d3
+compile/parentheses nested 70 deep #c1145a3cc16d6231	4cbe37bb3d3f199c
+compile/pasted names that expand, painted and rescanned #bcb451016a93f466	7a9d8e64cba72d85
+compile/pastes #27abdff220b8dc19	f58f2aadf85a1c97
+compile/pastes from a template in a file's text and collected #a31495effde8cc26	610bf0d7e24f2586
+compile/pastes of a variadic argument and without parameters #2126c797567d6e0b	9cbf885b29e55b73
+compile/pastes of numbers #b883f4957740c0ee	8c556cd194be8efb
+compile/pastes on new lines #30ee7a699c5057bb	f157d95867e5b142
+compile/pastes that make nothing among other tokens #cd1b650747ab53d0	4fdcbd0e911c0f35
+compile/pastes the templates leave to pp_substitute #e63de2163004baea	5c772548c53cd1b1
+compile/pastes with body tokens and other items #2043d738261bfe25	9db942cdbc7d8430
+compile/pasting %: and %: in c89 #62c8bd33cfb9418a	40037d20848998d1
+compile/pasting '$' as punctuation #166e7b6ab14844e3	25b7ceae7d4a5f36
+compile/pasting // in c89 #beab7c2a1ca6ccb4	2ed7ab0d66443af2
+compile/pasting a comment's start #907fc8a6db98e1ea	c5d4c8f4ee75082f
+compile/pasting a digraph's characters in c89 #ab4e1d980676a7d4	168273eae2c108a0
+compile/placemarkers #ca62f711cb84f866	0e7fd5b9a8590ce6
+compile/poisoned names a template pastes #6a8903bb9cfcc94a	dba4a9e39f25261a
+compile/poisoning a macro #facd539c873a9bf9	74b6fa5c281a55df
+compile/poisoning defined #570d8c99e9c33707	baa7297fa21d289c
+compile/pragmas #df44472e3ab619d3	78bfc5f697639aca
+compile/push_macro allows a redefinition #8e29c8b524afd55a	10a9fb7c0d1ac974
+compile/push_macro and pop_macro #532969c184eb0b83	c5114ccc93ea3f63
+compile/push_macro malformed #e2f04b5eff13fa7c	c124c0d3fba893bc
+compile/push_macro's and pop_macro's operands read expanded, and the rest as it is #80c493a16cc8d3a2	c46a189acdf09d42
+compile/raw query private views preserve recursive macro snapshots #e9977f8e16170bdd	6272c4a18bf20071
+compile/raw query private views retain once, import and guard identity #7fe76415ae82f813	d96f5894f706e6af
+compile/raw semantic-pragma control #1270dfe82de77017	13aac764bdfdf81a
+compile/raw semantic-pragma control #43951106b6169fc7	702832509729c6d6
+compile/raw semantic-pragma control #56fad0e1f44ab7fa	279bbf9c97b1b831
+compile/raw semantic-pragma control #91546859558e3a95	6675779d89805d71
+compile/raw semantic-pragma control #a55f26923a1d5a51	a8042d9afeef0d35
+compile/raw semantic-pragma control #bf8efb10dde963f4	07913e14eadc0ca4
+compile/raw semantic-pragma control #cbc6aa00caedca6c	4d79cdc060fe9ea3
+compile/raw semantic-pragma control #d8fcfcb546bff6b5	16da171ea3187875
+compile/raw semantic-pragma control #df55dc59314041b6	57e6f785027dab74
+compile/raw semantic-pragma control #e5e5ccc416f0ddf3	b7fc51e98bda405a
+compile/raw string literals after '$' as punctuation #a5399ef315eb1796	76191d5941506569
+compile/raw string literals after '$' in assembly #07b2e268b34f8fa4	34957783d6f9cbce
+compile/raw string literals in _Pragma, #line and a line marker #2fe2cdbb9548986f	125e6700f25de5d5
+compile/raw string literals in __has_warning #445318607763ee4b	3d4e6105208532db
+compile/raw string literals in a GNU mode #c47e5fb316bf5b90	1cb3bddd84e03c69
+compile/raw string literals in gnu99 #085550f1f71be27e	332ee3d2479c3a9f
+compile/raw string literals keep their splices and trigraphs #cdebe0bbb291968c	b4ba862f6de6ffb4
+compile/raw string literals over lines and directives #a84eecc603056276	967cff062b2438a7
+compile/raw string literals pasted and stringized #3abbfb60cf138422	fc3c1b03bb174fd6
+compile/raw strings resume after an opaque direct header #c507c97795379bf9	d6fb780e24a6cfb4
+compile/raw-looking direct angle header preserves following source #e9636417566f5df0	d12bd3aefe8a5a44
+compile/raw-looking error text preserves following source #588112f8f182d257	0533eae41106ded4
+compile/raw-looking warning text preserves following source #860ea692a112c309	afc67a5a64bab316
+compile/redefinition with other spacing #ba7f36097cf07d8c	5f888519f34f902f
+compile/redefinitions with other spellings #1db2b96934a09117	285dc96134b72a78
+compile/repeated raw-looking direct headers use one recovery #6dcebcfd07ece9c0	3459db9d5d09cea0
+compile/rescanning, redefinitions and painting #a1e8f9a146f1f303	e3b8f1443e127eae
+compile/right shifts in #if #8c3c15c14ff8e909	79747021577353a8
+compile/several characters in a wide character constant #8e0d7f27358543f3	4f85c36bb0754637
+compile/short wchar in #if #310ffbfa40f19291	15ab520fce90c6b1
+compile/signed char in #if #ff7cfa6301b73767	a338d4e35cf3a704
+compile/silent pragmas #93053c4dff8a2880	c5935f873e59aba3
+compile/skipped invalid raw literals suppress diagnostics #32e0d5457aec6820	84d75e18b4371ae6
+compile/slice context boundary #67670722972540eb	3c36bec06f7e1c25
+compile/slice disabled indirect #fc294ad40739cac1	ecd600b08484349e
+compile/slice disabled self #0e1a5299b1b1d744	a19c0bf7ccd1063d
+compile/slice empty arguments #1501be787f7d60a8	c383d5458a902eef
+compile/slice expansion order #d24a3350859e904c	e215617c26260f9c
+compile/slice omitted variadic #3351adacef21d002	d46ea2a20212c50b
+compile/slice pragma capture #157a392a93cf47b8	8840a2e81ff6949b
+compile/slice raw and expanded #92725b8209fda294	3265590e38b68541
+compile/slice source location #740107ef34c1853c	2fbd613581a51971
+compile/slice too few arguments #2e9908301800cf90	6768b28a890ec966
+compile/slice too many arguments #43e1ab2f9e1d84ae	d50ba0d27f2a62a8
+compile/slice variadic commas #29e2989e3ba3314d	842d38b33ce27c7d
+compile/slice whitespace #30d1de253a9a5354	3f9edb4699c2b094
+compile/spaces after invocations in a file's text #4facfab38d0b5e8f	d646939a95ce0256
+compile/spaces around __VA_OPT__ #a75d02215c7d51ce	f77f931b7881373e
+compile/spaces through empty expansions #6f892be0bfae9da5	8227d895d99fa1ad
+compile/splice makes a function-like macro #46bbc6be234ddc2c	0d771427ac5f558a
+compile/spliced raw-looking direct angle header #9cdf87a1dc287606	4b6f5eb659d7afe8
+compile/standard features in C23 #6a0abdd2659964ce	b777999c5fdcd5e9
+compile/standard features in C99 #e81f4982eccee4c5	a540a74df47e2957
+compile/standard features in GNU17 #8f48d0a39ce39c0c	8b3e4df7ed42ff3b
+compile/stringize across a splice and a comment #ef910132e9af1cc3	7e07403f5f75a9a6
+compile/stringize spacing and escapes #fc43e118f876c42b	453724f2abb7b6bf
+compile/stringizing from a template #cf4972bad64eeaeb	01707ae9b56397d1
+compile/successive raw header queries in one condition #cad765ff8f41d2ec	43d8585614adca82
+compile/target queries #12f3b93d8835763c	dfbae1817f868fde
+compile/the oracle recognizes ext_vector_type with either attribute spelling #b6f0db33d5c3f65c	f11cd49089db24b2
+compile/the space before a stringized __VA_OPT__ #aad4d814524ac35a	e745dcb56554e1ed
+compile/the token after a _Pragma that prints nothing #33d5f1bbd814cc4d	a28ca28afc03b22d
+compile/trigraphs ignored in the GNU modes #75bba0845177ed3f	644289a06c363200
+compile/trigraphs in the ISO modes before C23 #43c57fedff147e84	5ed97c8a8bc39351
+compile/true in C17 #24a5ed82b0449829	dab9145f8d28c426
+compile/true in C23 #d6cb263dbfaf9ea8	468ec0d5b73969f1
+compile/true in C99 #157af05336e3c95f	dab9145f8d28c426
+compile/two ## and an empty argument #0d8087d2dee26956	f8fb2b27c4674d78
+compile/two ## in a row #a89ff6731b4f8850	9eba9900a8ec8f46
+compile/u8 character constants before C23 #c6f012ffe04a05af	2e1ce7f0ad6c9701
+compile/undefined calls in skipped conditional groups remain skipped #4ad78d1c72c11f30	b2b7c339a6a8ff67
+compile/unknown target vendor #8bc4ba3add08c1a3	112ef510dccacc14
+compile/unknown tokens that a prefix C99 doesn't have starts #e6f2d94c0574c3cf	d2be0747f4484d20
+compile/unknown tokens that u8 starts before C23 #bb492c4d0fac90a9	885991ccc7f477a3
+compile/unlimited opaque recovery #0f1ceb506870ed03	f8c11cbd3fe9f039
+compile/unlimited opaque recovery #465f655cc90a498b	0175bb117eef335c
+compile/unlimited opaque recovery #4677d0928bedfd02	53327deffdd8b191
+compile/unlimited opaque recovery #47e1249872a7fc47	de24c5dc97580648
+compile/unlimited opaque recovery #551bc280d1a3308f	aa2d4d09057c5703
+compile/unlimited opaque recovery #88afb5fd2401ffd3	a37e9fba805a5f1b
+compile/unlimited opaque recovery #b0e6cf348ee3d4f0	611aecbcf709a31f
+compile/unlimited opaque recovery #b0ffd5886098e8de	51859cafa7547722
+compile/unlimited opaque recovery #b3b4a50ac1f6937f	6bf1148fe920d1e6
+compile/unlimited opaque recovery #e13438e1f07934f3	6133c3802dcf5d79
+compile/unterminated invocation #0f23e55d3cc56463	ab0616548a4c7a26
+compile/unterminated raw literal #87a5a152e9853a15	0442635dce553420
+compile/unused invalid raw macro argument diagnoses #7119490fc1e223d1	51ebbd0e73385428
+compile/unused invalid raw macro diagnoses once #fd1825b15f1ae2c4	290117dcb94ea70f
+compile/variadic macros #addd16154425ba9f	7685030e16f4b328
+compile/x86-64 #79d8e0eb17c519b5	729edca9274d2e85
+compile/x86-64-v2 #e3bcc4268dcc0470	8255871eabb37e85
+compile/x86-64-v3 #1476261eaef6467b	c441b9237f8a81af
+compile/x86-64-v4 #08150ff754c990b2	514d7ece74622743
+compile/znver5 #ff192039a772ff56	820f1529924de74b
+eval-method/case 0	25940591f14ebfce
+eval-method/case 1	e89e8bdff9f0b022
+eval-method/case 2	5020ebff476d8f9c
+eval-method/case 3	2862f4491c566bad
+eval-method/case 4	e8609c880171ac6c
+final-copy/source 0	bdd415564fb81872
+final-copy/source 1	54488a280de27466
+fuzz/c17	fe0f5a84d8f79bc0
+fuzz/c23	6feacb9432573440
+guards/!defined G || 0	cbbd5abae754f2f8
+guards/#if !defined G	27b3024125da04dc
+guards/#if !defined(G)	af5a4340aaafdfa8
+guards/#import	14ab79489d27764e
+guards/#pragma once through a symbolic link and a hard link	93f331b7fbfd566b
+guards/#undef between the inclusions	96a460cd4fc06581
+guards/a directive after the #endif	2b371ad951d5f417
+guards/a directive before the #ifndef	57121ac377df4fc1
+guards/a guard with #elif	9d04778287a48cae
+guards/a guard with #else	eeea54529f70d154
+guards/a guarded file included twice	f986f02840c51ede
+guards/a token after the #endif	653bfc5dc8415f40
+guards/a token before the #ifndef	dd87734cfefc428c
+guards/an inclusion from inside the file	d1f31f827801b6c7
+guards/an inclusion in a skipped group	80dec9fdab1f8da9
+guards/comments and null directives around the group	19c8e74379df7d18
+guards/extra tokens	26a18f385517f9df
+guards/parentheses and three '!'	e8cab9f54db62e58
+guards/the macro defined before the first inclusion	d5268c7a56a01801
+guards/two '!'	c5493b458a6ccb24
+history/CRLF	9ad37a38ad8fef47
+history/argument	680d96485788fa36
+history/argument macro name	d02c030894477da2
+history/argument prescan	b48036717b3e7773
+history/arity	c655406631061c9d
+history/arity across contexts	2108dcb63ac538d2
+history/builtin	305b1f887692809c
+history/cross-context invocation	86dadda49d42efb3
+history/defined before parentheses keeps its operator diagnostic	c7e1dfe12e468273
+history/disabled function-like recursive expansion	2a07cf5911e8d93d
+history/embed: an angled name too long for a path	44e46c3eab7686d3
+history/empty paste left	b6a619d64d69554d
+history/empty paste right	0c775f42e7d1341d
+history/empty stringification	d2449a0d4405b8b9
+history/extra arguments	40f03490354f1dfe
+history/forwarded function	f39b886c224062ac
+history/function	7b80e76654f0bf98
+history/header definition	4fe16a3f5e965bb1
+history/header errors	18823840c6a10045
+history/include: a name with a part longer than NAME_MAX	7572e45299add087
+history/include: a quoted name too long for a path	7572e45299add087
+history/include: an absolute name too long for a path	7572e45299add087
+history/include: an angled name too long for a path	539b1adbf36aadc3
+history/include: extra tokens after a name written out	6dffe95ce1e1a0a7
+history/include: the depth limit at a name a macro made	cc92ba0a65903c25
+history/include: the header refused at the depth limit	e78f10b9c56e8033
+history/invalid paste	918bf824ccced5bb
+history/line/include	5d1180ec7a586604
+history/name after a value keeps its operator diagnostic	8015d2dd24272c95
+history/nested	acd701f5ad938df2
+history/nested argument name	584c3c91eaf59dfa
+history/nested include stack	50c25e044d9376d6
+history/number before parentheses keeps its operator diagnostic	6d00632ebb09322e
+history/object	d78d3e8fd722422d
+history/output/argument	93d14f7efb44873a
+history/output/nested	cd34fecd10f6735a
+history/output/paste	2e8770632d2e3109
+history/output/redefinition	cb7158d54261e5b3
+history/parenthesized name keeps its operator diagnostic	e3c0fe8e214ea9ca
+history/paste	027b95e6ae7622f3
+history/stringification	5a4657bb840ab43a
+history/undefined function-like Unicode name	a0f10dabeebe645c
+history/undefined function-like alias	fd4128415fa8fe6a
+history/undefined function-like included name	b5d183a91b4c68a9
+history/undefined function-like long name is not truncated	a0f10dabeebe645c
+history/undefined function-like name	a0f10dabeebe645c
+history/undefined function-like name before a splice	a0f10dabeebe645c
+history/undefined function-like name in elif	772e26e3a325cc2d
+history/undefined function-like name in nested expansion	a8216987d47fcc7b
+history/undefined function-like name in short-circuited operands	d0262c2b804b4b93
+history/undefined function-like self expansion	adae54b56743333a
+lookup/accounting	5a640fe9109375cc
+pragma-origin/direct operator	aaf63613f423b0c0
+pragma-origin/forwarded argument operator	3d5c3bd4d8aae2b4
+pragma-origin/macro body operator	68afe92a0280fbda
+pragma-origin/multiline forwarded argument operator	8ae7263af0d11dbc
+pragma-origin/physical directive	16ac868ebdc0e35f
+print/# and ## with indirection #4a3f692e87e410de	64c1eb6b97334459
+print/#119: #include_next through three directories #06fbe989ed8dc827	511358c0fa687d4d
+print/#119: an inactive group's includes aren't looked for #21797a86395ef21d	1a19f91921d9561f
+print/#119: an include cycle stops at clang's depth limit #a50b1f3c2c4a6fc9	706606b2f725f27a
+print/#119: an include's diagnostics, at clang's places #5c42191bed773f12	f855ce35c95b18da
+print/#119: clang's recoveries from a name not found #90a48224840fc757	89610919183516f1
+print/#119: computed names, joined as clang joins them #3f2ee4d8bb8477ab	5617e370d4e0bfb2
+print/#119: header names written out, a comment that runs on to the next line among them #ad72af5b74633e9d	2a399b31eff863d8
+print/#119: one file through a symbolic link and a hard link #4adfcab6f366c124	ffe9836cc75d5ed5
+print/#252's review: __has_embed of files it only looks at #aa0be917eeec2922	02057b4ba26a0177
+print/#252's review: a token an #embed name's '>' starts #7ed1347cabba08bd	71dc2c82a2147f1e
+print/#252's review: an #embed after #pragma GCC system_header #275051fe4473c10a	ae89170b06168e81
+print/#252's review: an #embed's parameters past an angled name with "//" #2aa4214b3fad8f3b	78be38e298260b6d
+print/#252's review: an empty --embed-dir= is the working directory #299dfcd011678d50	29154c2ca23b3f34
+print/#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment #60b96bb0253ebb3b	705a8717636c0a78
+print/#252's second review: an #embed after #pragma GCC system_header, indented or after a blank line #9f2d2e2dc2c4a4fa	1020b19acd092152
+print/#252's second review: an #embed's line past a "//" name, through a block comment's newlines #4b85a76114e0a67f	b3ee0cc363401487
+print/#252's third review: a block comment right after an #embed's "//" name #c46058b9d71ef8e8	72f7b60a36e7423e
+print/#252's third review: an unterminated block comment in an #embed's line lexed again #8eb5759290f8786d	12a0009f64b57d18
+print/#252's third review: comments that end and begin again in an #embed's line lexed again #b42524cbfde97e95	c0bfaaaf4a740acb
+print/#252's third review: directives hidden in an #embed's line lexed again #fc52fba96fefa9c7	69cda3f7eb71c257
+print/#252's third review: poisoned names in an #embed's line lexed again #67eac9a478b66db0	6f0ccb1be9222b00
+print/#252's third review: poisoned names in comments of an #embed's line lexed again #b8420a0514326523	3a837e0db1bbf037
+print/#252's third review: the token after an #embed's line lexed again #18c70fc464d2e917	935d3f18f6a604b0
+print/#254's review: __has_include's and __has_embed's operands as their line writes them, "  x.h" alone #b7b2f29ae2ad947c	1631b4adb1bfedf9
+print/#254's review: __has_include's and __has_embed's operands as their line writes them, " x.h" alone #00e43f35cae03807	e87a7dc583ab5248
+print/#254's review: a header refused at the depth limit is included #26ba3c9cdd7eea6c	cec2a46cfa32d2e0
+print/#254's second review: a "//" name's line, through a block comment's newlines #73978cb246e7f3fa	b5fd39fbc6858481
+print/#254's second review: a backslash in a header name written out escapes its '>' #32bdf74df9b1fcd6	ab4d8fb2c9751a02
+print/#254's second review: a token a header query's '>' starts stays in its operand #85eace3d730fe1fe	912543605d90f000
+print/#254's second review: the rest of a line past a header name with "//" #284b43c90c3e0fdb	c6bdd6627002d8ab
+print/#254's third review: condition links ignore directives hidden by a raw query's comment #a03a1e56e75624a8	d713d1b708d44b30
+print/#254's third review: later queries retain raw names in a re-lexed suffix #73e6e5b27008fadc	b04f9a70c5b303c2
+print/#__VA_ARGS__ in a named variadic macro #dabd8f99b67a5a56	cbf29ce484222325
+print/#__VA_OPT__ after empty arguments #6cc079ff8daaf613	8f48f5e94d47aaa3
+print/#elif chains and nesting #6a14eab1311d7546	5c11599caddddfb1
+print/#elifdef without a name #94cb9e45d6e24543	cbf29ce484222325
+print/#embed before C23, an extension #c8cef99e42cf9069	73dbf95520aaabac
+print/#embed in a skipped group #80ddd63899bc5b8e	1a19f91921d9561f
+print/#embed: --embed-dir, angled names and the including file's directory #912b15d40bcd04e1	6d76c74354a973e5
+print/#embed: a file change before it starts a line #b14b6dbf7586edd8	fcc52d2a2e90df16
+print/#embed: computed names and macros among the parameters #fd4d781582ee6f62	c3c493f982b193f1
+print/#embed: data, limit, clang::offset, prefix, suffix and if_empty #f3bb356316be412e	b839e3dbbf70b1f9
+print/#embed: every byte's value, in pieces of every length #fede9132e0996d4a	8743492e7f54ad74
+print/#embed: the next token joins the data's line #3bf6c9a423957bfb	be3254bb95239415
+print/#embed: the parameters' errors drop the directive #058ffefad4c16cdf	e0562c9cbe3bbb68
+print/#ident among a macro's arguments, unexpanded #103340dba7ca461d	28e6b4cde74c2713
+print/#ident and #sccs #a0cb6395678c8973	c12eafeb56a5a863
+print/#ident malformed #80fe4d8082e8b3a8	cbf29ce484222325
+print/#ident's string read expanded, and the rest as it is #f27269cd15043540	a2f2e69e85db3404
+print/#if arithmetic #a5eaf7ebe17d437c	76065f09dda6ad15
+print/#if conditional common type without a conversion warning #70df92191393de8b	d171bc67591e4f04
+print/#if conversion liveness restored across precedence and conditional nesting #2960aa1822c80402	2884c43205e17c5a
+print/#if conversion macros and evaluated #elif #d3b1cba4f3d7aa86	da0aead8ad23fe4b
+print/#if conversions in unevaluated operands stay silent #0044cf3b93945e67	7c522bf4de8b344c
+print/#if lines of macros without a body of one token #4808b1ffc0bc1542	725ffcaa7f4ae40a
+print/#if lines without a capture #1edb5d24f0d7c630	4537a732ae1fd5ca
+print/#if negative conversion warnings are suppressed by -w #78cb956414c7cc45	521f67a8ca83f4c6
+print/#if negative conversion warnings can be demoted #5781d8747091380f	521f67a8ca83f4c6
+print/#if negative conversions are not sign-compare warnings #578d6a5da765d7ac	521f67a8ca83f4c6
+print/#if negative conversions for each arithmetic, comparison and bitwise operator #d3f74097082e0e90	cbe58f831f92afe9
+print/#if of an empty macro #b31c11e032ac4f29	08ed7c07b58a4eba
+print/#if promoted conversion in a system header is suppressed #adebafe44f268d67	714e1262e269ede5
+print/#if signed, nonnegative and already unsigned controls #8d3173bb109a056d	ca91ec8a74b630e0
+print/#ifdef defined #98e0d12074d48c6f	215b3819258f45d0
+print/#include among a macro's arguments #e93b435fb95a61c1	8544ab4415a2f660
+print/#include with extra tokens #f1924560bd48a9df	a5873666ee36428f
+print/#include_next through -iquote and -I #a8ae26b8772125a6	20072efdc29f4073
+print/#line among a macro's arguments #b335c6f9f26f56de	cce8110d710931ab
+print/#line continued on the next line #319f486ba2ce8d64	0d85f5f0f8916ddf
+print/#line continued, its number indented #3bcd872d95d3183b	ff535bf511b11806
+print/#line with digit separators #47584f0f056cb46c	82e4327659c80c2a
+print/#line without a file name #94237a1c66459f52	ef9255ef20f89e48
+print/#line's number after a _Pragma and an empty macro #a848714b783424f2	772902b581236a76
+print/#line's operands as phase 2 leaves them #5faaea5d405d6f1f	0f5ad0d85ac6be6d
+print/#line's operands read expanded, and the rest as it is #3f366b84305a3d53	fc8380f4a7c3d066
+print/#pragma GCC error #6191c7a945619295	0cf46518b20fd27b
+print/#pragma GCC poison's uses #c585128431862616	08d59e07b575f69f
+print/#pragma among a macro's arguments #46722404413d6822	8544ab4415a2f660
+print/#pragma lines among a macro's arguments after an invocation in a #if #fd752cb39c1f612e	a36c256ba7719bcf
+print/#pragma message's forms #43de80b0308e0c10	d5471fd064dccce0
+print/#pragma once with extra tokens #1e5b6a78abb3b5e6	cbf29ce484222325
+print/'$' before a prefixed literal across a line splice #bccc54e5878bc7c7	bdfa04f812dee1de
+print/'$' before a prefixed literal across a line splice in assembly #34271759b5c88d0b	bdfa04f812dee1de
+print/'$' before prefixed literals and pp-numbers #bee978f6a46ac2f7	79225e992f4987b6
+print/'$' before prefixed literals in C23 #d2d6504a53dad6fc	ea8a6341a8e7b77d
+print/'$' before prefixed literals in assembly #0fdab3d114496c3b	79225e992f4987b6
+print/-fasm in c89 #9f5a8a8e4c20ec1d	8e2e48ec12f592cf
+print/-fdigraphs in c89 #199c92f8529a2a4c	4a8090ed39071d83
+print/-fdollars-in-identifiers in assembly #f5fb35f55ce5b3b8	1e94ab8e30035e95
+print/-fgnu-keywords before -fno-asm #7e7e689f48a8468e	37a83bf99ce7e807
+print/-fno-digraphs #215ded70af2f8876	19bef4b6c472470b
+print/-fno-digraphs in C94 #8934e5313116efa3	da44c744a657292d
+print/-fno-digraphs in gnu89 #a78ff52e2ee685ae	7601662cacd49d20
+print/-fno-dollars-in-identifiers #d22c32993e4723cc	61fe449bd05bb13b
+print/-fno-gnu-keywords #7e9f3320200ba1ae	518080d709bb1b9a
+print/-fno-gnu-keywords in C23 #317d1f918dc1b279	988703f1476ae152
+print/-fno-raw-string-literals in a GNU mode #3bb9212b8beab29b	40a48f417794758f
+print/-fraw-string-literals in an ISO mode #8730f705b9fe7e9f	46d41fb92bbb4a1c
+print/-funsigned-char in #if #a2cd6adce76578a8	7c941349776afaae
+print/-municode is a joined option, and a -U before it undefines its UNICODE #42cb2af31cda3d97	abd36a175fedd72b
+print/-municode's UNICODE is <command line>'s first macro, before -D and -U #c976c2cd823c7b39	0802fe07b4c314ad
+print/-undef #4d26b1b32a2bfb99	6239cc8f1e912455
+print/-undef in assembly #c44c1bb25ef30790	12f3fd5b66ed9e90
+print/70 arguments #24565a13b6907b6b	a330a6297541a24f
+print/C23 keyword spellings before parentheses are undefined macro calls #c3960978e867d7e5	dbd2b03a5e921fb9
+print/C94's digraphs without // comments #99d80eb30ab1f576	d0b0b865cf5660e7
+print/GCC dependency #b15cccb2090957ab	08f0de07b58d2b17
+print/GCC poison #f8998f9114fc2648	08f0de07b58d2b17
+print/GCC poison used #37c6aee1757cb667	08d59e07b575f69f
+print/GNU comma and __VA_OPT__ #e9081d51439851cc	cf4518df53a05008
+print/GNU's comma before __VA_OPT__ past empty arguments #d3c5769878549354	ddf754605eb3baec
+print/GNU's comma before __VA_OPT__ past empty arguments, stringized #32db68a0f3a4f085	107ea0f7059df487
+print/GNU's comma paste after an argument #bda2125ab2fa37de	ede798bf40fcb9ff
+print/GNU's comma paste's spaces and placemarkers #3042fb116e34b205	d1c035fbde01bdd5
+print/UCN identifiers stringized #afd1ab4e9971f5d2	11fbc1cdbd951381
+print/UCNs in pragma lines #995d1055af586fcd	ca0331b5bc858e65
+print/UCNs of basic characters in C23 character constants #6caa2299ccc15349	7c941349776afaae
+print/UCNs pasted and stringized #e0c04e3da6a5eca5	72a1cb0a6ee1be3b
+print/UTF-16, UTF-32 and wide character constants' signedness in #if #b4fd86ce38f232d2	fd7755b060a9ba86
+print/UTF-8 character constants' signedness in #if (C23) #773bd844d4f47c78	1c185115ab359521
+print/_Pragma in an expanded argument #e719296f4e4c25a3	5e39df4fe4c6d7ad
+print/_Pragma in directives' lines #a48a8c053dac6044	8a7e2af24ebcdec3
+print/_Pragma of a macro #4d6bf19bf955ee4e	c41adc4c2adc63e0
+print/_Pragma's operand read expanded #01c28528bb7a46f9	f12a2e87a3694300
+print/__BASE_FILE__ after #line #cb97fcbdc83f7ced	91895dbbc1e4ef99
+print/__BASE_FILE__ in a forced include #49a531907b0802fc	e97f98a5587e5354
+print/__LINE__ at a ')' that starts at a line splice #12dd8dce60af77da	8cee77400a7410f3
+print/__LINE__ at a ')' that starts at a trigraph's line splice #405acb21ab3465cb	07ff9407b4c02ab8
+print/__VA_ARGS__ as a parameter #cf6d4ee61e5c35ad	d293c93ceed56861
+print/__VA_OPT__ in a macro without parameters #015e1d5615668875	bc617cb442eca510
+print/__VA_OPT__ next to ## #bf5678e21da46133	6b049b401c93b837
+print/__VA_OPT__ of an argument that expands to nothing #db3c7481be96b215	f3a64e385fe36e93
+print/__VA_OPT__ without variadic parameters #4cc49d8c768f3276	f63311aa6da8bb4e
+print/__VA_OPT__'s content pasted left to right #46f397ac3fc03dfc	594720aac7e76e3c
+print/__has_constexpr_builtin's name is raw, a macro's too #b87f855d5a01fad3	98882c9f4151ba6b
+print/__has_embed #a2382b74df73402e	008bc4d62afc20e9
+print/__has_embed: clang's limit and clang::offset #8566d367594b43e2	90b8db63bd487d42
+print/__has_include in a macro's argument in #if #11845681853373e8	2dd7255f7fd16412
+print/__has_warning #e931d1895881db62	243fc57066a8d992
+print/__is_identifier #e8d455ba4fe0e41a	a07edd5a9b315567
+print/__is_identifier in C23 #8d4982c9f489fa03	be201e9a6b6167f2
+print/a _Pragma's text that ends in a backslash #f6a141740a73462c	241c41c6c724509e
+print/a _Pragma's unterminated comment #104884e4fd18cdd1	857c4d9e9190564d
+print/a basic character's named UCN in C23's #if #8e21409bcf16de4b	bfc3c2f2c2b98989
+print/a computed #include's name read expanded, and the rest as it is #88447120be7aa077	dd236f0dfb57e747
+print/a dead arm's division isn't evaluated #888a20100a8bce41	08ed7c07b58a4eba
+print/a dead arm's division skips an #error #b27e3f4905530cc4	cebbb8a74bd80e97
+print/a disabled macro's last token #6e0a558d4ed344cc	b4321005beade3df
+print/a disabled macro's name among its arguments #b9dfcf37217ade94	05ee09490372f568
+print/a file twice by #include among a macro's arguments #185c6d203988379b	872c660b5765ec20
+print/a function-like name without arguments #1cff526e5382d5c4	b9dc206da487e3e7
+print/a group around 50 others #5c79c7a61e6e6c93	1a19f91921d9561f
+print/a line marker's flag 2 without 1 #5b9f6ffb0da9a327	cbf29ce484222325
+print/a line marker's invalid flags #c8da3c5eae9f472e	cbf29ce484222325
+print/a line marker's name and flags from macros #9e809ffbb16a9e19	1fcc12c99fcac518
+print/a line splice before the quote of a split literal #df0dc24d3450f274	9774e6afdcb685aa
+print/a line splice before the quote of u8'a' before C23 #d74f31f26a721a5c	bf91d2e5aa54d893
+print/a macro-named raw embed query restores later source #bfdf9f17f71ad899	c77088e4dbe79231
+print/a macro-named raw header query restores later source #e5b4c770219dd0a5	9f84a97d741df2e4
+print/a malformed raw-looking active diagnostic is opaque #63e9a434dde63084	dbd2b03a5e921fb9
+print/a missing absolute header #bdc72017faa3f411	2b0a9a1952d1e757
+print/a misspelled named UCN in #if's character constant #4baf06fd37361858	bfc3c2f2c2b98989
+print/a multiline raw macro argument remains opaque #36c425767c11f91d	ddb82546bdd1dd15
+print/a name painted while its macro is disabled, then expanded #8347f4bd709fca55	c9facd799d781070
+print/a named UCN in #if #e1dc8366b5fe7ab6	bfc3c2f2c2b98989
+print/a named UCN in #if's character constant #ae0689c6e34a7b9a	bfc3c2f2c2b98989
+print/a named UCN in a macro #335e638de50b4696	3bb16ffd5e146bc3
+print/a named UCN in an identifier #5fb4c482141b14a0	d1581c3894ddba2f
+print/a named UCN in an unused macro argument #3cb01770a3f950df	bfc3c2f2c2b98989
+print/a named UCN names a macro #1aa43471fe890656	9fc42820376c6700
+print/a paste that forms u8'a' before C23 #61467162d6fce12e	283703db1e740d39
+print/a poisoned name among arguments #3901ab9d135c8b2e	07f8bc07b4ba5002
+print/a poisoned name from a paste #da9996215ef708a9	7800d21956a4fed0
+print/a poisoned name in #ifdef #85c65f66260d377b	cbf29ce484222325
+print/a poisoned name in _Pragma's text #1ec9d0e67de5929f	187fa99dc27f94fe
+print/a poisoned name read from the file #37c6aee1757cb667	08d59e07b575f69f
+print/a pp-number before a + or - that an exponent would take #5c46c9472ba74da5	eba6416305877a37
+print/a pp-number without exponent digits #386fc382a277b07e	c181d2cae49cbf4d
+print/a pp-number without exponent digits in a skipped group #33225d62e2b71552	ef3f35e8cf117c27
+print/a pragma line among a macro's arguments while a _Pragma waits #cdb249b0b6761128	38d7a1b4d5090b24
+print/a prefix pasted onto an empty character constant in C23 #ba03c42ab5179a92	5925d7af78c8c7fc
+print/a quote after '$' that a digit separator frees #648e77562fbd0663	f5ec458a10115b34
+print/a raw header query with a splice #18314c53e56facee	c24680d11375c4eb
+print/a raw string literal isn't a header name #31408d7b8381fc05	3bf90cbad15899c0
+print/a repeated -I and #include_next #80927789f61caf7e	b26ea344711775ef
+print/a stringized argument isn't expanded #c3802c5f07c7fe8f	8f30c4f65224298a
+print/a stringized trailing backslash #ec0ce846be2b794e	fa2e2fc7936fadee
+print/a template's names across #define, #undef, push_macro and pop_macro #18dff0bcb1fab124	072a5c4847626f79
+print/a trigraph that a stringized argument spells, and one a paste forms #680ca474423297c9	20eb284e2bf669cd
+print/a warning in a repeated include #8484386e6e44d93e	117cf5a58a190831
+print/a warning preserves macro snapshots #5cec41b0c86450ae	9797bf039e60f570
+print/a warning's comment ends at its logical newline #78956ee41921e5c4	ad586e7772037016
+print/a warning's comment text preserves following source #09d890854ddaa437	d58ee129e8b59aab
+print/a warning's quote is text #3b26b445553c5897	d58ee129e8b59aab
+print/a warning's spliced name and text #efb39c3e3a53e7ed	d58ee129e8b59aab
+print/adjacent tokens don't paste #12fa3d04d6a2313e	031d81c07c3c4fff
+print/an alias's invocation #d0383a219e87d4af	07f1fc07b4b49e14
+print/an argument across blocks #5118256243f0627b	56fa508b305da56d
+print/an assume_nonnull region left open #193c910cc8121bcf	87bf20a02f6b318d
+print/an attribute query's operand across a directive #38acf06eaaf7d221	df51d3c2edcb20c4
+print/an attribute query's operand read expanded #6a49947e50459274	edb54eee407f3479
+print/an empty __VA_OPT__ expands nothing #bed870645ec28e6b	cbf29ce484222325
+print/an empty expansion's spaces #85e273402381d052	a4cfa4d440f7fbb1
+print/an error's comment text preserves following source #76825b86e34ac795	d58ee129e8b59aab
+print/an expansion of a template with ## past 16 tokens #07157dc69567d7be	155fad8ef5eaa9c5
+print/an inactive __VA_OPT__'s spacing #d755ae92d35ea826	eef556bb0f380b04
+print/an invocation in a #if among a macro's arguments clears clang's flag #437cc23db771c92c	662e1675b7f950a6
+print/an object-like macro in a #if among a macro's arguments keeps clang's flag #8f83669c604821c6	8544ab4415a2f660
+print/an octal escape out of range #9d616fe2ad4a9a76	6dd966311935e1cb
+print/an untaken elif still diagnoses invalid raw literals #c857292cabe7ee48	bfc3c2f2c2b98989
+print/an unterminated comment #5a9e8472ed18a0ce	089bdc07b544e7b2
+print/an unused argument isn't expanded #db52829fb6309712	07fc1e07b4bd2c5f
+print/arguments expanded in order of use #073c3136a26f7e7c	6357a25e45582a78
+print/arguments of direct objects beside a disabled macro's name #44ebba77621ac915	eaa62d71bdbc4c13
+print/arguments of direct objects on new lines #2286ca64f3c8b064	26e59262a0c66667
+print/arguments of direct objects used twice #db3d72584dc4c6fe	67fea8b658ece457
+print/arguments of direct objects, expanded in place #4103219c16b25248	4df4bc4ed3f99841
+print/assume_nonnull end after a presumed-file change #357410f6f68f6de5	305ab2a992264ed9
+print/assume_nonnull end uses the printer's current line #51d4fe4975096d42	dbaaf49e5c14f2a4
+print/assume_nonnull regions #526aac4f94969ef8	c290ec3e72625a4f
+print/builtin and feature names are raw, attribute names may expand #8caea279db4d0b4a	19688c34566f437e
+print/builtins #916248f799bdb847	c8dcfe3e5cd0718e
+print/builtins' operands, a computed #include and #line #6fda186fdbccb200	c267098594381e58
+print/c89 without digraphs or // comments #2ff2f43e34100dc7	2fc289612954a96a
+print/character constants' values #7db342ec2e6ed588	1a19f91921d9561f
+print/comma elision with an omitted sole variadic argument (C17) #fc071f3e75c5cff5	a779476f9d9d86de
+print/comma elision with an omitted sole variadic argument (GNU) #3af37aa4a75587ea	ca6016db934b32d4
+print/comment makes an object-like macro #410d91e578b9b494	499e58b508d6bbd3
+print/computed header names with line splices #61252a5385bee036	2c8b0c6562a9a775
+print/conditionals nested 40 deep #74b0765823433137	c4dcb7cad755b0da
+print/default wchar after short wchar in #if #15cb9368ef21ac03	7c941349776afaae
+print/defined from an argument that expands #ae28c2e260560b07	cbf29ce484222325
+print/defined from macros in #if #0a03449f1058cef8	080b1e7a52c71304
+print/defined function-like and bare names in conditions #49b2950dff72d01f	bfc3c2f2c2b98989
+print/diagnostic pragmas #89c732f08132cdc6	c6904e1ba44b4914
+print/digit separators before C23 #24157b0b0c1565cc	b8d453ad1a008b3b
+print/digit separators in C23 #4f38489f969fc6cf	31ef95a3dc96421d
+print/directives among a macro's arguments #eb9ead15617645cb	f1f07e863e6506f6
+print/embed limit diagnoses an undefined function-like name #9378c6814a09dafe	dbd2b03a5e921fb9
+print/empty and adjacent invocations in arguments #d249de93682445e0	2500811d6f1807a4
+print/escaped greater in a raw-looking direct header #08ce9be46ff95237	7a2ab283ed89fde0
+print/expansions past a template's tokens #ad39a6a939c150bf	ae3cb4104fd25ef4
+print/extra tokens after directives #f9df3e18adeae396	cbf29ce484222325
+print/feature answers' spelling #ca4ae8c15a19024b	5dddf03ee5269c26
+print/floating evaluation macro preprocessing control #2a3ba79add909990	20ab6f463d905a49
+print/floating evaluation macro preprocessing control #49f3465466f5ac22	2990c5eb5f62d493
+print/floating evaluation macro preprocessing control #5bccd5bd7862da3e	4561e3e4aca00f4f
+print/floating evaluation macro preprocessing control #9767c9b792756d4a	570706039e23f26d
+print/floating evaluation macro preprocessing control #b2172270f607f946	570706039e23f26d
+print/fuzzing, seed 2106 case 190642: #pragma among arguments after an invocation in a #elif #e6aa6364d51a1c46	ec8b1f3190a7b025
+print/header names with line splices #e1f4821f82e41cdb	c5c7b57bbfa2b2dd
+print/header-query continuation retains dollar punctuation and wide literal prefixes #ca95e862b834a6fd	d5ca9ee1737cfbb1
+print/identifiers written with UCNs and splices #ede5cf5ea5ec1a2d	72bcb36c31948eba
+print/include guard and #pragma once #812808c6e2ace0a2	34f06062d44d720b
+print/indexed parameters: #, ##, variadics and __VA_OPT__ #a5a596dcda540712	890e34111c8a9ffb
+print/indexed parameters: every # in an unused definition #41e25431f86ccac1	2fb61919bf35909f
+print/invalid raw delimiter keeps its line splice #88e1e9dc1dacf30b	b55367d76192faef
+print/invalid raw delimiters at active file scope #ae9a576d2f8bdb2f	93b7d2754af40a52
+print/invalid raw in a condition diagnoses after expansion #81fb7582640729b5	bfc3c2f2c2b98989
+print/invalid raw prefix with phase two splice #c51dad81391a00df	f35e0b3a0c94ab18
+print/invalid raw syntax in assembly #edc64dc7cccd7395	90dd021046112fda
+print/invalid raw syntax is ordinary text with raw disabled #b82755a1253e6d1c	4f1d93f7908fe99c
+print/invalid raw syntax with forced C89 raw literals #b210ea462c1016df	90dd021046112fda
+print/invocations in arguments beside painted names #646955967d79269d	aebf13cb14aa1758
+print/invocations in arguments leave expanding body names to rescan #da907bd907d55e1b	493030218dd5cbb8
+print/invocations in arguments on new lines #7bff338a67541794	23c82343a54945a1
+print/invocations in arguments pass pending space to an intervening run #dc6bab291966f54f	d25538e975850465
+print/invocations in arguments past the plans kept #8a9815897125f9a2	9254cad024ab508c
+print/invocations in arguments retain paint through outer rescan #d7085ac67e7a88fb	9dfd1f5fd871244a
+print/invocations in arguments, expanded in place #b0902f7bb4979325	b41959bf68eb706f
+print/last march and independent tune #7c5512fc3f9a1ba0	4555a09346f3e3b8
+print/line breaks in an unknown token and in a raw string literal #9b43e32b48157beb	5b1819185cb5cb14
+print/line marker flags #244e5075417e1505	6384b5a73bcdd66a
+print/line markers: #line in the main file and in an included one #392b3cbedb526602	4bfb82e060eafa42
+print/line markers: a crossed invocation spans printer batches #e74fe03461c02ada	051119e192368f6f
+print/line markers: a line among a macro's arguments #e7857f6faca432bd	2fbfd4dbe44432fd
+print/line markers: a paste of a line among a macro's arguments #c911b03fe41eb784	f79773c374027c2c
+print/line markers: a system include ends while collecting arguments #68aa29dbbd51cac6	8544ab4415a2f660
+print/line markers: an empty expansion crosses an included file's end #09accabe3333f7da	dbd2b03a5e921fb9
+print/line markers: an empty expansion crossing an include leaves no output #c7908ca9314a85e6	cbf29ce484222325
+print/line markers: an invocation after output crosses an included file's end #4db349ea3070a50d	2e2f59d1622469cf
+print/line markers: an invocation crosses an included file's end #267e8a2541a000fb	8544ab4415a2f660
+print/line markers: argument collection exits two included files #911fc6093e53bdcc	8544ab4415a2f660
+print/line markers: argument collection returns to an included file #c4c064c56dc99cd1	284bb2b16e13de54
+print/line markers: crossed files keep builtin and presumed locations #1072ceb56a870deb	311b290e3a25cbca
+print/line markers: lines that start with macros, and the line after _Pragma #9ac94b4fba7cf968	a9422cf5214a767b
+print/line markers: moved argument tokens after empty paste operands #d0e2c8bf8504dd02	522c0d8f6f509744
+print/line markers: the include stack, system headers and escaped names #eb88e77cf8501502	cd1b13a0eb508aa3
+print/literal prefixes before C11 #2ad52729668ad5a2	2c35c711f2643f91
+print/literal prefixes in C23 #3638b2ead9a27615	4be17e97de9c5751
+print/long literal macro batches #b950c589e3efdc40	3d87e96e470f67dc
+print/macro batch boundaries #db1fde4ac2819708	4540329bfae03ed3
+print/macro notes #6a2d82feaf541d30	07f8bc07b4ba5002
+print/macro notes malformed #ae7d14042945d154	cbf29ce484222325
+print/many macro parameters: reversed replacement and unused definition #3275f7657a4f16ff	fe08397e53cab325
+print/many macro parameters: reversed replacement and unused definition #327cc541bdbbbb4b	9f54e678ef610a45
+print/many macro parameters: reversed replacement and unused definition #34c0034bb5311147	eac9846e59c859a5
+print/many macro parameters: reversed replacement and unused definition #3c9127d7cb51136f	3537280f09ee6c25
+print/many macro parameters: reversed replacement and unused definition #428eb4a2590d087f	a468f9b6bc75cd0d
+print/many macro parameters: reversed replacement and unused definition #668dacf1480d11e9	41862deed20c4e01
+print/many macro parameters: reversed replacement and unused definition #688604502588dc35	5230660e847f3dfd
+print/many macro parameters: reversed replacement and unused definition #74f280657be405eb	969bee98bdd797c5
+print/many macro parameters: reversed replacement and unused definition #873fa0c3cd210e89	0de1eab31710ae83
+print/many macro parameters: reversed replacement and unused definition #8a3047168f471905	aadd8c68f6ec216d
+print/many macro parameters: reversed replacement and unused definition #949f9e4d90a97cb7	7c2cd5d94cdc08e5
+print/many macro parameters: reversed replacement and unused definition #9885220c40d7b18b	217ea92a7e514c35
+print/many macro parameters: reversed replacement and unused definition #ac5e94619465b11d	ac8e3534af42351f
+print/many macro parameters: reversed replacement and unused definition #c7adf5d800e0f3db	5a55df231384769d
+print/many macro parameters: reversed replacement and unused definition #cc15859f9a2d8a41	7b3274b82067e79b
+print/many macro parameters: reversed replacement and unused definition #f0ea0e73da511be7	0f097155330e82a5
+print/many macro parameters: reversed replacement and unused definition #fad233312bccebd5	91a358722ae77cd5
+print/named UCNs in skipped groups, literals and comments #dfb54ec4f017835e	8abedf91aefecb46
+print/named UCNs of aliases and names made by rule #9b5995c93bd9be5a	b3b6e23d93536ce2
+print/native #694e834877600bf1	-
+print/no raw string literals in an ISO mode #cc089e56c7fb472d	6d323220d4d25922
+print/omp pragmas expand #e2b62f2bb6181d7f	c081ef753d53ba63
+print/opaque header: a real unclosed comment after an opaque name #412e2ead411417c9	c4052e6de71fabf8
+print/opaque header: an unclosed comment delimiter in a query name #23510fe07b05f24d	dcb8716bc68d747c
+print/opaque header: an unclosed comment delimiter in an embed name #0e6076865638a7aa	9c71eb1357e2bd8d
+print/opaque header: an unclosed comment delimiter in an include name #8ff67964c6cf5e30	ae656e8a11baf8f8
+print/opaque raw-looking query with no lexical overlap #a3c467a1ae4be8fe	dbd2b03a5e921fb9
+print/parentheses nested 70 deep #c1145a3cc16d6231	326f1540d55d1fbc
+print/pasted names that expand, painted and rescanned #bcb451016a93f466	516ff3eeb4f48c4c
+print/pastes #27abdff220b8dc19	94407a524b82cf0e
+print/pastes from a template in a file's text and collected #a31495effde8cc26	098f6ec47c7c5b2e
+print/pastes of a variadic argument and without parameters #2126c797567d6e0b	ec6ff26251fec1ad
+print/pastes of numbers #b883f4957740c0ee	f7bebb09935f00bb
+print/pastes on new lines #30ee7a699c5057bb	228d6a3ad814ab84
+print/pastes that make nothing among other tokens #cd1b650747ab53d0	98706464cce9ec77
+print/pastes the templates leave to pp_substitute #e63de2163004baea	8e983d1d5f8500df
+print/pastes with body tokens and other items #2043d738261bfe25	06d90fae4fa44c0c
+print/pasting %: and %: in c89 #62c8bd33cfb9418a	4bbe2de1a30e2d97
+print/pasting '$' as punctuation #166e7b6ab14844e3	6189a65316e00bbb
+print/pasting // in c89 #beab7c2a1ca6ccb4	5808299de8b8755f
+print/pasting a comment's start #907fc8a6db98e1ea	aa2df6eca5a4b956
+print/pasting a digraph's characters in c89 #ab4e1d980676a7d4	b821ac1af63825d1
+print/placemarkers #ca62f711cb84f866	858fe0ddaee456a3
+print/poisoned names a template pastes #6a8903bb9cfcc94a	1798f5425054132b
+print/poisoning a macro #facd539c873a9bf9	cbf29ce484222325
+print/poisoning defined #570d8c99e9c33707	cbf29ce484222325
+print/pragmas #df44472e3ab619d3	c92b383d1f7dae7d
+print/printer batches, alignment 0	66b6417936c4c76d
+print/printer batches, alignment 1	22cf0facaecdd474
+print/printer batches, alignment 10	bfb9b5897ade70a3
+print/printer batches, alignment 11	8519e43863026dba
+print/printer batches, alignment 12	d8c52b26a1634f89
+print/printer batches, alignment 13	9850f5dd6437acf0
+print/printer batches, alignment 14	c11f40865f810d6f
+print/printer batches, alignment 15	c8b2e51e373c2e1e
+print/printer batches, alignment 16	c0454a993af73335
+print/printer batches, alignment 17	31a53bba34ea2ea4
+print/printer batches, alignment 18	154c3f8e122e0f7b
+print/printer batches, alignment 19	923997e50d182432
+print/printer batches, alignment 2	520f125944688f4b
+print/printer batches, alignment 20	746a72ab3107dd01
+print/printer batches, alignment 21	86906e140ca0f128
+print/printer batches, alignment 22	41f8105faec191c7
+print/printer batches, alignment 23	ae51dcfe61cd0436
+print/printer batches, alignment 24	c10ef6889daaec8d
+print/printer batches, alignment 25	0c035919de33e9fc
+print/printer batches, alignment 26	20c12737878032d3
+print/printer batches, alignment 27	4246fd394685366a
+print/printer batches, alignment 28	15b52d27165070b9
+print/printer batches, alignment 29	21dc9d6af854be20
+print/printer batches, alignment 3	c5ec3af93f507482
+print/printer batches, alignment 30	c84fd2c73e123c9f
+print/printer batches, alignment 31	e81605bcd2beef8e
+print/printer batches, alignment 32	f48e5f11cc5837a5
+print/printer batches, alignment 33	bf3c49f0690d8e54
+print/printer batches, alignment 34	02db3220747fed2b
+print/printer batches, alignment 35	dd4e9d76a29648e2
+print/printer batches, alignment 36	2e05c42f1e1cfaf1
+print/printer batches, alignment 37	ad82f2197210eb18
+print/printer batches, alignment 38	c01879435ff129f7
+print/printer batches, alignment 39	98a9c882d63f08a6
+print/printer batches, alignment 4	7906380465c71b91
+print/printer batches, alignment 40	50e0ce91e7243e3d
+print/printer batches, alignment 41	e4a51419d8365b6c
+print/printer batches, alignment 42	5b6a95528bb81583
+print/printer batches, alignment 43	fc1d0641868f969a
+print/printer batches, alignment 44	d4b09a6db7168f69
+print/printer batches, alignment 45	8df45d0e28c149d0
+print/printer batches, alignment 46	c7423c4062b5a2cf
+print/printer batches, alignment 47	57c0b82f3d3b5d7e
+print/printer batches, alignment 48	9acd7d1d09c1b415
+print/printer batches, alignment 49	d8aee09358d1d604
+print/printer batches, alignment 5	cd5bb8cab94a46b8
+print/printer batches, alignment 50	ba134ba1da3c195b
+print/printer batches, alignment 51	5c3f85dc86331412
+print/printer batches, alignment 52	9403a3e935e56e61
+print/printer batches, alignment 53	b581073b95747008
+print/printer batches, alignment 54	dcccc8d32974bfa7
+print/printer batches, alignment 55	333734b4814a9916
+print/printer batches, alignment 56	8ff18f64e86513ed
+print/printer batches, alignment 57	4a0e5a44b2f6b4dc
+print/printer batches, alignment 58	58a3efda4d4eb733
+print/printer batches, alignment 59	c7b5b66931f1e84a
+print/printer batches, alignment 6	973bdd9d82001497
+print/printer batches, alignment 60	874e6e57de3ca219
+print/printer batches, alignment 61	d144efbf909f1980
+print/printer batches, alignment 62	612e220c066fd8ff
+print/printer batches, alignment 63	87be5cfc65c48dee
+print/printer batches, alignment 64	ccbc684a18da0ccf
+print/printer batches, alignment 7	76393416d6ec84c6
+print/printer batches, alignment 8	9ff74d2f99f208dd
+print/printer batches, alignment 9	6f1377e2264b118c
+print/printer lines, alignment 0	2628c84b6bf85e0c
+print/printer lines, alignment 1	05b78345938fe94f
+print/printer lines, alignment 10	73163701e753a9c5
+print/printer lines, alignment 11	20de2213901bd418
+print/printer lines, alignment 12	d1dfdc2412d7a0cc
+print/printer lines, alignment 13	99cd1ed129dc7b03
+print/printer lines, alignment 14	17f55193d60844f5
+print/printer lines, alignment 15	a619370438f62ee2
+print/printer lines, alignment 16	84308e25fb22c953
+print/printer lines, alignment 17	25977a1469cb7163
+print/printer lines, alignment 18	b5f3d830e724e75b
+print/printer lines, alignment 19	534d3556ef792c28
+print/printer lines, alignment 2	0365ab7df9f8048b
+print/printer lines, alignment 20	01a0f51520f0f200
+print/printer lines, alignment 21	165c3185188e6ac6
+print/printer lines, alignment 22	a8a6707879ec46fe
+print/printer lines, alignment 23	de7d44835c5bce5e
+print/printer lines, alignment 24	90695b64b153716d
+print/printer lines, alignment 25	9fcb9fc0d5399331
+print/printer lines, alignment 26	0e1f03026d2e0152
+print/printer lines, alignment 27	927666eee6abbe82
+print/printer lines, alignment 28	6cb9100cf6824a0f
+print/printer lines, alignment 29	54ea52467cc49372
+print/printer lines, alignment 3	8b57280a9b350ef0
+print/printer lines, alignment 30	41e3c524f5784449
+print/printer lines, alignment 31	56cff2a421064521
+print/printer lines, alignment 32	64e65829edeaf030
+print/printer lines, alignment 33	3b1881e59278b319
+print/printer lines, alignment 34	b0c53fa47e326d02
+print/printer lines, alignment 35	31987f0fb068925e
+print/printer lines, alignment 36	d1f4fc564c20496b
+print/printer lines, alignment 37	06167f933d31ee4c
+print/printer lines, alignment 38	7fab593ce5d722d6
+print/printer lines, alignment 39	99575a765c1278da
+print/printer lines, alignment 4	2ca5be68118e7a39
+print/printer lines, alignment 40	a0587f0052a994d0
+print/printer lines, alignment 41	c025391652d5f374
+print/printer lines, alignment 42	22e4b30ef6814c2c
+print/printer lines, alignment 43	0315c574dbaeb78c
+print/printer lines, alignment 44	e664b61663807bf7
+print/printer lines, alignment 45	dbb8881ce37a5295
+print/printer lines, alignment 46	d4d38f56f49b512a
+print/printer lines, alignment 47	3908e7fcadb5bd89
+print/printer lines, alignment 48	a0d27691aa262dde
+print/printer lines, alignment 49	4437014b2fd558d1
+print/printer lines, alignment 5	3170e1236bc48872
+print/printer lines, alignment 50	5e11fdd2c52701f2
+print/printer lines, alignment 51	1538beb0109e9dbd
+print/printer lines, alignment 52	99bedf1cb80a43e4
+print/printer lines, alignment 53	3f834da0b2dc6b32
+print/printer lines, alignment 54	d8b74fc4735c0e94
+print/printer lines, alignment 55	4828a8e101e6db08
+print/printer lines, alignment 56	62493598a4528a8f
+print/printer lines, alignment 57	8b178763d69ea8f3
+print/printer lines, alignment 58	ce73df08d54d26e5
+print/printer lines, alignment 59	f6ae0ee0a4d0c8d5
+print/printer lines, alignment 6	b983f9127498ecd1
+print/printer lines, alignment 60	cf29d7ad94c3abc8
+print/printer lines, alignment 61	b096b9f03150f7c8
+print/printer lines, alignment 62	e35906270e05470c
+print/printer lines, alignment 63	67d47111d2b06edf
+print/printer lines, alignment 64	f882ec32c16e2a92
+print/printer lines, alignment 7	e96623f666a3cd0d
+print/printer lines, alignment 8	a142e79c165ce84e
+print/printer lines, alignment 9	e8045033e2f8ef32
+print/printer spelling paths, alignment 0, trigraphs 0	9b641d9347a9ab2c
+print/printer spelling paths, alignment 0, trigraphs 1	295a20c3c8f3a7e7
+print/printer spelling paths, alignment 1, trigraphs 0	52e9b39bb5d9c229
+print/printer spelling paths, alignment 1, trigraphs 1	1844a76f0122d61a
+print/printer spelling paths, alignment 10, trigraphs 0	36790b040fb45b6e
+print/printer spelling paths, alignment 10, trigraphs 1	098c1d2c9f4fa6e5
+print/printer spelling paths, alignment 11, trigraphs 0	3a579041e254ffcb
+print/printer spelling paths, alignment 11, trigraphs 1	967400ed748b28d8
+print/printer spelling paths, alignment 12, trigraphs 0	ca621e32297fd890
+print/printer spelling paths, alignment 12, trigraphs 1	120dc12933165e8b
+print/printer spelling paths, alignment 13, trigraphs 0	b44c6ea5ad734f0d
+print/printer spelling paths, alignment 13, trigraphs 1	55d6fcc940326b0e
+print/printer spelling paths, alignment 14, trigraphs 0	71062faf40d9ef92
+print/printer spelling paths, alignment 14, trigraphs 1	55229135226d3679
+print/printer spelling paths, alignment 15, trigraphs 0	4b8cd24b3859a927
+print/printer spelling paths, alignment 15, trigraphs 1	9a1ded04305375d4
+print/printer spelling paths, alignment 16, trigraphs 0	1f112c58112557a4
+print/printer spelling paths, alignment 16, trigraphs 1	e74edaf7023c5aef
+print/printer spelling paths, alignment 17, trigraphs 0	27eb398442274b19
+print/printer spelling paths, alignment 17, trigraphs 1	b5198b54913c372a
+print/printer spelling paths, alignment 18, trigraphs 0	3e0b9b937a1199d6
+print/printer spelling paths, alignment 18, trigraphs 1	7632f829d2bc321d
+print/printer spelling paths, alignment 19, trigraphs 0	2a37c0301fed9113
+print/printer spelling paths, alignment 19, trigraphs 1	acb34e40931aa6d0
+print/printer spelling paths, alignment 2, trigraphs 0	19242785700089e6
+print/printer spelling paths, alignment 2, trigraphs 1	fd5e23e7b27ebc0d
+print/printer spelling paths, alignment 20, trigraphs 0	f803f54764c4ddf8
+print/printer spelling paths, alignment 20, trigraphs 1	ad83d8a90fe2bf43
+print/printer spelling paths, alignment 21, trigraphs 0	1cb341f3fdad0ab5
+print/printer spelling paths, alignment 21, trigraphs 1	b64d2a1215401506
+print/printer spelling paths, alignment 22, trigraphs 0	3280013af5ed703a
+print/printer spelling paths, alignment 22, trigraphs 1	2055320932928611
+print/printer spelling paths, alignment 23, trigraphs 0	8059f049fddcc26f
+print/printer spelling paths, alignment 23, trigraphs 1	df4f4dbf0d9a7fac
+print/printer spelling paths, alignment 24, trigraphs 0	2dbabb9605c6170c
+print/printer spelling paths, alignment 24, trigraphs 1	298f84da2ca14d87
+print/printer spelling paths, alignment 25, trigraphs 0	0157f052c9da5e01
+print/printer spelling paths, alignment 25, trigraphs 1	09b9ae0ddbe9d5e2
+print/printer spelling paths, alignment 26, trigraphs 0	f149a8177c7f851e
+print/printer spelling paths, alignment 26, trigraphs 1	10d9b302653ecd35
+print/printer spelling paths, alignment 27, trigraphs 0	f46e2b46d0fbc87b
+print/printer spelling paths, alignment 27, trigraphs 1	58a5ddf4e0b27628
+print/printer spelling paths, alignment 28, trigraphs 0	c27f2262a5caa140
+print/printer spelling paths, alignment 28, trigraphs 1	07ee317b746a4f9b
+print/printer spelling paths, alignment 29, trigraphs 0	3323f679074ad7fd
+print/printer spelling paths, alignment 29, trigraphs 1	4ca4e3bad37be89e
+print/printer spelling paths, alignment 3, trigraphs 0	47035dd91c403123
+print/printer spelling paths, alignment 3, trigraphs 1	65783e8d12b92640
+print/printer spelling paths, alignment 30, trigraphs 0	ccdf79285ddc3bc2
+print/printer spelling paths, alignment 30, trigraphs 1	86982781b817f549
+print/printer spelling paths, alignment 31, trigraphs 0	b65954598abe6597
+print/printer spelling paths, alignment 31, trigraphs 1	d2dc6aa1541d6964
+print/printer spelling paths, alignment 32, trigraphs 0	ada119e8e5497e14
+print/printer spelling paths, alignment 32, trigraphs 1	c0d1aba6972c847f
+print/printer spelling paths, alignment 33, trigraphs 0	e2cc94c18d75a349
+print/printer spelling paths, alignment 33, trigraphs 1	3f1f91227470007a
+print/printer spelling paths, alignment 34, trigraphs 0	c456605f86bc8986
+print/printer spelling paths, alignment 34, trigraphs 1	5562ae0f52b3426d
+print/printer spelling paths, alignment 35, trigraphs 0	bade7a51eec642c3
+print/printer spelling paths, alignment 35, trigraphs 1	e91a915a001ecda0
+print/printer spelling paths, alignment 36, trigraphs 0	dcf99b5354c79368
+print/printer spelling paths, alignment 36, trigraphs 1	3a9b658f4eb28b53
+print/printer spelling paths, alignment 37, trigraphs 0	15c8127363ec7fe5
+print/printer spelling paths, alignment 37, trigraphs 1	657f2fc6c99f09d6
+print/printer spelling paths, alignment 38, trigraphs 0	ebe44bfb3572de2a
+print/printer spelling paths, alignment 38, trigraphs 1	f0c3a99d481840e1
+print/printer spelling paths, alignment 39, trigraphs 0	c88c9781e685245f
+print/printer spelling paths, alignment 39, trigraphs 1	ccf672cdbf14373c
+print/printer spelling paths, alignment 4, trigraphs 0	d281d8d7bd915fc8
+print/printer spelling paths, alignment 4, trigraphs 1	834ce7124f118bf3
+print/printer spelling paths, alignment 40, trigraphs 0	73065013f180e97c
+print/printer spelling paths, alignment 40, trigraphs 1	9ed95465f71114d7
+print/printer spelling paths, alignment 41, trigraphs 0	0959c78d896237f1
+print/printer spelling paths, alignment 41, trigraphs 1	e142ef35f5045272
+print/printer spelling paths, alignment 42, trigraphs 0	8857fe45f14b310e
+print/printer spelling paths, alignment 42, trigraphs 1	0f1849b7f3aca645
+print/printer spelling paths, alignment 43, trigraphs 0	bb66ffdc6b494e6b
+print/printer spelling paths, alignment 43, trigraphs 1	f29a112cfcf67138
+print/printer spelling paths, alignment 44, trigraphs 0	7b24017955bf2fb0
+print/printer spelling paths, alignment 44, trigraphs 1	2ce1f0adfb592eeb
+print/printer spelling paths, alignment 45, trigraphs 0	15f96e164ad2d3ad
+print/printer spelling paths, alignment 45, trigraphs 1	7618d6ef653f30ee
+print/printer spelling paths, alignment 46, trigraphs 0	05c35410b4a03932
+print/printer spelling paths, alignment 46, trigraphs 1	12f73b8505409ed9
+print/printer spelling paths, alignment 47, trigraphs 0	ed556230bab01547
+print/printer spelling paths, alignment 47, trigraphs 1	91a288c7fb36b734
+print/printer spelling paths, alignment 48, trigraphs 0	27bba0f73438fe44
+print/printer spelling paths, alignment 48, trigraphs 1	acfd328192a41f4f
+print/printer spelling paths, alignment 49, trigraphs 0	02e04f1cc96fd739
+print/printer spelling paths, alignment 49, trigraphs 1	52452631b544bd0a
+print/printer spelling paths, alignment 5, trigraphs 0	b147a71c37155bc5
+print/printer spelling paths, alignment 5, trigraphs 1	cb8125724f2b98f6
+print/printer spelling paths, alignment 50, trigraphs 0	a9b440eb884bcf76
+print/printer spelling paths, alignment 50, trigraphs 1	1c7b5a76df396d7d
+print/printer spelling paths, alignment 51, trigraphs 0	7dba29f6c391e733
+print/printer spelling paths, alignment 51, trigraphs 1	81986a23a08b0830
+print/printer spelling paths, alignment 52, trigraphs 0	de7db5bd06077e18
+print/printer spelling paths, alignment 52, trigraphs 1	6639ea5b83a5cfa3
+print/printer spelling paths, alignment 53, trigraphs 0	74940e685d439855
+print/printer spelling paths, alignment 53, trigraphs 1	9087988a44f39a66
+print/printer spelling paths, alignment 54, trigraphs 0	c0a4903d54a150da
+print/printer spelling paths, alignment 54, trigraphs 1	c7cdf6795560c3f1
+print/printer spelling paths, alignment 55, trigraphs 0	388c76903cb7ff8f
+print/printer spelling paths, alignment 55, trigraphs 1	0b1aa84a566c018c
+print/printer spelling paths, alignment 56, trigraphs 0	149fe10483173fac
+print/printer spelling paths, alignment 56, trigraphs 1	8320ae5a51d81c67
+print/printer spelling paths, alignment 57, trigraphs 0	34777aa4e28c72a1
+print/printer spelling paths, alignment 57, trigraphs 1	2d3ddd5825ce7dc2
+print/printer spelling paths, alignment 58, trigraphs 0	03116fadf516a7be
+print/printer spelling paths, alignment 58, trigraphs 1	a0ab8aebf07d2d15
+print/printer spelling paths, alignment 59, trigraphs 0	5bc7042b6200ae1b
+print/printer spelling paths, alignment 59, trigraphs 1	367099b35fa31308
+print/printer spelling paths, alignment 6, trigraphs 0	6580d49588cd368a
+print/printer spelling paths, alignment 6, trigraphs 1	89d4fcd798ba8c01
+print/printer spelling paths, alignment 60, trigraphs 0	3efe6a9a3a277a60
+print/printer spelling paths, alignment 60, trigraphs 1	006c1fc97410137b
+print/printer spelling paths, alignment 61, trigraphs 0	82a93e5ec742de9d
+print/printer spelling paths, alignment 61, trigraphs 1	88217c786e5418fe
+print/printer spelling paths, alignment 62, trigraphs 0	b13b18df9a8e9262
+print/printer spelling paths, alignment 62, trigraphs 1	b47f02d03588d629
+print/printer spelling paths, alignment 63, trigraphs 0	2fb281d471c5a337
+print/printer spelling paths, alignment 63, trigraphs 1	c4b76cc1a2b60cc4
+print/printer spelling paths, alignment 64, trigraphs 0	90edacc735bf7934
+print/printer spelling paths, alignment 64, trigraphs 1	2cbc9c31322043df
+print/printer spelling paths, alignment 7, trigraphs 0	c0d9335ffc61adbf
+print/printer spelling paths, alignment 7, trigraphs 1	c2aa5015ab266fdc
+print/printer spelling paths, alignment 8, trigraphs 0	fd21493edb1743dc
+print/printer spelling paths, alignment 8, trigraphs 1	40c2cae1dc945cf7
+print/printer spelling paths, alignment 9, trigraphs 0	1a1579464b6d7551
+print/printer spelling paths, alignment 9, trigraphs 1	f5f2445f5e629812
+print/push_macro allows a redefinition #8e29c8b524afd55a	e3d5200b17bcb1fa
+print/push_macro and pop_macro #532969c184eb0b83	fcda134c82758b81
+print/push_macro malformed #e2f04b5eff13fa7c	cbf29ce484222325
+print/push_macro's and pop_macro's operands read expanded, and the rest as it is #80c493a16cc8d3a2	07f8bc07b4ba5002
+print/raw query private views preserve recursive macro snapshots #e9977f8e16170bdd	b9ea96dbcd40ecc8
+print/raw query private views retain once, import and guard identity #7fe76415ae82f813	783de7525e1d0eaa
+print/raw semantic-pragma control #1270dfe82de77017	d06b16ecf2b017e0
+print/raw semantic-pragma control #43951106b6169fc7	4a884252fe506b1d
+print/raw semantic-pragma control #56fad0e1f44ab7fa	b04f93805d8c8ae0
+print/raw semantic-pragma control #91546859558e3a95	4f22ef27c69bfcf2
+print/raw semantic-pragma control #a55f26923a1d5a51	bc9b74109b5b14e5
+print/raw semantic-pragma control #bf8efb10dde963f4	b04f93805d8c8ae0
+print/raw semantic-pragma control #cbc6aa00caedca6c	7a588c1ae46568a1
+print/raw semantic-pragma control #d8fcfcb546bff6b5	8ce1a28bec1ccdef
+print/raw semantic-pragma control #df55dc59314041b6	b04f93805d8c8ae0
+print/raw semantic-pragma control #e5e5ccc416f0ddf3	502a7803a1e0463d
+print/raw string literals after '$' as punctuation #a5399ef315eb1796	92af7ff41ca7a069
+print/raw string literals after '$' in assembly #07b2e268b34f8fa4	a952bdfc2cba2022
+print/raw string literals in _Pragma, #line and a line marker #2fe2cdbb9548986f	c6cb385fcc4ae487
+print/raw string literals in __has_warning #445318607763ee4b	7c941349776afaae
+print/raw string literals in a GNU mode #c47e5fb316bf5b90	472dde40c2efb22b
+print/raw string literals in gnu99 #085550f1f71be27e	7e7676a7492b425e
+print/raw string literals keep their splices and trigraphs #cdebe0bbb291968c	de416c3cf66a8a6b
+print/raw string literals over lines and directives #a84eecc603056276	03c004514e6123ad
+print/raw string literals pasted and stringized #3abbfb60cf138422	b6c9580430e892f7
+print/raw strings resume after an opaque direct header #c507c97795379bf9	707782f629342a9a
+print/raw-looking direct angle header preserves following source #e9636417566f5df0	707782f629342a9a
+print/raw-looking error text preserves following source #588112f8f182d257	dbd2b03a5e921fb9
+print/raw-looking warning text preserves following source #860ea692a112c309	dbd2b03a5e921fb9
+print/redefinition with other spacing #ba7f36097cf07d8c	67b5a02f458f289f
+print/redefinitions with other spellings #1db2b96934a09117	76eb6b6baca0f0e1
+print/repeated raw-looking direct headers use one recovery #6dcebcfd07ece9c0	9e64546837dc4b72
+print/rescanning, redefinitions and painting #a1e8f9a146f1f303	4fb4140d26c8ed93
+print/right shifts in #if #8c3c15c14ff8e909	1a19f91921d9561f
+print/short wchar in #if #310ffbfa40f19291	7c941349776afaae
+print/signed char in #if #ff7cfa6301b73767	7c941349776afaae
+print/silent pragmas #93053c4dff8a2880	1e707104d687c146
+print/skipped invalid raw literals suppress diagnostics #32e0d5457aec6820	bfc3c2f2c2b98989
+print/slice context boundary #67670722972540eb	07f8bc07b4ba5002
+print/slice disabled indirect #fc294ad40739cac1	9c3d6f016a59f376
+print/slice disabled self #0e1a5299b1b1d744	865b15cb143347dd
+print/slice empty arguments #1501be787f7d60a8	7cb811670a9abf35
+print/slice expansion order #d24a3350859e904c	c51b30e283d57cda
+print/slice omitted variadic #3351adacef21d002	07f8bc07b4ba5002
+print/slice pragma capture #157a392a93cf47b8	82f65eb051ee39e1
+print/slice raw and expanded #92725b8209fda294	cecdf1406dab88de
+print/slice source location #740107ef34c1853c	2bd9101809c10d99
+print/slice variadic commas #29e2989e3ba3314d	c91d562d5347d3ab
+print/slice whitespace #30d1de253a9a5354	809dc0f5740ea66e
+print/spaces after invocations in a file's text #4facfab38d0b5e8f	fee3add25e96e07a
+print/spaces around __VA_OPT__ #a75d02215c7d51ce	3c6f3e221c90b6b5
+print/spaces through empty expansions #6f892be0bfae9da5	6f878fddd219bb6e
+print/splice makes a function-like macro #46bbc6be234ddc2c	c8b365533230a905
+print/spliced raw-looking direct angle header #9cdf87a1dc287606	707782f629342a9a
+print/standard features in C23 #6a0abdd2659964ce	ed28885273111b1c
+print/standard features in C99 #e81f4982eccee4c5	a9312f67dfa5db9d
+print/standard features in GNU17 #8f48d0a39ce39c0c	784a5bf9d0611765
+print/stringize across a splice and a comment #ef910132e9af1cc3	3ddbc65c7cb4c63d
+print/stringize spacing and escapes #fc43e118f876c42b	bdfd074a657a003c
+print/stringizing from a template #cf4972bad64eeaeb	e9ba6cb49b6ed5d6
+print/successive raw header queries in one condition #cad765ff8f41d2ec	045eb673e6083925
+print/target queries #12f3b93d8835763c	24baf3bb8315d022
+print/the oracle recognizes ext_vector_type with either attribute spelling #b6f0db33d5c3f65c	a6c3f6d309ef8115
+print/the space before a stringized __VA_OPT__ #aad4d814524ac35a	6cc25dc438b9cceb
+print/the token after a _Pragma that prints nothing #33d5f1bbd814cc4d	e054f25a89040700
+print/trigraphs ignored in the GNU modes #75bba0845177ed3f	4f4182a7cd1d62e0
+print/trigraphs in the ISO modes before C23 #43c57fedff147e84	702cae5444870dc2
+print/true in C17 #24a5ed82b0449829	215b3819258f45d0
+print/true in C23 #d6cb263dbfaf9ea8	7c941349776afaae
+print/true in C99 #157af05336e3c95f	215b3819258f45d0
+print/two ## and an empty argument #0d8087d2dee26956	c17995738e7ae7f3
+print/two ## in a row #a89ff6731b4f8850	cd955315c2fc4972
+print/u8 character constants before C23 #c6f012ffe04a05af	e3249828e711d66f
+print/undefined calls in skipped conditional groups remain skipped #4ad78d1c72c11f30	bfc3c2f2c2b98989
+print/unknown target vendor #8bc4ba3add08c1a3	988703f1476ae152
+print/unknown tokens that a prefix C99 doesn't have starts #e6f2d94c0574c3cf	676080e9d0aaf4aa
+print/unknown tokens that u8 starts before C23 #bb492c4d0fac90a9	689262897a1f8be0
+print/unlimited opaque recovery #0f1ceb506870ed03	0dd4dd43f085d0cb
+print/unlimited opaque recovery #465f655cc90a498b	79f7f4d656c681e0
+print/unlimited opaque recovery #4677d0928bedfd02	b12359bc7c5edaae
+print/unlimited opaque recovery #47e1249872a7fc47	540b8d511d11e160
+print/unlimited opaque recovery #551bc280d1a3308f	ca012ea42fc478f5
+print/unlimited opaque recovery #88afb5fd2401ffd3	12c3572c1f3c0163
+print/unlimited opaque recovery #b0e6cf348ee3d4f0	3b3b3ae44045da3e
+print/unlimited opaque recovery #b0ffd5886098e8de	742b40030fe06b0b
+print/unlimited opaque recovery #b3b4a50ac1f6937f	9151afd0100bc6d1
+print/unlimited opaque recovery #e13438e1f07934f3	0f623240129dbc35
+print/unterminated raw literal #87a5a152e9853a15	91e56fb8e8fe6f5a
+print/unused invalid raw macro argument diagnoses #7119490fc1e223d1	bfc3c2f2c2b98989
+print/unused invalid raw macro diagnoses once #fd1825b15f1ae2c4	91e009ee4b9cac29
+print/variadic macros #addd16154425ba9f	df208bb428a2ced1
+print/x86-64 #79d8e0eb17c519b5	f52f6820a5bad4b3
+print/x86-64-v2 #e3bcc4268dcc0470	f52f6820a5bad4b3
+print/x86-64-v3 #1476261eaef6467b	bba34814e0dfa4ff
+print/x86-64-v4 #08150ff754c990b2	b03f1d9f04600cc3
+print/znver5 #ff192039a772ff56	b03bbb9f045d3066
+semantic-pragma/case 0	b01cf752d046e060
+semantic-pragma/case 1	44d15d44f17ad0e1
+semantic-pragma/case 2	701774fdcfce7542
+semantic-pragma/case 3	2b38d9cd8289bd19
+semantic-pragma/case 4	e81d8629a8ed967d
+semantic-pragma/case 5	cc3edf99b923abca
+semantic-pragma/case 6	d8c6d9e77a267cf6
+semantic-pragma/case 7	bbc70b403b32d813
+semantic-pragma/case 8	4267f85b003c6f5b
+semantic-pragma/case 9	b7c28b4cf6bed9d2
+timestamps/0 __TIMESTAMP__ of each file	43f8488fc02902ae
+timestamps/1 __TIMESTAMP__ with SOURCE_DATE_EPOCH	43f8488fc02902ae
+timestamps/2 __TIMESTAMP__ with SOURCE_DATE_EPOCH	43f8488fc02902ae
+timestamps/3 __TIMESTAMP__ with SOURCE_DATE_EPOCH	43f8488fc02902ae
+timestamps/4 __TIMESTAMP__ with SOURCE_DATE_EPOCH	43f8488fc02902ae
+windows/windows: unit 0, window 1000	8ca075bc2b1fb35d
+windows/windows: unit 0, window 10000	8ca075bc2b1fb35d
+windows/windows: unit 0, window 4096	8ca075bc2b1fb35d
+windows/windows: unit 0, window 4097	8ca075bc2b1fb35d
+windows/windows: unit 1, window 1000	7b9335d2c6290b70
+windows/windows: unit 1, window 10000	7b9335d2c6290b70
+windows/windows: unit 1, window 4096	7b9335d2c6290b70
+windows/windows: unit 1, window 4097	7b9335d2c6290b70
+windows/windows: unit 10, window 1000	c55c929589e736bc
+windows/windows: unit 10, window 10000	c55c929589e736bc
+windows/windows: unit 10, window 4096	c55c929589e736bc
+windows/windows: unit 10, window 4097	c55c929589e736bc
+windows/windows: unit 11, window 1000	d6b1bdc5cbcc9995
+windows/windows: unit 11, window 10000	d6b1bdc5cbcc9995
+windows/windows: unit 11, window 4096	d6b1bdc5cbcc9995
+windows/windows: unit 11, window 4097	d6b1bdc5cbcc9995
+windows/windows: unit 12, window 1000	cfbe143070c4c9b9
+windows/windows: unit 12, window 10000	cfbe143070c4c9b9
+windows/windows: unit 12, window 4096	cfbe143070c4c9b9
+windows/windows: unit 12, window 4097	cfbe143070c4c9b9
+windows/windows: unit 13, window 1000	054ee4c9c123c42b
+windows/windows: unit 13, window 10000	054ee4c9c123c42b
+windows/windows: unit 13, window 4096	054ee4c9c123c42b
+windows/windows: unit 13, window 4097	054ee4c9c123c42b
+windows/windows: unit 14, window 1000	243a3d802567b01b
+windows/windows: unit 14, window 10000	243a3d802567b01b
+windows/windows: unit 14, window 4096	243a3d802567b01b
+windows/windows: unit 14, window 4097	243a3d802567b01b
+windows/windows: unit 15, window 1000	6ec07d6721d93556
+windows/windows: unit 15, window 10000	6ec07d6721d93556
+windows/windows: unit 15, window 4096	6ec07d6721d93556
+windows/windows: unit 15, window 4097	6ec07d6721d93556
+windows/windows: unit 16, window 1000	674b21744a53db56
+windows/windows: unit 16, window 10000	674b21744a53db56
+windows/windows: unit 16, window 4096	674b21744a53db56
+windows/windows: unit 16, window 4097	674b21744a53db56
+windows/windows: unit 17, window 1000	1256b9b0db46712f
+windows/windows: unit 17, window 10000	1256b9b0db46712f
+windows/windows: unit 17, window 4096	1256b9b0db46712f
+windows/windows: unit 17, window 4097	1256b9b0db46712f
+windows/windows: unit 18, window 1000	eaa49292ddecb497
+windows/windows: unit 18, window 10000	eaa49292ddecb497
+windows/windows: unit 18, window 4096	eaa49292ddecb497
+windows/windows: unit 18, window 4097	eaa49292ddecb497
+windows/windows: unit 19, window 1000	411a5797963b79e3
+windows/windows: unit 19, window 10000	411a5797963b79e3
+windows/windows: unit 19, window 4096	411a5797963b79e3
+windows/windows: unit 19, window 4097	411a5797963b79e3
+windows/windows: unit 2, window 1000	42e17c71cb9f2e7c
+windows/windows: unit 2, window 10000	42e17c71cb9f2e7c
+windows/windows: unit 2, window 4096	42e17c71cb9f2e7c
+windows/windows: unit 2, window 4097	42e17c71cb9f2e7c
+windows/windows: unit 20, window 1000	139dae9435828acb
+windows/windows: unit 20, window 10000	139dae9435828acb
+windows/windows: unit 20, window 4096	139dae9435828acb
+windows/windows: unit 20, window 4097	139dae9435828acb
+windows/windows: unit 21, window 1000	97a0533a3a1783d3
+windows/windows: unit 21, window 10000	97a0533a3a1783d3
+windows/windows: unit 21, window 4096	97a0533a3a1783d3
+windows/windows: unit 21, window 4097	97a0533a3a1783d3
+windows/windows: unit 22, window 1000	8dc49d8930d6648b
+windows/windows: unit 22, window 10000	8dc49d8930d6648b
+windows/windows: unit 22, window 4096	8dc49d8930d6648b
+windows/windows: unit 22, window 4097	8dc49d8930d6648b
+windows/windows: unit 23, window 0	fe02e676a5f6d997
+windows/windows: unit 3, window 1000	3119108fd55ffb15
+windows/windows: unit 3, window 10000	3119108fd55ffb15
+windows/windows: unit 3, window 4096	3119108fd55ffb15
+windows/windows: unit 3, window 4097	3119108fd55ffb15
+windows/windows: unit 4, window 1000	c5c6feee38d75d43
+windows/windows: unit 4, window 10000	c5c6feee38d75d43
+windows/windows: unit 4, window 4096	c5c6feee38d75d43
+windows/windows: unit 4, window 4097	c5c6feee38d75d43
+windows/windows: unit 5, window 1000	897cfd2867b3f845
+windows/windows: unit 5, window 10000	897cfd2867b3f845
+windows/windows: unit 5, window 4096	897cfd2867b3f845
+windows/windows: unit 5, window 4097	897cfd2867b3f845
+windows/windows: unit 6, window 1000	cc6ad5dcf2ec8723
+windows/windows: unit 6, window 10000	cc6ad5dcf2ec8723
+windows/windows: unit 6, window 4096	cc6ad5dcf2ec8723
+windows/windows: unit 6, window 4097	cc6ad5dcf2ec8723
+windows/windows: unit 7, window 1000	685416b3d7e867cb
+windows/windows: unit 7, window 10000	685416b3d7e867cb
+windows/windows: unit 7, window 4096	685416b3d7e867cb
+windows/windows: unit 7, window 4097	685416b3d7e867cb
+windows/windows: unit 8, window 1000	d5199ae6ecbec817
+windows/windows: unit 8, window 10000	d5199ae6ecbec817
+windows/windows: unit 8, window 4096	d5199ae6ecbec817
+windows/windows: unit 8, window 4097	d5199ae6ecbec817
+windows/windows: unit 9, window 1000	0a9c0a4c5da785ac
+windows/windows: unit 9, window 10000	0a9c0a4c5da785ac
+windows/windows: unit 9, window 4096	0a9c0a4c5da785ac
+windows/windows: unit 9, window 4097	0a9c0a4c5da785ac

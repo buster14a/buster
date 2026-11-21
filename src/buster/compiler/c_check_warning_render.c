@@ -181,6 +181,9 @@ struct CheckWarningSpelling
     // The macro that writes each calling convention throughout the unit, by TypeFunctionABI (check_driver_convention_macros).
     String8 convention_macros[TYPE_FUNCTION_ABI_COUNT];
     bool built;
+    // The checked stream of the events a pass renders, where its caller gives it, or NULL: an event finds its operands' nodes
+    // in it, for the counted_by family sugar of a member they read (#1842's 3c).
+    const CheckStream* stream;
 };
 
 // Each unnamed tag's diagnostic name (#992): the first typedef naming it, as clang's `T`/`T *` and `T2 *`'s
@@ -1449,21 +1452,116 @@ static const char* const check_driver_counted_names[] = { "counted_by", "sized_b
 // 'int *')`, `'int[] __counted_by(n)' (aka 'int[]')`, `&b->p`'s `'int * __counted_by(n)*' (aka 'int **')`. As clang's
 // printer places it, the attribute follows a pointer's before the placeholder and an array's after it. Empty for any
 // other operand, which prints as before.
+static String8 check_driver_counted_member_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, CheckWarningSpelling* spell,
+                                                Arena* scratch, uint32_t selected, uint32_t addresses, TypeId type);
+
+// Whether the unit has a member a counted_by family attribute counts (#1842's 3c), which few units have.
+static bool check_driver_counted_unit(const TypeTable* types)
+{
+    bool result = false;
+    for (uint32_t m = 1; !result && m < types->members.count; m += 1)
+    {
+        result = (types->members.flags[m] & BUSTER_TYPE_MEMBER_COUNT_MASK) != 0;
+    }
+    return result;
+}
+
+// The node at which the value of `node` takes its type from, as clang's expressions keep a type's sugar (#1842's 3c):
+// through implicit conversions (an lvalue's, an array's decay), `*&`, a comma's right operand, an assignment's or an
+// increment's operand, and a statement expression's value; `*addresses` counts the `&`s passed, and `*conditional` is a
+// conditional the walk stops at.
+static uint32_t check_driver_counted_walk(const CheckGraph* graph, uint32_t node, uint32_t* addresses, uint32_t* conditional)
+{
+    *conditional = BUSTER_CHECK_NONE;
+    bool walking = true;
+    for (uint32_t steps = 0; walking && node < graph->count && steps < 32; steps += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t operand = graph->operand0[node];
+        const bool cancelled = op == CHECK_OP_DEREFERENCE && operand < graph->count && graph->ops[operand] == CHECK_OP_ADDRESS;
+        const bool kept = op == CHECK_OP_CONVERT || op == CHECK_OP_ADDRESS || op == CHECK_OP_ASSIGN || (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
+                          op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT ||
+                          op == CHECK_OP_STATEMENT_VALUE;
+        *addresses += op == CHECK_OP_ADDRESS ? 1 : 0;
+        *conditional = op == CHECK_OP_CONDITIONAL ? node : BUSTER_CHECK_NONE;
+        walking = kept || cancelled || op == CHECK_OP_COMMA;
+        node = cancelled && operand < graph->count ? graph->operand0[operand] : op == CHECK_OP_COMMA ? graph->operand1[node] : walking ? operand : node;
+    }
+    return node;
+}
+
+// The counted_by family member whose sugar the value of `node` carries (check_driver_counted_walk), a conditional's where
+// both its arms carry the same (the same count of the same type); 0 for none.
+static uint32_t check_driver_counted_operand(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node,
+                                             uint32_t* addresses)
+{
+    const CheckGraph* graph = stream->graph;
+    uint32_t conditional = BUSTER_CHECK_NONE;
+    uint32_t outer = 0;
+    node = check_driver_counted_walk(graph, node, &outer, &conditional);
+    uint32_t arms[2] = { node, BUSTER_CHECK_NONE };
+    uint32_t levels[2] = { 0, 0 };
+    if (conditional != BUSTER_CHECK_NONE)
+    {
+        uint32_t inner = BUSTER_CHECK_NONE;
+        arms[0] = check_driver_counted_walk(graph, graph->operand1[conditional], levels, &inner);
+        arms[1] = check_driver_counted_walk(graph, graph->operand2[conditional], levels + 1, &inner);
+    }
+    uint32_t members[2] = { 0, 0 };
+    for (uint32_t a = 0; a < 2; a += 1)
+    {
+        const bool member = arms[a] < graph->count && (graph->ops[arms[a]] == CHECK_OP_MEMBER || graph->ops[arms[a]] == CHECK_OP_ARROW);
+        members[a] = member ? check_semantic_member_of(parser, input, stream, types, arms[a]) : 0;
+    }
+    const uint32_t first = members[0];
+    const uint32_t second = members[1];
+    const bool same = conditional == BUSTER_CHECK_NONE ||
+                      (first != 0 && second != 0 && levels[0] == levels[1] && types->members.count_name[first] == types->members.count_name[second] &&
+                       (types->members.flags[first] & BUSTER_TYPE_MEMBER_COUNT_MASK) == (types->members.flags[second] & BUSTER_TYPE_MEMBER_COUNT_MASK) &&
+                       type_unqualified(types->members.type[first]) == type_unqualified(types->members.type[second]));
+    *addresses = outer + levels[0];
+    return same ? first : 0;
+}
+
 static String8 check_driver_counted_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                          CheckWarningSpelling* spell, Arena* scratch, uint32_t node, TypeId type)
 {
-    const CheckGraph* graph = stream->graph;
-    String8 result = { 0 };
     uint32_t addresses = 0;
-    for (uint32_t steps = 0; node < graph->count && steps < 8 && (graph->ops[node] == CHECK_OP_CONVERT || graph->ops[node] == CHECK_OP_ADDRESS); steps += 1)
-    {
-        addresses += graph->ops[node] == CHECK_OP_ADDRESS ? 1 : 0;
-        node = graph->operand0[node];
-    }
-    const bool member = node < graph->count && addresses <= 1 && (graph->ops[node] == CHECK_OP_MEMBER || graph->ops[node] == CHECK_OP_ARROW) && type != 0;
-    const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, node) : 0;
+    const uint32_t selected = node < stream->graph->count && type != 0 ? check_driver_counted_operand(parser, input, stream, types, node, &addresses) : 0;
+    return addresses <= 1 ? check_driver_counted_member_type(parser, pp, input, types, spell, scratch, selected, addresses, type) : (String8){ 0 };
+}
+
+// An operand's type with the counted_by family sugar of the member it carries (#1842's 3c, check_driver_counted_type),
+// quoted with its a.k.a., where `type` is that member's own (or its address's); empty for any other.
+static String8 check_driver_counted_operand_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t node)
+{
+    uint32_t addresses = 0;
+    const uint32_t selected = stream != NULL && node < stream->graph->count && type != 0 ? check_driver_counted_operand(parser, input, stream, types, node, &addresses) : 0;
+    const TypeId own = selected != 0 ? type_unqualified(type_strip_aligned(types, types->members.type[selected])) : 0;
+    const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const bool pointer = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
+    const bool matches = own != 0 && (addresses == 0 ? bare == own : addresses == 1 && pointer && type_unqualified(type_strip_aligned(types, type_element(types, bare))) == own);
+    return matches ? check_driver_counted_member_type(parser, pp, input, types, spell, scratch, selected, addresses, type) : (String8){ 0 };
+}
+
+// An operand's type as a diagnostic quotes it: check_driver_counted_operand_type's, else as check_driver_warning_type
+// spells it by `spelling`.
+static String8 check_driver_operand_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                         CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t node, uint32_t spelling)
+{
+    const String8 counted = check_driver_counted_operand_type(parser, pp, input, stream, types, spell, scratch, type, node);
+    return counted.length != 0 ? counted : check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
+}
+
+// Member `selected`'s type with its CountAttributedType sugar, as check_driver_counted_type gives an operand's: under
+// `addresses` (0 or 1) of `&`, its a.k.a. `type`'s canonical spelling. Empty where the member counts nothing.
+static String8 check_driver_counted_member_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, CheckWarningSpelling* spell,
+                                                Arena* scratch, uint32_t selected, uint32_t addresses, TypeId type)
+{
+    String8 result = { 0 };
     // The member's count, which the reader kept (TypeMember.count_kind, count_name).
-    const uint32_t kind = selected != 0 && selected < types->members.count ?
+    const uint32_t kind = selected != 0 && selected < types->members.count && type != 0 ?
                           (uint32_t)((types->members.flags[selected] & BUSTER_TYPE_MEMBER_COUNT_MASK) >> BUSTER_TYPE_MEMBER_COUNT_SHIFT) : BUSTER_TYPE_COUNT_NONE;
     const bool counted = kind != BUSTER_TYPE_COUNT_NONE && kind <= BUSTER_ARRAY_LENGTH(check_driver_counted_names) && types->members.count_name[selected] != 0 &&
                          check_driver_spelling_ready(parser, pp, input, types, spell, scratch);
@@ -1805,6 +1903,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                                 function ? "function" : "variable", (int)name.length, name.pointer);
                 }
             }
+            // An unknown STDC pragma (#1970): clang's ext_stdc_pragma_ignored, of the STDC states' policy.
+            const bool plain = record == NULL && layout == NULL && packing == NULL;
+            result = plain && event->id == CHECK_WARNING_ID_UNKNOWN_PRAGMA ? "unknown pragma in STDC namespace" : result;
             break;
         }
         case CHECK_WARNING_EVENT_GNU_INLINE_WITHOUT_INLINE:
@@ -1818,8 +1919,28 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             break;
         case CHECK_WARNING_EVENT_NON_LITERAL_NULL:
         {
-            // payload.data is the destination operand's typedef-specifier declaration, or NONE for `__size_t` (#992).
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            // payload.data is the destination operand's typedef-specifier declaration, or NONE for `__size_t` (#992). An
+            // assignment of the value at the event's token to a counted_by family member keeps the member's sugar (#1842's 3c):
+            // a scan of the unit's nodes for it, only where the unit has counted members.
+            const bool looked = spell->stream != NULL && input->token_nodes != NULL && event->token < input->token_count && check_driver_counted_unit(types);
+            const uint32_t value = looked ? input->token_nodes[event->token] : BUSTER_CHECK_NONE;
+            uint32_t node = BUSTER_CHECK_NONE;
+            for (uint32_t n = 0; value < input->graph.count && node == BUSTER_CHECK_NONE && n < input->graph.count; n += 1)
+            {
+                const uint32_t assigned = input->graph.ops[n] == CHECK_OP_ASSIGN ? input->graph.operand1[n] : BUSTER_CHECK_NONE;
+                const bool converted = assigned < input->graph.count && input->graph.ops[assigned] == CHECK_OP_CONVERT && input->graph.operand0[assigned] == value;
+                node = assigned == value || converted ? n : BUSTER_CHECK_NONE;
+            }
+            const bool assigned = node < input->graph.count;
+            // An initializer's member is the event's detail, plus one (check_init_value's).
+            const uint32_t member = event->detail != 0 && event->detail - 1 < types->members.count && payload->first_type != 0 &&
+                                    type_unqualified(type_strip_aligned(types, types->members.type[event->detail - 1])) ==
+                                    type_unqualified(type_strip_aligned(types, payload->first_type)) ? event->detail - 1 : 0;
+            const String8 initialized = member != 0 ? check_driver_counted_member_type(parser, pp, input, types, spell, scratch, member, 0, payload->first_type) :
+                                        (String8){ 0 };
+            const String8 type = initialized.length != 0 ? initialized :
+                                 check_driver_operand_type(parser, pp, input, spell->stream, types, spell, scratch, payload->first_type,
+                                                           assigned ? input->graph.operand0[node] : BUSTER_CHECK_NONE, payload->data);
             result = type.length != 0 ? check_warning_text(scratch, "expression which evaluates to zero treated as a null pointer constant of type %.*s",
                 (int)type.length, type.pointer) : NULL;
             break;
@@ -1844,9 +1965,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         }
         case CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER:
         {
-            // payload.name/payload.data are the operands' own typedef-specifier declarations, or NONE (#992).
-            const String8 first = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
-            const String8 second = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->second_type, payload->data);
+            // payload.name/payload.data are the operands' own typedef-specifier declarations, or NONE (#992). The comparison at
+            // the event's token reads a counted_by family member's sugar where an operand is one (#1842's 3c).
+            const uint32_t node = spell->stream != NULL && input->token_nodes != NULL && event->token < input->token_count ? input->token_nodes[event->token] :
+                                  BUSTER_CHECK_NONE;
+            const bool compared = node < input->graph.count && input->graph.ops[node] >= CHECK_OP_LESS && input->graph.ops[node] <= CHECK_OP_GREATER_EQUAL;
+            const String8 first = check_driver_operand_type(parser, pp, input, spell->stream, types, spell, scratch, payload->first_type,
+                                                            compared ? input->graph.operand0[node] : BUSTER_CHECK_NONE, payload->name);
+            const String8 second = check_driver_operand_type(parser, pp, input, spell->stream, types, spell, scratch, payload->second_type,
+                                                             compared ? input->graph.operand1[node] : BUSTER_CHECK_NONE, payload->data);
             result = first.length != 0 && second.length != 0 ? check_warning_text(scratch, "ordered comparison between pointer and integer (%.*s and %.*s)",
                 (int)first.length, first.pointer, (int)second.length, second.pointer) : NULL;
             break;
@@ -1872,6 +1999,18 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             const String8 spelled = check_semantic_tag_spelling(parser, pp, event->token, scratch);
             result = spelled.length != 0 ? check_warning_text(scratch, "type '%.*s' has %s which currently causes the types to be treated as though they are incompatible",
                                                               (int)spelled.length, spelled.pointer, payload->data != 0 ? "a member with an attribute" : "an attribute") : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION:
+        {
+            static const char* const endings[] = {
+                [CHECK_NON_PROTOTYPE_PREVIOUS] = "is treated as a zero-parameter prototype in C23, conflicting with a previous declaration",
+                [CHECK_NON_PROTOTYPE_SUBSEQUENT] = "is treated as a zero-parameter prototype in C23, conflicting with a subsequent declaration",
+                [CHECK_NON_PROTOTYPE_SUBSEQUENT_DEFINITION] = "is treated as a zero-parameter prototype in C23, conflicting with a subsequent definition",
+                [CHECK_NON_PROTOTYPE_HAS_PARAMETERS] = "is not supported in C23",
+            };
+            result = payload->data < BUSTER_ARRAY_LENGTH(endings) ?
+                check_warning_text(scratch, "a function declaration without a prototype is deprecated in all versions of C and %s", endings[payload->data]) : NULL;
             break;
         }
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
@@ -2628,6 +2767,7 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             result = check_warning_text(scratch, "use 'static' to give inline function '%.*s' internal linkage", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
+        case CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE: result = "conflicting prototype is here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
         case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE: result = "previous attribute is here"; break;
@@ -2696,8 +2836,18 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
     return result;
 }
 
+static bool check_driver_warning_events_from(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, const CheckStream* stream,
+                                              const CheckWarningEvents* view, const CheckRepair* repair, uint32_t publication_end, Arena* scratch);
+
 static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                             const CheckWarningEvents* view, const CheckRepair* repair, uint32_t publication_end, Arena* scratch)
+{
+    return check_driver_warning_events_from(parser, pp, input, types, NULL, view, repair, publication_end, scratch);
+}
+
+// check_driver_warning_events_at, its events' operands found in `stream` where it isn't NULL (CheckWarningSpelling.stream).
+static bool check_driver_warning_events_from(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, const CheckStream* stream,
+                                              const CheckWarningEvents* view, const CheckRepair* repair, uint32_t publication_end, Arena* scratch)
 {
     bool valid = view != NULL && (view->count == 0 || view->events != NULL) && (view->note_count == 0 || view->notes != NULL);
     // A pass with no event publishes nothing and builds nothing (#992): an empty view returns before any
@@ -2730,7 +2880,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
     // rendered type pays nothing for what the pass already scanned. A unit with no unnamed tag skips the
     // spelling rows entirely.
     const uint64_t spelling_mark = scratch->length;
-    CheckWarningSpelling spell = { 0 };
+    CheckWarningSpelling spell = { .stream = stream != NULL && stream->graph == &input->graph ? stream : NULL };
     if (renders)
     {
         valid = check_driver_spelling_ready(parser, pp, input, types, &spell, scratch);
@@ -2868,8 +3018,19 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                             // next pack directive, whose line it lexes only after.
                             const bool directive = packing != NULL && semantic && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END && !packing->align;
                             const uint32_t following = directive ? check_input_pack_following(parser, input->pack_pragmas, packing) : UINT32_MAX;
-                            pp_diagnose_output_phase(pp, disposition, source, directive && following < boundary ? following : semantic ? boundary : event->payload.token,
-                                                     semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
+                            const uint32_t position = directive && following < boundary ? following : semantic ? boundary : event->payload.token;
+                            const PPDiagnosticPhase phase = semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL;
+                            // An unknown pragma's line without a name past its namespace: at the line's end (#1970,
+                            // c_check_ignored_pragma.c's payload.data).
+                            const uint32_t line_end = record == NULL && layout == NULL && packing == NULL ? event->payload.data : 0;
+                            if (line_end != 0)
+                            {
+                                pp_diagnose_output_location_at(pp, disposition, source, line_end, position, phase, "%s%s", message, suffix);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_phase(pp, disposition, source, position, phase, "%s%s", message, suffix);
+                            }
                         }
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_UNEVALUATED_PREFIX || event->kind == CHECK_WARNING_EVENT_DELIMITED_ESCAPE)
@@ -2908,8 +3069,9 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
+                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION)
                     {
+                        // A prototype merge warning precedes a conflicting-types error at the same declarator's completion.
                         // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
                     }

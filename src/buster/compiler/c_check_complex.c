@@ -5,6 +5,157 @@
 // component conversion calls only the noncomplex converter, so nested source types never recurse through it.
 // Floating components use their actual target format. Integer-complex components occupy separate 64-bit halves.
 
+// Complex integer constants of elements past 64 bits (#2219): a complex _BitInt of 65 bits or more, which an imaginary
+// bit-precise constant (0x1'0000'0000'0000'0000wbi) or the usual arithmetic conversions make (5wbi * (_BitInt(200))1),
+// and GNU's _Complex __int128 (5wbi * (__int128)1). Each part is ceil(width / 64) limbs in c_check_wide.c's region, the
+// least significant first, the bits past the width zero, as a _BitInt past 128 bits holds its own: the real part's
+// pointed to from floating_storage[0] and the imaginary part's from imaginary_storage[0], the words a _Complex
+// __float128's parts already use, which every copy, stream and comparison of values carries; `integer` keeps the real
+// part's low 128 bits. A part read out (check_complex_component) is an integer constant of the element: its low 128 bits
+// up to 128 bits, its limbs past them. An element of up to 64 bits keeps both parts in `integer`'s 64-bit halves.
+
+// An integer element past 64 bits, whose complex constants hold limbs, with its width and signedness.
+static bool check_complex_wide_element(const TypeTable* table, TypeId element, uint32_t* width, bool* sign)
+{
+    const bool narrow = check_action_integer_type(table, element, width, sign);
+    return narrow ? *width > 64 : check_wide_type(table, element, width, sign);
+}
+
+// A complex constant's part's `count` limbs, or null when it holds none (its pointer isn't the region's).
+static const uint64_t* check_complex_wide_limbs(const CheckValue* value, bool imaginary, uint32_t count)
+{
+    CheckValue part = { .constant_kind = CHECK_CONSTANT_INTEGER };
+    part.floating_storage[0] = imaginary ? value->imaginary_storage[0] : value->floating_storage[0];
+    return value->constant_kind == CHECK_CONSTANT_COMPLEX ? check_wide_limbs(&part, count) : NULL;
+}
+
+// `value` becomes the complex constant of `parts`, two arrays of limbs from check_wide_allocate of at least two each,
+// the real part's then the imaginary part's.
+static void check_complex_wide_publish(CheckValue* value, uint64_t* const parts[2])
+{
+    value->constant_kind = CHECK_CONSTANT_COMPLEX;
+    value->integer = (unsigned __int128)parts[0][1] << 64 | parts[0][0];
+    value->floating_storage[0] = (uint64_t)(uintptr_t)parts[0];
+    value->floating_storage[1] = 0;
+    value->imaginary_storage[0] = (uint64_t)(uintptr_t)parts[1];
+    value->imaginary_storage[1] = 0;
+}
+
+// `value` becomes the complex constant of `real` and `imaginary`, integer constants of its element, of `width` bits past
+// 64. False when a part holds no number or the region is full, which leaves `value` as it was.
+static bool check_complex_wide_set(const TypeTable* table, CheckValue* value, const CheckValue* real, const CheckValue* imaginary, uint32_t width)
+{
+    const uint32_t count = check_wide_count(width);
+    uint64_t* parts[2] = { check_wide_allocate(count), check_wide_allocate(count) };
+    const bool valid = parts[0] != NULL && parts[1] != NULL && check_wide_operand(table, real, parts[0], count) &&
+                       check_wide_operand(table, imaginary, parts[1], count);
+    if (valid)
+    {
+        parts[0][count - 1] &= check_wide_top_mask(width);
+        parts[1][count - 1] &= check_wide_top_mask(width);
+        check_complex_wide_publish(value, parts);
+    }
+    return valid;
+}
+
+// The complex constant `value`'s part as an integer constant of its element of `width` bits past 64, into `part`, whose
+// other fields the caller set: its low 128 bits up to 128 bits, else its limbs. False when it holds none.
+static bool check_complex_wide_part(const CheckValue* value, bool imaginary, uint32_t width, CheckValue* part)
+{
+    const uint64_t* limbs = check_complex_wide_limbs(value, imaginary, check_wide_count(width));
+    part->floating_storage[0] = 0;
+    part->floating_storage[1] = 0;
+    part->imaginary_storage[0] = 0;
+    part->imaginary_storage[1] = 0;
+    part->constant_kind = limbs != NULL ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
+    if (limbs != NULL && width <= 128)
+    {
+        part->integer = (unsigned __int128)limbs[1] << 64 | limbs[0];
+    }
+    else if (limbs != NULL)
+    {
+        check_wide_publish(part, limbs);
+    }
+    return limbs != NULL;
+}
+
+// Whether the complex constants `left` and `right` of an element of `width` bits past 64 hold the same number; false
+// when either holds none.
+static bool check_complex_wide_equal(const CheckValue* left, const CheckValue* right, uint32_t width)
+{
+    const uint32_t count = check_wide_count(width);
+    bool same = true;
+    for (uint32_t part = 0; part < 2; part += 1)
+    {
+        const uint64_t* a = check_complex_wide_limbs(left, part != 0, count);
+        const uint64_t* b = check_complex_wide_limbs(right, part != 0, count);
+        same &= a != NULL && b != NULL && check_wide_compare((CheckWideKernels){ 0 }, a, b, count) == 0;
+    }
+    return same;
+}
+
+// Whether two values hold the same complex constant of an element past 64 bits (1), different ones or one of them none
+// (0), or neither holds parts' limbs (-1), whatever their pointers, as check_wide_same is a wide constant's: for
+// comparisons of whole values, as the scalar and vector paths' (test-checker's check_test_value_equal).
+static __attribute__((unused)) int32_t check_complex_wide_same(const CheckValue* a, const CheckValue* b)
+{
+    int32_t result = -1;
+    bool same = true;
+    for (uint32_t part = 0; part < 2; part += 1)
+    {
+        CheckValue x = { .constant_kind = a->constant_kind == CHECK_CONSTANT_COMPLEX ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE };
+        CheckValue y = { .constant_kind = b->constant_kind == CHECK_CONSTANT_COMPLEX ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE };
+        x.floating_storage[0] = part == 0 ? a->floating_storage[0] : a->imaginary_storage[0];
+        y.floating_storage[0] = part == 0 ? b->floating_storage[0] : b->imaginary_storage[0];
+        const int32_t held = check_wide_same(&x, &y);
+        result = held >= 0 ? 0 : result;
+        same &= held == 1;
+    }
+    return result >= 0 && same ? 1 : result;
+}
+
+// Whether the complex constant `value` of an element of `width` bits past 64 is no zero, into `truth`; false when it
+// holds no number.
+static bool check_complex_wide_truth(const CheckValue* value, uint32_t width, bool* truth)
+{
+    const uint32_t count = check_wide_count(width);
+    const uint64_t* real = check_complex_wide_limbs(value, false, count);
+    const uint64_t* imaginary = check_complex_wide_limbs(value, true, count);
+    const bool known = real != NULL && imaginary != NULL;
+    *truth = known && !(check_wide_is_zero(real, count) && check_wide_is_zero(imaginary, count));
+    return known;
+}
+
+// Word `index` of a part's object representation, of its `count` limbs of `width` bits (`negative` its sign): its limb,
+// or past them its sign's fill, the bits past the width extended from its sign as the x86-64 _BitInt ABI keeps them, as
+// check_wide_bytes writes a _BitInt's.
+static uint64_t check_complex_wide_word(const uint64_t* limbs, uint32_t count, uint32_t width, bool negative, uint64_t index)
+{
+    uint64_t word = index < count ? limbs[index] : negative ? UINT64_MAX : 0;
+    word |= index + 1 == count && negative ? ~check_wide_top_mask(width) : 0;
+    return word;
+}
+
+// A part's object representation (#2219): `size` bytes, its element's, of a complex constant of an element of `width`
+// bits past 64 (check_complex_wide_word), for static data. False when it holds none. Cold, as c_check_wide.c's
+// check_wide_bytes is: a word at a time, for a constant of a type C can't spell but through an imaginary constant.
+static __attribute__((unused)) bool check_complex_wide_bytes(const CheckValue* value, bool imaginary, uint32_t width, bool sign, uint8_t* bytes, uint64_t size)
+{
+    const uint32_t count = check_wide_count(width);
+    const uint64_t* limbs = check_complex_wide_limbs(value, imaginary, count);
+    const bool valid = limbs != NULL && size >= (uint64_t)count * sizeof(uint64_t) && size % sizeof(uint64_t) == 0;
+    if (valid)
+    {
+        const bool negative = check_wide_negative(limbs, width, sign);
+        for (uint64_t i = 0; i < size / sizeof(uint64_t); i += 1)
+        {
+            const uint64_t word = check_complex_wide_word(limbs, count, width, negative, i);
+            memcpy(bytes + i * sizeof(uint64_t), &word, sizeof(word));
+        }
+    }
+    return valid;
+}
+
 static CheckValue check_complex_component(const TypeTable* table, const CheckValue* input, bool imaginary)
 {
     CheckValue value = *input;
@@ -26,6 +177,11 @@ static CheckValue check_complex_component(const TypeTable* table, const CheckVal
             // A _Complex __float128 constant's parts are its bits (check_quad_complex_set), each part a real one's.
             check_quad_set(&value, imaginary ? check_quad_complex_imaginary(input) : input->integer);
         }
+        else if (check_complex_wide_element(table, element, &width, &sign))
+        {
+            // An element past 64 bits: the part's limbs (#2219).
+            check_complex_wide_part(input, imaginary, width, &value);
+        }
         else
         {
             value.constant_kind = CHECK_CONSTANT_FLOATING;
@@ -39,6 +195,18 @@ static CheckValue check_complex_component(const TypeTable* table, const CheckVal
         value.integer = 0;
         value.floating = 0;
         value.constant_kind = check_action_is_integer(table, element) ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_FLOATING;
+        uint32_t width = 0;
+        bool sign = false;
+        if (check_wide_type(table, element, &width, &sign))
+        {
+            // A _BitInt past 128 bits' zero: its limbs, zeros as the region gives them (#2219).
+            const uint64_t* zero = check_wide_allocate(check_wide_count(width));
+            value.constant_kind = zero != NULL ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
+            if (zero != NULL)
+            {
+                check_wide_publish(&value, zero);
+            }
+        }
     }
     return value;
 }
@@ -92,7 +260,7 @@ static void check_complex_convert(const TypeTable* table, CheckValue* value, Typ
                     value->constant_kind = CHECK_CONSTANT_COMPLEX;
                     value->integer = real.integer | (imaginary.integer << 64);
                 }
-                else
+                else if (!check_complex_wide_element(table, element, &width, &sign) || !check_complex_wide_set(table, value, &real, &imaginary, width))
                 {
                     check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);
                 }
@@ -126,6 +294,33 @@ static CheckValue check_complex_integer_fold(CheckOp op, unsigned __int128 left,
         .extensions = extensions,
     };
     check_action_fold_integer(fold, &value);
+    return value;
+}
+
+// `op` on two parts of a complex integer constant, integer constants of its element `element` of `width` bits (`right`
+// `left` for a unary operator): the operation of up to 128 bits (check_complex_integer_fold), or past them of their
+// limbs (check_wide_fold, #2219). The result is an integer constant of the element, or a fault.
+static CheckValue check_complex_part_fold(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, TypeId element, uint32_t width,
+                                          bool sign, uint32_t node, uint32_t extensions)
+{
+    CheckValue value = { 0 };
+    if (width <= 128)
+    {
+        value = check_complex_integer_fold(op, left->integer, right->integer, width, sign, node, extensions);
+    }
+    else
+    {
+        uint32_t warnings = 0;
+        value.type = element;
+        value.category = CHECK_RVALUE;
+        if (left->constant_kind != CHECK_CONSTANT_INTEGER || right->constant_kind != CHECK_CONSTANT_INTEGER ||
+            !check_wide_fold(table, op, left, right, &value, node, extensions, false, &warnings))
+        {
+            check_action_set_fault(&value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);
+        }
+    }
+    value.type = element;
+    value.category = CHECK_RVALUE;
     return value;
 }
 
@@ -345,9 +540,16 @@ static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const Che
     if (comparison)
     {
         const bool integer = check_action_is_integer(table, element);
-        const bool same = integer ? left->integer == right->integer :
+        uint32_t width = 0;
+        bool sign = false;
+        // An element past 64 bits compares its parts' limbs (#2219), which both operands must hold.
+        const bool wide = integer && check_complex_wide_element(table, element, &width, &sign);
+        const bool same = wide ? check_complex_wide_equal(left, right, width) :
+                          integer ? left->integer == right->integer :
                           quad ? check_complex_quad_equal(ar.integer, br.integer) && check_complex_quad_equal(ai.integer, bi.integer) :
                                  left->floating == right->floating && left->imaginary == right->imaginary;
+        supported = !wide || (ar.constant_kind == CHECK_CONSTANT_INTEGER && ai.constant_kind == CHECK_CONSTANT_INTEGER &&
+                              br.constant_kind == CHECK_CONSTANT_INTEGER && bi.constant_kind == CHECK_CONSTANT_INTEGER);
         value->constant_kind = CHECK_CONSTANT_INTEGER;
         value->integer = op == CHECK_OP_EQUAL ? same : !same;
     }
@@ -397,41 +599,46 @@ static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const Che
     }
     else
     {
+        // An integer element's parts: in `integer`'s halves up to 64 bits, past them limbs (#2219), each part's operation
+        // the element's (check_complex_part_fold).
         uint32_t width = 0;
         bool sign = false;
-        supported = check_action_integer_type(table, element, &width, &sign) && width <= 64 &&
-                    (unary || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_MULTIPLY || op == CHECK_OP_DIVIDE);
+        const bool narrow = check_action_integer_type(table, element, &width, &sign) && width <= 64;
+        const bool wide = !narrow && check_complex_wide_element(table, element, &width, &sign) && ar.constant_kind == CHECK_CONSTANT_INTEGER &&
+                          ai.constant_kind == CHECK_CONSTANT_INTEGER && br.constant_kind == CHECK_CONSTANT_INTEGER && bi.constant_kind == CHECK_CONSTANT_INTEGER;
+        supported = (narrow || wide) && (unary || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_MULTIPLY || op == CHECK_OP_DIVIDE);
         if (supported)
         {
+            const TypeId part_type = type_unqualified(element);
             CheckValue components[2] = { 0 };
             if (op == CHECK_OP_MULTIPLY || op == CHECK_OP_DIVIDE)
             {
                 const CheckValue products[4] = {
-                    check_complex_integer_fold(CHECK_OP_MULTIPLY, ar.integer, br.integer, width, sign, node, extensions),
-                    check_complex_integer_fold(CHECK_OP_MULTIPLY, ai.integer, bi.integer, width, sign, node, extensions),
-                    check_complex_integer_fold(CHECK_OP_MULTIPLY, ar.integer, bi.integer, width, sign, node, extensions),
-                    check_complex_integer_fold(CHECK_OP_MULTIPLY, ai.integer, br.integer, width, sign, node, extensions),
+                    check_complex_part_fold(table, CHECK_OP_MULTIPLY, &ar, &br, part_type, width, sign, node, extensions),
+                    check_complex_part_fold(table, CHECK_OP_MULTIPLY, &ai, &bi, part_type, width, sign, node, extensions),
+                    check_complex_part_fold(table, CHECK_OP_MULTIPLY, &ar, &bi, part_type, width, sign, node, extensions),
+                    check_complex_part_fold(table, CHECK_OP_MULTIPLY, &ai, &br, part_type, width, sign, node, extensions),
                 };
                 for (uint32_t part = 0; part < 4; part += 1)
                 {
                     check_action_inherit(value, products + part);
                 }
-                components[0] = check_complex_integer_fold(op == CHECK_OP_MULTIPLY ? CHECK_OP_SUBTRACT : CHECK_OP_ADD,
-                                                          products[0].integer, products[1].integer, width, sign, node, extensions);
-                components[1] = check_complex_integer_fold(op == CHECK_OP_MULTIPLY ? CHECK_OP_ADD : CHECK_OP_SUBTRACT,
-                                                          products[3].integer, products[2].integer, width, sign, node, extensions);
+                components[0] = check_complex_part_fold(table, op == CHECK_OP_MULTIPLY ? CHECK_OP_SUBTRACT : CHECK_OP_ADD, products + 0, products + 1, part_type, width,
+                                                        sign, node, extensions);
+                components[1] = check_complex_part_fold(table, op == CHECK_OP_MULTIPLY ? CHECK_OP_ADD : CHECK_OP_SUBTRACT, products + 3, products + 2, part_type, width,
+                                                        sign, node, extensions);
                 if (op == CHECK_OP_DIVIDE)
                 {
-                    const CheckValue real_square = check_complex_integer_fold(CHECK_OP_MULTIPLY, br.integer, br.integer, width, sign, node, extensions);
-                    const CheckValue imaginary_square = check_complex_integer_fold(CHECK_OP_MULTIPLY, bi.integer, bi.integer, width, sign, node, extensions);
-                    const CheckValue divisor = check_complex_integer_fold(CHECK_OP_ADD, real_square.integer, imaginary_square.integer, width, sign, node, extensions);
+                    const CheckValue real_square = check_complex_part_fold(table, CHECK_OP_MULTIPLY, &br, &br, part_type, width, sign, node, extensions);
+                    const CheckValue imaginary_square = check_complex_part_fold(table, CHECK_OP_MULTIPLY, &bi, &bi, part_type, width, sign, node, extensions);
+                    const CheckValue divisor = check_complex_part_fold(table, CHECK_OP_ADD, &real_square, &imaginary_square, part_type, width, sign, node, extensions);
                     check_action_inherit(value, &real_square);
                     check_action_inherit(value, &imaginary_square);
                     check_action_inherit(value, &divisor);
                     for (uint32_t part = 0; part < 2; part += 1)
                     {
                         check_action_inherit(value, components + part);
-                        components[part] = check_complex_integer_fold(CHECK_OP_DIVIDE, components[part].integer, divisor.integer, width, sign, node, extensions);
+                        components[part] = check_complex_part_fold(table, CHECK_OP_DIVIDE, components + part, &divisor, part_type, width, sign, node, extensions);
                     }
                 }
             }
@@ -439,16 +646,22 @@ static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const Che
             {
                 for (uint32_t part = 0; part < 2; part += 1)
                 {
-                    components[part] = check_complex_integer_fold(op, part == 0 ? ar.integer : ai.integer,
-                                                                 part == 0 ? br.integer : bi.integer, width, sign, node, extensions);
+                    components[part] = check_complex_part_fold(table, op, part == 0 ? &ar : &ai, part == 0 ? &br : &bi, part_type, width, sign, node, extensions);
                 }
             }
             for (uint32_t part = 0; part < 2; part += 1)
             {
                 check_action_inherit(value, components + part);
             }
-            value->integer = components[0].integer | (components[1].integer << 64);
-            value->constant_kind = CHECK_CONSTANT_COMPLEX;
+            if (narrow)
+            {
+                value->integer = components[0].integer | (components[1].integer << 64);
+                value->constant_kind = CHECK_CONSTANT_COMPLEX;
+            }
+            else if (value->fault == CHECK_FAULT_NONE && !check_complex_wide_set(table, value, components + 0, components + 1, width))
+            {
+                supported = false;
+            }
         }
     }
     value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
@@ -514,10 +727,24 @@ static void check_complex_conjugate(TypeTable* table, const CheckAction* action,
     {
         CheckValue imaginary = check_complex_component(table, &input, true);
         const TypeId element = imaginary.type;
-        if (check_action_is_integer(table, element))
+        uint32_t width = 0;
+        bool sign = false;
+        if (check_action_is_integer(table, element) && check_complex_wide_element(table, element, &width, &sign))
         {
-            uint32_t width = 0;
-            bool sign = false;
+            // An element past 64 bits (#2219): the real part's limbs and the imaginary part's negation's.
+            const CheckValue real = check_complex_component(table, &input, false);
+            const CheckValue negated = check_complex_part_fold(table, CHECK_OP_NEGATIVE, &imaginary, &imaginary, element, width, sign, action->node,
+                                                               action->context.extensions);
+            check_action_inherit(&result->value, &negated);
+            const bool folded = real.constant_kind == CHECK_CONSTANT_INTEGER && imaginary.constant_kind == CHECK_CONSTANT_INTEGER &&
+                                result->value.fault == CHECK_FAULT_NONE && check_complex_wide_set(table, &result->value, &real, &negated, width);
+            if (!folded)
+            {
+                result->value.constant_kind = CHECK_CONSTANT_NONE;
+            }
+        }
+        else if (check_action_is_integer(table, element))
+        {
             check_action_integer_type(table, element, &width, &sign);
             const CheckIntegerFold fold = { .active = true, .op = CHECK_OP_NEGATIVE, .left = imaginary.integer, .width = width,
                                            .right_width = width, .is_signed = sign, .right_signed = sign, .node = action->node, .extensions = action->context.extensions };

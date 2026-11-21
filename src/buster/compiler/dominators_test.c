@@ -2,9 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original CFG fixtures and definition oracles. Include after dominators.c; run_dominator_tests is the command.
-// Dominance is checked by deleting each possible dominator and testing reachability, never by either solver's
-// transfer equation. Loop membership uses forward reachability to a latch with its header deleted; irreducibility
+// Dominance is checked by deleting each possible dominator and testing reachability, never by SEMI-NCA's
+// semidominators. Loop membership uses forward reachability to a latch with its header deleted; irreducibility
 // uses the acyclicity of the graph after deleting every dominance backedge. Guard mappings bound all CSR columns.
+// The default seed's largest generated graphs, past the loop oracle's sizes, are also checked against frozen digests.
 // The small generator is also included by dominators_benchmark.c, outside its timed region.
 // dominator_test_export checks dominators_export.c's format, which must be included before this file.
 
@@ -17,6 +18,8 @@
 
 #define BUSTER_DOMINATOR_TEST_BYTES (256ull << 20)
 #define BUSTER_DOMINATOR_TEST_SHAPES 9
+#define BUSTER_DOMINATOR_TEST_SEED 174
+#define BUSTER_DOMINATOR_TEST_FROZEN_SIZES 4
 
 typedef struct DominatorTestEdge DominatorTestEdge;
 struct DominatorTestEdge
@@ -291,7 +294,62 @@ static bool dominator_test_equal(const Dominators* a, const Dominators* b)
     return equal;
 }
 
-static void dominator_test_definition(DominatorTestTally* tally, Arena* memory, const DominatorCfg* cfg, const Dominators* result)
+// FNV-1a over bytes, continuing from hash.
+static uint64_t dominator_test_hash(uint64_t hash, const void* data, uint64_t bytes)
+{
+    const uint8_t* byte = data;
+    for (uint64_t i = 0; i < bytes; i += 1)
+    {
+        hash = (hash ^ byte[i]) * UINT64_C(0x100000001b3);
+    }
+    return hash;
+}
+
+// What dominator_test_equal compares, over the same extents.
+static uint64_t dominator_test_digest(const Dominators* result)
+{
+    const uint64_t column_bytes = (uint64_t)result->block_count * sizeof(uint32_t);
+    const uint32_t counts[] = {
+        result->block_count,
+        result->reachable_count,
+        result->loop_count,
+    };
+    uint64_t hash = dominator_test_hash(UINT64_C(0xcbf29ce484222325), counts, sizeof(counts));
+    if (result->block_count != 0)
+    {
+        hash = dominator_test_hash(hash, result->idom, column_bytes);
+        hash = dominator_test_hash(hash, result->rpo, column_bytes);
+        hash = dominator_test_hash(hash, result->rpo_index, column_bytes);
+        hash = dominator_test_hash(hash, result->preorder, column_bytes);
+        hash = dominator_test_hash(hash, result->subtree_end, column_bytes);
+        hash = dominator_test_hash(hash, result->tree_offsets, column_bytes + sizeof(uint32_t));
+        hash = dominator_test_hash(hash, result->tree_children, (uint64_t)(result->reachable_count - 1) * sizeof(uint32_t));
+        if ((result->outputs & BUSTER_DOMINATOR_FRONTIERS) != 0)
+        {
+            hash = dominator_test_hash(hash, result->frontiers, (uint64_t)result->block_count * result->row_words * sizeof(uint64_t));
+        }
+        if ((result->outputs & BUSTER_DOMINATOR_LOOPS) != 0)
+        {
+            hash = dominator_test_hash(hash, result->loop_depth, column_bytes);
+            hash = dominator_test_hash(hash, result->block_loop, column_bytes);
+            hash = dominator_test_hash(hash, result->irreducible, result->block_count);
+        }
+        if (result->loop_count != 0)
+        {
+            const uint64_t loop_bytes = (uint64_t)result->loop_count * sizeof(uint32_t);
+            hash = dominator_test_hash(hash, result->loop_header, loop_bytes);
+            hash = dominator_test_hash(hash, result->loop_parent, loop_bytes);
+            hash = dominator_test_hash(hash, result->loop_size, loop_bytes);
+            hash = dominator_test_hash(hash, result->loop_irreducible, result->loop_count);
+            hash = dominator_test_hash(hash, result->loop_bodies, (uint64_t)result->loop_count * result->row_words * sizeof(uint64_t));
+        }
+    }
+    return hash;
+}
+
+// With bodies false, the forward-path loop bodies, the loop forest and the per-block loop depths go unchecked: they
+// cost O(loops * blocks * edges) and O(loops^2 * blocks), and the generated graphs have up to one loop a block.
+static void dominator_test_definition(DominatorTestTally* tally, Arena* memory, const DominatorCfg* cfg, const Dominators* result, bool bodies)
 {
     const uint64_t saved = memory->length;
     const uint32_t count = cfg->block_count;
@@ -356,7 +414,7 @@ static void dominator_test_definition(DominatorTestTally* tally, Arena* memory, 
                 const uint32_t loop = expected_loops;
                 expected_loops += 1;
                 dominator_test_expect(tally, loop < result->loop_count && result->loop_header[loop] == header, "loop header and backedges");
-                if (loop < result->loop_count)
+                if (bodies && loop < result->loop_count)
                 {
                     uint32_t size = 0;
                     for (uint32_t block = 0; block < count; block += 1)
@@ -379,7 +437,7 @@ static void dominator_test_definition(DominatorTestTally* tally, Arena* memory, 
             }
         }
         dominator_test_expect(tally, result->loop_count == expected_loops, "all backedge headers have loops");
-        for (uint32_t loop = 0; loop < result->loop_count; loop += 1)
+        for (uint32_t loop = 0; bodies && loop < result->loop_count; loop += 1)
         {
             uint32_t parent = BUSTER_DOMINATOR_NONE;
             uint32_t size = UINT32_MAX;
@@ -398,7 +456,7 @@ static void dominator_test_definition(DominatorTestTally* tally, Arena* memory, 
             }
             dominator_test_expect(tally, result->loop_parent[loop] == parent, "forest parent by strict set containment");
         }
-        for (uint32_t block = 0; block < count; block += 1)
+        for (uint32_t block = 0; bodies && block < count; block += 1)
         {
             uint32_t depth = 0;
             uint32_t inner = BUSTER_DOMINATOR_NONE;
@@ -468,48 +526,90 @@ static void dominator_test_definition(DominatorTestTally* tally, Arena* memory, 
     arena_pop_to(memory, saved);
 }
 
-static void dominator_test_case(DominatorTestTally* tally, Arena* memory, Arena* scratch, const DominatorCfg* cfg, bool oracle)
+// The order and tree columns' contract (docs/dominators.md, "Results"), which the definition reads only through
+// dominance: rpo lists the reachable blocks from entry, every block after its immediate dominator, then NONE, and
+// rpo_index is its inverse; each block's children are those whose immediate dominator it is, in ascending order.
+static void dominator_test_columns(DominatorTestTally* tally, const Dominators* result)
+{
+    const uint32_t count = result->block_count;
+    const uint32_t reachable = result->reachable_count;
+    bool order = count == 0 || (reachable != 0 && result->rpo[0] == result->entry);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t block = result->rpo[i];
+        if (i < reachable)
+        {
+            order = order && block < count && result->rpo_index[block] == i;
+            order = order && (block == result->entry || result->rpo_index[result->idom[block]] < i);
+        }
+        else
+        {
+            order = order && block == BUSTER_DOMINATOR_NONE;
+        }
+    }
+    uint32_t indexed = 0;
+    for (uint32_t block = 0; block < count; block += 1)
+    {
+        indexed += result->rpo_index[block] != BUSTER_DOMINATOR_NONE;
+    }
+    dominator_test_expect(tally, order && indexed == reachable, "reverse postorder and its inverse");
+    bool tree = count == 0 || (result->tree_offsets[0] == 0 && result->tree_offsets[count] == reachable - 1);
+    for (uint32_t parent = 0; tree && parent < count; parent += 1)
+    {
+        const uint32_t first = result->tree_offsets[parent];
+        const uint32_t end = result->tree_offsets[(uint64_t)parent + 1];
+        tree = first <= end;
+        for (uint32_t child = first; tree && child < end; child += 1)
+        {
+            const uint32_t block = result->tree_children[child];
+            tree = block < count && block != result->entry && result->idom[block] == parent;
+            tree = tree && (child == first || result->tree_children[child - 1] < block);
+        }
+    }
+    dominator_test_expect(tally, tree, "children by immediate dominator, ascending");
+}
+
+// One analysis with every output, checked by the definition (see dominator_test_definition for bodies), by the
+// columns' contract, by a repeated analysis, and against frozen when given.
+static void dominator_test_case(DominatorTestTally* tally, Arena* memory, Arena* scratch, const DominatorCfg* cfg, bool bodies, const uint64_t* frozen)
 {
     const uint64_t saved = memory->length;
     const uint64_t scratch_saved = scratch->length;
-    Dominators scalar = {0};
-    Dominators vector = {0};
-    DominatorOptions options = dominators_options();
-    options.path = DOMINATOR_SCALAR;
-    const DominatorStatus scalar_status = dominators_analyze(memory, scratch, cfg, options, &scalar);
-    options.path = DOMINATOR_VECTOR;
-    const DominatorStatus vector_status = dominators_analyze(memory, scratch, cfg, options, &vector);
-    dominator_test_expect(tally, scalar_status == DOMINATOR_OK && vector_status == DOMINATOR_OK, "both paths succeed");
+    Dominators result = {0};
+    const DominatorOptions options = dominators_options();
+    const DominatorStatus status = dominators_analyze(memory, scratch, cfg, options, &result);
+    dominator_test_expect(tally, status == DOMINATOR_OK, "analysis succeeds");
     dominator_test_expect(tally, scratch->length == scratch_saved, "scratch lifetime restored");
-    if (scalar_status == DOMINATOR_OK && vector_status == DOMINATOR_OK)
+    if (status == DOMINATOR_OK)
     {
-        dominator_test_expect(tally, dominator_test_equal(&scalar, &vector), "scalar/vector complete result equality");
         for (uint32_t block = 0; block < cfg->block_count; block += 1)
         {
-            const uint64_t* row = vector.frontiers + (uint64_t)block * vector.row_words;
+            const uint64_t* row = result.frontiers + (uint64_t)block * result.row_words;
             dominator_test_expect(tally, ((uintptr_t)row & 63) == 0, "aligned frontier row");
-            for (uint64_t bit = cfg->block_count; bit < vector.row_words * 64; bit += 1)
+            for (uint64_t bit = cfg->block_count; bit < result.row_words * 64; bit += 1)
             {
                 dominator_test_expect(tally, !dominators_bit(row, (uint32_t)bit), "zero frontier tail bits");
             }
         }
-        for (uint32_t loop = 0; loop < vector.loop_count; loop += 1)
+        for (uint32_t loop = 0; loop < result.loop_count; loop += 1)
         {
-            const uint64_t* row = vector.loop_bodies + (uint64_t)loop * vector.row_words;
+            const uint64_t* row = result.loop_bodies + (uint64_t)loop * result.row_words;
             dominator_test_expect(tally, ((uintptr_t)row & 63) == 0, "aligned loop row");
-            for (uint64_t bit = cfg->block_count; bit < vector.row_words * 64; bit += 1)
+            for (uint64_t bit = cfg->block_count; bit < result.row_words * 64; bit += 1)
             {
                 dominator_test_expect(tally, !dominators_bit(row, (uint32_t)bit), "zero loop tail bits");
             }
         }
-        if (oracle)
+        dominator_test_definition(tally, memory, cfg, &result, bodies);
+        dominator_test_columns(tally, &result);
+        if (frozen != 0)
         {
-            dominator_test_definition(tally, memory, cfg, &vector);
+            dominator_test_expect(tally, dominator_test_digest(&result) == *frozen, "frozen default-seed result");
         }
         Dominators repeated = {0};
         const uint64_t repeated_at = memory->length;
         const DominatorStatus repeated_status = dominators_analyze(memory, scratch, cfg, options, &repeated);
-        dominator_test_expect(tally, repeated_status == DOMINATOR_OK && dominator_test_equal(&vector, &repeated), "repeatability");
+        dominator_test_expect(tally, repeated_status == DOMINATOR_OK && dominator_test_equal(&result, &repeated), "repeatability");
         arena_pop_to(memory, repeated_at);
     }
     arena_pop_to(memory, saved);
@@ -546,21 +646,36 @@ static void dominator_test_limits(DominatorTestTally* tally, Arena* memory, Aren
         status = dominators_analyze(memory, scratch, &cfg, options, &result);
         dominator_test_expect(tally, status == DOMINATOR_MATRIX_LIMIT && memory->length == start && memcmp(&result, &sentinel, sizeof(result)) == 0, "loop budget refusal");
         options.outputs = 0;
-        options.path = DOMINATOR_VECTOR;
         status = dominators_analyze(memory, scratch, &cfg, options, &result);
-        dominator_test_expect(tally, status == DOMINATOR_MATRIX_LIMIT && memory->length == start, "explicit vector budget refusal");
-        options.path = DOMINATOR_AUTO;
-        status = dominators_analyze(memory, scratch, &cfg, options, &result);
-        dominator_test_expect(tally, status == DOMINATOR_OK && result.path == DOMINATOR_SCALAR && result.matrix_peak_bytes == 0 && result.frontiers == 0 && result.loop_bodies == 0, "automatic linear-memory fallback");
+        dominator_test_expect(tally, status == DOMINATOR_OK && result.matrix_peak_bytes == 0 && result.frontiers == 0 && result.loop_bodies == 0, "the tree alone takes no matrix");
         arena_pop_to(memory, start);
+        // The budget bounds the frontier rows and the loop bodies, one 64-byte row each for 17 blocks: it admits
+        // exactly their sum.
         options = dominators_options();
         status = dominators_analyze(memory, scratch, &cfg, options, &result);
-        dominator_test_expect(tally, status == DOMINATOR_OK && result.path == DOMINATOR_SCALAR && result.loop_count != 0 && result.loop_path == DOMINATOR_VECTOR, "AUTO solves by SEMI-NCA and keeps vector loops that fit");
+        const uint64_t matrices = ((uint64_t)cfg.block_count + result.loop_count) * 64;
+        dominator_test_expect(tally, status == DOMINATOR_OK && result.row_words == 8 && result.loop_count != 0 && result.matrix_peak_bytes == matrices, "matrix peak is the frontiers and the loop bodies");
         arena_pop_to(memory, start);
-        options.max_matrix_bytes = 17 * 64 + 16 * 64;
+        options.max_matrix_bytes = matrices;
         status = dominators_analyze(memory, scratch, &cfg, options, &result);
-        dominator_test_expect(tally, status == DOMINATOR_OK && result.path == DOMINATOR_SCALAR && result.loop_path == DOMINATOR_SCALAR, "loop scratch independently falls back within budget");
+        dominator_test_expect(tally, status == DOMINATOR_OK && result.matrix_peak_bytes == matrices, "a budget of exactly the matrices");
         arena_pop_to(memory, start);
+        options.max_matrix_bytes = matrices - 1;
+        result = sentinel;
+        status = dominators_analyze(memory, scratch, &cfg, options, &result);
+        dominator_test_expect(tally, status == DOMINATOR_MATRIX_LIMIT && memory->length == start && memcmp(&result, &sentinel, sizeof(result)) == 0, "a budget one byte short");
+        // Frontiers alone: the budget admits exactly their rows.
+        options = dominators_options();
+        options.outputs = BUSTER_DOMINATOR_FRONTIERS;
+        options.max_matrix_bytes = (uint64_t)cfg.block_count * 64;
+        status = dominators_analyze(memory, scratch, &cfg, options, &result);
+        dominator_test_expect(tally, status == DOMINATOR_OK && result.matrix_peak_bytes == options.max_matrix_bytes && result.loop_bodies == 0, "a budget of exactly the frontiers");
+        arena_pop_to(memory, start);
+        options.max_matrix_bytes -= 1;
+        result = sentinel;
+        status = dominators_analyze(memory, scratch, &cfg, options, &result);
+        dominator_test_expect(tally, status == DOMINATOR_MATRIX_LIMIT && memory->length == start && memcmp(&result, &sentinel, sizeof(result)) == 0, "a frontier budget one byte short");
+        options = dominators_options();
         uint32_t* reverse = (uint32_t*)cfg.predecessors;
         const uint32_t first = reverse[0];
         reverse[0] = (first + 1) % cfg.block_count;
@@ -587,7 +702,6 @@ static void dominator_test_limits(DominatorTestTally* tally, Arena* memory, Aren
         dominator_test_expect(tally, status == DOMINATOR_INVALID, "unknown output flag rejected");
         // Exercise partial allocation failures in every phase, not only the first output/scratch push.
         options = dominators_options();
-        options.path = DOMINATOR_VECTOR;
         status = dominators_analyze(memory, scratch, &cfg, options, &result);
         dominator_test_expect(tally, status == DOMINATOR_OK, "allocation sweep baseline");
         if (status == DOMINATOR_OK)
@@ -691,83 +805,13 @@ static void dominator_test_guards(DominatorTestTally* tally, Arena* memory, Aren
                 cfg.successors = guards[1].data;
                 cfg.predecessor_offsets = guards[2].data;
                 cfg.predecessors = guards[3].data;
-                dominator_test_case(tally, memory, scratch, &cfg, sizes[i] < 66);
+                dominator_test_case(tally, memory, scratch, &cfg, sizes[i] < 66, 0);
             }
             for (uint32_t guard = 0; guard < 4; guard += 1)
             {
                 if (guards[guard].mapping != 0)
                 {
                     munmap(guards[guard].mapping, guards[guard].mapping_bytes);
-                }
-            }
-        }
-        arena_pop_to(memory, saved);
-    }
-}
-
-// The vector solver's own matrices end at inaccessible pages, independently of the borrowed-CSR guard tests.
-static void dominator_test_matrix_guards(DominatorTestTally* tally, Arena* memory, Arena* scratch)
-{
-    const uint32_t sizes[] = {
-        1,
-        63,
-        64,
-        65,
-        511,
-        512,
-        513,
-        1025,
-    };
-    for (uint64_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i += 1)
-    {
-        const uint64_t saved = memory->length;
-        DominatorCfg cfg;
-        tally->blocks = sizes[i];
-        const bool built = dominator_test_generate(memory, sizes[i], 4, tally->seed, &cfg);
-        dominator_test_expect(tally, built, "matrix guard fixture");
-        if (built)
-        {
-            DominatorOptions options = {
-                .path = DOMINATOR_SCALAR,
-                .outputs = 0,
-                .max_matrix_bytes = 0,
-            };
-            Dominators scalar;
-            const DominatorStatus status = dominators_analyze(memory, scratch, &cfg, options, &scalar);
-            dominator_test_expect(tally, status == DOMINATOR_OK, "matrix guard scalar oracle");
-            if (status == DOMINATOR_OK)
-            {
-                const uint64_t bytes = scalar.row_words * sizeof(uint64_t);
-                DominatorTestGuard sets = dominator_test_guard(0, (uint64_t)cfg.block_count * bytes);
-                DominatorTestGuard reachable = dominator_test_guard(0, bytes);
-                Dominators vector = scalar;
-                vector.idom = arena_push_array(memory, cfg.block_count, sizeof(uint32_t), _Alignof(uint32_t));
-                uint32_t* counts = arena_push_array(memory, cfg.block_count, sizeof(uint32_t), _Alignof(uint32_t));
-                const bool allocated = sets.mapping != 0 && reachable.mapping != 0 && vector.idom != 0 && counts != 0;
-                dominator_test_expect(tally, allocated, "matrix guard allocations");
-                if (allocated)
-                {
-                    memset(sets.data, 0xa5, (uint64_t)cfg.block_count * bytes);
-                    memset(reachable.data, 0xa5, bytes);
-                    vector.iterations = 0;
-                    dominators_vector(&cfg, &vector, sets.data, reachable.data, counts);
-                    dominator_test_expect(tally, memcmp(vector.idom, scalar.idom, (uint64_t)cfg.block_count * sizeof(uint32_t)) == 0, "guarded matrix solver result");
-                    const uint64_t* rows = sets.data;
-                    for (uint32_t block = 0; block < cfg.block_count; block += 1)
-                    {
-                        for (uint64_t bit = cfg.block_count; bit < vector.row_words * 64; bit += 1)
-                        {
-                            dominator_test_expect(tally, !dominators_bit(rows + (uint64_t)block * vector.row_words, (uint32_t)bit), "guarded dominator padding cleared");
-                        }
-                    }
-                }
-                if (sets.mapping != 0)
-                {
-                    munmap(sets.mapping, sets.mapping_bytes);
-                }
-                if (reachable.mapping != 0)
-                {
-                    munmap(reachable.mapping, reachable.mapping_bytes);
                 }
             }
         }
@@ -826,7 +870,7 @@ static void dominator_test_irreducible_regions(DominatorTestTally* tally, Arena*
     dominator_test_expect(tally, built, "irreducible region fixture");
     if (built)
     {
-        dominator_test_case(tally, memory, scratch, &cfg, true);
+        dominator_test_case(tally, memory, scratch, &cfg, true, 0);
         Dominators analysis;
         const DominatorStatus status = dominators_analyze(memory, scratch, &cfg, dominators_options(), &analysis);
         dominator_test_expect(tally, status == DOMINATOR_OK, "irreducible region analysis");
@@ -843,6 +887,160 @@ static void dominator_test_irreducible_regions(DominatorTestTally* tally, Arena*
     arena_pop_to(memory, saved);
 }
 
+// SEMI-NCA's path evaluation on two 6-block graphs whose DFS numbers are their block IDs. No generated shape had
+// either path.
+// - The climb passes the vertex numbered right after the one being processed: 2's predecessor 5 reaches, through 4
+//   and 3, the semidominator 0 that 3's edge from 0 gives it, so 2's immediate dominator is 0, not its DFS parent 1.
+// - A compressed link carries its path's least semidominator: processing 3 links 5 past 4, whose semidominator is 0;
+//   processing 2 then reads 5's link alone, and 2's immediate dominator is 0, not 1.
+static void dominator_test_semi_nca_paths(DominatorTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t saved = memory->length;
+    const DominatorTestEdge through[] = {
+        {
+            .source = 0,
+            .target = 1,
+        },
+        {
+            .source = 0,
+            .target = 3,
+        },
+        {
+            .source = 1,
+            .target = 2,
+        },
+        {
+            .source = 2,
+            .target = 3,
+        },
+        {
+            .source = 3,
+            .target = 4,
+        },
+        {
+            .source = 4,
+            .target = 5,
+        },
+        {
+            .source = 5,
+            .target = 2,
+        },
+    };
+    const DominatorTestEdge compressed[] = {
+        {
+            .source = 0,
+            .target = 1,
+        },
+        {
+            .source = 0,
+            .target = 4,
+        },
+        {
+            .source = 1,
+            .target = 2,
+        },
+        {
+            .source = 2,
+            .target = 3,
+        },
+        {
+            .source = 4,
+            .target = 1,
+        },
+        {
+            .source = 4,
+            .target = 5,
+        },
+        {
+            .source = 5,
+            .target = 3,
+        },
+        {
+            .source = 5,
+            .target = 2,
+        },
+    };
+    const DominatorTestEdge* const graphs[] = {
+        through,
+        compressed,
+    };
+    const uint32_t edge_counts[] = {
+        sizeof(through) / sizeof(through[0]),
+        sizeof(compressed) / sizeof(compressed[0]),
+    };
+    const uint32_t expected[][6] = {
+        {
+            0,
+            0,
+            0,
+            0,
+            3,
+            4,
+        },
+        {
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+        },
+    };
+    tally->blocks = 6;
+    for (uint32_t graph = 0; graph < 2; graph += 1)
+    {
+        DominatorCfg cfg;
+        const bool built = dominator_test_cfg(memory, 6, 0, graphs[graph], edge_counts[graph], &cfg);
+        dominator_test_expect(tally, built, "SEMI-NCA path fixture");
+        if (built)
+        {
+            dominator_test_case(tally, memory, scratch, &cfg, true, 0);
+            Dominators analysis;
+            const DominatorStatus status = dominators_analyze(memory, scratch, &cfg, dominators_options(), &analysis);
+            dominator_test_expect(tally, status == DOMINATOR_OK && memcmp(analysis.idom, expected[graph], sizeof(expected[graph])) == 0, "SEMI-NCA's semidominators through the processed forest");
+        }
+        arena_pop_to(memory, saved);
+    }
+}
+
+// An acyclic graph whose cross edge 2 -> 1 leaves the block numbered right at the end of 1's DFS subtree: an SCC test
+// that took that block for one of 1's descendants would flag a retreating edge. No generated shape had this edge.
+static void dominator_test_cross_edge(DominatorTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t saved = memory->length;
+    const DominatorTestEdge edges[] = {
+        {
+            .source = 0,
+            .target = 1,
+        },
+        {
+            .source = 0,
+            .target = 2,
+        },
+        {
+            .source = 2,
+            .target = 1,
+        },
+    };
+    DominatorCfg cfg;
+    tally->blocks = 3;
+    const bool built = dominator_test_cfg(memory, 3, 0, edges, sizeof(edges) / sizeof(edges[0]), &cfg);
+    dominator_test_expect(tally, built, "cross edge fixture");
+    if (built)
+    {
+        dominator_test_case(tally, memory, scratch, &cfg, true, 0);
+        Dominators analysis;
+        const DominatorStatus status = dominators_analyze(memory, scratch, &cfg, dominators_options(), &analysis);
+        bool flagged = status != DOMINATOR_OK;
+        for (uint32_t block = 0; status == DOMINATOR_OK && block < cfg.block_count; block += 1)
+        {
+            flagged = flagged || analysis.irreducible[block] != 0;
+        }
+        dominator_test_expect(tally, !flagged && analysis.loop_count == 0, "a cross edge to a finished subtree is not irreducible");
+    }
+    arena_pop_to(memory, saved);
+}
+
 static void dominator_test_deep(DominatorTestTally* tally, Arena* memory, Arena* scratch)
 {
     const uint64_t saved = memory->length;
@@ -854,7 +1052,6 @@ static void dominator_test_deep(DominatorTestTally* tally, Arena* memory, Arena*
     if (built)
     {
         DominatorOptions options = {
-            .path = DOMINATOR_AUTO,
             .outputs = 0,
             .max_matrix_bytes = 0,
         };
@@ -863,7 +1060,7 @@ static void dominator_test_deep(DominatorTestTally* tally, Arena* memory, Arena*
         dominator_test_expect(tally, status == DOMINATOR_OK, "100000-block explicit stacks");
         if (status == DOMINATOR_OK)
         {
-            dominator_test_expect(tally, result.reachable_count == count && result.path == DOMINATOR_SCALAR && result.matrix_peak_bytes == 0, "deep sparse memory policy");
+            dominator_test_expect(tally, result.reachable_count == count && result.matrix_peak_bytes == 0, "deep sparse memory policy");
             for (uint32_t block = 0; block < count; block += 1)
             {
                 dominator_test_expect(tally, result.idom[block] == (block == 0 ? 0 : block - 1) && result.preorder[block] == block && result.subtree_end[block] == count, "deep chain tree");
@@ -897,7 +1094,7 @@ static bool dominator_test_export_read(Arena* memory, const void* bytes, uint64_
 
 // buster-dominators-v1 (dominators_export.c). Generated CFGs written and read back keep their counts, entries,
 // successor views and names byte for byte; the predecessor view is the analyzer's (it validates both views) and
-// sorted by source, and both paths' complete results are those of the original. Every truncation and each named
+// sorted by source, and the complete analysis is the original's. Every truncation and each named
 // malformation of a small export is refused whole, leaving the arena as it was: bad completion counts, wrong or
 // repeated form numbers, a missing triplet member and a name or file that differs inside a function's records
 // among them.
@@ -992,10 +1189,9 @@ static void dominator_test_export(DominatorTestTally* tally, Arena* memory, Aren
             }
         }
         dominator_test_expect(tally, same, "export round trip keeps counts, names and both CSR views");
-        DominatorOptions options = dominators_options();
-        for (uint32_t path = 0; same && path < 2; path += 1)
+        if (same)
         {
-            options.path = path == 0 ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
+            const DominatorOptions options = dominators_options();
             const uint64_t analysis_at = memory->length;
             Dominators before = { 0 };
             Dominators after = { 0 };
@@ -1198,7 +1394,7 @@ static bool dominator_test_parse(const char* text, uint64_t* value)
 
 static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
 {
-    uint64_t seed = 174;
+    uint64_t seed = BUSTER_DOMINATOR_TEST_SEED;
     uint64_t random_count = 40;
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
@@ -1235,7 +1431,6 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
         {
             dominator_test_limits(&tally, &memory, &scratch);
             dominator_test_guards(&tally, &memory, &scratch);
-            dominator_test_matrix_guards(&tally, &memory, &scratch);
             dominator_test_irreducible_regions(&tally, &memory, &scratch);
             const uint32_t sizes[] = {
                 0,
@@ -1252,6 +1447,48 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
                 513,
                 1025,
             };
+            // The default seed's complete results (dominator_test_digest) for the last four sizes, by shape, frozen
+            // from main at 295417ae7. There SEMI-NCA and the AVX-512 bit-matrix solver gave equal complete results on
+            // every generated graph, and every one passed the whole definition, loop bodies included.
+            static const uint64_t frozen[BUSTER_DOMINATOR_TEST_SHAPES * BUSTER_DOMINATOR_TEST_FROZEN_SIZES] = {
+                UINT64_C(0x016c903ce81b4b57),
+                UINT64_C(0x5ae75e8dd84c2c35),
+                UINT64_C(0x8b594e3e05df8882),
+                UINT64_C(0x8e84ac135834a5dc),
+                UINT64_C(0x1f0ccf6ff9b4c0f5),
+                UINT64_C(0xcafe58cb630e026b),
+                UINT64_C(0xc7ac9e84e0a5d7c5),
+                UINT64_C(0x6ba410d6645af4f8),
+                UINT64_C(0x9f2dda61d80a1bdd),
+                UINT64_C(0xba3151524bddedce),
+                UINT64_C(0x559a3db99ca20d8c),
+                UINT64_C(0x5dea3c0604cdc5bc),
+                UINT64_C(0x95ba779fc2947199),
+                UINT64_C(0x93fceca78b1ee1d9),
+                UINT64_C(0xa6d0468bdbbfd709),
+                UINT64_C(0x573c55485c5c01e4),
+                UINT64_C(0xf02ad1772b9b1175),
+                UINT64_C(0xd45235e58ebd3c00),
+                UINT64_C(0xb3349731c725fa80),
+                UINT64_C(0xabb5fbb771739a56),
+                UINT64_C(0x923c8029ddc4ac52),
+                UINT64_C(0xa3afba9e7383435f),
+                UINT64_C(0xce91b3c2c55ed853),
+                UINT64_C(0xe9998f9b8ca9bd11),
+                UINT64_C(0x4e3e906f04e37388),
+                UINT64_C(0x19404ceaf915be65),
+                UINT64_C(0x646401fff917a1d2),
+                UINT64_C(0x0d9769bfd1c3f080),
+                UINT64_C(0xe5bfa6b019c1ff65),
+                UINT64_C(0x167130c20ac8585a),
+                UINT64_C(0x3be23b3ae892689f),
+                UINT64_C(0x38a17edddc5989b0),
+                UINT64_C(0x0b885684a2ef8546),
+                UINT64_C(0x0f4866b2e585bca9),
+                UINT64_C(0x31d7c641403ec7e3),
+                UINT64_C(0x2e04141093bdb7fd),
+            };
+            const uint64_t first_frozen = sizeof(sizes) / sizeof(sizes[0]) - BUSTER_DOMINATOR_TEST_FROZEN_SIZES;
             for (uint32_t shape = 0; shape < BUSTER_DOMINATOR_TEST_SHAPES; shape += 1)
             {
                 for (uint64_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i += 1)
@@ -1264,8 +1501,11 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
                     dominator_test_expect(&tally, built, "generated fixture");
                     if (built)
                     {
-                        // The full forward-loop oracle costs O(loops * blocks * edges); retain it on small graphs.
-                        dominator_test_case(&tally, &memory, &scratch, &cfg, sizes[i] <= 127 || (shape == 4 && sizes[i] == 513));
+                        // The loop-body oracle runs on the small graphs, and on one past 512 blocks for multi-vector rows.
+                        const bool bodies = sizes[i] <= 127 || (shape == 4 && sizes[i] == 513);
+                        const bool frozen_size = seed == BUSTER_DOMINATOR_TEST_SEED && i >= first_frozen;
+                        const uint64_t* digest = frozen_size ? &frozen[shape * BUSTER_DOMINATOR_TEST_FROZEN_SIZES + (i - first_frozen)] : 0;
+                        dominator_test_case(&tally, &memory, &scratch, &cfg, bodies, digest);
                     }
                     arena_pop_to(&memory, saved);
                 }
@@ -1281,7 +1521,7 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
                 dominator_test_expect(&tally, built, "random fixture");
                 if (built)
                 {
-                    dominator_test_case(&tally, &memory, &scratch, &cfg, true);
+                    dominator_test_case(&tally, &memory, &scratch, &cfg, true, 0);
                 }
                 arena_pop_to(&memory, saved);
             }
@@ -1329,8 +1569,10 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
             if (built)
             {
                 tally.blocks = 4;
-                dominator_test_case(&tally, &memory, &scratch, &special, true);
+                dominator_test_case(&tally, &memory, &scratch, &special, true, 0);
             }
+            dominator_test_semi_nca_paths(&tally, &memory, &scratch);
+            dominator_test_cross_edge(&tally, &memory, &scratch);
             dominator_test_deep(&tally, &memory, &scratch);
             dominator_test_export(&tally, &memory, &scratch);
         }

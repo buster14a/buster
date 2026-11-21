@@ -190,15 +190,42 @@ static MainResponseText* main_response_read(MainResponseArguments* storage, Main
     return result;
 }
 
+// Capacity counts expanded operands. argv[0] and the final NULL always have their own slots.
+static bool main_response_grow(MainResponseArguments* storage, uint32_t* capacity)
+{
+    const uint32_t current = *capacity;
+    char** grown = NULL;
+    if (current == BUSTER_RESPONSE_ARGUMENTS)
+    {
+        fputs("buster: response file argument limit exceeded\n", stderr);
+    }
+    else
+    {
+        const uint32_t next = current <= BUSTER_RESPONSE_ARGUMENTS / 2 ? current * 2 : BUSTER_RESPONSE_ARGUMENTS;
+        grown = realloc(storage->arguments, (next + 2) * sizeof(*grown));
+        if (grown != NULL)
+        {
+            storage->arguments = grown;
+            *capacity = next;
+        }
+        else
+        {
+            fputs("buster: response file expansion storage unavailable\n", stderr);
+        }
+    }
+    return grown != NULL;
+}
+
 static __attribute__((noinline)) bool main_response_files(int* count, char*** arguments)
 {
     MainResponseArguments* storage = &main_response_arguments;
+    uint32_t capacity = 8;
     // This is the terminal command's process-lifetime owner, never a reusable parser or a unit-shared global.
     const bool fresh = storage->arguments == NULL;
     bool valid = fresh;
     if (valid)
     {
-        storage->arguments = malloc((BUSTER_RESPONSE_ARGUMENTS + 2) * sizeof(*storage->arguments));
+        storage->arguments = malloc((capacity + 2) * sizeof(*storage->arguments));
         valid = storage->arguments != NULL;
     }
     if (!valid)
@@ -251,14 +278,10 @@ static __attribute__((noinline)) bool main_response_files(int* count, char*** ar
         }
         else if (valid && word != NULL)
         {
-            valid = storage->count <= BUSTER_RESPONSE_ARGUMENTS;
+            valid = storage->count <= capacity || main_response_grow(storage, &capacity);
             if (valid)
             {
                 storage->arguments[storage->count++] = word;
-            }
-            else
-            {
-                fputs("buster: response file argument limit exceeded\n", stderr);
             }
         }
     }

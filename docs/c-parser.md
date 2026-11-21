@@ -3,18 +3,19 @@
 `src/buster/compiler/c_parser.c` parses one translation unit (#127): the
 preprocessor's token stream (`c_preprocessor.c`) to a tree, with diagnostics for
 what C's grammar rejects. It is the design spike #186 chose, built in full: the
-spike's kernels in AVX-512 with their scalar twins, the scalar parser as the
-fallback, oracle and home of the diagnostics, and a pass of checks the spike
-didn't have, which lets the vector path take only code the scalar parser would
-accept with the same tree. `compiler file.c` runs the preprocessor and the
-parser; nothing is written yet.
+spike's kernels in AVX-512, the scalar parser as the fallback and home of the
+diagnostics, and a pass of checks the spike didn't have, which lets the vector
+path take only code the scalar parser would accept with the same tree.
+`compiler file.c` runs the preprocessor and the parser; nothing is written yet.
 
-The default uses the vector path only on hosts with the full vector instruction
-set. Other host builds and `--scalar` use the scalar parser directly, without
-the vector protocol's workspaces or fallback pass (#1369). The kernel twins
-remain test and benchmark entry points. A vector fallback that requests a
-whole-unit retry still resets the typedef meanings before the scalar parse;
-a directly selected scalar parse prepares them only once.
+The vector path is the only one (#2924): the kernels' scalar twins, the
+whole-unit scalar mode and the scalar arms of the input's conversion, the
+keyword pass and the scope numbers are gone, and `--scalar` no longer changes
+the parse. What stays scalar is the vector path's own fallbacks (K2's per-block
+loop, K4 past its 16-bit keys, K5's statement stack, K6's block range) and the
+scalar parser, which takes what K6 flags and a unit with an error. A fallback
+that requests a whole-unit retry resets the typedef meanings before the scalar
+parse.
 
 Salter's [operator fragments](c-parser-fragments.md), the alternative output
 that #104–#107 measured end to end against the postorder, read beside the
@@ -33,7 +34,7 @@ they accept as clang does, and agree with clang on 22,200 mutations of them.
 
 ## What it reads and what it gives
 
-The input (`parse_tokens_from_output`, with a scalar twin) is the
+The input (`parse_tokens_from_output`) is the
 preprocessor's output, its keywords already resolved by language mode. The
 parser's kinds (`ParseKind`, 83) keep the lexer's punctuators and merge the
 rest by what the grammar needs: any number, any character constant, any string
@@ -282,16 +283,15 @@ origins follow each diagnostic's source range. Original runtime fixtures
 and notes with Clang, including repeated markers, subsequent declarations,
 error limits and accepted file/block controls.
 
-It is the fallback for what the vector path flags, the oracle every kernel is
-tested against, and the parser of a unit with errors: the vector path sends the
-whole unit to it when the fallback finds one, so that its diagnostics are the
-scalar parser's alone. `--scalar` (with the preprocessor's scalar twins) runs
-it alone.
+It is the fallback for what the vector path flags and the parser of a unit with
+errors: the vector path sends the whole unit to it when the fallback finds one,
+so that its diagnostics are the scalar parser's alone. Until #2924 it was also
+the oracle every kernel was tested against, and `--scalar` ran it alone.
 
 ## The vector path
 
-`parse_vector` runs these passes over the unit's tokens, each in AVX-512 with
-an exact scalar twin (the twins together are `parse_twins`):
+`parse_vector` runs these passes over the unit's tokens, each in AVX-512, with
+the scalar fallbacks named below:
 
 1. **K1, brackets.** Kinds to +1, -1 or 0 with `vpermi2b`, a prefix sum in byte
    lanes, and each closer's opener by a nearest-smaller search within a block
@@ -321,7 +321,8 @@ an exact scalar twin (the twins together are `parse_twins`):
 6. **K5, statements.** The owners from a compress and an expand of the
    statement events' positions, the blocks' owners from a stack without
    branches, and else, do and while from a sparse loop. A unit it can't decide
-   alone (a `do` without its `while`) goes to its twin, the statement stack.
+   alone (a `do` without its `while`) goes to the statement stack, a token at a
+   time (`parse_statements`).
 7. **K6, the checks** (below).
 8. **The fallback** (below).
 
@@ -354,7 +355,7 @@ K6 also records the group each opener opens and each closer closes
 (`ParseKernels.check_groups`). K2's rules can't tell a declarator's parameter
 list from a call's arguments, as both follow an operand, so the vector path
 marks both a call's; after K6, a call's parentheses in a parameter list's group
-become a function's (`parse_function_role`, and in AVX-512 a block at a time in
+become a function's (`parse_function_roles_block_avx512`, a block at a time in
 the loop that counts the flagged tokens), as the scalar parser marks them
 (#1968). The checker reads that role, `check_driver_in_parameters` among others.
 
@@ -369,17 +370,17 @@ only the tokens clang allows there; nothing postfix follows `&&label`; and a `*`
 outside declarators is followed by an operand. A token that fails is flagged,
 with the reasons, which `test-parser --explain` tallies.
 
-The twin (`parse_check_scalar`) keeps a frame per node depth. The AVX-512
-kernel (`parse_check_avx512`) works in blocks of 64 tokens whose depths span at
+The block fallback (`parse_check_range`) keeps a frame per node depth. The
+AVX-512 kernel (`parse_check_avx512`) works in blocks of 64 tokens whose depths span at
 most 63, with a byte key per token: 4 times its depth above the block's lowest,
 plus a rank (0 for an item's start, 1 for an `=`, `,` or bit-field `:`, 2
 otherwise). One table of window minima serves
 three nearest-smaller searches: the enclosing opener, the item's start and the
 part's start. Group types come from a fixed point started from an expression
 guess, in at most 16 rounds; a block that needs more, or spans more depths,
-goes to the twin, and the twin's frames carry from block to block. The check
-tables are built from the twin's own functions (`parse_check_vector_init`), so
-the two can't disagree on a rule.
+goes to the block fallback, and its frames carry from block to block. The check
+tables are built from the block fallback's own functions
+(`parse_check_vector_init`), so the two can't disagree on a rule.
 
 The class refinement now groups virtual kinds with identical results for all
 seven refining roles. There are 28 distinct eight-byte rows (slot zero is
@@ -451,15 +452,15 @@ but the parents and the roles:
 
 With `ParseOptions.sizes` the last pass also takes each token's subtree start
 from its first child before it and writes the position's size,
-`end(v) - start(v) + 1`. `parse_tree_links` is the twin: the checker's reader's
+`end(v) - start(v) + 1`. `parse_tree_links` is the other derivation: the checker's reader's
 derivation before this change (each token's children linked from the last, then
 its position and its parent's end from a postorder in order).
 `parse_postorder` is the walk the spike measured the passes against (each token
 with no child after it, then the climb through the ancestors it ends): it
 mispredicts where the tree is irregular, as on `sqlite3.c`, and costs less where
 its branches predict, as on libc ("Measurements"). `test-parser` checks the
-columns of both paths' parses and of the twin against a depth-first walk of its
-own, and the benchmark times the four.
+parse's columns and `parse_tree_links`' against a depth-first walk of its own,
+and the benchmark times the four.
 
 Where the columns are made. Before, the parser derived its postorder and the
 subtree sizes in five passes (`parse_postorder_sorted`), and the checker's reader
@@ -471,7 +472,7 @@ columns and the reader reads them as they are, and the C driver parses
 pages the parse's temporaries already touched, so that no column of the parser's
 is faulted in for them. The prefix and repair views (`c_check_prefix.c`,
 `c_check_repair.c`) bring their own postorder, and the reader derives the rest
-from it with the twin.
+from it with `parse_tree_links`.
 
 Why scalar. The passes are a scatter's loads and stores: per token, two of the
 backward pass's loads and a read-modify-write land at the token's parent, its
@@ -592,12 +593,15 @@ arguments and the usual per-run lock.
 
 ## Correctness
 
-`test-parser` (AGENTS.md, "Parser tests") compares the two paths on every unit
-it reads, the tree's invariants and postorder, and each kernel with its twin,
-on snippets checked against clang, generated inputs, the driver's cases and
-failures, corpora, and mutations of them checked against clang.
+`test-parser` (AGENTS.md, "Parser tests") checks every unit it reads: the tree's
+invariants and postorder, the kernels' own checks, and on the generated batches
+the frozen digests of the vector path's outputs, recorded where it and every
+kernel agreed with the scalar parser and the kernels' twins before #2924 deleted
+them; on snippets checked against clang, generated inputs, the driver's cases
+and failures, corpora, and mutations of them checked against clang.
 
-On the 9700X, at `d59d035`, with `--clang`:
+Before #2924, `test-parser` compared the two paths on every unit and each kernel
+with its twin. On the 9700X, at `d59d035`, with `--clang`:
 
 - the tests without files: the 202 snippets (404 since #1127), the four fixtures (six since), 2,000 random
   streams, the snippets at every block alignment (12,928 inputs), nine kinds of
@@ -798,8 +802,8 @@ them; 3,869,223 tokens), and `main.c` with clang's predefines for
   two passes more, the first children forward and the starts. Without sizes the
   walk costs 5.3 on libc and 11.5 on `main.c`, where its branches predict well,
   and 15.0 on `sqlite3.c`, where it mispredicts 0.44 branches a token.
-- The kernels' twins are tests only: they cost 2.2 to 2.5 times the scalar
-  parser.
+- The kernels' twins were tests only: they cost 2.2 to 2.5 times the scalar
+  parser (#2924 deleted them).
 
 Stage by stage, in cycles a token, with the spike's third follow-up's for the
 kernels it had:
@@ -1025,14 +1029,14 @@ consumption after integration.
 Disposition: keep full postorder for actual checking, retain the already
 measured elimination for the diagnostics-only driver. The driver comparison
 above is complete fresh-process syntax checking; parser-kernel results are not
-that measurement. `test-parser --clang` checks kernel twins, independent
-postorder, alignments/depth/recovery and tree-only equivalence. [#126](https://github.com/buster14a/buster/issues/126)/[#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)
+that measurement. `test-parser --clang` checks the kernels' own checks and
+frozen digests (the twins until #2924), independent postorder, alignments/depth/recovery and tree-only equivalence. [#126](https://github.com/buster14a/buster/issues/126)/[#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)
 retain corpus and source-checker acceptance, including memory and fallback
 costs over real units, rather than assuming a fast kernel satisfies the handoff.
 ## Consumer contract for the preprocessing-to-parser handoff (#335)
 
 The retained boundary is `pp_run_main` → `pp_resolve_keywords` →
-`parse_translation_unit` → `parse_tokens_from_output` (or the scalar twins).
+`parse_translation_unit` → `parse_tokens_from_output`.
 The [preprocessor](../src/buster/compiler/c_preprocessor.c) owns `PPTokens`:
 u8 kinds/flags, u32 values/source locations, a logical `count` and a writable
 `capacity`. Values have kind-dependent meaning; identifiers and keywords keep

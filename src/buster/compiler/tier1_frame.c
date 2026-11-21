@@ -1023,11 +1023,7 @@ static Tier1FrameError tier1_frame_plan_scalar(const Tier1FrameRequest* request,
 
 static Tier1FrameError tier1_frame_plan(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier1_frame_plan_scalar(request, output, scratch, result);
-#else
     return tier1_frame_plan_path(request, output, scratch, false, result);
-#endif
 }
 
 static Tier1FrameError tier1_frame_plan_scalar(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result)

@@ -17,6 +17,13 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The discarded-comparison suggestion gate in `c_check_common_warnings.c` and
+its original driver fixtures (#2906) use the project default terms. LLVM
+revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaStmt.cpp` was consulted for the left operand's lvalue
+classification and the equality/inequality notes. Clang 23.1.4 is an external
+diagnostic oracle; no upstream implementation or test fixture is imported.
+
 The failed static assertion boolean-conversion recovery in
 `c_check_common_warnings.c` and `c_checker_driver.c`, its driver tests and the
 original `tests/driver/assert_bool_*.c` sources (#2409) use the project
@@ -282,7 +289,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/x86_64_disassembler.c`, `src/buster/compiler/x86_64_disassembly.c`, `src/buster/compiler/x86_64_disassembler_cli.c`, `src/buster/compiler/x86_64_disassembler_test.c`, `examples/disassembler/corpus.c`, `docs/x86-64-disassembler.md` | Original decoder, bounded formatter/command, tests, C corpus and documentation; Default. Decoder indices are built from this repository's encoder catalogue, and generated test operands use its existing generator. Independent raw-byte fixtures are handwritten. GNU as/objdump and Clang run externally as oracles for locally authored inputs; no implementation or external test corpus is imported. uops.info and ISA manuals supply design measurements and instruction facts, not copied implementation. |
 | `src/buster/compiler/main.c`, `src/buster/compiler/main_test.c`, `src/buster/compiler/lane_test.c` | Original integration, input handling, loader regressions and lane tests; Default. The loader fixtures and address-space-limit checks are written for this project; no external fixtures or implementation are imported. |
 | `src/buster/compiler/diagnostic.c`, `src/buster/compiler/diagnostic_test.c`, `src/buster/compiler/diagnostic_benchmark.c`, `src/buster/compiler/c_preprocessor_order_test.c`, `src/buster/compiler/link_order_test.c`, `docs/determinism.md` | Original buffered diagnostic ordering, scalar/vector kernels, tests, measurement harness and documentation; Default. The property tests reuse this repository's fixtures and generators. The diagnostic benchmark's clock, sample selection and conditioning helpers are original; no external implementation, fixtures or generated data are imported. |
-| `src/buster/compiler/dataflow.c`, `src/buster/compiler/dataflow_program.c`, `src/buster/compiler/dataflow_test.c`, `src/buster/compiler/dataflow_benchmark.c`, `docs/dataflow.md` | Original liveness/interference kernels, synthetic CFG generator, tests, benchmark and documentation; Default, with the public-domain SplitMix64 seed-mixing reference below. No external corpus is incorporated. |
+| `src/buster/compiler/dataflow.c`, `src/buster/compiler/dataflow_program.c`, `src/buster/compiler/dataflow_test.c`, `src/buster/compiler/dataflow_sweeps_test.c`, `src/buster/compiler/dataflow_benchmark.c`, `docs/dataflow.md` | Original liveness/interference kernels, synthetic CFG generator, tests, benchmark and documentation; Default, with the public-domain SplitMix64 seed-mixing reference below. No external corpus is incorporated. |
 | `src/buster/compiler/ssa.c`, `src/buster/compiler/ssa_program.c`, `src/buster/compiler/ssa_test.c`, `src/buster/compiler/ssa_benchmark.c`, `src/buster/compiler/ssa_ir.c`, `src/buster/compiler/ssa_ir_test.c`, `docs/ssa.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/ssa-2026-10-23/) | Original local-promotion implementation, IR adapter, CFG generator, interpreters, verifier, tests, benchmark and generated observations; Default. Braun et al. (CC 2013), Cytron et al. (TOPLAS 1991) and Cooper, Harvey and Kennedy (2001) supply algorithm descriptions, not copied code or fixtures. The generator is an original deterministic congruential generator; measurement helpers are original. Existing arena/dataflow/dominator/IR APIs, the typed-stream generator and test arithmetic helpers are reused. Sources and integration limits are in `docs/ssa.md`; the measurement record names its source revisions, compiler/CPU, commands and workflow. |
 | `src/buster/compiler/ir.c`, `src/buster/compiler/ir_lower.c`, `src/buster/compiler/ir_test.c`, `src/buster/compiler/ir_lower_test.c`, `src/buster/compiler/ir_benchmark.c`, `src/buster/compiler/ir_lower_benchmark.c`, `docs/ir.md` | Original per-function IR, typed-stream adapter, scalar/vector verifiers, compact CFG/use builders, printer, fixtures, test-only interpreter, benchmarks and documentation; Default. Tests and pipeline measurements reuse this project's Tier 0 generator and typed-stream interpreter. The timing and median helpers are original to this module. No external implementation, generated data or fixture corpus is imported. |
 | `src/buster/compiler/preprocessor_fuzz*.c`, `docs/preprocessor-fuzz.md` | Original independent test harness, generator, comparator, minimizer, tests and benchmark helpers; Default. Generated test programs are produced by this repository's C generator from a recorded seed, case ID and language mode. Clang 23 is an external oracle; no compiler implementation or external test fixtures are imported. |
@@ -708,6 +715,15 @@ musl's: they exercise the same instructions, constraints and operand shapes,
 and copy no function of musl's. No file of this tree holds musl's code.
 
 ## C semantic compatibility references
+
+The suppress attribute recovery and its original runtime fixtures (#2332)
+use Clang 23.1.4 externally as a diagnostic and acceptance oracle.
+`clang/lib/Parse/ParseDecl.cpp`, `clang/lib/Parse/ParseDeclCXX.cpp` and
+`clang/lib/Parse/Parser.cpp` at `llvmorg-23.1.4` (revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`) were read as behavior references
+for argument parsing, delimiter recovery and discarded attribute lists.
+No LLVM implementation or test fixtures were copied. The new code and
+fixtures use the project default terms.
 
 The TLS redeclaration diagnostics and for-initializer unused-warning scope fixes
 for #1784 are original project code and fixtures under the default terms.

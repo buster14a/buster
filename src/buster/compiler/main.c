@@ -454,6 +454,13 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
 #include "buster/compiler/assembler_benchmark.c"
 #endif
+// The assembly sink (#1362): a unit of the link representation as GNU as's AT&T source, from the emission's symbolic view
+// (the link and each function's sized records), and its tests, for the test-assembly-output command, which take the
+// assembler's matcher for their fixtures' records and its tests' GNU as comparison.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
+#include "buster/compiler/assembly_output.c"
+#include "buster/compiler/assembly_output_test.c"
+#endif
 
 #include "buster/compiler/x86_semantics_test.c"
 // The Zen 5 model's harness and tests (#181), whose fixtures come from the form table and the effects tables, and
@@ -712,6 +719,11 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_node_machine_facts.c"
 // #2850's step 2's second piece: what reads T's record, counted in the shadow (measure-node-machine --shadow --facts-reads).
 #include "buster/compiler/c_check_node_machine_reads.c"
+// #2850's step 2, C on the window: C's answers from the window's bytes, 64 records a step (--shadow --window-contexts).
+#include "buster/compiler/c_check_node_window_counter.c"
+#include "buster/compiler/c_check_node_machine_window.c"
+// #2850's step 2, X's rows on the window: the kinds and classes of X's entries from C's answers there (--shadow --window-rows).
+#include "buster/compiler/c_check_node_machine_rows.c"
 #endif
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).
@@ -1226,7 +1238,7 @@ static __attribute__((unused)) void main_backend_test_interfaces(void)
     (void)&dominators_export_read;
     (void)&tier0_tables_open;
     (void)&tier0_tables_close;
-    (void)&ir_lower_typed_path;
+    (void)&ir_lower_typed;
     (void)&tier1_cfg_from_ir;
     (void)&ir_reduce_oracle;
     (void)&tier1_select_emit;
@@ -1267,7 +1279,6 @@ static __attribute__((unused)) void main_driver_test_interfaces(void)
 
 static __attribute__((unused)) void main_x86_test_interfaces(void)
 {
-    (void)&x86_decode_classify_scalar;
     (void)&x86_target_forms_scalar;
     (void)&branch_sizing_generate;
     (void)&branch_sizing_chain;
@@ -1309,7 +1320,6 @@ static __attribute__((unused)) void main_checker_consumer_interfaces(void)
     (void)&check_builtin_float_strict;
     (void)&check_builtin_float;
     (void)&tier0_inline;
-    (void)&tier0_inline_scalar;
     (void)&tier0_inline_code;
     (void)&cbuiltin_x86_helper_kind;
     (void)&cbuiltin_x86_helper;
@@ -1385,10 +1395,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
 {
     int result = 0;
     *found = true;
-    if (!BUSTER_HOST_VECTOR && argc >= 2 && (strncmp(argv[1], "benchmark-", 10) == 0 || strcmp(argv[1], "measure-x86-zen5") == 0 || strcmp(argv[1], "measure-mask-spills") == 0))
+    // The chain's head: a command line without a command is no unit's.
+    if (argc < 2)
     {
-        fprintf(stderr, "benchmarks require an AVX-512 host build; run tests with this scalar build\n");
-        result = 1;
+        *found = false;
     }
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa") == 0)
@@ -1397,7 +1407,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ssa") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ssa") == 0)
     {
         result = run_ssa_benchmark(argc - 2, argv + 2);
     }
@@ -1415,7 +1425,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-diagnostics") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-diagnostics") == 0)
     {
         result = run_diagnostic_benchmark(argc - 2, argv + 2);
     }
@@ -1430,7 +1440,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_x86_semantics_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-semantics") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-semantics") == 0)
     {
         result = run_x86_semantics_benchmark(argc - 1, argv + 1);
     }
@@ -1447,9 +1457,15 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
     {
         result = run_assembler_benchmark(argc - 2, argv + 2);
+    }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "test-assembly-output") == 0)
+    {
+        result = run_assembly_output_tests(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
@@ -1458,7 +1474,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_preprocessor_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-preprocessor") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-preprocessor") == 0)
     {
         result = run_preprocessor_benchmark(argc - 1, argv + 1);
     }
@@ -1468,7 +1484,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_parser_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0)
     {
         result = run_parser_benchmark(argc - 1, argv + 1);
     }
@@ -1477,7 +1493,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_gnu_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-gnu") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-gnu") == 0)
     {
         result = run_gnu_benchmark(argc - 1, argv + 1);
     }
@@ -1485,7 +1501,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_c_bindings_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-bindings") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-bindings") == 0)
     {
         result = run_c_bindings_benchmark(argc - 2, argv + 2);
     }
@@ -1493,7 +1509,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_c_lowering_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-lowering") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-lowering") == 0)
     {
         result = run_c_lowering_benchmark(argc - 2, argv + 2);
     }
@@ -1501,7 +1517,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_parser_bindings_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-parser-bindings") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-parser-bindings") == 0)
     {
         result = run_parser_bindings_benchmark(argc - 2, argv + 2);
     }
@@ -1513,7 +1529,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lexer") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lexer") == 0)
     {
         result = run_c_lexer_benchmark(argc - 1, argv + 1);
     }
@@ -1541,13 +1557,13 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "benchmark-x86-zen5") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "benchmark-x86-zen5") == 0)
     {
         result = run_x86_zen5_benchmark(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-x86-zen5") == 0)
     {
         result = run_x86_zen5_measure(argc - 2, argv + 2);
     }
@@ -1559,18 +1575,18 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-mask-spills") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "measure-mask-spills") == 0)
     {
         result = run_mask_spill_measure(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
     {
         result = run_x86_target_benchmark(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
     {
         result = run_x86_encoder_benchmark(argc - 1, argv + 1);
     }
@@ -1584,7 +1600,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_x86_disassembler(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-disassembler") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-disassembler") == 0)
     {
         result = run_x86_disassembler_benchmark(argc - 1, argv + 1);
     }
@@ -1594,7 +1610,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_lane_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lanes") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-lanes") == 0)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
     }
@@ -1604,7 +1620,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_dominator_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-dominators") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-dominators") == 0)
     {
         result = run_dominator_benchmark(argc - 2, argv + 2);
     }
@@ -1614,7 +1630,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_tier1_allocate_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-allocation") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-allocation") == 0)
     {
         result = run_tier1_allocate_benchmark(argc - 2, argv + 2);
     }
@@ -1630,7 +1646,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_tier1_schedule_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-schedule") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-schedule") == 0)
     {
         result = run_tier1_schedule_benchmark(argc - 1, argv + 1);
     }
@@ -1644,7 +1660,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_dataflow_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-dataflow") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-dataflow") == 0)
     {
         result = run_dataflow_benchmark(argc - 1, argv + 1);
     }
@@ -1653,7 +1669,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_preprocessor_fuzz_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-preprocessor-fuzz") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-preprocessor-fuzz") == 0)
     {
         result = run_preprocessor_fuzz_benchmark(argc - 1, argv + 1);
     }
@@ -1662,7 +1678,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_refinement_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-refinement") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-refinement") == 0)
     {
         result = run_refinement_benchmark(argc - 1, argv + 1);
     }
@@ -1685,12 +1701,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "benchmark-debug") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "benchmark-debug") == 0)
     {
         result = run_debug_benchmark(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-object-writer") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-object-writer") == 0)
     {
         result = run_object_writer_benchmark(argc - 1, argv + 1);
     }
@@ -1700,7 +1716,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_import_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-import") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-import") == 0)
     {
         result = run_import_benchmark(argc - 1, argv + 1);
     }
@@ -1710,7 +1726,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_bind_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-bind") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-bind") == 0)
     {
         result = run_bind_benchmark(argc - 1, argv + 1);
     }
@@ -1720,7 +1736,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_executable_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
     }
@@ -1742,7 +1758,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_snapshot_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-snapshot") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-snapshot") == 0)
     {
         result = run_snapshot_benchmark(argc - 1, argv + 1);
     }
@@ -1761,15 +1777,15 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_foreign_corpus_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-output") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-output") == 0)
     {
         result = run_foreign_link_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-strings") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-strings") == 0)
     {
         result = run_foreign_strings_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-unwind") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-unwind") == 0)
     {
         result = run_foreign_unwind_benchmark(argc - 2, argv + 2);
     }
@@ -1779,24 +1795,24 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_foreign_link(argc - 2, argv + 2);
     }
 #if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-gc") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-gc") == 0)
     {
         result = run_foreign_gc_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-unwind-dedup") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-unwind-dedup") == 0)
     {
         result = run_foreign_unwind_dedup_benchmark(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-foreign") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-foreign") == 0)
     {
         result = run_foreign_benchmark(argc - 1, argv + 1);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-link") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-link") == 0)
     {
         result = run_link_benchmark(argc - 1, argv + 1);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-floors") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-floors") == 0)
     {
         result = run_floors_benchmark(argc - 1, argv + 1);
     }
@@ -1810,7 +1826,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_branch_sizing_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-branch-sizing") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-branch-sizing") == 0)
     {
         result = run_branch_sizing_benchmark(argc - 1, argv + 1);
     }
@@ -1820,7 +1836,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_files_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-files") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-files") == 0)
     {
         result = run_files_benchmark(argc - 1, argv + 1);
     }
@@ -1869,7 +1885,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_check_debug_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-debug") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-debug") == 0)
     {
         result = run_check_debug_benchmark(argc - 2, argv + 2);
     }
@@ -2007,7 +2023,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-environments") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-environments") == 0)
     {
         result = run_c_environment_benchmark(argc - 2, argv + 2);
     }
@@ -2025,19 +2041,19 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-deferred") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-deferred") == 0)
     {
         result = run_checker_deferred_benchmark(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
     {
         result = run_checker_source_benchmark(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
     {
         result = run_lowering_source_benchmark(argc - 2, argv + 2);
     }
@@ -2075,23 +2091,23 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_cfg_source_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-cfg-source") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-cfg-source") == 0)
     {
         result = run_tier1_cfg_source_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-certificate") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-certificate") == 0)
     {
         result = run_tier1_certificate_benchmark(argc - 2, argv + 2);
     }
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select-source") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select-source") == 0)
     {
         result = run_tier1_select_source_benchmark(argc - 2, argv + 2);
     }
 #endif
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-code-certificate") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-code-certificate") == 0)
     {
         // The checker's unit, the home of its corpus's preparation (ir_source_prepare), whose emitter is the one it times:
         // the code certificate's command reaches one copy of the emitter's lazily built tables (x86_zen5_id's).
@@ -2103,7 +2119,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ssa_source_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
     {
         result = run_ir_source_benchmark(argc - 2, argv + 2);
     }
@@ -2115,7 +2131,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
     {
         result = run_backend_source_benchmark(argc - 2, argv + 2);
     }
@@ -2127,24 +2143,24 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-lanes") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-lanes") == 0)
     {
         result = run_check_lanes_benchmark(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-units") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-units") == 0)
     {
         result = run_check_units_benchmark(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {
         result = run_checker_binding_benchmark(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-checker") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-checker") == 0)
     {
         result = run_checker_benchmark(argc - 1, argv + 1);
     }
@@ -2154,7 +2170,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_type_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-types") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-types") == 0)
     {
         result = run_type_benchmark(argc - 1, argv + 1);
     }
@@ -2176,11 +2192,11 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_check_builtin_atomic_rmw_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-builtins") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-builtins") == 0)
     {
         result = run_builtin_benchmark(argc - 1, argv + 1);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-calling-convention") == 0)
     {
         result = run_calling_convention_benchmark(argc - 1, argv + 1);
     }
@@ -2208,7 +2224,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_tier1_frame_execution_tests(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-frame") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-frame") == 0)
     {
         result = run_tier1_frame_benchmark(argc - 1, argv + 1);
     }
@@ -2257,7 +2273,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-builtin-lowering") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-builtin-lowering") == 0)
     {
         result = run_builtin_lower_benchmark(argc - 2, argv + 2);
     }
@@ -2275,7 +2291,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-unwind") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-unwind") == 0)
     {
         result = run_unwind_benchmark(argc - 2, argv + 2);
     }
@@ -2285,12 +2301,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_streaming_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-streaming") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-streaming") == 0)
     {
         result = run_streaming_benchmark(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-backend") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-backend") == 0)
     {
         result = run_backend_benchmark(argc - 1, argv + 1);
     }
@@ -2349,11 +2365,11 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_typed_source(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir") == 0)
     {
         result = run_ir_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-lowering") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-lowering") == 0)
     {
         result = run_ir_lower_benchmark(argc - 2, argv + 2);
     }
@@ -2424,7 +2440,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_tier1_pipeline_benchmark(argc - 2, argv + 2);
     }
 #endif
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select") == 0)
     {
         result = run_tier1_select_benchmark(argc - 1, argv + 1);
     }
@@ -2437,11 +2453,11 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_tier1_model_measure(argc - 1, argv + 1);
     }
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize-passes") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize-passes") == 0)
     {
         result = run_ir_optimize_passes_benchmark(argc - 1, argv + 1);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize") == 0)
     {
         result = run_ir_optimize_benchmark(argc - 1, argv + 1);
     }

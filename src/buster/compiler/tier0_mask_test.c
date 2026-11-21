@@ -871,17 +871,14 @@ static uint32_t tier0_test_mask_build(Tier0TestTally* tally, const char* name, c
         ready = ready && tier0_test_covered(tally, "masks", name, &scalar);
         uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
         uint32_t* fixup_ends = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(scalar.reference_count)) : 0;
-        uint8_t* other = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_X86_ENCODER_CAPACITY(scalar.count)) : 0;
         const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
         const uint32_t start = (size + 15) & ~15u;
         const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
-        ready = ready && tier0_test_expect(tally, offsets != 0 && fixup_ends != 0 && other != 0 && sizing.error == BRANCH_SIZING_OK &&
+        ready = ready && tier0_test_expect(tally, offsets != 0 && fixup_ends != 0 && sizing.error == BRANCH_SIZING_OK &&
                                                       start + room <= BUSTER_TIER0_TEST_MASK_CODE && fixups + scalar.reference_count <= 64,
                                            "masks", "%s: function %u: no room, or the branches can't be sized", name, f);
         const int64_t length = ready ? x86_encode(scalar.records, scalar.count, image + start, room, 0, fixup_ends) : -1;
-        const int64_t scalar_length = ready ? x86_encode_scalar(scalar.records, scalar.count, other, room, 0, 0) : -1;
-        ready = ready && tier0_test_expect(tally, length > 0 && length == scalar_length && memcmp(image + start, other, (size_t)length) == 0, "masks",
-                                           "%s: function %u: the encoders differ, or fail (%" PRId64 ", %" PRId64 ")", name, f, length, scalar_length);
+        ready = ready && tier0_test_expect(tally, length > 0, "masks", "%s: function %u: the encoder fails (%" PRId64 ")", name, f, length);
         for (uint32_t r = 0; ready && r < scalar.reference_count; r += 1)
         {
             const LinkReference* reference = &scalar.references[r];

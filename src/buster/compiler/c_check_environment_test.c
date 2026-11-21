@@ -317,7 +317,7 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
                     memset(poison, 0xa5, 1u << 20);
                 }
                 arena_pop_to(&scratch[path], mark);
-                const CheckOptions check_options = { .scalar = path == 0 };
+                const CheckOptions check_options = { 0 };
                 checked[path] = check_graph_run(&types[path].table, &inputs[path].graph, &checked_storage[path], &scratch[path], &check_options, &streams[path]);
                 check_test_expect(test, checked[path] && (streams[path].report_count != 0) == fixture->graph_rejected && scratch[path].length == mark,
                                   "production history fixture lost valid sequential graph output after scratch reuse");
@@ -353,6 +353,8 @@ static void check_test_environment_source(CheckTest* test, const CheckEnvironmen
         const CBindings* y = b->bindings;
         const bool counts = x->count == y->count && a->body_count == b->body_count && a->tag_count == b->tag_count;
         check_test_expect(test, counts, "production scalar/vector history counts differ");
+        check_test_expect(test, !checked[0] || check_test_stream_recorded(&streams[0], &inputs[0].graph, inputs[0].graph.argument_count, "environment"),
+                          "environment: the reference stream is its recorded digest");
         check_test_expect(test, checked[0] && checked[1] && inputs[0].graph.argument_count == inputs[1].graph.argument_count &&
                                check_test_stream_equal(&streams[0], &streams[1], inputs[0].graph.argument_count),
                           "production history handoff changed scalar/vector sequential typed output");
@@ -399,11 +401,7 @@ static void check_test_environment_counts(CheckTest* test)
         }
         parser.tree.roles = roles;
         parser.tokens.count = count;
-        parser.options.scalar = true;
-        const uint32_t scalar = check_environment_body_count(&parser);
-        parser.options.scalar = false;
-        check_test_expect(test, scalar == expected && check_environment_body_count(&parser) == expected,
-                          "guarded production body-count scalar/vector mismatch");
+        check_test_expect(test, check_environment_body_count(&parser) == expected, "guarded production body count");
     }
     if (mapping != MAP_FAILED)
     {

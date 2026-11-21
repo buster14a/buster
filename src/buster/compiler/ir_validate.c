@@ -7,15 +7,10 @@
 // ir_verify_complete allocates its graph and work through scratch, then lends an exactly pushed tree-output slice
 // to the dominator consumer. Temporary work still pushes through the parent, so its lazily committed prefix grows
 // normally. The caller's length and prefix are preserved on every outcome; no hidden arena is reserved.
-// Input columns must not overlap scratch's unused remainder. Tree-only analysis caps matrix work at 16 MiB and
-// falls back to the existing scalar algorithm; the scalar entry path requests that algorithm directly.
+// Input columns must not overlap scratch's unused remainder. The tree-only analysis takes no bitset matrix.
 
-#define BUSTER_IR_VALIDATE_MATRIX_BYTES (16ull << 20)
-
-static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cfg, const Dominators* tree, bool vector)
+static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cfg, const Dominators* tree)
 {
-    (void)vector;
-
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     IrUseBatch batch = { 0 };
     for (uint32_t instruction = 0; check.error == IR_OK && instruction < function->instruction_count; instruction += 1)
@@ -41,7 +36,7 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
                 batch.count += 1;
                 if (batch.count == BUSTER_IR_VECTOR_COUNT)
                 {
-                    check = ir_check_use_batch(&batch, true, BUSTER_VECTOR_PATH(vector));
+                    check = ir_check_use_batch(&batch, true);
                     batch.count = 0;
                 }
             }
@@ -49,7 +44,7 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
     }
     if (check.error == IR_OK && batch.count != 0)
     {
-        check = ir_check_use_batch(&batch, true, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_use_batch(&batch, true);
     }
     if (check.error == IR_OK)
     {
@@ -58,10 +53,8 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
     return check;
 }
 
-static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* function, Arena* scratch, bool vector)
+static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* function, Arena* scratch)
 {
-    (void)vector;
-
     IrCheck check = ir_check(function != 0 && scratch != 0 && scratch->length <= scratch->capacity ? IR_ERROR_MEMORY : IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0);
     const uint64_t mark = scratch != 0 ? scratch->length : 0;
     if (function != 0 && scratch != 0 && scratch->base != 0 && mark <= scratch->capacity)
@@ -71,7 +64,7 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
         check = ir_check_shape(function);
         if (check.error == IR_OK)
         {
-            check = ir_check_rows(function, BUSTER_VECTOR_PATH(vector));
+            check = ir_check_rows(function);
         }
         IrCfg cfg = { 0 };
         if (check.error == IR_OK)
@@ -80,7 +73,7 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
         }
         if (check.error == IR_OK)
         {
-            check = ir_check_graph(function, &cfg, scratch, 0, BUSTER_VECTOR_PATH(vector));
+            check = ir_check_graph(function, &cfg, scratch, 0);
         }
         if (check.error == IR_OK)
         {
@@ -106,21 +99,16 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
                     .predecessor_offsets = cfg.predecessor_offsets,
                     .predecessors = cfg.predecessors,
                 };
-                // The analyzer's per-block scratch ahead of any matrix (DFS frames and five u32 columns) and both
-                // possible 64-byte alignment gaps stay reserved, so a matrix the budget admits fits.
-                const uint64_t retained = (uint64_t)cfg.block_count * (sizeof(DominatorFrame) + 5 * sizeof(uint32_t)) + 126;
-                const uint64_t available = scratch->capacity - scratch->length;
-                const uint64_t budget = available > retained ? available - retained : 0;
+                // The tree alone needs no bitset matrix.
                 const DominatorOptions options = {
-                    .path = BUSTER_VECTOR_PATH(vector) ? DOMINATOR_AUTO : DOMINATOR_SCALAR,
                     .outputs = 0,
-                    .max_matrix_bytes = budget < BUSTER_IR_VALIDATE_MATRIX_BYTES ? budget : BUSTER_IR_VALIDATE_MATRIX_BYTES,
+                    .max_matrix_bytes = 0,
                 };
                 Dominators tree = { 0 };
                 const DominatorStatus status = dominators_analyze(&columns, scratch, &graph, options, &tree);
                 if (status == DOMINATOR_OK)
                 {
-                    check = ir_validate_reachable(function, &cfg, &tree, BUSTER_VECTOR_PATH(vector));
+                    check = ir_validate_reachable(function, &cfg, &tree);
                 }
                 else
                 {

@@ -20,11 +20,11 @@
 
 // The tokens the walk acts at among postorder positions [first, end) into `tokens`, in postorder, and each one's visits
 // byte into `classes`, but those whose byte is `skipped` (a class whose action is nothing, or a value no byte has);
-// returns how many. `end - first` is at most BUSTER_CHECK_EXPRESSION_CHUNK, the arrays' room. The vector path gathers 16
-// tokens' bytes from CheckInputReader.visits (four bytes at a token, which its padding allows) and compresses the tokens
-// it keeps; the scalar path, its twin, takes a token at a time, writing each and counting the ones it keeps.
+// returns how many. `end - first` is at most BUSTER_CHECK_EXPRESSION_CHUNK, the arrays' room. It gathers 16 tokens' bytes
+// from CheckInputReader.visits (four bytes at a token, which its padding allows) and compresses the tokens it keeps; a
+// unit past the gathers' signed 32-bit offsets takes a token at a time, writing each and counting the ones it keeps.
 static uint32_t check_input_expression_compact(const CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t* tokens, uint32_t* classes,
-                                               uint32_t skipped, bool scalar)
+                                               uint32_t skipped)
 {
     const uint8_t* visits = reader->visits;
     const uint32_t* postorder = reader->postorder;
@@ -32,7 +32,7 @@ static uint32_t check_input_expression_compact(const CheckInputReader* reader, u
     const bool indexed = reader->parser->tokens.count <= (uint32_t)INT32_MAX;
     uint32_t result = 0;
     uint32_t position = first;
-    for (; !BUSTER_SCALAR_PATH(scalar) && indexed && position < end; position += 16)
+    for (; indexed && position < end; position += 16)
     {
         const uint32_t length = end - position < 16 ? end - position : 16;
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, length);
@@ -203,10 +203,6 @@ static inline __attribute__((always_inline)) uint32_t check_input_batch_add(Chec
         batch->leaves += leaf;
         batch->count = place + 1;
         reader->value_next[node] = BUSTER_CHECK_NONE;
-        if (reader->walk_ends != NULL)
-        {
-            reader->walk_ends[node] = BUSTER_CHECK_NONE;
-        }
         result = node;
     }
     else
@@ -326,9 +322,10 @@ static inline __attribute__((always_inline)) void check_input_batch_record(Check
 // (check_graph_record_nodes, in node order), and the batch emptied after them. The vector path writes 16 nodes at a time:
 // the columns the batch holds as they are, and the types, contexts, expression ends, warnings' suppression and
 // floating-point environments from the nodes' tokens' columns, gathered (a byte column through check_input_gather_bytes),
-// and records them as it writes them (check_input_batch_record, #1671), after the nodes a visit made before them; the
-// scalar path, its twin, a node at a time, as check_input_add_node and the actions write them, and records them after.
-static void check_input_expression_flush(CheckInputReader* reader, CheckInputBatch* batch, bool scalar)
+// and records them as it writes them (check_input_batch_record, #1671), after the nodes a visit made before them; a unit
+// past the gathers' signed 32-bit offsets, a node at a time, as check_input_add_node and the actions write them, and
+// records them after.
+static void check_input_expression_flush(CheckInputReader* reader, CheckInputBatch* batch)
 {
     CheckInput* input = reader->output;
     CheckGraph* graph = &input->graph;
@@ -339,7 +336,7 @@ static void check_input_expression_flush(CheckInputReader* reader, CheckInputBat
         const uint32_t base = batch->base;
         // Gathers index by signed 32-bit offsets: the tokens', and the leaves' records' dwords.
         const bool indexed = parser->tokens.count <= (uint32_t)INT32_MAX - 4;
-        const bool vector = !BUSTER_SCALAR_PATH(scalar) && indexed;
+        const bool vector = indexed;
         // The vector path records its nodes as it writes them (check_input_batch_record), where the graph holds its leaves
         // as records, after the nodes a visit made before the batch.
         const bool recording = vector && graph->recorded_pure != NULL && graph->leaf_records != NULL && graph->dense_leaves == NULL &&
@@ -466,7 +463,7 @@ static inline bool check_input_expression_room(CheckInputReader* reader, CheckIn
 {
     if (batch->count + need > BUSTER_CHECK_EXPRESSION_BATCH)
     {
-        check_input_expression_flush(reader, batch, false);
+        check_input_expression_flush(reader, batch);
     }
     return need <= BUSTER_CHECK_EXPRESSION_BATCH;
 }
@@ -637,9 +634,9 @@ static __attribute__((noinline, cold)) void check_input_note_enums(const CheckIn
 // The entries of the chunk's identifiers, the `acting` tokens and classes whose class is CHECK_INPUT_CODE_IDENTIFIER, in
 // their order into `identifiers`; returns how many. The vector path compresses the identifiers 16 tokens at a time, then
 // gathers 16 identifiers' columns at once: their types and declarations, then their declarations' columns and their
-// types' kinds; the scalar path, its twin, makes each entry by check_input_identifier_entry.
+// types' kinds; a unit past the gathers' signed 32-bit offsets makes each entry by check_input_identifier_entry.
 static uint32_t check_input_expression_identifiers(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
-                                                   CheckInputIdentifiers* identifiers, bool scalar)
+                                                   CheckInputIdentifiers* identifiers)
 {
     const CheckInput* input = reader->output;
     const uint32_t identifier = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_IDENTIFIER << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
@@ -649,7 +646,7 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
     uint32_t count = 0;
     uint32_t position = 0;
     __mmask16 registers = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && indexed && position < acting; position += 16)
+    for (; indexed && position < acting; position += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, acting - position < 16 ? acting - position : 16);
         const __mmask16 matched = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, classes + position), _mm512_set1_epi32((int32_t)identifier));
@@ -731,7 +728,7 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         identifiers->flags[at] |= (identifiers->flags[at] & BUSTER_CHECK_REGISTER) != 0 ? check_input_register_flags(reader, identifiers->declarations[at], found[at]) : 0;
     }
     // Weak addresses are rare. The gather marks every object non-null; this clears a weak attribute or `#pragma weak`.
-    if (reader->weak_name_count != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0))
+    if (input->weak_name_count != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0))
     {
         for (uint32_t at = 0; at < count; at += 1)
         {
@@ -841,10 +838,11 @@ static inline __m512i check_input_literal_digits(__m512i words, __m512i offsets,
 // one chain a literal: their names and sources; the sources' kinds, locations and ends; the numbers' ranges, which are
 // pp_find_range's (one of the two the last numbers were in, else found by a search of the ranges' bases that all lanes
 // take in step), and the spellings' addresses where their ranges hold them; then the two aligned words that hold each spelling's bytes, four tokens a vector, and their digits
-// (check_input_literal_digits). The preprocessor's ints take their values. The scalar path, the twin, takes
-// check_input_literal_plain for every literal. An aligned word holds a byte of the spelling, so is on its page.
+// (check_input_literal_digits). The preprocessor's ints take their values. A unit past the gathers' signed 32-bit
+// offsets takes check_input_literal_plain for every literal. An aligned word holds a byte of the spelling, so is on its
+// page.
 static uint32_t check_input_expression_literals(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
-                                                CheckInputLiterals* literals, bool scalar)
+                                                CheckInputLiterals* literals)
 {
     const Parser* parser = reader->parser;
     const Preprocessor* pp = reader->pp;
@@ -868,7 +866,7 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader, 
     uint32_t count = 0;
     uint32_t position = 0;
     uint32_t cursor = BUSTER_PP_NONE;
-    for (; !BUSTER_SCALAR_PATH(scalar) && indexed && position < acting; position += 16)
+    for (; indexed && position < acting; position += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, acting - position < 16 ? acting - position : 16);
         const __mmask16 matched = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, classes + position), _mm512_set1_epi32((int32_t)literal));
@@ -1315,7 +1313,7 @@ static bool check_input_expression_condition(CheckInputReader* reader, CheckInpu
     const bool acted = values.count == 1;
     if (acted)
     {
-        const uint32_t keyword = reader->first_child[token];
+        const uint32_t keyword = check_input_statement_keyword(reader, token);
         const bool switched = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
         const uint32_t second = switched ? reader->value_next[values.first] : BUSTER_CHECK_NONE;
         const uint32_t node = check_input_expression_operator(reader, batch, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, token, values.first, second, BUSTER_CHECK_NONE);
@@ -1495,7 +1493,7 @@ static inline __attribute__((always_inline)) void check_input_expression_coded(C
         }
         // The visit reads and writes the graph: the batch's nodes go to it first (the actions' time, not the visit's),
         // and the batch's next node is the next after the visit's.
-        check_input_expression_flush(reader, batch, false);
+        check_input_expression_flush(reader, batch);
         const bool clocked = coded && visited != NULL;
         const uint64_t start = clocked ? __rdtsc() : 0;
         check_input_expression_visit(reader, token, classes);
@@ -1586,7 +1584,7 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
         for (uint32_t chunk = 0; chunk < count; chunk += BUSTER_CHECK_EXPRESSION_CHUNK)
         {
             const uint32_t end = count - chunk < BUSTER_CHECK_EXPRESSION_CHUNK ? count : chunk + BUSTER_CHECK_EXPRESSION_CHUNK;
-            const uint32_t acting = check_input_expression_compact(reader, chunk, end, tokens, classes, dropped, false);
+            const uint32_t acting = check_input_expression_compact(reader, chunk, end, tokens, classes, dropped);
             for (uint32_t i = 0; i < acting; i += 1)
             {
                 const uint32_t token = tokens[i];
@@ -1680,9 +1678,9 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front, 
                                                               uint32_t acting, CheckInputIdentifiers* identifiers, CheckInputLiterals* literals, uint64_t start)
 {
     const uint64_t compacted = __rdtsc();
-    check_input_expression_identifiers(reader, tokens, classes, acting, identifiers, false);
+    check_input_expression_identifiers(reader, tokens, classes, acting, identifiers);
     const uint64_t identified = __rdtsc();
-    check_input_expression_literals(reader, tokens, classes, acting, literals, false);
+    check_input_expression_literals(reader, tokens, classes, acting, literals);
     const uint64_t ready = __rdtsc();
     front->shadow->compact_ticks += compacted - start;
     front->shadow->identifier_ticks += identified - compacted;
@@ -1690,6 +1688,13 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front, 
     uint64_t fronting = 0;
     if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_BEFORE)
     {
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+        if (front->window)
+        {
+            node_front_chunk_windowed(front, reader, tokens, classes, acting, identifiers, literals);
+        }
+        else
+#endif
         if (front->lean)
         {
             node_front_chunk_lean(front, reader, tokens, classes, acting, identifiers, literals);
@@ -1722,8 +1727,15 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
         front->shadow->acting[(classes[k] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += 1;
     }
     const uint64_t flushing = __rdtsc();
-    check_input_expression_flush(reader, batch, false);
+    check_input_expression_flush(reader, batch);
     const uint64_t flushed = __rdtsc() - flushing;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_AFTER && front->window)
+    {
+        node_front_chunk_windowed(front, reader, tokens, classes, acting, identifiers, literals);
+    }
+    else
+#endif
     if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_AFTER && front->lean)
     {
         node_front_chunk_lean(front, reader, tokens, classes, acting, identifiers, literals);
@@ -1753,12 +1765,19 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
 }
 
 // What else the options ask of a unit the front reads, begun: the machine's state at reader time for T there
-// (BUSTER_NODE_FRONT_TYPES), the checker unit's alone, as the machine is; and the flat front's state
+// (BUSTER_NODE_FRONT_TYPES), the checker unit's alone, as the machine is, with the window the front writes for the
+// fact words' kernel there (BUSTER_NODE_READER_WINDOW); and the flat front's state
 // (BUSTER_NODE_FRONT_FLAT), on the scratch as the front's, touched beforehand where the front's is
 // (BUSTER_NODE_FRONT_WARM).
 static __attribute__((noinline)) void node_front_started(NodeFront* front, CheckInputReader* reader, uint8_t fronted)
 {
     front->typer = NULL;
+    front->window = false;
+    front->window_facts = NULL;
+    front->window_numbers = NULL;
+    front->window_argument_count = 0;
+    front->plain = NULL;
+    front->chunks = 0;
     front->flat = (fronted & BUSTER_NODE_FRONT_FLAT) != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFlat), 64) : NULL;
     if (front->flat != NULL)
     {
@@ -1772,11 +1791,160 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
     {
         front->typer = node_machine_reader_begin(reader, front->shadow, (fronted & BUSTER_NODE_FRONT_SWEEPS) != 0);
+        // Whether the front writes the fact words' window (BUSTER_NODE_READER_WINDOW), where the kernel runs there.
+        node_facts_window_begin(front, reader);
     }
 #else
     (void)reader;
     (void)fronted;
 #endif
+}
+
+// --node-window's first complete expressions have one native CONST each and no references, events, calls or
+// relocations. Admit them from the chunk's coded postorder and the reader's int literals, before the walk numbers
+// any of their nodes. Their return type is already bound. For other spellings or a fault the walk sees the
+// original tokens, including the original literal cursor. The node machine's fold lives in the checker unit.
+bool check_node_window_prepare(void);
+bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result);
+void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value);
+
+static uint32_t check_input_window_code(const uint32_t* classes, uint32_t i)
+{
+    return (classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+}
+
+// Where this return's candidate begins. Returns the return's position to leave the ordinary path its whole expression.
+// Both its source tokens and their postorder must agree: a match cannot consume a sibling, or only part of a return.
+static uint32_t check_input_window_first(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t start, uint32_t end)
+{
+    const uint32_t token = tokens[end];
+    const Parser* parser = reader->parser;
+    uint32_t first = end;
+    if (reader->return_types[token] == BUSTER_TYPE_INT && token < parser->tokens.count && parser->tokens.count - token >= 3 &&
+        parser->tokens.kinds[token] == PARSE_KIND_RETURN)
+    {
+        if (end - start >= 1 && tokens[end - 1] == token + 1 && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL &&
+            parser->tokens.kinds[token + 2] == PARSE_KIND_SEMI)
+        {
+            first = end - 1;
+        }
+        else if (end - start >= 2 && parser->tokens.count - token >= 4 && tokens[end - 2] == token + 2 && tokens[end - 1] == token + 1 &&
+                 check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_PREFIX &&
+                 parser->tokens.kinds[token + 1] == PARSE_KIND_MINUS && parser->tokens.kinds[token + 3] == PARSE_KIND_SEMI)
+        {
+            first = end - 2;
+        }
+        else if (end - start >= 3 && parser->tokens.count - token >= 5 && tokens[end - 3] == token + 1 && tokens[end - 2] == token + 3 && tokens[end - 1] == token + 2 &&
+                 check_input_window_code(classes, end - 3) == CHECK_INPUT_CODE_LITERAL && check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL &&
+                 check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_BINARY && parser->tokens.kinds[token + 4] == PARSE_KIND_SEMI)
+        {
+            const uint8_t kind = parser->tokens.kinds[token + 2];
+            if (kind == PARSE_KIND_PLUS || kind == PARSE_KIND_MINUS || kind == PARSE_KIND_STAR)
+            {
+                first = end - 3;
+            }
+        }
+    }
+    return first;
+}
+
+// Keep a durable tape entry only after admission. A refusal to grow this optional tape leaves the graph path available.
+static CheckInputWindowEntry* check_input_window_entry(CheckInputReader* reader)
+{
+    CheckInput* input = reader->output;
+    if (input->window_count == input->window_capacity)
+    {
+        const uint64_t capacity = input->window_capacity != 0 ? (uint64_t)input->window_capacity * 2 : 8;
+        CheckInputWindowEntry* entries = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWindowEntry, capacity) : NULL;
+        if (entries != NULL)
+        {
+            if (input->window_count != 0)
+            {
+                memcpy(entries, input->window_entries, (size_t)input->window_count * sizeof(*entries));
+            }
+            input->window_entries = entries;
+            input->window_capacity = (uint32_t)capacity;
+        }
+    }
+    return input->window_count < input->window_capacity ? input->window_entries + input->window_count : NULL;
+}
+
+static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, uint32_t first, uint32_t end,
+                                    const CheckInputLiterals* literals, uint32_t* literal)
+{
+    const uint32_t returned = tokens[end];
+    const uint32_t operands = end - first;
+    const bool binary = operands == 3;
+    const uint32_t left = literals->values[*literal];
+    const uint32_t right = binary ? literals->values[*literal + 1] : 0;
+    uint32_t value = left;
+    const CheckOp op = binary ? check_input_binary(reader->parser->tokens.kinds[tokens[end - 1]]) : CHECK_OP_NEGATIVE;
+    const bool admitted = left != BUSTER_CHECK_NONE && right != BUSTER_CHECK_NONE && (operands == 1 || check_node_window_fold_int(op, left, right, binary, &value));
+    CheckInputWindowEntry* entry = admitted ? check_input_window_entry(reader) : NULL;
+    bool published = false;
+    if (entry != NULL)
+    {
+        check_input_expression_room(reader, batch, 1);
+        const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, returned, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
+        if (node != BUSTER_CHECK_NONE)
+        {
+            const CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = value };
+            check_input_batch_set_leaf(reader, batch, node, &summary);
+            check_node_window_int_entry(entry, value);
+            entry->node = node;
+            CheckInput* input = reader->output;
+            input->window_count += 1;
+            input->window_nodes += operands + 1;
+            batch->members[node - batch->base] = input->window_count;
+            input->token_nodes[returned] = node;
+            reader->query_types[returned] = BUSTER_TYPE_INT;
+            reader->first_value[returned] = BUSTER_CHECK_NONE;
+            *literal += binary ? 2 : 1;
+            published = true;
+        }
+    }
+    return published;
+}
+
+// List return actions 16 at a time. The ordinary action loop runs unchanged between admitted spans, including a
+// return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
+static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
+                                                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
+                                                                     uint64_t* visited)
+{
+    uint32_t returns[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
+    uint32_t candidates = 0;
+    for (uint32_t i = 0; i < acting; i += 16)
+    {
+        const uint32_t run = acting - i < 16 ? acting - i : 16;
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, run);
+        const __m512i bytes = _mm512_maskz_loadu_epi32(lanes, classes + i);
+        const __m512i codes = _mm512_and_si512(bytes, _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
+        const __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+        for (uint32_t bits = found; bits != 0; bits &= bits - 1)
+        {
+            returns[candidates++] = i + (uint32_t)__builtin_ctz(bits);
+        }
+    }
+    returns[candidates] = acting;
+    uint32_t identifier = 0;
+    uint32_t literal = 0;
+    uint32_t cursor = 0;
+    for (uint32_t k = 0; k <= candidates && !reader->output->resource; k += 1)
+    {
+        const uint32_t end = returns[k];
+        const uint32_t start = k != 0 ? returns[k - 1] + 1 : 0;
+        const uint32_t first = k < candidates ? check_input_window_first(reader, tokens, classes, start, end) : end;
+        for (; cursor < first && !reader->output->resource; cursor += 1)
+        {
+            check_input_expression_coded(reader, batch, tokens[cursor], (uint8_t)classes[cursor], true, identifiers, &identifier, literals, &literal, visited);
+        }
+        if (!reader->output->resource && first < end && check_input_window_take(reader, batch, tokens, first, end, literals, &literal))
+        {
+            cursor = end + 1;
+        }
+    }
+    return cursor;
 }
 
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
@@ -1871,12 +2039,16 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     uint64_t visited = 0;
     // A coded unit's actions timed by class where the options ask (CheckInput.expression_class_ticks).
     const bool timed = coded && reader->pp->options.expression_timing;
+    // Deferred parts publish their graphs separately; they do not own a unit's tape. A musttail check needs the
+    // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
+    const bool window = reader->pp->options.node_window && coded && begin == 0 && stop == count && !timed && front == NULL &&
+                        reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint64_t start = __rdtsc();
         const uint32_t end = stop - first < BUSTER_CHECK_EXPRESSION_CHUNK ? stop : first + BUSTER_CHECK_EXPRESSION_CHUNK;
-        const uint32_t acting = check_input_expression_compact(reader, first, end, tokens, classes, coded ? dropped : UINT32_MAX, false);
+        const uint32_t acting = check_input_expression_compact(reader, first, end, tokens, classes, coded ? dropped : UINT32_MAX);
         // Where the front runs its hook makes the entries (a front can only be where the walk is coded), with the front
         // where it runs before the walk: its ticks are its own, no part's of the walk.
         uint64_t fronting = 0;
@@ -1886,14 +2058,18 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         }
         else if (coded)
         {
-            check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers, false);
-            check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
+            check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers);
+            check_input_expression_literals(reader, tokens, classes, acting, &literals);
         }
         const uint64_t ready = __rdtsc();
         uint32_t identifier = 0;
         uint32_t literal = 0;
         uint32_t i = 0;
-        if (!timed)
+        if (window)
+        {
+            i = check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, &visited);
+        }
+        else if (!timed)
         {
             for (; i < acting && !reader->output->resource; i += 1)
             {
@@ -1929,7 +2105,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     if (batch != NULL)
     {
         const uint64_t start = __rdtsc();
-        check_input_expression_flush(reader, batch, false);
+        check_input_expression_flush(reader, batch);
         acted += __rdtsc() - start;
     }
     if (front != NULL)

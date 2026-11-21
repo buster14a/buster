@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Attributed block declarations with no type in C99 through C17 (#2332): the original parser errors, Sema's declaration diagnostics and
+// Attributed block declarations with no type in C99 through C23 (#2332): the original parser errors, Sema's declaration diagnostics and
 // notes, initializer expressions and later independent errors all survive recovery. Compare complete ordered diagnostic
 // lines with the installed Clang, and prove that rejected -c requests preserve an existing output or create none.
-// C23 has no implicit-int recovery: its unsupported cases retain the exact pre-change parser diagnostics below.
+// C23 retains invalid declarations and prior bindings, without pre-C23 implicit-int redeclaration diagnostics.
 // GNU89's accepted typed control, like the other standards', is compared with Clang and compiled and run.
 
 // A ready prefix can become a rejected-warning view later (#2748). Its borrowed metadata must be complete; reparsing
@@ -59,65 +59,36 @@ static void check_test_driver_prefix_meanings(CheckTest* test)
 
 // Mismatched closers are not balanced suffixes, and a brace must never be erased as a parenthesis's closer. These
 // parser-level checks cover the mixed-brace case whose later Clang diagnostics are outside this bounded repair.
-static void check_test_attribute_declaration_boundaries(CheckTest* test)
+static void check_test_attribute_declaration_boundaries(CheckTest* test, uint32_t c)
 {
-    for (uint32_t c = 14; c <= 16; c += 1)
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    char define[64];
+    snprintf(define, sizeof(define), "DBUSTER_CASE=%u", c);
+    const char* macros[] = { define };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .macros = macros, .macro_count = 1 };
+    const bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && pp_run(&pp, "tests/driver/attribute_declarations.c");
+    check_test_expect(test, ready, "mixed-delimiter attributed declaration fixture initializes");
+    if (ready)
     {
-        static InternTable identifiers;
-        static Preprocessor pp;
-        static Parser parser;
-        char define[64];
-        snprintf(define, sizeof(define), "DBUSTER_CASE=%u", c);
-        const char* macros[] = { define };
-        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .macros = macros, .macro_count = 1 };
-        const bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && pp_run(&pp, "tests/driver/attribute_declarations.c");
-        check_test_expect(test, ready, "mixed-delimiter attributed declaration fixture initializes");
-        for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+        const ParseOptions parse_options = { 0 };
+        const bool initialized = parse_initialize(&parser, &parse_options, options.language);
+        const bool parsed = initialized && parse_translation_unit(&parser, &pp);
+        bool refused = false;
+        for (uint32_t d = 0; initialized && d < parser.diagnostic_count; d += 1)
         {
-            const ParseOptions parse_options = { .scalar = scalar != 0 };
-            const bool initialized = parse_initialize(&parser, &parse_options, options.language);
-            const bool parsed = initialized && parse_translation_unit(&parser, &pp);
-            bool refused = false;
-            for (uint32_t d = 0; initialized && d < parser.diagnostic_count; d += 1)
+            const ParseDiagnostic* diagnostic = parser.diagnostics + d;
+            if (diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION)
             {
-                const ParseDiagnostic* diagnostic = parser.diagnostics + d;
-                if (diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION)
-                {
-                    refused = !diagnostic->resumed && diagnostic->resume_end == 0;
-                }
+                refused = !diagnostic->resumed && diagnostic->resume_end == 0;
             }
-            check_test_expect(test, initialized && !parsed && refused, "mismatched delimiters and braces never enable attributed suffix recovery");
-            parse_release(&parser);
         }
-        pp_release(&pp);
-        intern_release(&identifiers);
+        check_test_expect(test, initialized && !parsed && refused, "mismatched delimiters and braces never enable attributed suffix recovery");
+        parse_release(&parser);
     }
-}
-
-// Frozen C23 parser diagnostics from c471f32f0. These are an unchanged-behavior control, not Clang parity: C23's
-// invalid-declaration recovery differs from pre-C23 implicit int and is outside this fix.
-static bool check_test_attribute_c23_baseline(uint32_t c, const char* source, char* text, uint32_t capacity)
-{
-    static const uint16_t places[][4] = {
-        { 10, 30, 32, 0 }, { 17, 30, 0, 0 }, { 24, 30, 0, 0 }, { 32, 31, 34, 0 },
-        { 39, 30, 0, 0 }, { 47, 36, 0, 0 }, { 54, 38, 0, 0 }, { 61, 30, 0, 62 },
-        { 69, 30, 0, 0 }, { 76, 30, 32, 0 }, { 83, 30, 32, 0 }, { 88, 30, 32, 0 },
-        { 93, 30, 32, 0 }, { 0, 0, 0, 0 }, { 107, 30, 36, 0 }, { 112, 30, 36, 0 },
-    };
-    const bool bounded = c < BUSTER_ARRAY_LENGTH(places) && places[c][0] != 0;
-    int length = bounded ? snprintf(text, capacity, "%s:%u:%u: error: a type specifier is required for all declarations\n", source, places[c][0], places[c][1]) : -1;
-    bool valid = length > 0 && (uint32_t)length < capacity;
-    if (valid && places[c][2] != 0)
-    {
-        const int next = snprintf(text + length, capacity - (uint32_t)length, "%s:%u:%u: error: expected ';' at end of declaration\n", source, places[c][0], places[c][2]);
-        valid = next > 0 && (uint32_t)next < capacity - (uint32_t)length;
-    }
-    if (valid && places[c][3] != 0)
-    {
-        const int next = snprintf(text + length, capacity - (uint32_t)length, "%s:%u:%u: error: a type specifier is required for all declarations\n", source, places[c][3], places[c][1]);
-        valid = next > 0 && (uint32_t)next < capacity - (uint32_t)length;
-    }
-    return valid;
+    pp_release(&pp);
+    intern_release(&identifiers);
 }
 
 static bool check_test_attribute_declaration_output(const char* path, const char* sentinel, bool accepted)
@@ -145,15 +116,17 @@ static bool check_test_attribute_declaration_output(const char* path, const char
 static void check_test_driver_attribute_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_prefix_meanings(test);
-    check_test_attribute_declaration_boundaries(test);
     const char* source = "tests/driver/attribute_declarations.c";
     const bool available = access(source, R_OK) == 0;
     check_test_expect(test, available, "attributed declaration fixture is available (run from the repository root)");
+    // Runtime rows hold the case, expected status and checks (bit 0: Clang comparison, bit 1: parser boundary).
+    FILE* catalog = fopen("tests/driver/attribute_declarations.cases", "r");
+    check_test_expect(test, catalog != NULL, "attributed declaration runtime catalogue is available");
     static const char* const standards[] = { "-std=gnu99", "-std=gnu17", "-std=gnu23", "-std=gnu89" };
     static const char* const options[] = { NULL, "-Wall", "-w", "-Werror", "-Werror=ignored-attributes", "-Wno-ignored-attributes", "-ferror-limit=2" };
     static const char* const lanes[] = { NULL, NULL, NULL, NULL, "1", "2", "3" };
     static const char sentinel[] = "preserve the existing declaration-recovery output\n";
-    enum { CASES = 16, CONTROL = 13, LINES = 12288 };
+    enum { LINES = 12288 };
     char* expected_lines = malloc(LINES);
     char* actual_lines = malloc(LINES);
     check_test_expect(test, expected_lines != NULL && actual_lines != NULL, "attributed declaration diagnostic buffers initialize");
@@ -161,13 +134,29 @@ static void check_test_driver_attribute_declarations(CheckTest* test, const char
     char binary[PATH_MAX];
     snprintf(object, sizeof(object), "%s/attribute-declaration.o", directory);
     snprintf(binary, sizeof(binary), "%s/attribute-declaration", directory);
-    for (uint32_t c = 0; available && expected_lines != NULL && actual_lines != NULL && c < CASES; c += 1)
+    uint32_t c = 0;
+    uint32_t expected_status = 0;
+    uint32_t checks = 0;
+    uint32_t rows = 0;
+    int fields = 0;
+    while (available && catalog != NULL && expected_lines != NULL && actual_lines != NULL &&
+           (fields = fscanf(catalog, "%u %u %u", &c, &expected_status, &checks)) == 3 && expected_status <= 1 && checks != 0 && checks <= 3)
     {
+        rows += 1;
+        if ((checks & 2) != 0)
+        {
+            check_test_attribute_declaration_boundaries(test, c);
+        }
+        if ((checks & 1) == 0)
+        {
+            continue;
+        }
+        const bool accepted = expected_status == 0;
         char define[64];
         snprintf(define, sizeof(define), "-DBUSTER_CASE=%u", c);
         for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(standards); s += 1)
         {
-            if (s == 3 && c != CONTROL)
+            if (s == 3 && !accepted)
             {
                 continue;
             }
@@ -183,12 +172,7 @@ static void check_test_driver_attribute_declarations(CheckTest* test, const char
                 char* expected = NULL;
                 const int oracle = check_test_driver_spawn(arguments, &expected);
                 bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
-                check_test_expect(test, lines && (oracle == 0) == (c == CONTROL), "attributed declaration oracle status and diagnostic lines");
-                const bool baseline = s == 2 && c != CONTROL;
-                if (baseline)
-                {
-                    lines = check_test_attribute_c23_baseline(c, source, expected_lines, LINES);
-                }
+                check_test_expect(test, lines && oracle == (int)expected_status, "attributed declaration oracle status and diagnostic lines");
                 for (uint32_t mode = 0; lines && mode < BUSTER_ARRAY_LENGTH(lanes); mode += 1)
                 {
                     arguments[0] = (char*)executable;
@@ -215,14 +199,13 @@ static void check_test_driver_attribute_declarations(CheckTest* test, const char
                     char* actual = NULL;
                     const int status = check_test_driver_spawn(arguments, &actual);
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
-                    output = output && (mode < 2 || check_test_attribute_declaration_output(object, sentinel, c == CONTROL));
+                    output = output && (mode < 2 || check_test_attribute_declaration_output(object, sentinel, accepted));
                     char description[8192];
-                    snprintf(description, sizeof(description), "attributed declaration %u, %s %s, mode %u: status %d (clang %d), output %u, lines\n%s(%s\n%s)",
-                             c, standards[s], options[o] != NULL ? options[o] : "", mode, status, oracle, output, actual_lines,
-                             baseline ? "unchanged C23 baseline" : "clang", expected_lines);
+                    snprintf(description, sizeof(description), "attributed declaration %u, %s %s, mode %u: status %d (clang %d), output %u, lines\n%s(clang\n%s)",
+                             c, standards[s], options[o] != NULL ? options[o] : "", mode, status, oracle, output, actual_lines, expected_lines);
                     check_test_expect(test, same && status == oracle && output, description);
                     free(actual);
-                    if (c == CONTROL && o == 0 && mode >= 2 && status == 0 && output)
+                    if (accepted && o == 0 && mode >= 2 && status == 0 && output)
                     {
                         char* linked = NULL;
                         char* link[] = { (char*)clang, object, "-o", binary, NULL };
@@ -238,6 +221,11 @@ static void check_test_driver_attribute_declarations(CheckTest* test, const char
                 free(expected);
             }
         }
+    }
+    check_test_expect(test, rows != 0 && fields == EOF && catalog != NULL && !ferror(catalog), "attributed declaration catalogue is complete and well-formed");
+    if (catalog != NULL)
+    {
+        fclose(catalog);
     }
     // A rejected request also leaves a previously absent path absent, across both readers and all deferred lane counts.
     for (uint32_t mode = 2; available && mode < BUSTER_ARRAY_LENGTH(lanes); mode += 1)

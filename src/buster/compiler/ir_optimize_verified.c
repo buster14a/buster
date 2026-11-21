@@ -67,12 +67,12 @@ static __attribute__((unused)) bool ir_verified_current(const IrVerifiedAnalysis
 // Both use ir.c's verifier, not a weaker optimizer-specific substitute.
 // On failure neither result nor the analysis arena is published; scratch is restored on every path. The analysis
 // and scratch arenas must be distinct; aliasing them is an argument error, refused before either is touched.
-static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Arena* scratch, bool scalar, IrVerifiedAnalysis* result)
+static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Arena* scratch, IrVerifiedAnalysis* result)
 {
     const uint64_t analysis_mark = analyses->length;
     const uint64_t scratch_mark = scratch->length;
     IrVerifiedAnalysis candidate = { 0 };
-    IrCheck check = ir_verify_cfg(function, analyses, scratch, !BUSTER_SCALAR_PATH(scalar), &candidate.cfg);
+    IrCheck check = ir_verify_cfg(function, analyses, scratch, &candidate.cfg);
     if (check.error == IR_OK)
     {
         candidate.shape_checks += 1;
@@ -94,7 +94,6 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
         };
         DominatorOptions options = dominators_options();
         options.outputs = 0;
-        options.path = BUSTER_SCALAR_PATH(scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         candidate.dominator_builds += 1;
         const DominatorStatus status = dominators_analyze(analyses, scratch, &graph, options, &candidate.dominators);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
@@ -107,7 +106,7 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
             .block_count = candidate.dominators.block_count,
         };
         candidate.dominance_checks += 1;
-        check = ir_verify_dominance(function, &candidate.cfg, &dominance, !BUSTER_SCALAR_PATH(scalar));
+        check = ir_verify_dominance(function, &candidate.cfg, &dominance);
     }
     if (check.error == IR_OK)
     {
@@ -141,16 +140,13 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
     IrOptimizeWork work = { 0 };
     IrVerifiedAnalysis candidate = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
-    // Capture the caller's policy before AUTO chooses the transformation passes' twin.
-    const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
-    (void)verify_scalar;
     if (revision->number != UINT64_MAX && output != scratch && analyses != scratch && analyses != output &&
         options.path <= BUSTER_IR_OPTIMIZE_SCALAR &&
         (options.passes & ~BUSTER_IR_OPTIMIZE_PASSES) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
-        check = ir_optimize_prepare_twins(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), BUSTER_SCALAR_PATH(verify_scalar), true);
+        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
     }
     if (check.error == IR_OK)
     {
@@ -201,7 +197,7 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
         {
             check.error = IR_ERROR_MEMORY;
         }
-        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, BUSTER_SCALAR_PATH(verify_scalar), &work.statistics.forwarded_loads))
+        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, &work.statistics.forwarded_loads))
         {
             check.error = IR_ERROR_MEMORY;
         }
@@ -217,7 +213,7 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
     arena_pop_to(scratch, scratch_mark);
     if (check.error == IR_OK)
     {
-        check = ir_verified_build(&work.statistics.function, analyses, scratch, BUSTER_SCALAR_PATH(verify_scalar), &candidate);
+        check = ir_verified_build(&work.statistics.function, analyses, scratch, &candidate);
     }
     if (check.error == IR_OK)
     {

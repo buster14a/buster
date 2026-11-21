@@ -15,6 +15,7 @@ struct CheckDriverDefaultWarningFixture
     uint32_t notes;
     bool c23;
     bool compare_warning_text;
+    bool compare_node_window;
     bool syntax_only;
 };
 
@@ -3062,22 +3063,23 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                 check_test_expect(test, oracle_matches, description);
                 for (uint32_t lane = 0; oracle_ready && lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
                 {
-                    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                    const char* alternate = fixture->compare_node_window ? "--node-window" : "--scalar";
+                    for (uint32_t route = 0; route < 2; route += 1)
                     {
                         arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");
-                        arguments[7] = objects[scalar];
+                        arguments[7] = objects[route];
                         arguments[count] = "--lanes";
                         arguments[count + 1] = (char*)lanes[lane];
-                        arguments[count + 2] = scalar != 0 ? "--scalar" : NULL;
+                        arguments[count + 2] = route != 0 ? (char*)alternate : NULL;
                         arguments[count + 3] = NULL;
-                        unlink(objects[scalar]);
+                        unlink(objects[route]);
                         static const char sentinel[] = "preserved-warning-output";
                         const bool preserve = mode != 0 && oracle == 1;
-                        const bool prior = !preserve || parse_test_write(objects[scalar], sentinel, sizeof(sentinel));
+                        const bool prior = !preserve || parse_test_write(objects[route], sentinel, sizeof(sentinel));
                         char* actual = NULL;
                         const int status = check_test_driver_spawn(arguments, &actual);
                         snprintf(description, sizeof(description), "%s policy=%u mode=%u lanes=%s %s: complete Clang diagnostics",
-                                 fixture->name, policy, mode, lanes[lane], scalar != 0 ? "scalar" : "vector");
+                                 fixture->name, policy, mode, lanes[lane], route != 0 ? alternate : "default");
                         const char* expected_text = fixture->compare_warning_text ? strstr(expected, "warning: ") : NULL;
                         expected_text = fixture->compare_warning_text && expected_text == NULL ? strstr(expected, "error: ") : expected_text;
                         const char* actual_text = fixture->compare_warning_text && expected_text != NULL ?
@@ -3094,7 +3096,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                         }
                         if (preserve)
                         {
-                            FILE* retained = fopen(objects[scalar], "rb");
+                            FILE* retained = fopen(objects[route], "rb");
                             char bytes[sizeof(sentinel)] = { 0 };
                             const bool unchanged = retained != NULL && fread(bytes, 1, sizeof(bytes), retained) == sizeof(bytes) &&
                                                    memcmp(bytes, sentinel, sizeof(bytes)) == 0 && fgetc(retained) == EOF;
@@ -3106,7 +3108,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                         }
                         else
                         {
-                            check_test_expect(test, (access(objects[scalar], F_OK) == 0) == (mode != 0 && status == 0),
+                            check_test_expect(test, (access(objects[route], F_OK) == 0) == (mode != 0 && status == 0),
                                               "default warning policy controls object publication");
                         }
                         free(actual);
@@ -3114,7 +3116,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                     if (mode != 0 && oracle == 0)
                     {
                         check_test_expect(test, check_test_driver_same_files(objects[0], objects[1]),
-                                          "default warning source has identical scalar/vector objects at each lane request");
+                                          "default warning source has identical objects through both routes at each lane request");
                         if (lane == 0)
                         {
                             check_test_expect(test, link(objects[0], objects[3]) == 0, "the first lane request retains a frozen object twin");
@@ -3203,6 +3205,10 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
 {
     check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, check_driver_default_warning_fixtures,
                                              BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures), true);
+    if (check_test_driver_takes())
+    {
+        check_test_driver_warning_catalog(test, clang, executable, directory, "checker/division-by-zero");
+    }
 }
 
 // -flazy-system-headers defers only system-header bodies. A unit with no deferred body must still publish its
