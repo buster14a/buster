@@ -1070,6 +1070,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .sequence_operands = sequence_operands,
             .sequence_results = sequence_results,
             .sequence_count = sequence_count,
+            // The IR's tree, where the driver gives it (#2611): the machine CFG's blocks from `added` on are the IR's.
+            .dominators = options->dominators,
+            .dominator_shift = added,
             .block_count = blocks,
             .edge_count = edges,
             .value_count = value_count,

@@ -871,6 +871,9 @@ struct CheckInputCleanup
     uint32_t argument;
     uint32_t scope;
     uint32_t end;
+    // The furthest `end` of the records up to this one, which are in source order (check_input_cleanup_record): a token
+    // after this record's declaration and before the next one's is in some variable's scope where it is before this.
+    uint32_t reach;
 };
 
 // A return statement with clang's musttail attribute (#147, check_input_statement_attributes): its `return` token, the
@@ -897,6 +900,11 @@ struct CheckInput
     CheckInputPackPragmas* pack_pragmas;
     CheckInputVisibilityPragmas* visibility_pragmas;
     CheckInputSymbolPragmas* symbol_pragmas;
+    // The names the reader noted as weak addresses, each with the declaration token it is weak from
+    // (check_input_note_weak_name): a use of the name at or after the token may be null, a use before it still folds, as
+    // clang folds it (check_input_address_is_weak). The node machine's facts read them too (#3206).
+    const struct CheckInputWeakName* weak_names;
+    uint32_t weak_name_count;
     CheckInputMsPragmas* ms_pragmas;
     uint8_t* ms_struct;
     uint8_t* object_visibility;
@@ -2071,9 +2079,6 @@ struct CheckInputReader
     uint32_t* declaration_starts;
     uint32_t* declaration_storage;
     uint8_t* declaration_flags;
-    // Weak names applied so far, with the declaration token. A use before that token still folds, as clang folds it.
-    struct CheckInputWeakName* weak_names;
-    uint32_t weak_name_count;
     uint8_t* declaration_abis;
     CheckInputAttributes** attribute_bases;
     CheckInputAttributes* specifier_attributes;
@@ -2414,6 +2419,26 @@ struct CheckConstantFailure
     uint32_t actual;
     bool variadic;
 };
+
+// The keyword of control statement `node`, the closing parenthesis of its condition (an if's, a while's, a switch's) or
+// of a for's head: its first child but the statement's attribute lists, which the parser makes its children before it,
+// each by its closer (`[[clang::likely]] while (x)`, `__attribute__((nomerge)) switch (x)`: #1844), as a label's are
+// its colon's (#2291).
+static uint32_t check_input_statement_keyword(const CheckInputReader* reader, uint32_t node)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t keyword = node < count ? reader->first_child[node] : BUSTER_CHECK_NONE;
+    bool attribute = true;
+    while (keyword < count && attribute)
+    {
+        const uint8_t role = parser->tree.roles[keyword];
+        attribute = role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT ||
+                    role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT || role == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
+        keyword = attribute ? reader->next_child[keyword] : keyword;
+    }
+    return keyword < count ? keyword : BUSTER_CHECK_NONE;
+}
 
 // What a constant's reading does with an undeclared name it binds (check_constant_name). By default nothing: its caller
 // reports its failure. A declarator's constant reports each one in clang's words, at the name, with its typo's
@@ -6957,28 +6982,49 @@ static bool check_input_pragma_weak(const CheckInput* input, IdentId name, uint3
     return weak;
 }
 
+// Whether the reader noted `name` as a weak address at or before `use` (CheckInput.weak_names); with `use` UINT32_MAX,
+// anywhere in the unit. Eight records a step: a record is a name and its token.
+static bool check_input_weak_name(const CheckInput* input, IdentId name, uint32_t use)
+{
+    const __m512i names = _mm512_set1_epi32((int)name);
+    const __m512i uses = _mm512_set1_epi32((int)use);
+    const uint32_t count = input->weak_name_count;
+    __mmask16 found = 0;
+    for (uint32_t i = 0; found == 0 && i < count; i += 8)
+    {
+        const uint32_t live = count - i < 8 ? count - i : 8;
+        const __mmask16 lanes = (__mmask16)((1u << (2 * live)) - 1);
+        const __m512i records = _mm512_maskz_loadu_epi32(lanes, input->weak_names + i);
+        const __mmask16 named = _mm512_mask_cmpeq_epi32_mask(lanes & 0x5555, records, names);
+        const __mmask16 before = _mm512_mask_cmple_epu32_mask(lanes & 0xaaaa, records, uses);
+        found = named & (__mmask16)(before >> 1);
+    }
+    return found != 0;
+}
+
 // Records `name` as a weak address at `token`. A use before that token still folds.
 static void check_input_note_weak_name(CheckInputReader* reader, IdentId name, uint32_t token)
 {
+    CheckInput* input = reader->output;
     bool seen = name == 0;
-    for (uint32_t i = 0; !seen && i < reader->weak_name_count; i += 1)
+    for (uint32_t i = 0; !seen && i < input->weak_name_count; i += 1)
     {
-        seen = reader->weak_names[i].name == name && reader->weak_names[i].token == token;
+        seen = input->weak_names[i].name == name && input->weak_names[i].token == token;
     }
     if (!seen)
     {
-        CheckInputWeakName* names = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWeakName, (uint64_t)reader->weak_name_count + 1);
+        CheckInputWeakName* names = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWeakName, (uint64_t)input->weak_name_count + 1);
         if (names != 0)
         {
-            if (reader->weak_name_count != 0)
+            if (input->weak_name_count != 0)
             {
-                memcpy(names, reader->weak_names, (uint64_t)reader->weak_name_count * sizeof(CheckInputWeakName));
+                memcpy(names, input->weak_names, (uint64_t)input->weak_name_count * sizeof(CheckInputWeakName));
             }
-            names[reader->weak_name_count] = (CheckInputWeakName){ .name = name, .token = token };
-            reader->weak_names = names;
-            reader->weak_name_count += 1;
+            names[input->weak_name_count] = (CheckInputWeakName){ .name = name, .token = token };
+            input->weak_names = names;
+            input->weak_name_count += 1;
         }
-        reader->output->resource |= names == 0;
+        input->resource |= names == 0;
     }
 }
 
@@ -6988,12 +7034,7 @@ static bool check_input_address_is_weak(const CheckInputReader* reader, uint32_t
     const Parser* parser = reader->parser;
     const bool named = parser != NULL && parser->tokens.names != NULL && declaration < parser->tokens.count;
     const IdentId name = named ? parser->tokens.names[declaration] : 0;
-    bool weak = reader->output != NULL && check_input_pragma_weak(reader->output, name, use);
-    for (uint32_t i = 0; !weak && i < reader->weak_name_count; i += 1)
-    {
-        weak = reader->weak_names[i].name == name && reader->weak_names[i].token <= use;
-    }
-    return weak;
+    return reader->output != NULL && (check_input_pragma_weak(reader->output, name, use) || check_input_weak_name(reader->output, name, use));
 }
 
 // BUSTER_CHECK_NONNULL_ADDRESS for a declaration's address, or 0 when the address may be null or is not an object.
@@ -14493,7 +14534,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 for (uint32_t ancestor = parser->tree.parents[i]; ancestor < parser->tokens.count && !loop; ancestor = parser->tree.parents[ancestor])
                 {
                     const uint8_t ancestor_role = parser->tree.roles[ancestor];
-                    const uint32_t keyword = reader->first_child[ancestor];
+                    const uint32_t keyword = check_input_statement_keyword(reader, ancestor);
                     loop = (i > ancestor || ancestor_role == PARSE_ROLE_DO) && (ancestor_role == PARSE_ROLE_CLOSE_FOR || ancestor_role == PARSE_ROLE_DO ||
                            (ancestor_role == PARSE_ROLE_CLOSE_CONDITION && keyword < parser->tokens.count &&
                             (parser->tokens.kinds[keyword] == PARSE_KIND_WHILE || (kind == PARSE_KIND_BREAK && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH))));
@@ -15059,6 +15100,64 @@ static void check_input_longjmp_argument(CheckInputReader* reader, const CheckIn
     }
 }
 
+// A builtin immediate uses the source evaluator's integer witness. Its original expression still has every
+// node checked, including parts the constant evaluator leaves unevaluated.
+static uint32_t check_input_immediate(CheckInputReader* reader, uint32_t argument, uint32_t first, uint32_t end)
+{
+    CheckValue value = { 0 };
+    uint32_t proven = BUSTER_CHECK_NONE;
+    if (check_input_evaluate_cached(reader, first, end, &value) && check_input_integer_ice(reader, &value))
+    {
+        CheckGraph* graph = &reader->output->graph;
+        proven = check_input_add(reader, CHECK_OP_VALUE, graph->tokens[argument], BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        if (proven != BUSTER_CHECK_NONE)
+        {
+            check_graph_set_leaf(graph, proven, &value);
+        }
+    }
+    return proven;
+}
+
+// The integer-constant operands checked by check_builtin_misc_constant, including the object-size queries.
+// Runtime operands keep their nodes even when the source evaluator can fold them.
+static uint32_t check_input_builtin_immediates(CheckInputReader* reader, uint16_t builtin, uint32_t closing, uint32_t first)
+{
+    uint32_t mask = 0;
+    switch (builtin)
+    {
+        case CBUILTIN_FRAME_ADDRESS:
+        case CBUILTIN_RETURN_ADDRESS:
+        case CBUILTIN_EH_RETURN_DATA_REGNO: mask = 1; break;
+        case CBUILTIN_OBJECT_SIZE:
+        case CBUILTIN_DYNAMIC_OBJECT_SIZE:
+        case CBUILTIN_ASSUME_ALIGNED:
+        case CBUILTIN_ALLOCA_WITH_ALIGN:
+        case CBUILTIN_ALLOCA_WITH_ALIGN_UNINITIALIZED: mask = 2; break;
+        case CBUILTIN_PREFETCH: mask = 6; break;
+        default: break;
+    }
+    uint32_t begin = reader->first_child[closing] + 2;
+    uint32_t* link = &first;
+    while (mask != 0 && *link != BUSTER_CHECK_NONE && begin < closing)
+    {
+        const uint32_t argument = *link;
+        const uint32_t end = check_constant_punctuation(reader->parser, begin, closing, PARSE_KIND_COMMA);
+        if ((mask & 1) != 0 && reader->output->graph.ops[argument] != CHECK_OP_VALUE)
+        {
+            const uint32_t proven = check_input_immediate(reader, argument, begin, end);
+            if (proven != BUSTER_CHECK_NONE)
+            {
+                *link = proven;
+                reader->value_next[proven] = reader->value_next[argument];
+            }
+        }
+        link = &reader->value_next[*link];
+        mask >>= 1;
+        begin = end + 1;
+    }
+    return first;
+}
+
 static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call,
                                                uint32_t first, uint64_t* ice_arguments)
 {
@@ -15082,21 +15181,13 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
     for (uint32_t index = 0; index < call->argument_count && argument != BUSTER_CHECK_NONE; index += 1)
     {
         const uint32_t next = reader->value_next[argument];
-        CheckValue value = { 0 };
         const CheckInputIntrinsicArgument span = call->arguments[index];
-        const bool ice = index < 64 && check_input_evaluate_cached(reader, span.first, span.end, &value) && check_input_integer_ice(reader, &value);
-        if (ice)
+        if (index < 64 && (required & (UINT64_C(1) << index)) != 0)
         {
-            *ice_arguments |= UINT64_C(1) << index;
-        }
-        if (ice && (required & (UINT64_C(1) << index)) != 0)
-        {
-            // Keep the original subtree checked, but an immediate operand is the value proved in its source
-            // constant context. Runtime-only effects in discarded constant-evaluator paths are not call inputs.
-            const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, graph->tokens[argument], BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            const uint32_t proven = check_input_immediate(reader, argument, span.first, span.end);
             if (proven != BUSTER_CHECK_NONE)
             {
-                check_graph_set_leaf(graph, proven, &value);
+                *ice_arguments |= UINT64_C(1) << index;
                 argument = proven;
             }
         }
@@ -15659,7 +15750,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     {
         // The condition itself is the first value; child statements have already been checked and dropped.
         supported = count == 1;
-        const uint32_t keyword = reader->first_child[token];
+        const uint32_t keyword = check_input_statement_keyword(reader, token);
         op = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION;
     }
     else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_FOR)
@@ -15845,6 +15936,12 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         {
             const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[token] - 1;
             intrinsic_offset = check_input_intrinsic_arguments(reader, call, a, &intrinsic_ice);
+        }
+        else if ((op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_QUERY) &&
+                 (reader->output->const_values.count != 0 || reader->output->const_values.prefix != NULL))
+        {
+            // A source fold can read a const initializer that the runtime graph sees as an object load.
+            a = check_input_builtin_immediates(reader, reader->builtins[token], token, a);
         }
         node = check_input_add(reader, op, token, left, one || arguments ? BUSTER_CHECK_NONE : omitted ? a : b,
                                omitted ? b : op == CHECK_OP_CONDITIONAL || op == CHECK_OP_BUILTIN_OVERFLOW ? c : BUSTER_CHECK_NONE);
