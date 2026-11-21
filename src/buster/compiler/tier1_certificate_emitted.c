@@ -15,8 +15,9 @@
 // - Trusted, as the source: the IR and its selection (each node's rule, and what its sequence computes from the
 //   registers it is given: tier1_emit_cfg_kernel, tier1_select_fixed, and a machine row's template, the front end's
 //   records that tier0_operation_valid admits, by the roles they name), the ABI's argument registers and its records of
-//   by-value aggregates, the rematerialization recipes, the frame's layout of the frame base register's offsets, the
-//   CFG with its phis, and x86 semantics' effects of each record (which registers and memory it writes).
+//   by-value aggregates, the rematerialization recipes and tier1_rematerialize's copy of each (a recomputation is checked
+//   to be that copy, not for what it computes), the frame's layout of the frame base register's offsets, the CFG with its
+//   phis, and x86 semantics' effects of each record (which registers and memory it writes).
 // - Untrusted: the allocation, every emitted record and the emitter's account of them: each record's origin
 //   (Tier1Origin), each block's and stub's first record, the references, and each machine row's placement
 //   (Tier1RowPlacement). An origin only says which decoding applies, and a placement only how to place a row's

@@ -527,8 +527,9 @@ computes from the registers it is given: `tier1_emit_cfg_kernel`,
 `tier1_select_fixed`, and a machine row's template, the front end's records
 that `tier0_operation_valid` admits, by the roles they name), the ABI's
 argument registers and its records of by-value aggregates, the
-rematerialization recipes, the frame's displacements from its base register,
-the CFG and its phis, and `x86_semantics.c`'s effects of each record.
+rematerialization recipes and `tier1_rematerialize`'s copy of each, the frame's
+displacements from its base register, the CFG and its phis, and
+`x86_semantics.c`'s effects of each record.
 
 **Untrusted:** the allocation, every emitted record, and the emitter's
 account of them: each record's origin (`Tier1Origin`, marked by
@@ -568,10 +569,15 @@ The decoding:
   and 32 bytes, and a carrier's VEX `vmovq` and `vinsertps`. A recomputation is a constant's edit only where
   `tier1_rematerialize` writes exactly that record, with its reference, for the
   value its origin names. A frame address at the frame base register itself is
-  that register's 64-bit copy (`mov r64, rsp` where rsp is the base, #3149),
-  which is tried as a recomputation first (`tier1_cert_emitted_recomputed`);
-  only otherwise is it a move, of a register no value is in, which the check
-  then refuses.
+  that register's 64-bit copy (`mov r64, rsp` where rsp is the base, `mov r64,
+  rbp` where rbp is, #3149), which is tried as a recomputation first
+  (`tier1_cert_emitted_recomputed`); only otherwise is it a move, of a register
+  no value is in, which the check then refuses. The recipes are trusted, and so
+  is `tier1_rematerialize`'s copy of one: the check proves that the record is
+  the copy that function writes, as the emitter does, not what it computes.
+  `test-tier1-allocation` checks that: every frame base's copy into every
+  register at displacements 0, 8, -32 and 128 against the encoder's lea, and
+  rsp's copies at 0 and -32 run natively.
 - **Nodes.** Each node's records are regenerated from the allocation's
   registers at its use phase and must equal the emitted ones byte for byte. They
   are one instruction: its operands read where the allocation has them, every
