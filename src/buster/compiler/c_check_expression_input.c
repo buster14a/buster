@@ -1485,7 +1485,10 @@ static inline __attribute__((always_inline)) void check_input_expression_coded(C
     // that the visit is rare took 19 thousand more taken branches (#1175).
     if (!acted)
     {
-        reader->output->expression_left[code] += coded;
+        if (!reader->pp->options.skip_expression_profile)
+        {
+            reader->output->expression_left[code] += coded;
+        }
         if (reader->expression_declined != NULL)
         {
             reader->expression_declined[token] = 1;
@@ -2291,10 +2294,12 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
     const bool window = (reader->pp->options.node_window || reader->pp->options.node_window_constants) && coded && begin == 0 && stop == count && !timed && front == NULL &&
                         reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
+    const bool profile = !reader->pp->options.skip_expression_profile;
+    uint64_t* visit_ticks = profile ? &visited : NULL;
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
-        const uint64_t start = __rdtsc();
+        const uint64_t start = profile ? __rdtsc() : 0;
         const uint32_t end = stop - first < BUSTER_CHECK_EXPRESSION_CHUNK ? stop : first + BUSTER_CHECK_EXPRESSION_CHUNK;
         const uint32_t acting = check_input_expression_compact(reader, first, end, tokens, classes, coded ? dropped : UINT32_MAX);
         // Where the front runs its hook makes the entries (a front can only be where the walk is coded), with the front
@@ -2309,21 +2314,21 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers);
             check_input_expression_literals(reader, tokens, classes, acting, &literals);
         }
-        const uint64_t ready = __rdtsc();
+        const uint64_t ready = profile ? __rdtsc() : 0;
         uint32_t identifier = 0;
         uint32_t literal = 0;
         uint32_t i = 0;
         if (window)
         {
             i = reader->pp->options.node_window_constants ?
-                check_integer_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, &visited) :
-                check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, &visited);
+                check_integer_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, visit_ticks) :
+                check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, visit_ticks);
         }
         else if (!timed)
         {
             for (; i < acting && !reader->output->resource; i += 1)
             {
-                check_input_expression_coded(reader, batch, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, &visited);
+                check_input_expression_coded(reader, batch, tokens[i], (uint8_t)classes[i], coded, &identifiers, &identifier, &literals, &literal, visit_ticks);
             }
         }
         else
@@ -2339,11 +2344,11 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
                 reader->output->expression_class_overhead += __rdtsc() - after;
             }
         }
-        for (uint32_t k = 0; coded && k < i; k += 1)
+        for (uint32_t k = 0; profile && coded && k < i; k += 1)
         {
             reached[k & 3][(classes[k] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += 1;
         }
-        const uint64_t done = __rdtsc();
+        const uint64_t done = profile ? __rdtsc() : 0;
         prepared += ready - start - fronting;
         acted += done - ready;
         if (front != NULL)
@@ -2354,23 +2359,26 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     // The last batch's nodes, written as the actions' (and its time theirs).
     if (batch != NULL)
     {
-        const uint64_t start = __rdtsc();
+        const uint64_t start = profile ? __rdtsc() : 0;
         check_input_expression_flush(reader, batch);
-        acted += __rdtsc() - start;
+        acted += profile ? __rdtsc() - start : 0;
     }
     if (front != NULL)
     {
         node_front_finish(front, reader, base);
     }
-    // A coded unit's visits lie within its chunks' actions; another's actions are all visits.
-    visited = coded ? (visited < acted ? visited : acted) : acted;
-    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_PREPARE] = prepared;
-    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS] = acted - visited;
-    reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_VISITS] = visited;
-    for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+    if (profile)
     {
-        const uint32_t tokens_reached = reached[0][code] + reached[1][code] + reached[2][code] + reached[3][code];
-        reader->output->expression_acted[code] = tokens_reached - reader->output->expression_left[code];
+        // A coded unit's visits lie within its chunks' actions; another's actions are all visits.
+        visited = coded ? (visited < acted ? visited : acted) : acted;
+        reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_PREPARE] = prepared;
+        reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS] = acted - visited;
+        reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_VISITS] = visited;
+        for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+        {
+            const uint32_t tokens_reached = reached[0][code] + reached[1][code] + reached[2][code] + reached[3][code];
+            reader->output->expression_acted[code] = tokens_reached - reader->output->expression_left[code];
+        }
     }
     if (reader->expression_declined != NULL && !reader->output->resource)
     {

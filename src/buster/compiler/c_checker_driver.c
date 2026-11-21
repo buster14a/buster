@@ -14887,6 +14887,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         parsed = driver_cache_streams(&arena, inputs, input_kinds, input_count, &options);
     }
     options.node_window_constants = node_window_constants;
+    options.skip_expression_profile = !time_stages;
     options.semantic_pragmas = true;
     options.timing = time_stages;
     options.node_window_assignments = node_window_assignments && !options.predefines.debug && !options.predefines.debug_modules;

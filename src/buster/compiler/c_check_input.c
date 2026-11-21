@@ -17862,20 +17862,27 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         check_input_sizeof_prepare(&reader);
                     }
-                    struct rusage before;
-                    const bool used = getrusage(RUSAGE_SELF, &before) == 0;
-                    const uint64_t expressions_start = __rdtsc();
-                    check_input_expressions(&reader);
-                    input->expression_ticks = __rdtsc() - expressions_start;
-                    struct rusage after;
-                    const bool read = used && getrusage(RUSAGE_SELF, &after) == 0;
-                    if (read)
+                    if (reader.pp->options.skip_expression_profile)
                     {
-                        input->expression_faults = (uint64_t)(after.ru_minflt - before.ru_minflt);
-                        input->expression_system_us = (uint64_t)((after.ru_stime.tv_sec - before.ru_stime.tv_sec) * 1000000 +
-                                                                 (after.ru_stime.tv_usec - before.ru_stime.tv_usec));
+                        check_input_expressions(&reader);
                     }
-                    input->expression_usage_failed = !read;
+                    else
+                    {
+                        struct rusage before;
+                        const bool used = getrusage(RUSAGE_SELF, &before) == 0;
+                        const uint64_t expressions_start = __rdtsc();
+                        check_input_expressions(&reader);
+                        input->expression_ticks = __rdtsc() - expressions_start;
+                        struct rusage after;
+                        const bool read = used && getrusage(RUSAGE_SELF, &after) == 0;
+                        if (read)
+                        {
+                            input->expression_faults = (uint64_t)(after.ru_minflt - before.ru_minflt);
+                            input->expression_system_us = (uint64_t)((after.ru_stime.tv_sec - before.ru_stime.tv_sec) * 1000000 +
+                                                                     (after.ru_stime.tv_usec - before.ru_stime.tv_usec));
+                        }
+                        input->expression_usage_failed = !read;
+                    }
                 }
                 if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
                 {

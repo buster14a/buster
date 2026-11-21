@@ -386,6 +386,8 @@ struct PPOptions
     // the coded walk's classes reach. Off in every compile; benchmark-checker-bindings sets it for runs of its own,
     // apart from its samples.
     bool expression_timing;
+    // The command driver sets this on an unmeasured compile. Direct checker tests and benchmarks collect the walk's counters.
+    bool skip_expression_profile;
     // After the coded walk, number its tokens again as the graph by passes would (CheckInput.expression_numbering_*,
     // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
     // expression_timing.
