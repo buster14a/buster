@@ -1200,6 +1200,9 @@ struct CheckEmitLane
     CheckTier1Lane* tier1;
     // With Tier 0's inlining (CheckEmitRun.tier0_inline), its cache of expanded callees; null without.
     CheckTier0InlineLane* tier0_inline;
+    // The Tier 0 code of the body it is emitting, whose frame check_program_emit_code describes at its final offsets
+    // where EmittedCode.frame_direct says so.
+    Tier0Code frame_code;
     bool prepared;
     bool ready;
 };
@@ -1331,16 +1334,18 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
 #endif
 // A function's unwind descriptor, `frame`, from its emitted code's frame events after branch sizing (`offsets`, which
 // gets the length at the record count): resolved through the final layout (emitted_unwind) into `rows` (frame_count
-// room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
-// their control flow too (emitted_verify_frames: but an assembly template's code, the user's, a function an asm
-// statement's template returns from, and a rule a form
-// x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
-// (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
-// internal error; no room is a resource failure,
-// which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason. Where
-// provided, failed receives a rejected verifier verdict for the calling thread's diagnostic, never printed on a lane.
-static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
-                                                           Arena* scratch, UnwindFunction* frame, const char** reason, EmittedVerdict* failed)
+// room, which the tables read once the lanes are done); or, for a Tier 0 frame of the fixed shape alone
+// (EmittedCode.frame_direct, which has no events), from the frame Tier 0 published, `direct`, at the final offsets
+// (unwind_tier0_frame_tails, which checks each of its prologue's and epilogue's records). With `verify`, the events are
+// proved against the records and their control flow too (emitted_verify_frames: but an assembly template's code, the
+// user's, a function an asm statement's template returns from, and a rule a form x86_semantics.c doesn't cover leaves
+// unproven), and where Tier 0's fixed-frame analyzer takes the records (unwind_tier0, which reads them alone), its frame
+// must be the same CFI, a direct frame's too. Code past 2 GB is unsupported, not an internal error; no room is a
+// resource failure, which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its
+// reason. Where provided, failed receives a rejected verifier verdict for the calling thread's diagnostic, never
+// printed on a lane.
+static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* code, const Tier0Code* direct, uint32_t* offsets, int64_t length, bool verify, bool scalar,
+                                                           EmissionFrameRow* rows, Arena* scratch, UnwindFunction* frame, const char** reason, EmittedVerdict* failed)
 {
     if (failed != NULL)
     {
@@ -1357,11 +1362,11 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
     if (status == CHECK_PROGRAM_OK)
     {
         offsets[code->count] = (uint32_t)length;
-        const UnwindError error = emitted_unwind(code, offsets, (uint32_t)length, scalar, rows, frame);
+        const UnwindError error = direct != NULL ? unwind_tier0_frame_tails(direct, offsets, (uint32_t)length, frame, 0) : emitted_unwind(code, offsets, (uint32_t)length, scalar, rows, frame);
         status = error == UNWIND_OK ? status : CHECK_PROGRAM_BACKEND;
-        *reason = error == UNWIND_OK ? 0 : "internal compiler error: a function's frame events don't resolve to an unwind table";
+        *reason = error == UNWIND_OK ? 0 : direct != NULL ? mismatch : "internal compiler error: a function's frame events don't resolve to an unwind table";
     }
-    if (status == CHECK_PROGRAM_OK && verify && !code->assembly)
+    if (status == CHECK_PROGRAM_OK && verify && !code->assembly && direct == NULL)
     {
         // A frame the verifier can't prove past a form x86_semantics.c doesn't cover (an x86 builtin's leaf of one)
         // stands, as Tier 0's analyzer below leaves it.
@@ -1399,7 +1404,7 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
 static __attribute__((unused)) CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar,
                                                                            EmissionFrameRow* rows, Arena* scratch, UnwindFunction* frame, const char** reason)
 {
-    return check_program_emit_frame_checked(code, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
+    return check_program_emit_frame_checked(code, NULL, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
 }
 #if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 // A bounded diagnostic for the selected failure only, after the lanes have joined. Numeric form and raw operand
@@ -1816,11 +1821,13 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         if (valid && run->unwind)
         {
             // Its frame events resolved after sizing (a naked function's code is its templates', which say nothing of
-            // its frame: no events, so its unwind entry, as clang's, has the call's rule alone, whatever they push). A
+            // its frame: no events, so its unwind entry, as clang's, has the call's rule alone, whatever they push), or
+            // a frame of the fixed shape alone (EmittedCode.frame_direct) described from the frame Tier 0 published. A
             // frame its producer couldn't describe is the compiler's own failure; and with --verify, so are events its
             // records don't establish.
             const char* reason = 0;
-            failure = check_program_emit_frame_checked(code, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
+            const Tier0Code* direct = code->frame_direct ? &lane->frame_code : NULL;
+            failure = check_program_emit_frame_checked(code, direct, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
             valid = failure == CHECK_PROGRAM_OK;
             failure = valid ? CHECK_PROGRAM_BACKEND : failure;
             body->reason = valid ? body->reason : reason;
@@ -2097,9 +2104,13 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                 }
                 // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
                 // read, as it doesn't a naked function's; and so does one that moves a value into rsp (#1846, tier0_asm_stack).
-                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources,
-                                                   naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source),
-                                                   lane->code);
+                // A frame of the fixed shape alone has no events: its descriptor is made from the frame at its final offsets
+                // (check_program_emit_frame_checked).
+                const bool direct = naked == 0 && emitted_tier0_frame_direct(&compiled);
+                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0 && !direct, run->sources,
+                                                   naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source), lane->code);
+                run->codes[b].frame_direct = direct;
+                lane->frame_code = compiled;
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
             if (forbidden || run->codes[b].error != TIER0_OK)
@@ -5512,7 +5523,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 if (encodes && unwind)
                 {
                     const char* reason = 0;
-                    failure = check_program_emit_frame_checked(code, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason, &helper_verdict);
+                    failure = check_program_emit_frame_checked(code, NULL, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason, &helper_verdict);
                     body->frame_verdict = helper_verdict.error != EMITTED_VERIFY_OK ? &helper_verdict : NULL;
                     encodes = failure == CHECK_PROGRAM_OK;
                     failure = encodes ? CHECK_PROGRAM_BACKEND : failure;
