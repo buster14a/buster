@@ -302,6 +302,9 @@ struct CheckInputAttribute
     uint32_t argument_count;
     CheckInputAttributeKind kind;
     CheckInputAttributeSchema schema;
+    // An asm label's reserved warning after a definition (#2936, check_input_attribute_late), its index in the reader's
+    // warning events plus one, 0 for none: the asm labels' pass publishes it where it drops the label.
+    uint32_t warning;
     int64_t value;
     int64_t* argument_values;
     uint32_t* argument_ends;
@@ -349,6 +352,10 @@ struct CheckInputAttribute
     bool constant_argument;
     uint32_t constants;
     uint32_t wide;
+    // A counted_by family's top-level `,` (#1842), where clang's parser expects the argument's `)`, or 0: the argument ends
+    // there, and the member's check gives the "expected ')'" (check_input_counted_by_member). (In the hole before the
+    // pointer that follows, which keeps the record's size.)
+    uint32_t counted_paren;
     // An argument's error clang's handler gives once the attribute's subject takes it (#147: tls_model's model, constructor's,
     // destructor's and assume_aligned's integers), which the attributes' reader made and moved here
     // (check_input_attribute_defer), for check_input_attribute_subjects to give; or NULL.
@@ -2645,8 +2652,9 @@ static bool check_input_attribute_musttail(CheckInputReader* reader, CheckInputA
 
 // The counted_by family's argument as clang's parser reads it (#148, ParseBoundsAttribute): one expression in
 // parentheses. Without them, its count's error ("takes at least 1 argument"), at the name; with nothing in them, "argument
-// required after attribute" at the `)`; with a second argument, "expected ')'" at the `,` (a note at the `(`). The
-// expression itself the member's declaration checks (check_input_counted_by_member).
+// required after attribute" at the `)`. With a second argument, the first is the argument, as clang's parser keeps it, and
+// the `,` is where it expects the `)` (#1842, CheckInputAttribute.counted_paren). The expression itself the member's
+// declaration checks (check_input_counted_by_member).
 static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
 {
     const Parser* parser = reader->parser;
@@ -2659,7 +2667,7 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
     {
         comma = parser->tokens.kinds[i] == PARSE_KIND_COMMA ? i : BUSTER_CHECK_NONE;
     }
-    const bool valid = parenthesized && first < end && comma == BUSTER_CHECK_NONE;
+    const bool valid = parenthesized && first < end && comma != first;
     const uint32_t reported = reader->output->report_count;
     if (!parenthesized)
     {
@@ -2669,8 +2677,9 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
     {
         check_input_report(reader, end, CHECK_INPUT_COUNTED_REQUIRED);
     }
-    else if (comma != BUSTER_CHECK_NONE)
+    else if (comma == first)
     {
+        // An empty first argument: clang's parser expects an expression.
         const uint32_t before = reader->output->report_count;
         check_input_report(reader, comma, CHECK_INPUT_COUNTED_PAREN);
         if (reader->output->report_count > before)
@@ -2678,6 +2687,11 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
             reader->output->reports[before].note_token = first - 1;
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
         }
+    }
+    else if (comma != BUSTER_CHECK_NONE)
+    {
+        attribute->counted_paren = comma;
+        attribute->argument_end = comma;
     }
     if (!valid && reader->output->report_count > reported)
     {
@@ -4937,6 +4951,11 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
     const Parser* parser = reader->parser;
     uint32_t i = *cursor;
     bool valid = end <= parser->tokens.count && i <= end && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE;
+    // A GNU group's scan of the groups after it (whether a body follows) is the same for each group it passes, so a
+    // group that the previous group's scan reached first takes that scan's end, and hands it on to the next group of
+    // the scan, whatever its own kind: a run of n groups is scanned once, not n times (#2995).
+    uint32_t chain_next = UINT32_MAX;
+    uint32_t chain_after = 0;
     while (valid && check_input_attribute_starts(parser, i, end))
     {
         const uint32_t first = i;
@@ -4954,13 +4973,16 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             valid &= close > open + 1 && close < end && parser->tokens.kinds[open + 1] == (standard ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_PAREN);
             const uint32_t list_end = valid ? parser->tree.parents[open + 1] : end;
             valid &= list_end + 1 == close;
-            uint32_t after = close + 1;
             const bool suffix = valid && !standard && parser->tree.roles[open] == PARSE_ROLE_OPEN_ATTRIBUTE;
-            while (suffix && after < end && check_input_attribute_starts(parser, after, end))
+            uint32_t after = first == chain_next ? chain_after : close + 1;
+            while (suffix && first != chain_next && after < end && check_input_attribute_starts(parser, after, end))
             {
                 const uint32_t next_open = parser->tokens.kinds[after] == PARSE_KIND_L_SQUARE ? after : after + 1;
                 after = next_open < end ? check_input_attribute_after_group(parser, next_open, end) : end + 1;
             }
+            // The scan's first step from this group is the group at close + 1, where it goes on as from there.
+            chain_next = close + 1 < after ? close + 1 : UINT32_MAX;
+            chain_after = after;
             const bool definition = suffix && after <= end && after < parser->tokens.count && parser->tree.roles[after] == PARSE_ROLE_OPEN_BODY;
             i = open + 2;
             if (valid && standard && parser->language.standard < 2023)
@@ -8109,12 +8131,11 @@ static bool check_input_swift_cf_error(CheckInputReader* reader, TypeId record)
     const bool structure = record != 0 && type_kind(reader->types, record) == BUSTER_TYPE_KIND_STRUCT;
     bool found = reader->cf_error != 0 && type_unqualified(record) == reader->cf_error;
     const CheckSparseWide all = reader->output->attributes;
-    const bool scalar = parser->options.scalar;
     const uint32_t end = parser->tokens.count;
-    for (uint32_t first = structure && reader->cf_error == 0 ? check_input_attributed_next(all, 0, end, scalar) : end; !found && first < end;
-         first = check_input_attributed_next(all, first + 16, end, scalar))
+    for (uint32_t first = structure && reader->cf_error == 0 ? check_input_attributed_next(all, 0, end) : end; !found && first < end;
+         first = check_input_attributed_next(all, first + 16, end))
     {
-        for (uint32_t selected = check_input_attributed_group(all, first, end, scalar); !found && selected != 0; selected &= selected - 1)
+        for (uint32_t selected = check_input_attributed_group(all, first, end); !found && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
             const CheckInputAttributes* attributes = type_unqualified(reader->tag_types[token]) == type_unqualified(record) ?
@@ -9546,12 +9567,11 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
         const bool kept = !attribute->ignored && !attribute->subject_ignored && !attribute->keyword;
         const String8 name = kept ? check_input_attribute_name(reader, attribute->name) : (String8){ "", 0 };
         const bool listed = kept && check_input_attribute_excludable(reader, attribute);
-        const bool scalar = reader->parser->options.scalar;
         const CheckSparseWide all = reader->output->attributes;
-        for (uint32_t first = listed ? check_input_attributed_next(all, 0, token, scalar) : token; !reported && first < token;
-             first = check_input_attributed_next(all, first + 16, token, scalar))
+        for (uint32_t first = listed ? check_input_attributed_next(all, 0, token) : token; !reported && first < token;
+             first = check_input_attributed_next(all, first + 16, token))
         {
-            const uint32_t lanes = check_input_attributed_group(all, first, token, scalar);
+            const uint32_t lanes = check_input_attributed_group(all, first, token);
             for (uint32_t selected = lanes; !reported && selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -9625,11 +9645,10 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
         {
             memset(reader->late_attribute_masks, 0, (uint64_t)count + 1);
             memset(reader->late_attribute_kinds, 0, 2 * ((uint64_t)count + 1) * sizeof(uint64_t));
-            const bool scalar = reader->parser->options.scalar;
             const CheckSparseWide attributes = reader->output->attributes;
-            for (uint32_t first = check_input_attributed_next(attributes, 0, token, scalar); first < token; first = check_input_attributed_next(attributes, first + 16, token, scalar))
+            for (uint32_t first = check_input_attributed_next(attributes, 0, token); first < token; first = check_input_attributed_next(attributes, first + 16, token))
             {
-                const uint32_t lanes = check_input_attributed_group(attributes, first, token, scalar);
+                const uint32_t lanes = check_input_attributed_group(attributes, first, token);
                 for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
                 {
                     const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -9644,6 +9663,42 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
                 }
             }
         }
+    }
+    // An asm label after the definition (#2936): clang drops it with "attribute declaration must precede definition" at its
+    // string, noted at the definition, unless the definition has a label. The asm labels' pass decides that, as it knows
+    // the definition's label from every declaration of the object, a block's too (check_input_asm_labels). Its warning is
+    // reserved here, suppressed, at this merge and before the other attributes' below, where clang gives it; a
+    // redefinition's, whose others complete at their names, at the first name of the declaration's attributes. A body's on
+    // a lane goes to source order, whose events keep their indices.
+    const CheckInputAttribute* label = NULL;
+    uint32_t first_name = UINT32_MAX;
+    for (uint32_t i = 0; after && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        label = label == NULL && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored ? attribute : label;
+        first_name = attribute->name_token < first_name ? attribute->name_token : first_name;
+    }
+    check_input_lane_refuse(reader, label != NULL && reader->lane, "a body's redeclaration after a definition has an asm label");
+    uint32_t reserved = 0;
+    if (label != NULL && !reader->lane)
+    {
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+            .kind = CHECK_WARNING_EVENT_LATE_ATTRIBUTE,
+            .token = label->argument_first,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = BUSTER_CHECK_WARNING_SUPPRESSED,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = redefinition ? first_name : point,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        const CheckWarningNote note = {
+            .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+            .token = reader->definition_origins[previous] - 1,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        reserved = check_input_warning_event(reader, &event, &note, 1) ? reader->warning_events.count : 0;
     }
     bool dropped = false;
     for (uint32_t i = 0; copied && !reader->lane && reader->late_attribute_masks != NULL && i < copy->count; i += 1)
@@ -9699,6 +9754,13 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
             check_input_attribute_summary(copy);
         }
         check_input_set_attributes_at(reader->output, token, copy);
+    }
+    // (The label's own record, in the declaration's list as it now is: its reserved warning.)
+    CheckInputAttributes* merged = reserved != 0 ? check_input_attributes_at(reader->output, token) : NULL;
+    for (uint32_t i = 0; merged != NULL && i < merged->count; i += 1)
+    {
+        CheckInputAttribute* record = merged->records + i;
+        record->warning = record->first == label->first && record->kind == CHECK_ATTRIBUTE_ASM_LABEL ? reserved : record->warning;
     }
     check_input_attribute_merge_exclusions(reader, token, previous, visible);
 }
@@ -11049,17 +11111,17 @@ static CheckInputDeprecatedBlock check_input_deprecated_block(const Parser* pars
 // in source order. A use reads those up to the declaration its lookup finds, which inherits from the ones before it,
 // as clang's redeclarations inherit their attributes: not a block's later one, which it doesn't see. A tag's use, which
 // finds its first declaration, reads those before it.
-// The scalar path walks every token (check_input_deprecated_use). A unit with such an attribute marks a few declarations
-// (glibc's headers mark a handful of functions), so the vector path visits only the tokens a use may be at and the
-// braces that open and close the scopes they read, with the brackets between them counted 64 tokens a mask (#1489):
-// sqlite3.c's 716,158 tokens took 25 M cycles of the 9700X's for the scalar walk.
+// A unit with such an attribute marks a few declarations (glibc's headers mark a handful of functions), so the scan
+// visits only the tokens a use may be at and the braces that open and close the scopes they read, with the brackets
+// between them counted 64 tokens a mask (#1489): sqlite3.c's 716,158 tokens took 25 M cycles of the 9700X's for a walk
+// of every token (check_input_deprecated_use), which a unit past the gathers' signed 32-bit lanes still takes.
 static void check_input_deprecated_uses(CheckInputReader* reader, bool errors)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const uint64_t mark = reader->scratch->length;
-    // The vector path's gathers index by signed 32-bit lanes.
-    const bool vector = BUSTER_VECTOR_PATH(!parser->options.scalar) && count <= INT32_MAX;
+    // The scan's gathers index by signed 32-bit lanes.
+    const bool vector = count <= INT32_MAX;
     // marks: a key's first marked declaration plus one; chain: a marked declaration's next of its key plus one; latest:
     // a key's last marked declaration plus one while the marks are found, then a tag key's latest declaration so far.
     uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
@@ -11130,15 +11192,14 @@ static void check_input_deprecated_uses(CheckInputReader* reader, bool errors)
             member_marks[marked_member->name < count ? marked_member->name : count] = bit;
         }
         reader->member_marks = member_marks;
-        const bool scalar = parser->options.scalar;
         const CheckSparseWide all = reader->output->attributes;
         // Whether an attribute marks what may be a tag (an enumerator's use reads its enum's marks, and a typedef's use
         // its struct's, union's or enum's): any mark but on a function, an object or an enumerator, or on a keyword.
         bool tags = false;
         // In source order, so that each key's chain runs first to last.
-        for (uint32_t first = check_input_attributed_next(all, 0, count, scalar); first < count; first = check_input_attributed_next(all, first + 16, count, scalar))
+        for (uint32_t first = check_input_attributed_next(all, 0, count); first < count; first = check_input_attributed_next(all, first + 16, count))
         {
-            const uint32_t lanes = check_input_attributed_group(all, first, count, scalar);
+            const uint32_t lanes = check_input_attributed_group(all, first, count);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -11161,9 +11222,9 @@ static void check_input_deprecated_uses(CheckInputReader* reader, bool errors)
         }
         // `latest` again all zeros, for the walk: the loop above wrote it only at its keys, which the same tokens give
         // again (#529), where a fill wrote every token's entry.
-        for (uint32_t first = check_input_attributed_next(all, 0, count, scalar); first < count; first = check_input_attributed_next(all, first + 16, count, scalar))
+        for (uint32_t first = check_input_attributed_next(all, 0, count); first < count; first = check_input_attributed_next(all, first + 16, count))
         {
-            for (uint32_t selected = check_input_attributed_group(all, first, count, scalar); selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(all, first, count); selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
                 const uint32_t key = check_input_deprecated_record(check_input_attributes_at(reader->output, d)) != NULL ? check_input_deprecated_key(reader, d) : count;

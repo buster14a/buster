@@ -1,7 +1,8 @@
 # C driver build-system integration (#1113)
 
-The C driver supports dependency output, buffered standard input, explicit static
-and PIE linking, verbose diagnostics and the common compiler-information probes.
+The C driver supports dependency output, buffered standard input, explicit static,
+PIE and position-dependent (`-no-pie`) linking, verbose diagnostics and the common
+compiler-information probes.
 This is not a claim that every CFLAGS or LDFLAGS accepted by GCC/Clang works.
 
 ## Dependency options
@@ -127,17 +128,30 @@ reinterpreted as driver actions. `--` ends option recognition.
 
 ## Link kinds and remaining limits
 
-`-pie` selects the normal dynamic PIE. `-static` and `-static-pie` select the
-existing static and static-PIE runtime, binding and executable-writing paths.
-Static PIE takes precedence over static, and either static option over `-pie`,
-regardless of argument order, as Clang's driver does. Static library search never
-falls back to a `.so`.
+`-pie` selects the normal dynamic PIE. `-no-pie` (#1503) selects a
+position-dependent dynamic executable: an `ET_EXEC` at `0x400000` with the
+dynamic loader and the shared libc, linked with `crt1.o`, `crtbegin.o` and
+`crtend.o` (`RUNTIME_KIND_NO_PIE`, its snapshot `runtime-no-pie.snapshot`), as
+Clang's `-no-pie` links one; code generation is unchanged, as Clang's is. Its
+own symbols need no relocation: no `RELATIVE` relocation, RELR or
+`DF_1_PIE`. `-static` and `-static-pie` select the existing static and
+static-PIE runtime, binding and executable-writing paths. Static PIE takes
+precedence over static, and either static option over `-pie` and `-no-pie`,
+regardless of argument order, and the last of `-pie` and `-no-pie` decides
+between those two, as Clang's driver does (its `getStaticPIE`, `getStatic` and
+`getPIE`); a link that names `-no-pie` and `-static-pie` in either order is
+refused, as Clang refuses it ("cannot specify '-no-pie' along with
+'-static-pie'"), and `-c` leaves both unused. `-rpath` is taken with `-no-pie`
+as with `-pie`. The mixed path (object and archive inputs, `-l` archives) links
+`-no-pie` with the same startup files through the foreign resolver. Static
+library search never falls back to a `.so`.
 
 The existing direct linker still rejects nonempty user `-l` archives. This change
 does not implement general archive extraction beyond the runtime's own archives.
 `-fPIC` / `-shared` still require real preemption and shared-library TLS support
-(#811). Stack-protector and control-flow-protection requests remain explicit
-refusals, not ignored security flags. `-S`, `-save-temps`, general object-input
+(#811); `-shared` stays an unknown argument, so it can't take precedence over
+`-no-pie` as Clang's does. Stack-protector and control-flow-protection requests
+remain explicit refusals, not ignored security flags. `-S`, `-save-temps`, general object-input
 linking and macro-only forced includes (`-imacros`) are not added here. These
 limits mean **#1113 remains open**; dependency support alone does not make Buster
 a universal drop-in CC for CMake/autotools projects.
@@ -149,8 +163,21 @@ fixtures run the real compiler executable, compare short dependency rules with
 Clang (ignoring only empty physical lines around phony rules), exercise stdin,
 symlinked depfiles, non-regular sources, combined `-print-*` probes,
 parallel-unit publication, aliases and failure preservation, consume escaping
-through GNU Make, and execute all three link kinds with TLS and libc. ELF type
-and interpreter headers independently verify the link mode. It can also be built
+through GNU Make, and execute all four link kinds (`-pie`, `-static`,
+`-static-pie` and `-no-pie`) with TLS and libc. ELF type and interpreter
+headers independently verify the link mode. `c_driver_no_pie_test.c`, which it
+includes, links `-no-pie` programs with the compiler and with clang and GNU ld
+(`-fuse-ld=bfd -no-pie`) and compares them as `readelf -hlrd` shows them: a C
+program calling libc's functions, taking `puts`'s address, reading `stdout`
+and `environ`, setting `errno` and using its own thread-locals and a
+clang-built library's (`TPOFF64`), and the mixed path with a clang `-fno-pie`
+object (copies of `stdout` and `environ`, and a weak function tested and
+called, both at address 0); both run, as `ET_EXEC` with `PT_INTERP` at the same
+base, with the same `DT_NEEDED` libraries, no `DF_1_PIE`, RELR or `RELATIVE`
+relocation, and the same symbols relocated by the same classes (a GOT slot's
+`GLOB_DAT`, GNU ld's lazy `JUMP_SLOT` for a call; a copy by the program's own
+name among its aliases). The link kind's options are run in Clang's orders
+too, and `-no-pie` with `-static-pie` refused. It can also be built
 as a standalone harness, with the compiler path as its first operand:
 
 ```sh

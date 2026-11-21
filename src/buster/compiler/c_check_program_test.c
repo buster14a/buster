@@ -1908,6 +1908,27 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     return same;
 }
 
+// The return facts' definition (#2924): check_program_return_node at every node in order, with the unknown declarations
+// and the library names check_program_return_facts gives it, a node's operands' facts made before it. Its `count` + 1
+// entries end with the sink, zero; null where scratch runs out.
+static uint8_t* check_test_return_facts_definition(CheckProgram* program, Arena* scratch)
+{
+    const uint32_t count = program->input->graph.count;
+    uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
+    uint32_t* unknowns = NULL;
+    const bool ready = facts != NULL && check_program_return_unknowns(program, scratch, &unknowns);
+    const uint8_t* names = ready ? check_program_return_library_names(program->identifiers, scratch) : NULL;
+    for (uint32_t node = 0; ready && node < count; node += 1)
+    {
+        facts[node] = check_program_return_node(program, facts, node, unknowns, names);
+    }
+    if (ready)
+    {
+        facts[count] = 0;
+    }
+    return ready ? facts : NULL;
+}
+
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), for a target (null for
 // x86-64's), against clang's build of it with the same, or of `oracle_source` where it isn't null, which must differ
 // from it with `mismatch` (check_test_program_execute_with_alignment); its executable runs where `run_native` says the
@@ -1940,7 +1961,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         Arena bytes = arena_reserve(UINT64_C(1) << 22);
         Arena scratch = arena_reserve(plan_room);
         const ParseOptions parse_options = { .scalar = path == 0 };
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         bool ready = input_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
                      parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
         CheckInput input = { 0 };
@@ -1981,12 +2002,12 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
             check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
-            // The return facts' vector path visits only the nodes that can have facts (check_program_return_sparse): every
-            // node's must be what the scalar path, which visits each, gives it.
+            // The return facts' walk visits only the nodes that can have facts (check_program_return_sparse): every
+            // node's must be the definition's, check_program_return_node at every node in order.
             const uint64_t facts_mark = scratch.length;
-            const uint8_t* exact = check_program_return_facts(&program, &scratch, NULL, true);
+            const uint8_t* exact = check_test_return_facts_definition(&program, &scratch);
             const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
-            snprintf(description, sizeof(description), "%s: the return facts' vector path gives every node the scalar path's facts", name);
+            snprintf(description, sizeof(description), "%s: the return facts' walk gives every node the definition's facts", name);
             check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
             arena_pop_to(&scratch, facts_mark);
         }
@@ -2613,7 +2634,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
@@ -2770,7 +2791,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
         Arena output = arena_reserve(UINT64_C(1) << 26);
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
@@ -4179,6 +4200,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test,
             "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
             "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);
+        // Statements with attributes (#1844): a loop's and a switch's, whose breaks, continues and cases are theirs, and
+        // jumps with attributes, which jump as without them; a switch's promoted condition of a signed char.
+        check_test_program_source(test,
+            "static int h(int x){return x*3;}"
+            "int tested(int n){int t=0;signed char c=(signed char)(n*200);for(int i=-3;i<12;i++){[[clang::likely]] switch(i){"
+            "case -2:t+=5;[[fallthrough]];case 1:t+=1;[[clang::likely]] break;case 4 ... 6:[[clang::unlikely]] continue;default:t+=i;}"
+            "__attribute__((nomerge)) switch(c){case -56:t+=1000;break;default:t-=1;}int k=i;"
+            "[[clang::likely]] while(k>0){k-=2;if(k==3)__attribute__((nomerge)) continue;if(k<0)[[clang::unlikely]] break;t+=h(k);}"
+            "[[clang::unlikely]] do{t^=k;if(t&1)[[clang::likely]] __attribute__((nomerge)) break;}while(0);"
+            "if(i==10)[[clang::likely]] goto out;}out:[[clang::unlikely]] return t;}", "attributed-statements", clang);
         check_test_program_source(test,
             "int tested(int n){int x=2;int y=(n>0&&++x);int z=(n<0||++x);int q=n?x++:++x;"
             "return x*1000+y*100+z*10+q;}", "short-circuit-updates", clang);
@@ -6242,8 +6273,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, true, 0, 1);
     }
     // The 128-bit integers, _BitInt(65) to _BitInt(128) and those past 128 bits (in memory, #137): lowered, the overflow
-    // builtins of a _BitInt of 65 to 127 bits too (#1447), but a bit-field of them spread over more than 8 bytes, or past 128
-    // bits.
+    // builtins of a _BitInt of 65 to 127 bits too (#1447), but a bit-field of them wider than 64 bits, or past 128 bits.
     if (check_test_takes())
     {
         check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
@@ -6251,7 +6281,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int tested(int n){_BitInt(129) x=n;return x>1;}", "bit-int-129", true, true, 0, 1);
         check_test_program_boundary(test, "_BitInt(200) g;int tested(int n){_BitInt(200) x=n;g=x*x;return g>1;}", "bit-int-200-global", true, true, 1, 1);
         check_test_program_boundary_reason(test, "struct W{unsigned _BitInt(200) x:150;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "bit-int-200-bit-field", true,
-                                           false, 0, 0, "bit-fields of this type or spread over more than 8 bytes");
+                                           false, 0, 0, "bit-fields of this type or wider than 64 bits");
         check_test_program_boundary(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, true, 0, 0);
         // A result SSE, SSEUP of 22 bytes where the target's vectors are 32 bytes, which clang returns as <2 x double> in
         // xmm0 (#2113). At x86-64's 16 bytes it is MEMORY, through a hidden pointer.
@@ -6279,10 +6309,11 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         }
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);
+        // A packed field in 9 bytes lowers, as its first 8 and its ninth (#2999).
         check_test_program_boundary(test,
                                     "struct __attribute__((packed)) P{unsigned char c:4;unsigned long long x:64;};"
                                     "int tested(int n){struct P p;p.x=(unsigned long long)n;return (int)p.x;}",
-                                    "bit-field-nine-byte-machine-boundary", true, false, 0, 0);
+                                    "bit-field-nine-byte-machine-boundary", true, true, 0, 0);
         check_test_program_boundary(test, "int tested(unsigned n){switch(n){case -1:return 1;case 4294967295U:return 2;}return 0;}",
                                     "case-conversion-collision", false, false, 0, 0);
         check_test_program_boundary(test, "int tested(int n){switch(n){case 1 ... 5:return 1;case 4 ... 7:return 2;}return 0;}",

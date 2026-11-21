@@ -131,20 +131,13 @@ static void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t begin, 
         {
             target->origins[begin] = origin;
         }
-        else if (BUSTER_VECTOR_PATH(pp->vectorized))
+        else
         {
             const __m512i value = _mm512_set1_epi32((int)origin);
             for (uint32_t i = begin; i < end; i += 16)
             {
                 const __mmask16 valid = (__mmask16)_bzhi_u32(~0u, end - i < 16 ? end - i : 16);
                 _mm512_mask_storeu_epi32(target->origins + i, valid, value);
-            }
-        }
-        else
-        {
-            for (uint32_t i = begin; i < end; i += 1)
-            {
-                target->origins[i] = origin;
             }
         }
     }
@@ -160,26 +153,9 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
         {
             const uint32_t slot = target == &pp->arguments ? 0 : target == &pp->captures ? 1 : 2;
             pp->origin_peak[slot] = pp->origin_peak[slot] < at + end - begin ? at + end - begin : pp->origin_peak[slot];
-            if (BUSTER_VECTOR_PATH(pp->vectorized))
-            {
-                memmove(target->origins + at, source->origins + begin, (uint64_t)(end - begin) * sizeof(uint32_t));
-            }
-            else if (target == source && at > begin && at < end)
-            {
-                for (uint32_t i = end - begin; i > 0; i -= 1)
-                {
-                    target->origins[at + i - 1] = source->origins[begin + i - 1];
-                }
-            }
-            else
-            {
-                for (uint32_t i = 0; i < end - begin; i += 1)
-                {
-                    target->origins[at + i] = source->origins[begin + i];
-                }
-            }
+            memmove(target->origins + at, source->origins + begin, (uint64_t)(end - begin) * sizeof(uint32_t));
         }
-        else if (BUSTER_VECTOR_PATH(pp->vectorized))
+        else
         {
             uint32_t previous = source->origins[begin];
             pp_history_change(pp, at, previous);
@@ -202,20 +178,6 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
                     pp->history_run_count += added;
                 }
                 previous = source->origins[i + count - 1];
-            }
-            pp_history_change(pp, at + end - begin, 0);
-        }
-        else
-        {
-            uint32_t previous = ~source->origins[begin];
-            for (uint32_t i = begin; i < end; i += 1)
-            {
-                const uint32_t origin = source->origins[i];
-                if (origin != previous)
-                {
-                    pp_history_change(pp, at + i - begin, origin);
-                    previous = origin;
-                }
             }
             pp_history_change(pp, at + end - begin, 0);
         }
@@ -290,54 +252,45 @@ static uint32_t pp_history_generated(Preprocessor* pp, PPGeneratedKind kind, uin
 }
 
 // Sixteen independent binary searches. Record loads are scalar on Zen 5; bounds/decisions run in vectors.
-static __attribute__((unused)) void pp_history_lookup(const Preprocessor* pp, const uint32_t* tokens, uint32_t* origins, uint32_t count, bool scalar)
+static __attribute__((unused)) void pp_history_lookup(const Preprocessor* pp, const uint32_t* tokens, uint32_t* origins, uint32_t count)
 {
-    (void)scalar;
-
-    for (uint32_t i = 0; i < count; i += BUSTER_SCALAR_PATH(scalar) ? 1 : 16)
+    for (uint32_t i = 0; i < count; i += 16)
     {
-        if (BUSTER_SCALAR_PATH(scalar))
+        const uint32_t take = count - i < 16 ? count - i : 16;
+        const __mmask16 valid = (__mmask16)_bzhi_u32(~0u, take);
+        const __m512i positions = _mm512_maskz_loadu_epi32(valid, tokens + i);
+        __m512i low = _mm512_setzero_si512();
+        __m512i high = _mm512_set1_epi32((int)pp->history_run_count);
+        __mmask16 active = valid & _mm512_cmplt_epu32_mask(low, high);
+        while (active != 0)
         {
-            origins[i] = pp_history_at(pp, tokens[i]);
-        }
-        else
-        {
-            const uint32_t take = count - i < 16 ? count - i : 16;
-            const __mmask16 valid = (__mmask16)_bzhi_u32(~0u, take);
-            const __m512i positions = _mm512_maskz_loadu_epi32(valid, tokens + i);
-            __m512i low = _mm512_setzero_si512();
-            __m512i high = _mm512_set1_epi32((int)pp->history_run_count);
-            __mmask16 active = valid & _mm512_cmplt_epu32_mask(low, high);
-            while (active != 0)
-            {
-                const __m512i middle = _mm512_add_epi32(low, _mm512_srli_epi32(_mm512_sub_epi32(high, low), 1));
-                uint32_t indices[16] __attribute__((aligned(64)));
-                uint32_t starts[16] __attribute__((aligned(64))) =
-                {
-                    0,
-                };
-                _mm512_store_si512(indices, middle);
-                // Clang otherwise turns these explicit scalar loads back into Zen 5's expensive gathers.
-#pragma clang loop vectorize(disable) interleave(disable)
-                for (uint32_t k = 0; k < take; k += 1)
-                {
-                    if ((active >> k) & 1)
-                    {
-                        starts[k] = pp->history_runs[indices[k]].token;
-                    }
-                }
-                const __mmask16 after = active & _mm512_cmple_epu32_mask(_mm512_load_si512(starts), positions);
-                low = _mm512_mask_add_epi32(low, after, middle, _mm512_set1_epi32(1));
-                high = _mm512_mask_mov_epi32(high, active & ~after, middle);
-                active = valid & _mm512_cmplt_epu32_mask(low, high);
-            }
+            const __m512i middle = _mm512_add_epi32(low, _mm512_srli_epi32(_mm512_sub_epi32(high, low), 1));
             uint32_t indices[16] __attribute__((aligned(64)));
-            _mm512_store_si512(indices, low);
+            uint32_t starts[16] __attribute__((aligned(64))) =
+            {
+                0,
+            };
+            _mm512_store_si512(indices, middle);
+            // Clang otherwise turns these explicit scalar loads back into Zen 5's expensive gathers.
 #pragma clang loop vectorize(disable) interleave(disable)
             for (uint32_t k = 0; k < take; k += 1)
             {
-                origins[i + k] = tokens[i + k] < pp->output.count && indices[k] != 0 ? pp->history_runs[indices[k] - 1].origin : 0;
+                if ((active >> k) & 1)
+                {
+                    starts[k] = pp->history_runs[indices[k]].token;
+                }
             }
+            const __mmask16 after = active & _mm512_cmple_epu32_mask(_mm512_load_si512(starts), positions);
+            low = _mm512_mask_add_epi32(low, after, middle, _mm512_set1_epi32(1));
+            high = _mm512_mask_mov_epi32(high, active & ~after, middle);
+            active = valid & _mm512_cmplt_epu32_mask(low, high);
+        }
+        uint32_t indices[16] __attribute__((aligned(64)));
+        _mm512_store_si512(indices, low);
+#pragma clang loop vectorize(disable) interleave(disable)
+        for (uint32_t k = 0; k < take; k += 1)
+        {
+            origins[i + k] = tokens[i + k] < pp->output.count && indices[k] != 0 ? pp->history_runs[indices[k] - 1].origin : 0;
         }
     }
 }

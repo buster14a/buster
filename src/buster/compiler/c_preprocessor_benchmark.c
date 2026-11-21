@@ -5,7 +5,8 @@
 
 //
 // The preprocessor benchmark: preprocesses translation units from scratch, as `-E` does without printing, with the
-// vectorized kernels and with their scalar twins, and reports per token what each costs.
+// vectorized kernels, and again with pp_define's body scan by its scalar arm (pp_scan_body_scalar, the one scalar twin
+// the preprocessor keeps: #2924), and reports per token what each costs.
 //
 // Usage: build/compiler benchmark-preprocessor [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost]
 //        [--only vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] [-E's options] file...
@@ -25,7 +26,7 @@
 // failures; these exclude directory enumeration's libc-internal calls and the benchmark harness's I/O, not process-wide
 // syscall totals. With --clang it also times `clang -E -P` with the same options (but --predefines and
 // --location-limit, which are ours; --buster-headers becomes ours' search) writing to /dev/null, a process per file, the median of as many runs, for scale.
-// --history-cost and --guard-cost replace the scalar twins with the vectorized kernels with their macro expansion
+// --history-cost and --guard-cost replace the scalar body scan with the vectorized kernels with their macro expansion
 // history deferred (PPOptions.defer_history, as -E and `parse` run them: a unit without diagnostics records none), or
 // without skipping the inclusions of guarded files (#120), whose output must be the same. --spelling-cost replaces them
 // with the vectorized kernels whose printer gives every chunk's spellings by its general loop, token by token, as
@@ -48,8 +49,8 @@
 // the one record per #embed, as above. The remaining output is emitted individually or lifted from captured pragmas.
 //
 // With --tables, the arguments are paths, and it times the directive tables alone (#118): every .c and .h file under
-// them is read and prepared once, then each pass builds every file's table (pp_directive_table) by each kernel, whose
-// tables must be the same, and it reports the medians per input token and per directive, and the scan's share.
+// them is read and prepared once, then each pass builds every file's table (pp_directive_table), whose tables must be
+// the same in every pass, and it reports the medians per input token and per directive, and the scan's share.
 //
 // Layout: the clock and the counters, the passes, the directive tables alone, and run_preprocessor_benchmark.
 
@@ -282,10 +283,10 @@ static bool pp_benchmark_clang(char** arguments, int argument_count, char** file
     return result;
 }
 
-// --embed N: the text -E prints for an #embed's N bytes (random, from a fixed seed), by pp_embed_text_vector and by its
-// scalar twin, a printer's piece (BUSTER_PP_EMBED_PRINT_BYTES) at a time into one buffer, as pp_print_embed writes them:
-// after a warm-up, BUSTER_PP_BENCHMARK_PASSES passes that alternate which goes first, and the medians per input byte.
-// The two texts must be the same. Returns the exit status.
+// --embed N: the text -E prints for an #embed's N bytes (random, from a fixed seed), by pp_embed_text_vector, a printer's
+// piece (BUSTER_PP_EMBED_PRINT_BYTES) at a time into one buffer, as pp_print_embed writes them: after a warm-up,
+// BUSTER_PP_BENCHMARK_PASSES passes, and the medians per input byte. Every pass's text must be the same. Returns the exit
+// status.
 static int pp_benchmark_embed(uint64_t count)
 {
     uint8_t* bytes = malloc(count + 64);
@@ -299,61 +300,58 @@ static int pp_benchmark_embed(uint64_t count)
     }
     const int cycles_fd = pp_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
     const int instructions_fd = pp_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
-    static uint64_t samples[2][3][BUSTER_PP_BENCHMARK_PASSES];
+    static uint64_t samples[3][BUSTER_PP_BENCHMARK_PASSES];
     uint64_t lengths[2] = { 0, 0 };
     uint64_t digests[2] = { 0, 0 };
     for (uint32_t pass = 0; result == 0 && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
     {
-        for (uint32_t order = 0; order < 2; order += 1)
+        uint64_t length = 0;
+        uint64_t digest = 0;
+        const uint64_t nanoseconds = pp_benchmark_nanoseconds();
+        const uint64_t cycles = pp_benchmark_read_counter(cycles_fd);
+        const uint64_t instructions = pp_benchmark_read_counter(instructions_fd);
+        for (uint64_t done = 0; done < count; done += BUSTER_PP_EMBED_PRINT_BYTES)
         {
-            const uint32_t scalar = (pass + order) & 1;
-            uint64_t length = 0;
-            uint64_t digest = 0;
-            const uint64_t nanoseconds = pp_benchmark_nanoseconds();
-            const uint64_t cycles = pp_benchmark_read_counter(cycles_fd);
-            const uint64_t instructions = pp_benchmark_read_counter(instructions_fd);
-            for (uint64_t done = 0; done < count; done += BUSTER_PP_EMBED_PRINT_BYTES)
-            {
-                const uint64_t step = count - done < BUSTER_PP_EMBED_PRINT_BYTES ? count - done : BUSTER_PP_EMBED_PRINT_BYTES;
-                const uint64_t written = scalar ? pp_embed_text_scalar(bytes + done, step, done != 0, text) : pp_embed_text_vector(bytes + done, step, done != 0, text);
-                // A use of the text the compiler can't drop: its length, and up to a word of it from its middle, never past
-                // `written` (the kernels' slack past it differs).
-                length += written;
-                uint64_t word = 0;
-                const uint64_t taken = written < sizeof(word) ? written : sizeof(word);
-                memcpy(&word, text + (written - taken) / 2, taken);
-                digest = digest * 31 + word;
-            }
-            const uint64_t elapsed[3] = {
-                pp_benchmark_nanoseconds() - nanoseconds,
-                pp_benchmark_read_counter(cycles_fd) - cycles,
-                pp_benchmark_read_counter(instructions_fd) - instructions,
-            };
-            for (uint32_t k = 0; pass != 0 && k < 3; k += 1)
-            {
-                samples[scalar][k][pass - 1] = elapsed[k];
-            }
-            lengths[scalar] = length;
-            digests[scalar] = digest;
+            const uint64_t step = count - done < BUSTER_PP_EMBED_PRINT_BYTES ? count - done : BUSTER_PP_EMBED_PRINT_BYTES;
+            const uint64_t written = pp_embed_text_vector(bytes + done, step, done != 0, text);
+            // A use of the text the compiler can't drop: its length, and up to a word of it from its middle, never past
+            // `written` (the kernel's slack past it is not the text).
+            length += written;
+            uint64_t word = 0;
+            const uint64_t taken = written < sizeof(word) ? written : sizeof(word);
+            memcpy(&word, text + (written - taken) / 2, taken);
+            digest = digest * 31 + word;
         }
-        if (lengths[0] != lengths[1] || digests[0] != digests[1])
+        const uint64_t elapsed[3] = {
+            pp_benchmark_nanoseconds() - nanoseconds,
+            pp_benchmark_read_counter(cycles_fd) - cycles,
+            pp_benchmark_read_counter(instructions_fd) - instructions,
+        };
+        for (uint32_t k = 0; pass != 0 && k < 3; k += 1)
         {
-            fprintf(stderr, "embed text: the vector kernel's text differs from the scalar one's\n");
+            samples[k][pass - 1] = elapsed[k];
+        }
+        // The warm-up's text, then every pass's, which must be the same.
+        lengths[pass != 0] = length;
+        digests[pass != 0] = digest;
+        if (pass != 0 && (lengths[0] != lengths[1] || digests[0] != digests[1]))
+        {
+            fprintf(stderr, "embed text: a pass's text differs from the warm-up's\n");
             result = 1;
         }
     }
-    for (uint32_t scalar = 0; result == 0 && scalar < 2; scalar += 1)
+    for (uint32_t k = 0; result == 0 && k < 3; k += 1)
     {
-        for (uint32_t k = 0; k < 3; k += 1)
-        {
-            pp_benchmark_sort(samples[scalar][k], BUSTER_PP_BENCHMARK_PASSES);
-        }
-        const double nanoseconds = (double)samples[scalar][0][BUSTER_PP_BENCHMARK_PASSES / 2];
-        const double cycles = (double)samples[scalar][1][BUSTER_PP_BENCHMARK_PASSES / 2];
-        const double instructions = (double)samples[scalar][2][BUSTER_PP_BENCHMARK_PASSES / 2];
-        printf("embed text, %lu bytes, %s: %.3f ns, %.3f cycles, %.2f instructions per byte (IPC %.2f), %.2f GB/s of text\n", (unsigned long)count,
-               scalar ? "scalar" : "vector", nanoseconds / (double)count, cycles / (double)count, instructions / (double)count, cycles != 0 ? instructions / cycles : 0.0,
-               nanoseconds != 0 ? (double)lengths[scalar] / nanoseconds : 0.0);
+        pp_benchmark_sort(samples[k], BUSTER_PP_BENCHMARK_PASSES);
+    }
+    if (result == 0)
+    {
+        const double nanoseconds = (double)samples[0][BUSTER_PP_BENCHMARK_PASSES / 2];
+        const double cycles = (double)samples[1][BUSTER_PP_BENCHMARK_PASSES / 2];
+        const double instructions = (double)samples[2][BUSTER_PP_BENCHMARK_PASSES / 2];
+        printf("embed text, %lu bytes: %.3f ns, %.3f cycles, %.2f instructions per byte (IPC %.2f), %.2f GB/s of text\n", (unsigned long)count,
+               nanoseconds / (double)count, cycles / (double)count, instructions / (double)count, cycles != 0 ? instructions / cycles : 0.0,
+               nanoseconds != 0 ? (double)lengths[0] / nanoseconds : 0.0);
     }
     free(bytes);
     free(text);
@@ -466,8 +464,8 @@ static bool pp_benchmark_tables_path(PPBenchmarkTables* tables, const char* path
     return result;
 }
 
-// What a pass of one kernel measured: the whole tables, and the directive scan alone (both of its calls, as
-// pp_directive_table makes them); and a digest of the tables, which must be the same for both kernels.
+// What a pass measured: the whole tables, and the directive scan alone (both of its calls, as pp_directive_table makes
+// them); and a digest of the tables, which must be the same in every pass.
 typedef struct PPBenchmarkTablesSample PPBenchmarkTablesSample;
 struct PPBenchmarkTablesSample
 {
@@ -478,10 +476,9 @@ struct PPBenchmarkTablesSample
     uint64_t digest;
 };
 
-static bool pp_benchmark_tables_pass(PPBenchmarkTables* tables, bool vectorized, int cycles_fd, int instructions_fd, PPBenchmarkTablesSample* sample)
+static bool pp_benchmark_tables_pass(PPBenchmarkTables* tables, int cycles_fd, int instructions_fd, PPBenchmarkTablesSample* sample)
 {
     Preprocessor* pp = &tables->pp;
-    pp->vectorized = vectorized;
     const uint64_t arena_length = pp->arena.length;
     bool result = true;
     *sample = (PPBenchmarkTablesSample){ .digest = 14695981039346656037ull };
@@ -490,7 +487,7 @@ static bool pp_benchmark_tables_pass(PPBenchmarkTables* tables, bool vectorized,
     const uint64_t instructions = pp_benchmark_read_counter(instructions_fd);
     for (uint32_t f = 0; result && f < tables->count; f += 1)
     {
-        result = pp_directive_table(pp->vectorized, &pp->arena, &tables->datas[f]);
+        result = pp_directive_table(&pp->arena, &tables->datas[f]);
     }
     sample->instructions = pp_benchmark_read_counter(instructions_fd) - instructions;
     sample->cycles = pp_benchmark_read_counter(cycles_fd) - cycles;
@@ -519,16 +516,8 @@ static bool pp_benchmark_tables_pass(PPBenchmarkTables* tables, bool vectorized,
     for (uint32_t f = 0; result && f < tables->count; f += 1)
     {
         const PPFileData* data = &tables->datas[f];
-        if (vectorized)
-        {
-            pp_scan_directives_vector(data->kinds, data->token_count, 0, lines);
-            pp_scan_directives_vector(data->kinds, data->token_count, hashes, lines);
-        }
-        else
-        {
-            pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
-            pp_scan_directives_scalar(data->kinds, data->token_count, hashes, lines);
-        }
+        pp_scan_directives_vector(data->kinds, data->token_count, 0, lines);
+        pp_scan_directives_vector(data->kinds, data->token_count, hashes, lines);
     }
     sample->scan_cycles = pp_benchmark_read_counter(cycles_fd) - scan_cycles;
     scratch_end(scratch);
@@ -536,9 +525,9 @@ static bool pp_benchmark_tables_pass(PPBenchmarkTables* tables, bool vectorized,
     return result;
 }
 
-// --tables PATH...: builds the directive table of every .c and .h file under the paths, by each kernel in turn, 21
-// passes after a warm-up, and reports the medians per input token and per directive (#118).
-static int pp_benchmark_tables(char** paths, int path_count, uint32_t only)
+// --tables PATH...: builds the directive table of every .c and .h file under the paths, 21 passes after a warm-up, and
+// reports the medians per input token and per directive (#118).
+static int pp_benchmark_tables(char** paths, int path_count)
 {
     static PPBenchmarkTables tables;
     const PPOptions options = { .language = { .standard = 2017, .gnu = true } };
@@ -551,66 +540,49 @@ static int pp_benchmark_tables(char** paths, int path_count, uint32_t only)
     }
     const int cycles_fd = pp_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
     const int instructions_fd = pp_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
-    static PPBenchmarkTablesSample samples[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS][BUSTER_PP_BENCHMARK_PASSES];
+    static PPBenchmarkTablesSample samples[BUSTER_PP_BENCHMARK_PASSES];
     uint64_t digest = 0;
-    bool have_digest = false;
     for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
     {
-        for (uint32_t order = 0; ran && order < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; order += 1)
+        PPBenchmarkTablesSample sample;
+        ran = pp_benchmark_tables_pass(&tables, cycles_fd, instructions_fd, &sample);
+        ran = ran && (pass == 0 || sample.digest == digest);
+        digest = sample.digest;
+        if (pass > 0)
         {
-            const uint32_t implementation = order ^ (pass & 1);
-            PPBenchmarkTablesSample sample;
-            if (((only >> implementation) & 1) != 0)
-            {
-                ran = pp_benchmark_tables_pass(&tables, implementation == 0, cycles_fd, instructions_fd, &sample);
-                ran = ran && (!have_digest || sample.digest == digest);
-                digest = sample.digest;
-                have_digest = true;
-                if (pass > 0)
-                {
-                    samples[implementation][pass - 1] = sample;
-                }
-            }
+            samples[pass - 1] = sample;
         }
     }
     if (!ran)
     {
-        fprintf(stderr, "a file can't be read or prepared, or the kernels' tables differ\n");
+        fprintf(stderr, "a file can't be read or prepared, or a pass's tables differ from the warm-up's\n");
     }
     else
     {
-        static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "scalar" };
         printf("directive tables: %u files, %lu input tokens, %lu directives (one per %.1f tokens); %d passes, medians:\n", tables.count, (unsigned long)tables.tokens,
                (unsigned long)tables.directives, tables.directives != 0 ? (double)tables.tokens / (double)tables.directives : 0.0, BUSTER_PP_BENCHMARK_PASSES);
-        for (uint32_t implementation = 0; implementation < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; implementation += 1)
+        uint64_t nanoseconds[BUSTER_PP_BENCHMARK_PASSES];
+        uint64_t cycles[BUSTER_PP_BENCHMARK_PASSES];
+        uint64_t instructions[BUSTER_PP_BENCHMARK_PASSES];
+        uint64_t scan[BUSTER_PP_BENCHMARK_PASSES];
+        for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
         {
-            uint64_t nanoseconds[BUSTER_PP_BENCHMARK_PASSES];
-            uint64_t cycles[BUSTER_PP_BENCHMARK_PASSES];
-            uint64_t instructions[BUSTER_PP_BENCHMARK_PASSES];
-            uint64_t scan[BUSTER_PP_BENCHMARK_PASSES];
-            for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
-            {
-                nanoseconds[pass] = samples[implementation][pass].nanoseconds;
-                cycles[pass] = samples[implementation][pass].cycles;
-                instructions[pass] = samples[implementation][pass].instructions;
-                scan[pass] = samples[implementation][pass].scan_cycles;
-            }
-            pp_benchmark_sort(nanoseconds, BUSTER_PP_BENCHMARK_PASSES);
-            pp_benchmark_sort(cycles, BUSTER_PP_BENCHMARK_PASSES);
-            pp_benchmark_sort(instructions, BUSTER_PP_BENCHMARK_PASSES);
-            pp_benchmark_sort(scan, BUSTER_PP_BENCHMARK_PASSES);
-            const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
-            const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
-            const double tokens = tables.tokens != 0 ? (double)tables.tokens : 1.0;
-            const double directives = tables.directives != 0 ? (double)tables.directives : 1.0;
-            if (((only >> implementation) & 1) != 0)
-            {
-                printf("  %-10s %8.3f ms  %5.3f cycles/token  %6.2f cycles/directive  %5.3f instructions/token  IPC %.2f  (the scan %5.3f cycles/token)\n",
-                       names[implementation], (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, median_cycles / tokens, median_cycles / directives,
-                       median_instructions / tokens, median_cycles != 0 ? median_instructions / median_cycles : 0.0,
-                       (double)scan[BUSTER_PP_BENCHMARK_PASSES / 2] / tokens);
-            }
+            nanoseconds[pass] = samples[pass].nanoseconds;
+            cycles[pass] = samples[pass].cycles;
+            instructions[pass] = samples[pass].instructions;
+            scan[pass] = samples[pass].scan_cycles;
         }
+        pp_benchmark_sort(nanoseconds, BUSTER_PP_BENCHMARK_PASSES);
+        pp_benchmark_sort(cycles, BUSTER_PP_BENCHMARK_PASSES);
+        pp_benchmark_sort(instructions, BUSTER_PP_BENCHMARK_PASSES);
+        pp_benchmark_sort(scan, BUSTER_PP_BENCHMARK_PASSES);
+        const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
+        const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
+        const double tokens = tables.tokens != 0 ? (double)tables.tokens : 1.0;
+        const double directives = tables.directives != 0 ? (double)tables.directives : 1.0;
+        printf("  %-10s %8.3f ms  %5.3f cycles/token  %6.2f cycles/directive  %5.3f instructions/token  IPC %.2f  (the scan %5.3f cycles/token)\n",
+               "vectorized", (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, median_cycles / tokens, median_cycles / directives,
+               median_instructions / tokens, median_cycles != 0 ? median_instructions / median_cycles : 0.0, (double)scan[BUSTER_PP_BENCHMARK_PASSES / 2] / tokens);
     }
     if (cycles_fd >= 0)
     {
@@ -630,9 +602,10 @@ static int pp_benchmark_tables(char** paths, int path_count, uint32_t only)
 // ---------------------------------------------------------------------------------------------------------------------
 // Definitions and lookups alone (--defines)
 
-// What a pass of one kernel measured (#121), file by file: its #defines defined in order (pp_define), its macros so
-// defined compiled (pp_compile_macro), and its identifiers looked up as the main loop's test looks one up
-// (pp_is_macro), each in user-space cycles; the counts, and a digest of the macros, which both kernels must make alike.
+// What a pass of one implementation measured (#121), file by file: its #defines defined in order (pp_define), its
+// macros so defined compiled (pp_compile_macro), and its identifiers looked up as the main loop's test looks one up
+// (pp_is_macro), each in user-space cycles; the counts, and a digest of the macros, which both implementations (the
+// vectorized kernels, and pp_define's body scan by its scalar arm) must make alike.
 typedef struct PPBenchmarkDefinesSample PPBenchmarkDefinesSample;
 struct PPBenchmarkDefinesSample
 {
@@ -679,8 +652,7 @@ static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_
         now = pp_benchmark_read_counter(cycles_fd);
         sample->compile_cycles += now - before;
         before = now;
-        // Both rows classify 64 kinds at a time; the lookups use the selected main-loop kernel's macro-name bitset
-        // (vectorized) or direct macro table (scalar reference).
+        // Both rows classify 64 kinds at a time and look the identifiers up in the macro names' bits.
         uint64_t found = 0;
         uint64_t lookups = 0;
         for (uint32_t t = 0; t < data->token_count; t += 64)
@@ -715,7 +687,7 @@ static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_
 }
 
 // --defines PATH...: each .c and .h file under the paths defines its #defines, compiles its macros and looks up its
-// identifiers, by each kernel in turn, 21 passes after a warm-up, and it reports the medians per #define, per macro
+// identifiers, by each implementation in turn, 21 passes after a warm-up, and it reports the medians per #define, per macro
 // compiled and per lookup (#121).
 static int pp_benchmark_defines(char** paths, int path_count, uint32_t only)
 {
@@ -763,7 +735,7 @@ static int pp_benchmark_defines(char** paths, int path_count, uint32_t only)
     }
     if (!ran)
     {
-        fprintf(stderr, "a file can't be read or prepared, or the kernels' macros differ\n");
+        fprintf(stderr, "a file can't be read or prepared, or the implementations' macros differ\n");
     }
     else
     {
@@ -961,9 +933,9 @@ int run_preprocessor_benchmark(int argc, char** argv)
         }
         read_limit_count *= listing_count;
     }
-    if (tables && file_count != 0 && only != 0)
+    if (tables && file_count != 0 && only == 3)
     {
-        result = pp_benchmark_tables(files, file_count, only);
+        result = pp_benchmark_tables(files, file_count);
         file_count = 0;
     }
     else if (defines && file_count != 0 && only != 0)
@@ -1010,7 +982,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
     {
         fprintf(stderr, "usage: %s [--clang] [--markers] [--history-cost | --guard-cost | --spelling-cost] [--only vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] "
                         "[-E's options] file...\n"
-                        "       %s --tables|--defines [--only vectorized|scalar] path... | --embed bytes\n", argv[0], argv[0]);
+                        "       %s --tables path... | --defines [--only vectorized|scalar] path... | --embed bytes\n", argv[0], argv[0]);
     }
     else
     {
@@ -1049,7 +1021,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
                 {
                     continue;
                 }
-                // The second implementation: the scalar twins, or with --history-cost, --guard-cost and --spelling-cost
+                // The second implementation: pp_define's body scan by its scalar arm, or with --history-cost, --guard-cost and --spelling-cost
                 // the vectorized kernels with their history deferred, without skipping guarded files, or with the
                 // printer's spellings token by token. With --markers, every run is -E's with its line markers.
                 PPBenchmarkSample sample;
@@ -1073,8 +1045,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
                     fprintf(stderr, history_cost ? "deferring the history changed the output token digest\n" : "the read limit changed the output token digest\n");
                     ran = false;
                 }
-                // The warm-up's prints: every run prints the same bytes, with line markers or without (the vectorized
-                // printer and the scalar one, or --spelling-cost's two, at every read limit).
+                // The warm-up's prints: every run prints the same bytes, with line markers or without (both
+                // implementations', or --spelling-cost's two, at every read limit).
                 if (pass == 0 && !have_print_digest)
                 {
                     expected_print_digest = sample.print_digest;

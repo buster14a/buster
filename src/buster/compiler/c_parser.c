@@ -1238,6 +1238,10 @@ struct ParseScalar
     // it read as an expression's, at the argument's first token (BUSTER_PARSE_NONE if none), and its message.
     uint32_t error_follow_token;
     uint8_t error_follow_message;
+    // Before it, where the type name's argument goes on (`counted_by(T n)`): clang's "expected ')'" at that token, its note
+    // at the group's `(`, as ParseBoundsAttribute's (#1842); BUSTER_PARSE_NONE for none, and the `(`.
+    uint32_t error_follow_paren;
+    uint32_t error_follow_open;
     uint8_t error_message;
     uint8_t error_place;
     // Whether the error is a missing `;` that clang's recovery reads past (ParseDiagnostic.resumed).
@@ -1495,7 +1499,7 @@ struct ParseStatementStack
 // What the vector K5 reads of each token's surroundings, a bit per token for 64 tokens: whether its statement context is
 // a block (OPEN_BLOCK or OPEN_BODY), as parse_statement_event reads it (the group around the token, or for a closer of
 // ( [ { the group around its opener); and whether it is a closer whose opener follows `if`, or `while`. The vector K2
-// writes them, and parse_statement_contexts checks them.
+// writes them.
 typedef struct ParseStatementContext ParseStatementContext;
 struct ParseStatementContext
 {

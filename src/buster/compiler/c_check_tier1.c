@@ -374,7 +374,7 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
         uint32_t* place = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)function->instruction_count + 1) : 0;
         const bool copied = !certify || (order != 0 && place != 0 && tier1_schedule_ir_copy(function, scratch, &original));
         Tier1SinkIrStats sink_stats = { 0 };
-        IrError error = copied ? tier1_schedule_ir_sink(function, scratch, order, scalar, &sink_stats) : IR_ERROR_MEMORY;
+        IrError error = copied ? tier1_schedule_ir_sink(function, scratch, order, &sink_stats) : IR_ERROR_MEMORY;
         error = error == IR_OK && certify && sink_stats.trees != 0 && !tier1_schedule_ir_verify(&original, function, order, place) ? IR_ERROR_STRUCTURE : error;
         arena_pop_to(scratch, mark);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
@@ -471,7 +471,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     IrWideResult wide = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const IrCheck check = scalar ? ir_wide_split_scalar(&promoted, &lane->steps[6], scratch, &wide) : ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
+        const IrCheck check = ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
         outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
@@ -482,7 +482,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     {
         IrVectorSplitResult pieces = { 0 };
         const uint32_t piece = ir_typed_vector_piece(target->features);
-        const IrCheck check = scalar ? ir_vector_split_scalar(&wide.function, piece, &lane->steps[6], scratch, &pieces) : ir_vector_split(&wide.function, piece, &lane->steps[6], scratch, &pieces);
+        const IrCheck check = ir_vector_split(&wide.function, piece, &lane->steps[6], scratch, &pieces);
         outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
@@ -493,7 +493,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         // The lane owns these columns, including the borrowed promoted columns when no wide split was needed.
         // No later consumer reads their old operands and no analysis revision has been published. Simplify before
         // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
-        ir_truth_simplify(&wide.function, scalar);
+        ir_truth_simplify(&wide.function);
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
@@ -502,14 +502,14 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         // as the originals were, so that a copied `icmp ne (zext c), 0` is c, the branch's comparison. The result
         // borrows the input's tables, which stay live until the optimizer copies them.
         IrThreadResult threaded = { 0 };
-        const IrCheck check = ir_thread(&wide.function, &lane->steps[6], scratch, scalar, &threaded);
+        const IrCheck check = ir_thread(&wide.function, &lane->steps[6], scratch, &threaded);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
         if (stage == CHECK_TIER1_COMPILED && threaded.rounds != 0)
         {
             wide.function = threaded.function;
-            ir_truth_simplify(&wide.function, scalar);
+            ir_truth_simplify(&wide.function);
         }
     }
     if (stage == CHECK_TIER1_COMPILED)
@@ -517,7 +517,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         // #1382's bounded, total scalar arms become selects before any retained analysis is built. The result
         // borrows immutable tables from the promoted/wide input; all stay live until the optimizer copies them.
         IrIfConvertResult converted = { 0 };
-        const IrCheck check = ir_if_convert(&wide.function, &lane->steps[6], scratch, scalar, &converted);
+        const IrCheck check = ir_if_convert(&wide.function, &lane->steps[6], scratch, &converted);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
@@ -556,7 +556,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0)
     {
         IrVectorizeResult vectorized = { 0 };
-        const IrVectorizeOptions options = { .target = lane->vectorize, .scalar = scalar };
+        const IrVectorizeOptions options = { .target = lane->vectorize };
         const IrCheck check = ir_vectorize_loops(&wide.function, &options, &lane->steps[10], scratch, &vectorized);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, NULL);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
@@ -581,7 +581,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 && !input->summary)
     {
         IrUnrollOptions options = ir_unroll_options();
-        options.scalar = scalar;
         IrUnrollResult unrolled = { 0 };
         const IrCheck check = ir_optimize_unroll(&wide.function, &lane->steps[11], scratch, options, &unrolled);
         const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
@@ -632,7 +631,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
 static CheckTier1Outcome check_tier1_unroll_own(CheckTier1Lane* lane, bool scalar, bool certify, const CheckTier1Fault* fault, IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
     IrUnrollOptions options = ir_unroll_options();
-    options.scalar = scalar;
     IrUnrollResult unrolled = { 0 };
     const IrCheck check = ir_optimize_unroll(&passes->optimized.function, &lane->steps[11], &lane->scratch, options, &unrolled);
     const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
@@ -848,6 +846,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,
+            // The optimized function's dominator tree (#2611), current for the planned revision (ir_verified_current).
+            .dominators = &analysis.dominators,
             .certify = certify,
             .sources = sources,
         };

@@ -173,6 +173,11 @@ static ImportResult foreign_link_unwind_references(const ForeignLink* output, co
     {
         Elf64_Rela relocation;
         memcpy(&relocation, entries.pointer + r * sizeof(Elf64_Rela), sizeof(relocation));
+        const uint32_t type = (uint32_t)ELF64_R_TYPE(relocation.r_info);
+        if (relocation.r_addend == 0 || type == R_X86_64_NONE)
+        {
+            continue;
+        }
         const uint64_t index = ELF64_R_SYM(relocation.r_info);
         const SymbolId target = index < object->symbol_count ? object->symbols[index] : 0;
         const AtomId atom = link->symbols.atom[target];
@@ -182,13 +187,13 @@ static ImportResult foreign_link_unwind_references(const ForeignLink* output, co
         {
             changed = output->objects[owner].section_atoms[frame->section] == atom && frame->plan.bytes.length != frame->plan.old_length;
         }
-        if (changed && relocation.r_addend != 0 && ELF64_R_TYPE(relocation.r_info) != R_X86_64_NONE)
+        if (changed)
         {
             result = import_fail(IMPORT_ERROR_UNSUPPORTED, r * sizeof(Elf64_Rela));
             result.section = section;
             result.relocation = (uint32_t)r;
             result.symbol = (uint32_t)index;
-            result.type = (uint32_t)ELF64_R_TYPE(relocation.r_info);
+            result.type = type;
         }
     }
     return result;

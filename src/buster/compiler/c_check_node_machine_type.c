@@ -406,7 +406,7 @@ static inline __attribute__((always_inline)) void node_machine_record(NodeMachin
 }
 
 // Record `r`'s value from `value`: into its columns where they hold it whole (node_machine_record_value gives it back
-// field for field: at most one of its integer, offset and floating value is no zero), and else into `wides`.
+// field for field: node_machine_whole), and else into `wides`.
 static void node_machine_put_value(NodeMachine* machine, uint32_t r, const CheckValue* value)
 {
     NodeMachineColumns* columns = machine->columns;
@@ -420,8 +420,7 @@ static void node_machine_put_value(NodeMachine* machine, uint32_t r, const Check
     const bool rare = high != 0 || value->imaginary_storage[0] != 0 || (value->imaginary_storage[1] & 0xffffu) != 0 || value->overload_head != 0 ||
                       value->bit_width != 0 || value->fault != CHECK_FAULT_NONE || value->fault_node != 0 || value->object_bit_offset != 0 ||
                       (uint32_t)value->category > 0x03u || (uint32_t)kind > 0x07u;
-    const uint32_t fields = (low != 0) + (offset != 0) + floating;
-    const bool whole = !rare && fields <= 1;
+    const bool whole = !rare && node_machine_whole(kind, low, offset, floating);
     columns->value_types[r] = value->type;
     columns->value_flags[r] = value->flags;
     columns->objects[r] = value->object;
@@ -575,7 +574,7 @@ static bool node_machine_discard(NodeMachine* machine, uint32_t r, uint32_t node
     const CheckConstantKind constant_kind = (CheckConstantKind)((standing >> 2) & 0x07u);
     const uint8_t kind = (uint8_t)(columns->words[a] >> 16);
     const bool taken = (wide == NULL || wide->overload_head == 0) && graph->types != NULL && graph->types[node] == BUSTER_TYPE_VOID &&
-                       graph->overload_candidate_count == 0 && (standing & 0x03u) == CHECK_RVALUE && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION &&
+                       !machine->overloads && (standing & 0x03u) == CHECK_RVALUE && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION &&
                        kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR && kind != BUSTER_TYPE_KIND_COMPLEX;
     const CheckConversion none = { 0 };
     if (taken && wide == NULL && (kind != BUSTER_TYPE_KIND_BIT_INT || constant_kind == CHECK_CONSTANT_NONE))
@@ -1201,11 +1200,12 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
 
 // Whether call record `r` (node `node`, callee record `a`) has a callee with semantics of its own, which the machine
 // leaves to the pipeline (docs/node-machine.md, "T: bind and type"): a library builtin's call that the catalogue folds or
-// computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library), any call in a unit with overload sets, a callee without a prototype
-// or of another convention than System V's (what check_lower_convention_call refuses, and the conventions that keep more
-// registers), more arguments than Tier 0's calls take, or a callee that returns twice (check_lower_calls_twice's and
-// check_lower_indirect_twice's, which the lowering marks its function for). The census refuses before it the callees
-// whose attributes or names the warnings read (node_census_callee).
+// computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library) and any the reader marked for one in a
+// unit with a rename pragma (node_machine_renames), any call in a unit with overload sets (node_machine_overloads), a
+// callee without a prototype or of another convention than System V's (what check_lower_convention_call refuses, and
+// the conventions that keep more registers), more arguments than Tier 0's calls take, or a callee that returns twice
+// (check_lower_calls_twice's and check_lower_indirect_twice's, which the lowering marks its function for). The census
+// refuses before it the callees whose attributes or names the warnings read (node_census_callee).
 static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a)
 {
     const NodeMachineColumns* columns = machine->columns;
@@ -1213,7 +1213,7 @@ static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, 
     const TypeTable* types = machine->types;
     const uint32_t member = graph->members != NULL ? graph->members[node] : 0;
     const TypeId function = node_machine_callee_function(machine, a);
-    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && node_machine_call_library(machine, r, node)) || graph->overload_candidate_count != 0 || function == 0 ||
+    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && (machine->renames || node_machine_call_library(machine, r, node))) || machine->overloads || function == 0 ||
                    columns->argument_counts[r] > BUSTER_TIER0_MAX_CALL_ARGUMENTS;
     refused = refused || (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 ||
               type_function_abi_kind(types, function) != TYPE_FUNCTION_ABI_SYSV || type_function_has_parameter_abis(types, function);

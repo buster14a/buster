@@ -206,16 +206,14 @@ static uint32_t check_transition_static(const CheckGraph* graph, const CheckStre
 }
 
 // Each node's static word before the node order, which no node's answer changes (check_transition_static), and a vector
-// member's (CheckGraph.vector_members) BUSTER_CHECK_TRANSITION_OTHER. The vector path takes 16 nodes at a time: their
-// operators, a call's argument count and member by masked loads, the system-header bit by a gather of the 4 bytes from each
-// token's own, where they lie within the tokens' array (and one at a time where they don't); the scalar path (`scalar`) a
-// node at a time, its twin.
-static void check_transition_statics(const CheckGraph* graph, const CheckStream* stream, uint32_t* statics, bool scalar)
+// member's (CheckGraph.vector_members) BUSTER_CHECK_TRANSITION_OTHER. It takes 16 nodes at a time: their operators, a call's
+// argument count and member by masked loads, the system-header bit by a gather of the 4 bytes from each token's own, where
+// they lie within the tokens' array (and one at a time where they don't); the nodes past the last 16 one at a time.
+static void check_transition_statics(const CheckGraph* graph, const CheckStream* stream, uint32_t* statics)
 {
-    (void)scalar;
     const uint32_t count = graph->count;
     uint32_t node = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && count - node >= 16; node += 16)
+    for (; count - node >= 16; node += 16)
     {
         const __m512i op = _mm512_loadu_si512(graph->ops + node);
         const __mmask16 call = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_CALL));
@@ -847,7 +845,7 @@ static __attribute__((noinline)) void check_transition_verify(TypeTable* types, 
         argument_conversions[i] = stream->argument_conversions[offset + i];
     }
     const uint32_t interned = types->types.count;
-    check_graph_guarded_node(types, graph, stream, node, arguments, scratch, false, NULL);
+    check_graph_guarded_node(types, graph, stream, node, arguments, scratch, NULL);
     stream->statistics.scalar_nodes -= 1;
     const CheckValue checked = check_stream_value(stream, node);
     bool equal = check_transition_value_equal(&value, &checked) && memcmp(&conversions, stream->conversions + node, sizeof(conversions)) == 0 &&
@@ -883,7 +881,7 @@ static __attribute__((noinline)) void check_transition_flush(TypeTable* types, c
     if (batch->count == 1)
     {
         CheckTransitionMiss* miss = batch->misses;
-        check_graph_guarded_node(types, graph, stream, batch->nodes[0], arguments, scratch, false, miss->keyed ? &miss->guards : NULL);
+        check_graph_guarded_node(types, graph, stream, batch->nodes[0], arguments, scratch, miss->keyed ? &miss->guards : NULL);
         check_transition_missed(table, graph, stream, classes, batch->nodes[0], miss, NULL);
     }
     else if (batch->count != 0)
@@ -980,7 +978,7 @@ static __attribute__((noinline)) void check_transition_other(CheckTransitionRun*
     else
     {
         check_transition_flush(run->types, graph, stream, table, run->classes, batch, run->arguments, run->scratch);
-        check_graph_guarded_node(run->types, graph, stream, node, run->arguments, run->scratch, false, miss->keyed ? &miss->guards : NULL);
+        check_graph_guarded_node(run->types, graph, stream, node, run->arguments, run->scratch, miss->keyed ? &miss->guards : NULL);
         check_transition_missed(table, graph, stream, run->classes, node, miss, run->words);
     }
 }
@@ -1006,7 +1004,7 @@ static __attribute__((noinline)) bool check_graph_transitions(TypeTable* types, 
     else
     {
         batch->count = 0;
-        check_transition_statics(graph, stream, statics, false);
+        check_transition_statics(graph, stream, statics);
     }
     CheckTransitionRun run = {
         .types = types,

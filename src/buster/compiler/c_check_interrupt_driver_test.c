@@ -13,8 +13,8 @@
 // sizeof, and in the operands the reader's evaluator alone reads: a typeof's, a constant array bound's), and
 // -Wexcessive-regsave in interrupt service routines and no_caller_saved_registers functions, with its notes (a builtin's
 // at its first use), its order among nested calls, and its options and pragmas; the unit's later diagnostics after a
-// handler's or a direct call's error. Then a definition's -c, which Tier 0's handler frame compiles
-// (check_program_interrupt), a variadic one's too.
+// handler's or a direct call's error; six such units with each token at every lane of the 64-token scans (#2924).
+// Then a definition's -c, which Tier 0's handler frame compiles (check_program_interrupt), a variadic one's too.
 
 // Keeps `text`'s diagnostic lines, as check_test_diagnostic_lines does, and those of no place ("error: ...").
 static bool check_test_interrupt_lines(const char* text, char* lines, size_t capacity)
@@ -377,6 +377,54 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
         }
         free(expected);
     }
+    // The scans of 64 tokens at a time (#2924): the redeclaration marks' declaring tokens and the evaluator's calls'
+    // closers. Each unit after a function of 0 to 63 empty statements, so that each of its tokens falls at every lane of a
+    // block, against clang. In a unit with links (a hidden block's declaration, then a file-scope one), a redeclaration
+    // inheriting its routine's mark from the declaration before it, and a block's routine called in its block.
+    static const char* const swept[] = {
+        "void q(void); void g(void) { { __attribute__((no_caller_saved_registers)) void q(void); } } void q(void); __attribute__((interrupt)) void h(void *p) { q(); }\n",
+        "void f(void *p); void g(void) { { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { f(0); }\n",
+        "void q(void *p); void g(void) { { void q(void *); } } void q(void *p); __attribute__((interrupt)) void f(void *p); void f(void *p); void k(void) { f(0); }\n",
+        "void f(void *p); void g(void) { { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { { __attribute__((interrupt)) void f(void *); f(0); } }\n",
+        "int g(void); __attribute__((interrupt)) void k(void *f) { typeof(g()) y = 0; int b[sizeof(g())]; (void)y; (void)b; }\n",
+        "__attribute__((interrupt)) void h(void *f); int a[sizeof(h(0))];\n",
+    };
+    char padded[1024];
+    uint32_t sweeps = 0;
+    bool swept_same = expected_lines != NULL && actual_lines != NULL;
+    for (uint32_t unit = 0; swept_same && unit < BUSTER_ARRAY_LENGTH(swept); unit += 1)
+    {
+        for (uint32_t pad = 0; swept_same && pad < 64; pad += 1)
+        {
+            int length = snprintf(padded, sizeof(padded), "void pad(void) {");
+            for (uint32_t i = 0; i < pad; i += 1)
+            {
+                padded[length++] = ';';
+            }
+            length += snprintf(padded + length, sizeof(padded) - (size_t)length, "}\n%s", swept[unit]);
+            const bool made = parse_test_write(source, padded, (size_t)length);
+            char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL };
+            char* expected = NULL;
+            const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+            arguments[0] = (char*)executable;
+            char* actual = NULL;
+            const int status = made ? check_test_driver_spawn(arguments, &actual) : -1;
+            swept_same = expected != NULL && actual != NULL && check_test_interrupt_lines(expected, expected_lines, LINES) &&
+                         check_test_interrupt_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0 &&
+                         (status != 0) == (oracle != 0);
+            if (!swept_same)
+            {
+                char description[4096];
+                snprintf(description, sizeof(description), "interrupt sweep %u, %u empty statements first: status %d (clang %d), lines\n%s(clang\n%s)", unit, pad,
+                         status, oracle, actual_lines, expected_lines);
+                check_test_expect(test, false, description);
+            }
+            sweeps += swept_same ? 1 : 0;
+            free(expected);
+            free(actual);
+        }
+    }
+    check_test_expect(test, swept_same && sweeps == 64 * BUSTER_ARRAY_LENGTH(swept), "interrupt sweeps: every unit at every lane as clang");
     free(expected_lines);
     free(actual_lines);
     // A definition's code: Tier 0's frame (Tier0Function.interrupt, which check_test_driver_interrupt_handlers runs), as clang

@@ -282,8 +282,8 @@ It then sets `BUSTER_HOSTED_OFFLINE`, `BUSTER_CI_CACHE` and
   runtime measurement before extracting its tree, including `src/luac.c`.
   The hosted code-size qualification consumes that tree and the frozen
   SQLite amalgamation with `measure-tier1-programs --sizes-only
-  --check-code-size=lua`. It validates both reports and enforces the Lua
-  bound, reusing the row's existing compiler with no timing or 9700X work.
+  --check-code-size`. It validates both reports and enforces both bounds
+  (#1116's Lua one and #2646's SQLite one), reusing the row's existing compiler with no timing or 9700X work.
 - A single-job workflow (`build.yml`, an empty `artifact-name`) is its own
   preparation. It restores the same caches and runs `prepare` itself.
 

@@ -3,7 +3,7 @@
 //
 // Sparse scalar proofs for test-check-debug (#1114), included after c_check_tier1.c. Each expected cell gives the
 // actual whole-value carrier before a record: register 0..31, one exact frame displacement, literal bytes or NONE.
-// The complete constructor, CFG fixed point and incremental count/fill publisher all run against these tables.
+// The complete constructor, CFG fixed point and incremental range publisher all run against these tables.
 // Final-order arrays include the driver's terminal record_order[count] == count sentinel.
 
 #define BUSTER_CHECK_DEBUG_VALUE_MEMORY(offset) (UINT32_C(0x40000000) | (uint16_t)(offset))
@@ -16,15 +16,15 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
     _Alignas(64) uint8_t storage[32768] = { 0 };
     Arena scratch = { .base = storage, .capacity = sizeof(storage) };
     CheckTier1DebugValues proof = { 0 };
-    EmittedLocalRange locations[128] = { 0 };
+    _Alignas(64) EmittedLocalRange locations[128] = { 0 };
+    Arena output = { .base = (uint8_t*)locations, .capacity = sizeof(locations) };
+    CheckTier1Debug result = { 0 };
     uint32_t actual[128];
     memset(actual, 0xff, sizeof(actual));
     const uint64_t cells = (uint64_t)function->local_count * emitted->code.count;
     bool valid = cells <= BUSTER_ARRAY_LENGTH(actual) && check_tier1_debug_values(function, ir, emitted, order, NULL, NULL, &scratch, &proof);
-    const uint64_t count = valid ? check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, NULL) : 0;
-    valid = valid && count <= BUSTER_ARRAY_LENGTH(locations);
-    valid = valid && check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, locations) == count;
-    for (uint64_t k = 0; valid && k < count; k += 1)
+    valid = valid && check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, &output, &result);
+    for (uint32_t k = 0; valid && k < result.local_range_count; k += 1)
     {
         const EmittedLocalRange location = locations[k];
         valid = location.local < function->local_count && location.begin < location.end && location.end <= emitted->code.count;
@@ -54,6 +54,63 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
     }
     check_debug_test_expect(tally, valid && memcmp(actual, expected, cells * sizeof(uint32_t)) == 0,
                             "sparse scalar ranges match independently specified whole-value carriers", description);
+    if (valid && result.local_range_count != 0 && result.local_range_count < BUSTER_ARRAY_LENGTH(locations))
+    {
+        // One existing range, followed by exactly enough room for this function's ranges.
+        const uint32_t count = result.local_range_count;
+        locations[0].local = UINT32_MAX;
+        output.length = sizeof(*locations);
+        output.capacity = (count + 1) * sizeof(*locations);
+        result.local_range_count = 1;
+        const bool exact = check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, &output, &result);
+        check_debug_test_expect(tally, exact && result.local_ranges == locations && locations[0].local == UINT32_MAX &&
+                                result.local_range_count == count + 1 && output.length == output.capacity, "debug range suffix fits exactly", description);
+        output.length = sizeof(*locations);
+        output.capacity -= 1;
+        result.local_range_count = 1;
+        const bool short_buffer = check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, &output, &result);
+        check_debug_test_expect(tally, !short_buffer && locations[0].local == UINT32_MAX && result.local_range_count == count, "short debug range suffix fails at the final row", description);
+    }
+}
+
+// A cursor can move across many repeated boundaries in either direction. The pending list keeps the first
+// boundary for each local and keeps an already pending local at its original position.
+static void check_debug_tier1_region_changes(CheckDebugTestTally* tally)
+{
+    const uint8_t locals[] = {
+        5, 5, 1, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 3,
+        4, 6, 2, 2, 6, 2, 6, 2, 6, 2, 6, 2, 6, 2, 3, 7, 8, 7, 9,
+    };
+    uint32_t last[10] = { 0 };
+    uint64_t events[BUSTER_ARRAY_LENGTH(locals)];
+    uint32_t previous[BUSTER_ARRAY_LENGTH(locals)];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(locals); i += 1)
+    {
+        events[i] = ((uint64_t)(i + 1) << 32) | locals[i];
+        previous[i] = last[locals[i]];
+        last[locals[i]] = i + 1;
+    }
+    const CheckTier1DebugValues proof = { .region_events = events, .region_previous = previous };
+    const uint32_t expected[] = { 4, 5, 1, 2, 3, 6, 7, 8, 9 };
+    for (uint32_t direction = 0; direction < 2; direction += 1)
+    {
+        uint8_t queued[10] = { 0 };
+        uint32_t changed[10] = { 0 };
+        CheckTier1DebugValueLive live = { .local_queued = queued, .changed_locals = changed };
+        check_tier1_debug_local_changed(&live, 4);
+        const uint32_t end = BUSTER_ARRAY_LENGTH(locals);
+        check_tier1_debug_region_changes(&proof, &live, direction ? end : 1, direction ? 1 : end);
+        check_tier1_debug_region_changes(&proof, &live, 16, 16);
+        check_debug_test_expect(tally, live.local_count == BUSTER_ARRAY_LENGTH(expected) && memcmp(changed, expected, sizeof(expected)) == 0,
+                                "crossing two vector boundaries queues each local in stable order", direction ? "backward cursor" : "forward cursor");
+    }
+    uint8_t queued[10] = { 0 };
+    uint32_t changed[10] = { 0 };
+    CheckTier1DebugValueLive live = { .local_queued = queued, .changed_locals = changed };
+    const uint32_t middle[] = { 4, 6, 2, 3, 7, 8 };
+    check_tier1_debug_region_changes(&proof, &live, 16, 33);
+    check_debug_test_expect(tally, live.local_count == BUSTER_ARRAY_LENGTH(middle) && memcmp(changed, middle, sizeof(middle)) == 0,
+                            "a preceding boundary outside this interval still queues its local", "unaligned start and one trailing event");
 }
 
 // The static CFG meet alone can hide a stale-iteration bug by discarding a first-trip-absent row. Walk the concrete
@@ -350,6 +407,7 @@ static void check_debug_tier1_values_bindings(CheckDebugTestTally* tally)
     emitted.debug_definitions = NULL;
     check_debug_tier1_values_binding_case(tally, &function, &ir, &emitted, NULL, sequence_entries, sequence_safe, 8, absent,
                                          "without a checked later RHS, old source origins cannot justify stale assignment ranges");
+    check_debug_tier1_region_changes(tally);
     check_debug_tier1_values_fresh(tally);
     check_debug_tier1_values_float_call(tally);
 }

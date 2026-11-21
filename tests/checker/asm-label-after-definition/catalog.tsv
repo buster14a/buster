@@ -1,0 +1,7 @@
+buster-fixtures v1 checker-warnings
+function.c	1	0	1	an asm label after a function definition warns at its string, noted at the definition
+attributes.c	9	0	8	an asm label after a definition warns before the declaration's other late attributes
+objects.c	5	0	5	an asm label after an object definition, not after a tentative one
+repeated.c	3	0	3	repeated labels and declarators after a definition, and a definition that has the label
+blocks.c	2	0	2	block-scope labels before and after a definition
+used.c	2	0	2	a label after a definition and a use warns rather than refusing the use

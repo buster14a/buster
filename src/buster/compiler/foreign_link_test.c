@@ -62,6 +62,7 @@ static const ForeignLinkTestSource foreign_link_test_sources[] = {
         .name = "fl_weak",
         .text =
             ".text\n.weak winner\n.hidden winner\n.type winner,@function\nwinner:\nmov $99,%eax\nret\n.size winner,.-winner\n"
+            ".data\n.weak absent_weak\n.type absent_weak,@object\n.quad absent_weak\n"
             ".section .note.GNU-stack,\"\",@progbits\n",
     },
     {
@@ -85,6 +86,7 @@ static const ForeignLinkTestSource foreign_link_test_sources[] = {
             ".section .rodata\n.type local_value,@object\nlocal_value:\n.long 200\n.size local_value,4\n"
             ".data\n.balign 8\n.globl loser_pointer\n.type loser_pointer,@object\nloser_pointer:\n.quad chosen\n.size loser_pointer,8\n"
             ".globl loser_local_pointer\n.type loser_local_pointer,@object\nloser_local_pointer:\n.quad local_value\n.size loser_local_pointer,8\n"
+            ".weak absent_weak\n.type absent_weak,@function\n.quad absent_weak\n"
             ".section .note.GNU-stack,\"\",@progbits\n",
     },
     {
@@ -183,8 +185,8 @@ static void foreign_link_test_structure(ForeignTestTally* tally, const Foreign* 
                                   (link->symbols.flags[winner] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_HIDDEN,
                         "strong winner retains merged visibility", 0);
     foreign_test_expect(tally, absent != 0 && link->symbols.source[absent] == BUSTER_LINK_SOURCE_NONE &&
-                                  (link->symbols.flags[absent] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK,
-                        "unresolved weak remains weak", 0);
+                                  (link->symbols.flags[absent] & (BUSTER_LINK_SYMBOL_TYPE | BUSTER_LINK_SYMBOL_BINDING)) == (BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_WEAK),
+                        "unresolved weak takes its first typed object's type", 0);
     foreign_test_expect(tally, absent_tls != 0 && link->symbols.source[absent_tls] == BUSTER_LINK_SOURCE_NONE &&
                                   (link->symbols.flags[absent_tls] & (BUSTER_LINK_SYMBOL_TYPE | BUSTER_LINK_SYMBOL_BINDING)) == (BUSTER_LINK_SYMBOL_TLS | BUSTER_LINK_SYMBOL_WEAK),
                         "unresolved weak retains TLS type", 0);

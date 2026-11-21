@@ -26,6 +26,7 @@
 #: cpu 13 0.80 AMD EPYC 9V74 80-Core Processor
 #: cpu 3 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: unmeasured Test deterministic work and growth contracts [1 CPU]
 #: unmeasured Test the caret display against clang
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
@@ -39,6 +40,7 @@
 #: derived Test the C lexer as C++
 #: derived Test the C lexer with C11's raw-string prefixes
 #: derived Test the C lexer with the R and LR raw-string prefixes
+#: unmeasured Test the assembly sink against GNU as
 #: unmeasured Compile the lexer's benchmark unit by Tier 1 on one lane and on four [4 CPUs]
 #: unmeasured Link Tier 1's literal pools with clang's and merge their equal entries
 #: peak 61 Check unity fixture ownership without rebuilding
@@ -188,6 +190,7 @@
 #: peak 91 Test Tier 1 integer truth round trips against native and instruction-shape oracles
 #: peak 187 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: peak 93 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+23.7 Test deterministic work and growth contracts [1 CPU]
 0.0 Check unity fixture ownership without rebuilding
 274.9 Test the foreign inputs [8 CPUs]
 264.8 Check the no-recursion rule on the call graph [8 CPUs]
@@ -291,6 +294,7 @@
 48.1 Test the x86-64 disassembler against GNU tools
 23.7 Check the frozen SQLite source against Clang
 125.0 Test the scalar and AVX-512 assembly frontends
+23.7 Test the assembly sink against GNU as
 0.8 Assemble a .s and a .S file that -c comes before
 12.6 Test generated-code ISA selection and native records
 13.7 Test binding

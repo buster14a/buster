@@ -228,9 +228,12 @@ static bool check_diagnostic_option(String8 option, const char* expected)
 
 #include "c_check_warning_policy.c"
 
-static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, bool* quiet)
+// A floating-point pragma's warning of policy `id` at output token `source`: its command-line severity, and in *quiet
+// whether -w or a system header without -Wsystem-headers hides it (-Wignored-pragmas' empty stack, and #1970's
+// -Wunknown-pragmas: an STDC pragma's state that is no ON, OFF or DEFAULT).
+static uint8_t check_input_fp_warning_policy(Preprocessor* pp, uint32_t source, uint32_t id, bool* quiet)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, CHECK_WARNING_ID_IGNORED_PRAGMA, false, false);
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, false, false);
     pp_history_ensure(pp);
     const bool system = pp_system_level_at(pp, pp_expansion_location(pp, source, pp_history_at(pp, source))) != BUSTER_PP_USER_FILE;
     *quiet = command.quiet || (system && !command.system_headers);
@@ -503,19 +506,19 @@ static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input
     return suppressed ? CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, baseline);
 }
 
-static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
+// The string of the ignored asm label of the declaration at `token`, or BUSTER_CHECK_NONE (#2936): a label after a
+// definition, which check_input_asm_labels drops with -Wignored-attributes' warning there. Its event is published as any
+// other's; the first error's scans (check_diagnostic_first_error, the corpus's) read its place and severity here.
+static uint32_t check_diagnostic_ignored_label(const CheckInput* input, uint32_t token)
 {
     const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) && token < input->token_count ? check_input_attributes_at(input, token) : NULL;
-    uint32_t warnings = 0;
+    uint32_t label = BUSTER_CHECK_NONE;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        if (attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored)
-        {
-            warnings |= CHECK_WARNING_IGNORED_ATTRIBUTES;
-        }
+        label = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && attribute->ignored && label == BUSTER_CHECK_NONE ? attribute->argument_first : label;
     }
-    return warnings;
+    return label;
 }
 
 static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t node)
@@ -682,10 +685,10 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     }
     for (uint32_t at = 0; policies && check_sparse_wide_present(input->attributes) && at < input->token_count && at < first; at += 1)
     {
-        const uint32_t warnings = check_diagnostic_attribute_warnings(input, at);
-        if (warnings != 0 && check_diagnostic_severity(input, at, warnings) >= CHECK_WARNING_ERROR)
+        const uint32_t label = check_diagnostic_ignored_label(input, at);
+        if (label < first && check_diagnostic_severity(input, label, CHECK_WARNING_IGNORED_ATTRIBUTES) >= CHECK_WARNING_ERROR)
         {
-            first = at;
+            first = label;
         }
     }
     for (uint32_t at = 0; policies && input->constant_warnings != NULL && at < input->token_count; at += 1)
@@ -742,6 +745,17 @@ static const char* check_diagnostic_pragma_message(const CheckInputFpPragma* rec
     const char* result = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0 ? "floating-point pragma is not permitted within an expression" :
                          (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 ? "#pragma float_control(pop, ...) failed: stack empty" :
                          check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA);
+    return result;
+}
+
+// The severity of an STDC pragma's state that is no ON, OFF or DEFAULT (#1970): clang's ext_on_off_switch_syntax, a
+// -Wunknown-pragmas extension on by default, its command line's policy (the reader's, check_input_fp_warning_policy) and
+// then a source pragma's at the directive. Ignored for any other record.
+static CheckWarningSeverity check_diagnostic_unknown_state_severity(const CheckInput* input, const CheckInputFpPragma* record)
+{
+    const bool unknown = (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 && !record->warning_quiet;
+    const CheckWarningSeverity result = unknown ? check_diagnostic_severity_id_from(input, record->token, record->source_begin, CHECK_WARNING_ID_UNKNOWN_PRAGMA,
+                                                                                    (CheckWarningSeverity)record->warning_severity) : CHECK_WARNING_IGNORE;
     return result;
 }
 
@@ -804,8 +818,7 @@ static bool check_diagnostic_first_pragma_error_mode(const CheckInput* input, ui
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
         const bool invalid = (record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0;
-        const bool unknown = (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0 &&
-                             check_diagnostic_severity_at(input, record->token, record->source_begin, CHECK_WARNING_UNKNOWN_PRAGMA, false) >= CHECK_WARNING_ERROR;
+        const bool unknown = check_diagnostic_unknown_state_severity(input, record) >= CHECK_WARNING_ERROR;
         const bool empty = (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0 && !record->warning_quiet &&
                            check_diagnostic_severity_id_from(input, record->token, record->source_begin, CHECK_WARNING_ID_IGNORED_PRAGMA,
                                                              (CheckWarningSeverity)record->warning_severity) >= CHECK_WARNING_ERROR;
@@ -1102,6 +1115,12 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
                     .kind = complex ? CHECK_FP_PRAGMA_CX_LIMITED_RANGE : contract ? CHECK_FP_PRAGMA_FP_CONTRACT : CHECK_FP_PRAGMA_FENV_ACCESS,
                     .warnings = impossible ? CHECK_FP_PRAGMA_INVALID_PLACEMENT : CHECK_FP_PRAGMA_UNKNOWN_STATE,
                 };
+                if (!recognized)
+                {
+                    // As the ordinary reader's (check_input_fp_pragmas): -Wunknown-pragmas' command-line policy (#1970).
+                    CheckInputFpPragma* record = records + result->fp_pragma_count - 1;
+                    record->warning_severity = check_input_fp_warning_policy(pp, source + 2, CHECK_WARNING_ID_UNKNOWN_PRAGMA, &record->warning_quiet);
+                }
             }
         }
     }

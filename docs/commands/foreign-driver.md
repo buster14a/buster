@@ -12,7 +12,10 @@ requirements. [Command index](README.md).
   whose `--build-id`, `--eh-frame-hdr`, `--hash-style=gnu`, `-m elf_x86_64`
   and `-z now`/`relro`/`noexecstack`/`text` it takes as what its output is
   already. It writes every kind (#394): static executables (with `libc.a` or
-  without libc, `-static`), static PIEs (`-static -pie`), dynamic PIEs (`-pie`)
+  without libc, `-static`), static PIEs (`-static -pie`), dynamic PIEs (`-pie`),
+  position-dependent dynamic executables (`-no-pie`, #1503: `ET_EXEC` at a
+  fixed address with the interpreter; the last of `-pie` and `-no-pie` counts,
+  `-static` makes either static and `-shared` a library, as lld takes them)
   and shared libraries (`-shared`, `-soname`), with copy relocations and their
   aliases, `__start_`/`__stop_`, `STB_GNU_UNIQUE`, lld's rule for libraries'
   own references, lld's regular symbol table, and a dynamic PIE's own IFUNCs
@@ -56,3 +59,9 @@ requirements. [Command index](README.md).
   general- and local-dynamic TLS accesses still relax. The driver tests cover
   definition-only, ordinary-call and mixed TLS-access links, with and without
   debug information, on both paths and all lane counts, against GNU ld and lld.
+  Its path tests link `-pie -no-pie` as a position-dependent executable (at
+  `BUSTER_EXECUTABLE_BASE`, with `.dynamic` and no `DF_1_PIE`, RELR or
+  RELATIVE relocation) and `-no-pie -pie` as a PIE, by both paths and every
+  lane count into the same bytes, which run; test-checker-driver's
+  compatibility cases compare a `-fno-pie` object's mixed `-no-pie` link,
+  copies and all, with clang and GNU ld's.

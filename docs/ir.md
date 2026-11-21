@@ -389,13 +389,12 @@ than U64 is a structural error).
 address becomes a `ptr`, with its size and location; a call with a result object
 (`call_result_objects`) gets the object's slot address as its destination and the
 object's size as its `result_size`. A call that passes the function's own hidden
-pointer on (#2684, `BUSTER_TIER0_RESULT_HIDDEN`) returns into the function's one
-forwarding slot, past the dispatch slot, of `hidden_size` bytes aligned to
-`hidden_alignment`, which is then copied where parameter 0 points, by a `COPY`'s
-pieces or, past 256 bytes, a call of the front end's `memmove` (`hidden_copy`), as
-the lowering's copy of a call's object was: Tier 1 takes a
-call's destination as a frame object's address alone (`tier1_select_call_abi`), so
-its code keeps the copy that Tier 0's and the interpreter's leave out. An object parameter is a `ptr` whose bytes the
+pointer on (#2684, `BUSTER_TIER0_RESULT_HIDDEN`) has parameter 0's pointer as its
+destination (`inttoptr` of its slot's load), of `hidden_size` bytes, and copies
+nothing, as Tier 0's and the interpreter's call doesn't: Tier 1 takes a destination
+that is a pointer value, no frame object's address, as the call's last effective
+use, which the call's general moves put in rdi (#2820,
+`tier1_select_call_destination`). The front end's `hidden_copy` is no longer read. An object parameter is a `ptr` whose bytes the
 preheader copies into its object, as `COPY` copies (below); a result in
 registers (`result_size`) returns `inttoptr` of its RETURN's address, and the
 IR's result type is `ptr`. A function with an object parameter or an aggregate

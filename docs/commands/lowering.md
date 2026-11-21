@@ -281,6 +281,15 @@ and values whose first operand is an `&&` or `||`, of every scalar type (NaN
 among the doubles), a first operand the program knows, and chains of 17
 operands. The node templates' entries are the tasks' there.
 
+A third program is for a condition the program must not know (#3028): an
+lvalue at an absolute address (`if (*(int *)4096)`), whose truth is its
+value's, which the program loads. Its address says nothing of it
+(`check_action_truth`). Twenty forms each keep the lvalue's load in their
+entries: an `if`'s condition, the first operand of `&&` and of `||`, a
+conditional's condition, of each scalar class, through a member and a
+subscript, and the forms that read before the fix too. Two keep none: an
+array at an absolute address decays to it, and `&` of the lvalue is it.
+
 ## Node machine census (#2524)
 
 `./build/compiler measure-node-machine [--list N] [preprocessor options] file...`
@@ -316,7 +325,9 @@ unevaluated operands too; its counts are the evaluated nodes, the inventory's.
   operand with an effect, constants (a narrowing conversion that changes one, a
   division by zero, a shift out of range, a null dereference, a subscript past
   its array, a comparison outside its operand's range in the comparison's
-  common type, a non-literal null), parentheses (an assignment as a condition,
+  common type, a null pointer constant that is no literal, by the compiler's own
+  test of an assignment's, a conversion's and an initializer's source and of a
+  call's arguments), parentheses (an assignment as a condition,
   a comparison in a bitwise operator, `!` before a comparison, a shift of a sum,
   a chained comparison, a shift in a truth context), a discarded value without
   an effect or a discarded call of a `warn_unused_result`, `const` or `pure`
@@ -355,7 +366,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -633,10 +644,8 @@ takes its entries.
     compact=N identifiers=N literals=N`: the lean front reads the first and
     the last). `--list N` lists the first differences and the taken
     expressions the front missed. A difference fails the command.
-  - **Where it runs:** beside the coded walk over a whole unit, which is the
-    reader's vector path. A unit the scalar walk reads (a build without the
-    vector paths, `BUSTER_HOST_ARCH=x86-64`; the parser's scalar option) or
-    that is read by parts has no front, and the report says so: `node-shadow:
+  - **Where it runs:** beside the coded walk over a whole unit. A unit that is
+    read by parts has no front, and the report says so: `node-shadow:
     front not run in N of M units`. `test-checker` then expects it to have
     made nothing.
   - Every shadow run prints `node-shadow: walk ticks classes=N prepare=N
@@ -672,7 +681,10 @@ takes its entries.
     body: taken N, context N) declarations'-discards-not-run=N compared=N
     (records N) differences=0 (range 0, refusal 0)
     taken-expressions-the-front-left=N the-front's-not-run=N` and
-    `reader-time T objects=N differences=0 library-calls=N differences=0`.
+    `reader-time T objects=N differences=0 library-calls=N differences=0
+    the-program's-own-objects=N objects-a-pragma-labelled=N` (the last two
+    are counted apart and compared as [their
+    section](#the-tests-holes-and-the-objects-side-2850) says).
     `never-lowered` are the expressions it typed that the lowering never
     popped: in a body the lowering lowers (a constant's context, a condition
     the program folds) or in one the selection dropped.
@@ -825,6 +837,20 @@ takes its entries.
   window** (`PPOptions.node_reader`'s bit 128, with `--front-window`'s and
   `--front-tests`' bits): their loop 64 records a step over the records the
   kernel has just made. [Its section](#the-tests-on-the-window-2850) has it.
+- `--window-contexts` makes **C's answers on that window** too
+  (`PPOptions.node_reader`'s bit 4, with `--window-tests`' bits): each
+  record's template, context and target, 64 records a step, beside C on T's
+  columns at reader time. [Its section](#c-on-the-window-2850) has it, and
+  [a call's](#a-calls-arguments-in-the-kernel-and-cs-call-2850).
+- `--window-rows` makes **X's rows on that window** too
+  (`PPOptions.node_reader`'s bit 512, with `--window-contexts`' bits): each
+  evaluated record's entries' kinds, classes and values, 64 records a step,
+  beside X on T's columns at reader time. [Its
+  section](#xs-rows-on-the-window-2850) has it. And, for each expression
+  whose tape they make, **a summary node's side facts**: its references and
+  its root's return fact, beside the program's own walks after the pipeline
+  ([their section](#a-summary-nodes-side-facts-on-the-window-2850));
+  `--no-window-summaries` (bit 4096) leaves them out, for their cost.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -894,7 +920,7 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's twelve fixtures run again with its tests at reader time
+The census's eighteen fixtures run again with its tests at reader time
 (`node_tests_test_fixture`: `--front-tests` with `--verify`, then the same
 with the lean front's window and `--window-tests`, the machine's own form
 beside the census's code, whose bits, root's kinds and spans must be its;
@@ -961,7 +987,16 @@ each place of a block; and, with `-Wtype-safety`, every call kept), the
 twelfth (two functions with clang's `no_builtin`, one naming `memset` and one
 naming nothing, between three without it: the unit's calls are made, and a
 plain library builtin is its declaration's call in the function whose
-attribute covers it and has its own semantics in the others), the seventh's
+attribute covers it and has its own semantics in the others), the
+thirteenth to the eighteenth ([what the compiler's own tests had and no
+corpus](#the-tests-holes-and-the-objects-side-2850): a pointer's ordered
+comparison with an integer and what converts to a pointer, a declaration
+that inherits a list of conditions, a declarator's warning in its
+initializer's tokens, an automatic object's asm label, a `return` under a
+cleanup, a sum of 72 operands; a value in a segment's address space; a
+unit with x86's `interrupt`; one that spells `noderef`; the pointer's
+comparisons under the sign comparison's warning; and with every warning
+off), the seventh's
 function `v` (the loop's rules of a pointer: its cast to void, as a
 statement's discard and written, to a pointer and to a pointer to void,
 left out; to a 64-bit integer, listed with nothing; to a 32-bit one, a bool
@@ -1529,8 +1564,10 @@ kernel's run in place (`node_facts_window_run`).
   may be void, an array). A record has its type's word whichever path wrote
   it.
 - **The records' bytes** (`node_tests_window_bytes`), sixteen records a
-  step: four gathers from the kernel's 64-byte records (the word, the flags,
-  the object, the standing), one of a name's declaration's line's byte
+  step: four columns of the kernel's 64-byte records (the word, the flags,
+  the object, the standing) by sixteen loads and twelve permutes ([the
+  columns](#the-records-bytes-columns-2850)), and one gather of a name's
+  declaration's line's byte
   (`NodeCensusReader.line_bytes`, which the census's code makes at the
   line's first leaf). Two byte columns come out: the type's byte and the
   value's (a constant a test may read, a bit-field, a declaration the tests
@@ -1582,7 +1619,11 @@ kernel's run in place (`node_facts_window_run`).
   they have no aggregate and no constant but an address's or such an
   integer's, which the callee's type's row says each parameter takes
   unchanged (`BUSTER_NODE_FACTS_TAKES`: no enumeration's type, no floating
-  one, no integer's but a plain one of 8 to 64 bits). The callee's part is a
+  one, no integer's but a plain one of 8 to 64 bits). The calls' second pass
+  takes the 1 away where an argument may be a null pointer constant that is
+  no literal: an integer constant without the literal's flag whose own
+  parameter's conversion's type is a pointer's (the arguments' rule's
+  answer's `BUSTER_NODE_FACTS_ARGUMENT_QUIET`). The callee's part is a
   bit of its declaration's line's byte (`BUSTER_NODE_TESTS_LINE_LOUD`, the
   census's code's fact of the declaration, made at the line's first leaf
   where the leaf's type's row says it calls), which a name's leaf has in its
@@ -1660,17 +1701,27 @@ The report adds:
   not-their-payloads'=0`: the operators the rule left out, of every record
   the loop swept; with `--verify`, those of them in an expression the tests
   ran on, each checked (a swept record of an expression without tests has
-  none to check), and the integer constants whose record says its value;
+  none to check), and the integer constants whose record says its value
+  (one folded from a floating constant is a wide value, which says none);
 - `node-shadow: own tests calls-left-out=N checked=N of-them-with-a-test=0
   of-them-with-a-loud-argument=0 casts-over-one=N
-  callees-asked-for-their-result=N`: the calls the rule left out, of every
-  record the loop swept; with `--verify`, those of them in an expression the
-  tests ran on, each checked twice; the casts to void in the asks' list;
-  and the declarations asked whether they want their result;
+  callees-asked-for-their-result=N
+  initializers-asked-for-a-null-constant=N`: the calls the rule left out, of
+  every record the loop swept; with `--verify`, those of them in an
+  expression the tests ran on, each checked twice; the casts to void in the
+  asks' list; the declarations asked whether they want their result; and
+  the initializers' roots asked of the census's code for a null pointer
+  constant that is no literal (an integer constant without the literal's
+  flag whose object's type is a pointer's);
 - `node-shadow: own tests casts-left-out=N checked=N of-them-with-a-test=0`:
   the casts the loop left out for their own type, of every record it swept;
   with `--verify`, those of them in an expression the tests ran on, each
   checked;
+- `node-shadow: own tests pointers'-ordered-comparisons-left-out=N
+  checked=N of-them-with-a-test=0`: the ordered comparisons the loop left
+  out for two operands that are each a pointer once converted, of every
+  record it swept; with `--verify`, those of them in an expression the
+  tests ran on, each checked;
 - `node-shadow: own tests tree's-tests'-records-no-listed-operator-has
   checked=N of-them-with-a-test=0
   lists'-words-with-a-bit-past-their-expression=0`: with `--verify`, the
@@ -1683,14 +1734,987 @@ The report adds:
 
 `--list N` lists the first differences (`node-tests: window difference`),
 and a difference, an operator left out with a test, a call left out with a
-test or with a loud argument, a cast left out with a test, a value said that
-is not its payload's, a
+test or with a loud argument, a cast or a pointers' comparison left out
+with a test, a value said that is not its payload's, a
 record left to no listed operator with a tree's test, a list's bit past its
 expression, or an expression with nothing listed and another verdict fails
 the command.
 
-`test-checker` runs it on the census's twelve fixtures, as "The shadow" above
+`test-checker` runs it on the census's eighteen fixtures, as "The shadow" above
 has, and on the window's test of values without room at a chunk's end: the
 tests run on the 8,259 expressions the kernel makes in place there, and on
 none of the 64 that the ends cut. [The
 design](../node-machine.md#the-tests-on-the-window) has what it measured.
+
+### C on the window (#2850)
+
+`./build/compiler measure-node-machine --shadow --window-contexts [--passes 0] [--list N] [preprocessor options] file...`
+is the next part of step 2 of [the one-core path](../one-core-path.md): C's
+answers made from the window once the kernel has made a chunk's records in
+place and the tests' sweep has made their bytes. C gives every evaluated
+record its template, its context and its target, and refuses an expression
+with an evaluated record that has no template. The option implies
+`--window-tests`. C on T's columns at reader time (`node_machine_contexts`, a
+record at a time from each root down) is its reference. No compile takes any
+of it. The code is `c_check_node_machine_window.c`
+(`node_contexts_window_chunk` and what it calls), behind a hook after the
+tests' chunk (`node_facts_window_run`).
+
+- **What it decides.** An expression the kernel placed and the reference's C
+  ran on is decided on the window unless one of its records is listed: a
+  call whose record doesn't say every argument's conversion is made, or
+  whose callee is no name's leaf and has an object ([a call's
+  arguments](#a-calls-arguments-in-the-kernel-and-cs-call-2850)); an `&&`,
+  an `||`, a `?:` or a comma that the masks don't take ([an operator's
+  value and a comma](#an-operators-value-and-a-comma-on-the-window-2850));
+  an update the masks don't take; a selection; a division or a remainder by
+  an integer constant
+  (the tasks' rule for a power of two reads the divisor's value); a record
+  whose value the columns don't hold whole (a bit-field's, a faulted
+  constant's and an overload set's are); a cast to a union; a leaf with an
+  effect, of void's type, or read for its address without being an address
+  constant; and any operator the loop has no case for. C on T's records
+  decides a listed one, as before. Listing is always safe; a refusal must be
+  C's own, so each of C's terms is in the loop unless what makes the
+  records implies it (the file's comments name what does).
+- **A consumer's distance.** The front writes each operand's record its
+  consumer's distance among the window's records (`NodeFront.window_ups`,
+  beside `ups` in `node_front_add`: one store an operand, with the window
+  alone). `ups` is the distance in the unit's postorder, which is another
+  where a chunk's end took records from between a control's root and its
+  operand; it says whether a record has a consumer yet.
+- **The records' bytes.** Where C runs, the tests' sweep
+  (`node_tests_window_bytes`) makes five byte columns more from its columns:
+  the type's word's low three bytes (its class, its facts and its kind), the
+  standing's byte, and a byte of what C's rules read of the flags and the
+  object (`BUSTER_NODE_CONTEXTS_*`: an effect, a vector's element, whether
+  the record has an object, whether a name's leaf's object has a symbol of
+  its own, and whether the kernel placed the record). The symbol's bit is
+  the declaration's line's byte's (`BUSTER_NODE_TESTS_LINE_SYMBOL`), made at
+  the line's first leaf.
+- **The loop** (`node_contexts_window_loop`), 64 records a step, from the
+  chunk's last block to its first, so that a consumer's template is made
+  before its operands read it:
+  - a record's context by its consumer's operator's class and its own place
+    among the operands (`NodeContextsTables.classes`, one byte permute of two
+    registers by the operator's code; the consumer's bytes through its
+    distance forward, from this block and the block after);
+  - its template by masks, C's rules (`node_machine_classify`'s) term by
+    term: what every operator shares first (a type no template takes, an
+    atomic lvalue's read, a folded constant), then a case an operator's
+    class, over the record's own bytes, its context and its two operands'
+    bytes. C reads T's conversion of each operand; an operand's own type
+    stands for it where the two say the same (an array's and a function's
+    are a pointer's; two operands of a number's class convert to a
+    number's). The template's number is four masks, one a bit;
+  - whether its consumer evaluates it and where its target comes from, a
+    table of 64 rows by the consumer's template and the place
+    (`NodeContextsTables.rows`, one byte permute): T's conversion of the operand, the
+    consumer's own type (a wrapper's operand and a store's value: a cast to
+    an atomic type converts its operand to the value type and has the atomic
+    one), long (a pointer's index), or none;
+  - the records under one that isn't evaluated, taken out by its subtree's
+    size (the front's `sizes`), a record at a time: few have any.
+- **Three things a record at a time.** A pointer's stride, for a pointer's
+  sum and a subscript: its type's row's (`node_contexts_stride`), or the
+  type table's by a call where the row doesn't hold it. C's rule on T's two
+  conversions themselves (`node_contexts_converted`), where the usual
+  arithmetic conversions make an operand's class and its conversion's
+  differ: a sum or a binary operator of a number's class with an operand
+  whose class is no number's and no pointer on either side (a 128-bit
+  integer beside a double is converted to it). And a consumer past the block after or a first
+  operand before the block before, read by loads into a block of the loop's
+  frame and blended in by one masked load a column (a second operand is its
+  operator's record's neighbour for every operator with a case).
+- **The targets** (`node_contexts_window_targets`), 16 records a step: the
+  type a source names, one gather from the consumer's record's line, at its
+  conversion of the operand (by the operand's place) or at its own type; or,
+  for a call's argument, from the record's own line, at its conversion's
+  type (`BUSTER_NODE_CONTEXTS_SOURCE_OWN`).
+- **An expression's part** (`node_contexts_window_part`): whether any of its
+  records is listed and whether any evaluated one has no template, each a
+  range of a block's mask read as one word, and its root's target, which is
+  the one the expression is given.
+- **The comparison** (`node_contexts_window_compare`): for each decided
+  expression, its verdict and each of its records: whether it is evaluated,
+  and of an evaluated one its template, its context and its target.
+- **A second run.** The shadow runs the three sweeps again over the same
+  chunk and counts those ticks apart: what the first run's are over them is
+  the chunk's cold start.
+
+The report adds:
+
+- `node-shadow: window contexts expressions=N records=N decided=N (P%)
+  their-records=N (P%) of-them-refused=N differences=0 records-that-differ=0
+  strides-read=N of-them-asked-of-the-type-table=N
+  rules-that-read-the-conversions=N out-of-a-block's-reach=N
+  records-swept=N`: the expressions the kernel placed and the reference ran
+  on; those decided on the window, and of them those C refuses;
+- `node-shadow: window contexts listed, by an expression's first record's
+  reason:` a count a reason (`node_contexts_reason_names`);
+- `node-shadow: window contexts ticks=N (N a record swept, N a record of the
+  decided)`, then by sweep: `the loop`, `the targets`, `an expression's
+  part`, and `the reference's C on the decided expressions`, a record of
+  theirs;
+- `node-shadow: window contexts a second run over the same chunk, not
+  counted`, the same three sweeps' ticks.
+
+`--list N` lists the first differences (`node-shadow: window contexts
+difference`, with the file, the line and the root's token), and a difference
+fails the command.
+
+`test-checker` runs it on the census's eighteen fixtures in their window's
+form, each with its count of decided and refused expressions pinned, and on a
+fixture of its own (`node_contexts_test_fixture`): two functions of 250
+expressions with each rule's cases on both sides, whose decided and refused
+expressions, strides read, rules that read the conversions, loads out of a
+block's reach and listed expressions by reason are pinned. The fixture then
+runs again with `BUSTER_NODE_READER_WINDOW_CONTEXTS_FAULT`
+(`PPOptions.node_reader`'s bit 8, the tests' alone): one of the reference's
+answers is changed for each expression C takes, and the comparison has to
+count every one of them. [The design](../node-machine.md#c-on-the-window)
+has what it measured.
+
+### A call's arguments in the kernel, and C's call (#2850)
+
+The same command, `measure-node-machine --shadow --window-contexts`. The
+kernel in place makes each argument's conversion with its call's record, and
+C's answers for a call are made on the window from them. No compile takes
+any of it. [The design](../node-machine.md#a-call-on-the-window) has what it
+measured.
+
+- **The arguments' rule** (`node_facts_argument_made` in
+  `c_check_node_machine_facts.c`) is T's own (`node_machine_argument`) as
+  words of 0 or 1, with one branch (a pointer to another pointer type asks
+  that pair's slot, `node_facts_pair`). It asks the type table nothing: a
+  type's answers are made once with its row (`node_facts_argued`:
+  `NodeFacts.argued` by a value's type's index, with the type its value has
+  past the parameters above them; `NodeFacts.targets` by a parameter's place,
+  the conversion's target with its answers above it). Three answers
+  (`BUSTER_NODE_FACTS_ARGUMENT_*`): made (the conversion, T's type and flags,
+  in the argument's record's last quadword); kept (the conversion is T's and
+  changes nothing the call inherits, so the call's record is the kernel's);
+  neither (the call is T's).
+- **The answers' slots** (`NodeFactsArgumentSlot`, 4,096 of half a line, by
+  a hash of the key): the key is everything the rule reads of the record
+  (`node_facts_argument_standing`: its type, the target, the flags of
+  `BUSTER_NODE_FACTS_ARGUMENT_FLAGS`, its standing, and whether it is an
+  integer constant whose payload is zero). The calls' loop
+  (`node_facts_call_arguments`, a second pass over a batch's calls in
+  `node_facts_calls_of`) reads each argument's slot, and where the slot has
+  another key's answer or none the rule answers there and then
+  (`node_facts_argument_fill`, out of line).
+- **A call's record** says two bits more in its exponent, beside the tests'
+  quiet bit: every argument's conversion is made
+  (`BUSTER_NODE_FACTS_CONVERTED_CALL`), and the call is a plain one as C asks
+  (`BUSTER_NODE_FACTS_PLAIN_CALL`: its prototype's result, and its arguments'
+  conversions' types, are plain scalars). A call with an argument that is
+  neither made nor kept goes to the call's rule, which leaves it to T. The
+  loop marks it as a value the record doesn't hold whole first: a call of
+  its batch may have it as an argument (a call's code is not after a
+  call's), and that one then follows it to the rule, which makes it from
+  T's record of the first.
+- **C's call** (`node_contexts_window_loop`): the call's template
+  (`BUSTER_NODE_MACHINE_TEMPLATE_CALL`) where the record says a plain call
+  and its context is no address's; its callee evaluated unless the lowering
+  calls it directly, by its own bytes (no lvalue, an address constant with
+  an object that has a symbol, no offset, no effect); its arguments
+  evaluated, each to its own record's conversion's type. C sets a call's
+  depth too, which the window does not make.
+- **The comparison.** The shadow's check of the kernel in place
+  (`node_facts_same`) compares, for a call whose record says its arguments'
+  conversions are made, each one with T's (`argument_conversions`, type and
+  flags). Before each run every record's last quadword is poisoned
+  (`node_facts_given`), so that a reader of one that is no argument's reads
+  no conversion.
+
+The report adds:
+
+- `node-shadow: reader-time fact words the kernel in place's calls:
+  to-make=N made=N with-every-argument's-conversion=N (P% of the calls to
+  make) of-them-plain=N left-for-an-argument=N; the arguments' rule's
+  answers=N of-them-in-the-timed-run=N ticks=N (N an answer)`: the calls the
+  kernel is to make and those it made; those whose record says every
+  argument's conversion is made, and the plain ones among them; those the
+  rule left to T for an argument alone; and the rule's answers (the slots'
+  misses) over the unit's runs, with their ticks. The timed run has its
+  slots filled by the runs before it, so its answers are the keys that were
+  not at their slots; a unit's first answers are in no timed figure.
+
+`test-checker`'s fixture (`node_contexts_test_fixture`) has a call for each
+term of the rule and pins the calls' counts. Its control changes T's
+conversion of each call's arguments too, and the kernel's comparison has to
+count every converted call that has an argument, once over poison and once
+over decoys. And it runs once more with
+`BUSTER_NODE_READER_ONE_SLOT` (`PPOptions.node_reader`'s bit 256, the tests'
+alone): an answer is written to every slot, so a key's probe meets another
+key's answer wherever the last answer was another's; the records, the
+counts and C's answers have to be the same, and the rule's answers and
+those of the timed run are pinned.
+
+### An update on the window (#2850)
+
+The same command, `measure-node-machine --shadow --window-contexts`. C's
+answers for an update (`++`, `--` and the compound assignments) are made on
+the window by the loop's masks. No compile takes any of it. [The
+design](../node-machine.md#an-update-on-the-window) has what it measured.
+
+- **The masks** (`node_contexts_window_loop` in
+  `c_check_node_machine_window.c`) take what C's plan takes
+  (`node_machine_update_plan`): a record of a number's class that is no `/=`
+  or `%=` of an integer by an integer constant (listed, as `/` and `%` are),
+  whose destination is no atomic's and, where it is a name's, no register
+  variable's, and whose second operand is of a number's class unless the
+  update is `++`, `--` or a pointer's. The comment there says, for each term
+  of the plan, which byte gives it or why none is needed.
+- **Three bits are new:** two of an operator's class
+  (`BUSTER_NODE_CONTEXTS_CLASS_INCREMENT` and `_QUOTIENT`, the classes'
+  table's) and one of a record's flags' byte
+  (`BUSTER_NODE_CONTEXTS_REGISTER`, the bytes' sweep's in
+  `c_check_node_census.c`, from the use's `BUSTER_CHECK_REGISTER`).
+- **A pointer's update** asks its stride in the loop the pointers' sums ask
+  theirs in (`node_contexts_stride`, a record at a time): the update's
+  record holds T's conversion of its destination as a sum's does its first
+  operand's.
+- **A unit with a type in a space of its own** (`TypeTable.extended`:
+  `__seg_gs`): the loop asks each masked update's destination's type's space
+  (`check_lower_segment_override`) a record at a time, and one in a
+  segment's lists its expression.
+- **An update the masks don't take lists its expression**, with the reason
+  `update`, which a `/=` and a `%=` by a constant have too.
+- **The operands' rows** are by the update's key: its template's number
+  (`BUSTER_NODE_MACHINE_TEMPLATE_UPDATE`) and two bits
+  (`BUSTER_NODE_CONTEXTS_KEY_ADDRESS` and `_POINTER`). A destination that is
+  no name's is evaluated for its address; the second operand is evaluated to
+  T's conversion of it, or to long where the destination is a pointer. The
+  loop keeps the keys in a register for the block below, and the column it
+  stores has C's templates.
+
+The report adds:
+
+- `node-shadow: window contexts updates=N (P% of the records swept) taken=N
+  listed=N`: the updates C asks its plan of, those of them the masks took,
+  and the rest.
+
+`test-checker` (part 5 of 8) reads two fixtures for it, in
+`c_check_node_census_test.c`: the lines from "An update" on in C on the
+window's (`node_contexts_test_source`), a line a case of a term, and a unit
+with a segment's space (`node_contexts_test_spaced_source`). The updates
+asked and taken are pinned (`NodeContextsExpected.updates` and
+`.updates_taken`).
+
+### A condition's branches on the window (#2850)
+
+The same command, `measure-node-machine --shadow --window-contexts`. C's
+answers for a statement's CONDITION over `&&`, `||` and `!`, which C
+evaluates as branches and no value (`NODE_MACHINE_TEMPLATE_BRANCHES`), are
+made on the window by the loop's masks. No compile takes any of it. [The
+design](../node-machine.md#a-conditions-branches-on-the-window) has what it
+measured.
+
+- **Each record says it of itself** (`node_contexts_window_loop` in
+  `c_check_node_machine_window.c`), where C branches a record from the root
+  down: from its own bytes, its first operand's and its consumer's class.
+  The comment there says, for each term of C's rule
+  (`node_machine_branch_operator`, `node_machine_branch_condition`,
+  `node_machine_classify_branches`), which byte gives it or why none is
+  needed.
+- **A branch operator** is a `!`, an `&&` or an `||` that is no folded
+  constant, and for `&&` and `||` one whose first operand's truth is not
+  known: no constant, or an object's lvalue, whose constant is its address.
+- **A CONDITION is branched** where its operand is `&&` or `||`; `&&` and
+  `||` are under a CONDITION, an `&&`, an `||` or a `!`; `!` is under an
+  `&&` or an `||`.
+- **What that cannot say lists the expression,** with the reason
+  `logical-or-conditional`. Since [an operator's value and a
+  comma](#an-operators-value-and-a-comma-on-the-window-2850) a record that
+  has its consumer's answer reads it from the next record, down a run of
+  such records, and what is listed is there: an `&&` or an `||` whose first
+  operand's truth may be known, a `!` over `&&` or `||` under a CONDITION,
+  and a run of more than three.
+- **A branched record's operands** are each evaluated: one branched in its
+  turn with no target, a value to T's conversion of it, which C then tests.
+  An operand of a type no truth's entries test leaves the record no
+  template, which refuses the expression.
+- **A class and a bit are new** in the classes' table: a conditional's own
+  class (`BUSTER_NODE_CONTEXTS_CLASS_CONDITIONAL`; it had `&&`'s and `||`'s,
+  and is listed still), and a statement's CONDITION's bit
+  (`BUSTER_NODE_CONTEXTS_CLASS_CONDITION`), which `!` has not. A far first
+  operand's standing is a row more of the far lanes'.
+
+The report adds:
+
+- `node-shadow: window contexts branched=N (P% of the records swept)
+  of-them-a-condition=N`: the records the loop evaluates as branches, and
+  the statements' CONDITIONs among them.
+
+`test-checker` (part 5 of 8) reads the lines from "A condition's branches"
+on in C on the window's fixture (`node_contexts_test_source`), a line a case
+of a term, and six statements 64 times each for the blocks' ends. The
+branched records and the CONDITIONs among them are pinned
+(`NodeContextsExpected.branched` and `.branched_roots`).
+
+### The records' bytes' columns (#2850)
+
+No command of its own: the sweep that `--window-tests` and
+`--window-contexts` both run (`node_tests_window_bytes_by` in
+`c_check_node_census.c`). [The
+design](../node-machine.md#the-records-bytes-without-their-four-gathers) has
+what it measured.
+
+- **Four columns, no gather.** A step's sixteen records' words, flags,
+  objects and standings come from sixteen loads of the lines' first halves,
+  two records a register, one permute of two registers for each four
+  records, and eight lane shuffles. The last four are masked by the placed
+  records: a record the kernel didn't place reads as zeros.
+- **The columns' places** are `BUSTER_NODE_TESTS_COLUMN_*`, dwords of a
+  record's line; an assert beside them ties them to `NodeFactsRecord` and
+  the window's size to a whole number of steps, since a step reads its
+  sixteen lines whether placed or not.
+- **What is a gather still:** a name's declaration's line's byte, and the
+  reader's verify's two.
+
+`test-checker` (part 5 of 8) reads the sweep through the tests on the
+window's fixtures and C on the window's: a column that is another record's
+fails their pins, and one that is not masked fails the reader's verify, which
+counts a record the kernel didn't place that has a byte with the values it
+finds wrong (`own_values_wrong`, pinned at zero).
+
+### X's rows on the window (#2850)
+
+`./build/compiler measure-node-machine --shadow --window-rows [--passes 0] [--list N] [preprocessor options] file...`
+
+`--window-rows` adds X's rows to `--window-contexts`' run. For each
+expression C takes on the window, the kinds, the classes and the values of
+each evaluated record's own entries and of its conversion's, of an update's
+two rows and of a tested value's test and branch are made from C's answers
+there, 64 records a step, and compared entry by entry with X's tape on T's
+columns at reader time (`node_machine_expand`), their reference. No compile
+takes any of it. The design has what it measured: [the
+shapes](../node-machine.md#xs-rows-on-the-window-first-their-shapes), [an
+update's rows](../node-machine.md#an-updates-rows-on-the-window), [the
+branches' rows](../node-machine.md#the-branches-rows-on-the-window) and [the
+entries' values](../node-machine.md#the-entries-values-on-the-window).
+
+- **A shape a part** (`c_check_node_machine_rows.c`): a byte for a record's
+  own entries and one for its conversion's. Below 64 it is a typed kind's
+  number, one entry of the record's class. From 64 up
+  (`BUSTER_NODE_ROWS_ADDRESS` to `_FOLDED`) it is a row of `NodeRowsTables`:
+  for each of a part's four slots the entry's kind and its class, or where
+  the class comes from (`BUSTER_NODE_ROWS_CLASS_OWN`, `_TARGET`,
+  `_OPERAND`). `BUSTER_NODE_ROWS_LATER` is the mark of a template whose
+  rows are not made here (`NodeRowsTables.templates`).
+- **The reads** (`node_rows_window_reads`): masks, 64 records a step,
+  compress the numbers of the records to read for into two lists, and a loop
+  a list reads a record at a time: a target's type's word where a record
+  converts (its class and facts; none for void), and a record's line for a
+  member's offset, a truth's operand's conversion's class and whether an
+  address constant's object is a local's.
+- **The shapes** (`node_rows_window_shapes`), 64 records a step:
+  `node_machine_own`'s case of a record's template and
+  `node_machine_convert`'s cases as masks over the window's bytes and the
+  reads' columns. A term of the rules that no record on the window separates
+  is no mask, and the comments there say of each what makes it: the
+  discarded context, a complex's and a `_BitInt`'s source, the facts of a
+  complex's and an aggregate's conversion, an address constant's offset's
+  value.
+- **The rows** (`node_rows_window_write`), 64 records a step: a slot's kinds
+  and classes by one lookup each of the block's shapes, the classes made from
+  their sources, the eight slots transposed into eight records' rows a
+  register, and the entries compressed into the chunk's two streams
+  (`x_kinds`, `x_classes`). A row's place is `node_rows_window_place`.
+- **An expression's part** (`node_rows_window_part`): it is listed for X
+  where one of its operand's records is; else its tape is its operand's
+  records' rows, in a row in the streams, and its root's. A root's own record
+  never lists it alone (the comment there).
+- **What is listed**, and left to X on T's columns: a value that an operator
+  evaluated as branches tests after a conversion of its own (a qualified
+  `_Bool`'s read, #3185); a conversion from or to a class past double's (a
+  long double's, a 128-bit integer's, a half-precision one's, an aggregate's,
+  a complex type's), which X's rules refuse; an integer constant converted
+  to float or double, whose fold reads its value; a bool's update, whose
+  result is tested; and a postfix update through an address whose
+  destination's own entries leave its first row no room (an address and its
+  offset; a member's offset's two and a CONVERT).
+- **A record's type is a column** with `--window-rows`: the records' bytes'
+  sweep makes it with its four (`node_tests_window_bytes_by`,
+  `window_x_types`), so a target and a type are compared in registers.
+- **An update's two rows** (`node_rows_window_updates`, after the shapes'
+  sweep and before the rows' write): a sweep of masks compresses the chunk's
+  updates' numbers into a list, and a loop over the list writes an update's
+  two rows' shapes over what the shapes' sweep made of its record and of its
+  destination's, with their lengths (`node_rows_window_update`). Each row
+  goes where its record has free slots. Its own row
+  (`BUSTER_NODE_ROWS_UPDATE`, `_UPDATE_POINTER`) is the update's record's own
+  part, with two marks the write resolves a record: the operation's kind, by
+  the operator's code (`NodeRowsTables.operations`), and the store's
+  (`BUSTER_NODE_ROWS_KIND_OPERATION`, `_STORE`). Its first row is its
+  destination's record's: for one read by name, which is not evaluated, the
+  read and a postfix update's DUP in its own part (`BUSTER_NODE_ROWS_FIRST`)
+  and the CONVERT in its conversion's (`_FIRST_CONVERT`); the conversion's
+  part of one read through its address (`_FIRST_ADDRESS`); and for a postfix
+  update through an address, whose first row is six entries, both parts, by
+  the shape of the destination's own entries (`BUSTER_NODE_ROWS_KEPT`,
+  `NodeRowsTables.kept_owns` and `kept_conversions`). The loop reads the
+  update's line for its computation's class (T's conversion of its first
+  operand). An update has no column of its own: the shapes go into the
+  shapes' two columns, the store's kind where a member's and an address's
+  bits are (`window_x_bits`), the computation's class into the first
+  operand's conversion's column, and a bool's update's and a destination's
+  with no room's bit into the block's mask of the records that list their
+  expression. The reads' and the shapes' sweeps have no term of an update.
+- **The branches' rows** (the same function's second list and loop, in a
+  chunk where C's loop evaluated a record as branches): the sweep compresses
+  the chunk's `!`, `&&` and `||` evaluated as branches into a second list,
+  and a loop goes down it from its end, a turn an operator
+  (`node_rows_window_branch`). An operator's sense is a byte of the senses'
+  column (`window_x_senses`), which its consumer's turn left there; a
+  statement's CONDITION takes no turn, and the reader writes its sense at
+  its operand's record (`node_facts_reader_expression`: a `do`'s is true, an
+  `if`'s, a `while`'s and a `for`'s false). A turn gives each operand its
+  sense (`node_rows_window_tested`): an `&&`'s first false and an `||`'s
+  true, a second operand its operator's, a `!`'s the other. An operand that
+  is such an operator keeps it for its own turn. A value takes its test and
+  its branch as its conversion's part's row (`BUSTER_NODE_ROWS_TESTED`: a
+  narrow class's or not, by the sense), where that part is free; one with a
+  conversion of its own keeps its row and lists its expression. An operator
+  has no entry; its turn leaves its own part the shape that says it took one,
+  and whether it has a label of its own (`BUSTER_NODE_ROWS_BRANCHED`: an
+  `&&` branched where true and an `||` where false), and a tested value's
+  byte in the senses' column has whether its branch's label is such an
+  operator's (`BUSTER_NODE_ROWS_SENSE_OWNED`).
+- **The entries' values** (`node_rows_window_values`, after the rows'
+  write): a third stream, a quadword an entry (`x_values`).
+  - It starts as zeros, and as the 1 of each PTR_ADD, by the entries' kinds.
+  - A sweep of masks, 64 records a step, puts each record on the lists its
+    own shape's byte of `NodeRowsTables.value_owns` says
+    (`BUSTER_NODE_ROWS_LIST_*`), and a loop a list writes its values at the
+    rows' places. What a loop reads is a column: a record's value
+    (`window_x_values`: its object's number where it has one and its
+    constant is an address's, else its payload, which is what `(_Bool)&x`,
+    a 1 of x's record, has; the records' bytes' sweep makes it with the
+    records' types, and
+    the reads leave a member's offset in bytes there) and a pointer's stride
+    (`window_c_strides`, which
+    C's loop keeps as it asks for it, `node_contexts_stride`). An integer
+    constant's bits are extended from its own class's width and then its
+    entry's (`node_rows_extend`); a floating one's, one folded to bool and
+    an address constant's offset after its object's address are the rest's,
+    a record at a time from its line (`node_rows_window_rest`).
+  - Two loops go over lists made before the sweep: the tested values whose
+    branch has the control's label, which the branches' loop lists as it
+    gives each its test, and the chunk's updates, each for its store by
+    name's object, its step and, of a postfix update through an address, its
+    destination's two temporaries.
+  - **The numbers of an expression** (`node_rows_window_number`): a call's
+    row, an operator's own label and a postfix update's temporaries are
+    numbered in their expression, and an expression's first of each is what
+    the loops wrote (a zero, the pair 0 and 1). The sweep finds the records
+    that are no first such record of their expression by one subtraction a
+    block, from two masks: those records, and the expressions' operands'
+    last records, which the reader marks in the senses' column as it reads
+    an expression (`BUSTER_NODE_ROWS_SENSE_TOP`; the bytes are cleared at a
+    batch's end). They are the sweep's last list
+    (`BUSTER_NODE_ROWS_LIST_SECOND`), and each one's expression is then
+    numbered once, a record at a time, by the reference's own rules.
+
+The report adds:
+
+- `node-shadow: window rows expressions=N records=N taken=N (P%)
+  their-records=N (P%) their-entries=N differences=N
+  not-kept-by-the-reference=N second-runs-that-differ=N records-swept=N
+  entries-written=N`: the expressions C takes on the window; those whose tape
+  is made here; the tapes that differ from X's on T's columns in their
+  number of entries, a kind, a class or a value; the taken ones the reference
+  kept no tape for, for want of room; and the chunks whose second run wrote
+  other entries (the first run's streams are kept and compared with it, byte
+  for byte, and so are its lists' counts).
+- `node-shadow: window rows listed, by an expression's first record's
+  reason: update=N branches=N refused-conversion=N
+  constant-to-a-floating-class=N`.
+- `node-shadow: window rows records read a record at a time: a target's
+  word=N (P% of the records swept) a line or a table=N (P%) an update's
+  line=N (P%); and operators evaluated as branches, a turn each=N (P%)`: the
+  reads' two lists' records, the updates' list's and the branches' list's.
+- `node-shadow: window rows values: tapes that differ in a value alone=N;
+  records on a list=N (T a record swept): its record's value=N a store by
+  name's destination's=N an integer constant's bits=N a stride=N the
+  control's label=N the rest=N a number of its expression's after the
+  first=N; expressions numbered=N (P% of the taken), the records their
+  labels' walks went over=N`: the tapes with every kind and class the
+  reference's and a value that is not (they are counted with the differences
+  too); the values' lists' records; and the expressions whose calls' rows,
+  labels or temporaries were numbered.
+- `node-shadow: window rows ticks=N (T a record swept, T a record of the
+  taken): the reads=N (T) the shapes=N (T) the updates and the branches=N
+  (T) the rows=N (T) the values=N (T) an expression's part=N (T); the
+  reference's X on the taken expressions=N (T a record of theirs)`: TSC
+  ticks. The values' are their sweep's, their loops' and the numbering's,
+  with the batch's end's clearing of the expressions' ends' bits.
+- `node-shadow: window rows a second run over the same chunk, not counted:
+  ...`: the same six parts over the chunk once more, their code and tables
+  at hand.
+- `node-shadow: window rows difference file=F line=N token=N`, with `--list
+  N`: where a tape that differs is.
+
+The command fails where a tape differs, in a value too, or a chunk's second
+run wrote other entries.
+
+`test-checker` (part 5 of 8) reads the rows' fixture
+(`node_rows_test_source`): a line a shape, a line a term's case (a `_BitInt`'s
+target, the targets past double's, an aggregate converted to an aggregate, a
+store of a constant, records that are not evaluated), an update's rows (by
+name and through an address, prefix and postfix, each operator, a narrow, a
+floating and a pointer's destination, its value used, an update below
+another, and the four it lists), two groups of statements 64 times each
+for the blocks' ends, five update statements 64 times each (an update
+and its destination on either side of a block's end, and more than 16
+updates in a block), and a condition's lines: `&&`, `||` and `!` under an
+`if`, a `while`, a `do` and a `for`, nested in either operand; a tested value
+of each class and kind, the bounds of a narrow class, the `const` bool's
+reads it lists and a bool's update that is tested; and four conditions 64
+times each (a condition's records on either side of a block's end, more than
+16 operators in a block, a listed value on every lane). Two units of one
+chunk each have one update, and one condition with no update. The values'
+fixture (`node_rows_test_values_source`) has a line a source of a value: a
+constant of each class, its own and folded (extended, cut, to bool), a
+floating one's and its zeros; an object's number read, stored and updated, a
+local's, a parameter's and a global's; an address constant's with and
+without an object and an offset; a member's offset; a pointer's stride of
+each element, one past 4 GB, and its update's; an update's step of each
+class; one, two and three postfix updates through an address; calls nested,
+side by side, in a callee and not evaluated, and in an expression C leaves
+between two it takes; conditions whose operators own a label, two and three
+of them, with calls and postfix updates as their tested values, and with an
+operator that has no label between a tested value and its owner; expressions
+of more than 64 records with their numbered
+records on either side of the first 64; a postfix update with no room after
+a statement whose tape is made; and seven statements 64 times each. It reads C on
+the window's fixture through the rows too. Every tape made is X's on T's columns; the
+reader's verify finds no byte of the window wrong, the types' column's among
+them; the expressions, the tapes, their entries, the listed ones by reason,
+the entries written and the records read for (an update's plan among them),
+the operators with a turn, the values' lists' records, the expressions
+numbered and the records their labels' walks went over are pinned
+(`NodeRowsExpected`); no chunk's second run writes other entries than its
+first; and with one of the reference's answers changed for each tape
+(`BUSTER_NODE_READER_WINDOW_ROWS_FAULT`: its first entry's kind, its last's
+class, its length and an entry's value in turn, the value's its first
+entry's and its last's, by its lowest bit and its highest) the comparison
+counts every tape, and the tapes it counts for a value alone are pinned (the
+class's turn changes the first entry's value too, and such a tape is none of
+them). The same control changes one of a chunk's first run's answers, in
+thirteen turns (its entries' count, its first entry's kind, class and value,
+the count of the expressions numbered, of their walks' records and of each
+list's), and every chunk's second run then differs from it: the fixtures'
+chunks are pinned.
+`node_rows_test_tables` checks the tables: each shape's entries and length,
+the classes' sources and the two marks the write resolves, by part and
+slot; a postfix update's destination's two parts by its own entries' shape;
+each template's shape with the mark of those whose rows are not made here,
+the order's permutation, void's word, which the reads don't read, and the
+values' two tables' bytes by a record's own shape.
+
+### Hardware counters for the window's sweeps (#3196)
+
+`./build/compiler measure-node-machine --shadow --window-rows --passes 0 --window-counter rows cycles file.c`
+
+Select one family and one hardware event per invocation. The families are
+`tests` (bytes and the tests loop with its cast-result asks), `contexts`
+(loop, targets and expressions), and `rows` (reads, shapes, update/branch
+lists, write, values, expressions and summaries). The events are `cycles`,
+`instructions`, `branches`, `branch-misses`, `frontend-stalls`,
+`l1d-misses` and `l1i-misses`. An unavailable or unschedulable counter
+makes the command fail. Pin the Release executable to the benchmark CPU.
+
+Each `node-window-counter` line gives the user-mode hardware event total
+for the first or second execution over the same chunks across all input
+files. Both runs use the ordinary shadow's sweeps. Selecting `tests` also
+repeats its byte and mask construction over the first run's memoized
+declarations. The lists interval includes the test for a chunk with no
+updates or branches. With `--no-window-summaries` there is no summaries
+reading. `raw` is the unadjusted total. Both rates subtract one median
+empty interval per chunk and divide by all chunks or all swept records.
+A small adjusted reading may be negative. Use the ordinary command
+without profiling for the existing TSC comparisons.
+
+
+### An operator's value and a comma on the window (#2850)
+
+The same commands, `measure-node-machine --shadow --window-contexts` and
+`--window-rows`. `&&` and `||` as values, `?:` and a comma are made in C's
+loop and in X's rows on the window, where both listed them. No compile takes
+any of it. [The design](../node-machine.md#an-operators-value-and-a-comma-on-the-window)
+has the rules, what it measured and its gates.
+
+- **A comma** (`node_contexts_window_loop`): a free record of a comma's
+  class and a number's that is not read for its address has a wrapper's
+  template and a key of its own (`BUSTER_NODE_CONTEXTS_KEY_COMMA`): its
+  first operand is converted to void (`BUSTER_NODE_CONTEXTS_SOURCE_VOID`,
+  which the targets' sweep writes) and its second to the comma's type. A
+  discarded comma (`_KEY_COMMA_DISCARD`: a comma's first operand, or one
+  whose consumer, a wrapper or a conditional with the comma for an arm, is
+  of void's class, a byte read a record at a time) converts its second
+  operand to void too and has the discard's context. Listed: a comma read for its
+  address, a folded one, and a comma's second operand that is a comma.
+- **Which operators are branches.** A branch operator (`!`, `&&`, `||`,
+  free, the last two with a first operand whose truth is not known) is
+  entered as an `&&`'s or an `||`'s first operand, and, where it is an `&&`,
+  an `||` or a `!` over one with `!`s alone between (a deep `!`), as a
+  CONDITION's operand or a conditional's condition; it is chained, with its
+  consumer's answer, as an `&&`'s or an `||`'s second operand or a `!`'s
+  operand. The answers go down a run of chained records by two doubling
+  steps, with a bit from the block after. Any other is a value.
+- **An operator's value** (`NODE_MACHINE_TEMPLATE_BRANCH`): an `&&` or an
+  `||` that is a value, and a conditional whose condition's truth is not
+  known (its key `BUSTER_NODE_CONTEXTS_KEY_CONDITIONAL`: its arms are
+  converted to its own type). A record at a time, for these records alone:
+  a conditional of one operand twice, and the conversion its consumer puts
+  into its arms (`node_contexts_sinks`: three of the reference's terms,
+  which list a little more than the reference leaves to the tasks), asked of
+  a root in its expression's part. Each lists.
+- **Listed still:** a condition whose truth may be known, a value whose
+  first operand is a `!`, a `!` over `&&` or `||` under a CONDITION, a run
+  of more than three chained records, a block's last record that is a branch
+  operator under a `!`, and a selection (reason `operator`).
+- **X's turns** (`node_rows_window_held`, from the branches' loop): the
+  condition's test and branch, a tested value's shape with its operator's
+  label; a conditional's first arm's jump after its conversion
+  (`BUSTER_NODE_ROWS_ARM`, by `NodeRowsTables.arms`); a logical operator's
+  own four entries (`BUSTER_NODE_ROWS_LOGIC`); a conditional's own part with
+  no entry (`BUSTER_NODE_ROWS_HELD`). Listed for X: an arm whose conversion
+  leaves its jump no slot, and a logical operator whose second operand's
+  conversion is of a narrow class.
+- **The labels:** an operator's value has two. The values' sweep counts the
+  records with a label apart from those with a call's row or a temporary
+  (`BUSTER_NODE_ROWS_VALUE_LABELED`), and the numbering
+  (`node_rows_window_label`) counts labels: two a value's, one an operator's
+  evaluated as branches with a label of its own.
+
+The report adds:
+
+- `node-shadow: window contexts valued=N (P% of the records swept)
+  of-them-listed-for-their-target=N commas=N`: the records the loop gives an
+  operator's value's two labels, those of them whose consumer's conversion
+  lists their expression, and the commas it takes. `comma-or-selection`
+  among the listed reasons is `comma` now.
+
+`test-checker` (part 5 of 8) reads the function `valued` in C on the
+window's fixture (`node_contexts_test_source`), which the rows' fixture run
+reads too: a line a case of each term (commas discarded and not, of each
+operand and consumer; conditionals with each arm's conversion and each kind
+of condition; `&&` and `||` as values with each operand's class and each
+operator for an operand; runs of `!`s and of chained operators of each
+length; what the tasks sink; operands and consumers past two blocks), and
+six statements 64 times each for the blocks' ends. The operators' values,
+those listed for their target and the commas are pinned
+(`NodeContextsExpected.valued`, `.sunk` and `.commas`), and
+`node_rows_test_tables` has the new shapes' rows, the arms' table and the
+values' bytes.
+
+### A summary node's side facts on the window (#2850)
+
+`./build/compiler measure-node-machine --shadow --window-rows [--no-window-summaries] [--passes 0] [--list N] [preprocessor options] file...`
+
+`--window-rows` makes, for each expression whose tape X makes whole on the
+window, what a pass after the reader reads below a full expression's root
+today: the facts one summary node in its nodes' place would have to answer
+from a side record. After the pipeline they are compared with the program's
+own walks on each such root. No compile takes any of it. [The
+design](../node-machine.md#a-summary-nodes-side-facts-on-the-window) has the
+survey of those passes, what it measured and its gates.
+
+- **Its references** (`check_program_references`: the static objects its
+  leaves name, a set an expression). A reference is a leaf whose object
+  that walk takes, evaluated or not: a name's with a symbol of its own, or
+  a literal's with an object, a string's. The sweep
+  (`node_rows_window_summary`, 64 records a step) lists the chunk's by a
+  table of the flags a record of each kind needs and writes the count of
+  the references through each record
+  (`NodeFactsReader.window_x_referenced`: one multiplication and three steps
+  of sums in a register); a gather then writes each listed record's object,
+  eight a step. An expression's references are the list's between
+  the count through the record before its operand's first and the count
+  through its last: two loads where its summary's record is written, and
+  no step of the sweep is an expression's own.
+- **Its root's return fact** (`check_program_return_facts`: a stop, an
+  unknown, which `-Wreturn-type` reads). A call of a plain function's name
+  has none: the name of a function that is not declared noreturn and whose
+  name is none of the library's that the flow leaves unknown. A function's
+  declaration's line has a bit for that and one for noreturn
+  (`BUSTER_NODE_TESTS_LINE_PLAIN` and `_STOPS`, made with the line), and the
+  tests' sweep copies a name's leaf's line's byte to `window_x_lines`. The
+  tests' loop (`node_tests_window_loop_by`) gives each block a mask of its
+  other calls, those whose callee is no plain function's leaf in the block
+  or the block before. The sweep lists the ones the kernel placed, and each
+  is asked its own fact a record at a time (`node_rows_summary_call`, the
+  flow's `check_program_return_call` by the callee's record's byte: a stop
+  where it is the leaf of a function declared noreturn, none where it is a
+  plain function's, and an unknown for any other: a call through a value,
+  or of a library's name the flow leaves unknown). The flow reads a callee
+  through `*` and `&` to a function's name; C lists an expression that
+  calls `*f` or `&f` of one, so the window asks no such call. An
+  expression's fact is its calls' facts together, but where a call stops
+  and the expression has an `&&`, an `||` or a `?:`: that expression has
+  the flow's reduction over its records (`node_rows_summary_reduce`). In a
+  unit with a function the flow leaves unknown from a declaration on
+  (`check_program_return_unknowns`, made at the reader's start) no call is
+  plain: each is asked a record at a time, and a call of such a function
+  after that declaration is unknown.
+- **A condition's truth and a constant's fold** are a summary node's
+  value's to answer, with nothing in the side record.
+  `check_program_branch_truth` knows a branch's condition's truth where the
+  condition's value has none in two cases, and the window lists both.
+  - **By one operand of an `&&` or an `||`:** the turns list an `&&` or an
+    `||` whose second operand's truth is known (`node_rows_window_decided`:
+    a constant's, but an object's lvalue's), whether it is evaluated as
+    branches or as a value (reason `branches`).
+  - **Through a cast:** the walk gives a cast its operand's truth (#3204),
+    so a cast that is no constant itself, over an operand whose truth may
+    be known, passes a truth its own value has not (`(char)(long)&x`: an
+    address is not null, and its low byte is no constant). C's loop lists
+    its expression (`node_contexts_window_loop`'s `passes_truth`, reason
+    `operator`) where its consumer may ask its truth: a CONDITION, a `!`,
+    an `&&` or an `||`, or another wrapper. A cast that is a constant with
+    an effect's flag is listed too, and a cast to void never. A `!` and a
+    CONDITION are a constant wherever their operand's truth is known
+    (`check_action_logic`), and ask for no term.
+
+  The controls' fold (`check_control_fold_truth`) does not fold a comma
+  whose left operand is no constant: C lists a folded comma.
+- **Not made: a `switch`'s selector's type.** `-Wswitch` reads the node at
+  the selector's first token (#3200), which only the walk makes: a
+  `switch`'s condition stays the walk's.
+
+`--no-window-summaries` is the cost's switch: the same run with no lines'
+column, no calls' mask and no sweep, and with nothing kept or compared. The
+turns list the same expressions with it.
+
+The report adds:
+
+- `node-shadow: window summaries expressions=N their-references=N (R a
+  record swept) with-an-unknown=N with-a-stop=N; records listed for a
+  reference=N calls asked a record at a time=N (R a record swept)
+  expressions reduced=N second-runs-that-differ=N; operators whose turn
+  lists for a second operand whose truth is known=N`: the expressions whose
+  facts are kept (those whose tape is made), their references as the sweep
+  gives them (an object once a leaf), those with each fact; the records the
+  sweep lists for a reference, in any expression, the calls it asks and the
+  expressions the reduction runs on; the chunks whose second run made other
+  facts; and the operators the turns list.
+- `node-shadow: window contexts casts-listed-for-a-truth-their-value-has-not=N`,
+  with `--window-contexts` too: the casts C's loop lists.
+- `node-shadow: window summaries compared=N (not kept: N) the program's
+  references=N reference-differences=N fact-differences=N (the program's:
+  a stop=N an unknown=N); folds asked=N fold-differences=N (of the
+  compared: a constant folded=N); branches' conditions' truths asked=N
+  truth-differences=N (of the compared: a truth known=N)`: after the
+  pipeline, each kept root's references against `check_program_references`
+  run on it alone (the same set of objects) and its fact against
+  `check_program_return_facts`' byte; whether `check_control_fold_truth`
+  folds it exactly where a leaf of its value would; and, where it is a
+  branch's condition, whether `check_program_branch_truth` knows its truth
+  exactly where its value says it. The four differences, `not kept` and the
+  second runs that differ must be 0: the command exits 1 otherwise.
+- `node-shadow: window summaries ticks=N (T a record swept, T a chunk); a
+  second run over the same chunk, not counted: ticks=N (T a record swept,
+  T a chunk)`: the sweep's TSC ticks.
+- `node-shadow: window summaries difference file=F line=N token=N
+  kept|not kept: references=same|DIFFERENT (the program's N, reader time's
+  N) fact=N (reader N) truth=same|DIFFERENT fold=same|DIFFERENT`, with
+  `--list N`.
+
+`test-checker` (part 5 of 8) has a fixture of its own
+(`node_summary_test_source`), a line a case: references of each kind of
+leaf in each place; calls of each form, with an unknown and with a stop in
+each place an operator puts them; conditions an operand decides; and, 64
+times each for a block's every lane, a statement of eleven records with a
+plain call, a call through a pointer and four references, two conditionals
+with an arm that stops (in chunks one after another: the reduction's bytes
+of one chunk's records are the next's to clear) and a call that stops; and
+calls whose callee is before the block before. A
+second (`node_summary_test_unknowns_source`) is a unit with a function
+unknown from a declaration on. `node_summary_test_fixture` pins each count
+(`NodeSummaryExpected`), asks that no fact differ and that the switch keep
+none with the same tapes, and runs the control
+(`BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT`): reader time keeps each
+expression's facts with one changed (a reference more, a reference's
+object, the fact's stop, its unknown, in turn), and the comparison must
+count every expression by its turn; one of a chunk's first run's facts is
+changed (the count of the references through its last record, its first
+expression's fact, its references' count, its first reference's object, in
+turn), and every chunk's second run must differ; and the truths and the
+folds are asked of every root reader time typed, kept or not, where they
+must count the fixture's lines the window lists for them. The rows'
+fixtures' runs ask that their expressions' facts not differ either.
+The fixture's function `passed` has the cast's rule a term a line (the cast
+under each consumer that may ask its truth, and each case that keeps its
+expression: no such consumer, an operand with no truth, a cast that is a
+constant, an operator that is no cast, a cast to void), with the count of
+the casts listed pinned (`NodeSummaryExpected.passed`), and two constants
+that are no address's whose record has an object (`(_Bool)&g`), whose
+entries' values must be the reference's.
+
+### The tests' holes and the objects' side (#2850)
+
+`./build/compiler measure-node-machine --shadow --window-rows [--passes 0] [--list N] [preprocessor options] file...`
+
+The corpora, the fixtures and the probes are code that warns of nothing. The
+compiler's own test tables are not: every C string literal of
+`src/buster/compiler/*_test.c` that is a program and every file under
+`tests/`, each through the shadow alone under three warning sets, differed
+in fifteen ways in the pieces before
+([#3201](https://github.com/buster14a/buster/issues/3201),
+[#3202](https://github.com/buster14a/buster/issues/3202),
+[#3203](https://github.com/buster14a/buster/issues/3203),
+[#3205](https://github.com/buster14a/buster/issues/3205),
+[#3206](https://github.com/buster14a/buster/issues/3206),
+[#3207](https://github.com/buster14a/buster/issues/3207)). This is what
+closed them; no compile takes any of it. [The
+design](../node-machine.md#what-the-compilers-own-tests-had-and-no-corpus)
+has what was found, what it measured and its gates, and [the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tests-holes-2850-2026-11-21)
+the sweep's scripts.
+
+**The tests.** A test's verdict is the census's code's at both times
+(`node_census_node`, `node_census_root_tests`); the machine's own form
+(`node_tests_operator`) and the window's loop
+(`node_tests_window_loop_by`) list the records sent to that code; and a
+type's byte (`node_census_type_bits_make`) is what all three read of a
+type.
+
+- **A pointer's ordered comparison with an integer** (clang's extension
+  warning, which no option of its own turns off; the compiler raises it
+  after the graph's run: `check_warning_ordered_event`) has a test of its
+  own
+  (`pointer-integer-order`, `node_census_ordered`): exactly one operand is
+  a pointer as the action converts it (an array's and a function's value
+  are), and the other an integer that is no null pointer constant. The own
+  form's table sends `<`, `<=`, `>` and `>=` for an operand that converts
+  to a pointer. The window's loop leaves out one whose two operands both
+  do, a loop's `p < end`, where nothing else sends it.
+- **What converts to a pointer** (`BUSTER_NODE_CENSUS_TYPE_CONVERTS`): a
+  function's type's byte has the pointer's bit and the void pointee's, as
+  `nullptr_t`'s has, so a cast of a function or of an array to an integer
+  narrower than a pointer, or to an enumeration, is sent to the cast's
+  test as a pointer's is. The void dereference's test asks the type's own
+  kind.
+- **A declaration with a list of conditions** (`node_census_conditioned`):
+  one that inherits an earlier redeclaration's `diagnose_if` or `enable_if`
+  list is a callee to ask, though no attribute of its own or of its
+  entity's first declaration says so. (A use that is no call is diagnosed
+  before the walk, and its event refuses its expression.)
+- **Two attributes whose warnings no test stands for** refuse their unit's
+  every expression: x86's `interrupt` and `no_caller_saved_registers` on
+  any declaration (every other call in such a function's body warns:
+  `-Wexcessive-regsave`), and `noderef` spelled anywhere (a dereference
+  warns by its operand's declaration's type's annotation, which no node's
+  type says).
+- **An initializer.** Its events' tokens begin after its object's name at
+  reader time too (`node_census_initializer_low`), so a declarator's
+  warning the reader has raised by then refuses it. Its braces are looked
+  for up to its first token (`CheckInput.initializer_begins`), not in its
+  value: `(enum { V })0` is no brace initializer. And an automatic object
+  with an asm label (`node_census_labelled`: in a body, with no linkage,
+  neither `static` nor `register`) refuses its initializer at both times,
+  as a brace's: the reader's warning that it ignores the label comes after
+  the body.
+- **A `return` under a cleanup** (`node_census_cleans`): the program
+  computes the value first, runs the cleanups and returns it, so the
+  value's root is no return's after the pipeline. Reader time says the
+  same by a search of the unit's cleanups, which keep the furthest end of
+  the scopes up to each (`CheckInputCleanup.reach`).
+- **A returned address** is followed through every operand
+  (`node_census_returns_address`): a list of 64 refused a sum of more.
+- **A value in a segment's address space** (256 to 258: `%gs`, `%fs`,
+  `%ss`) is of a type the machine has no kind for
+  (`node_census_special_type`): the lowering gives each load and store
+  there its segment's override, which the machine's rows have no entry for.
+  A pointer to one, and a value in another space, are taken.
+
+**The objects' side**: what T and the kernel read of an object that the
+reader settles after the bodies.
+
+- **Whether the unit has an overload's candidates**
+  (`node_machine_overloads`, `NodeMachine.overloads`): T refuses every call
+  of such a unit, and a candidate of a function multiversioned by target
+  strings is made after the last body. The answer is the candidates the
+  graph has before the bodies (an overloadable function's declarations) or
+  the unit declaring a function multiversioned so
+  (`CheckInput.target_multiversion`): the same at both times. A unit that
+  declares one and never calls it has its calls refused.
+- **The program's own objects.** For a multiversioned function (by target
+  strings, by `target_clones` or by `cpu_dispatch`) the program makes an
+  object no declaration declares, its versions' reference, numbered after
+  its attribute's name's token. The shadow compares the declared objects
+  (`BUSTER_NODE_MACHINE_OBJECT_DECLARED`), counts the program's own apart
+  and asks that reader time have nothing for one.
+- **An asm label**, which decides one answer of T's: whether a plain
+  library builtin's call is computed in place or called
+  (`node_machine_call_library`). The asm pass runs after the bodies and
+  ignores a label on a declaration of an object that a declaration before
+  it defines (`check_input_asm_labels`); the machine at reader time applies
+  the same rule to the declarations in their order where it makes the
+  objects' facts (`node_machine_begin_reader`,
+  `BUSTER_NODE_MACHINE_OBJECT_DEFINED`).
+- **A rename pragma** (`#pragma redefine_extname`) labels a declaration
+  once the reader is done. In a unit with one the reader took
+  (`node_machine_renames`), T refuses every call the reader marked for a
+  library builtin, at both times, and asks no label. The shadow leaves the
+  label of such an object out of its comparison and counts the object.
+  (In a unit with no `asm` token the program reads no label at all:
+  [#3208](https://github.com/buster14a/buster/issues/3208).)
+- **A weak name** is the name's from a token on, not a declaration's: the
+  reader notes it at a `weak`, `weakref` or `weak_import` attribute on any
+  declaration of the name (`CheckInput.weak_names`) and at a `#pragma
+  weak`, and a use at or after that token may be null. The reader and the
+  kernel ask the same search (`check_input_weak_name`, eight records a
+  step). A declaration whose name the unit notes anywhere can change its
+  line at another declaration's token, so its line is made again at every
+  use (`BUSTER_NODE_FACTS_LINE_UNSETTLED` in `NodeFacts.numbers`); every
+  other declaration's last line is still taken by one load and one test.
+  The names' pass's second run compares a line by its number or by its
+  words.
+
+The report adds `pointers'-ordered-comparisons-left-out=N checked=N
+of-them-with-a-test=0` to the own tests' lines,
+`the-program's-own-objects=N objects-a-pragma-labelled=N` to `reader-time T
+objects`, and to the words' line the uses that asked for a declaration's
+line the long way (`declarations'-lines=N (T ticks each; N made again; N
+uses asked the long way)`); `--list N` lists an object that differs
+(`reader-time object difference`). What decides the command's status is
+one function, `node_shadow_differs`.
+
+`test-checker` (part 5 of 8) has six fixtures more for the tests, run as
+the census's others are, after the pipeline and at reader time, in the
+census's form and on the window: `node_census_test_holes` (a line a case:
+an ordered comparison by each operator, of an integer with a pointer on
+either side, with an array and with a function, as a statement's
+condition, with a null constant, of two pointers and of two integers; a
+function's, an array's and a string's casts, to an integer narrower than a
+pointer, to an enumeration, to one as wide and to a pointer; a call of a
+function whose earlier redeclaration has a condition; an initializer whose
+declarator warns, at file scope too, one with a cast's braces, an
+automatic object's label, a register variable's and a static local's;
+returns under a cleanup of the function's scope, of a block's and of a
+`for` statement's, in a later function, of an aggregate, and before one; a
+dereference of a function that returns void; and a sum of 72 operands),
+`node_census_test_segments`, `node_census_test_interrupt`,
+`node_census_test_noderef`, `node_census_test_signs` (`-Wsign-compare`:
+every comparison is sent whatever its operands, and the loop leaves no
+pointers' comparison out) and `node_census_test_silent` (`-w`: nothing is
+refused, and nothing left out). And seven for
+the objects' side (`node_objects_test_fixture`: the whole shadow as the
+command runs it, nothing differing, with its counts pinned in
+`NodeObjectsCounted`), a unit each because each answer is a unit's: labels
+kept and ignored with a builtin of each; a rename pragma with a builtin's
+call before and after it; a weak pragma, which is no rename pragma; a
+function multiversioned by target strings, called and not called; an
+overloadable function, with a call through a pointer; and the weak names,
+by each way the reader notes one, with a declaration used before and after
+another declaration makes its name weak and a name the unit does not note,
+whose later uses ask nothing. `node_objects_test_weak_search` asks the
+search of lists of every length to 20, and
+`node_objects_test_comparisons` the shadow's own comparisons, a row a
+case: an object's facts against the program's, the objects a rename
+pragma labelled, and a name's line by its number or its words.
