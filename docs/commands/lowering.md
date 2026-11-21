@@ -2716,7 +2716,9 @@ The uninitialized pass uses the summary node's reach and order together with
 that token, so that it still reports the first evaluated read of an
 uninitialized variable, including its source position and note. An
 unreachable read still counts as a syntactic use of a written parameter.
-Other storage classes, special registers and qualified types keep their graph.
+Local reads use the ordinary graph with debug information enabled, preserving
+the identifier source positions. Other storage classes, special registers and
+qualified types also keep their graph.
 
 Admission requires the entire expression in the same coded chunk. Other types,
 operators and spellings, deferred parts, and units requiring

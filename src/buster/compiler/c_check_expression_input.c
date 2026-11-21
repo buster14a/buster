@@ -1887,7 +1887,8 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
         const CheckInput* input = reader->output;
         // Only an ordinary automatic int, with the reader's own lvalue classification, object and declaration.
         // Static storage, thread-local storage, special registers, qualifiers and constexpr all keep their walk.
-        admitted = identifiers->status[i] == (BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) &&
+        admitted = !reader->pp->options.predefines.debug && !reader->pp->options.predefines.debug_modules &&
+                   identifiers->status[i] == (BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) &&
                    identifiers->types[i] == (BUSTER_TYPE_INT | ((uint64_t)CHECK_LVALUE << 32)) &&
                    identifiers->flags[i] == (((uint64_t)CHECK_CONSTANT_ADDRESS << 32) | BUSTER_CHECK_NONNULL_ADDRESS) && declared < input->token_count &&
                    identifiers->objects[i] == (uint64_t)declared + 1 && input->declaration_kinds[declared] == C_BINDING_OBJECT &&

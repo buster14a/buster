@@ -6115,22 +6115,23 @@ static bool node_front_test_builtins(const char* directory, uint8_t front, uint6
 
 // Compile the source independently both ways. Change the retained first row after checking and lower it again:
 // only a lowering that actually splices the reader's tape can emit the changed value.
-static void node_window_test_compile(CheckTest* test)
+static void node_window_test_compile(CheckTest* test, bool debug)
 {
     char file[PATH_MAX];
     snprintf(file, sizeof(file), "%s/checker/node-window.c", check_test_fixture_root);
-    char* options[] = { "-nostdinc", "-Wall", "-Wextra" };
+    char* options[] = { "-nostdinc", "-Wall", "-Wextra", "-g" };
+    const uint32_t option_count = debug ? BUSTER_ARRAY_LENGTH(options) : BUSTER_ARRAY_LENGTH(options) - 1;
     static LowerSource plain;
     static LowerSource window;
-    const bool opened_plain = lower_source_open(&plain, file, options, BUSTER_ARRAY_LENGTH(options), false);
-    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), true);
+    const bool opened_plain = lower_source_open(&plain, file, options, option_count, false);
+    const bool opened_window = lower_source_open(&window, file, options, option_count, true);
     const bool prepared = opened_plain && opened_window && plain.prepared && window.prepared;
     check_test_expect(test, prepared, "node-window prepares its mixed ordinary and taken returns");
     if (prepared)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        bool same = reference->window_count == 0 && input->window_count == 9 && input->window_nodes == 28 &&
+        bool same = reference->window_count == 0 && input->window_count == (debug ? 7u : 9u) && input->window_nodes == (debug ? 23u : 28u) &&
                     reference->graph.count == input->graph.count + input->window_nodes - input->window_count;
         uint32_t reads = 0;
         for (uint32_t i = 0; same && i < input->window_count; i += 1)
@@ -6160,7 +6161,7 @@ static void node_window_test_compile(CheckTest* test)
                 same &= row->kind == BUSTER_TYPED_CONST && row->value == (uint64_t)(int64_t)(int32_t)value.integer;
             }
         }
-        check_test_expect(test, same && reads == 2, "node-window replaces 28 ordinary nodes by nine checked roots with their exact native rows and two local read events");
+        check_test_expect(test, same && reads == (debug ? 0u : 2u), "node-window preserves the exact typed values and takes local reads only without source rows");
         CheckProgramLowered original = { 0 };
         CheckProgramLowered first = { 0 };
         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
@@ -6170,20 +6171,23 @@ static void node_window_test_compile(CheckTest* test)
             lowered = check_test_program_function(original.functions + b, first.functions + b);
         }
         check_test_expect(test, lowered, "node-window mixed returns lower to the ordinary functions' native tapes");
-        // The ordinary CONVERT and the summary both own the return token. A difference in any
-        // entry's token matters even on one line, where the final DWARF row can coalesce it.
-        CheckProgramLowered plain_debug = { 0 };
-        CheckProgramLowered window_debug = { 0 };
-        bool tokens = check_program_lower_sources(&plain_debug, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
-                      check_program_lower_sources(&window_debug, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) &&
-                      plain_debug.count == window_debug.count;
-        for (uint32_t b = 0; tokens && b < plain_debug.count; b += 1)
+        if (debug)
         {
-            const uint32_t entries = plain_debug.functions[b].count;
-            tokens = check_test_program_function(plain_debug.functions + b, window_debug.functions + b) &&
-                     (entries == 0 || memcmp(plain_debug.entry_tokens[b], window_debug.entry_tokens[b], (size_t)entries * sizeof(uint32_t)) == 0);
+            // The ordinary CONVERT and the summary both own the return token. A difference in any
+            // entry's token matters even on one line, where the final DWARF row can coalesce it.
+            CheckProgramLowered plain_debug = { 0 };
+            CheckProgramLowered window_debug = { 0 };
+            bool tokens = check_program_lower_sources(&plain_debug, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+                          check_program_lower_sources(&window_debug, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) &&
+                          plain_debug.count == window_debug.count;
+            for (uint32_t b = 0; tokens && b < plain_debug.count; b += 1)
+            {
+                const uint32_t entries = plain_debug.functions[b].count;
+                tokens = check_test_program_function(plain_debug.functions + b, window_debug.functions + b) &&
+                         (entries == 0 || memcmp(plain_debug.entry_tokens[b], window_debug.entry_tokens[b], (size_t)entries * sizeof(uint32_t)) == 0);
+            }
+            check_test_expect(test, tokens, "node-window debug lowering keeps the exact source token and native row for each entry");
         }
-        check_test_expect(test, tokens, "node-window debug lowering keeps the exact source token and native row for each entry");
         bool replayed = false;
         if (lowered && input->window_count != 0)
         {
@@ -6236,7 +6240,8 @@ static bool node_window_test_debug_driver(const char* directory)
 
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
-    node_window_test_compile(test);
+    node_window_test_compile(test, false);
+    node_window_test_compile(test, true);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready && node_window_test_debug_driver(directory), "node-window takes integer returns under -g and preserves the debug object");
