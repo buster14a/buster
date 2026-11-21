@@ -15708,12 +15708,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         else if (!discard)
         {
             const uint32_t before = writer->count;
-            const CheckInput* input = writer->program->input;
-            const uint32_t entry = input->window_count != 0 && op == CHECK_OP_VALUE ? graph->members[node] : 0;
-            if (__builtin_expect(entry != 0 && entry <= input->window_count && input->window_entries[entry - 1].node == node, 0))
+            const CheckInputWindowEntry* row = check_input_window_row(program->input, node);
+            if (__builtin_expect(row != NULL, 0))
             {
-                const CheckInputWindowEntry row = input->window_entries[entry - 1];
-                check_lower_emit(writer, row.kind, row.class, row.value);
+                check_lower_emit(writer, row->kind, row->class, row->value);
             }
             else
             {
@@ -15729,8 +15727,21 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_VALUE)
     {
+        const CheckInputWindowEntry* row = check_input_window_row(program->input, node);
         const uint32_t object = value->object;
-        if (value->type == BUSTER_TYPE_VOID)
+        if (__builtin_expect(row != NULL, 0))
+        {
+            const uint32_t local = row->value < program->object_count ? check_lower_local_of(writer, (uint32_t)row->value) : BUSTER_CHECK_NONE;
+            if (row->kind == BUSTER_TYPED_LOCAL && local < writer->local_count)
+            {
+                check_lower_emit(writer, row->kind, row->class, local);
+            }
+            else
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+        }
+        else if (value->type == BUSTER_TYPE_VOID)
         {
             // The final value of a statement region without an expression statement is void.
         }

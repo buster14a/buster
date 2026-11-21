@@ -891,7 +891,7 @@ struct CheckInputMusttail
 
 #include "c_check_noderef_types.c"
 
-// A taken expression's typed tape. The first accepted class, a return of a plain int constant, has one entry.
+// A taken int return's single native entry. A LOCAL's value is its declared object until lowering.
 typedef struct CheckInputWindowEntry CheckInputWindowEntry;
 struct CheckInputWindowEntry
 {
@@ -899,6 +899,8 @@ struct CheckInputWindowEntry
     uint32_t node;
     uint8_t kind;
     uint8_t class;
+    // The read of a local, in tokens from its return (zero for a constant).
+    uint16_t read_offset;
 };
 
 struct CheckInput
@@ -1287,6 +1289,14 @@ struct CheckInput
     uint32_t window_count;
     uint32_t window_nodes;
 };
+
+// The tape row owned by this graph node. VALUE is the only operator whose members index can name a
+// summary, and the row records its owner to distinguish the graph's other uses of that column.
+static inline __attribute__((unused)) const CheckInputWindowEntry* check_input_window_row(const CheckInput* input, uint32_t node)
+{
+    const uint32_t slot = input->window_count != 0 && input->graph.ops[node] == CHECK_OP_VALUE ? input->graph.members[node] : 0;
+    return slot != 0 && slot <= input->window_count && input->window_entries[slot - 1].node == node ? input->window_entries + slot - 1 : NULL;
+}
 
 static __attribute__((unused)) uint32_t check_input_target_candidate(const CheckInput* input, uint32_t token)
 {

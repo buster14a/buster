@@ -6130,8 +6130,9 @@ static void node_window_test_compile(CheckTest* test)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        bool same = reference->window_count == 0 && input->window_count == 7 && input->window_nodes == 23 &&
+        bool same = reference->window_count == 0 && input->window_count == 9 && input->window_nodes == 28 &&
                     reference->graph.count == input->graph.count + input->window_nodes - input->window_count;
+        uint32_t reads = 0;
         for (uint32_t i = 0; same && i < input->window_count; i += 1)
         {
             const CheckInputWindowEntry* row = input->window_entries + i;
@@ -6147,10 +6148,19 @@ static void node_window_test_compile(CheckTest* test)
             const CheckValue regular = check_stream_value(&plain.path.stream, other);
             same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && value.type == regular.type &&
                    value.category == regular.category && value.flags == regular.flags && value.constant_kind == regular.constant_kind &&
-                   value.integer == regular.integer && row->kind == BUSTER_TYPED_CONST && row->class == BUSTER_TYPED_CLASS_I32 &&
-                   row->value == (uint64_t)(int64_t)(int32_t)value.integer;
+                   value.integer == regular.integer && row->class == BUSTER_TYPED_CLASS_I32;
+            if (row->read_offset != 0)
+            {
+                const uint32_t token = returned + row->read_offset;
+                same &= row->kind == BUSTER_TYPED_LOCAL && token < input->token_count && input->declarations[token] + 1 == row->value;
+                reads += 1;
+            }
+            else
+            {
+                same &= row->kind == BUSTER_TYPED_CONST && row->value == (uint64_t)(int64_t)(int32_t)value.integer;
+            }
         }
-        check_test_expect(test, same, "node-window replaces 23 ordinary nodes by seven checked roots with the exact return value and native row");
+        check_test_expect(test, same && reads == 2, "node-window replaces 28 ordinary nodes by nine checked roots with their exact native rows and two local read events");
         CheckProgramLowered original = { 0 };
         CheckProgramLowered first = { 0 };
         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
