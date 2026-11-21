@@ -1795,6 +1795,7 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
         }
         node_flat_begin(front->flat, front->shadow);
         front->flat->window = NULL;
+        front->flat->window_literals = NULL;
     }
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)

@@ -654,6 +654,7 @@ struct NodeFrontShadow
     uint64_t flat_window_other;
     uint64_t flat_window_ticks;
     uint64_t flat_window_kernel_ticks;
+    uint64_t flat_window_literal_ticks;
     uint64_t flat_ticks;
     uint64_t flat_compact_ticks;
     uint64_t flat_stage_ticks[8];

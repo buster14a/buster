@@ -4828,6 +4828,7 @@ struct NodeShadow
     uint64_t flat_window_other;
     uint64_t flat_window_ticks;
     uint64_t flat_window_kernel_ticks;
+    uint64_t flat_window_literal_ticks;
     uint64_t flat_ticks;
     uint64_t flat_compact_ticks;
     uint64_t flat_stage_ticks[8];
@@ -7057,8 +7058,8 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                shadow->flat_compared, shadow->flat_differences, shadow->flat_only, shadow->flat_lean_only, shadow->flat_unread, shadow->flat_far);
         if ((shadow->reader & BUSTER_NODE_READER_FLAT_WINDOW) != 0)
         {
-            printf("node-shadow: flat window expressions=%" PRIu64 " records=%" PRIu64 " cross-chunk=%" PRIu64 " far=%" PRIu64 " unmapped=%" PRIu64 " ticks=%" PRIu64 " admitted-kernel-ticks=%" PRIu64 "\n",
-                   shadow->flat_window_roots, shadow->flat_window_records, shadow->flat_window_cross, shadow->flat_window_far, shadow->flat_window_other, shadow->flat_window_ticks, shadow->flat_window_kernel_ticks);
+            printf("node-shadow: flat window expressions=%" PRIu64 " records=%" PRIu64 " cross-chunk=%" PRIu64 " far=%" PRIu64 " unmapped=%" PRIu64 " ticks=%" PRIu64 " admitted-kernel-ticks=%" PRIu64 " own-literal-ticks=%" PRIu64 "\n",
+                   shadow->flat_window_roots, shadow->flat_window_records, shadow->flat_window_cross, shadow->flat_window_far, shadow->flat_window_other, shadow->flat_window_ticks, shadow->flat_window_kernel_ticks, shadow->flat_window_literal_ticks);
         }
         printf("node-shadow: flat front ticks=%" PRIu64 " compact-ticks=%" PRIu64 "\n", shadow->flat_ticks, shadow->flat_compact_ticks);
         printf("node-shadow: flat front stage ticks classify=%" PRIu64 " leaves=%" PRIu64 " places=%" PRIu64 " records=%" PRIu64 " empties=%" PRIu64 "\n",
@@ -7548,6 +7549,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->flat_window_other += front->flat_window_other;
                     shadow->flat_window_ticks += front->flat_window_ticks;
                     shadow->flat_window_kernel_ticks += front->flat_window_kernel_ticks;
+                    shadow->flat_window_literal_ticks += front->flat_window_literal_ticks;
                     shadow->flat_ticks += front->flat_ticks;
                     shadow->flat_compact_ticks += front->flat_compact_ticks;
                     shadow->flat_tokens += front->flat_tokens;

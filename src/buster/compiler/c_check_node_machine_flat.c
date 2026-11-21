@@ -125,6 +125,7 @@ struct NodeFlat
 {
     NodeFrontShadow* shadow;
     struct NodeFlatWindow* window;
+    CheckInputLiterals* window_literals;
     // The next chunk's first postorder position, the last chunk's, the records made in the unit so far, and the first
     // of the last chunk's.
     uint32_t position;
@@ -1011,6 +1012,8 @@ static __attribute__((noinline)) void node_flat_empties(NodeFlat* flat, uint64_t
     }
 }
 
+static void node_flat_differs(NodeFrontShadow* shadow, uint32_t token, uint32_t field);
+
 // The flat front's passes over a chunk (this file's first comment), with the chunk's literals' entries
 // (check_input_expression_literals). The compaction's ticks and the other passes' are apart, and each stage's.
 static __attribute__((noinline)) void node_front_chunk_flat(NodeFlat* flat, CheckInputReader* reader, const CheckInputLiterals* literals)
@@ -1035,7 +1038,15 @@ static __attribute__((noinline)) void node_front_chunk_flat(NodeFlat* flat, Chec
     flat->argument_count = 0;
     node_flat_classify(flat, work, false);
     ticks[2] = __rdtsc();
-    node_flat_leaves(flat, reader, literals);
+    uint32_t own_literals = 0;
+    if (flat->window_literals != NULL)
+    {
+        // The window producer has its own compacted token and class columns. Decode their literals before writing
+        // its leaves. This time is included in the flat structural passes as well as reported separately.
+        own_literals = check_input_expression_literals(reader, flat->tokens, flat->classes, work, flat->window_literals);
+        shadow->flat_window_literal_ticks += __rdtsc() - ticks[2];
+    }
+    node_flat_leaves(flat, reader, flat->window_literals != NULL ? flat->window_literals : literals);
     ticks[3] = __rdtsc();
     node_flat_places(flat, reader, work, reach, &beyond, &lefts);
     ticks[4] = __rdtsc();
@@ -1062,6 +1073,14 @@ static __attribute__((noinline)) void node_front_chunk_flat(NodeFlat* flat, Chec
     shadow->flat_tokens += work;
     shadow->flat_beyond += beyond;
     shadow->flat_left += lefts;
+    if (flat->window_literals != NULL)
+    {
+        const uint32_t count = flat->list_counts[CHECK_INPUT_CODE_LITERAL];
+        if (count != own_literals || memcmp(literals->values, flat->window_literals->values, count * sizeof(uint32_t)) != 0)
+        {
+            node_flat_differs(shadow, work != 0 ? flat->tokens[0] : 0, BUSTER_NODE_FLAT_FIELD_LEAF);
+        }
+    }
 }
 
 // A difference between the flat front and the lean one, counted and, the first ones, listed.

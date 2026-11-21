@@ -13,6 +13,7 @@ struct NodeFlatWindow
 {
     // The writers operate on a NodeFront. Only its kernel columns, leaf payload scratch and operator tables are used.
     NodeFront candidate;
+    CheckInputLiterals entries;
     NodeFront* target;
     NodeFacts literals;
     uint64_t lines[4 * (BUSTER_NODE_FRONT_RECORDS + 1)];
@@ -28,6 +29,7 @@ static void node_facts_flat_begin(NodeFront* front, CheckInputReader* reader)
     if (window != NULL)
     {
         front->flat->window = window;
+        front->flat->window_literals = &window->entries;
         window->target = front;
         window->literals.lines = window->lines;
         window->candidate.window_facts = &window->literals;
