@@ -21,6 +21,8 @@
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_TYPE_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_TYPE_INCLUDED
 
+#include <pthread.h>
+
 // The builtin types a row's operand may be: a code below this.
 #define BUSTER_NODE_MACHINE_KINDS 24u
 
@@ -319,6 +321,20 @@ static bool node_machine_tables_initialize(void)
         node_machine_tables_ready = valid;
     }
     return valid;
+}
+
+// Baked compilers start with the rows. In PIE builds (including TSan, MSan and fuzzing) the
+// first enabled reader makes the same rows once, before any lane uses them. The image baker
+// calls the initializer directly while checking its writes to the image's table section.
+static void node_machine_tables_runtime(void)
+{
+    (void)node_machine_tables_initialize();
+}
+
+bool check_node_window_prepare(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    return pthread_once(&once, node_machine_tables_runtime) == 0 && node_machine_tables_ready;
 }
 
 // The first source position at which check_context_source_complete takes `type` as complete, with `graph`'s tag history:

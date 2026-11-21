@@ -891,6 +891,16 @@ struct CheckInputMusttail
 
 #include "c_check_noderef_types.c"
 
+// A taken expression's typed tape. The first accepted class, a return of a plain int constant, has one entry.
+typedef struct CheckInputWindowEntry CheckInputWindowEntry;
+struct CheckInputWindowEntry
+{
+    uint64_t value;
+    uint32_t node;
+    uint8_t kind;
+    uint8_t class;
+};
+
 struct CheckInput
 {
     CheckGraph graph;
@@ -1274,6 +1284,11 @@ struct CheckInput
     uint32_t* sugar_nodes;
     uint32_t sugar_mask;
     uint32_t sugar_entries;
+    // A summary is a VALUE at its return token, whose members column is its tape entry's one-based index.
+    CheckInputWindowEntry* window_entries;
+    uint32_t window_capacity;
+    uint32_t window_count;
+    uint32_t window_nodes;
 };
 
 static __attribute__((unused)) uint32_t check_input_target_candidate(const CheckInput* input, uint32_t token)

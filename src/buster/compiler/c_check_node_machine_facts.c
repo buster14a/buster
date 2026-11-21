@@ -60,7 +60,7 @@
 // they are written: a chunk's records are its window (node_facts_window_run). The two other makings of the same inputs
 // are its twins.
 //
-// No compile takes any of it.
+// The opt-in compile shares the integer fold with the window (check_node_window_fold_int).
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_FACTS_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_FACTS_INCLUDED
 
@@ -2066,6 +2066,26 @@ static inline __attribute__((always_inline)) bool node_facts_fold(NodeFactsRecor
             node_facts_conversions(records, w, BUSTER_TYPE_BUILTIN(row->converted[0]), row->conversion_flags[0], unary ? 0 : BUSTER_TYPE_BUILTIN(row->converted[1]),
                                    unary ? 0 : row->conversion_flags[1], 0);
         }
+    }
+    return taken;
+}
+
+// The first production window admits only unqualified int operands. The fold above reads signedness and the
+// result's carried word from these type rows. Its result is immediately published as a leaf, so no next rule
+// reads its word. The reader prepares the shared transition table once before admitting any windows.
+bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result)
+{
+    static const NodeFactsRow rows[BUSTER_TYPE_CODE_INT + 1] = { [BUSTER_TYPE_CODE_INT] = { .flags = BUSTER_NODE_FACTS_SIGNED } };
+    const NodeFactsView view = { .rows = rows };
+    const uint8_t standing = BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER);
+    NodeFactsRecord records[3] = {
+        { .type = BUSTER_TYPE_INT, .payload = left, .standing = standing, .flags = BUSTER_CHECK_ICE },
+        { .type = BUSTER_TYPE_INT, .payload = right, .standing = standing, .flags = BUSTER_CHECK_ICE },
+    };
+    const bool taken = node_machine_tables_ready && node_facts_fold(records, &view, 2, 0, 1, binary, op);
+    if (taken)
+    {
+        *result = (uint32_t)records[2].payload;
     }
     return taken;
 }

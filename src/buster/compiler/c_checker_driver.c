@@ -12519,6 +12519,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 _Static_assert(BUSTER_CHECK_CLOCK_WALK_PARTS == BUSTER_CHECK_EXPRESSION_PARTS, "the clock reports each of the walk's parts");
                 stage_clock->expression_ticks += input.expression_ticks;
+                if (pp->options.node_window)
+                {
+                    fprintf(errors, "node-window: taken=%u ordinary-nodes-replaced=%u summary-nodes=%u graph-nodes=%u\n", input.window_count, input.window_nodes,
+                            input.window_count, input.graph.count);
+                }
                 for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
                 {
                     stage_clock->expression_part_ticks[p] += input.expression_part_ticks[p];
@@ -13872,6 +13877,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool verify = false;
     // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
     bool check_transitions = false;
+    bool node_window = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -14157,6 +14163,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (match.exact == C_OPTION_VERIFY)
         {
             verify = true;
+        }
+        else if (match.exact == C_OPTION_NODE_WINDOW)
+        {
+            node_window = true;
         }
         else if (match.exact == C_OPTION_CHECK_TRANSITIONS)
         {
@@ -14529,6 +14539,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     options.semantic_pragmas = true;
     options.timing = time_stages;
+    options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
     // The preprocessor's phases' ticks in pp_run, for the report.
     uint64_t pp_ticks[PP_PHASE_COUNT] = { 0 };
@@ -14643,7 +14654,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
