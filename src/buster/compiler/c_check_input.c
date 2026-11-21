@@ -1956,6 +1956,7 @@ struct CheckInputReader
     CheckWarningQueries warning_queries;
     CBindings bindings;
     TypeId* declared_types;
+    // Operator targets, including the result type at each return keyword.
     TypeId* query_types;
     // Post-binding operand types, not type-name queries: graph operands and their constraints stay intact.
     TypeId* sizeof_types;
@@ -2033,7 +2034,6 @@ struct CheckInputReader
     uint32_t function_name_ids[3];
     uint32_t file_function_name_ids[3];
     uint32_t function_name_body;
-    TypeId* return_types;
     uint8_t* declaration_kinds;
     // CheckInput.declaration_bits.
     uint8_t* declaration_bits;
@@ -12629,7 +12629,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->parameter_vla_begin = vla_begin;
                     reader->parameter_vla_end = reader->output->vla_count;
                     check_sparse_set(reader->output->sparse_pool, reader->output->body_declarations, i, name);
-                    reader->function_specifiers[i] = first;
+                    if (reader->function_specifiers != NULL)
+                    {
+                        reader->function_specifiers[i] = first;
+                    }
                     check_sparse_set(reader->output->sparse_pool, reader->parameters, i, parameters);
                     reader->parameter_declarations[i] = parameter_declarations;
                     reader->query_types[i] = type_return(reader->types, type);
@@ -14539,7 +14542,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             if (kind == PARSE_KIND_RETURN)
             {
-                reader->return_types[i] = reader->function_result;
+                reader->query_types[i] = reader->function_result;
                 const uint32_t declaration = reader->function_body < parser->tokens.count ?
                     check_sparse_get(reader->output->body_declarations, reader->function_body) : BUSTER_CHECK_NONE;
                 if (declaration < parser->tokens.count && reader->output->function_flags != NULL &&
@@ -15691,7 +15694,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     {
         list = count == 1;
         const uint32_t parent = parser->tree.parents[token];
-        if (reader->query_types[token] != 0 && parent < parser->tokens.count)
+        // A return keyword already holds its function's result type.
+        if (reader->query_types[token] != 0 && parent < parser->tokens.count && parser->tokens.kinds[parent] != PARSE_KIND_RETURN)
         {
             reader->query_types[parent] = reader->query_types[token];
         }
@@ -15739,13 +15743,13 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     }
     else if (role == PARSE_ROLE_RETURN)
     {
-        supported = reader->return_types[token] != 0 && count <= 1;
+        const TypeId result = kind == PARSE_KIND_RETURN ? reader->query_types[token] : 0;
+        supported = result != 0 && count <= 1;
         if (count == 1)
         {
             op = CHECK_OP_CONVERT;
-            reader->query_types[token] = reader->return_types[token];
         }
-        else if (check_action_kind(reader->types, reader->return_types[token]) != BUSTER_TYPE_KIND_VOID &&
+        else if (check_action_kind(reader->types, result) != BUSTER_TYPE_KIND_VOID &&
                  !check_graph_relaxed_token(graph, token))
         {
             // No value for a non-void function: -Wreturn-mismatch, which clang suppresses in a system header (and a
@@ -16651,6 +16655,8 @@ struct CheckInputTokenCounts
     uint32_t asm_groups;
     uint32_t size_queries;
     uint32_t vector_members;
+    // A pretty function name is the only reader of a body's original declaration specifiers.
+    bool pretty_function_name;
     // The operands, and the closing parentheses of calls and function declarators: the overloads' room.
     uint32_t operands;
     uint32_t calls;
@@ -16676,6 +16682,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                                                                               uint32_t name_count, uint8_t* syntax, uint8_t* visits)
 {
     // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
+    // The last name also gates the declaration-specifier column. Keep it in the filter of possible names.
     static const uint32_t syntax_names[] =
     {
         C_NAME_BUILTIN_VA_ARG,
@@ -16757,10 +16764,13 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                 {
                     matched[groups[i]] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)names[i]));
                 }
-                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
+                for (uint32_t i = 0; i + 1 < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
                 {
                     syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
                 }
+                const __mmask16 pretty = _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32(C_NAME_PRETTY_FUNCTION));
+                syntax_matched[2] |= pretty;
+                result.pretty_function_name |= pretty != 0;
             }
             // The span of the builtins of constants the walk works out (BUSTER_CHECK_SOURCE_BUILTIN_SPAN), one comparison.
             const __mmask16 source = _mm512_mask_cmplt_epu32_mask(present, _mm512_sub_epi32(name, _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_FIRST)),
@@ -17275,8 +17285,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // pages the parse's temporaries took first (ParseOptions.scratch) and the later stages take again.
 #define BUSTER_CHECK_INPUT_ARRAY(field, type) reader.field = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0
     BUSTER_CHECK_INPUT_ARRAY(query_types, TypeId);
-    BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(return_types, TypeId);
+    if (counts.pretty_function_name)
+    {
+        BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
+    }
     BUSTER_CHECK_INPUT_ARRAY(definition_origins, uint32_t);
     // The declaration a name's or a declarator attribute's starts at is asked per C89 implicit candidate and per
     // attribute in every mode (check_input_resolve_range), and for the rare static function note: the column answers
@@ -17506,8 +17518,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     {
         input->constant_warnings_prepared = true;
         memset(reader.query_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.function_specifiers, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.return_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
+        if (reader.function_specifiers != NULL)
+        {
+            memset(reader.function_specifiers, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
         memset(reader.conditions, 0, (uint64_t)count + 1);
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
         if (input->deferred_tokens != 0 && deferred == 0)

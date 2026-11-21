@@ -1234,11 +1234,10 @@ static bool check_input_expression_string(CheckInputReader* reader, CheckInputBa
 // warns (-Wreturn-mismatch). A return outside a function's body, or of more values, is the walk's.
 static bool check_input_expression_return(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
 {
-    const TypeId type = reader->return_types[token];
+    const TypeId type = reader->query_types[token];
     const bool acted = type != 0 && values.count <= 1;
     if (acted && values.count == 1)
     {
-        reader->query_types[token] = type;
         const uint32_t node = check_input_expression_operator(reader, batch, CHECK_OP_CONVERT, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (node != BUSTER_CHECK_NONE)
         {
@@ -1882,8 +1881,8 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
             first = check_input_window_void_first(reader, tokens, classes, start, end);
         }
     }
-    else if (reader->return_types[token] == BUSTER_TYPE_INT && token < parser->tokens.count && parser->tokens.count - token >= 3 &&
-        parser->tokens.kinds[token] == PARSE_KIND_RETURN)
+    else if (token < parser->tokens.count && parser->tokens.count - token >= 3 && parser->tokens.kinds[token] == PARSE_KIND_RETURN &&
+             reader->query_types[token] == BUSTER_TYPE_INT)
     {
         if (end - start >= 1 && tokens[end - 1] == token + 1 &&
             (check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL || check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_IDENTIFIER) &&
@@ -2025,7 +2024,6 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
         if (node != BUSTER_CHECK_NONE)
         {
             reader->output->token_nodes[returned] = node;
-            reader->query_types[returned] = BUSTER_TYPE_INT;
             reader->first_value[returned] = BUSTER_CHECK_NONE;
             *literal += name ? 0 : binary ? 2 : 1;
             *identifier += name ? 1 : 0;
