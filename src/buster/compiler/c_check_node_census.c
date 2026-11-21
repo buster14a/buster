@@ -6884,8 +6884,6 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
             printf("node-shadow: window contexts valued=%" PRIu64 " (%.2f%% of the records swept) of-them-listed-for-their-target=%" PRIu64 " commas=%" PRIu64 "\n",
                    counts[NODE_FACTS_COUNT_CONTEXTS_VALUED], node_census_share(counts[NODE_FACTS_COUNT_CONTEXTS_VALUED], swept), counts[NODE_FACTS_COUNT_CONTEXTS_SUNK],
                    counts[NODE_FACTS_COUNT_CONTEXTS_COMMAS]);
-            // The casts that list their expression for a truth their operand may have and their own value has not.
-            printf("node-shadow: window contexts casts-listed-for-a-truth-their-value-has-not=%" PRIu64 "\n", counts[NODE_FACTS_COUNT_CONTEXTS_PASSED]);
             printf("node-shadow: window contexts listed, by an expression's first record's reason:");
             for (uint32_t reason = 1; reason < BUSTER_NODE_CONTEXTS_REASONS; reason += 1)
             {
