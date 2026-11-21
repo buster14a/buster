@@ -413,6 +413,10 @@ static void check_test_program_scans(CheckTest* test)
             uint32_t allocation_next[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t vla_blocks[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t vla_saves[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            // Each path's walks to the statements keep their own answers (check_program_statement, #2995).
+            uint32_t statement_ends[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t statement_keys[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint64_t statement_known[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 64) / 64];
             CheckProgram programs[2] = { 0 };
             for (uint32_t path = 0; path < 2; path += 1)
             {
@@ -421,7 +425,14 @@ static void check_test_program_scans(CheckTest* test)
                 memset(allocation_next[path], 0xa5, sizeof(allocation_next[path]));
                 memset(vla_blocks[path], 0, sizeof(vla_blocks[path]));
                 memset(vla_saves[path], 0, sizeof(vla_saves[path]));
-                check_program_allocations(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path], vla_saves[path], path == 0);
+                memset(statement_known[path], 0, sizeof(statement_known[path]));
+                const CheckProgramStatements statements = {
+                    .ends = statement_ends[path],
+                    .keys = statement_keys[path],
+                    .known = statement_known[path],
+                };
+                check_program_allocations(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path], vla_saves[path],
+                                          &statements, path == 0);
             }
             check_test_expect(test, programs[0].status == programs[1].status && programs[0].token == programs[1].token &&
                                    memcmp(allocation_first[0], allocation_first[1], sizeof(allocation_first[0])) == 0 &&
@@ -1990,6 +2001,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
                 check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
         uint64_t return_flow_work = 0;
+        uint64_t region_target_work = 0;
+        uint64_t statement_walk_work = 0;
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -1999,6 +2012,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             .initializer_reference_count = data.reference_count,
             .scalar = path == 0,
             .return_flow_work = &return_flow_work,
+            .region_target_work = &region_target_work,
+            .statement_walk_work = &statement_walk_work,
             .target = pp_options.target,
             .predefines = &predefines,
         };
@@ -2008,6 +2023,22 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             check_test_expect(test, program.body_count >= 65 && return_flow_work >= input.graph.count &&
                                    return_flow_work <= (uint64_t)input.graph.count * 8 + 1,
                               "aggregate return graph-mark initialization and visited work are linear in the unit graph");
+        }
+        // #2995: the walks from statement expressions to their break targets and from variable-length arrays to their
+        // statements keep their answers, so in every program they pass a token at most once a body, and twice for the
+        // arrays' two walks; walks that kept none pass a region's or a bound's ancestors again for each, which the checker
+        // sources' deep shapes take far past these bounds.
+        if (ready)
+        {
+            const bool regions = strcmp(name, "quadratic-statement-expressions") == 0;
+            const bool statements = strcmp(name, "quadratic-vla-bounds") == 0;
+            char walks[320];
+            snprintf(walks, sizeof(walks), "%s: %s walks to break targets and statements take %llu and %llu parent steps for %u tokens", name,
+                     path == 0 ? "scalar" : "vector", (unsigned long long)region_target_work, (unsigned long long)statement_walk_work, input.token_count);
+            check_test_expect(test,
+                              region_target_work <= input.token_count && statement_walk_work <= 2 * (uint64_t)input.token_count &&
+                                  (!regions || region_target_work != 0) && (!statements || statement_walk_work != 0),
+                              walks);
         }
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
@@ -2373,6 +2404,24 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
 {
     check_test_program_source_char(test, source, name, clang, false);
+}
+
+// A checker source (tests/checker/sources/NAME.c) as a program fixture, against `clang`'s build of it: its `tested` runs.
+static void check_test_program_checker_source(CheckTest* test, const char* name, const char* clang)
+{
+    CheckTestFixtures fixture = { .storage = arena_reserve(UINT64_C(1) << 20) };
+    char path[PATH_MAX + 128];
+    snprintf(path, sizeof(path), "%s/checker/sources/%s.c", check_test_fixture_root, name);
+    uint64_t length = 0;
+    const char* source = fixture.storage.base != NULL ? check_test_fixture_read(&fixture, path, &length) : NULL;
+    char description[PATH_MAX + 160];
+    snprintf(description, sizeof(description), "%s: the checker source %s is read", name, path);
+    check_test_expect(test, source != NULL && length != 0, description);
+    if (source != NULL && length != 0)
+    {
+        check_test_program_source(test, source, name, clang);
+    }
+    arena_release(&fixture.storage);
 }
 
 // A program fixture in another language mode, with clang reading the same source and mode as the oracle.
@@ -5363,6 +5412,41 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test,
             "int tested(int n){int x=0;int y=3+({int z=4+({x++;n+1;});for(int i=0;i<3;i++)z+=i;z;});return x*100+y;}",
             "nested-statement-regions-and-loop", clang);
+        // #2995: GNU breaks and continues in statement expressions nested in each other, in loops and switches inside
+        // regions, a do statement's body, and nine regions deep; each region's targets reuse its enclosing tokens' answers.
+        check_test_program_source(test,
+            "#define W(e) ({int w_=(e);w_;})\n"
+            "int tested(int n){int x=0;for(int i=0;i<8;i++){"
+            "x+=({int a=({int b=({if(i==2)continue;if(i==6+n%3)break;i;});b*2;});a+1;});"
+            "x+=({int s=0;for(int j=0;j<5;j++){s+=({int c=({if(j==1)continue;if(j==3+(n&1))break;j;});c+1;});}s;});"
+            "switch(i&3){case 0:x+=({int d=({if(n>4)break;5;});d;});x+=100;break;case 1:x+=({int e=({if(i==5)continue;7;});e;});break;"
+            "default:x+=({int t=0;do{t+=({int g=({if(t>3+(n&3))break;2;});g;});}while(t<10);t;});}"
+            "x+=W(W(W(W(W(W(W(W(({if(i==4&&n<0)continue;i*3;})))))))));}return x;}",
+            "statement-regions-nested-loop-targets", clang);
+        // The same in a while condition, whose break and continue are its enclosing loop's: GCC's, as above.
+        check_test_program_source(test,
+            "int tested(int n){int x=0;for(int i=0;i<6;i++){int k=0;"
+            "while(({int c=({if(i==2)continue;k<3+(n&1);});c;})){k++;x+=({({if(k==2&&i==4)break;k;});});}"
+            "x+=k*10+({int s=0;while(({({if(s>2+(n&1)&&i==4)break;s<3;});})){s++;}s;});}return x;}",
+            "statement-regions-nested-loop-condition-targets-gcc", "gcc");
+        // Variable-length arrays of several bounds in nested blocks, a loop's, a declaration of several, one of 31 bounds
+        // and one in a statement expression that a break leaves (#2995: their statements found by walks that share paths).
+        check_test_program_source(test,
+            "#define O5 [one][one][one][one][one]\n"
+            "int tested(int n){int m=n+5,one=m-n-4,r=0;"
+            "{int a[m][m+1][2];a[1][2][1]=7;r+=(int)sizeof a+a[1][2][1];"
+            "{int b[m][2][m][3],c[m],d[2][m],e0[one],e1[one+1],e2[one+2];b[m-1][1][m-1][2]=m;c[0]=1;d[1][m-1]=2;"
+            "r+=(int)(sizeof b+sizeof c+sizeof d+sizeof e0+sizeof e1+sizeof e2)+b[m-1][1][m-1][2]+c[0]+d[1][m-1];"
+            "for(int i=0;i<m;i++){int f[i+1][m];f[i][m-1]=i;r+=(int)sizeof f+f[i][m-1];if(i==2)continue;r+=1;}}}"
+            "int z O5 O5 O5 O5 O5 O5[m];z[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][m-1]=4;"
+            "r+=(int)(sizeof z/sizeof(int))+z[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][m-1];"
+            "for(int i=0;i<m;i++){r+=({int h[m][i+1];h[m-1][i]=i;if(i==3)break;(int)sizeof h+h[m-1][i];});}"
+            "return r+({int g[m][m];g[0][1]=3;(int)sizeof g+g[0][1];});}",
+            "vla-several-bounds-nested-blocks", clang);
+        // The checker sources' deep shapes of both (#2995), whose walks the program harness counts: GCC's for the break in
+        // a while condition, as above.
+        check_test_program_checker_source(test, "quadratic-statement-expressions", "gcc");
+        check_test_program_checker_source(test, "quadratic-vla-bounds", clang);
         check_test_program_source(test,
             "int tested(int n){int x=0;double z=0.5+({double y=n+0.25;x++;y;});return (int)(z*4)+x;}", "statement-region-floating-pending-value", clang);
         check_test_program_source(test,

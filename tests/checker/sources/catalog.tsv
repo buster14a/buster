@@ -430,3 +430,5 @@ quadratic-case-runs	quadratic-case-runs.c	-	runs of case labels on one statement
 quadratic-generic-chains	quadratic-generic-chains.c	-	_Generic selections nested in their last association, and 40 associations (#2995)
 quadratic-generic-duplicate	quadratic-generic-duplicate.c	rejected	a duplicate type after 40 associations (#2995)
 quadratic-typeof-chains	quadratic-typeof-chains.c	-	typeof queries nested as the whole type name of the one around them (#2995)
+quadratic-statement-expressions	quadratic-statement-expressions.c	-	statement expressions nested 100 deep, in loops and switches with GNU break and continue, and many under deep blocks (#2995; the program tests run it, against GCC, and count its walks)
+quadratic-vla-bounds	quadratic-vla-bounds.c	-	a variable-length array of 100 bounds, a declaration of 100 such declarators, and arrays of several in nested blocks (#2995; the program tests run it and count its walks)
