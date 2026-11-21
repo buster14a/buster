@@ -974,6 +974,9 @@ struct CheckDriverDiagnostic
     // A parameter's unknown type name corrected to a specifier (#2498) precedes that specifier's own errors at the
     // same token, and is retained alongside them rather than deduplicated as another account of the same error.
     bool parameter_correction;
+    // Notes beside it, where `notes` isn't null: a counted_by pointer's initialization's two (#1842's 3d).
+    const PPOutputDiagnosticNote* notes;
+    uint32_t note_count;
 };
 
 // A conversion clang warns of with an error by default and makes (#1969, check_driver_report_default_error), whose source a
@@ -2645,7 +2648,9 @@ static const char* check_driver_conditional_mismatch_message(const Parser* parse
             const TypeId pointee = type_kind_is_array(kind) ? type_element(types, type_strip_aligned(types, type)) : type;
             const TypeId decayed = decays ? type_find_pointer(types, pointee) : 0;
             const uint32_t spelling = decays ? 0 : check_driver_pointer_spelling(parser, input, stream, types, arms[i]);
-            names[i] = check_driver_warning_type(parser, pp, input, types, spell, scratch, decayed != 0 ? decayed : type, spelling);
+            // (A counted_by family member's keeps its sugar, #1842's 3c.)
+            names[i] = decayed != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, decayed, spelling) :
+                                      check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, type, arms[i], spelling);
         }
         const char* words = warning == CHECK_WARNING_CONDITIONAL_POINTER_TYPES ? "pointer type mismatch" : "pointer/integer type mismatch in conditional expression";
         result = names[0].length != 0 && names[1].length != 0 ?
@@ -3655,7 +3660,7 @@ static String8 check_driver_library_designator(const Parser* parser, Preprocesso
 // type has none.
 static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                  CheckWarningSpelling* spell, uint32_t source, TypeId recovered, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
-                                                 uint32_t target_declaration, uint32_t target_node, uint8_t action, Arena* scratch)
+                                                 uint32_t target_declaration, uint32_t target_node, uint32_t target_member, uint8_t action, Arena* scratch)
 {
     const char* result = NULL;
     if ((recovered != 0 || source < stream->count) && target != 0)
@@ -3675,7 +3680,9 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         check_driver_space_scope(parser, pp, input, types, spell, target_declaration, &scope, scratch);
         const String8 placed_to = target_sugar == 0 ? check_driver_placed_type(parser, pp, input, types, spell, scratch, target, target_declaration) : (String8){ 0 };
         // A member a counted_by family attribute counts, as clang's CountAttributedType prints it (#1842's 3c).
+        // An initializer's subobject that is such a member (`target_member`) too.
         const String8 counted_to = target_node != BUSTER_CHECK_NONE ? check_driver_counted_type(parser, pp, input, stream, types, spell, scratch, target_node, target) :
+                                   target_member != 0 ? check_driver_counted_member_type(parser, pp, input, types, spell, scratch, target_member, 0, target) :
                                    (String8){ 0 };
         const String8 to = counted_to.length != 0 ? counted_to : placed_to.length != 0 ? placed_to :
                            check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
@@ -3754,9 +3761,11 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     }
     uint32_t spelling = 0;
     const TypeId spelled = whole ? check_input_object_spelling(types, input, parser, declaration, input->declared_types[declaration], target, &spelling) : target;
-    // A subobject's member or element spells it (#1447, check_semantic_subobject_spelling).
+    // A subobject's member or element spells it (#1447, check_semantic_subobject_spelling), and a counted_by family member
+    // prints its sugar (#1842's 3c).
     spelling = !whole && declared && source < stream->count ?
                check_semantic_subobject_spelling(parser, input, types, input->declared_types[declaration], declaration, offset, target) : spelling;
+    const uint32_t member = !whole && declared && source < stream->count ? check_semantic_subobject_member(types, input->declared_types[declaration], offset, target) : 0;
     const TypeId bare = type_strip_aligned(types, target);
     const bool array = type_kind_is_array(type_kind(types, bare));
     // An array's (clang's FK_ArrayNeedsInitList and its string literal kinds): the literal its element takes named, a
@@ -3766,8 +3775,8 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
     const char* result = recovered == 0 && source >= stream->count ? NULL :
                          !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, recovered, spelled, spelling,
-                                                                whole ? check_input_declared_sugar(input, declaration) : 0, whole ? declaration : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0,
-                                                                scratch) :
+                                                                whole ? check_input_declared_sugar(input, declaration) : 0, whole ? declaration : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE,
+                                                                member, 0, scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
                          wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
     *located = whole ? declaration : token;
@@ -3894,7 +3903,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
     const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, 0, target, target_spelling, target_sugar,
-                                                                 target_declaration, target_node, action,
+                                                                 target_declaration, target_node, 0, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
     return result;
@@ -4154,7 +4163,7 @@ static const char* check_driver_dump_struct(const Parser* parser, Preprocessor* 
         const bool placed = parameter < input->token_count;
         const char* words = target != 0 ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, 0, target,
                                                                          placed ? check_driver_parameter_spelling(parser, input, parameter) : 0, 0,
-                                                                         placed ? parameter : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 3, scratch) : NULL;
+                                                                         placed ? parameter : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0, 3, scratch) : NULL;
         // The first line's call: the rest as written, then the record's line's format and type name.
         const uint32_t opening = graph->argument_tokens[offset] > 0 ? check_semantic_argument_begin(parser, graph, node, 0) - 1 : 0;
         const uint32_t closing = opening < parser->tokens.count ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
@@ -4222,7 +4231,7 @@ static const char* check_driver_builtin_conversion(const Parser* parser, Preproc
         const uint32_t source = graph->argument_nodes[offset + operand];
         const char* words = conversion.flags == BUSTER_CHECK_CONVERT_FAILED && conversion.type != 0 ?
                             check_driver_conversion_words(parser, pp, input, stream, types, spell, source, 0, conversion.type, 0, 0, BUSTER_CHECK_NONE,
-                                                          BUSTER_CHECK_NONE, 3, scratch) : NULL;
+                                                          BUSTER_CHECK_NONE, 0, 3, scratch) : NULL;
         if (words != NULL)
         {
             result = words;
@@ -4669,7 +4678,6 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
     const uint32_t scanned = count < input->token_count ? count : input->token_count;
     const uint32_t nodes = stream != NULL ? stream->count : 0;
-    const bool attribute_warnings = !input->asm_warnings_prepared || input->ignored_asm_count != 0;
     const uint32_t constant_warnings = input->constant_warnings_prepared ? input->constant_warning_count : scanned;
     const uint32_t node_warnings = stream != NULL && stream->warnings_prepared ? stream->warning_count : nodes;
     const bool show_warnings = !quiet;
@@ -4677,7 +4685,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const uint64_t kr_offset64 = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count;
     const uint64_t call_offset64 = kr_offset64 + input->kr_diagnostic_count;
     const uint64_t report_room = call_offset64 + (show_warnings ? node_warnings : 0) + 1;
-    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + (uint64_t)node_warnings * 2 + excess_count + 1 : 0;
+    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (uint64_t)node_warnings * 2 + excess_count + 1 : 0;
     const uint32_t completion_count = show_warnings ? input->warning_events.count : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && call_offset64 + nodes <= UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
@@ -4860,21 +4868,6 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         if (reports)
         {
             firsts[first_count] = UINT64_MAX;
-        }
-        const CheckSparseWide attributes = input->attributes;
-        const bool attributed = show_warnings && attribute_warnings && check_sparse_wide_present(attributes);
-        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned, scalar) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned, scalar))
-        {
-            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned, scalar);
-            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
-            {
-                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-                const uint32_t flags = check_diagnostic_attribute_warnings(input, token);
-                if (flags != 0)
-                {
-                    warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags);
-                }
-            }
         }
         for (uint32_t first = 0; show_warnings && constant_warnings != 0 && input->constant_warnings != NULL && first < scanned; first += 64)
         {
@@ -6661,6 +6654,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 .message = "attribute is here",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s", message);
+                        }
+                        else if (phase == 2 && extra[index].notes != NULL)
+                        {
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, extra[index].notes, extra[index].note_count, "%s", message);
                         }
                         else if (phase == 2 && extra[index].note != NULL && extra[index].unlocated_note)
                         {
@@ -9031,7 +9028,6 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .identifiers = identifiers,
                 .types = program->types,
                 .output = output,
-                .scalar = parser->options.scalar,
                 .internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1,
                 .object_size_compat = candidate->object_sizes != NULL,
             };
@@ -12733,6 +12729,40 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             excess_count = initializers.warning_count;
                         }
                     }
+                    // A counted_by or counted_by_or_null pointer member's initializations while its pointee is incomplete
+                    // (#1842's 3d): clang's errors at each, ahead of the initializers' other errors at the same token (their
+                    // conversions'), each ordered by its own position.
+                    const uint32_t counted_begin = additional_count;
+                    if (expression_valid && !repairing && check_init_counted_unit(&types))
+                    {
+                        CheckInitCounted counted = { .arena = arena };
+                        const bool traced = check_initializers_counted(&counted, &input, &stream, checking, &types, output_arena, scratch);
+                        const bool room = traced && counted.count != 0 &&
+                                          check_driver_additional_room(&additional, &additional_capacity, additional_count, counted.count, output_arena);
+                        CheckWarningSpelling counted_spell = { 0 };
+                        for (uint32_t e = 0; room && e < counted.count; e += 1)
+                        {
+                            const CheckInitCountedError* error = counted.errors + e;
+                            PPOutputDiagnosticNote* notes = BUSTER_ARENA_PUSH_ARRAY(output_arena, PPOutputDiagnosticNote, BUSTER_CHECK_SEMANTIC_NOTES);
+                            uint32_t note_count = 0;
+                            const char* message = notes != NULL ? check_semantic_counted_initialization(checking, checking_pp, &input, &types, &counted_spell, error->member,
+                                                                                                        error->record, error->implicit, notes, &note_count, output_arena) : NULL;
+                            additional[additional_count++] = (CheckDriverDiagnostic){
+                                .token = error->token,
+                                .message = message != NULL ? message : "cannot initialize a '__counted_by' attributed pointer whose pointee type is incomplete",
+                                .position = error->position,
+                                .completion = error->completion,
+                                .repeated = true,
+                                .notes = message != NULL && note_count != 0 ? notes : NULL,
+                                .note_count = note_count,
+                            };
+                        }
+                        if (!traced)
+                        {
+                            check_common_exhausted(pp);
+                        }
+                    }
+                    const uint32_t counted_end = additional_count;
                     uint32_t* rejected_initializer_roots = NULL;
                     if (!expression_valid || repairing || initializers.status != CHECK_INIT_OK)
                     {
@@ -12847,12 +12877,20 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                         rejected_initializer_roots[failure.failed_source - 1] = failure.completion;
                                     }
                                 }
+                                // Clang's error for a counted_by member's initialization comes first at its value (#1842's 3d),
+                                // which this one follows rather than giving way to.
+                                bool after_counted = false;
+                                for (uint32_t c = counted_begin; c < counted_end; c += 1)
+                                {
+                                    after_counted |= additional[c].position == place;
+                                }
                                 // (Its node plus one, CheckDriverDiagnostic.default_source.)
                                 additional[additional_count++] = (CheckDriverDiagnostic){
                                     .token = place,
                                     .message = message != NULL ? message : "initializer checking capacity exhausted",
                                     .position = place,
                                     .completion = failure.completion,
+                                    .repeated = after_counted,
                                     .default_source = default_error ? failure.failed_source : 0,
                                     .default_target = default_error ? failure.failed_type : 0,
                                 };
@@ -13184,8 +13222,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                               NULL, 0, quiet, &shift_warnings, scratch) ||
-                        !check_driver_warning_events_at(checking, pp, &input, &types, &input_warnings, repairing ? &repair : NULL, publication_end, scratch) ||
-                        !check_driver_warning_events_at(checking, pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, scratch))
+                        !check_driver_warning_events_from(checking, pp, &input, &types, &stream, &input_warnings, repairing ? &repair : NULL, publication_end, scratch) ||
+                        !check_driver_warning_events_from(checking, pp, &input, &types, &stream, &stream.warning_events, repairing ? &repair : NULL, publication_end,
+                                                          scratch))
                     {
                         fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
                         driver_fatal = true;
@@ -14586,19 +14625,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     if (parsed && libraries_ready)
     {
-        char** sources = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)input_count + 1);
-        uint32_t source_inputs = 0;
-        parsed = sources != NULL && (input_count == 0 || input_kinds != NULL);
-        for (uint32_t i = 0; parsed && i < input_count; i += 1)
-        {
-            const CheckDriverInputKind kind = input_kinds[i].kind;
-            if (kind == CHECK_DRIVER_INPUT_C || kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
-            {
-                sources[source_inputs] = inputs[i];
-                source_inputs += 1;
-            }
-        }
-        parsed = parsed && driver_cache_streams(&arena, sources, source_inputs, &options);
+        parsed = driver_cache_streams(&arena, inputs, input_kinds, input_count, &options);
     }
     options.semantic_pragmas = true;
     options.timing = time_stages;

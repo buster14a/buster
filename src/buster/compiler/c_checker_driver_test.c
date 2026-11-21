@@ -1691,8 +1691,7 @@ static void check_test_driver_windowed_loop(CheckTest* test, const char* executa
 }
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
-// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding of an element past 4 GiB; an NSString of
-// no literal, which clang's code reads as one
+// BPF's preserve_access_index and HLSL's resource pointer; an NSString of no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
 // data taken again across side effects, a __float128's and a 2-byte vector's, those clang's code crashes on (a 32-byte
@@ -1709,8 +1708,6 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_preserve_access_index, which clang compiles for BPF alone (an error without -g)" },
         { "void f(int x) { __builtin_hlsl_resource_getpointer_typed(x); }\n",
           "unsupported: __builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either" },
-        { "struct S { char c[1L << 32]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
-          "unsupported: __builtin_clear_padding of an element past 4 GiB" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
           "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         // A static initializer of one, which clang's evaluator takes as an address constant (#1785): its object refused by the
@@ -6808,12 +6805,6 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
         if (show_warnings)
         {
             memset(warnings, 0, ((uint64_t)count + 1) * sizeof(*warnings));
-            for (uint32_t token = 0; token < count && token < input->token_count; token += 1)
-            {
-                const uint32_t flags = check_diagnostic_attribute_warnings(input, token);
-                warnings[token].flags = flags;
-                warnings[token].enabled = flags;
-            }
             for (uint32_t token = 0; input->constant_warnings != NULL && token < count && token < input->token_count; token += 1)
             {
                 const uint8_t flags = input->constant_warnings[token];
@@ -7090,7 +7081,6 @@ static void check_test_driver_reports(CheckTest* test)
         const CheckInput checked = input;
         const CheckStream streamed = stream;
         uint32_t warning_rows = 0;
-        uint32_t attribute_rows = 0;
         uint32_t constant_rows = 0;
         for (uint32_t node = 0; ready && node < stream.count; node += 1)
         {
@@ -7098,13 +7088,11 @@ static void check_test_driver_reports(CheckTest* test)
         }
         for (uint32_t token = 0; ready && token < count; token += 1)
         {
-            attribute_rows += check_diagnostic_attribute_warnings(&input, token) != 0;
             constant_rows += input.constant_warnings[token] != 0;
         }
-        check_test_expect(test, ready && stream.warnings_prepared && stream.warning_count == warning_rows && input.asm_warnings_prepared &&
-                               (input.ignored_asm_count != 0) == (attribute_rows != 0) && input.constant_warnings_prepared &&
+        check_test_expect(test, ready && stream.warnings_prepared && stream.warning_count == warning_rows && input.constant_warnings_prepared &&
                                input.constant_warning_count == constant_rows,
-                          "warning producers publish exact node/constant counts and ignored-asm presence for report collection");
+                          "warning producers publish exact node/constant counts for report collection");
         const uint32_t errors = pp.errors;
         const uint32_t warnings = pp.warnings;
         for (uint32_t round = 0; ready && round < 160; round += 1)
@@ -9345,6 +9333,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
+#include "c_check_unused_comparison_driver_test.c"
 #include "c_check_address_space_driver_test.c"
 #include "c_check_auto_qualifier_driver_test.c"
 #include "c_check_sizeof_array_decay_driver_test.c"
@@ -9583,6 +9572,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool operand_diagnostics_only = false;
     // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
     bool assert_bool_only = false;
+    // --unused-comparison-only: discarded comparisons' assignment-note eligibility (#2906).
+    bool unused_comparison_only = false;
     // --record-extensions-only: zero-length arrays and zero-size records, their policies and output preservation.
     bool record_extensions_only = false;
     // --auto-qualifiers-only: qualified __auto_type declarations and recovered atomic pointees (#1844).
@@ -9645,6 +9636,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--assert-bool-only") == 0)
         {
             assert_bool_only = true;
+        }
+        else if (strcmp(argv[i], "--unused-comparison-only") == 0)
+        {
+            unused_comparison_only = true;
         }
         else if (strcmp(argv[i], "--record-extensions-only") == 0)
         {
@@ -9712,7 +9707,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only +
-                             (uint32_t)run_modes_only + (uint32_t)correctness_edges_only;
+                             (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)unused_comparison_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10262,6 +10257,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_assert_bool(&test, clang, executable, directory);
     }
+    if (temporary && unused_comparison_only)
+    {
+        check_test_driver_unused_comparisons(&test, clang, executable, directory);
+    }
     if (temporary && record_extensions_only)
     {
         check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
@@ -10503,6 +10502,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_conditional_mismatches,
             check_test_driver_generic_attributes,
             check_test_driver_unused_results,
+            check_test_driver_unused_comparisons,
             check_test_driver_address_spaces,
             check_test_driver_auto_qualifiers,
             check_test_driver_sizeof_array_decay,
@@ -10752,9 +10752,19 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_alias_late_attributes(&test, clang, executable, directory);
             }
+            // An asm label after a definition (#2936): clang's warning at the label's string, noted at the definition, among
+            // its declaration's other diagnostics, whole, in each policy, mode, lane request and reader.
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/asm-label-after-definition");
+            }
             if (check_test_driver_takes())
             {
                 check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
+                if (!lazy)
+                {
+                    check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/non-prototype");
+                }
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -10863,6 +10873,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_divide(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_leaf(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

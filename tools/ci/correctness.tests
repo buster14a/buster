@@ -3,6 +3,11 @@
 # BUSTER_COMPILER, its own executable's path, so that the commands test the configuration that runs them; run one by
 # hand with BUSTER_COMPILER set to a build's executable, such as build/compiler.
 
+== Test deterministic work and growth contracts [1 CPU]
+# #2041: bounded dependency admission and sparse SSA storage at N, 2N and 4N, with semantic checks, deterministic
+# work/byte records, real excessive-work mutations and a check that production builds cannot enable the counters.
+# The standalone harnesses inherit this row's host and sanitizer flags; no elapsed time or RSS decides their verdict.
+bash tests/work-contracts/run.sh
 == Check unity fixture ownership without rebuilding
 # The existing compiler's dependency graph keeps private fixtures, arbitrary nested includes and test headers in
 # one main unit. Exact shared exceptions and shared-root structure may not grow silently; stale/incomplete records
@@ -992,7 +997,7 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 # checks that the truth values became branches, constants are stores' immediates, no shift by zero is left, each
 # computed goto has its own indirect jump, (#2676) each select of a comparison is a cmov of its flags, with no setcc,
 # (#2791) a select of a floating comparison by <, <=, > or >= a cmov of its ucomis's flags, on NaN and signed-zero
-# operands, and
+# operands, (#2922) one of == or != two cmovs, the parity flag's too, unless its values recur through it, and
 # (#2745) no object a vector's value writes whole is zeroed first.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns

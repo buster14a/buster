@@ -273,6 +273,37 @@ static void check_debug_values_test_ranges(CheckDebugTestTally* tally)
                             "optimized locations intersect both PC bounds and lexical gaps without adding a default location", "");
 }
 
+// The first instance owns only descendant spans. An unrelated root, a body span and a zero-length
+// child span exercise both bounds and the gaps the indexed interval must retain.
+static void check_debug_values_test_inline_bounds(CheckDebugTestTally* tally)
+{
+    CheckDebugInline instances[] = {
+        { .parent = BUSTER_CHECK_NONE }, { .parent = 0 }, { .parent = 1 },
+        { .parent = 0 }, { .parent = BUSTER_CHECK_NONE }, { .parent = BUSTER_CHECK_NONE },
+    };
+    const CheckDebugValueSpan spans[] = {
+        { .begin = 0, .end = 10 }, { .begin = 10, .end = 15, .inline_instance = 6 },
+        { .begin = 15, .end = 19, .inline_instance = 2 }, { .begin = 19, .end = 21, .inline_instance = 3 },
+        { .begin = 21, .end = 22 }, { .begin = 23, .end = 24, .inline_instance = 2 },
+        { .begin = 24, .end = 26, .inline_instance = 4 }, { .begin = 26, .end = 26, .inline_instance = 2 },
+        { .begin = 26, .end = 31, .inline_instance = 6 },
+    };
+    const CheckDebugBody body = { .inlines = instances, .inline_count = BUSTER_ARRAY_LENGTH(instances), .spans = spans, .span_count = BUSTER_ARRAY_LENGTH(spans) };
+    CheckDebugInlineSpans bounds[BUSTER_ARRAY_LENGTH(instances)];
+    check_debug_inline_span_bounds(&body, bounds);
+    check_debug_test_expect(tally, bounds[0].first == 2 && bounds[0].end == 8 && bounds[1].first == 2 && bounds[1].end == 8 &&
+                                   bounds[2].first == 3 && bounds[2].end == 4 && bounds[3].first == 6 && bounds[3].end == 7 &&
+                                   bounds[4].first > bounds[4].end && bounds[5].first == 1 && bounds[5].end == 9,
+                            "inline span bounds include descendants and omit unrelated prefix and suffix spans", "");
+    uint8_t bytes[32];
+    DebugWriter writer = { .bytes = bytes };
+    const uint8_t expected[] = { 1, 7, 4, 15, 21, 4, 23, 26, 0 };
+    const uint32_t pairs = check_debug_inline_ranges(&body, &writer, 7, 0, 4, bounds[0]);
+    const uint32_t empty = check_debug_inline_ranges(&body, &writer, 7, 4, 5, bounds[4]);
+    check_debug_test_expect(tally, pairs == 2 && empty == 0 && writer.size == sizeof(expected) && memcmp(bytes, expected, sizeof(expected)) == 0,
+                            "a parent coalesces adjacent descendant PCs and keeps the body gap; an empty instance emits nothing", "");
+}
+
 // A function type's parameter names are not variables of the enclosing body (#1688). The const qualifiers here
 // belong only to unused prototypes, while volatile belongs to an actual definition parameter and must survive.
 static void check_debug_values_test_parameters(CheckDebugTestTally* tally, const char* directory, Arena* arena)
@@ -444,6 +475,7 @@ static void check_debug_values_test_roots(CheckDebugTestTally* tally, const char
 static void check_debug_values_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
     check_debug_values_test_ranges(tally);
+    check_debug_values_test_inline_bounds(tally);
     check_debug_values_test_parameters(tally, directory, arena);
     check_debug_values_test_roots(tally, directory, arena);
     char source[PATH_MAX];

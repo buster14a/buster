@@ -840,15 +840,13 @@ static bool check_input_asm_label_use(const CheckInputReader* reader, uint32_t t
     return evaluated;
 }
 
-// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877, #1167): the
-// vector path skips 256 tokens without attributes with a load of their directory entries and tests 16 tokens' values 8
-// at a time (check_sparse_wide_entries); the scalar path, its twin, tests each token's. The asm labels' passes read them
-// rather than the column, which a unit's few attributed tokens left them sweeping three times.
-static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint32_t limit, uint32_t* tokens, bool scalar)
+// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877, #1167): it
+// skips 256 tokens without attributes with a load of their directory entries and tests 16 tokens' values 8 at a time
+// (check_sparse_wide_entries). The asm labels' passes read them rather than the column, which a unit's few attributed
+// tokens left them sweeping three times.
+static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint32_t limit, uint32_t* tokens)
 {
-    (void)scalar;
-
-    return check_sparse_wide_entries(input->attributes, limit, !BUSTER_SCALAR_PATH(scalar), tokens);
+    return check_sparse_wide_entries(input->attributes, limit, tokens);
 }
 
 // Whether bit `index` of `bits` is set: words of 32 bits, as the kernels below gather them.
@@ -922,8 +920,6 @@ static uint32_t check_input_asm_labelled_uses(const CheckInput* input, const uin
 static void check_input_asm_labels(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
-    input->asm_warnings_prepared = true;
-    const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
     const uint64_t mark = reader->scratch->length;
     const uint64_t slots = (uint64_t)input->token_count + 1;
     const uint64_t words = (slots + 31) / 32;
@@ -931,7 +927,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
     // A label needs an asm keyword: without one, no token has a label to check.
     uint32_t* attributed = input->asm_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)limit + 1) : NULL;
     input->resource |= input->asm_capacity != 0 && attributed == NULL;
-    const uint32_t attributed_count = attributed != NULL ? check_input_asm_attributed_tokens(input, limit, attributed, scalar) : 0;
+    const uint32_t attributed_count = attributed != NULL ? check_input_asm_attributed_tokens(input, limit, attributed) : 0;
     bool present = false;
     for (uint32_t a = 0; !present && a < attributed_count; a += 1)
     {
@@ -944,7 +940,9 @@ static void check_input_asm_labels(CheckInputReader* reader)
     }
     const CheckInputAttribute** labels = present ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, const CheckInputAttribute*, slots) : NULL;
     uint8_t* states = labels != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, slots) : NULL;
-    uint32_t* labelled = states != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, words) : NULL;
+    // A labelled object's first definition, which a later label's warning notes (#2936), valid where its state has bit 2.
+    uint32_t* definitions = states != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, slots) : NULL;
+    uint32_t* labelled = definitions != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, words) : NULL;
     uint32_t* declared = labelled != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, words) : NULL;
     input->resource |= present && declared == NULL;
     if (declared != NULL)
@@ -968,6 +966,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
                         labelled[object / 32] |= UINT32_C(1) << (object % 32);
                         states[object] = 0;
                         labels[object] = NULL;
+                        definitions[object] = BUSTER_CHECK_NONE;
                     }
                     states[object] |= 1;
                 }
@@ -1015,14 +1014,48 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                         input->recovered_reports[r].repeated |= input->recovered_reports[r].token == token;
                                     }
                                 }
+                                else if (previous == NULL && (states[object] & 4) != 0)
+                                {
+                                    // A first label after the definition (#2936): clang's checkNewAttributesAfterDef drops it
+                                    // with "attribute declaration must precede definition" at its string, noted at the
+                                    // definition, before it would look at an earlier use. The warning its merge reserved
+                                    // (check_input_attribute_late) is published, or else one at the label is made.
+                                    attribute->ignored = true;
+                                    CheckWarningBuffer* events = &reader->warning_events;
+                                    const uint32_t reserved = attribute->warning;
+                                    CheckWarningEvent* held = reserved != 0 && reserved <= events->count ? events->events + reserved - 1 : NULL;
+                                    held = held != NULL && held->kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE && held->token == attribute->argument_first &&
+                                           held->note_count == 1 && held->note_first < events->note_count ? held : NULL;
+                                    if (held != NULL)
+                                    {
+                                        held->flags &= ~BUSTER_CHECK_WARNING_SUPPRESSED;
+                                        events->notes[held->note_first].token = definitions[object];
+                                    }
+                                    else
+                                    {
+                                        const CheckWarningEvent event =
+                                        {
+                                            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                                            .kind = CHECK_WARNING_EVENT_LATE_ATTRIBUTE,
+                                            .token = attribute->argument_first,
+                                            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                                            .completion = attribute->end,
+                                            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                                        };
+                                        const CheckWarningNote note =
+                                        {
+                                            .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+                                            .token = definitions[object],
+                                            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                                        };
+                                        check_input_warning_event(reader, &event, &note, 1);
+                                    }
+                                }
                                 else if (previous == NULL && (states[object] & 2) != 0)
                                 {
                                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
-                                }
-                                else if (previous == NULL && (states[object] & 4) != 0)
-                                {
-                                    attribute->ignored = true;
-                                    input->ignored_asm_count += 1;
                                 }
                                 else
                                 {
@@ -1030,7 +1063,9 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                 }
                             }
                         }
-                        states[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? 4 : 0;
+                        const bool defined = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+                        definitions[object] = defined && (states[object] & 4) == 0 ? token : definitions[object];
+                        states[object] |= defined ? 4 : 0;
                     }
                     else if (reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && check_input_asm_label_use(reader, token))
                     {

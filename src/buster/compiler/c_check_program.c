@@ -1539,9 +1539,10 @@ static void check_control_entry(CheckControlWriter* writer, CheckControlKind kin
     });
 }
 
-// The return under a chain of attribute specifiers, a musttail return's (check_input_statement_attributes), from the
-// closer of the first: each closer's child after it is the next specifier's closer, or the statement. BUSTER_CHECK_NONE
-// where the statement isn't a return (another statement's attributes, which the reader refuses but a null statement's).
+// The jump under a chain of attribute specifiers (check_input_statement_attributes), from the closer of the first: each
+// closer's child after it is the next specifier's closer, or the statement: a return (a musttail one's), a break, a
+// continue or a goto, whose attributes change nothing of its jump (#1844: `[[clang::likely]] break;`,
+// `__attribute__((nomerge)) continue;`). BUSTER_CHECK_NONE where the statement is another (an expression's, a null one's).
 static uint32_t check_control_attributed(const CheckControlWriter* writer, uint32_t closer)
 {
     const Parser* parser = writer->parser;
@@ -1555,7 +1556,9 @@ static uint32_t check_control_attributed(const CheckControlWriter* writer, uint3
         }
         at = next;
     }
-    return at != BUSTER_CHECK_NONE && parser->tree.roles[at] == PARSE_ROLE_RETURN && parser->tokens.kinds[at] == PARSE_KIND_RETURN ? at : BUSTER_CHECK_NONE;
+    const uint8_t kind = at != BUSTER_CHECK_NONE ? parser->tokens.kinds[at] : 0;
+    const bool jump = kind == PARSE_KIND_RETURN || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_GOTO;
+    return at != BUSTER_CHECK_NONE && parser->tree.roles[at] == PARSE_ROLE_RETURN && jump ? at : BUSTER_CHECK_NONE;
 }
 
 // Whether return `token` is a musttail return's (CheckInput.musttails, in source order: a binary search).
@@ -3572,15 +3575,15 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
 // CheckProgram.object_labelled: the objects of the declarations with an asm label not ignored (check_input_attribute_of's),
 // by one scan of the tokens
 // with attributes (CheckInput.attributes), in a unit with an asm keyword alone; false where the column has no room.
-static bool check_program_labelled_objects(CheckProgram* program, Arena* output, bool scalar)
+static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     bool room = true;
-    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count, scalar) : count; room && first < count;
-         first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
+    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
+         first = check_input_attributed_next(input->attributes, first + 16, count))
     {
-        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count, scalar);
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
         for (uint32_t selected = lanes; room && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -6178,7 +6181,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
                                     check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
     valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
     // The labelled library declarations, which a computed call's test reads in the references' pass below.
-    valid = valid && check_program_labelled_objects(program, output, BUSTER_SCALAR_PATH(options.scalar));
+    valid = valid && check_program_labelled_objects(program, output);
     // The candidates as the pass before the bodies' controls finds them (#2536's step 2.2, census_pass): the constant ifs'
     // left-out tokens (check_program_constant_arms), then the pruned scan without them, timed together.
     if (valid && (options.selection_census || options.candidates) && program->status == CHECK_PROGRAM_OK)

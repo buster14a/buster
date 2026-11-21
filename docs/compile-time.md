@@ -872,8 +872,8 @@ It is a wide column of the sparse pool now (`CheckSparseWide`):
   as the other columns' are taken (`check_sparse_take`, of two blocks here).
 - **The scans.** Each of the four skips 256 tokens without attributes with a
   load of their 16 directory entries (`check_sparse_wide_next`) and tests a
-  group's values 8 at a time (`check_sparse_wide_group`); the scalar path, their
-  twin, visits every group and reads each token's value.
+  group's values 8 at a time (`check_sparse_wide_group`). Their scalar twin,
+  which visited every group and read each token's value, went with #2924.
 
 `test-checker`'s scans test checks wide columns against columns of a 64-bit
 value a token at every count to 200, beside a column of the same pool: every
@@ -2242,8 +2242,8 @@ Every change keeps both paths' objects and diagnostics byte for byte.
     such keyword maps to its parent, of which it must be the first child, and sets a bit at that close's postorder
     position. The pass visits those bits' closes in order, which is the order the walk would visit them in, so a
     selection's operands are still selected before it.
-  - **Scalar path.** The walk. The kernel's own scalar path tests every close as the walk does: its twin in
-    `test-checker`.
+  - **Scalar path.** The walk, which the pass still takes where it has no room for the bits. The kernel's own scalar
+    path, its twin in `test-checker`, went with #2924.
   - **Fallback.** Without room for the bits (`(count + 63) / 64` words of scratch), the vector path walks.
 - **`check_program`'s columns.** `vla_first`, `allocation_first`, `allocation_next`, `vla_blocks` and `vla_saves`, and the
   allocations' pass over every token, are made only where the unit may have a variable-length array
