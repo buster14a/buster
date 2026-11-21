@@ -253,8 +253,11 @@ subtraction, OR or XOR on a common operand, the join can compute
 `s op (c ? x : y)`. Both results must be private to the phi, and subtraction
 requires `s` on the left in both arms. Each arm moves
 at most four non-constant rows, each join takes at most four selects, and the
-moved rows' cost plus two per select is at most eight. These are policy bounds,
-not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
+moved rows' cost plus two per select is at most eight. Since #2842 a join's
+`f32` and `f64` phis convert too, their rows constants, copies, selects,
+bitcasts, negations and proven loads, none of which raises a floating
+exception; floating arithmetic, comparisons and conversions keep their arm's
+branch. These are policy bounds, not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
 the rules.
 
 `test-ir-optimize` runs `ir_if_convert_test.c`: complete SSA verification,
@@ -264,6 +267,11 @@ against their definitions on random columns, every guarded candidate-scan tail, 
 orientations, sequential, nested and three-predecessor regions over rounds,
 loop-carried values, shared switch/call side-table words, allocation rollback,
 refusal of unsafe or expensive speculation, the reload and truth fixtures,
+#2842's floating phis (`f32` and `f64` copies and negations converted, an
+addition, a subtraction, a multiplication, a division and a dead comparison
+refused, a floating load speculated behind the head's integer access of its
+bytes and refused past them or volatile, drawing their trials from a stream of
+their own),
 a running maximum kept as a branch (and converted with a constant bound), and
 the loop's conditional sum sunk below its addition.
 The reload fixtures reuse a reload, speculate it behind a store or a fence, and
@@ -277,7 +285,15 @@ and nested) and conditional arithmetic, no select of a tested truth value (no
 values (#2677; their `cmov`s are #2676's fused selects of comparisons), and
 `cmov` with only the loop's branch for the conditional sum and the `?:` sum. They also
 require the branches to remain for loads, division, variable shifts, calls, a
-reload after a call and the running max.
+reload after a call and the running max. #2842's floating selects (the issue's
+kernels, the six double comparisons, `!(a < b)` and `!(a == b)`, the float
+comparisons `<`, `!(a > b)` and `!=`, a mixed width, a triangle, sequential and
+nested clamps, a magnitude, a reused load and a nested choice) are compiled at
+x86-64, x86-64-v3 and x86-64-v4 and run against clang -O0 on NaNs, signed
+zeros, infinities and both conditions; their decoded code has its blends
+(`kmovw` and `vpblendmq` under k1 at x86-64-v4 for an integer condition, at
+either width, `cmps*` and `pand` otherwise) and no branch but a loop's, the
+nested clamp's outer test and those of an unproven load and a division.
 
 ## Dominator analysis (#1352, #2924)
 
