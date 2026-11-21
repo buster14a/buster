@@ -214,9 +214,9 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
     },
     {
         .name = "a redeclaration's own enable_if, not the one before",
-        .source = "void q2(int x) __attribute__((enable_if(x > 0, \"p1\")));\n"
+        .source = "void q2(int x) __attribute__((enable_if(x > 5, \"p1\")));\n"
                   "void q2(int x) __attribute__((enable_if(x > 1, \"p2\")));\n"
-                  "int h(void) { q2(5); q2(1); return 0; }\n",
+                  "int h(void) { q2(3); q2(1); return 0; }\n",
         .errors = 1,
         .notes = 1,
     },

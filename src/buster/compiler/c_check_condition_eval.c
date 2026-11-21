@@ -176,7 +176,10 @@ static bool check_condition_run(TypeTable* types, const CheckCondition* conditio
         else if (step->op == BUSTER_CHECK_CONDITION_PARAMETER)
         {
             valid = step->index < count;
-            const CheckValue unknown = { .type = step->type, .category = CHECK_RVALUE };
+            const CheckValue unknown = {
+                .type = step->type,
+                .category = CHECK_RVALUE,
+            };
             values[s] = !valid ? (CheckValue){ 0 } : bound != NULL ? bound[step->index] : unknown;
         }
         else

@@ -11169,10 +11169,11 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   parameters of the declaration that wrote it, while clang binds the
   arguments to the found declaration's, so each parameter it reads is
   unknown (#2464, `check_condition_disabled`): one that reads a parameter
-  (`n < 100`, `n || 1`, `(n, 1)`, `p != 0` with an object's address)
-  disables every call through a later declaration, a definition or a
-  block-scope declaration, and one that reads none (`1 || n`, `sizeof(n)`,
-  `1`) decides as written. A diagnose_if reads the arguments, inherited or
+  in a shape the steps take (`n < 100`, `n || 1`, `(n, 1)`, `p != 0` with
+  an object's address) disables every call through a later declaration, a
+  definition or a block-scope declaration, and one that reads none
+  (`1 || n`, `sizeof(n)`, `1`) decides as written. A kept shape (a
+  `__builtin_object_size` of the parameter) still decides nothing. A diagnose_if reads the arguments, inherited or
   not, as clang binds them to the declaration that wrote it. The first
   enable_if that doesn't admit the call, in source order, is "no matching
   function for call to 'f'" at the callee, its note "candidate disabled: M"
@@ -11337,8 +11338,11 @@ enables, which this checker doesn't all give. A call an enable_if disables
 gives none of its diagnose_ifs that need the arguments, where clang still
 gives those that hold at its `)`; one that names no parameter, at a
 disabled call's callee, comes after the call's error, where clang gives it
-first; and a call in a typeof's operand isn't checked against its
-enable_ifs, where clang's is (a sizeof's is).
+first; a call in a typeof's operand isn't checked against its
+enable_ifs, where clang's is (a sizeof's is); and an inherited enable_if's
+`__builtin_object_size` of a parameter admits every call, where clang folds
+it to the unknown size, `(size_t)-1` for types 0 and 1 and 0 for 2 and 3,
+which can disable it (`<= 8`, `!= (size_t)-1`).
 
 ## Operand errors (#147)
 
