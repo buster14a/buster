@@ -1061,9 +1061,6 @@ struct CheckInput
     // A kept warn_unused_result typedef can remain in a function's returned type through typeof or compatible
     // redeclarations, but canonical TypeIds lose that provenance. Keep logical-call discard warnings in such a unit.
     bool typedef_result_contracts;
-    // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
-    uint32_t ignored_asm_count;
-    bool asm_warnings_prepared;
     // The pool of the sparse columns below (c_check_sparse.c, #628): initializer_nodes, initializer_begins,
     // initializer_ends, evaluation_nodes, body_declarations, declaration_bodies, parameters, parameter_next,
     // control_owners, label_targets, case_ranges and string_ids, which few tokens have an entry in, and of the wide

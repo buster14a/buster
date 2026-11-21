@@ -302,6 +302,9 @@ struct CheckInputAttribute
     uint32_t argument_count;
     CheckInputAttributeKind kind;
     CheckInputAttributeSchema schema;
+    // An asm label's reserved warning after a definition (#2936, check_input_attribute_late), its index in the reader's
+    // warning events plus one, 0 for none: the asm labels' pass publishes it where it drops the label.
+    uint32_t warning;
     int64_t value;
     int64_t* argument_values;
     uint32_t* argument_ends;
@@ -9650,6 +9653,42 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
             }
         }
     }
+    // An asm label after the definition (#2936): clang drops it with "attribute declaration must precede definition" at its
+    // string, noted at the definition, unless the definition has a label. The asm labels' pass decides that, as it knows
+    // the definition's label from every declaration of the object, a block's too (check_input_asm_labels). Its warning is
+    // reserved here, suppressed, at this merge and before the other attributes' below, where clang gives it; a
+    // redefinition's, whose others complete at their names, at the first name of the declaration's attributes. A body's on
+    // a lane goes to source order, whose events keep their indices.
+    const CheckInputAttribute* label = NULL;
+    uint32_t first_name = UINT32_MAX;
+    for (uint32_t i = 0; after && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        label = label == NULL && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored ? attribute : label;
+        first_name = attribute->name_token < first_name ? attribute->name_token : first_name;
+    }
+    check_input_lane_refuse(reader, label != NULL && reader->lane, "a body's redeclaration after a definition has an asm label");
+    uint32_t reserved = 0;
+    if (label != NULL && !reader->lane)
+    {
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+            .kind = CHECK_WARNING_EVENT_LATE_ATTRIBUTE,
+            .token = label->argument_first,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = BUSTER_CHECK_WARNING_SUPPRESSED,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = redefinition ? first_name : point,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        const CheckWarningNote note = {
+            .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+            .token = reader->definition_origins[previous] - 1,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        reserved = check_input_warning_event(reader, &event, &note, 1) ? reader->warning_events.count : 0;
+    }
     bool dropped = false;
     for (uint32_t i = 0; copied && !reader->lane && reader->late_attribute_masks != NULL && i < copy->count; i += 1)
     {
@@ -9704,6 +9743,13 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
             check_input_attribute_summary(copy);
         }
         check_input_set_attributes_at(reader->output, token, copy);
+    }
+    // (The label's own record, in the declaration's list as it now is: its reserved warning.)
+    CheckInputAttributes* merged = reserved != 0 ? check_input_attributes_at(reader->output, token) : NULL;
+    for (uint32_t i = 0; merged != NULL && i < merged->count; i += 1)
+    {
+        CheckInputAttribute* record = merged->records + i;
+        record->warning = record->first == label->first && record->kind == CHECK_ATTRIBUTE_ASM_LABEL ? reserved : record->warning;
     }
     check_input_attribute_merge_exclusions(reader, token, previous, visible);
 }

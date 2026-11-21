@@ -4669,7 +4669,6 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
     const uint32_t scanned = count < input->token_count ? count : input->token_count;
     const uint32_t nodes = stream != NULL ? stream->count : 0;
-    const bool attribute_warnings = !input->asm_warnings_prepared || input->ignored_asm_count != 0;
     const uint32_t constant_warnings = input->constant_warnings_prepared ? input->constant_warning_count : scanned;
     const uint32_t node_warnings = stream != NULL && stream->warnings_prepared ? stream->warning_count : nodes;
     const bool show_warnings = !quiet;
@@ -4677,7 +4676,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const uint64_t kr_offset64 = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count;
     const uint64_t call_offset64 = kr_offset64 + input->kr_diagnostic_count;
     const uint64_t report_room = call_offset64 + (show_warnings ? node_warnings : 0) + 1;
-    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + (uint64_t)node_warnings * 2 + excess_count + 1 : 0;
+    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (uint64_t)node_warnings * 2 + excess_count + 1 : 0;
     const uint32_t completion_count = show_warnings ? input->warning_events.count : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && call_offset64 + nodes <= UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
@@ -4860,21 +4859,6 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         if (reports)
         {
             firsts[first_count] = UINT64_MAX;
-        }
-        const CheckSparseWide attributes = input->attributes;
-        const bool attributed = show_warnings && attribute_warnings && check_sparse_wide_present(attributes);
-        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned))
-        {
-            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned);
-            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
-            {
-                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-                const uint32_t flags = check_diagnostic_attribute_warnings(input, token);
-                if (flags != 0)
-                {
-                    warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags);
-                }
-            }
         }
         for (uint32_t first = 0; show_warnings && constant_warnings != 0 && input->constant_warnings != NULL && first < scanned; first += 64)
         {

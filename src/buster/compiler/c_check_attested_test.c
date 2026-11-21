@@ -779,8 +779,6 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "declaration_bits", CHECK_ATTESTED_FIELD_OWN },
     { "attributes", CHECK_ATTESTED_FIELD_OWN },
     { "typedef_result_contracts", CHECK_ATTESTED_FIELD_CONSEQUENCE },
-    { "ignored_asm_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
-    { "asm_warnings_prepared", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "sparse_pool", CHECK_ATTESTED_FIELD_AMBIENT },
     { "initializer_nodes", CHECK_ATTESTED_FIELD_OWN },
     { "initializer_begins", CHECK_ATTESTED_FIELD_OWN },

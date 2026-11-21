@@ -1207,6 +1207,14 @@ deferred body containing one of these attributes conservatively falls back to so
 state cannot race another body's token columns. `test-checker-deferred` compares the fallback with the scalar and vector
 readers.
 
+An asm label first given after a definition (#2936) is dropped too, with the same warning at the label's string and the
+definition's note, unless the definition has a label from any declaration of the object, a block's included. The asm
+labels' pass at the reader's end decides it (`check_input_asm_labels`), before an earlier use's error, as clang's
+checkNewAttributesAfterDef comes first. Its warning is reserved, suppressed, where the declaration is merged
+(`check_input_attribute_late`), so that it comes first among that declaration's late attributes and after its own
+attributes' warnings; the pass publishes it. A body's such declaration on a lane goes to source order.
+`tests/checker/asm-label-after-definition` compares whole outputs with clang's in `test-checker-driver`.
+
 ### Typed output
 
 `CheckStream.count` matches the input graph's count. Operators, source tokens
