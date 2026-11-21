@@ -128,15 +128,15 @@ static const CheckDriverDefaultWarningFixture check_driver_bitfield_fixtures[] =
         .errors = 2,
     },
     {
-        .name = "-Werror=conversion promotes all three",
+        .name = "-Werror=constant-conversion promotes all three",
         .source = check_driver_bitfield_groups_source,
-        .options = { "-Werror=conversion" },
+        .options = { "-Werror=constant-conversion" },
         .errors = 3,
     },
     {
-        .name = "-Wconversion enables all three after -Wno-everything",
+        .name = "-Wconstant-conversion enables all three after -Wno-everything",
         .source = check_driver_bitfield_groups_source,
-        .options = { "-Wno-everything", "-Wconversion" },
+        .options = { "-Wno-everything", "-Wconstant-conversion" },
         .warnings = 3,
     },
     {
