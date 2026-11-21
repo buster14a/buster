@@ -1619,8 +1619,8 @@ kernel's run in place (`node_facts_window_run`).
   they have no aggregate and no constant but an address's or such an
   integer's, which the callee's type's row says each parameter takes
   unchanged (`BUSTER_NODE_FACTS_TAKES`: no enumeration's type, no floating
-  one, no integer's but a plain one of 8 to 64 bits). The calls' second pass
-  takes the 1 away where an argument may be a null pointer constant that is
+  one, no integer's but a plain one of 8 to 64 bits). The call's argument conversions
+  take the 1 away where an argument may be a null pointer constant that is
   no literal: an integer constant without the literal's flag whose own
   parameter's conversion's type is a pointer's (the arguments' rule's
   answer's `BUSTER_NODE_FACTS_ARGUMENT_QUIET`). The callee's part is a
@@ -1900,7 +1900,7 @@ measured.
   (`node_facts_argument_standing`: its type, the target, the flags of
   `BUSTER_NODE_FACTS_ARGUMENT_FLAGS`, its standing, and whether it is an
   integer constant whose payload is zero). The calls' loop
-  (`node_facts_call_arguments`, a second pass over a batch's calls in
+  (`node_facts_call_arguments`, immediately after checking each callee in
   `node_facts_calls_of`) reads each argument's slot, and where the slot has
   another key's answer or none the rule answers there and then
   (`node_facts_argument_fill`, out of line).
