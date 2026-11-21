@@ -6902,6 +6902,17 @@ keyword, as a value of a conditional's arm or a comma's operand does, and so
 does a `_Generic`'s or `__builtin_choose_expr`'s chosen operand without an
 effect. `-Wunused-value` is in `-Wunused`, `-Wmost` and `-Wall`, with
 `-Wunused-comparison` and `-Wunused-result` under it.
+A discarded equality or inequality supplies its assignment suggestion only
+when its original left operand is an lvalue (#2906,
+`check_common_comparison_lvalue`). The comma and ordinary statement emitters
+share that check. Parentheses, static selections and implicit conversions
+preserve the operand's classification; explicit casts and other rvalues do
+not qualify. A repeated vector swizzle is excluded even though Buster stores
+it as an lvalue with a duplicate-component flag. This follows Clang's
+suggestion rule rather than full assignment validation: const objects and
+arrays still receive notes, and a floating or pointer lvalue can still receive
+the inequality's `|=` suggestion. The existing warning emitter retains its
+locations, macro handling, warning group and severity policy.
 A discarded `&&` or `||` (#1390) is quiet where either operand accepts the
 discard: an ordinary direct call, an assignment, an increment, a volatile read,
 or a nested logical operator, comma, conditional, selection or statement
@@ -9068,7 +9079,27 @@ change, it refused such a declaration by name.
   "conflicting attribute is here" at that declaration's first token;
   `nomerge` on a statement that evaluates no call, "'X' attribute is ignored
   because there exists no call expression inside the statement"; a `nomerge`
-  of arguments, clang's "'nomerge' attribute takes no arguments"; and
+  of arguments, clang's "'nomerge' attribute takes no arguments". Each
+  attribute's error drops that attribute alone, as clang's
+  `ProcessStmtAttributes` drops it (#1844): the statement's other attributes
+  are checked on (a valid `fallthrough` and `musttail` keep their effects), and
+  the errors are recovered (`check_input_recover_reports`), so the unit's later
+  statements are read on and their attributes' errors given too. They are
+  published once the statement is read (`CheckInputReport.completion` at
+  `check_input_loop_statement_end`), after the statement's own errors, and an
+  inner statement's before those of an outer one that ends with it. Clang's
+  analysis, which reports a misplaced `fallthrough`, runs for no function
+  that ends after such an error (`check_input_fallthrough_placements`'
+  `first_error`). Where clang's Sema drops the statement itself (a return of
+  an undeclared name, a parser error in the expression), it gives none of its
+  attributes' errors, which the checker still does. A statement's attribute
+  lists are its children in the parser's tree, before its keyword, each by
+  its closer: the walks find an attributed `while`'s, `for`'s and `switch`'s
+  keyword past them (`check_input_statement_keyword`), so that its breaks,
+  continues, cases and fallthroughs are its own and a switch's condition is
+  promoted, and the control writer finds an attributed `break`, `continue` or
+  `goto` under its specifiers as a musttail return's (`check_control_attributed`),
+  which on main compiled to nothing; and
   `suppress`'s arguments, string literals through parentheses
   (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`); a non-string
   inside them (`suppress((1))`, #2332) is the string error, then the parser's

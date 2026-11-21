@@ -14485,19 +14485,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     if (parsed && libraries_ready)
     {
-        char** sources = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)input_count + 1);
-        uint32_t source_inputs = 0;
-        parsed = sources != NULL && (input_count == 0 || input_kinds != NULL);
-        for (uint32_t i = 0; parsed && i < input_count; i += 1)
-        {
-            const CheckDriverInputKind kind = input_kinds[i].kind;
-            if (kind == CHECK_DRIVER_INPUT_C || kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP)
-            {
-                sources[source_inputs] = inputs[i];
-                source_inputs += 1;
-            }
-        }
-        parsed = parsed && driver_cache_streams(&arena, sources, source_inputs, &options);
+        parsed = driver_cache_streams(&arena, inputs, input_kinds, input_count, &options);
     }
     options.semantic_pragmas = true;
     options.timing = time_stages;

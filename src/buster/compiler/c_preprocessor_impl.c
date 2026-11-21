@@ -839,18 +839,18 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
 }
 
 // Whether buster's own headers' directory has a file `name` (`length` bytes), which clang's resource directory after
-// it (pp->fallback_directory) then doesn't supply, to the search or beside one of its own headers: so a #include_next
+// it (pp->search.fallback_directory) then doesn't supply, to the search or beside one of its own headers: so a #include_next
 // in buster's header goes on past clang's header of the same name, to the C library's. The path is the one the search
 // of buster's directory looks up, so its record is usually in the table already (a #include_next in buster's header
 // names that header).
 static bool pp_buster_supplies(Preprocessor* pp, const uint8_t* name, uint32_t length)
 {
     char path[PATH_MAX];
-    const uint32_t directory_length = pp->buster_directory_length;
+    const uint32_t directory_length = pp->search.buster_directory_length;
     bool result = false;
     if ((uint64_t)directory_length + 1 + length < PATH_MAX)
     {
-        memcpy(path, pp->buster_directory, directory_length);
+        memcpy(path, pp->search.buster_directory, directory_length);
         path[directory_length] = '/';
         memcpy(path + directory_length + 1, name, length);
         const uint32_t record = pp_lookup_path(pp, path, directory_length + 1 + length, directory_length, 0, BUSTER_PP_SYSTEM_FILE);
@@ -865,7 +865,7 @@ static bool pp_buster_supplies(Preprocessor* pp, const uint8_t* name, uint32_t l
 // a path that can't be opened for another reason than there being no file there (PPFile.error) or one PATH_MAX bytes
 // long or longer, which no system call takes (ENAMETOOLONG), is a fatal error at `report`, as clang's
 // getFileAndSuggestModule reports it, and ends the search; with `report` BUSTER_PP_NONE, it is a place without the file.
-// With --buster-headers, clang's resource directory after buster's (pp->fallback_directory) doesn't supply a name
+// With --buster-headers, clang's resource directory after buster's (pp->search.fallback_directory) doesn't supply a name
 // buster's directory has (pp_buster_supplies), neither as a search directory nor as the directory of an includer of
 // clang's: a #include_next in buster's header goes on past clang's header of the same name, to the C library's.
 // The optional timing spans this whole search, including candidate construction, cached hits/misses, file probing
@@ -897,13 +897,13 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         // The place's directory as clang names it: the includer's, a search directory, or none for an absolute name.
         const bool absolute = length != 0 && name[0] == '/';
         const bool own = candidate != PP_CANDIDATE_END && !absolute && directory == BUSTER_PP_NONE;
-        const char* prefix = own ? (source.directory_length != BUSTER_PP_NONE ? source.path : ".") : directory != BUSTER_PP_NONE ? pp->directories[directory] : "";
+        const char* prefix = own ? (source.directory_length != BUSTER_PP_NONE ? source.path : ".") : directory != BUSTER_PP_NONE ? pp->search.directories[directory] : "";
         const uint32_t prefix_length = own ? (source.directory_length != BUSTER_PP_NONE ? source.directory_length : 1)
-                                           : directory != BUSTER_PP_NONE ? pp->directory_lengths[directory] : 0;
+                                           : directory != BUSTER_PP_NONE ? pp->search.directory_lengths[directory] : 0;
         // Clang's resource directory behind buster's, which doesn't supply a name buster's directory has.
-        const uint32_t fallback = pp->fallback_directory;
+        const uint32_t fallback = pp->search.fallback_directory;
         const bool behind = fallback != BUSTER_PP_NONE &&
-                            (own ? prefix_length == pp->directory_lengths[fallback] && memcmp(prefix, pp->directories[fallback], prefix_length) == 0 : directory == fallback);
+                            (own ? prefix_length == pp->search.directory_lengths[fallback] && memcmp(prefix, pp->search.directories[fallback], prefix_length) == 0 : directory == fallback);
         const bool shadowed = candidate != PP_CANDIDATE_END && behind && pp_buster_supplies(pp, name, length);
         int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
         if (candidate == PP_CANDIDATE_PATH && !shadowed)
@@ -13327,24 +13327,23 @@ static bool pp_clang_resource_directory(char* path, uint32_t capacity, uint64_t*
     return result;
 }
 
-static bool pp_add_directory(Preprocessor* pp, const char* path, uint8_t system)
+static bool pp_add_directory(PPSearchDirectories* search, Arena* arena, uint32_t capacity, const char* path, uint8_t system)
 {
     uint32_t length = (uint32_t)strlen(path);
     while (length > 1 && path[length - 1] == '/')
     {
         length -= 1;
     }
-    char* copy = arena_push(&pp->arena, (uint64_t)length + 1, 1);
-    const bool result = copy != 0 && pp->directory_count < (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift);
+    char* copy = search->directory_count < capacity ? arena_push(arena, (uint64_t)length + 1, 1) : NULL;
+    const bool result = copy != NULL;
     if (result)
     {
         memcpy(copy, path, length);
         copy[length] = 0;
-        pp->directories[pp->directory_count] = copy;
-        pp->directory_lengths[pp->directory_count] = length;
-        pp->directory_system[pp->directory_count] = system;
-        pp->directory_entries[pp->directory_count] = 0;
-        pp->directory_count += 1;
+        search->directories[search->directory_count] = copy;
+        search->directory_lengths[search->directory_count] = length;
+        search->directory_system[search->directory_count] = system;
+        search->directory_count += 1;
     }
     return result;
 }
@@ -13352,10 +13351,10 @@ static bool pp_add_directory(Preprocessor* pp, const char* path, uint8_t system)
 // Drops the search directories that don't exist, and the later of two that are the same directory (the same device and
 // inode), as clang does (InitHeaderSearch): among the -iquote ones, then among the others, where a directory that is
 // both a system one and not drops the one that isn't. So #include_next can't find a file again through a repeated -I.
-static void pp_dedupe_directories(Preprocessor* pp)
+static void pp_dedupe_directories(PPSearchDirectories* search, uint64_t* stat_count)
 {
     Scratch scratch = scratch_begin(0);
-    const uint32_t count = pp->directory_count;
+    const uint32_t count = search->directory_count;
     uint64_t* devices = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint64_t), 8);
     uint64_t* inodes = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint64_t), 8);
     bool* kept = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(bool), 8);
@@ -13364,22 +13363,22 @@ static void pp_dedupe_directories(Preprocessor* pp)
         for (uint32_t i = 0; i < count; i += 1)
         {
             struct stat stats;
-            if (pp->options.timing)
+            if (stat_count != NULL)
             {
-                pp->statistics.directory_stats += 1;
+                *stat_count += 1;
             }
-            kept[i] = stat(pp->directories[i], &stats) == 0 && S_ISDIR(stats.st_mode);
+            kept[i] = stat(search->directories[i], &stats) == 0 && S_ISDIR(stats.st_mode);
             devices[i] = kept[i] ? (uint64_t)stats.st_dev : 0;
             inodes[i] = kept[i] ? (uint64_t)stats.st_ino : 0;
         }
         for (uint32_t i = 0; i < count; i += 1)
         {
-            const uint32_t group_first = i < pp->angled_first ? 0 : pp->angled_first;
+            const uint32_t group_first = i < search->angled_first ? 0 : search->angled_first;
             for (uint32_t j = group_first; kept[i] && j < i; j += 1)
             {
                 if (kept[j] && devices[j] == devices[i] && inodes[j] == inodes[i])
                 {
-                    const bool system_over_user = pp->directory_system[i] && !pp->directory_system[j];
+                    const bool system_over_user = search->directory_system[i] && !search->directory_system[j];
                     kept[j] = !system_over_user;
                     kept[i] = system_over_user;
                 }
@@ -13392,22 +13391,106 @@ static void pp_dedupe_directories(Preprocessor* pp)
         uint32_t fallback = BUSTER_PP_NONE;
         for (uint32_t i = 0; i < count; i += 1)
         {
-            angled_first += i < pp->angled_first && kept[i];
+            angled_first += i < search->angled_first && kept[i];
             if (kept[i])
             {
-                fallback = i == pp->fallback_directory ? written : fallback;
-                pp->directories[written] = pp->directories[i];
-                pp->directory_lengths[written] = pp->directory_lengths[i];
-                pp->directory_system[written] = pp->directory_system[i];
-                pp->directory_entries[written] = 0;
+                fallback = i == search->fallback_directory ? written : fallback;
+                search->directories[written] = search->directories[i];
+                search->directory_lengths[written] = search->directory_lengths[i];
+                search->directory_system[written] = search->directory_system[i];
                 written += 1;
             }
         }
-        pp->directory_count = written;
-        pp->angled_first = angled_first;
-        pp->fallback_directory = fallback;
+        search->directory_count = written;
+        search->angled_first = angled_first;
+        search->fallback_directory = fallback;
     }
     scratch_end(scratch);
+}
+
+static bool pp_search_directories(PPSearchDirectories* search, Arena* arena, const PPOptions* options, uint32_t capacity, uint64_t* stat_count)
+{
+    bool result = true;
+    search->fallback_directory = BUSTER_PP_NONE;
+    // The search directories: -iquote ones for quoted names only, then -I, -isystem, the standard ones and -idirafter.
+    for (uint32_t i = 0; result && i < options->quote_directory_count; i += 1)
+    {
+        result = pp_add_directory(search, arena, capacity, options->quote_directories[i], BUSTER_PP_USER_FILE);
+    }
+    search->angled_first = search->directory_count;
+    for (uint32_t i = 0; result && i < options->include_directory_count; i += 1)
+    {
+        result = pp_add_directory(search, arena, capacity, options->include_directories[i], BUSTER_PP_USER_FILE);
+    }
+    for (uint32_t i = 0; result && i < options->system_directory_count; i += 1)
+    {
+        result = pp_add_directory(search, arena, capacity, options->system_directories[i], BUSTER_PP_SYSTEM_FILE);
+    }
+    if (result && !options->no_standard_includes)
+    {
+        // The compiler's headers, which -nobuiltininc leaves out: clang's resource directory (the default), or with
+        // --buster-headers buster's own, then clang's for the headers buster's doesn't supply. That one has no name
+        // buster's directory has (pp_find_include), so buster's headers' #include_next goes on to the C library's,
+        // and every other name is found as without the flag.
+        const bool builtin = !options->no_builtin_includes;
+        char buster[PATH_MAX];
+        char resource[PATH_MAX];
+        bool buster_added = false;
+        if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster), stat_count))
+        {
+            search->missing_headers = true;
+        }
+        else if (builtin && options->buster_headers)
+        {
+            result = pp_add_directory(search, arena, capacity, buster, BUSTER_PP_SYSTEM_FILE);
+            buster_added = result;
+            search->buster_directory = result ? search->directories[search->directory_count - 1] : 0;
+            search->buster_directory_length = result ? search->directory_lengths[search->directory_count - 1] : 0;
+        }
+        if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource), stat_count))
+        {
+            search->fallback_directory = buster_added ? search->directory_count : BUSTER_PP_NONE;
+            result = pp_add_directory(search, arena, capacity, resource, BUSTER_PP_SYSTEM_FILE);
+        }
+        // Then the C library's, as clang's Linux toolchain lists them: Debian's multiarch directory and /include
+        // between /usr/local/include and /usr/include. pp_dedupe_directories drops those a system doesn't have.
+        result = result && pp_add_directory(search, arena, capacity, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) &&
+                 pp_add_directory(search, arena, capacity, "/usr/include/x86_64-linux-gnu", BUSTER_PP_EXTERN_C_FILE) &&
+                 pp_add_directory(search, arena, capacity, "/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(search, arena, capacity, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
+    }
+    for (uint32_t i = 0; result && i < options->after_directory_count; i += 1)
+    {
+        result = pp_add_directory(search, arena, capacity, options->after_directories[i], BUSTER_PP_SYSTEM_FILE);
+    }
+    if (result)
+    {
+        search->requested = search->directory_count;
+        pp_dedupe_directories(search, stat_count);
+    }
+    return result;
+}
+
+// Build the search once before a command's unit lanes start. Paths and columns live in the command's arena.
+// On allocation failure the driver falls back to the ordinary per-unit setup.
+BUSTER_PREPROCESSOR_ENTRY bool pp_prepare_search(PPSearchDirectories* search, Arena* arena, const PPOptions* options)
+{
+    const uint64_t count = (uint64_t)options->quote_directory_count + options->include_directory_count + options->system_directory_count +
+                           options->after_directory_count + (options->no_standard_includes ? 0u : 6u);
+    const uint64_t mark = arena->length;
+    bool ready = count <= BUSTER_PP_MAX_PUSHED;
+    if (ready && count != 0)
+    {
+        search->directories = BUSTER_ARENA_PUSH_ARRAY(arena, char*, count);
+        search->directory_lengths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
+        search->directory_system = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, count);
+        ready = search->directories != NULL && search->directory_lengths != NULL && search->directory_system != NULL;
+    }
+    ready = ready && pp_search_directories(search, arena, options, (uint32_t)count, NULL);
+    if (!ready)
+    {
+        arena_pop_to(arena, mark);
+    }
+    return ready;
 }
 
 // An array of `count` records of `size` bytes in an arena of its own (address space, touched as it is used), whose first
@@ -13516,7 +13599,6 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp->diagnostic_include_range = BUSTER_PP_NONE;
     pp->diagnostic_position = BUSTER_PP_NONE;
     pp->diagnostic_run_first = BUSTER_PP_NONE;
-    pp->fallback_directory = BUSTER_PP_NONE;
     pp->predefines_data = BUSTER_PP_NONE;
     pp->main_file = BUSTER_PP_NONE;
     pp->options = *options;
@@ -13570,6 +13652,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     // own file cache (#652), which had four arenas of their own, a mapping and a commit each, though a small unit
     // touches a page of each or none.
     const uint32_t shift = pp->capacity_shift;
+    const bool shared_search = options->search != NULL && options->search->requested <= (BUSTER_PP_MAX_PUSHED >> shift);
     PPTables plan = { 0 };
     pp_table(&plan, (void**)&pp->ranges, BUSTER_PP_MAX_RANGES >> shift, sizeof(PPRange));
     pp_table(&plan, (void**)&pp->datas, BUSTER_PP_MAX_FILES >> shift, sizeof(PPFileData));
@@ -13578,9 +13661,9 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp_table(&plan, (void**)&pp->files, BUSTER_PP_MAX_FILES >> shift, sizeof(PPFile));
     pp_table(&plan, (void**)&pp->file_slots, BUSTER_PP_FILE_SLOTS >> shift, sizeof(uint32_t));
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
-    pp_table(&plan, (void**)&pp->directories, BUSTER_PP_MAX_PUSHED >> shift, sizeof(char*));
-    pp_table(&plan, (void**)&pp->directory_lengths, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint32_t));
-    pp_table(&plan, (void**)&pp->directory_system, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint8_t));
+    pp_table(&plan, (void**)&pp->search.directories, shared_search ? 0 : BUSTER_PP_MAX_PUSHED >> shift, sizeof(char*));
+    pp_table(&plan, (void**)&pp->search.directory_lengths, shared_search ? 0 : BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint32_t));
+    pp_table(&plan, (void**)&pp->search.directory_system, shared_search ? 0 : BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint8_t));
     pp_table(&plan, (void**)&pp->directory_entries, BUSTER_PP_MAX_PUSHED >> shift, sizeof(FileCacheDirectory*));
     pp_table(&plan, (void**)&pp->line_directives, BUSTER_PP_MAX_LINE_DIRECTIVES >> shift, sizeof(PPLineDirective));
     pp_table(&plan, (void**)&pp->expansion_starts, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> shift) + 1, sizeof(PPExpansionStart));
@@ -13664,61 +13747,19 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
         // Macro 0 is none; location 0 is none.
         pp->macro_count = 1;
         pp->location_top = 1;
-        // The search directories: -iquote ones for quoted names only, then -I, -isystem, the standard ones and -idirafter.
-        for (uint32_t i = 0; result && i < options->quote_directory_count; i += 1)
+        if (shared_search)
         {
-            result = pp_add_directory(pp, options->quote_directories[i], BUSTER_PP_USER_FILE);
+            pp->search = *options->search;
         }
-        pp->angled_first = pp->directory_count;
-        for (uint32_t i = 0; result && i < options->include_directory_count; i += 1)
+        else
         {
-            result = pp_add_directory(pp, options->include_directories[i], BUSTER_PP_USER_FILE);
+            result = pp_search_directories(&pp->search, &pp->arena, options, BUSTER_PP_MAX_PUSHED >> shift, options->timing ? &pp->statistics.directory_stats : NULL);
         }
-        for (uint32_t i = 0; result && i < options->system_directory_count; i += 1)
+        if (pp->search.missing_headers)
         {
-            result = pp_add_directory(pp, options->system_directories[i], BUSTER_PP_SYSTEM_FILE);
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
         }
-        if (result && !options->no_standard_includes)
-        {
-            // The compiler's headers, which -nobuiltininc leaves out: clang's resource directory (the default), or with
-            // --buster-headers buster's own, then clang's for the headers buster's doesn't supply. That one has no name
-            // buster's directory has (pp_find_include), so buster's headers' #include_next goes on to the C library's,
-            // and every other name is found as without the flag.
-            const bool builtin = !options->no_builtin_includes;
-            char buster[PATH_MAX];
-            char resource[PATH_MAX];
-            bool buster_added = false;
-            uint64_t* stat_count = options->timing ? &pp->statistics.directory_stats : 0;
-            if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster), stat_count))
-            {
-                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
-            }
-            else if (builtin && options->buster_headers)
-            {
-                result = pp_add_directory(pp, buster, BUSTER_PP_SYSTEM_FILE);
-                buster_added = result;
-                pp->buster_directory = result ? pp->directories[pp->directory_count - 1] : 0;
-                pp->buster_directory_length = result ? pp->directory_lengths[pp->directory_count - 1] : 0;
-            }
-            if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource), stat_count))
-            {
-                pp->fallback_directory = buster_added ? pp->directory_count : BUSTER_PP_NONE;
-                result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
-            }
-            // Then the C library's, as clang's Linux toolchain lists them: Debian's multiarch directory and /include
-            // between /usr/local/include and /usr/include. pp_dedupe_directories drops those a system doesn't have.
-            result = result && pp_add_directory(pp, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) &&
-                     pp_add_directory(pp, "/usr/include/x86_64-linux-gnu", BUSTER_PP_EXTERN_C_FILE) &&
-                     pp_add_directory(pp, "/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(pp, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
-        }
-        for (uint32_t i = 0; result && i < options->after_directory_count; i += 1)
-        {
-            result = pp_add_directory(pp, options->after_directories[i], BUSTER_PP_SYSTEM_FILE);
-        }
-        if (result)
-        {
-            pp_dedupe_directories(pp);
-        }
+        memset(pp->directory_entries, 0, (size_t)pp->search.directory_count * sizeof(*pp->directory_entries));
         // The builtin macros.
         static const struct
         {
@@ -14562,7 +14603,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_run_input(Preprocessor* pp, const char* path)
     else
     {
         String8 bytes = { 0 };
-        const int kind = driver_read_nonregular(&pp->arena, path, &bytes);
+        const int kind = path == pp->options.probed_input ? 0 : driver_read_nonregular(&pp->arena, path, &bytes, NULL);
         if (kind > 0)
         {
             result = bytes.length <= UINT32_MAX && pp_run_source(pp, path, (const uint8_t*)bytes.pointer, (uint32_t)bytes.length);
@@ -16090,11 +16131,11 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
     const bool found = search && pp_buster_headers_directory(ours, PATH_MAX, 0);
     const bool interned = found && intern_initialize(&table);
     const bool initialized = interned && pp_initialize(&pp, &quiet, &table) && !pp.fatal;
-    const uint32_t directories = initialized ? pp.directory_count : 0;
+    const uint32_t directories = initialized ? pp.search.directory_count : 0;
     uint64_t bytes = 0;
     for (uint32_t d = 0; d < directories; d += 1)
     {
-        bytes += (uint64_t)pp.directory_lengths[d] + 1;
+        bytes += (uint64_t)pp.search.directory_lengths[d] + 1;
     }
     const uint64_t slots = (uint64_t)count + 2 * (uint64_t)directories + 2;
     char** result = !search || initialized ? malloc(slots * sizeof(char*) + bytes) : 0;
@@ -16131,18 +16172,18 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
         bool after = false;
         for (uint32_t d = 0; ready && d < directories; d += 1)
         {
-            const uint8_t system = pp.directory_system[d];
-            const bool fallback = d == pp.fallback_directory;
+            const uint8_t system = pp.search.directory_system[d];
+            const bool fallback = d == pp.search.fallback_directory;
             after = after || system == BUSTER_PP_EXTERN_C_FILE;
             *linked = *linked || (fallback && pp_clang_fallback_links(ours, links));
             ready = !fallback || *linked;
             if (ready && system != BUSTER_PP_EXTERN_C_FILE)
             {
-                memcpy(names, pp.directories[d], (size_t)pp.directory_lengths[d] + 1);
-                result[n] = d < pp.angled_first ? "-iquote" : system == BUSTER_PP_USER_FILE ? "-I" : after ? "-idirafter" : "-isystem";
+                memcpy(names, pp.search.directories[d], (size_t)pp.search.directory_lengths[d] + 1);
+                result[n] = d < pp.search.angled_first ? "-iquote" : system == BUSTER_PP_USER_FILE ? "-I" : after ? "-idirafter" : "-isystem";
                 result[n + 1] = fallback ? links : names;
                 n += 2;
-                names += pp.directory_lengths[d] + 1;
+                names += pp.search.directory_lengths[d] + 1;
             }
         }
     }

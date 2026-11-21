@@ -644,8 +644,13 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
     // The first clang::likely or clang::unlikely, which excludes the other (#2291).
     uint32_t likelihood = BUSTER_CHECK_NONE;
     bool likely = false;
-    for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+    // clang's Sema drops an attribute it gives an error for and goes on to the next (ProcessStmtAttributes), so each one's
+    // errors are given (#1844), and the statement's attributes are valid where all of them are.
+    bool all = true;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
+        all = all && valid;
+        valid = true;
         CheckInputAttribute* attribute = attributes->records + i;
         const CheckInputAttributeKind kind = attribute->kind;
         const String8 generic = kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
@@ -703,7 +708,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
                 }
             }
             valid = holder.error == CHECK_ATTRIBUTE_ERROR_NONE && reader->output->report_count == reported;
-            aligned = code_align && aligned == BUSTER_CHECK_NONE ? attribute->first : aligned;
+            aligned = code_align && valid && aligned == BUSTER_CHECK_NONE ? attribute->first : aligned;
             attribute->ignored = true;
         }
         else if (check_input_attribute_equal(generic, "assume"))
@@ -954,7 +959,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
             }
         }
     }
-    return valid;
+    return all && valid;
 }
 
 // The first clang::likely or clang::unlikely among the C23 attribute lists from `token` on, as clang's
@@ -1174,10 +1179,12 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     }
     else if (body && (empty || keyword || expression))
     {
+        const uint32_t statement_reports = reader->output->report_count;
         uint32_t cursor = first;
         CheckInputAttributes* attributes = 0;
         reader->statement_attributes = true;
-        bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
+        const bool read = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
+        bool valid = read;
         reader->statement_attributes = false;
         // GNU suppresses that clang's parser drops, all of them (#1844): it parses the statement as a declaration, whose
         // first token here, no `(` nor `*` that a declarator could start with, is its second error. (A `(` or a `*` makes
@@ -1226,21 +1233,38 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
                 check_input_warning_event(reader, &event, &note, 1);
             }
         }
+        // A fallthrough is valid on a null statement and a musttail on a return, whatever the other attributes' errors,
+        // which drop those alone (check_input_statement_attribute_kinds).
         bool fallthrough = false;
-        for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+        for (uint32_t i = 0; read && attributes != 0 && i < attributes->count; i += 1)
         {
             fallthrough |= attributes->records[i].kind == CHECK_ATTRIBUTE_FALLTHROUGH;
         }
-        if (valid && empty && fallthrough)
+        if (read && empty && fallthrough)
         {
             check_input_set_attributes_at(reader->output, after, attributes);
         }
-        if (valid && returns && musttail != BUSTER_CHECK_NONE)
+        if (read && returns && musttail != BUSTER_CHECK_NONE)
         {
             const CheckInputMusttail record = { .statement = after, .attributes = first, .name = musttail, .body = reader->function_body };
             check_input_musttail_record(reader, record);
             // Its function's own type and its scopes' cleanups, which the check reads, are source order's.
             check_input_lane_refuse(reader, reader->lane, "a body has a musttail return");
+        }
+        // clang's Sema processes a statement's attributes once it has the statement (ProcessStmtAttributes), so their
+        // errors follow the statement's own, an inner statement's before those of one ending with it, and drops one it
+        // gives an error for, keeping the statement: the unit's later statements are read on, their attributes' errors
+        // too (#1844: a second `nomerge(1)`).
+        if (reader->output->report_count > statement_reports && !reader->output->resource)
+        {
+            const uint32_t end = after < count ? check_input_loop_statement_end(reader, after) : after;
+            for (uint32_t r = statement_reports; r < reader->output->report_count; r += 1)
+            {
+                CheckInputReport* report = reader->output->reports + r;
+                report->completion = report->completion < end ? end : report->completion;
+                report->suborder = report->suborder == 0 ? (uint64_t)(count - first) : report->suborder;
+            }
+            check_input_recover_reports(reader, statement_reports);
         }
         for (uint32_t token = first; token < after; token += 1)
         {
@@ -2920,7 +2944,7 @@ static bool check_input_fallthrough_breaks(CheckInputReader* reader, uint32_t bo
         uint32_t child = token;
         for (uint32_t at = parser->tree.parents[token]; own && live && !above && at < count; at = parser->tree.parents[at])
         {
-            const uint32_t keyword = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FOR ? reader->first_child[at] :
+            const uint32_t keyword = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FOR ? check_input_statement_keyword(reader, at) :
                                                                                                                                           BUSTER_CHECK_NONE;
             const uint8_t kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
             own = kind != PARSE_KIND_WHILE && kind != PARSE_KIND_FOR && kind != PARSE_KIND_SWITCH && parser->tokens.kinds[at] != PARSE_KIND_DO;
@@ -3334,7 +3358,7 @@ static bool check_input_fallthrough_leaves(CheckInputReader* reader, uint32_t it
         const uint8_t role = parser->tree.roles[node];
         const uint32_t first = check_input_fallthrough_first(reader, node);
         const uint8_t first_kind = parser->tokens.kinds[first];
-        const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR ? reader->first_child[node] : BUSTER_CHECK_NONE;
+        const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR ? check_input_statement_keyword(reader, node) : BUSTER_CHECK_NONE;
         const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
         const bool statement = parser->tokens.kinds[node] == PARSE_KIND_SEMI;
         if (statement && (first_kind == PARSE_KIND_RETURN || first_kind == PARSE_KIND_GOTO || first_kind == PARSE_KIND_BREAK || first_kind == PARSE_KIND_CONTINUE))
@@ -3584,7 +3608,7 @@ static bool check_input_fallthrough_flows(CheckInputReader* reader, uint32_t tok
             while (result == 2 && child != BUSTER_CHECK_NONE)
             {
                 const uint8_t role = parser->tree.roles[child];
-                const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION ? reader->first_child[child] : BUSTER_CHECK_NONE;
+                const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION ? check_input_statement_keyword(reader, child) : BUSTER_CHECK_NONE;
                 const bool straight = check_input_fallthrough_straight(reader, child);
                 bool if_alone = keyword < count && parser->tokens.kinds[keyword] == PARSE_KIND_IF;
                 for (uint32_t branch = if_alone ? reader->first_child[child] : BUSTER_CHECK_NONE; branch != BUSTER_CHECK_NONE; branch = reader->next_child[branch])
@@ -3679,7 +3703,7 @@ static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint3
         else if (role == PARSE_ROLE_CLOSE_CONDITION)
         {
             // An if's branch goes on after the if, and a switch's body after the switch; a loop's body goes back.
-            const uint32_t keyword = reader->first_child[parent];
+            const uint32_t keyword = check_input_statement_keyword(reader, parent);
             const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
             done = keyword_kind != PARSE_KIND_IF && keyword_kind != PARSE_KIND_SWITCH;
             statement = parent;
@@ -3746,10 +3770,16 @@ static void check_input_fallthrough_placements(CheckInputReader* reader)
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const CheckInput* input = reader->output;
+    // clang's analysis runs for no function that ends after an error (hasUncompilableErrorOccurred), one the reader went
+    // on past (CheckInput.recovered_reports) too: a statement attribute's (#1844).
     uint32_t first_error = count;
     for (uint32_t report = 0; report < input->report_count; report += 1)
     {
         first_error = input->reports[report].token < first_error ? input->reports[report].token : first_error;
+    }
+    for (uint32_t report = 0; report < input->recovered_count; report += 1)
+    {
+        first_error = input->recovered_reports[report].token < first_error ? input->recovered_reports[report].token : first_error;
     }
     const uint32_t recorded = reader->fallthrough_count;
     uint32_t function = BUSTER_CHECK_NONE;
@@ -3993,7 +4023,7 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                         owner = case_owner;
                         break;
                     }
-                    const uint32_t keyword = reader->first_child[owner];
+                    const uint32_t keyword = check_input_statement_keyword(reader, owner);
                     if (parser->tree.roles[owner] == PARSE_ROLE_CLOSE_CONDITION && keyword < count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH)
                     {
                         break;
@@ -4112,7 +4142,7 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 bool enclosed = false;
                 for (uint32_t ancestor = parser->tree.parents[token]; ancestor < count && !enclosed; ancestor = parser->tree.parents[ancestor])
                 {
-                    const uint32_t keyword = reader->first_child[ancestor];
+                    const uint32_t keyword = check_input_statement_keyword(reader, ancestor);
                     enclosed = parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_CONDITION && keyword < count &&
                                parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
                 }

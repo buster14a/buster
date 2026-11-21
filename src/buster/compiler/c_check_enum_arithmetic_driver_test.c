@@ -163,7 +163,7 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtu
         .notes = 1,
     },
     {
-        .name = "-Wconversion holds -Wenum-conversion",
+        .name = "-Wenum-conversion enables its implemented enum diagnostics",
         .source = "enum E { A, B }; enum F { C, D }; enum { X, Y }; typedef enum E TE;\n"
                   "int f(enum E e, enum F g, TE t, float fl, int i) {\n"
                   "    int r = 0;\n"
@@ -184,7 +184,7 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtu
                   "    r += e << g;\n"
                   "    return r;\n"
                   "}\n",
-        .options = { "-Wconversion" },
+        .options = { "-Wenum-conversion" },
         .warnings = 11,
     },
     {
