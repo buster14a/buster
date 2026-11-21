@@ -312,7 +312,7 @@ static bool check_program_return_prepare(CheckProgram* program, CheckReturnFacts
 }
 
 // The complete postorder reduction for the diagnostic census and the checker's independent comparison.
-static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch, uint64_t* work, bool scalar)
+static __attribute__((unused)) uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch, uint64_t* work, bool scalar)
 {
     const uint32_t count = program->input->graph.count;
     CheckReturnFacts cache = { 0 };
