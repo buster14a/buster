@@ -114,13 +114,92 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .errors = 1,
         .notes = 1,
     },
+    // An inherited enable_if names the parameters of the declaration that wrote it, and clang binds a call's arguments to
+    // the found declaration's, so each parameter it reads is unknown (#2464): a call through a later declaration is
+    // disabled, one through the writer isn't, and an overloadable redeclaration's enable_ifs are its own.
+    {
+        .name = "an inherited enable_if that reads a parameter",
+        .source = "int r(int n) __attribute__((enable_if(n < 100, \"small\")));\n"
+                  "void t0(void) { r(8); }\n"
+                  "int r(int n);\n"
+                  "void t1(void) { r(8); }\n"
+                  "int r(int m);\n"
+                  "int r(int);\n"
+                  "void t2(void) { r(9); }\n"
+                  "int k(int n) __attribute__((overloadable, enable_if(n < 100, \"small\")));\n"
+                  "int k(int n) __attribute__((overloadable, enable_if(n < 100, \"small\")));\n"
+                  "void t3(void) { k(8); }\n"
+                  "void w(int x) __attribute__((enable_if(0, \"p1\")));\n"
+                  "void w(int x) __attribute__((enable_if(x < 10, \"p2\")));\n"
+                  "void t4(void) { w(5); }\n"
+                  "void w(int x);\n"
+                  "void t5(void) { w(5); }\n",
+        .errors = 3,
+        .notes = 3,
+    },
+    // Its parameters are unknown values, not an error: an operator that doesn't read one still decides, a non-null
+    // address is unknown too, and a diagnose_if still reads the arguments (#2464).
+    {
+        .name = "an inherited enable_if's unknown parameters",
+        .source = "int a(int n) __attribute__((enable_if(1 || n, \"or\")));\n"
+                  "int a(int n);\n"
+                  "int c(int n) __attribute__((enable_if(n || 1, \"lor\")));\n"
+                  "int c(int n);\n"
+                  "int d(int n) __attribute__((enable_if(sizeof(n) == 4, \"size\")));\n"
+                  "int d(int n);\n"
+                  "int e(int n) __attribute__((enable_if((n, 1), \"comma\")));\n"
+                  "int e(int n);\n"
+                  "int f(int n) __attribute__((enable_if(n * 0 == 0, \"mul\")));\n"
+                  "int f(int n);\n"
+                  "int p(int *q) __attribute__((enable_if(q != 0, \"nonnull\")));\n"
+                  "int p(int *q);\n"
+                  "int g(int n) __attribute__((enable_if(1 || n, \"ok\"), diagnose_if(n == 8, \"eight\", \"warning\")));\n"
+                  "int g(int n);\n"
+                  "int v;\n"
+                  "void t(void) { a(1); c(1); d(1); e(1); f(1); p(&v); g(8); g(7); }\n",
+        .warnings = 2,
+        .errors = 4,
+        .notes = 5,
+    },
+    {
+        .name = "an inherited enable_if at block scope and after a definition",
+        .source = "int r(int n) __attribute__((enable_if(n < 100, \"small\")));\n"
+                  "void t1(void) { int r(int n); r(8); }\n"
+                  "void t2(void) { r(8); }\n"
+                  "void t3(void) { extern int r(int k); r(8); }\n"
+                  "int r(int n) { return n; }\n"
+                  "void t4(void) { r(8); }\n",
+        .errors = 3,
+        .notes = 3,
+    },
+    // A redeclaration takes an enable_if only where it has none of its own, and then only the previous declaration's
+    // first, as clang's attribute merge skips a kind the declaration has (#2464): `q`'s address can be taken.
+    {
+        .name = "a redeclaration's inherited enable_if is the first alone",
+        .source = "void q(int x) __attribute__((enable_if(1, \"a\"), enable_if(0, \"b\")));\n"
+                  "void q(int x);\n"
+                  "void h(void) { q(1); void (*p)(int) = q; (void)p; }\n"
+                  "void w(int x) __attribute__((enable_if(0, \"p1\")));\n"
+                  "void w(int x) __attribute__((enable_if(x < 10, \"p2\")));\n"
+                  "void hw(void) { w(5); }\n",
+    },
+    {
+        .name = "an inherited enable_if of a pass_object_size function",
+        .source = "int r(void *p __attribute__((pass_object_size(0)))) __attribute__((enable_if(p != 0, \"nn\")));\n"
+                  "int r(void *p __attribute__((pass_object_size(0))));\n"
+                  "int s(void *p __attribute__((pass_object_size(0)))) __attribute__((enable_if(1, \"one\")));\n"
+                  "int s(void *p __attribute__((pass_object_size(0))));\n"
+                  "void t(void) { char b[4]; r(b); s(b); }\n",
+        .errors = 1,
+        .notes = 1,
+    },
     {
         .name = "enable_if with one argument",
         .source = "void f(int x) __attribute__((enable_if(x)));\n",
         .errors = 1,
     },
     {
-        .name = "enable_if of the latest declaration first",
+        .name = "a redeclaration's own enable_if, not the one before",
         .source = "void q2(int x) __attribute__((enable_if(x > 0, \"p1\")));\n"
                   "void q2(int x) __attribute__((enable_if(x > 1, \"p2\")));\n"
                   "int h(void) { q2(5); q2(1); return 0; }\n",
