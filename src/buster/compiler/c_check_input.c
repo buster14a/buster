@@ -1922,6 +1922,7 @@ struct CheckInputReader
     CheckWarningQueries warning_queries;
     CBindings bindings;
     TypeId* declared_types;
+    // Operator targets, including the result type at each return keyword.
     TypeId* query_types;
     // Post-binding operand types, not type-name queries: graph operands and their constraints stay intact.
     TypeId* sizeof_types;
@@ -1999,7 +2000,6 @@ struct CheckInputReader
     uint32_t function_name_ids[3];
     uint32_t file_function_name_ids[3];
     uint32_t function_name_body;
-    TypeId* return_types;
     uint8_t* declaration_kinds;
     // CheckInput.declaration_bits.
     uint8_t* declaration_bits;
@@ -14520,7 +14520,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             if (kind == PARSE_KIND_RETURN)
             {
-                reader->return_types[i] = reader->function_result;
+                reader->query_types[i] = reader->function_result;
                 const uint32_t declaration = reader->function_body < parser->tokens.count ?
                     check_sparse_get(reader->output->body_declarations, reader->function_body) : BUSTER_CHECK_NONE;
                 if (declaration < parser->tokens.count && reader->output->function_flags != NULL &&
@@ -15672,7 +15672,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     {
         list = count == 1;
         const uint32_t parent = parser->tree.parents[token];
-        if (reader->query_types[token] != 0 && parent < parser->tokens.count)
+        // A return keyword already holds its function's result type.
+        if (reader->query_types[token] != 0 && parent < parser->tokens.count && parser->tokens.kinds[parent] != PARSE_KIND_RETURN)
         {
             reader->query_types[parent] = reader->query_types[token];
         }
@@ -15720,13 +15721,13 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     }
     else if (role == PARSE_ROLE_RETURN)
     {
-        supported = reader->return_types[token] != 0 && count <= 1;
+        const TypeId result = kind == PARSE_KIND_RETURN ? reader->query_types[token] : 0;
+        supported = result != 0 && count <= 1;
         if (count == 1)
         {
             op = CHECK_OP_CONVERT;
-            reader->query_types[token] = reader->return_types[token];
         }
-        else if (check_action_kind(reader->types, reader->return_types[token]) != BUSTER_TYPE_KIND_VOID &&
+        else if (check_action_kind(reader->types, result) != BUSTER_TYPE_KIND_VOID &&
                  !check_graph_relaxed_token(graph, token))
         {
             // No value for a non-void function: -Wreturn-mismatch, which clang suppresses in a system header (and a
@@ -17257,7 +17258,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 #define BUSTER_CHECK_INPUT_ARRAY(field, type) reader.field = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0
     BUSTER_CHECK_INPUT_ARRAY(query_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(return_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(definition_origins, uint32_t);
     // The declaration a name's or a declarator attribute's starts at is asked per C89 implicit candidate and per
     // attribute in every mode (check_input_resolve_range), and for the rare static function note: the column answers
@@ -17488,7 +17488,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         input->constant_warnings_prepared = true;
         memset(reader.query_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.function_specifiers, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.return_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.conditions, 0, (uint64_t)count + 1);
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
         if (input->deferred_tokens != 0 && deferred == 0)

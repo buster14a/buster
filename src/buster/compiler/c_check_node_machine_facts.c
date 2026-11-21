@@ -5292,7 +5292,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_front_integer(N
 //   floating literal's of its spelling decoded again; a string's of its type and its object.
 // - A member's name is the token's after the operator's; a cast's type its token's query's (CheckInputReader.query_types),
 //   a root's cast's void (a statement's discard), and a return's conversion's the function's
-//   (CheckInputReader.return_types).
+//   (CheckInputReader.query_types).
 // - A call's arguments are the records before it, the last first, each one's subtree before the next
 //   (NodeFront.sizes), and its callee the record before the first argument's subtree.
 // - A record's source position is its token's expression's end (check_input_expression_end).
@@ -5401,7 +5401,7 @@ static uint32_t node_facts_front_expression(struct NodeFactsReader* state, const
             }
             else if (op == CHECK_OP_CONVERT)
             {
-                entry = reader->return_types[token];
+                entry = reader->query_types[token];
             }
             else if (op == CHECK_OP_CONDITIONAL)
             {

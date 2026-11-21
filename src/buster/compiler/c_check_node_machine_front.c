@@ -1719,7 +1719,7 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                 case CHECK_INPUT_CODE_RETURN:
                 {
                     const uint32_t count = node_front_values(front, mine, values);
-                    const TypeId type = reader->return_types[token];
+                    const TypeId type = reader->query_types[token];
                     left = type == 0 || count == BUSTER_NODE_FRONT_UNKNOWN || count > 1;
                     if (!left && count == 1)
                     {
