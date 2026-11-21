@@ -2298,6 +2298,30 @@ each template's shape with the mark of those whose rows are not made here,
 the order's permutation, void's word, which the reads don't read, and the
 values' two tables' bytes by a record's own shape.
 
+### Hardware counters for the window's sweeps (#3196)
+
+`./build/compiler measure-node-machine --shadow --window-rows --passes 0 --window-counter rows cycles file.c`
+
+Select one family and one hardware event per invocation. The families are
+`tests` (bytes and the tests loop with its cast-result asks), `contexts`
+(loop, targets and expressions), and `rows` (reads, shapes, update/branch
+lists, write, values, expressions and summaries). The events are `cycles`,
+`instructions`, `branches`, `branch-misses`, `frontend-stalls`,
+`l1d-misses` and `l1i-misses`. An unavailable or unschedulable counter
+makes the command fail. Pin the Release executable to the benchmark CPU.
+
+Each `node-window-counter` line gives the user-mode hardware event total
+for the first or second execution over the same chunks across all input
+files. Both runs use the ordinary shadow's sweeps. Selecting `tests` also
+repeats its byte and mask construction over the first run's memoized
+declarations. The lists interval includes the test for a chunk with no
+updates or branches. With `--no-window-summaries` there is no summaries
+reading. `raw` is the unadjusted total. Both rates subtract one median
+empty interval per chunk and divide by all chunks or all swept records.
+A small adjusted reading may be negative. Use the ordinary command
+without profiling for the existing TSC comparisons.
+
+
 ### An operator's value and a comma on the window (#2850)
 
 The same commands, `measure-node-machine --shadow --window-contexts` and
@@ -2513,26 +2537,3 @@ constant, an operator that is no cast, a cast to void), with the count of
 the casts listed pinned (`NodeSummaryExpected.passed`), and two constants
 that are no address's whose record has an object (`(_Bool)&g`), whose
 entries' values must be the reference's.
-
-### Hardware counters for the window's sweeps (#3196)
-
-`./build/compiler measure-node-machine --shadow --window-rows --passes 0 --window-counter rows cycles file.c`
-
-Select one family and one hardware event per invocation. The families are
-`tests` (bytes and the tests loop with its cast-result asks), `contexts`
-(loop, targets and expressions), and `rows` (reads, shapes, update/branch
-lists, write, values, expressions and summaries). The events are `cycles`,
-`instructions`, `branches`, `branch-misses`, `frontend-stalls`,
-`l1d-misses` and `l1i-misses`. An unavailable or unschedulable counter
-makes the command fail. Pin the Release executable to the benchmark CPU.
-
-Each `node-window-counter` line gives the user-mode hardware event total
-for the first or second execution over the same chunks across all input
-files. Both runs use the ordinary shadow's sweeps. Selecting `tests` also
-repeats its byte and mask construction over the first run's memoized
-declarations. The lists interval includes the test for a chunk with no
-updates or branches. With `--no-window-summaries` there is no summaries
-reading. `raw` is the unadjusted total. Both rates subtract one median
-empty interval per chunk and divide by all chunks or all swept records.
-A small adjusted reading may be negative. Use the ordinary command
-without profiling for the existing TSC comparisons.
