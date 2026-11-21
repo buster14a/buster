@@ -1461,10 +1461,10 @@ typedef enum IrRule
     X(IR_SEXT,          1, 1, BUSTER_IR_INTS, IR_RULE_EXTEND, 0) \
     X(IR_FTRUNC,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FTRUNC, 0) \
     X(IR_FEXT,          1, 1, BUSTER_IR_FLOATS, IR_RULE_FEXTEND, 0) \
-    X(IR_SITOFP,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FROM_INT, 0) \
-    X(IR_UITOFP,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FROM_INT, 0) \
-    X(IR_FPTOSI,        1, 1, BUSTER_IR_INTS, IR_RULE_FROM_FLOAT, 0) \
-    X(IR_FPTOUI,        1, 1, BUSTER_IR_INTS, IR_RULE_FROM_FLOAT, 0) \
+    X(IR_SITOFP,        1, 1, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_FROM_INT, 0) \
+    X(IR_UITOFP,        1, 1, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_FROM_INT, 0) \
+    X(IR_FPTOSI,        1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_FROM_FLOAT, 0) \
+    X(IR_FPTOUI,        1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_FROM_FLOAT, 0) \
     X(IR_INTTOPTR,      1, 1, 1u << IR_PTR, IR_RULE_FROM_INT, 0) \
     X(IR_PTRTOINT,      1, 1, BUSTER_IR_INTS, IR_RULE_FROM_POINTER, 0) \
     X(IR_BITCAST,       1, 1, BUSTER_IR_VALUES, IR_RULE_BITCAST, 0) \
@@ -1496,7 +1496,7 @@ typedef enum IrRule
     X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_COMPRESS_STORE, 7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0) \
-    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64), IR_RULE_FMA, 0) \
+    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64) | BUSTER_IR_VECTORS, IR_RULE_FMA, 0) \
     X(IR_SCATTER,       3, 7, 1u << IR_VOID, IR_RULE_SCATTER, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
@@ -1624,6 +1624,11 @@ static IrSimdOperation ir_lane_operation(uint32_t op)
         case IR_FSUB: result = IR_SIMD_FSUB; break;
         case IR_FMUL: result = IR_SIMD_FMUL; break;
         case IR_FDIV: result = IR_SIMD_FDIV; break;
+        case IR_FMA: result = IR_SIMD_FMA; break;
+        case IR_SITOFP: result = IR_SIMD_SITOFP; break;
+        case IR_UITOFP: result = IR_SIMD_UITOFP; break;
+        case IR_FPTOSI: result = IR_SIMD_FPTOSI; break;
+        case IR_FPTOUI: result = IR_SIMD_FPTOUI; break;
         case IR_VCMP: result = IR_SIMD_COMPARE; break;
         case IR_VSELECT: result = IR_SIMD_SELECT; break;
         default: break;
@@ -1776,55 +1781,7 @@ static bool ir_gather_index_valid(uint32_t type, uint32_t lane, uint32_t index)
 // (an invalid operation of numbers), the default NaN.
 static uint64_t ir_fma_bits(uint32_t type, uint64_t a, uint64_t b, uint64_t c)
 {
-    const bool d = type == IR_F64;
-    const uint64_t exponent = d ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
-    const uint64_t mantissa = d ? UINT64_C(0x000fffffffffffff) : UINT64_C(0x007fffff);
-    const uint64_t quiet = d ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
-    const uint64_t operands[3] = {
-        a,
-        b,
-        c,
-    };
-    uint64_t result = 0;
-    bool found = false;
-    for (uint32_t k = 0; k < 3; k += 1)
-    {
-        const bool nan = (operands[k] & exponent) == exponent && (operands[k] & mantissa) != 0;
-        result = !found && nan ? (operands[k] & (exponent | mantissa | (d ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000)))) | quiet : result;
-        found = found || nan;
-    }
-    if (!found && d)
-    {
-        double x = 0;
-        double y = 0;
-        double z = 0;
-        memcpy(&x, &a, sizeof(x));
-        memcpy(&y, &b, sizeof(y));
-        memcpy(&z, &c, sizeof(z));
-        const double r = __builtin_fma(x, y, z);
-        memcpy(&result, &r, sizeof(r));
-    }
-    else if (!found)
-    {
-        const uint32_t bits[3] = {
-            (uint32_t)a,
-            (uint32_t)b,
-            (uint32_t)c,
-        };
-        float x = 0;
-        float y = 0;
-        float z = 0;
-        memcpy(&x, &bits[0], sizeof(x));
-        memcpy(&y, &bits[1], sizeof(y));
-        memcpy(&z, &bits[2], sizeof(z));
-        const float r = __builtin_fmaf(x, y, z);
-        uint32_t word = 0;
-        memcpy(&word, &r, sizeof(word));
-        result = word;
-    }
-    const bool invalid = !found && (result & exponent) == exponent && (result & mantissa) != 0;
-    result = invalid ? (d ? UINT64_C(0xfff8000000000000) : UINT64_C(0xffc00000)) : result;
-    return result;
+    return ir_simd_fma_bits(type == IR_F64, a, b, c);
 }
 
 #endif
@@ -2346,8 +2303,16 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_EXTEND: valid = ir_integer(ta) && ir_type_bits[ta] < ir_type_bits[type]; break;
             case IR_RULE_FTRUNC: valid = ir_floating(ta) && ir_type_bits[ta] > ir_type_bits[type]; break;
             case IR_RULE_FEXTEND: valid = ir_floating(ta) && ir_type_bits[ta] < ir_type_bits[type]; break;
-            case IR_RULE_FROM_INT: valid = ir_integer(ta); break;
-            case IR_RULE_FROM_FLOAT: valid = ir_floating(ta); break;
+            // A vector conversion (#2806) is one lane at a time, i32 with f32 or i64 with f64, the float lane in the
+            // flags. A scalar conversion's flags stay clear. inttoptr and ptrtoint stay scalar.
+            case IR_RULE_FROM_INT:
+                valid = ir_vector_type(type) ? (op == IR_SITOFP || op == IR_UITOFP) && ta == type && ir_lane_valid(op, f->flags[i]) :
+                        ir_integer(ta) && f->flags[i] == 0;
+                break;
+            case IR_RULE_FROM_FLOAT:
+                valid = ir_vector_type(type) ? (op == IR_FPTOSI || op == IR_FPTOUI) && ta == type && ir_lane_valid(op, f->flags[i]) :
+                        ir_floating(ta) && f->flags[i] == 0;
+                break;
             case IR_RULE_FROM_POINTER: valid = ta == IR_PTR; break;
             // Bits for bits of the same width; a mask (#179) only to or from an integer of its width (i8 to i64, the
             // boundary an opmask's kmov to and from a general register is), or to itself.
@@ -2564,8 +2529,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && operand_types[2] == ir_lane_mask(tb, f->flags[i]); break;
             // A gather's index of an element per lane, of 32 or 64 bits, and its mask at its lanes (#1840).
             case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && operand_types[2] == ir_lane_mask(type, f->flags[i]); break;
-            // A fused multiply-add's three operands are its result's type (#1840).
-            case IR_RULE_FMA: valid = ta == type && tb == type && operand_types[2] == type; break;
+            // A fused multiply-add's three operands are its result's type (#1840). A vector's lanes are floats or
+            // doubles (#2806); a scalar's flags stay clear.
+            case IR_RULE_FMA:
+                valid = ta == type && tb == type && operand_types[2] == type &&
+                        (ir_vector_type(type) ? ir_lane_valid(op, f->flags[i]) : f->flags[i] == 0);
+                break;
             // A scatter's (#1840) `c` is its two extra values' index, no kind's: its stored vector's lanes, a dword's or a
             // qword's, take b's index elements, and its mask is of those lanes.
             case IR_RULE_SCATTER:

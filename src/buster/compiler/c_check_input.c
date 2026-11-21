@@ -10901,11 +10901,19 @@ static void check_input_invalid_declare(CheckInputReader* reader, uint32_t token
     }
 }
 
+// The visit bit and its list head describe the same source point. In a single reader the count pass
+// starts every token with only its syntax bit. Deferred readers retain the initialized heads across
+// their body boundaries, where one reader may already have reused a visit byte for expressions.
+static uint32_t check_input_list_head(const CheckInputReader* reader, const uint32_t* heads, uint32_t point, uint8_t reason)
+{
+    return reader->deferred != NULL || (reader->visits[point] & reason) != 0 ? heads[point] : BUSTER_CHECK_NONE;
+}
+
 static void check_input_schedule(CheckInputReader* reader, uint32_t token, uint32_t point, TypeId type, CBindingKind kind)
 {
     reader->declared_types[token] = type;
     reader->declaration_kinds[token] = (uint8_t)kind;
-    reader->activation_next[token] = reader->activate[point];
+    reader->activation_next[token] = check_input_list_head(reader, reader->activate, point, BUSTER_CHECK_RESOLVE_ACTIVATE);
     reader->activate[point] = token;
     check_input_visit(reader, point, BUSTER_CHECK_RESOLVE_ACTIVATE);
     reader->ignored[token] = true;
@@ -14304,7 +14312,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             // The definition's declaration is visible at its ordinary source point. Only its selected-out
             // body is deferred; parameters and the full function declarator were checked before this opening.
-            for (uint32_t token = reader->activate[i]; token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
+            for (uint32_t token = check_input_list_head(reader, reader->activate, i, BUSTER_CHECK_RESOLVE_ACTIVATE); token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
             {
                 check_input_bind(reader, token, i);
             }
@@ -16888,12 +16896,15 @@ static void check_input_output_none(CheckInput* input, CheckInputReader* reader,
     memset(input->declarations, 0xff, bytes);
     memset(input->token_nodes, 0xff, bytes);
     memset(reader->initializer_declarations, 0xff, bytes);
-    memset(reader->initializer_finish_heads, 0xff, bytes);
     if (reader->selected_tokens != NULL)
     {
         memset(reader->selected_tokens, 0xff, bytes);
     }
-    memset(reader->activate, 0xff, bytes);
+    if (reader->deferred != NULL)
+    {
+        memset(reader->initializer_finish_heads, 0xff, bytes);
+        memset(reader->activate, 0xff, bytes);
+    }
     memset(reader->first_value, 0xff, bytes);
 }
 

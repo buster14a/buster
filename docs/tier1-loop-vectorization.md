@@ -71,15 +71,16 @@ Each needed row of the body is then, in order:
   bytes per iteration.
 - **a vector:** a load or store whose pointer advances by its access's bytes;
   element-wise integer `add` to `ashr` (not divisions) and floating `fadd` to
-  `fdiv`, of vectors and uniforms (splatted); `icmp` into a mask; `select` on
-  one; `zext`/`sext` of a mask (a `vselect` of 1 or -1 and 0); `zext`, `sext` and
-  `trunc` between integer lanes (`extend`, `truncate`); `popcnt` of each lane
-  (`lane_unary`).
+  `fdiv` and `fma`, of vectors and uniforms (splatted); `sitofp`, `uitofp`,
+  `fptosi` and `fptoui` between i32 and f32 or i64 and f64; `icmp` into a mask;
+  `select` on one; `zext`/`sext` of a mask (a `vselect` of 1 or -1 and 0);
+  `zext`, `sext` and `trunc` between integer lanes (`extend`, `truncate`);
+  `popcnt` of each lane (`lane_unary`).
 
 Anything else refuses the loop, counted by reason: `shape` (control flow in the
 body, no dedicated preheader, an outer loop), `induction`, `phi` (a recurrence
 that isn't a reduction, a float sum), `operation` (a call, a division, a fence,
-a volatile or atomic access, `fma`, `sitofp`), `address` (a strided or gathered
+a volatile or atomic access), `address` (a strided or gathered
 access), `use` (the induction as data, a reduction's partial value),
 `dependence` and `width`.
 
@@ -183,7 +184,7 @@ accumulators where the vector loop has one chain (#2755's unroller) and using
 `vpmaddwd` for `dot_i16`. At x86-64 only `add_i32`, `saxpy_f32`, `fill_u32`,
 `copy_u8` and `matmul_f32`'s inner loop are taken: masks, reductions and lane
 conversions are EVEX forms in Tier 1. The refusals that remain have issues:
-`max_i32` (#2805), the contracted `fma` and `sitofp` (#2806), the masked
+`max_i32` (#2805), the masked
 remainder (#2807), and strided accesses and narrow-into-wide counts (#2808).
 Compiling sqlite3.c with the option cost 2.30% more user cycles at znver5 and
 1.51% at x86-64 in the first build, which built a CFG and dominators for each

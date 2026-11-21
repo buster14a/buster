@@ -274,7 +274,8 @@ struct IrVectorizeWork
 // The admission kinds by opcode. Integer and pointer arithmetic, comparisons, selects and conversions are PURE, SAFE
 // where LICM would speculate them; floating arithmetic is FLOAT (vectorized, never speculated); a phi, a branch, a
 // load and a store have their own kinds; everything else (calls, divisions, fences, atomics, undef, stack operations,
-// masked and gathered memory, floating conversions, existing vector rows) refuses.
+// masked and gathered memory, and existing vector rows) refuses. fma and the same-width integer/float
+// conversions are FLOAT (#2806): vectorized, and never speculated or given a masked tail.
 static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
     [IR_CONST] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
     [IR_PARAM] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
@@ -302,6 +303,11 @@ static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
     [IR_FSUB] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
     [IR_FMUL] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
     [IR_FDIV] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_FMA] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_SITOFP] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_UITOFP] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_FPTOSI] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_FPTOUI] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
     [IR_LOAD] = BUSTER_IR_VECTORIZE_KIND_LOAD,
     [IR_STORE] = BUSTER_IR_VECTORIZE_KIND_STORE,
     [IR_PHI] = BUSTER_IR_VECTORIZE_KIND_PHI,
@@ -1121,6 +1127,31 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
             ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_VECTOR, 0, size, false);
         }
     }
+    else if (op == IR_FMA)
+    {
+        const bool admitted = (type == IR_F32 || type == IR_F64) && ir_vectorize_lane_operand(work, loop, a, type) &&
+                              ir_vectorize_lane_operand(work, loop, b, type) && ir_vectorize_lane_operand(work, loop, f->c[i], type);
+        refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
+        if (admitted)
+        {
+            ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_VECTOR, 0, size, true);
+        }
+    }
+    else if (op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI)
+    {
+        // Same width only: i32 with f32, i64 with f64. The float lane is the row's, and the integer operand or result
+        // is that many bits.
+        const bool to_float = op == IR_SITOFP || op == IR_UITOFP;
+        const uint32_t source = f->type[a];
+        const bool pair = to_float ? (type == IR_F32 && source == IR_I32) || (type == IR_F64 && source == IR_I64) :
+                                     (type == IR_I32 && source == IR_F32) || (type == IR_I64 && source == IR_F64);
+        const bool admitted = pair && ir_vectorize_lane_operand(work, loop, a, source);
+        refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
+        if (admitted)
+        {
+            ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_VECTOR, 0, size, to_float);
+        }
+    }
     else if ((op >= IR_ADD && op <= IR_ASHR && op != IR_SDIV && op != IR_UDIV && op != IR_SREM && op != IR_UREM && integer) || ((kind & 7) == BUSTER_IR_VECTORIZE_KIND_FLOAT && (type == IR_F32 || type == IR_F64)))
     {
         const bool admitted = ir_vectorize_lane_operand(work, loop, a, type) && ir_vectorize_lane_operand(work, loop, b, type);
@@ -1277,6 +1308,11 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
             else if (op == IR_INTRINSIC)
             {
                 legal = legal && ir_vectorize_has(t->popcount[size], bytes);
+            }
+            else if (op == IR_FMA || op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI)
+            {
+                const uint32_t float_lane = ir_vectorize_lane(size, true);
+                legal = legal && ir_vectorize_has(t->binary[op][float_lane], bytes);
             }
             else
             {
@@ -1796,6 +1832,19 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
         const uint32_t flags = size | BUSTER_IR_LANE_UNARY_POPCOUNT << 2;
         value = ir_vectorize_row(build, IR_INTRINSIC, vtype, flags, 0, work->values[f->a[i]], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_UNARY, origin);
     }
+    else if (op == IR_FMA)
+    {
+        const uint32_t x = ir_vectorize_lanes_of(work, build, loop, f->a[i], lanes);
+        const uint32_t y = ir_vectorize_lanes_of(work, build, loop, f->b[i], lanes);
+        const uint32_t z = ir_vectorize_lanes_of(work, build, loop, f->c[i], lanes);
+        value = ir_vectorize_row(build, IR_FMA, vtype, lane, 0, x, y, z, origin);
+    }
+    else if (op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI)
+    {
+        const uint32_t float_lane = ir_vectorize_lane(size, true);
+        const uint32_t x = ir_vectorize_lanes_of(work, build, loop, f->a[i], lanes);
+        value = ir_vectorize_row(build, op, vtype, float_lane, 0, x, BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
+    }
     else
     {
         // An element-wise operation, or a reduction's update of its accumulator. The bitwise operations read no lanes.
@@ -2210,7 +2259,7 @@ static bool ir_vectorize_candidate(const IrFunction* f)
 static __attribute__((unused)) void ir_vectorize_target_ir(IrVectorizeTarget* target)
 {
     *target = (IrVectorizeTarget){ .moves = 7 };
-    static const uint8_t binaries[] = { IR_ADD, IR_SUB, IR_MUL, IR_AND, IR_OR, IR_XOR, IR_SHL, IR_LSHR, IR_ASHR, IR_FADD, IR_FSUB, IR_FMUL, IR_FDIV };
+    static const uint8_t binaries[] = { IR_ADD, IR_SUB, IR_MUL, IR_AND, IR_OR, IR_XOR, IR_SHL, IR_LSHR, IR_ASHR, IR_FADD, IR_FSUB, IR_FMUL, IR_FDIV, IR_FMA };
     for (uint32_t lane = 0; lane < IR_SIMD_LANE_COUNT; lane += 1)
     {
         for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(binaries); k += 1)
@@ -2235,6 +2284,15 @@ static __attribute__((unused)) void ir_vectorize_target_ir(IrVectorizeTarget* ta
         target->popcount[from] = 7;
         target->masked[from] = 7;
     }
+    // Same-width integer/float conversions (#2806), keyed by the float lane.
+    target->binary[IR_SITOFP][IR_SIMD_LANE_F32] = 7;
+    target->binary[IR_SITOFP][IR_SIMD_LANE_F64] = 7;
+    target->binary[IR_UITOFP][IR_SIMD_LANE_F32] = 7;
+    target->binary[IR_UITOFP][IR_SIMD_LANE_F64] = 7;
+    target->binary[IR_FPTOSI][IR_SIMD_LANE_F32] = 7;
+    target->binary[IR_FPTOSI][IR_SIMD_LANE_F64] = 7;
+    target->binary[IR_FPTOUI][IR_SIMD_LANE_F32] = 7;
+    target->binary[IR_FPTOUI][IR_SIMD_LANE_F64] = 7;
     // A mask of 2 to 64 lanes.
     target->mask = 0x7e;
     for (uint32_t operation = BUSTER_IR_REDUCE_ADD; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
