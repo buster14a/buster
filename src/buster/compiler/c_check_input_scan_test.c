@@ -311,7 +311,7 @@ static void check_test_sparse_lane_writes(void* argument)
     bool scanned = true;
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(lanes->columns); c += 1)
     {
-        const uint32_t found = check_sparse_entries(lanes->columns[c], begin, end, c != 1, lanes->positions[lane]);
+        const uint32_t found = check_sparse_entries(lanes->columns[c], begin, end, lanes->positions[lane]);
         uint32_t expected = 0;
         for (uint32_t token = begin; token < end; token += 1)
         {
@@ -461,13 +461,12 @@ static void check_test_sparse_columns(CheckTest* test)
             {
                 for (uint32_t end = begin; end <= count + 1; end += 5)
                 {
-                    uint32_t positions[2][202];
-                    const uint32_t found = check_sparse_entries(columns[c], begin, end, true, positions[0]);
-                    exact &= check_sparse_entries(columns[c], begin, end, false, positions[1]) == found;
+                    uint32_t positions[202];
+                    const uint32_t found = check_sparse_entries(columns[c], begin, end, positions);
                     uint32_t expected = 0;
                     for (uint32_t token = begin; token < end; token += 1)
                     {
-                        exact &= values[c][token] == BUSTER_CHECK_NONE || (expected < found && positions[0][expected] == token && positions[1][expected] == token);
+                        exact &= values[c][token] == BUSTER_CHECK_NONE || (expected < found && positions[expected] == token);
                         expected += values[c][token] != BUSTER_CHECK_NONE;
                     }
                     exact &= expected == found;
@@ -591,11 +590,10 @@ static void check_test_sparse_wide(CheckTest* test)
                 {
                     expected |= (uint32_t)(values[first + lane] != BUSTER_CHECK_SPARSE_WIDE_NONE) << lane;
                 }
-                exact &= check_sparse_wide_group(wide, first, end, true) == expected && check_sparse_wide_group(wide, first, end, false) == expected;
-                // The next group with a block, which the scalar path leaves at `first`: no group the vector path skips has
-                // an entry, and the group it stops at has a block.
-                const uint32_t next = check_sparse_wide_next(wide, first, end, true);
-                exact &= check_sparse_wide_next(wide, first, end, false) == first && next >= first && next % BUSTER_CHECK_SPARSE_TOKENS == 0;
+                exact &= check_sparse_wide_group(wide, first, end) == expected;
+                // The next group with a block: no group it skips has an entry, and the group it stops at has a block.
+                const uint32_t next = check_sparse_wide_next(wide, first, end);
+                exact &= next >= first && next % BUSTER_CHECK_SPARSE_TOKENS == 0;
                 for (uint32_t token = first; token < next && token < end; token += 1)
                 {
                     exact &= values[token] == BUSTER_CHECK_SPARSE_WIDE_NONE;
@@ -605,13 +603,12 @@ static void check_test_sparse_wide(CheckTest* test)
         }
         for (uint32_t end = 0; exact && end <= count + 1; end += 1)
         {
-            uint32_t positions[2][202];
-            const uint32_t found = check_sparse_wide_entries(wide, end, true, positions[0]);
-            exact &= check_sparse_wide_entries(wide, end, false, positions[1]) == found;
+            uint32_t positions[202];
+            const uint32_t found = check_sparse_wide_entries(wide, end, positions);
             uint32_t expected = 0;
             for (uint32_t token = 0; token < end; token += 1)
             {
-                exact &= values[token] == BUSTER_CHECK_SPARSE_WIDE_NONE || (expected < found && positions[0][expected] == token && positions[1][expected] == token);
+                exact &= values[token] == BUSTER_CHECK_SPARSE_WIDE_NONE || (expected < found && positions[expected] == token);
                 expected += values[token] != BUSTER_CHECK_SPARSE_WIDE_NONE;
             }
             exact &= expected == found;
@@ -718,10 +715,57 @@ static void check_test_declaration_starts(CheckTest* test)
     check_test_expect(test, differences == 0, "the declaration-start column gives the walk's start for every random role");
 }
 
+// check_sparse_next against its definition, the first token from `token` below `count` whose value isn't NONE, or
+// `count`, and check_sparse_wide_next against its, the first 16 from a multiple of 16 that has a block, or one at or past
+// the end: columns of 255 to 1,100 tokens, up to 69 directory entries, with one entry at every 7th token, from every
+// start. Past a 16 without a block each scans 16 directory entries at a time from the next, so the entry's block falls
+// at each lane of that scan; the column tests' 200 tokens reach none past their 13th entry.
+static __attribute__((noinline)) void check_test_sparse_next(CheckTest* test)
+{
+    Arena owned = arena_reserve(UINT64_C(1) << 22);
+    bool exact = owned.base != NULL && arena_commit(&owned, owned.capacity);
+    const uint32_t counts[] = { 255, 256, 257, 600, 1100 };
+    uint64_t cases = 0;
+    for (uint32_t c = 0; exact && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        const uint32_t count = counts[c];
+        for (uint32_t entry = 0; exact && entry < count; entry += 7)
+        {
+            owned.length = 0;
+            CheckSparsePool* pool = NULL;
+            CheckSparseColumn column = { 0 };
+            CheckSparseWide wide = { 0 };
+            exact = check_sparse_reserve_wide(&owned, &pool, &column, 1, &wide, 1, count, false, false);
+            if (exact)
+            {
+                check_sparse_set(pool, column, entry, entry + 1);
+                check_sparse_wide_set(pool, wide, entry, (uint64_t)entry + 1);
+            }
+            for (uint32_t start = 0; exact && start <= count; start += 1)
+            {
+                exact = check_sparse_next(column, start, count) == (start <= entry ? entry : count);
+                cases += 1;
+            }
+            const uint32_t group = entry & ~(BUSTER_CHECK_SPARSE_TOKENS - 1);
+            for (uint32_t first = 0; exact && first < count; first += BUSTER_CHECK_SPARSE_TOKENS)
+            {
+                const uint32_t next = check_sparse_wide_next(wide, first, count);
+                exact = first <= group ? next == group : next >= count;
+                cases += 1;
+            }
+        }
+    }
+    char description[160];
+    snprintf(description, sizeof(description), "the sparse columns' next entries are their definitions' in %llu cases", (unsigned long long)cases);
+    check_test_expect(test, exact && cases > 100000, description);
+    arena_release(&owned);
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
     check_test_sparse_columns(test);
+    check_test_sparse_next(test);
     check_test_sparse_wide(test);
     check_test_sparse_lanes(test);
     check_test_declaration_starts(test);
@@ -1820,15 +1864,12 @@ static __attribute__((noinline)) void check_test_selection_positions(CheckTest* 
             }
         }
         selections += expected_count;
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-        {
-            memset(bits, 0, (uint64_t)words * sizeof(uint64_t));
-            const uint32_t found = check_input_selection_positions(names, parents, first_child, postorder, positions, count, bits, scalar != 0);
-            differences += found != expected_count || memcmp(bits, expected, (uint64_t)words * sizeof(uint64_t)) != 0;
-        }
+        memset(bits, 0, (uint64_t)words * sizeof(uint64_t));
+        const uint32_t found = check_input_selection_positions(names, parents, first_child, positions, count, bits);
+        differences += found != expected_count || memcmp(bits, expected, (uint64_t)words * sizeof(uint64_t)) != 0;
     }
     char description[160];
-    snprintf(description, sizeof(description), "the selections' closes: %u of 840 position sets differ from the tree's (%u closes)", differences, selections);
+    snprintf(description, sizeof(description), "the selections' closes: %u of 420 position sets differ from the tree's (%u closes)", differences, selections);
     check_test_expect(test, ready && differences == 0 && selections != 0, description);
     for (uint32_t i = 0; i < COLUMNS; i += 1)
     {
@@ -1926,7 +1967,7 @@ static __attribute__((noinline)) void check_test_asm_label_kernels(CheckTest* te
                 expected_declared[i / 32] |= UINT32_C(1) << (i % 32);
             }
         }
-        const uint32_t found = check_input_asm_attributed_tokens(&input, count, tokens, false);
+        const uint32_t found = check_input_asm_attributed_tokens(&input, count, tokens);
         differences += found != expected_count || memcmp(tokens, expected, (uint64_t)found * sizeof(uint32_t)) != 0;
         memset(declared, 0xa5, (uint64_t)token_words * sizeof(uint32_t));
         check_input_asm_labelled_tokens(&input, labelled, declared);

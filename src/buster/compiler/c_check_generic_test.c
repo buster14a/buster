@@ -20,10 +20,15 @@ static void check_test_generic_masks(CheckTest* test)
             }
             for (TypeId key = 7; key <= 10; key += 1)
             {
-                const uint32_t scalar = check_generic_masks(keys, key, true);
-                const uint32_t vector = check_generic_masks(keys, key, false);
-                check_test_expect(test, scalar == vector && (scalar >> BUSTER_CHECK_GENERIC_GROUP) == (UINT16_MAX & (UINT32_C(0xffff) << length)),
-                                  "generic scalar/vector masks agree through the last owned group");
+                // The definition: a lane's bit where its key is `key`, and where it's empty in the high half.
+                uint32_t expected = 0;
+                for (uint32_t lane = 0; lane < BUSTER_CHECK_GENERIC_GROUP; lane += 1)
+                {
+                    expected |= (uint32_t)(keys[lane] == key) << lane | (uint32_t)(keys[lane] == 0) << (BUSTER_CHECK_GENERIC_GROUP + lane);
+                }
+                const uint32_t masks = check_generic_masks(keys, key);
+                check_test_expect(test, masks == expected && (masks >> BUSTER_CHECK_GENERIC_GROUP) == (UINT16_MAX & (UINT32_C(0xffff) << length)),
+                                  "generic masks are each lane's match and emptiness through the last owned group");
             }
         }
     }

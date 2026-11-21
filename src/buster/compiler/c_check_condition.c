@@ -814,7 +814,7 @@ static uint32_t check_condition_overload_prior(CheckInputReader* reader, uint32_
     signature_hash = object_size ? type_hash_mix(signature_hash, 1) : signature_hash;
     reader->output->resource |= reader->overload_candidates != NULL && !hashed;
     const uint64_t key = check_overload_index_key(signature_hash, name, UINT32_MAX);
-    const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
+    const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX) : UINT32_MAX;
     const CheckConditionTable table = check_condition_table(reader->output);
     uint32_t prior = BUSTER_CHECK_NONE;
     for (uint32_t linked = hashed ? check_overload_index_head(&reader->overload_index, slot) : UINT32_MAX; prior == BUSTER_CHECK_NONE && linked != UINT32_MAX;

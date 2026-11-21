@@ -37,8 +37,8 @@ contexts run on whole-body groups. The expression graph is built in complete par
 parts after binding recovery, selections, complete uses, region setup and
 `sizeof` preparation. Independent parts have private graph counters, value
 chains, append lists, warnings and immutable type-table views. The caller
-publishes them in source order, using bounded vector relocation and its scalar
-twin; runtime VLA/region work, type insertion and other exceptional actions
+publishes them in source order, using bounded vector relocation; runtime
+VLA/region work, type insertion and other exceptional actions
 stay ordered. Graph purity and summary records are built with each part.
 Any post-merge error or allocation failure discards the partial result and
 repeats the complete source-order reader, preserving its diagnostic recovery.
@@ -107,9 +107,9 @@ state's own arenas must be base pages (`check_deferred_test_memory`).
 Empty, duplicate-position and nonzero-start linked histories are checked against
 a forward oracle with their ends at a protected page; the last update at the
 opening must be selected. The merge's scans of the token columns
-(`check_deferred_entries` and the others) must give their scalar twins'
-positions and counts on ranges ending at a protected page, and every merged
-fixture must merge alike with the twins (`CheckDeferred.scalar_merge`).
+(`check_deferred_entries` and the others) must give their definitions'
+positions and counts (the range's tokens whose value isn't the column's none)
+on ranges ending at a protected page.
 Post-merge fixtures, of four bodies each, require actual parallel expression
 work on four lanes or more, including builtins, local initializers and
 15/16/17-leaf boundaries, and none on two or three. An injected failure after the

@@ -194,6 +194,7 @@ struct Tier1EmitPrepared
     // (tier1_select_class_forms, Tier1SelectHoles.vex), and machine rows place their roles below xmm16
     // (tier1_emit_cfg_row).
     bool vex;
+    uint8_t unsigned_dword_memory_forms;
     // The target has AVX512F (#1281's review): zmm16 and on and EVEX's 512-bit moves, which a 64-byte row's roles keep
     // even without AVX512VL (Knights Landing's).
     bool zmm;
@@ -211,6 +212,8 @@ struct Tier1EmitPrepared
     uint32_t x87_count;
     // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
     const IrFunction* function;
+    // Allowed register forms for converting an unsigned qword to float or double.
+    uint8_t unsigned_i64_float_forms;
 };
 
 // The CFG consumer's vector encoding level (BUSTER_TIER1_ENCODING_*): legacy SSE's, VEX's or EVEX's.
@@ -288,7 +291,7 @@ struct Tier1EmitResult
     // The references' room: a call's each, and in the CFG consumer a symbol's address's each too, with its options'
     // symbols' access (Tier1EmitOptions.symbol_access).
     uint32_t reference_capacity;
-    // The literals its code loads (#2744, tier1_emit_cfg_literal): each one of the function's vector constants
+    // The literals its code loads (#2744, #1387): an F80 constant at its selected format or one of the function's vector constants
     // (IrFunction.vector_constants) at one width, `literal_count` of them, its bytes past the width zero; a reference whose
     // target is BUSTER_TIER1_EMIT_LITERAL + k is to literal k (the emitted code's EmittedLiteral, which the C driver's
     // merge places in the unit's pool). And by constant, each width's literal (16, 32 and 64 bytes, three entries a
@@ -298,6 +301,8 @@ struct Tier1EmitResult
     uint32_t literal_count;
     uint32_t literal_capacity;
     uint32_t* literal_of;
+    // Private F80 constants' pool indices plus one, indexed by the scalar constant table.
+    uint32_t* x87_literal_of;
     // The nodes of fixed-register rules (tier1_select_fixed_registers), whose sequences take records past a node's share.
     uint32_t fixed_count;
     // In the CFG consumer, the callee-saved registers its values may take (live across a call), and those they took,
@@ -1346,11 +1351,13 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     // (tier1_emit_cfg_stack_argument): `argument_registers` holds a location for the others alone (a general register's
     // number, or an xmm register's BUSTER_TIER1_EMIT_VECTOR_LOCATION + n), and the callee's at the arguments' count.
     // A static chain (#148) is a general argument in r10, and its indirect call's callee goes to rax instead
-    // (tier1_select_callee_register).
+    // (tier1_select_callee_register). A destination that is a pointer value (#2820) is the last effective use, after the
+    // callee's, which the moves put in rdi, the hidden pointer's register, which no argument takes then.
     const bool indirect = function->op[node] == IR_CALL_INDIRECT;
     const uint8_t callee = tier1_select_callee_register(function, call);
-    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
-    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
+    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 3];
+    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 3];
     uint32_t vector_sources[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t vector_destinations[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t general = 0;
@@ -1418,6 +1425,13 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     {
         sources[general] = argument_registers[call->argument_count];
         destinations[general] = callee;
+        general += 1;
+    }
+    if (pointer)
+    {
+        sources[general] = argument_registers[call->argument_count + indirect];
+        destinations[general] = X86_REGISTER_RDI;
+        error = sources[general] < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? error : TIER1_EMIT_ALLOCATION;
         general += 1;
     }
     const Tier1ParallelMoves moves = {
@@ -1492,11 +1506,12 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         };
         error = !staged.valid ? TIER1_EMIT_ALLOCATION : tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     }
-    // An aggregate result through the hidden pointer (#789): rdi, which no argument takes then, the result object's address.
+    // An aggregate result through the hidden pointer (#789): rdi, which no argument takes then, the result object's
+    // address, or the pointer the moves put there (#2820).
     const bool hidden = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY;
     const bool parts_returned = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_REGISTERS;
-    error = error != TIER1_EMIT_OK || (!hidden && !parts_returned) || (into != 0 && into->valid) ? error : TIER1_EMIT_ALLOCATION;
-    if (error == TIER1_EMIT_OK && hidden)
+    error = error != TIER1_EMIT_OK || (!hidden && !parts_returned) || (hidden && pointer) || (into != 0 && into->valid) ? error : TIER1_EMIT_ALLOCATION;
+    if (error == TIER1_EMIT_OK && hidden && !pointer)
     {
         const X86Instruction address = { .displacement = into->displacement, .reg = X86_REGISTER_RDI, .rm = into->base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_LEA_R64_M };
         error = tier1_emit_append(buffer, address) ? error : TIER1_EMIT_MEMORY;
@@ -1621,8 +1636,22 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     return error;
 }
 
+static uint8_t tier1_emit_unsigned_dword_memory_forms(const uint8_t* allowed_forms)
+{
+    return (uint8_t)(x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SS_X_X_RM32) |
+                     (x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SD_X_X_RM32) << 1));
+}
+
+static uint8_t tier1_emit_unsigned_i64_float_forms(const uint8_t* allowed_forms)
+{
+    return (uint8_t)(x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SS_X_X_RM64) |
+                     (x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SD_X_X_RM64) << 1));
+}
+
 static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
+    const uint8_t unsigned_dword_memory_forms = tier1_emit_unsigned_dword_memory_forms(allowed_forms);
+    const uint8_t unsigned_i64_float_forms = tier1_emit_unsigned_i64_float_forms(allowed_forms);
     const uint32_t count = plan->function->instruction_count;
     // The nodes of fixed-register rules, whose sequences and saves take records past their share (tier1_emit_prepare's).
     result->fixed_count = result->prepared.fixed_count;
@@ -1736,6 +1765,8 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             else if (!calls)
             {
                 holes = tier1_select_holes(plan, transitions.registers, node);
+                holes.unsigned_dword_memory_forms = unsigned_dword_memory_forms;
+                holes.unsigned_i64_float_forms = unsigned_i64_float_forms;
             }
         }
         if (error == TIER1_EMIT_OK)

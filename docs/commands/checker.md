@@ -441,7 +441,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   a full expression of its own, checked first, and a brace initializer's list is one, checked once its last value
   is walked (`check_unseq_plans`, a range's value once per element). Candidates come from one vector pass over the
   graph's operators for a modification; a root whose postorder node range names no modified variable twice (counting
-  its modifications; `check_unseq_repeats`, vector and scalar twins, a superset of the walk's usages) can't report and
+  its modifications; `check_unseq_repeats`, 16 nodes at a time, a superset of the walk's usages) can't report and
   isn't walked, as most aren't; the walk is scalar, an ordered tree walk with a union-find. A random
   differential of 21,000 full expressions over three variables, without constant first operands, matches clang
   23.1.6 exactly. Differences left: buster's evaluation facts take an assignment's or a statement expression's value

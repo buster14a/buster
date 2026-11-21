@@ -2580,11 +2580,10 @@ What the lowering covers past scalars (#145's programs):
   function (`check_lower_init_reentry`), from the body's controls 16 kinds at a
   time on the vector path (`check_lower_control_kinds`, shared with the named
   result's search) with a scalar twin. The function's `hidden_size` and
-  `hidden_alignment` give the bytes such a call writes: Tier 1's IR returns
-  them into a slot of its own and copies them there ([the IR](ir.md)), as it
-  did, past 256 bytes by the `memmove` the lowering registers for it
-  (`hidden_copy`, which no Tier 0 entry calls); Tier 0 and the interpreter copy
-  nothing.
+  `hidden_alignment` give the bytes such a call writes. Tier 0, the
+  interpreter and, since #2820, Tier 1 ([the IR](ir.md)) copy nothing: the
+  `memmove` the lowering still registers for such a copy past 256 bytes
+  (`hidden_copy`) is called by none of them.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the
@@ -5070,8 +5069,7 @@ It also checks that `-c` of each fixture is refused with no object written. The
 deferred readings are `-c`'s, on one, two and three lanes: `-fsyntax-only`
 starts no lanes, so a deferred `-fsyntax-only` reading is source order's. The
 driver reads `--scalar`'s in source order; `test-checker-deferred` compares the
-deferred reader with both paths, and its merge with its scalar twins, on its
-recovered fixtures too.
+deferred reader with both paths on its recovered fixtures too.
 The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
@@ -7222,8 +7220,7 @@ scalar path, the twin, tests every comparison; #2451), a plain `x = y` for `-Wse
 an analysis whose diagnostics are ignored. The token passes find their roles
 and kinds 64 tokens at a time, the node passes their operators 16 nodes at a
 time through an operator bitset, and `-Wuninitialized`'s declaration loops a
-sparse column's next entry by its directory (`check_sparse_next`). Each scalar
-path, the twin, visits every item and runs the same tests.
+sparse column's next entry by its directory (`check_sparse_next`).
 A static selection's unselected arms and controlling expression
 (`check_common_unselected_roots`, which `check_common_evaluated` and the
 returned-address check use) are the roots inside its range, from past its
