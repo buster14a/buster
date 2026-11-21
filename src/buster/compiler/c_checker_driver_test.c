@@ -10755,6 +10755,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (check_test_driver_takes())
             {
                 check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
+                if (!lazy)
+                {
+                    check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/non-prototype");
+                }
             }
             if (!lazy && check_test_driver_takes())
             {

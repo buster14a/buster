@@ -1813,6 +1813,8 @@ struct CheckInputSpecifierJob
 // At a continuation comma, retain the specifiers' rejected restrict on an atomic __auto_type (#1844).
 #define BUSTER_CHECK_DECLARATION_ATOMIC_RESTRICT_GROUP 0x20u
 #define BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP 0x40u
+// On a function name, the composite type inherited a prototype that was absent from this declaration.
+#define BUSTER_CHECK_DECLARATION_INHERITED_PROTOTYPE 0x40u
 // A deduced declarator's type (DEDUCED) is __auto_type's, whose errors name `__auto_type` (#147).
 #define BUSTER_CHECK_DECLARATION_GNU_AUTO 0x80u
 typedef struct CheckConstexprValue CheckConstexprValue;
@@ -12833,11 +12835,12 @@ static bool check_input_builtin_function(CheckInputReader* reader, uint32_t name
 // its "cannot redeclare builtin function", with the same note; and a definition is clang's error
 // (ActOnStartOfFunctionDef's err_builtin_definition), but of a library builtin. A compatible declaration leaves the name
 // the builtin's: its calls are the builtin's (check_input_resolve_name, check_input_intrinsic_prepare). Rare: scalar.
-static __attribute__((noinline)) void check_input_builtin_declaration(CheckInputReader* reader, uint32_t token)
+static __attribute__((noinline)) bool check_input_builtin_declaration(CheckInputReader* reader, uint32_t token)
 {
     TypeId builtin = 0;
     bool custom = false;
-    if (check_input_builtin_function(reader, reader->parser->tokens.names[token], &builtin, &custom))
+    const bool builtin_function = check_input_builtin_function(reader, reader->parser->tokens.names[token], &builtin, &custom);
+    if (builtin_function)
     {
         const TypeAnswer compatible = builtin != 0 && !custom ? type_compatible(reader->types, builtin, reader->declared_types[token]) : TYPE_ANSWER_YES;
         reader->output->resource |= compatible == TYPE_ANSWER_FULL;
@@ -12855,6 +12858,7 @@ static __attribute__((noinline)) void check_input_builtin_declaration(CheckInput
             check_input_report(reader, token, CHECK_INPUT_BUILTIN_DEFINITION);
         }
     }
+    return builtin_function;
 }
 
 // Whether `token` declares an object's redefinition kept after its error (CheckInputReader.invalid_redefinitions).
@@ -12934,6 +12938,66 @@ static void check_input_implicit_late_attributes(CheckInputReader* reader, uint3
     }
 }
 
+static bool check_input_library_enabled(const BuiltinIntrinsicInfo* info, const PPOptions* options);
+
+// The reader keeps a composite type after binding. The warning compares written prototypes and still needs the
+// inherited parameter count when clang describes an earlier, unprototyped declaration that acquired parameters.
+static bool check_input_non_prototype_merge(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
+{
+    const TypeTable* types = reader->types;
+    const TypeId current = reader->declared_types[token];
+    const TypeId prior = reader->declared_types[previous];
+    const bool current_proto = (types->types.flags[type_index(current)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    const bool prior_proto = (types->types.flags[type_index(prior)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 &&
+                             (BUSTER_CHECK_RARE(reader, declaration_flags, previous) & BUSTER_CHECK_DECLARATION_INHERITED_PROTOTYPE) == 0;
+    const uint8_t* flags = reader->output->function_flags;
+    const bool kr = flags != NULL && (flags[token] & CHECK_INPUT_FUNCTION_KR) != 0;
+    const bool prior_kr = flags != NULL && (flags[previous] & CHECK_INPUT_FUNCTION_KR) != 0;
+    const bool implicit = flags != NULL && ((flags[token] | flags[previous]) & CHECK_INPUT_FUNCTION_IMPLICIT) != 0;
+    const bool definition = point < reader->parser->tokens.count && reader->parser->tokens.kinds[point] == PARSE_KIND_L_BRACE;
+    // A K&R definition warns at its own name on completion. With a prior empty list it warns there too, after the body.
+    // An empty-list definition following a prototype gets clang's conflicting-types error alone.
+    bool warned = false;
+    if (!implicit && (current_proto != (prior_proto && !prior_kr)) && !(kr && prior_kr) && !(definition && !current_proto))
+    {
+        const uint32_t plain = current_proto ? previous : token;
+        const uint32_t prototype = current_proto ? token : previous;
+        uint32_t count = 0;
+        type_parameters(types, reader->declared_types[prototype], &count);
+        if (count != 0)
+        {
+            const IdentId name = reader->parser->tokens.names[plain];
+            const InternSpan span = reader->pp->table->spans[name];
+            const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)reader->pp->table->records + span.offset, span.length);
+            const bool builtin = check_input_linkage(reader->declaration_bits, plain) == 2 && info != NULL &&
+                                 memchr(info->attributes, 'f', info->attributes_length) != NULL && check_input_library_enabled(info, &reader->pp->options);
+            if (!builtin)
+            {
+                uint32_t inherited_count = 0;
+                type_parameters(types, reader->declared_types[plain], &inherited_count);
+                const CheckWarningEvent event = {
+                    .id = CHECK_WARNING_ID_KR_DEFINITION,
+                    .kind = CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION,
+                    .token = plain,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = kr ? CHECK_WARNING_COMPLETE_AFTER_DELIMITER : CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = kr ? reader->parser->tree.parents[point] : point,
+                    .payload = { .data = inherited_count != 0 ? CHECK_NON_PROTOTYPE_HAS_PARAMETERS :
+                                         !current_proto ? CHECK_NON_PROTOTYPE_PREVIOUS :
+                                         definition ? CHECK_NON_PROTOTYPE_SUBSEQUENT_DEFINITION : CHECK_NON_PROTOTYPE_SUBSEQUENT },
+                };
+                const CheckWarningNote note = {
+                    .kind = CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE,
+                    .token = prototype,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                };
+                warned = check_input_warning_event(reader, &event, &note, kr ? 0 : 1);
+            }
+        }
+    }
+    return warned;
+}
+
 // A declaration's binding at its point, after its checks against the visible declaration `old` (a handle, or 0) and its
 // entity's linked one.
 static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, uint32_t point, uint32_t old)
@@ -12943,10 +13007,11 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
     const bool linked_visible = old != 0 && check_input_linkage(reader->declaration_bits, old_declaration) != 0 && check_input_linkage(reader->declaration_bits, token) != 0;
     const bool overload = check_input_overload_active(reader, token);
+    bool builtin_function = false;
     if (__builtin_expect(kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && !overload &&
                          check_input_builtin_named(reader, name), 0))
     {
-        check_input_builtin_declaration(reader, token);
+        builtin_function = check_input_builtin_declaration(reader, token);
     }
     const uint32_t linked_library = kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && reader->linked_declarations != NULL ? reader->linked_declarations[name] : 0;
     const bool library_redeclaration = kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && linked_library != 0 && reader->output->function_flags != NULL &&
@@ -12987,6 +13052,16 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     if (reader->target_versions && kind == C_BINDING_FUNCTION && old != 0 && version == BUSTER_CHECK_NONE && !versions)
     {
         version = check_input_target_versions_match(reader, token, &versions);
+    }
+    bool prototype_warning = false;
+    if (kind == C_BINDING_FUNCTION && !builtin_function && !overload && !versions && reader->parser->language.standard < 2023 && reader->pp != NULL)
+    {
+        const uint32_t previous = linked_visible ? old_declaration : linked_library != 0 ? linked_library - 1 : BUSTER_CHECK_NONE;
+        if (previous < reader->parser->tokens.count && reader->declaration_kinds[previous] == C_BINDING_FUNCTION &&
+            check_input_linkage(reader->declaration_bits, token) == check_input_linkage(reader->declaration_bits, previous))
+        {
+            prototype_warning = check_input_non_prototype_merge(reader, token, previous, point);
+        }
     }
     if (version != BUSTER_CHECK_NONE)
     {
@@ -13074,6 +13149,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
             const uint32_t before = reader->output->report_count;
             check_input_redeclaration_report(reader, token, previous, judged, repeatable, parameter_conflict, true, message);
+            if (prototype_warning && reader->output->report_count == before + 1)
+            {
+                reader->output->reports[before].completion = point;
+            }
             if (auto_type && judged == TYPE_ANSWER_NO && reader->output->report_count == before + 1)
             {
                 CheckInputReport* report = reader->output->reports + before;
@@ -13143,6 +13222,13 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             {
                 // The visible prototype survives an empty-list redeclaration in the composite type, but
                 // parameter notes still belong to the latest declaration's own written parameter list.
+                if (kind == C_BINDING_FUNCTION && composite != reader->declared_types[token] &&
+                    (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 &&
+                    (reader->types->types.flags[type_index(composite)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0)
+                {
+                    check_input_rare_claim(reader, &reader->declaration_flags[token]);
+                    reader->declaration_flags[token] |= BUSTER_CHECK_DECLARATION_INHERITED_PROTOTYPE;
+                }
                 reader->declared_types[token] = composite;
             }
         }
@@ -13214,6 +13300,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                                   CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
                 check_input_redeclaration_report(reader, token, previous, judged, true, parameter_conflict, !thread_local_checked && !thread_local_alone, message);
+                if (prototype_warning && reader->output->report_count == before + 1)
+                {
+                    reader->output->reports[before].completion = point;
+                }
                 // (The redefinition's error is the declaration's second at its name: kept after the TLS one.)
                 if (thread_local_reported && reader->output->report_count == before + 1 && !reader->output->resource)
                 {
