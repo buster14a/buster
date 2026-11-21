@@ -117,6 +117,18 @@
 // (node_rows_window_compare); and one of a chunk's first run's answers is changed, so that its second run's
 // comparison is seen to count every chunk (node_rows_window_chunk).
 #define BUSTER_NODE_READER_WINDOW_ROWS_FAULT 1024u
+// test-checker's control of a summary's side facts' comparison (with BUSTER_NODE_READER_WINDOW_ROWS; the shadow's
+// node_shadow_summaries, after the pipeline): the facts are kept with one of them changed for each expression (a
+// reference more, a reference's object, its return fact's stop or its unknown, in turn), so that the comparison with
+// the program's own walks is seen to count every one of them; one of a chunk's first run's facts is changed, so that
+// its second run's comparison is seen to count every chunk; and the comparison asks its truth and its fold of every
+// root reader time typed, kept or not, so that the two are seen to count the expressions the window lists for them.
+#define BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT 2048u
+// The shadow's switch for the side facts' cost (with BUSTER_NODE_READER_WINDOW_ROWS): X's rows on the window with no
+// summary's side facts. Neither the lines' column, the calls' mask nor the sweep is made, and nothing is kept for the
+// comparison; the turns list what they list with them. One executable then reads the other sweeps with the facts and
+// without.
+#define BUSTER_NODE_READER_WINDOW_SUMMARY_OFF 4096u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u
 // What the reference did with an expression (NodeFactsReader.c_ran, which the reader gives the kernel's state at each
@@ -272,6 +284,9 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_CONTEXTS_VALUED,
     NODE_FACTS_COUNT_CONTEXTS_SUNK,
     NODE_FACTS_COUNT_CONTEXTS_COMMAS,
+    // The casts that list their expression for a truth their operand may have and their own value has not: a
+    // branch's condition over one has a truth its root's value does not say (a summary's side facts' piece).
+    NODE_FACTS_COUNT_CONTEXTS_PASSED,
     // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS): the expressions it ran on (those C takes on the window)
     // and their records; those whose tape it made, their records and their entries; the listed ones by their first
     // record's reason (BUSTER_NODE_ROWS_REASON_*, in its order); the made tapes that differ from the reference's, and
@@ -320,6 +335,24 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES,
     NODE_FACTS_COUNT_ROWS_VALUE_TICKS,
     NODE_FACTS_COUNT_ROWS_LATER_VALUE_TICKS,
+    // A summary's side facts on the window (c_check_node_machine_rows.c's node_rows_window_summary): the records it
+    // lists for a reference, and the calls it asks a record at a time (one whose callee is no plain function's name
+    // in its block or the block before); the expressions the rows take whose facts it keeps, and their references;
+    // those of them with an unknown for a return fact, those with a stop; the expressions whose fact the flow's
+    // reduction made a record at a time; the chunks whose second run's facts differ from its first's, which must be
+    // none; the operators whose turn lists their expression for a second operand whose truth is known; and its
+    // ticks, a chunk's first run's and its second's.
+    NODE_FACTS_COUNT_SUMMARY_LISTED,
+    NODE_FACTS_COUNT_SUMMARY_SUSPECTS,
+    NODE_FACTS_COUNT_SUMMARY_EXPRESSIONS,
+    NODE_FACTS_COUNT_SUMMARY_REFERENCES,
+    NODE_FACTS_COUNT_SUMMARY_UNKNOWN,
+    NODE_FACTS_COUNT_SUMMARY_STOPS,
+    NODE_FACTS_COUNT_SUMMARY_REDUCED,
+    NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES,
+    NODE_FACTS_COUNT_SUMMARY_DECIDED,
+    NODE_FACTS_COUNT_SUMMARY_TICKS,
+    NODE_FACTS_COUNT_SUMMARY_LATER_TICKS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 
@@ -404,6 +437,20 @@ struct NodeFrontTypes
     uint64_t* tape_values;
     uint64_t tape_count;
     uint64_t tape_capacity;
+    // A summary's side facts (BUSTER_NODE_READER_WINDOW_ROWS; null otherwise), by root node, for an expression the
+    // rows take whole on the window: its references' first in their store (UINT32_MAX: none is kept for the root) and
+    // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
+    // objects one after another, `summary_count` of `summary_capacity`; an expression it had no room for keeps none
+    // (`summary_unkept`). And the unit's functions the return flow leaves unknown from a declaration on
+    // (check_program_return_unknowns' table, by object; null where the unit has none).
+    uint32_t* summary_firsts;
+    uint16_t* summary_counts;
+    uint8_t* summary_facts;
+    uint32_t* summary_objects;
+    uint64_t summary_count;
+    uint64_t summary_capacity;
+    uint64_t summary_unkept;
+    const uint32_t* return_unknowns;
     // The expressions C and X ran on (those T took), by their refusal; their entries; and the tapes the store had no
     // room for. With them `ticks` is of T, C and X together.
     uint64_t swept;
