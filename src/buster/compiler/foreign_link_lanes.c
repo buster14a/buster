@@ -181,41 +181,67 @@ static void foreign_link_names_lanes(ForeignLinkLanes* state)
     }
 }
 
-// The objects' maps of their global symbols on lanes, each lane a range of the objects; then, on lane 0, each undefined
-// symbol that a reference gives a type gets the type of the least object's, as the exact path's id order gives it.
+// The least object with a typed reference owns the symbol's flags. Count its wins before scanning its records so
+// each winning object stops at its last required type, and an object that won nothing reads no records again.
 static void foreign_link_maps_lanes(ForeignLinkLanes* state)
 {
     ForeignLinkBuild* build = state->build;
     ForeignLink* output = build->output;
     const Foreign* foreign = build->foreign;
+    uint32_t* first_typed = state->first_typed;
+    uint64_t* wins = state->fixups; // The relocation pass fills this object column after the maps are finished.
     const Range64 symbols = lane_range(output->link.symbols.count);
     for (uint64_t symbol = symbols.begin; symbol < symbols.end; symbol += 1)
     {
-        state->first_typed[symbol] = UINT32_MAX;
+        first_typed[symbol] = UINT32_MAX;
     }
     lane_sync();
     const Range64 range = lane_range(foreign->object_count > 1 ? foreign->object_count - 1 : 0);
     for (uint64_t at = range.begin; at < range.end; at += 1)
     {
-        foreign_link_map_object(output, foreign, (uint32_t)at + 1, state->first_typed);
+        const uint32_t id = (uint32_t)at + 1;
+        wins[id] = 0;
+        foreign_link_map_object(output, foreign, id, first_typed);
     }
     lane_sync();
-    for (uint64_t symbol = symbols.begin; symbol < symbols.end; symbol += 1)
+    // Consecutive wins for the same object share one atomic addition per run on this lane.
+    for (uint64_t begin = symbols.begin; begin < symbols.end;)
     {
-        const uint32_t object_id = state->first_typed[symbol];
-        if (object_id != UINT32_MAX)
+        const uint32_t id = first_typed[begin];
+        uint64_t end = begin + 1;
+        while (end < symbols.end && first_typed[end] == id)
         {
-            // The type the least object's reference gives it: its record for the symbol's name.
-            const ForeignObject* input = &foreign->objects[object_id];
+            end += 1;
+        }
+        if (id != UINT32_MAX)
+        {
+            __atomic_fetch_add(&wins[id], end - begin, __ATOMIC_RELAXED);
+        }
+        begin = end;
+    }
+    lane_sync();
+    uint8_t* flags = output->link.symbols.flags;
+    for (uint64_t at = range.begin; at < range.end; at += 1)
+    {
+        const uint32_t id = (uint32_t)at + 1;
+        uint64_t left = wins[id];
+        if (left != 0)
+        {
+            const ForeignObject* input = &foreign->objects[id];
             const ForeignRound* round = foreign_symbol_round(foreign, input->global_begin);
-            uint8_t type = 0;
-            for (uint32_t i = 0; type == 0 && i < input->global_count; i += 1)
+            const uint8_t* info = round->symbols.info + (input->global_begin - round->first_symbol);
+            const SymbolId* targets = output->objects[id].symbols + input->first_global;
+            for (uint32_t i = 0; left != 0 && i < input->global_count; i += 1)
             {
-                const uint32_t at = input->global_begin + i - round->first_symbol;
-                const bool same = output->names[round->symbols.name_id[at]] == symbol;
-                type = same ? (uint8_t)ELF64_ST_TYPE(round->symbols.info[at]) : 0;
+                const SymbolId symbol = targets[i];
+                const uint8_t type = ELF64_ST_TYPE(info[i]);
+                // Only this object's lane can read or write these flags. Later records for the name see its type.
+                if (type != STT_NOTYPE && first_typed[symbol] == id && (flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_NOTYPE)
+                {
+                    flags[symbol] |= type;
+                    left -= 1;
+                }
             }
-            output->link.symbols.flags[symbol] |= type;
         }
     }
     lane_sync();

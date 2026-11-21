@@ -99,7 +99,7 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
         CheckDeferred deferred = { .fail_after_replay = path == 4 };
         const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
         const ParseOptions parsing = { .scalar = path == 1 };
-        const CheckOptions checking = { .scalar = path == 1 };
+        const CheckOptions checking = { 0 };
         bool ready = output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) &&
                      pp_initialize(&pp, &preprocessing, &identifiers) && parse_initialize(&parser, &parsing, preprocessing.language) &&
                      pp_run_source(&pp, "literal-table.c", (const uint8_t*)source, strlen(source)) && parse_translation_unit(&parser, &pp) &&
@@ -707,7 +707,7 @@ static void check_test_literal_table_order(CheckTest* test)
         CheckInitializers plans = { 0 };
         const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
         const ParseOptions parsing = { .scalar = path == 1 };
-        const CheckOptions checking = { .scalar = path == 1 };
+        const CheckOptions checking = { 0 };
         bool valid = output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) &&
                      pp_initialize(&pp, &preprocessing, &identifiers) && parse_initialize(&parser, &parsing, preprocessing.language) &&
                      pp_run_source(&pp, "literal-table-order.c", (const uint8_t*)source, strlen(source)) && parse_translation_unit(&parser, &pp) &&

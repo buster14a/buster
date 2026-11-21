@@ -92,14 +92,14 @@ static uint64_t check_tier1_inline_generations = 0;
 // are found 16 tokens at a time, as the emission's scan of them is (check_input_attributed_next), with its scalar twin.
 #define BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE 1u
 #define BUSTER_CHECK_TIER1_INLINE_ROOTED 2u
-static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, uint8_t* marks)
+static void check_tier1_inline_marks(const CheckProgram* program, uint8_t* marks)
 {
     const CheckInput* input = program->input;
     const uint32_t tokens = input->token_count;
     const CheckSparseWide attributes = input->attributes;
-    for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
+    for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
     {
-        for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
+        for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
             const CheckInputAttributes* records = input->declarations[token] == token ? check_input_attributes_at(input, token) : 0;
@@ -178,7 +178,7 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
     if (marks != 0)
     {
         memset(marks, 0, (uint64_t)input->token_count + 1);
-        check_tier1_inline_marks(program, scalar, marks);
+        check_tier1_inline_marks(program, marks);
         // What else keeps an object's code: static data's references to it, an alias's of it.
         for (uint32_t k = 0; k < program->initializer_reference_count; k += 1)
         {

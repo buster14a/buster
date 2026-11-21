@@ -4863,9 +4863,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         const CheckSparseWide attributes = input->attributes;
         const bool attributed = show_warnings && attribute_warnings && check_sparse_wide_present(attributes);
-        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned, scalar) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned, scalar))
+        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned))
         {
-            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned, scalar);
+            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -8139,7 +8139,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         }
     }
     valid = valid && (selected || input.report_count != 0) && !input.resource;
-    const CheckOptions check_options = { .scalar = scalar };
+    const CheckOptions check_options = { 0 };
     CheckStream stream = { 0 };
     // The reading's own errors: its reader's (a recovered one's unit is valid), whose reports stand without the graph, which
     // may not run after them, and its graph's.
@@ -9031,7 +9031,6 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .identifiers = identifiers,
                 .types = program->types,
                 .output = output,
-                .scalar = parser->options.scalar,
                 .internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1,
                 .object_size_compat = candidate->object_sizes != NULL,
             };
@@ -12545,7 +12544,6 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             else if (input_valid || input.diagnostic_graph)
             {
                 const CheckOptions check_options = {
-                    .scalar = scalar,
                     .verify = verify,
                     .transitions = command->check_transitions,
                     .verify_transitions = verify,

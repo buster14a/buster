@@ -93,7 +93,7 @@ static void check_embed_test_compact(CheckTest* test, const char* resource, cons
             .scalar = path == 0,
         };
         const ParseOptions parse_options = { .scalar = path == 0 };
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
                      pp_run_source(&pp, "compact-embed.c", (const uint8_t*)source, (uint32_t)strlen(source)) && check_test_types_open(&types) &&
                      parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp);
@@ -153,7 +153,7 @@ static void check_embed_test_mixed(CheckTest* test, const char* resource, const 
         Arena scratch = arena_reserve(UINT64_C(1) << 26);
         const PPOptions pp_options = { .language = { .standard = 2023 }, .no_standard_includes = true, .scalar = path == 0 };
         const ParseOptions parse_options = { .scalar = path == 0 };
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers plans = { 0 };
