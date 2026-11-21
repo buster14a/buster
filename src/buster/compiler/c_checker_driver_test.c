@@ -9573,6 +9573,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool operand_diagnostics_only = false;
     // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
     bool assert_bool_only = false;
+    // --assert-diagnostics-only: assertion requirements, member recovery and boolean conversions (#2409).
+    bool assert_diagnostics_only = false;
     // --unused-comparison-only: discarded comparisons' assignment-note eligibility (#2906).
     bool unused_comparison_only = false;
     // --record-extensions-only: zero-length arrays and zero-size records, their policies and output preservation.
@@ -9639,6 +9641,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--assert-bool-only") == 0)
         {
             assert_bool_only = true;
+        }
+        else if (strcmp(argv[i], "--assert-diagnostics-only") == 0)
+        {
+            assert_diagnostics_only = true;
         }
         else if (strcmp(argv[i], "--unused-comparison-only") == 0)
         {
@@ -9714,7 +9720,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only +
-                             (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only;
+                             (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10261,7 +10267,11 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_auto_qualifiers(&test, clang, executable, directory);
     }
-    if (temporary && assert_bool_only)
+    if (temporary && assert_diagnostics_only)
+    {
+        check_test_driver_assert_const(&test, clang, executable, directory);
+    }
+    if (temporary && (assert_bool_only || assert_diagnostics_only))
     {
         check_test_driver_assert_bool(&test, clang, executable, directory);
     }

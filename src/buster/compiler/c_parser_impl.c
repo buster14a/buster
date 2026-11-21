@@ -2604,6 +2604,30 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
         // A static assertion after attribute lists at file scope: clang's error at the first of them.
         parse_scalar_error(parser, parse_scalar_leading_list(parser, i), PARSE_MESSAGE_ATTRIBUTE_LIST_NOT_ALLOWED, BUSTER_PARSE_AT_TOKEN);
     }
+    else if (kind == PARSE_KIND_STATIC_ASSERT && frame->role == PARSE_ROLE_OPEN_STRUCT &&
+             (frame->flags & (BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_TYPE_SEEN)) == 0 && i > 0 && parser->kinds[i - 1] == PARSE_KIND_EXTENSION)
+    {
+        // A member's leading __extension__ starts declaration specifiers, so its following assertion is not read as
+        // an assertion. Clang diagnoses the missing type and member before the missing semicolon (#2409). Retain the
+        // rejected-record recovery boundary: removing just this member would make an invalid record appear valid.
+        uint32_t begin = i;
+        while (begin > frame->opener + 1 && parser->kinds[begin - 1] == PARSE_KIND_EXTENSION)
+        {
+            begin -= 1;
+        }
+        const bool leading = begin == frame->opener + 1 || (begin > 0 && parser->kinds[begin - 1] == PARSE_KIND_SEMI);
+        if (leading)
+        {
+            parse_scalar_note(parser, i, PARSE_MESSAGE_TYPE_NAME_REQUIRES_SPECIFIER, BUSTER_PARSE_NONE, true);
+            parse_scalar_note(parser, i, PARSE_MESSAGE_EXPECTED_MEMBER_NAME, BUSTER_PARSE_NONE, true);
+            parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST, BUSTER_PARSE_AFTER_PREVIOUS);
+        }
+        else
+        {
+            // Attributes before the run have a separate recovery boundary.
+            parse_scalar_end_specifiers(parser, i, frame, step);
+        }
+    }
     else if ((kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEDEF) && (frame->flags & BUSTER_PARSE_FRAME_KR_DECLARATIONS) &&
              parse_scalar_storage_class(parser, i) && parser->names[i] != C_NAME_REGISTER)
     {
@@ -11489,12 +11513,36 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
         char text[256];
         parse_diagnostic_message(parser, pp, diagnostic, text, sizeof(text));
         const uint32_t token = diagnostic->token;
+        // Inside one expansion, an after-previous diagnostic is already located at the next token
+        // (parse_diagnostic_location). Keep that token's macro-note chain instead of reducing it to a byte location.
         const uint32_t previous = diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS && token > 0 && token < parser->tokens.count ?
                                       parse_expansion_context(pp, parser->tokens.sources[token - 1]) : 0;
         const bool inside = previous != 0 && previous == parse_expansion_context(pp, parser->tokens.sources[token]);
-        // Inside one expansion, an after-previous diagnostic is already located at the next token
-        // (parse_diagnostic_location). Keep that token's macro-note chain instead of reducing it to a byte location.
-        if ((diagnostic->place == BUSTER_PARSE_AT_TOKEN || inside) && token < parser->tokens.count)
+        const bool member_assertion = token > 0 && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT &&
+                                      parser->tokens.kinds[token - 1] == PARSE_KIND_EXTENSION;
+        const bool member_type = diagnostic->message == PARSE_MESSAGE_TYPE_NAME_REQUIRES_SPECIFIER;
+        const bool member_semi = diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST;
+        if (member_assertion && (member_type || member_semi))
+        {
+            // This missing semicolon follows the member's type/name errors, despite pointing before them. Inside one
+            // macro expansion it uses the assertion's spelling and notes; between expansions it points just after
+            // the previous invocation. The type and semicolon diagnostics name a caller-spelled argument directly;
+            // the member-name diagnostic below spans the declaration and keeps its argument-expansion note.
+            const uint32_t source = parser->tokens.sources[token];
+            const uint32_t member_previous = member_semi ? parse_expansion_context(pp, parser->tokens.sources[token - 1]) : 0;
+            const bool member_inside = member_previous != 0 && member_previous == parse_expansion_context(pp, source);
+            const bool spelled = member_type || member_inside;
+            const uint32_t location = spelled ? pp->output.locations[source] : parse_diagnostic_location(parser, pp, diagnostic);
+            uint32_t origin = spelled ? pp_history_at(pp, source) : 0;
+            const uint32_t count = pp->substitution_count;
+            for (uint32_t step = 0; (origin & ~BUSTER_PP_ORIGIN_INDEX) == BUSTER_PP_ORIGIN_ARGUMENT && step < count; step += 1)
+            {
+                const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+                origin = index < count ? pp->substitutions[index].source : 0;
+            }
+            pp_diagnose_placed_sources_phase(pp, PP_SEVERITY_ERROR, location, origin, source, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, "%s", text);
+        }
+        else if ((diagnostic->place == BUSTER_PARSE_AT_TOKEN || inside) && token < parser->tokens.count)
         {
             // An expected closer's note at its opener (#147): "to match this '('".
             const uint32_t opener = diagnostic->note;
@@ -11514,7 +11562,11 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             }
             else
             {
+                // A rejected extension-prefixed member spans the declaration specifiers and the unexpected token.
+                const bool spans = pp->diagnostic_spans;
+                pp->diagnostic_spans |= member_assertion && diagnostic->message == PARSE_MESSAGE_EXPECTED_MEMBER_NAME;
                 pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
+                pp->diagnostic_spans = spans;
             }
         }
         else

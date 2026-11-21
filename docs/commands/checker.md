@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -150,10 +150,19 @@ unused-warning fixtures also check exact scope-completion tokens.
   pinning missing warnings: full discarded-comma recovery belongs to #2409.
   `--assert-bool-only` runs `c_check_assert_bool_driver_test.c` alone, including
   the original `tests/driver/assert_bool_*.c` sources for root and nested
-  boolean-conversion warnings in failed static assertions (#2409). It compares
+  boolean-conversion and discarded-comma warnings in failed static assertions
+  (#2409). It compares
   complete diagnostics and exit status under warning promotion/suppression,
   error limits, source policy, C17/C23, both reader choices and lane requests,
   and verifies existing object-output preservation for rejected input.
+  `--assert-diagnostics-only` runs that suite together with
+  `c_check_assert_const_driver_test.c`: failed-assertion requirements, selected
+  literals, attributed type spellings, and the rejected member declaration
+  `__extension__ _Static_assert` (#2409). The canonical-spelling and recovery
+  fixtures compare complete diagnostics and exit status with Clang through the
+  shared warning-policy, reader and requested-lane matrix. A separate safety
+  fixture checks assertion errors, diagnostic counts and preserved output for
+  complex attributed forms that deliberately retain their source spelling.
   `--record-extensions-only` runs the existing GNU empty-record checks plus the runtime
   `tests/driver/record-extensions/` catalogue for zero-size-record C++ compatibility and
   zero-length-array warnings (#2409). Complete GNU17/C23 diagnostics cover explicit and
