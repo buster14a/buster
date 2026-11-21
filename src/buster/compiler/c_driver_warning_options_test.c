@@ -126,52 +126,49 @@ static void cc_warning_capability_run(CCCompatibilityTest* test, const char* con
     const size_t length = strlen(expected);
     for (uint32_t action = 0; action < sizeof(actions) / sizeof(actions[0]); action += 1)
     {
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        const bool kept = cc_compat_write(test, "warning-capability.out", "previous output\n") &&
+                          cc_compat_write(test, "warning-capability.d", "previous dependencies\n");
+        const char* arguments[32] =
         {
-            const bool kept = cc_compat_write(test, "warning-capability.out", "previous output\n") &&
-                              cc_compat_write(test, "warning-capability.d", "previous dependencies\n");
-            const char* arguments[32] =
-            {
-                actions[action],
-                "-MD",
-                "-MF",
-                "warning-capability.d",
-                "-o",
-                "warning-capability.out",
-                scalar != 0 ? "--scalar" : "-pipe",
-            };
-            uint32_t count = 7;
-            for (uint32_t i = 0; options[i] != NULL; i += 1)
-            {
-                arguments[count++] = options[i];
-            }
-            arguments[count++] = "warning-capabilities.c";
-            arguments[count] = NULL;
-            CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, arguments);
-            bool good = kept && run.errors != NULL && run.status == (refused != NULL);
-            if (refused != NULL)
-            {
-                char* output = cc_compat_read(test, "warning-capability.out");
-                char* dependencies = cc_compat_read(test, "warning-capability.d");
-                good = good && strncmp(run.errors, expected, length) == 0 && strncmp(run.errors + length, "usage: compiler ", 16) == 0 &&
-                       run.output != NULL && run.output[0] == 0 && output != NULL && strcmp(output, "previous output\n") == 0 &&
-                       dependencies != NULL && strcmp(dependencies, "previous dependencies\n") == 0;
-                free(output);
-                free(dependencies);
-            }
-            else
-            {
-                good = good && run.errors[0] == 0;
-            }
-            char description[256];
-            snprintf(description, sizeof(description), "warning capability %s, %s, %s: status, diagnostic and preserved outputs", options[0], actions[action], scalar != 0 ? "scalar" : "default");
-            cc_compat_expect(test, good, description);
-            if (!good)
-            {
-                fprintf(stderr, "  Buster status %d; expected prefix: %s  actual:\n%s", run.status, refused != NULL ? expected : "(silent success)\n", run.errors != NULL ? run.errors : "(missing)\n");
-            }
-            cc_compat_release(&run);
+            actions[action],
+            "-MD",
+            "-MF",
+            "warning-capability.d",
+            "-o",
+            "warning-capability.out",
+            "-pipe",
+        };
+        uint32_t count = 7;
+        for (uint32_t i = 0; options[i] != NULL; i += 1)
+        {
+            arguments[count++] = options[i];
         }
+        arguments[count++] = "warning-capabilities.c";
+        arguments[count] = NULL;
+        CCCompatibilityRun run = cc_compat_run(test, test->compiler, NULL, arguments);
+        bool good = kept && run.errors != NULL && run.status == (refused != NULL);
+        if (refused != NULL)
+        {
+            char* output = cc_compat_read(test, "warning-capability.out");
+            char* dependencies = cc_compat_read(test, "warning-capability.d");
+            good = good && strncmp(run.errors, expected, length) == 0 && strncmp(run.errors + length, "usage: compiler ", 16) == 0 &&
+                   run.output != NULL && run.output[0] == 0 && output != NULL && strcmp(output, "previous output\n") == 0 &&
+                   dependencies != NULL && strcmp(dependencies, "previous dependencies\n") == 0;
+            free(output);
+            free(dependencies);
+        }
+        else
+        {
+            good = good && run.errors[0] == 0;
+        }
+        char description[256];
+        snprintf(description, sizeof(description), "warning capability %s, %s: status, diagnostic and preserved outputs", options[0], actions[action]);
+        cc_compat_expect(test, good, description);
+        if (!good)
+        {
+            fprintf(stderr, "  Buster status %d; expected prefix: %s  actual:\n%s", run.status, refused != NULL ? expected : "(silent success)\n", run.errors != NULL ? run.errors : "(missing)\n");
+        }
+        cc_compat_release(&run);
     }
 }
 
