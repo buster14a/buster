@@ -1606,7 +1606,7 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
                     {
                         id += made[token];
                         chain = reader->first_value[token];
-                        chained = reader->value_counts[token];
+                        chained = chain != BUSTER_CHECK_NONE ? reader->value_counts[token] : 0;
                     }
                     else if (code == CHECK_INPUT_CODE_TERMINATOR)
                     {

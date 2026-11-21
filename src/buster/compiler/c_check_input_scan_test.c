@@ -149,8 +149,7 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
 }
 
-// The columns check_input_output_none fills, `columns`' 8: the output's declarations and token_nodes, and the reader's
-// own six.
+// The seven columns check_input_output_none fills and the reader's unwritten value-chain tails in the eighth.
 static void check_test_output_none_columns(uint32_t* const* columns, uint32_t count, CheckInput* input, CheckInputReader* reader)
 {
     *input = (CheckInput)
@@ -204,7 +203,7 @@ static void check_test_output_none(CheckTest* test)
             }
             for (uint32_t token = 0; token <= count; token += 1)
             {
-                exact &= columns[column][token] == UINT32_MAX;
+                exact &= columns[column][token] == (columns[column] == reader.last_value ? UINT32_C(0xa5a5a5a5) : BUSTER_CHECK_NONE);
             }
         }
         char description[120];
@@ -246,7 +245,7 @@ static void check_test_output_none(CheckTest* test)
             {
                 for (uint32_t token = 0; token <= counts[at]; token += 1)
                 {
-                    exact &= columns[column][token] == BUSTER_CHECK_NONE;
+                    exact &= columns[column][token] == (columns[column] == reader.last_value ? UINT32_C(0x63636363) : BUSTER_CHECK_NONE);
                 }
             }
         }

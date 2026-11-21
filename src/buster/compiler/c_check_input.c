@@ -2278,6 +2278,7 @@ struct CheckInputReader
     const uint32_t* ends;
     const uint32_t* first_child;
     const uint32_t* next_child;
+    // An empty chain has a NONE head. A nonempty head publishes its tail and count together.
     uint32_t* first_value;
     uint32_t* last_value;
     // The length of each token's chain of values, from first_value to last_value, written with them: a parent adds its
@@ -16886,7 +16887,6 @@ static void check_input_output_none(CheckInput* input, CheckInputReader* reader,
     memset(reader->selected_tokens, 0xff, bytes);
     memset(reader->activate, 0xff, bytes);
     memset(reader->first_value, 0xff, bytes);
-    memset(reader->last_value, 0xff, bytes);
 }
 
 #include "c_check_comma_input.c"
