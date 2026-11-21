@@ -12610,7 +12610,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->parameter_vla_begin = vla_begin;
                     reader->parameter_vla_end = reader->output->vla_count;
                     check_sparse_set(reader->output->sparse_pool, reader->output->body_declarations, i, name);
-                    reader->function_specifiers[i] = first;
+                    if (reader->function_specifiers != NULL)
+                    {
+                        reader->function_specifiers[i] = first;
+                    }
                     check_sparse_set(reader->output->sparse_pool, reader->parameters, i, parameters);
                     reader->parameter_declarations[i] = parameter_declarations;
                     reader->query_types[i] = type_return(reader->types, type);
@@ -16633,6 +16636,8 @@ struct CheckInputTokenCounts
     uint32_t asm_groups;
     uint32_t size_queries;
     uint32_t vector_members;
+    // A pretty function name is the only reader of a body's original declaration specifiers.
+    bool pretty_function_name;
     // The operands, and the closing parentheses of calls and function declarators: the overloads' room.
     uint32_t operands;
     uint32_t calls;
@@ -16658,6 +16663,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                                                                               uint32_t name_count, uint8_t* syntax, uint8_t* visits)
 {
     // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
+    // __PRETTY_FUNCTION__ also sets _STRING; its comparison below gates the declaration-specifier column.
     static const uint32_t syntax_names[] =
     {
         C_NAME_BUILTIN_VA_ARG,
@@ -16674,7 +16680,6 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         C_NAME_NULL_UNSPECIFIED,
         C_NAME_FUNC,
         C_NAME_FUNCTION,
-        C_NAME_PRETTY_FUNCTION,
     };
     CheckInputTokenCounts result = { 0 };
     const uint32_t count = parser->tokens.count;
@@ -16743,6 +16748,9 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                 {
                     syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
                 }
+                const __mmask16 pretty = _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32(C_NAME_PRETTY_FUNCTION));
+                syntax_matched[2] |= pretty;
+                result.pretty_function_name |= pretty != 0;
             }
             // The span of the builtins of constants the walk works out (BUSTER_CHECK_SOURCE_BUILTIN_SPAN), one comparison.
             const __mmask16 source = _mm512_mask_cmplt_epu32_mask(present, _mm512_sub_epi32(name, _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_FIRST)),
@@ -17257,7 +17265,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // pages the parse's temporaries took first (ParseOptions.scratch) and the later stages take again.
 #define BUSTER_CHECK_INPUT_ARRAY(field, type) reader.field = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0
     BUSTER_CHECK_INPUT_ARRAY(query_types, TypeId);
-    BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
+    if (counts.pretty_function_name)
+    {
+        BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
+    }
     BUSTER_CHECK_INPUT_ARRAY(definition_origins, uint32_t);
     // The declaration a name's or a declarator attribute's starts at is asked per C89 implicit candidate and per
     // attribute in every mode (check_input_resolve_range), and for the rare static function note: the column answers
@@ -17487,7 +17498,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     {
         input->constant_warnings_prepared = true;
         memset(reader.query_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.function_specifiers, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        if (reader.function_specifiers != NULL)
+        {
+            memset(reader.function_specifiers, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
         memset(reader.conditions, 0, (uint64_t)count + 1);
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
         if (input->deferred_tokens != 0 && deferred == 0)
