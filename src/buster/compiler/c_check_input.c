@@ -2108,7 +2108,7 @@ struct CheckInputReader
     // Appended records of the next definition's header, retained separately from the body's later records.
     uint32_t parameter_vla_begin;
     uint32_t parameter_vla_end;
-    uint8_t* expression_commas;
+    uint64_t* expression_commas;
     uint8_t* conditions;
     uint32_t* region_roots;
     uint8_t* constant_contexts;
@@ -2501,6 +2501,12 @@ typedef enum CheckConstantNames
     CHECK_CONSTANT_NAMES_REPORT,
     CHECK_CONSTANT_NAMES_RECOVER,
 } CheckConstantNames;
+
+// The comma context at a token, inherited by a separator from its parent.
+static bool check_input_expression_comma(const CheckInputReader* reader, uint32_t token)
+{
+    return (reader->expression_commas[token >> 6] >> (token & 63u) & 1u) != 0;
+}
 
 // Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
 // group, a cached constant, a runtime selection, a va_arg call, a designator, a variable array's bound or an asm statement.
@@ -15326,7 +15332,6 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         const __m512i builtins_low = _mm512_maskz_loadu_epi16(low, check_input_rare_line(reader, reader->builtins + token));
         const __m512i builtins_high = _mm512_maskz_loadu_epi16(high, check_input_rare_line(reader, reader->builtins + token + 32));
         const uint64_t builtin = (uint64_t)_mm512_test_epi16_mask(builtins_low, builtins_low) | (uint64_t)_mm512_test_epi16_mask(builtins_high, builtins_high) << 32;
-        const __m512i commas = _mm512_maskz_loadu_epi8(lanes, reader->expression_commas + token);
         const __m512i initializers = _mm512_maskz_loadu_epi8(lanes, reader->initializers + token);
         uint64_t intrinsic = 0;
         uint64_t acts = 0;
@@ -15350,7 +15355,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
                 intrinsic |= (uint64_t)_mm512_test_epi32_mask(ids, ids) << part;
             }
         }
-        const uint64_t comma = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_SEPARATOR)) & _mm512_test_epi8_mask(commas, commas);
+        const uint64_t comma = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_SEPARATOR)) & reader->expression_commas[token >> 6];
         codes = _mm512_mask_mov_epi8(codes, comma, _mm512_set1_epi8(CHECK_INPUT_CODE_BINARY));
         const uint64_t assigned = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_BINARY)) & _mm512_test_epi8_mask(initializers, initializers);
         codes = _mm512_mask_mov_epi8(codes, assigned, _mm512_set1_epi8(CHECK_INPUT_CODE_INITIALIZE));
@@ -15657,7 +15662,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             default: supported = false; break;
         }
     }
-    else if ((role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA || (role == PARSE_ROLE_SEPARATOR && reader->expression_commas[token]))
+    else if ((role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA || (role == PARSE_ROLE_SEPARATOR && check_input_expression_comma(reader, token)))
     {
         op = check_input_binary(kind);
         supported = count == 2 && op != CHECK_OP_COUNT;
@@ -17334,7 +17339,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.string_ids = input->string_ids;
 
     BUSTER_CHECK_INPUT_ARRAY(selected_tokens, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(expression_commas, uint8_t);
+    reader.expression_commas = valid ? arena_push_array(scratch, (count >> 6) + 1, sizeof(uint64_t), 64) : NULL;
+    valid &= reader.expression_commas != NULL;
     BUSTER_CHECK_INPUT_ARRAY(conditions, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(constant_contexts, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(activate, uint32_t);

@@ -129,7 +129,7 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     // The columns the reader wrote before the walk refine a class (#1038): a separator of a comma operator is a BINARY, and
     // an initializer's assignment an INITIALIZE; a builtin's token where the class's action would leave it to the walk,
     // and an intrinsic's call, are the walk's.
-    code = code == CHECK_INPUT_CODE_SEPARATOR && reader->expression_commas[i] != 0 ? CHECK_INPUT_CODE_BINARY : code;
+    code = code == CHECK_INPUT_CODE_SEPARATOR && check_input_expression_comma(reader, i) ? CHECK_INPUT_CODE_BINARY : code;
     code = code == CHECK_INPUT_CODE_BINARY && reader->initializers[i] != 0 ? CHECK_INPUT_CODE_INITIALIZE : code;
     code = code == CHECK_INPUT_CODE_GROUP && reader->initializers[i] != 0 ? CHECK_INPUT_CODE_SCALAR : code;
     const bool builtin_declines = code == CHECK_INPUT_CODE_PREFIX || code == CHECK_INPUT_CODE_BINARY || code == CHECK_INPUT_CODE_CAST ||
@@ -1037,7 +1037,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         reader.first_value = check_test_scan_column(mappings[FIRST_VALUE] + page, count, 4);
         reader.specifier_finishes = check_test_scan_column(mappings[FINISHES] + page, count, sizeof(CheckInputSpecifierJob*));
         reader.builtins = check_test_scan_column(mappings[BUILTINS] + page, count, 2);
-        reader.expression_commas = check_test_scan_column(mappings[COMMAS] + page, count, 1);
+        reader.expression_commas = check_test_scan_column(mappings[COMMAS] + page, (count + 63) >> 6, sizeof(uint64_t));
+        memset(reader.expression_commas, 0, ((count + 63) >> 6) * sizeof(uint64_t));
         reader.initializers = check_test_scan_column(mappings[INITIALIZERS] + page, count, 1);
         // A unit without intrinsics has no column of their ids.
         input.intrinsic_ids = (count & 1) != 0 ? check_test_scan_column(mappings[INTRINSICS] + page, count, 4) : NULL;
@@ -1061,7 +1062,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             const uint32_t folds = check_test_random(test);
             reader.builtins[i] = (folds & 7) == 0 ? (uint16_t)(1 + (folds >> 16) % 900) : 0;
             reader.initializers[i] = ((folds >> 3) & 7) == 0 ? (uint8_t)(1 + ((folds >> 24) & 1)) : 0;
-            reader.expression_commas[i] = (uint8_t)((folds >> 6) & 1);
+            reader.expression_commas[i >> 6] |= (uint64_t)((folds >> 6) & 1) << (i & 63u);
             if (input.intrinsic_ids != NULL)
             {
                 input.intrinsic_ids[i] = ((folds >> 7) & 7) == 0 ? 1 + (folds >> 20) : 0;
