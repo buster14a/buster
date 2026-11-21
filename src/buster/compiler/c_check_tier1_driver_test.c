@@ -3206,8 +3206,43 @@ static bool check_test_tier1_lifetime_build(const char* executable, const char* 
     return status == 0 && reported && taken;
 }
 
+// A lifetime start and end in live must not refer to the first two graph nodes, which belong to unused.
+static void check_test_tier1_lifetime_references(CheckTest* test, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/checker/lifetime-reference-roots.c", check_test_fixture_root);
+    snprintf(object, sizeof(object), "%s/lifetime-reference-roots.o", directory);
+    char* arguments[] = { (char*)executable, "--tier1", "-c", source, "-o", object, NULL };
+    char* text = NULL;
+    const int status = check_test_driver_spawn(arguments, &text);
+    uint64_t length = 0;
+    uint8_t* bytes = status == 0 ? check_test_driver_read_aligned(object, &length) : NULL;
+    CheckTestElf elf;
+    const bool opened = bytes != NULL && check_test_elf_open(&elf, (String8){ .pointer = (char*)bytes, .length = length });
+    bool live = false;
+    bool kept = false;
+    bool unused = false;
+    for (uint64_t i = 1; opened && i < elf.symbol_count; i += 1)
+    {
+        const Elf64_Sym* symbol = elf.symbols + i;
+        const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
+        if (name != NULL && symbol->st_shndx != SHN_UNDEF)
+        {
+            live |= strcmp(name, "live") == 0;
+            kept |= strcmp(name, "kept") == 0;
+            unused |= strcmp(name, "first") == 0 || strcmp(name, "second") == 0 || strcmp(name, "unused") == 0;
+        }
+    }
+    check_test_expect(test, opened && live && kept && !unused, "Tier 1 lifetime controls preserve only the live body's symbol references");
+    free(bytes);
+    free(text);
+    unlink(object);
+}
+
 static void check_test_driver_tier1_lifetimes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_tier1_lifetime_references(test, executable, directory);
     char source[512];
     char reference[512];
     snprintf(source, sizeof(source), "%s/tier1-lifetimes.c", directory);

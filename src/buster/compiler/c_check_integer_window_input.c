@@ -97,10 +97,13 @@ static bool check_integer_window_observed(const Parser* parser, uint32_t token, 
 // wide integer storage. All literals outside this domain take the ordinary parsing and diagnostic path.
 static uint32_t check_integer_window_literal(CheckInputReader* reader, uint32_t token, uint32_t value)
 {
-    const uint32_t source = reader->parser->tokens.sources[token];
+    if (value != BUSTER_CHECK_NONE || reader->parser->tokens.names[token] != 0)
+    {
+        return value;
+    }
+    const uint32_t source = parse_source_index(&reader->parser->tokens, token);
     const PPTokens* pp = &reader->pp->output;
-    if (value == BUSTER_CHECK_NONE && reader->parser->tokens.names[token] == 0 && pp->kinds[source] == C_TOKEN_NUMERIC_CONSTANT &&
-        pp->values[source] - pp->locations[source] <= 16)
+    if (source < pp->count && pp->kinds[source] == C_TOKEN_NUMERIC_CONSTANT && pp->values[source] - pp->locations[source] <= 16)
     {
         uint8_t buffer[17];
         const uint8_t* bytes = NULL;

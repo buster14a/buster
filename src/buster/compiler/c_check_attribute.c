@@ -3695,7 +3695,7 @@ static void check_input_attribute_clang_macro(CheckInputReader* reader, uint32_t
 {
     const Parser* parser = reader->parser;
     const PPTokens* output = &reader->pp->output;
-    const uint32_t source = parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&parser->tokens, token);
     const bool rewritten = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && source < output->count && output->kinds[source] == C_TOKEN_NUMERIC_CONSTANT;
     if (rewritten)
     {
@@ -10035,7 +10035,7 @@ static void check_input_nonnull_warning(CheckInputReader* reader, const CheckInp
 // file's (SourceLocation::isFileID).
 static bool check_input_attribute_expanded(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
-    const uint32_t source = attribute->first < reader->parser->tokens.count ? reader->parser->tokens.sources[attribute->first] : UINT32_MAX;
+    const uint32_t source = attribute->first < reader->parser->tokens.count ? parse_source_index(&reader->parser->tokens, attribute->first) : UINT32_MAX;
     const bool history = source < reader->pp->output.count && pp_history_ensure(reader->pp);
     return history && pp_history_at(reader->pp, source) != 0;
 }
