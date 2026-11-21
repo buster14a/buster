@@ -3407,6 +3407,9 @@ _Static_assert(BUSTER_NODE_TESTS_CLASS_UNCODED == BUSTER_NODE_TESTS_SET_UNCODED 
 #define BUSTER_NODE_TESTS_MASK_OPERATORS 2u
 #define BUSTER_NODE_TESTS_MASK_WRITES 3u
 #define BUSTER_NODE_TESTS_MASK_DISCARDS 4u
+#define BUSTER_NODE_TESTS_MASK_QUIET_CALLS 5u
+#define BUSTER_NODE_TESTS_MASK_QUIET_CASTS 6u
+#define BUSTER_NODE_TESTS_MASK_QUIET_ORDERS 7u
 #define BUSTER_NODE_TESTS_MASKS 8u
 
 // The outermost brace pair around token `token` into `opening` and `closing`: whether there is one. The parser's tree
@@ -4116,10 +4119,6 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
     const __m512i places = _mm512_set_epi16(31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
     uint32_t ask_total = 0;
     uint64_t far_total = 0;
-    uint64_t quiet_total = 0;
-    uint64_t call_total = 0;
-    uint64_t cast_total = 0;
-    uint64_t order_total = 0;
     const __m512i converts = _mm512_set1_epi8((char)BUSTER_NODE_TESTS_OPERAND_CONVERTS);
     // A plain pointer that is a constant a test may read: its kind and its constant's bit, among a value's byte's
     // kind's three bits and that bit.
@@ -4269,23 +4268,32 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         uint64_t* masks = tests->window_masks + BUSTER_NODE_TESTS_MASKS * (uint64_t)(x / 64);
         masks[BUSTER_NODE_TESTS_MASK_TREE] = tree_first | _mm512_test_epi8_mask(tree_sends, operands);
         masks[BUSTER_NODE_TESTS_MASK_QUIET] = quiet | quiet_calls | quiet_casts | quiet_orders;
-        quiet_total += (uint64_t)_mm_popcnt_u64(quiet);
-        call_total += (uint64_t)_mm_popcnt_u64(quiet_calls);
-        cast_total += (uint64_t)_mm_popcnt_u64(quiet_casts);
-        order_total += (uint64_t)_mm_popcnt_u64(quiet_orders);
         masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = sent & ~quiet & ~quiet_calls & ~quiet_casts & ~quiet_orders;
         masks[BUSTER_NODE_TESTS_MASK_WRITES] = writes;
         masks[BUSTER_NODE_TESTS_MASK_DISCARDS] = writes | voids | quiet_calls;
+        masks[BUSTER_NODE_TESTS_MASK_QUIET_CALLS] = quiet_calls;
+        masks[BUSTER_NODE_TESTS_MASK_QUIET_CASTS] = quiet_casts;
+        masks[BUSTER_NODE_TESTS_MASK_QUIET_ORDERS] = quiet_orders;
         previous = property;
         previous_values = values;
         previous_marks = tree_marks;
         previous_left_out = left_out;
     }
     *far_count += far_total;
-    *quiet_count += quiet_total;
-    *call_count += call_total;
-    *cast_count += cast_total;
-    *order_count += order_total;
+    // Each block occupies one cache line. Count its masks together after the sweep to keep the
+    // four counters out of the block's live set. The four quiet masks cover disjoint operators.
+    __m512i totals = _mm512_setzero_si512();
+    for (uint32_t x = 0; x < count; x += 64)
+    {
+        const uint64_t* masks = tests->window_masks + BUSTER_NODE_TESTS_MASKS * (uint64_t)(x / 64);
+        totals = _mm512_add_epi64(totals, _mm512_popcnt_epi64(_mm512_loadu_si512(masks)));
+    }
+    uint64_t counts[BUSTER_NODE_TESTS_MASKS];
+    _mm512_storeu_si512(counts, totals);
+    *call_count += counts[BUSTER_NODE_TESTS_MASK_QUIET_CALLS];
+    *cast_count += counts[BUSTER_NODE_TESTS_MASK_QUIET_CASTS];
+    *order_count += counts[BUSTER_NODE_TESTS_MASK_QUIET_ORDERS];
+    *quiet_count += counts[BUSTER_NODE_TESTS_MASK_QUIET] - counts[BUSTER_NODE_TESTS_MASK_QUIET_CALLS] - counts[BUSTER_NODE_TESTS_MASK_QUIET_CASTS] - counts[BUSTER_NODE_TESTS_MASK_QUIET_ORDERS];
     *ask_count = ask_total;
 }
 
