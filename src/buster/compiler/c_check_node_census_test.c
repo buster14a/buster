@@ -6845,8 +6845,10 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .calls_plain = 303,
         .calls_left = 21,
         .calls_compared = 309,
-        .single_answers = 2543,
-        .single_timed = 363,
+        // Callee and argument checks run consecutively for each call. A shared
+        // slot therefore sees a different sequence of conversion keys.
+        .single_answers = 2487,
+        .single_timed = 355,
     };
     check_test_expect(test, ready && node_contexts_test_fixture(directory, "contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &contexts_expected),
                       "node-contexts: C on the window decides each expression of its rules as C does on T's columns, and lists the kinds it has no case for");
