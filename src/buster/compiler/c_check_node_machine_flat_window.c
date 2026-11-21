@@ -15,8 +15,7 @@ struct NodeFlatWindow
     NodeFront candidate;
     CheckInputLiterals entries;
     NodeFront* target;
-    NodeFacts literals;
-    uint64_t lines[4 * (BUSTER_NODE_FRONT_RECORDS + 1)];
+    NodeFacts facts;
     uint32_t ordinals[BUSTER_NODE_FLAT_RECORDS + 16];
     uint16_t places[BUSTER_NODE_FLAT_RECORDS];
     uint8_t refusals[BUSTER_NODE_FRONT_RECORDS];
@@ -26,13 +25,31 @@ struct NodeFlatWindow
 static void node_facts_flat_begin(NodeFront* front, CheckInputReader* reader)
 {
     NodeFlatWindow* window = arena_push_array(reader->scratch, 1, sizeof(NodeFlatWindow), 64);
-    if (window != NULL)
+    const NodeFacts* tables = front->window_facts;
+    const uint64_t declarations = (uint64_t)tables->input->token_count + 1;
+    uint32_t* numbers = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, declarations);
+    uint64_t* lines = arena_push_array(reader->scratch, 4 * (uint64_t)tables->line_capacity, sizeof(uint64_t), 64);
+    if (window != NULL && numbers != NULL && lines != NULL)
     {
         front->flat->window = window;
         front->flat->window_literals = &window->entries;
         window->target = front;
-        window->literals.lines = window->lines;
-        window->candidate.window_facts = &window->literals;
+        // The unit's type rows and names are inputs. Each producer interns its own declaration lines. The first
+        // numbers are reserved for literals in its current window, just as for the reference.
+        memset(numbers, 0, declarations * sizeof(uint32_t));
+        window->facts = (NodeFacts){
+            .machine = tables->machine,
+            .input = tables->input,
+            .parser = tables->parser,
+            .enum_values = tables->enum_values,
+            .rows = tables->rows,
+            .lines = lines,
+            .numbers = numbers,
+            .line_count = tables->line_count,
+            .line_capacity = tables->line_capacity,
+        };
+        window->candidate.window_facts = &window->facts;
+        window->candidate.window_numbers = numbers;
         memcpy(window->candidate.window_op_kinds, front->window_op_kinds, sizeof(front->window_op_kinds));
         memcpy(window->candidate.window_op_codes, front->window_op_codes, sizeof(front->window_op_codes));
     }
@@ -126,8 +143,7 @@ static uint8_t node_facts_flat_leaf(NodeFlat* flat, CheckInputReader* reader, ui
         node_facts_window_leaf(source, reader, place, token, kind, payload, &decoded);
         if (kind == BUSTER_NODE_FRONT_LEAF_IDENTIFIER)
         {
-            // A declaration's interned lines belong to the unit. Only literal lines are private to each producer.
-            node_facts_window_name(flat->window->target->window_facts, source->window_kinds, source->window_entries, place, token);
+            node_facts_window_name(&flat->window->facts, source->window_kinds, source->window_entries, place, token);
         }
     }
     return given ? 0 : BUSTER_NODE_FLAT_UNMAPPED;
@@ -175,10 +191,6 @@ static void node_facts_flat_chunk(NodeFront* front, CheckInputReader* reader)
     NodeFlat* flat = front->flat;
     NodeFlatWindow* window = flat->window;
     NodeFront* source = &window->candidate;
-    source->window_numbers = front->window_numbers;
-    window->literals.rows = front->window_facts->rows;
-    window->literals.machine = front->window_facts->machine;
-    window->literals.parser = front->window_facts->parser;
     source->window_argument_count = 0;
     uint32_t place = front->made;
     // A ring overrun loses the chunk's first records and hence its compacted numbering.
@@ -245,7 +257,7 @@ static void node_facts_flat_expression(NodeFlatWindow* window, uint32_t record, 
         }
         if (kind == BUSTER_NODE_FACTS_LITERAL_LINE)
         {
-            const uint64_t* own = window->lines + 4 * (uint64_t)entry;
+            const uint64_t* own = window->facts.lines + 4 * (uint64_t)entry;
             same = same && prior == entry && memcmp(target->window_facts->lines + 4 * (uint64_t)entry, own, 4 * sizeof(uint64_t)) == 0;
             memcpy(target->window_facts->lines + 4 * (uint64_t)entry, own, 4 * sizeof(uint64_t));
             target->window_entries[x] = entry;
@@ -254,15 +266,36 @@ static void node_facts_flat_expression(NodeFlatWindow* window, uint32_t record, 
         {
             const uint32_t args = source->window_counts[x];
             same = same && args == target->window_counts[x] && memcmp(target->window_arguments + prior, source->window_arguments + entry, args * sizeof(uint16_t)) == 0;
-            if (args == target->window_counts[x])
+            if (args == target->window_counts[x] && prior <= target->window_argument_count && args <= target->window_argument_count - prior)
             {
                 memcpy(target->window_arguments + prior, source->window_arguments + entry, args * sizeof(uint16_t));
             }
         }
         else
         {
-            same = same && (kind == BUSTER_NODE_FACTS_IDENTIFIER ? node_facts_window_name_same(target->window_facts->lines, target->window_kinds[x], kind, prior, entry) : prior == entry);
-            target->window_entries[x] = entry;
+            if (kind == BUSTER_NODE_FACTS_IDENTIFIER)
+            {
+                // The kernel uses the unit's common arena. Its storage slot can differ between two independently
+                // built name tables. Compare the four words, then give it the flat producer's words in that slot.
+                const bool room = target->window_kinds[x] == kind && prior != 0 && prior < target->window_facts->line_capacity &&
+                                  entry != 0 && entry < window->facts.line_capacity;
+                if (room)
+                {
+                    const uint64_t* own = window->facts.lines + 4 * (uint64_t)entry;
+                    uint64_t* placed = target->window_facts->lines + 4 * (uint64_t)prior;
+                    same = same && memcmp(placed, own, 4 * sizeof(uint64_t)) == 0;
+                    memcpy(placed, own, 4 * sizeof(uint64_t));
+                }
+                else
+                {
+                    same = false;
+                }
+            }
+            else
+            {
+                same = same && prior == entry;
+                target->window_entries[x] = entry;
+            }
         }
         target->window_kinds[x] = kind;
         target->window_classes[x] = source->window_classes[x];
