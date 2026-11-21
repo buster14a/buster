@@ -141,8 +141,10 @@ The scheduler, AVX-512 alone since #2924 (the 9700X's gate read the scalar twin
 1.29 times its time on sqlite3.c, Lua and musl), obtains effects in eight-record
 batches and model latencies by the existing 32-ID in-register lookup. It compares each record's
 resource masks against eight prior records together, producing dependency
-bitsets. Reverse ready frontiers assign dependency levels; contiguous masked
-height loads reduce the already completed successor levels. The flags'
+bitsets. Every edge points forward in the original order, so one reverse pass
+assigns levels and heights. In groups of 16 successors it takes the greatest
+level across all edges and the greatest height across register and flag RAW
+edges. The flags'
 liveness is one backward pass over the block. The scheduler selects a ready
 instruction of greatest priority and resolves ties by its original position;
 this selection loop is scalar, one dependency at a time.

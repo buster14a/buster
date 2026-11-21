@@ -1805,6 +1805,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                                 function ? "function" : "variable", (int)name.length, name.pointer);
                 }
             }
+            // An unknown STDC pragma (#1970): clang's ext_stdc_pragma_ignored, of the STDC states' policy.
+            const bool plain = record == NULL && layout == NULL && packing == NULL;
+            result = plain && event->id == CHECK_WARNING_ID_UNKNOWN_PRAGMA ? "unknown pragma in STDC namespace" : result;
             break;
         }
         case CHECK_WARNING_EVENT_GNU_INLINE_WITHOUT_INLINE:
@@ -1872,6 +1875,18 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             const String8 spelled = check_semantic_tag_spelling(parser, pp, event->token, scratch);
             result = spelled.length != 0 ? check_warning_text(scratch, "type '%.*s' has %s which currently causes the types to be treated as though they are incompatible",
                                                               (int)spelled.length, spelled.pointer, payload->data != 0 ? "a member with an attribute" : "an attribute") : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION:
+        {
+            static const char* const endings[] = {
+                [CHECK_NON_PROTOTYPE_PREVIOUS] = "is treated as a zero-parameter prototype in C23, conflicting with a previous declaration",
+                [CHECK_NON_PROTOTYPE_SUBSEQUENT] = "is treated as a zero-parameter prototype in C23, conflicting with a subsequent declaration",
+                [CHECK_NON_PROTOTYPE_SUBSEQUENT_DEFINITION] = "is treated as a zero-parameter prototype in C23, conflicting with a subsequent definition",
+                [CHECK_NON_PROTOTYPE_HAS_PARAMETERS] = "is not supported in C23",
+            };
+            result = payload->data < BUSTER_ARRAY_LENGTH(endings) ?
+                check_warning_text(scratch, "a function declaration without a prototype is deprecated in all versions of C and %s", endings[payload->data]) : NULL;
             break;
         }
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
@@ -2628,6 +2643,7 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             result = check_warning_text(scratch, "use 'static' to give inline function '%.*s' internal linkage", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
+        case CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE: result = "conflicting prototype is here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
         case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE: result = "previous attribute is here"; break;
@@ -2868,8 +2884,19 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                             // next pack directive, whose line it lexes only after.
                             const bool directive = packing != NULL && semantic && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END && !packing->align;
                             const uint32_t following = directive ? check_input_pack_following(parser, input->pack_pragmas, packing) : UINT32_MAX;
-                            pp_diagnose_output_phase(pp, disposition, source, directive && following < boundary ? following : semantic ? boundary : event->payload.token,
-                                                     semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
+                            const uint32_t position = directive && following < boundary ? following : semantic ? boundary : event->payload.token;
+                            const PPDiagnosticPhase phase = semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL;
+                            // An unknown pragma's line without a name past its namespace: at the line's end (#1970,
+                            // c_check_ignored_pragma.c's payload.data).
+                            const uint32_t line_end = record == NULL && layout == NULL && packing == NULL ? event->payload.data : 0;
+                            if (line_end != 0)
+                            {
+                                pp_diagnose_output_location_at(pp, disposition, source, line_end, position, phase, "%s%s", message, suffix);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_phase(pp, disposition, source, position, phase, "%s%s", message, suffix);
+                            }
                         }
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_UNEVALUATED_PREFIX || event->kind == CHECK_WARNING_EVENT_DELIMITED_ESCAPE)
@@ -2908,8 +2935,9 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
+                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION)
                     {
+                        // A prototype merge warning precedes a conflicting-types error at the same declarator's completion.
                         // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
                     }

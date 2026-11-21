@@ -676,6 +676,134 @@ static void check_test_driver_reservation_failure(CheckTest* test)
 #endif
 }
 
+// #2996: a SOURCE_DATE_EPOCH the preprocessor refuses ends -fsyntax-only and -c with the preprocessor's fatal error
+// alone, never followed by a memory failure no reservation had. Each value runs in a child, whose environment it sets.
+static void check_test_driver_epoch_refusal(CheckTest* test)
+{
+    static const char* const values[] = {
+        "abc",
+        "",
+        "-1",
+        "0x10",
+        " 5",
+        "253402300800",
+    };
+    static const char* const modes[] = {
+        "-fsyntax-only",
+        "-c",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(values) * BUSTER_ARRAY_LENGTH(modes); i += 1)
+    {
+        const char* const value = values[i / BUSTER_ARRAY_LENGTH(modes)];
+        const char* const mode = modes[i % BUSTER_ARRAY_LENGTH(modes)];
+        FILE* errors = tmpfile();
+        pid_t child = -1;
+        int status = 0;
+        if (errors != NULL)
+        {
+            fflush(NULL);
+            child = fork();
+            if (child == 0)
+            {
+                const bool ready = dup2(fileno(errors), STDERR_FILENO) == STDERR_FILENO && unsetenv("MAKEFLAGS") == 0 &&
+                                   setenv("SOURCE_DATE_EPOCH", value, 1) == 0;
+                char* arguments[] = { (char*)mode, (char*)"missing.c", (char*)"-o", (char*)"/dev/null" };
+                const int code = ready ? run_check_command(BUSTER_ARRAY_LENGTH(arguments), arguments, false) : 126;
+                fflush(stderr);
+                _exit(code);
+            }
+        }
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        char* output = NULL;
+        size_t length = 0;
+        const bool read = errors != NULL && waited == child && pp_test_read_output(errors, &output, &length);
+        const char* const first = read ? strstr(output, "fatal error: ") : NULL;
+        const bool passed = first != NULL && WIFEXITED(status) && WEXITSTATUS(status) == 1 && strstr(first + 1, "fatal error: ") == NULL &&
+                            strstr(output, "SOURCE_DATE_EPOCH") != NULL && strstr(output, "memory") == NULL;
+        check_test_expect(test, passed, "a refused SOURCE_DATE_EPOCH is the unit's only fatal error, with no memory failure");
+        free(output);
+        if (errors != NULL)
+        {
+            fclose(errors);
+        }
+    }
+}
+
+// #3000: a failed parse whose typo pass gives a tentative tail back, so that the pass's parse is the failed one, of
+// which no view can be made. The views that failed cleared the one the unit was read as; the unit's reports, a
+// conversion's spelling of a typeof's or a typedef's sugar or a call's operand among them, read it through a null
+// column. Each unit must end with status 1 and its parse's errors, at clang's places, never by a signal. Each runs in a
+// child, which a fault ends alone.
+static void check_test_driver_failed_parse_views(CheckTest* test, const char* directory)
+{
+    typedef struct CheckTestFailedView CheckTestFailedView;
+    struct CheckTestFailedView
+    {
+        const char* source;
+        const char* first;
+        const char* second;
+    };
+    static const CheckTestFailedView cases[] = {
+        { "int f(typeof(int (*)(Z *)) g) { long *z 0; return g(z); }\n", ":1:22: error: unknown type name 'Z'", ":1:40: error: expected ';' at end of declaration" },
+        { "int f(typeof(int (*)(Z *)) g) { long z 0; return g(z); }\n", ":1:22: error: unknown type name 'Z'", ":1:39: error: expected ';' at end of declaration" },
+        { "int f(typeof(void (*)(Z *, int)) g) { long *z 0; g(z, z); return 0; }\n", ":1:23: error: unknown type name 'Z'",
+          ":1:46: error: expected ';' at end of declaration" },
+        { "int f(typeof(int (*)(Z *)) g) { long *z 0; long (*h)(void) = g; return 0; }\n", ":1:22: error: unknown type name 'Z'",
+          ":1:40: error: expected ';' at end of declaration" },
+        { "int f(typeof(int (*)(Z *)) g) { long *z 0; return sizeof(g(z)); }\n", ":1:22: error: unknown type name 'Z'", ":1:40: error: expected ';' at end of declaration" },
+        { "int a a;\nint *b = a;\n}\n", ":1:6: error: expected ';' after top level declarator", ":3:1: error: extraneous closing brace ('}')" },
+        { "int a b;\nint before() {\n  a();\n", ":1:6: error: expected ';' after top level declarator", ":3:7: error: expected '}'" },
+        { "int a(int b c) {\n  d()();\n", ":1:13: error: expected ')'", NULL },
+    };
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/failed-views.c", directory);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        const bool written = parse_test_write(source, cases[i].source, strlen(cases[i].source));
+        FILE* errors = written ? tmpfile() : NULL;
+        pid_t child = -1;
+        int status = 0;
+        if (errors != NULL)
+        {
+            fflush(NULL);
+            child = fork();
+            if (child == 0)
+            {
+                const bool ready = dup2(fileno(errors), STDERR_FILENO) == STDERR_FILENO && unsetenv("MAKEFLAGS") == 0;
+                char* arguments[] = { (char*)"-fsyntax-only", source };
+                const int code = ready ? run_check_command(BUSTER_ARRAY_LENGTH(arguments), arguments, false) : 126;
+                fflush(stderr);
+                _exit(code);
+            }
+        }
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        char* output = NULL;
+        size_t length = 0;
+        const bool read = errors != NULL && waited == child && pp_test_read_output(errors, &output, &length);
+        const char* const first = read ? strstr(output, cases[i].first) : NULL;
+        const bool passed = first != NULL && WIFEXITED(status) && WEXITSTATUS(status) == 1 && (cases[i].second == NULL || strstr(first, cases[i].second) != NULL);
+        char description[160];
+        snprintf(description, sizeof(description), "a failed parse whose typo pass has no view ends with its parse's errors (case %u)", i);
+        check_test_expect(test, passed, description);
+        free(output);
+        if (errors != NULL)
+        {
+            fclose(errors);
+        }
+    }
+    unlink(source);
+}
+
 // The address space a process of the executable at `path` maps for its image before it runs: its loadable segments'
 // pages. 0 if it can't be read. Unused where a sanitizer leaves check_test_driver_address_limit out.
 static __attribute__((unused)) uint64_t check_test_driver_image_bytes(const char* path)
@@ -7040,6 +7168,9 @@ static void check_test_driver_reports(CheckTest* test)
                     fp[p] = model != NULL ? *model : (CheckInputFpPragma){ .source_begin = 0, .source_end = 6 };
                     fp[p].token = check_test_driver_random_token(&state, count, true);
                     fp[p].warnings = (uint8_t)((random >> 4) & (CHECK_FP_PRAGMA_INVALID_PLACEMENT | CHECK_FP_PRAGMA_UNKNOWN_STATE));
+                    // An unknown state's command-line policy, as the reader records it (#1970): a warning, or -Werror's error.
+                    fp[p].warning_severity = (uint8_t)((random >> 8) % 4 == 0 ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING);
+                    fp[p].warning_quiet = false;
                 }
                 // In token order, but now and then out of it.
                 for (uint32_t p = 1; fp != NULL && p < pragma_count; p += 1)
@@ -10224,6 +10355,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_reservation_failure(&test);
+            check_test_driver_epoch_refusal(&test);
+            check_test_driver_failed_parse_views(&test, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -10622,6 +10755,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (check_test_driver_takes())
             {
                 check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
+                if (!lazy)
+                {
+                    check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/non-prototype");
+                }
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -10736,6 +10873,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_divide(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_leaf(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

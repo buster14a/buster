@@ -33,6 +33,7 @@ main_unit_frontend.c parse_tokens_from_output
 main_unit_frontend.c parse_prepare_meanings
 main_unit_frontend.c parse_kernels_reserve_tree
 main_unit_frontend.c parse_vector_buffers_reserve
+main_unit_frontend.c parse_vector
 main_unit_frontend.c arena_reserve_small
 main_unit_frontend.c pp_warning_flag
 main_unit_frontend.c arena_reserve_tables
@@ -414,7 +415,7 @@ main_unit_checker.c check_common_facts
 - sysconf
 - __read_nocancel
 main_unit_frontend.c file_cache_count_miss
-main_unit_frontend.c pp_print_vector
+main_unit_frontend.c pp_print
 main_unit_frontend.c run_preprocessor_command_mode
 main_unit_frontend.c intern_lay_out
 main_unit_frontend.c pp_build_directory
@@ -584,6 +585,7 @@ main_unit_frontend.c pp_line_end_location
 main_unit_frontend.c pp_check_replacement_list
 main_unit_frontend.c pp_same_definition
 main_unit_frontend.c pp_same_file_token
+main_unit_frontend.c pp_without_splices
 main_unit_frontend.c pp_remove_splices_by
 main_unit_frontend.c pp_literal_header_name
 main_unit_frontend.c pp_header_name_tail

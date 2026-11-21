@@ -330,6 +330,7 @@ static bool cc_compat_elf(CCCompatibilityTest* test, const char* name, uint16_t 
 }
 
 #include "c_driver_response_test.c"
+#include "c_driver_no_pie_test.c"
 
 static void cc_compat_cleanup(CCCompatibilityTest* test)
 {
@@ -1095,12 +1096,13 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         cc_compat_fifo_source(&test);
         cc_compat_pipe_source(&test);
         cc_compat_failed_output_kinds(&test);
-        const char* modes[] = { "-pie", "-static", "-static-pie" };
-        for (uint32_t m = 0; m < 3; m += 1)
+        const char* modes[] = { "-pie", "-static", "-static-pie", "-no-pie" };
+        for (uint32_t m = 0; m < 4; m += 1)
         {
             const char* args[] = { modes[m], "main.c", "-o", "program", NULL };
             CCCompatibilityRun linked = cc_compat_run(&test, test.compiler, NULL, args);
-            const bool elf = linked.status == 0 && cc_compat_elf(&test, "program", m == 1 ? ET_EXEC : ET_DYN, m == 0);
+            const bool position_dependent = m == 1 || m == 3;
+            const bool elf = linked.status == 0 && cc_compat_elf(&test, "program", position_dependent ? ET_EXEC : ET_DYN, m == 0 || m == 3);
             cc_compat_expect(&test, elf, modes[m]);
             if (!elf)
             {
@@ -1123,6 +1125,7 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
         priority = cc_compat_run(&test, test.compiler, NULL, static_pie_order);
         cc_compat_expect(&test, priority.status == 0 && cc_compat_elf(&test, "program", ET_DYN, false), "-static cannot downgrade a static PIE request");
         cc_compat_release(&priority);
+        cc_compat_no_pie(&test);
         // Feed an actually escaped target/prerequisite rule to GNU make, not just a string oracle.
         files = cc_compat_write(&test, "Makefile", "include space.d\nall: out\\ \\#$$.o\n\t@echo dependency-ready\n");
         const char* const make_rule[] = { "-M", "-MF", "space.d", "-MQ", "out #$.o", "-MP", "space.c", NULL };

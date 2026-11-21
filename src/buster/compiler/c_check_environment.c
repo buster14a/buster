@@ -33,27 +33,17 @@ struct CheckEnvironment
     bool valid;
 };
 
-// Count the parser's body roles before allocating their exact range column. The two parser paths exercise the
-// scalar/vector twins. Bounded masked loads include partial tails; no token bytes are reparsed here.
+// Count the parser's body roles before allocating their exact range column, 64 roles at a time. Bounded masked loads
+// include partial tails; no token bytes are reparsed here.
 static uint32_t check_environment_body_count(const Parser* parser)
 {
     uint32_t count = 0;
-    if (BUSTER_SCALAR_PATH(parser->options.scalar))
+    for (uint64_t block = 0; block < parser->tokens.count; block += 64)
     {
-        for (uint32_t token = 0; token < parser->tokens.count; token += 1)
-        {
-            count += parser->tree.roles[token] == PARSE_ROLE_CLOSE_BODY;
-        }
-    }
-    else
-    {
-        for (uint64_t block = 0; block < parser->tokens.count; block += 64)
-        {
-            const uint32_t live = parser->tokens.count - block < 64 ? (uint32_t)(parser->tokens.count - block) : 64;
-            const __mmask64 mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
-            const __m512i roles = _mm512_maskz_loadu_epi8(mask, parser->tree.roles + block);
-            count += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(mask, roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_BODY)));
-        }
+        const uint32_t live = parser->tokens.count - block < 64 ? (uint32_t)(parser->tokens.count - block) : 64;
+        const __mmask64 mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+        const __m512i roles = _mm512_maskz_loadu_epi8(mask, parser->tree.roles + block);
+        count += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(mask, roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_BODY)));
     }
     return count;
 }

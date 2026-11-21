@@ -622,8 +622,12 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
         // (_Bool)((char*)&s + (1ul << 63)) to 1. The flag stays on the lvalue too, but a failed value load must not
         // become "true" just because the object exists. A weak symbol is not a constant.
         const bool nonnull = (value->flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 && value->category != CHECK_LVALUE;
+        // An lvalue's truth is its value's, which the program loads: no address says it, an absolute one's no more
+        // than an object's (#3028: `if (*(int*)4096)` was true for its address). An array's lvalue is no load, and
+        // its truth is its address's.
+        const bool loaded = value->category == CHECK_LVALUE && !type_kind_is_array(type_kind(table, type_strip_aligned(table, value->type)));
         *truth = nonnull || value->offset != 0;
-        known &= value->object == 0 || nonnull;
+        known &= !loaded && (value->object == 0 || nonnull);
     }
     else
     {
@@ -2361,6 +2365,63 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
     }
 }
 
+// Distinct source objects compare unequal at interior addresses. Either may be one-past unless the other
+// address is its object's beginning. String literals can share storage with each other.
+static bool check_action_separate_objects(const TypeTable* table, const CheckContext* context, const CheckValue* left, const CheckValue* right)
+{
+    const CheckConstValues* values = context->const_values;
+    bool separate = values != NULL;
+    const CheckConstPart* strings[2] = { NULL, NULL };
+    const CheckValue* operands[2] = { left, right };
+    for (uint32_t i = 0; separate && i < 2; i += 1)
+    {
+        const CheckValue* address = operands[i];
+        const uint32_t id = address->object;
+        const bool declared = id != 0 && id <= values->declarations.count && values->declarations.objects[id - 1] == id;
+        // A declared object has a type even without an initializer. A string literal's completed array is
+        // registered with its storage size. A label or other synthetic base has neither proof.
+        TypeId type = declared ? values->declarations.types[id - 1] : 0;
+        if (!declared)
+        {
+            const CheckConstValues* owner = NULL;
+            const CheckConstObject* literal = check_const_find(values, id, context->source_position, &owner);
+            if (literal != NULL && literal->part_count == 1 && literal->part_first < owner->part_count && owner->parts != NULL)
+            {
+                const CheckConstPart* bytes = owner->parts + literal->part_first;
+                if (bytes->kind == CHECK_CONST_BYTES && bytes->bytes != NULL && bytes->bit_offset == 0 &&
+                    bytes->byte_count == literal->byte_size && bytes->bit_count == bytes->byte_count * 8)
+                {
+                    strings[i] = bytes;
+                    type = literal->type;
+                }
+            }
+        }
+        separate = type_is_valid(table, type);
+        if (separate)
+        {
+            const uint8_t kind = check_action_kind(table, type);
+            const uint64_t size = declared ? type_size(table, type) : strings[i]->byte_count;
+            const uint64_t offset = (uint64_t)address->offset;
+            separate = declared && kind == BUSTER_TYPE_KIND_FUNCTION ? offset == 0 :
+                       (declared || type_kind_is_array(kind)) && check_context_source_complete(table, type, context) &&
+                       size != 0 && (offset < size || (offset == size && operands[1 - i]->offset != 0));
+        }
+    }
+    if (separate && strings[0] != NULL && strings[1] != NULL)
+    {
+        // Equal pointers would align the bytes before and after each offset. A mismatch in their overlap
+        // disproves equality even with literal pooling; a matching overlap leaves the linker's choice open.
+        const uint64_t a = (uint64_t)left->offset;
+        const uint64_t b = (uint64_t)right->offset;
+        const uint64_t before = a < b ? a : b;
+        const uint64_t a_tail = strings[0]->byte_count - a;
+        const uint64_t b_tail = strings[1]->byte_count - b;
+        const uint64_t after = a_tail < b_tail ? a_tail : b_tail;
+        separate = memcmp(strings[0]->bytes + (a - before), strings[1]->bytes + (b - before), before + after) != 0;
+    }
+    return separate;
+}
+
 // Comparisons as clang's CheckCompareOperands has them in C, in every language mode: two pointers always compare,
 // with a warning for incompatible pointees (but for void and any pointee under equality), the right converted to the
 // left's type (the left to the right's when only the left is a null pointer constant). A pointer and an integer
@@ -2420,7 +2481,7 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
         result->value.type = BUSTER_TYPE_INT;
         check_action_inherit(&result->value, &left);
         check_action_inherit(&result->value, &right);
-        // Different objects can have equal one-past/beginning addresses. Leave their comparison to emitted code.
+        // Addresses with the same base compare by their displacements.
         if (left.constant_kind == CHECK_CONSTANT_ADDRESS && right.constant_kind == CHECK_CONSTANT_ADDRESS && left.object == right.object && (equality || left.object != 0) && result->value.fault == CHECK_FAULT_NONE)
         {
             bool answer = false;
@@ -2436,6 +2497,19 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
             }
             result->value.constant_kind = CHECK_CONSTANT_INTEGER;
             result->value.integer = answer;
+        }
+        else if (equality && action->context.constant_evaluated && left.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                 right.constant_kind == CHECK_CONSTANT_ADDRESS && result->value.fault == CHECK_FAULT_NONE)
+        {
+            const bool left_nonnull = left.object != 0 && (left.flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0;
+            const bool right_nonnull = right.object != 0 && (right.flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0;
+            const bool against_null = (left_nonnull && right.object == 0 && right.offset == 0) ||
+                                      (right_nonnull && left.object == 0 && left.offset == 0);
+            if (against_null || (left_nonnull && right_nonnull && check_action_separate_objects(table, &action->context, &left, &right)))
+            {
+                result->value.constant_kind = CHECK_CONSTANT_INTEGER;
+                result->value.integer = action->op == CHECK_OP_NOT_EQUAL;
+            }
         }
     }
 }

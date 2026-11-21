@@ -480,6 +480,23 @@ static void check_test_program_helper_contracts(CheckTest* test)
         checked[CHECK_PROGRAM_HELPER_X86] += kept;
         snprintf(description, sizeof(description), "helper contracts: x86 leaf %s: %s", cbuiltin_x86_helper_infos[k].name, reason != NULL ? reason : "");
         check_test_expect(test, kept, description);
+        if (k == CBUILTIN_X86_HELPER_INIT_DWARF_REG_SIZE_TABLE)
+        {
+            static const uint8_t expected[] = {
+                0xb8, 0x08, 0x08, 0x08, 0x08,  // mov eax, 0x08080808
+                0x66, 0x0f, 0x6e, 0xc0,        // movd xmm0, eax
+                0x0f, 0xc6, 0xc0, 0x00,        // shufps xmm0, xmm0, 0
+                0x0f, 0x11, 0x07,              // movups [rdi], xmm0
+                0x88, 0x47, 0x10,              // mov [rdi + 16], al
+                0xc3,                          // ret
+            };
+            uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(6)];
+            const int64_t count = x86_encode(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0);
+            check_test_expect(test, native.parameter_count == 1 && native.result_class == BUSTER_TYPED_CLASS_VOID &&
+                                    native.code.frame_size == 0 && native.code.frame_saved == 0 && !native.code.frame_pointer &&
+                                    count == sizeof(expected) && memcmp(bytes, expected, sizeof(expected)) == 0,
+                              "DWARF register sizes: frameless void leaf writes sixteen unaligned bytes and one tail byte");
+        }
         arena_pop_to(&output, mark);
     }
     // A helper no family names keeps UNMODELED's bounds whatever its code does, which needn't back any of them: a trap's
@@ -599,8 +616,7 @@ static void check_test_program_string_helpers(CheckTest* test)
                 // the independently expected machine code is shorter than one vector store.
                 uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(6)];
                 char description[256];
-                const int64_t written = path == 0 ? x86_encode_scalar(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0) :
-                                                   x86_encode(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0);
+                const int64_t written = x86_encode(native.code.records, native.code.count, bytes, sizeof(bytes), 0, 0);
                 snprintf(description, sizeof(description), "%s imm8=%u %s encoder: fixed lengths, index/flag/mask result and ABI (%lld encoded bytes, %u expected)",
                          cbuiltin_x86_helper_infos[cases[c].kind].name, immediate, path == 0 ? "scalar" : "vector", (long long)written, count);
                 check_test_expect(test, native.code.error == TIER0_OK && native.parameter_count == (cases[c].explicit_length ? 5 : 3) &&
@@ -763,7 +779,7 @@ static void check_test_program_helpers(CheckTest* test)
         },
         {
             .id = CBUILTIN_FLT_ROUNDS,
-            .count = 31,
+            .count = 27,
             .bytes = {
                 0x48,
                 0x83,
@@ -773,24 +789,20 @@ static void check_test_program_helpers(CheckTest* test)
                 0x3c,
                 0x24,
                 0x0f,
-                0xb7,
-                0x04,
+                0xb6,
+                0x44,
                 0x24,
+                0x01,
+                0x24,
+                0x0c,
+                0xc0,
+                0xc8,
+                0x03,
+                0x04,
+                0x7f,
                 0xc1,
                 0xe8,
-                0x0a,
-                0x83,
-                0xc0,
-                0x01,
-                0x83,
-                0xe0,
-                0x03,
-                0x8b,
-                0xc8,
-                0xd1,
-                0xe9,
-                0x31,
-                0xc8,
+                0x06,
                 0x48,
                 0x83,
                 0xc4,
@@ -952,8 +964,7 @@ static void check_test_program_helpers(CheckTest* test)
                 for (uint32_t path = 0; match != 0 && path < 2; path += 1)
                 {
                     uint8_t bytes[256] = { 0 };
-                    const int64_t count = path == 0 ? x86_encode_scalar(helper->code.records, helper->code.count, bytes, sizeof(bytes), 0, 0) :
-                                                     x86_encode(helper->code.records, helper->code.count, bytes, sizeof(bytes), 0, 0);
+                    const int64_t count = x86_encode(helper->code.records, helper->code.count, bytes, sizeof(bytes), 0, 0);
                     check_test_expect(test, count == match->count && memcmp(bytes, match->bytes, match->count) == 0,
                                       "helper records encode to independently stated baseline x86 bytes");
                 }

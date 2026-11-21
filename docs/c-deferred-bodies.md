@@ -34,7 +34,7 @@ counters, append metadata, warning buffers and value chains, and borrows an
 immutable type-table view. Its nodes, leaves and arguments occupy disjoint
 reservations in the final graph's storage. Purity and graph summaries are
 computed there, then contiguous columns are compacted in source order with
-masked vector relocation (and `CheckDeferred.scalar_merge`'s twin).
+masked vector relocation.
 
 Actions that need runtime VLA/region state, evaluation or new types retain
 ordered execution directly at their final graph identities. Token roots,

@@ -869,7 +869,7 @@ static bool object_section_valid(const ObjectAtomSection* section, uint8_t class
 static bool object_section_is_default(const ObjectAtomSection* section, uint8_t class)
 {
     const ObjectSectionFormat* format = &object_class_sections[class];
-    const uint64_t length = strlen(format->name);
+    const uint64_t length = format->name_length;
     return section->name.length == 0 ||
            (section->name.length == length && memcmp(section->name.pointer, format->name, length) == 0 && section->type == format->type &&
             section->flags == format->flags && section->entry_size == format->entry_size);
@@ -886,7 +886,7 @@ static bool object_sections_equal(const ObjectAtomSection* a, const ObjectAtomSe
 // descriptor's, in the order of their first atoms, each group in id order. Each group's first place and descriptor (0
 // for the class's own) go to `firsts` and `descriptors`, `*groups` of them, the class's own first even without atoms,
 // and `firsts[*groups]` is `end`. The descriptors are told apart through a table of twice as many slots as atoms, by a
-// hash of their names: a unit has few named sections, and this pass runs only for units with descriptors. Returns false
+// hash of their names: this pass runs only for classes with custom descriptors or group members. Returns false
 // for want of scratch memory.
 static bool object_group_atoms(const ObjectBuilder* builder, uint8_t class, const AtomId* unit_atoms, uint32_t begin, uint32_t end, AtomId* order,
                                uint32_t* firsts, const ObjectAtomSection** descriptors, uint32_t* section_groups, uint32_t* groups, Arena* scratch)
@@ -966,6 +966,48 @@ static bool object_group_atoms(const ObjectBuilder* builder, uint8_t class, cons
     return result;
 }
 
+// An ordinary class already has its final atom order. While validating the unit's descriptors, record which classes
+// need grouping and how many entries their shared work tables need.
+static bool object_validate_sections(const ObjectBuilder* builder, const uint32_t* bounds, bool* group_class, uint32_t* largest)
+{
+    const LinkAtoms* atoms = &builder->link->atoms;
+    const ObjectAtomSection* table = builder->options.atom_sections;
+    const uint32_t* memberships = builder->link->groups.count != 0 ? builder->link->groups.atom_groups : 0;
+    bool result = true;
+    for (uint8_t class = 1; result && class < BUSTER_LINK_CLASS_COUNT; class += 1)
+    {
+        const uint32_t count = bounds[class + 1] - bounds[class];
+        bool needs_group = false;
+        for (uint32_t i = bounds[class]; result && i < bounds[class + 1]; i += 1)
+        {
+            const AtomId atom = builder->units->atoms[i];
+            const bool member = memberships != 0 && memberships[atom] != 0;
+            if (table != 0)
+            {
+                const ObjectAtomSection* descriptor = &table[atom];
+                // A linked section's target must be in this unit and an earlier class (#1447).
+                const AtomId linked = descriptor->link;
+                const bool ordered = (descriptor->flags & SHF_LINK_ORDER) != 0;
+                const bool link_valid = ordered ? linked != 0 && linked < atoms->count && atoms->unit[linked] == builder->unit && atoms->class[linked] < class :
+                                                  linked == 0;
+                result = object_section_valid(descriptor, class) && ((descriptor->flags & SHF_GROUP) == 0 || member) && link_valid;
+                needs_group = needs_group || member || (result && !object_section_is_default(descriptor, class));
+            }
+            else if (member)
+            {
+                needs_group = true;
+                break;
+            }
+        }
+        group_class[class] = needs_group;
+        if (needs_group && count > *largest)
+        {
+            *largest = count;
+        }
+    }
+    return result;
+}
+
 // The unit's sections of atoms: a section per class with atoms (with function sections, per TEXT atom), and with
 // ObjectOptions.atom_sections one per other descriptor of the class after it (object_group_atoms); each atom at the next
 // multiple of its alignment there, and each section's size, alignment and fixups.
@@ -973,48 +1015,43 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
 {
     const LinkAtoms* atoms = &builder->link->atoms;
     ObjectUnits* units = builder->units;
-    const uint64_t key = (uint64_t)builder->unit * BUSTER_LINK_CLASS_COUNT;
-    const uint32_t unit_begin = units->atom_begin[key];
-    const uint32_t unit_count = units->atom_begin[key + BUSTER_LINK_CLASS_COUNT] - unit_begin;
-    const bool described = builder->options.atom_sections != 0 || builder->link->groups.count != 0;
-    AtomId* order = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, AtomId, (uint64_t)unit_count + 1) : 0;
-    uint32_t* firsts = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)unit_count + 2) : 0;
-    const ObjectAtomSection** descriptors = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, const ObjectAtomSection*, (uint64_t)unit_count + 1) : 0;
-    uint32_t* section_groups = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)unit_count + 1) : 0;
-    bool memory = !described || (order != 0 && firsts != 0 && descriptors != 0 && section_groups != 0);
-    bool result = memory;
-    builder->atoms = described ? order : units->atoms + unit_begin;
+    const uint32_t* bounds = units->atom_begin + (uint64_t)builder->unit * BUSTER_LINK_CLASS_COUNT;
+    const uint32_t unit_count = bounds[BUSTER_LINK_CLASS_COUNT] - bounds[0];
+    const AtomId* unit_atoms = units->atoms + bounds[0];
+    bool group_class[BUSTER_LINK_CLASS_COUNT];
+    uint32_t largest = 0;
+    bool result = (builder->options.atom_sections == 0 && builder->link->groups.count == 0) || object_validate_sections(builder, bounds, group_class, &largest);
+    const bool reorder = result && largest != 0;
+    AtomId* order = reorder ? BUSTER_ARENA_PUSH_ARRAY(scratch, AtomId, unit_count) : 0;
+    const uint64_t mark = scratch->length;
+    uint32_t* firsts = reorder ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)largest + 2) : 0;
+    const ObjectAtomSection** descriptors = reorder ? BUSTER_ARENA_PUSH_ARRAY(scratch, const ObjectAtomSection*, (uint64_t)largest + 1) : 0;
+    uint32_t* section_groups = reorder ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)largest + 1) : 0;
+    bool memory = !reorder || (order != 0 && firsts != 0 && descriptors != 0 && section_groups != 0);
+    result = result && memory;
+    builder->atoms = reorder ? order : unit_atoms;
     for (uint8_t class = 1; result && class < BUSTER_LINK_CLASS_COUNT; class += 1)
     {
-        const uint32_t begin = units->atom_begin[key + class] - unit_begin;
-        const uint32_t end = units->atom_begin[key + class + 1] - unit_begin;
-        // A class without atoms has no sections, which its groups' pass would only confirm: with descriptors, as every -c
-        // compile's (check_program_sections), most of a small unit's classes (#1629).
+        const uint32_t begin = bounds[class] - bounds[0];
+        const uint32_t end = bounds[class + 1] - bounds[0];
         uint32_t groups = begin != end ? 1 : 0;
-        for (uint32_t i = begin; result && builder->options.atom_sections != 0 && i < end; i += 1)
+        const bool grouped = reorder && group_class[class];
+        if (grouped)
         {
-            const AtomId atom = units->atoms[unit_begin + i];
-            const ObjectAtomSection* descriptor = &builder->options.atom_sections[atom];
-            const bool grouped = builder->link->groups.count != 0 && builder->link->groups.atom_groups[atom] != 0;
-            // A linked section's atom is the unit's, of a class whose sections are already counted (#1447).
-            const AtomId linked = descriptor->link;
-            const bool ordered = (descriptor->flags & SHF_LINK_ORDER) != 0;
-            const bool link_valid = ordered ? linked != 0 && linked < atoms->count && atoms->unit[linked] == builder->unit && atoms->class[linked] < class :
-                                              linked == 0;
-            result = object_section_valid(descriptor, class) && ((descriptor->flags & SHF_GROUP) == 0 || grouped) && link_valid;
-        }
-        if (result && described && begin != end)
-        {
-            memory = object_group_atoms(builder, class, units->atoms + unit_begin, begin, end, order, firsts, descriptors, section_groups, &groups, scratch);
+            memory = object_group_atoms(builder, class, unit_atoms, begin, end, order, firsts, descriptors, section_groups, &groups, scratch);
             result = memory;
+        }
+        else if (order != 0 && begin != end)
+        {
+            memcpy(order + begin, unit_atoms + begin, (uint64_t)(end - begin) * sizeof(*order));
         }
         for (uint32_t g = 0; result && g < groups; g += 1)
         {
             // The class's own section (with function sections, a section per TEXT atom), or another descriptor's.
-            const uint32_t group_begin = described ? firsts[g] : begin;
-            const uint32_t group_end = described ? firsts[g + 1] : end;
-            const ObjectAtomSection* explicit = described ? descriptors[g] : 0;
-            const uint32_t membership = described ? section_groups[g] : 0;
+            const uint32_t group_begin = grouped ? firsts[g] : begin;
+            const uint32_t group_end = grouped ? firsts[g + 1] : end;
+            const ObjectAtomSection* explicit = grouped ? descriptors[g] : 0;
+            const uint32_t membership = grouped ? section_groups[g] : 0;
             const bool apart = explicit == 0 && builder->options.function_sections && class == BUSTER_LINK_CLASS_TEXT;
             builder->retained |= explicit != 0 && (explicit->flags & SHF_GNU_RETAIN) != 0;
             for (uint32_t first = group_begin; result && first < group_end; first = apart ? first + 1 : group_end)
@@ -1046,6 +1083,7 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
             }
         }
     }
+    arena_pop_to(scratch, mark);
     if (!result)
     {
         builder->error = memory ? OBJECT_ERROR_RANGE : OBJECT_ERROR_FULL;

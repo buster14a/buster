@@ -98,25 +98,26 @@ static void check_test_integer_policy_graph(CheckTest* test, TypeTable* table)
         for (uint32_t policy = 0; policy < 2; policy += 1)
         {
             graph.extensions = policy != 0 ? BUSTER_CHECK_EXTENSION_GNU_CONSTANT : 0;
-            CheckStream scalar;
-            const CheckOptions scalar_options = { .scalar = true };
-            const bool checked = check_graph_run(table, &graph, &output, &scratch, &scalar_options, &scalar);
-            check_test_expect(test, checked && scalar.report_count == (policy != 0 ? 1 : 2),
+            CheckStream reference;
+            const CheckOptions node_order = { 0 };
+            const bool checked = check_graph_run(table, &graph, &output, &scratch, &node_order, &reference);
+            check_test_expect(test, checked && reference.report_count == (policy != 0 ? 1 : 2),
                               "explicit graph fold policy differs from each root's strict or GNU acceptance policy");
             if (checked)
             {
-                check_test_expect(test, policy != 0 ? scalar.reports[0].node == strict && scalar.reports[0].message == CHECK_MESSAGE_ICE &&
-                                                     scalar.warnings[sum] == CHECK_WARNING_INTEGER_OVERFLOW && scalar.warnings[negative] == CHECK_WARNING_GNU_CONSTANT &&
-                                                     scalar.warning_ignored[negative] == CHECK_WARNING_GNU_CONSTANT :
-                                                     scalar.reports[0].fault == CHECK_FAULT_SIGNED_OVERFLOW && scalar.warnings[sum] == 0,
+                check_test_expect(test, policy != 0 ? reference.reports[0].node == strict && reference.reports[0].message == CHECK_MESSAGE_ICE &&
+                                                     reference.warnings[sum] == CHECK_WARNING_INTEGER_OVERFLOW && reference.warnings[negative] == CHECK_WARNING_GNU_CONSTANT &&
+                                                     reference.warning_ignored[negative] == CHECK_WARNING_GNU_CONSTANT :
+                                                     reference.reports[0].fault == CHECK_FAULT_SIGNED_OVERFLOW && reference.warnings[sum] == 0,
                                   "graph retains exact operation warning provenance without widening a strict ICE root");
                 const uint64_t mark = output.length;
+                check_test_expect(test, check_test_stream_recorded(&reference, &graph, 0, "integer-policy-graphs"), "integer-policy-graphs: the reference stream is its recorded digest");
                 for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
                 {
                     CheckStream vector;
                     const CheckOptions vector_options = { .batch_size = batch, .regions = batch != 0 };
                     check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &vector_options, &vector) &&
-                                           check_test_stream_equal(&scalar, &vector, 0),
+                                           check_test_stream_equal(&reference, &vector, 0),
                                       "GNU extension graph warnings, witnesses and strict reports agree at every scheduler partition");
                     arena_pop_to(&output, mark);
                 }
@@ -229,35 +230,36 @@ static void check_test_integer_warning_contexts(CheckTest* test, TypeTable* tabl
                     graph.contexts[assertion] = BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
                 }
                 const uint32_t generic = context == 1 ? CHECK_WARNING_GNU_CONSTANT : 0;
-                CheckStream scalar;
-                const CheckOptions scalar_options = { .scalar = true };
-                const bool checked = check_graph_run(table, &graph, &output, &scratch, &scalar_options, &scalar);
-                check_test_expect(test, checked && scalar.report_count == 0 && scalar.warnings[operation] == (primary | generic) &&
-                                       scalar.warning_ignored[operation] == generic,
+                CheckStream reference;
+                const CheckOptions node_order = { 0 };
+                const bool checked = check_graph_run(table, &graph, &output, &scratch, &node_order, &reference);
+                check_test_expect(test, checked && reference.report_count == 0 && reference.warnings[operation] == (primary | generic) &&
+                                       reference.warning_ignored[operation] == generic,
                                   "graph warning facts and default-ignored GNU context match the independent language oracle");
                 if (checked)
                 {
                     const uint64_t mark = output.length;
+                    check_test_expect(test, check_test_stream_recorded(&reference, &graph, graph.argument_count, "integer-policy-graphs"), "integer-policy-graphs: the reference stream is its recorded digest");
                     for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
                     {
                         CheckStream vector;
                         const CheckOptions options = { .batch_size = batch, .regions = batch != 0 };
                         check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &options, &vector) &&
-                                               check_test_stream_equal(&scalar, &vector, graph.argument_count),
+                                               check_test_stream_equal(&reference, &vector, graph.argument_count),
                                           "warning contexts retain exact metadata in every scalar/vector partition");
                         arena_pop_to(&output, mark);
                     }
                     if (context == 9)
                     {
-                        check_test_expect(test, scalar.warnings[graph.count - 1] == 0 &&
-                                               (check_stream_flags(&scalar, graph.count - 1) & BUSTER_CHECK_ICE) != 0,
+                        check_test_expect(test, reference.warnings[graph.count - 1] == 0 &&
+                                               (check_stream_flags(&reference, graph.count - 1) & BUSTER_CHECK_ICE) != 0,
                                           "discarded wrapped lexical ICE retains strict eligibility without a GNU folding warning");
                     }
                     if (context == 7 || context == 8)
                     {
                         suppressed[operation] = CHECK_WARNING_SHIFT_OVERFLOW;
                         CheckStream invalid;
-                        check_test_expect(test, !check_graph_run(table, &graph, &output, &scratch, &scalar_options, &invalid) &&
+                        check_test_expect(test, !check_graph_run(table, &graph, &output, &scratch, &node_order, &invalid) &&
                                                invalid.status == CHECK_STATUS_INVALID_GRAPH && output.length == mark && scratch.length == 0,
                                           "source warning suppression cannot hide retained shift-overflow diagnostics or publish partial output");
                     }

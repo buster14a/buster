@@ -2019,13 +2019,27 @@ static void check_driver_pragma_report(const Parser* parser, Preprocessor* pp, c
     }
     else if (!quiet && (record->warnings & CHECK_FP_PRAGMA_UNKNOWN_STATE) != 0)
     {
-        const CheckWarningSeverity severity = check_diagnostic_severity_at(input, record->token, record->source_begin,
-                                                                           CHECK_WARNING_UNKNOWN_PRAGMA, false);
+        // clang's lexer warning with its flag, as its options and pragmas map it (#1970): at the state, or at the line's
+        // end where a directive's line has none (its eod; a _Pragma's stays at the _Pragma, as clang's does).
+        const CheckWarningSeverity severity = check_diagnostic_unknown_state_severity(input, record);
         if (severity != CHECK_WARNING_IGNORE)
         {
             const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                            severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-            pp_diagnose_output(pp, pp_severity, check_diagnostic_pragma_source(record), "%s", check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
+            const uint32_t source = check_diagnostic_pragma_source(record);
+            const char* message = check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA);
+            const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR);
+            // (The output's columns may have been given back: pp_output_ensure.)
+            const bool missing = record->source_end - record->source_begin <= 5 && pp_history_ensure(pp) && pp_output_ensure(pp) && pp_history_at(pp, source) == 0;
+            const uint32_t line_end = missing ? pp_output_line_end(pp, source) : 0;
+            if (line_end != 0)
+            {
+                pp_diagnose_output_location_at(pp, pp_severity, source, line_end, source, PP_DIAGNOSTIC_SEMANTIC, "%s [%s-Wunknown-pragmas]", message, prefix);
+            }
+            else
+            {
+                pp_diagnose_output(pp, pp_severity, source, "%s [%s-Wunknown-pragmas]", message, prefix);
+            }
         }
     }
     else if (!quiet && !record->warning_quiet && (record->warnings & CHECK_FP_PRAGMA_EMPTY_STACK) != 0)
@@ -4969,9 +4983,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         const CheckSparseWide attributes = input->attributes;
         const bool attributed = show_warnings && attribute_warnings && check_sparse_wide_present(attributes);
-        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned, scalar) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned, scalar))
+        for (uint32_t first = attributed ? check_input_attributed_next(attributes, 0, scanned) : scanned; first < scanned; first = check_input_attributed_next(attributes, first + 16, scanned))
         {
-            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned, scalar);
+            const uint32_t lanes = check_input_attributed_group(attributes, first, scanned);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -8268,7 +8282,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         }
     }
     valid = valid && (selected || input.report_count != 0) && !input.resource;
-    const CheckOptions check_options = { .scalar = scalar };
+    const CheckOptions check_options = { 0 };
     CheckStream stream = { 0 };
     // The reading's own errors: its reader's (a recovered one's unit is valid), whose reports stand without the graph, which
     // may not run after them, and its graph's.
@@ -9160,7 +9174,6 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .identifiers = identifiers,
                 .types = program->types,
                 .output = output,
-                .scalar = parser->options.scalar,
                 .internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1,
                 .object_size_compat = candidate->object_sizes != NULL,
             };
@@ -12282,13 +12295,24 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528), and the tree
     // alone: the reader derives the traversal it reads into those pages (check_input_run).
     const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .scratch = scratch };
-    bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order)) && pp_initialize(pp, options, identifiers) &&
-                 parse_initialize(parser, &parser_options, options->language);
+    bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order));
+    // A preprocessor that refused to start on its own fatal error (an invalid SOURCE_DATE_EPOCH, #2996) has printed it;
+    // the unit ends with that error alone, not with a memory failure that didn't happen.
+    bool pp_refused = false;
+    if (ready)
+    {
+        ready = pp_initialize(pp, options, identifiers);
+        pp_refused = !ready && pp->fatal;
+    }
+    ready = ready && parse_initialize(parser, &parser_options, options->language);
     // Whether the unit reported its memory failure itself (arena_report_failure), which the notes at its end then don't.
     bool memory_reported = false;
     if (!ready || scratch->base == 0 || output_arena->base == 0)
     {
-        arena_report_failure(errors, "checking", UINT64_C(1) << 36);
+        if (!pp_refused || scratch->base == 0 || output_arena->base == 0)
+        {
+            arena_report_failure(errors, "checking", UINT64_C(1) << 36);
+        }
         driver_fatal = true;
         memory_reported = true;
     }
@@ -12314,6 +12338,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         CheckDriverTypoEdits typo_edits = { .count = 0, .table = pp->table, .scratch = scratch };
         const CheckPrefixTails typo_tails = { .end = check_driver_typo_tail, .context = &typo_edits };
         bool parse_printed = false;
+        // A typo pass whose parse has no view (#3000): the unit then ends as one whose failed parse has none does.
+        bool unviewed = false;
         check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
         pp->options.collect_diagnostics = true;
         pp_driver_verbose(options, path);
@@ -12568,6 +12594,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     else
                     {
+                        // The views that failed cleared the one the unit was read as, and the reading is of another
+                        // parse: the unit has its parse's errors alone, and the view the stages after it read is the
+                        // parse itself, whose pragmas the earlier ones aren't.
+                        checking = recovered;
+                        original_pragmas_ready = false;
+                        unviewed = true;
                         ready = false;
                     }
                 }
@@ -12648,14 +12680,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             // A rejected reader may retain complete earlier expressions solely for diagnostics. Their typed
             // reports share source order with declaration reports, but this fragment can never be emitted.
-            if (grants.return_failed)
+            if (grants.return_failed || unviewed)
             {
                 result = 1;
             }
             else if (input_valid || input.diagnostic_graph)
             {
                 const CheckOptions check_options = {
-                    .scalar = scalar,
                     .verify = verify,
                     .transitions = command->check_transitions,
                     .verify_transitions = verify,
@@ -13948,6 +13979,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool dump_static = false;
     bool emit_object = false;
     RuntimeKind runtime_kind = RUNTIME_KIND_DYNAMIC;
+    // The link kind's options (#1503), which decide runtime_kind after the loop as clang's driver decides it (its
+    // getStaticPIE, getStatic and getPIE): -static-pie over -static, either over -pie and -no-pie whatever their order,
+    // the last of -pie and -no-pie between those two, and -no-pie with -static-pie refused.
+    bool static_pie_requested = false;
+    bool static_requested = false;
+    bool no_pie_requested = false;
+    bool no_pie_last = false;
     bool syntax_only = false;
     bool quiet = false;
     bool return_warning = true;
@@ -14199,18 +14237,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 }
             }
         }
-        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE)
+        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE || match.exact == C_OPTION_NO_PIE)
         {
-            // Clang gives -static-pie priority over -static, and either static request priority over -pie,
+            // Clang gives -static-pie priority over -static, and either static request priority over -pie and -no-pie,
             // irrespective of their argv order. Never downgrade a static request to shared-library resolution.
-            if (match.exact == C_OPTION_STATIC_PIE)
-            {
-                runtime_kind = RUNTIME_KIND_STATIC_PIE;
-            }
-            else if (match.exact == C_OPTION_STATIC && runtime_kind != RUNTIME_KIND_STATIC_PIE)
-            {
-                runtime_kind = RUNTIME_KIND_STATIC;
-            }
+            static_pie_requested |= match.exact == C_OPTION_STATIC_PIE;
+            static_requested |= match.exact == C_OPTION_STATIC;
+            no_pie_requested |= match.exact == C_OPTION_NO_PIE;
+            no_pie_last = match.exact == C_OPTION_NO_PIE || (no_pie_last && match.exact != C_OPTION_PIE);
+            runtime_kind = static_pie_requested ? RUNTIME_KIND_STATIC_PIE
+                           : static_requested   ? RUNTIME_KIND_STATIC
+                           : no_pie_last        ? RUNTIME_KIND_NO_PIE
+                                                : RUNTIME_KIND_DYNAMIC;
         }
         else if (!check_request_scan_match(&request, arguments[i], match))
         {
@@ -14539,7 +14577,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
     }
     const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
-    const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && runtime_kind != RUNTIME_KIND_DYNAMIC;
+    const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && !runtime_kind_is_dynamic_executable(runtime_kind);
+    // Clang refuses -no-pie beside -static-pie in either order when it links ("cannot specify 'nopie' along with
+    // 'static-pie'"); -c and -fsyntax-only leave both unused.
+    const bool pie_conflict = link && static_pie_requested && no_pie_requested;
     // Code generation's options, which the driver reports before a usage error: the first one it doesn't implement, else
     // the last stack-protector and CET option, which decides whether those unsupported behaviors were requested, else,
     // where it emits code, the object and linkage options its producer doesn't implement (#1124: a command line's
@@ -14552,7 +14593,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool markers = false;
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
-    bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
+    bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && !pie_conflict && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
                   !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_helper_forms && !invalid_tier1_schedule && !invalid_tier1_passes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || invalid_stdin))
     {
@@ -14704,6 +14745,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (runtime_path_refused)
     {
         fprintf(stderr, "error: runtime search paths require dynamic output\n");
+    }
+    else if (pie_conflict)
+    {
+        fprintf(stderr, "error: cannot specify '-no-pie' along with '-static-pie'\n");
     }
     else if (codegen.error != CHECK_REQUEST_ACCEPTED)
     {

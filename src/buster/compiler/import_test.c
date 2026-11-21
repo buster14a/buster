@@ -2183,6 +2183,50 @@ static uint64_t import_test_text(const char* text, uint32_t width)
     return result;
 }
 
+// The many-symbol fixture has no symbol in member 2. The lazy reader numbers just the four indexed members.
+static void import_test_archive_ranks(ImportTestTally* tally, const ImportTestArchive* archive, const ImportTestFile* file, bool ordered, Arena* arena)
+{
+    static const uint32_t members[] = { 0, 1, 3, 4 };
+    const String8 bytes = import_test_bytes(file);
+    const uint64_t position = arena->length;
+    ImportArchiveIndex index;
+    const ImportResult read = import_archive_lazy(&index, bytes, arena);
+    bool same = read.error == IMPORT_ERROR_NONE && index.thin == archive->thin && index.indexed && index.members &&
+                index.member_count == BUSTER_ARRAY_LENGTH(members) && index.symbol_count == archive->symbol_count;
+    for (uint32_t rank = 0; same && rank < index.member_count; rank += 1)
+    {
+        const uint32_t m = members[rank];
+        ImportMember member;
+        same = index.member_offsets[rank] == file->headers[m] && import_archive_member(&member, bytes, &index, rank).error == IMPORT_ERROR_NONE &&
+               import_equal(member.name, archive->names[m]) && member.offset == file->headers[m] && member.nested == 0 &&
+               member.bytes.pointer == bytes.pointer + file->contents[m] && member.bytes.length == (archive->thin ? 0 : archive->sizes[m]);
+    }
+    for (uint32_t s = 0; same && s < index.symbol_count; s += 1)
+    {
+        const uint32_t rank = index.symbols[s].member;
+        same = rank < index.member_count && members[rank] == archive->symbol_members[s] && import_equal(index.symbols[s].name, archive->symbols[s]);
+    }
+    import_test_expect(tally, same, "lazy index names, ranks and members", archive->width);
+
+    Scratch scratch = scratch_begin(arena);
+    const uint64_t capacity = scratch.arena->capacity;
+    const uint64_t room = archive->symbol_count * sizeof(uint32_t);
+    const bool fits = arena_push(scratch.arena, 0, _Alignof(uint64_t)) != 0 && room <= capacity - scratch.arena->length;
+    if (fits)
+    {
+        scratch.arena->capacity = scratch.arena->length + room;
+        const bool taken = import_archive_lazy_vector(&index, bytes, arena);
+        import_test_expect(tally, taken == ordered, "only ranks in scratch, offsets in member order", archive->width);
+        scratch.arena->capacity -= 1;
+        const ImportResult limited = import_archive_lazy(&index, bytes, arena);
+        import_test_expect(tally, import_test_same_result(limited, import_test_result(IMPORT_ERROR_MEMORY, 0, 0, 0, 0, 0)), "one byte short for ranks", archive->width);
+        scratch.arena->capacity = capacity;
+    }
+    import_test_expect(tally, fits, "scratch room for the index fixture", archive->width);
+    scratch_end(scratch);
+    arena_pop_to(arena, position);
+}
+
 static bool import_test_archives(Arena* arena)
 {
     ImportTestTally tally = {
@@ -2317,11 +2361,21 @@ static bool import_test_archives(Arena* arena)
     for (uint32_t width = 4; width <= 8; width += 4)
     {
         many.width = width;
-        built = import_test_archive(&file, &many, arena);
-        import_test_expect(&tally, built, "the archive made by hand", width);
-        if (built)
+        for (uint32_t thin = 0; thin <= 1; thin += 1)
         {
-            import_test_archive_check(&tally, &many, &file, "an index of several batches", arena);
+            many.thin = thin != 0;
+            for (uint32_t unordered = 0; unordered <= 1; unordered += 1)
+            {
+                // Lane 7 and the next lane 0 either repeat member 0 or descend from member 1 to member 0.
+                many.symbol_members[7] = unordered;
+                built = import_test_archive(&file, &many, arena);
+                import_test_expect(&tally, built, "the archive made by hand", width);
+                if (built)
+                {
+                    import_test_archive_check(&tally, &many, &file, "an index of several batches", arena);
+                    import_test_archive_ranks(&tally, &many, &file, unordered == 0, arena);
+                }
+            }
         }
     }
     archive.width = 0;
