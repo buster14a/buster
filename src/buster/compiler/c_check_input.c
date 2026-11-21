@@ -16548,16 +16548,17 @@ static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, con
 
 // The constant context a token opens, if any: a static object's initializer, a static assertion's condition or a case
 // label's value.
-static void check_input_constant_context(CheckInputReader* reader, uint32_t token)
+static void check_input_constant_context(CheckInputReader* reader, uint32_t token, uint32_t* assertion_end)
 {
     const Parser* parser = reader->parser;
     const CheckInput* input = reader->output;
     const uint32_t count = parser->tokens.count;
+    const uint8_t context = 1u | (token < *assertion_end ? BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT : 0u);
     const uint32_t begin = check_sparse_get(input->initializer_begins, token);
     const uint32_t end = check_sparse_get(input->initializer_ends, token);
     if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && begin < end && end <= count)
     {
-        memset(reader->constant_contexts + begin, 1, end - begin);
+        memset(reader->constant_contexts + begin, context, end - begin);
     }
     if (parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT && token + 1 < count)
     {
@@ -16565,7 +16566,14 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         if (close > token + 1 && close < count)
         {
             const uint32_t separator = check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA);
-            memset(reader->constant_contexts + token + 2, 1, separator - token - 2);
+            // A failed assertion describes its written operand graph, even for a comparison below a comma.
+            // Tell the window reader to leave that graph in place. Nested case and initializer contexts keep the mark.
+            if (reader->pp->options.node_window_constants && separator > *assertion_end)
+            {
+                *assertion_end = separator;
+            }
+            const uint8_t assertion = 1u | (token < *assertion_end ? BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT : 0u);
+            memset(reader->constant_contexts + token + 2, assertion, separator - token - 2);
             // Clang parses this whole condition as constant-evaluated, including static-selection arms that the
             // evaluated graph does not retain as operands. Their runtime shift-count diagnostics are not queued.
             check_input_warning_suppress(reader, token + 2, separator, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
@@ -16590,7 +16598,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         const uint32_t close = parser->tree.parents[token];
         if (close > token && close < count)
         {
-            memset(reader->constant_contexts + token + 1, 1, close - token - 1);
+            memset(reader->constant_contexts + token + 1, context, close - token - 1);
             check_input_warning_suppress(reader, token + 1, close, CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW);
         }
     }
@@ -16602,6 +16610,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
 static void check_input_constant_contexts_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
+    uint32_t assertion_end = 0;
     for (uint32_t first = begin; first < end; first += 64)
     {
         uint64_t selected = check_input_scan_bit(reader->output->declaration_bits, first, end, BUSTER_CHECK_BITS_STATIC) |
@@ -16609,7 +16618,7 @@ static void check_input_constant_contexts_range(CheckInputReader* reader, uint32
                             check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_CASE);
         for (; selected != 0; selected &= selected - 1)
         {
-            check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected));
+            check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected), &assertion_end);
         }
     }
 }

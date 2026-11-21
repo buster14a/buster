@@ -4,6 +4,7 @@
 #define MASK (0x20 | 7)
 enum { COUNT = 2 + 3 };
 _Static_assert(COUNT == 5, "constant");
+_Static_assert(7 < 8, "written comparison");
 extern int consume(int);
 int window_constants(int n, int *v)
 {

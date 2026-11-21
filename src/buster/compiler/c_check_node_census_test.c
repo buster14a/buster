@@ -6261,11 +6261,13 @@ static void node_window_test_constants(CheckTest* test)
     check_test_expect(test, smaller, "constant windows remove integer arithmetic below ordinary parents");
     uint32_t matched = 0;
     uint32_t shifts = 0;
+    uint32_t comparisons = 0;
     bool division_kept = false;
     for (uint32_t node = 0; smaller && node < input->graph.count; ++node)
     {
         const uint32_t token = input->graph.tokens[node];
         shifts += input->graph.ops[node] == CHECK_OP_SHIFT_LEFT;
+        comparisons += input->graph.ops[node] == CHECK_OP_LESS;
         if (input->graph.ops[node] == CHECK_OP_DIVIDE)
         {
             const uint32_t left = input->graph.operand0[node];
@@ -6285,8 +6287,8 @@ static void node_window_test_constants(CheckTest* test)
             }
         }
     }
-    check_test_expect(test, smaller && matched == input->integer_window_count && shifts == 1 && division_kept,
-                      "constant operands preserve checked values and the original shift and division syntax used by diagnostics");
+    check_test_expect(test, smaller && matched == input->integer_window_count && shifts == 1 && comparisons == 1 && division_kept,
+                      "constant operands preserve checked values and original assertion, shift and division syntax used by diagnostics");
     CheckProgramLowered ordinary = { 0 };
     CheckProgramLowered taken = { 0 };
     bool same = smaller && check_program_lower_sources(&ordinary, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&

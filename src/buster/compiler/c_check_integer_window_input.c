@@ -171,7 +171,8 @@ static __attribute__((noinline)) uint32_t check_integer_window_actions(CheckInpu
             const CheckOp op = binary ? check_input_binary(kind) : kind == PARSE_KIND_PLUS ? CHECK_OP_POSITIVE : kind == PARSE_KIND_MINUS ?
                                CHECK_OP_NEGATIVE : kind == PARSE_KIND_TILDE ? CHECK_OP_BIT_NOT : CHECK_OP_COUNT;
             uint32_t value;
-            if (op < CHECK_OP_COUNT && !check_integer_window_observed(parser, token, op) && check_node_window_fold_int(op, left.value, right.value, binary, &value))
+            if (op < CHECK_OP_COUNT && (reader->constant_contexts[token] & BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT) == 0 &&
+                !check_integer_window_observed(parser, token, op) && check_node_window_fold_int(op, left.value, right.value, binary, &value))
             {
                 spans[i] = (CheckIntegerWindowSpan){ value, left.first, (uint16_t)(left.literals + (binary ? right.literals : 0)),
                                                      (uint16_t)(1 + left.nodes + (binary ? right.nodes : 0)) };
