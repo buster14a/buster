@@ -776,7 +776,10 @@ static uint32_t check_diagnostic_custom_attribute_name(const Parser* parser, uin
     {
         custom |= parser->meanings.custom_attributes[s] == name;
     }
-    return custom ? token + 3 : BUSTER_CHECK_NONE;
+    // Suppress shares the parser's preserved-argument table so its string list reaches the checker, but Clang keeps
+    // its attribute at the scope. It does not use the custom parsers' name location for a label's subject error.
+    const bool suppress = custom && check_input_attribute_suppress_name(check_input_attribute_spelling(parser->meanings.table, name));
+    return custom && !suppress ? token + 3 : BUSTER_CHECK_NONE;
 }
 
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)

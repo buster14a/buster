@@ -338,6 +338,19 @@ static const char* const parse_predeclared_typedefs[] =
 #define BUSTER_PARSE_TOKEN_PADDING 128
 // The second colon split from one preprocessing `::` token, distinct from adjacent expanded `:` tokens.
 #define BUSTER_PARSE_COLONCOLON_SECOND 0x10u
+// On an identifier, a diagnostic-only reparse retains a previously diagnosed unknown type as a specifier, even when
+// removing its invalid declarator tail changes the following token. On a semicolon, the same private bit marks a
+// discarded declarator after an attribute prefix; no user null declaration has it. Input conversion clears the
+// preprocessor's printing flag before either recovery uses it.
+#define BUSTER_PARSE_RECOVERED_TYPE 0x40u
+#define BUSTER_PARSE_DROPPED_DECLARATOR BUSTER_PARSE_RECOVERED_TYPE
+_Static_assert(BUSTER_PARSE_RECOVERED_TYPE == BUSTER_PP_NAME_LINE, "private parser flag cleared during preprocessing-token conversion");
+// Private recovery views mark an inserted suppress argument ')' when clang dropped the attribute. Its original
+// arguments still produce diagnostics; the repaired closer must not make the attribute applicable. The parser
+// does not need the preprocessor printer's NAME_SPACE/NAME_LINE flags, so conversion clears those two bits first.
+#define BUSTER_PARSE_DROPPED_ATTRIBUTE 0x20u
+#define BUSTER_PARSE_PP_FLAGS ((uint8_t)~(BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE))
+_Static_assert(BUSTER_PARSE_DROPPED_ATTRIBUTE == BUSTER_PP_NAME_SPACE, "private parser flag cleared during preprocessing-token conversion");
 // A `#pragma pack` comes just before the token (parse_mark_pragma_packs, #1127): clang reads it among a declaration's
 // specifiers, after a tag's body too, where it takes it for what may follow a type. The preprocessor's output tokens
 // never have this bit, which is a context's pending flag alone (BUSTER_PP_JOIN_LINE), so the parser's tokens take it.
@@ -777,15 +790,19 @@ struct ParseDiagnostic
     // The token where the parser knew it, where that is after `token` (a counted_by family's second error, at its
     // argument's first token, known at the type name the first is at, #1842), or 0 for `token` itself.
     uint32_t publication;
-    // A missing `;` after a declaration's declarator before what clang takes for a declaration specifier (#147): clang's
-    // ParseDeclGroup goes on as if the `;` were there, and reads the specifier as the next declaration's first.
+    // A delimiter error with a proven diagnostic-only continuation. Ordinarily this inserts a missing declaration
+    // semicolon; an attribute's missing ')' or ']' instead retains its already-read arguments (#2332).
     bool resumed;
     // A parameter's missing or unknown type. A diagnostic-only view may recover it as int after proving the whole
     // enclosing declaration structurally complete, while preserving the original tokens and error.
     bool parameter_type;
-    // An attributed block declaration with no type. `argument` is its first GNU attribute; a diagnostic-only view
-    // keeps the declarator with implicit int, as Sema does, while the original missing-type error still rejects it.
+    // An attributed block declaration with no type. `argument` is its complete leading attribute prefix; a private
+    // view uses int to retain its expression checks. C23 keeps an invalid binding, and the original error rejects it.
     bool declaration_type;
+    // A misplaced C23 list after a block declaration's GNU prefix. Its arguments and following declaration remain
+    // structurally complete; the checker drops that list's attributes after reading its argument diagnostics.
+    // Also marks an unknown type after a block's attribute prefix, diagnosed before those attributes' type checks.
+    bool attribute_prefix;
     // A balanced malformed type-name tail is removed without inserting a declaration terminator.
     bool resume_delete;
     // A rejected call retains its callee, parentheses and arguments before/after the unread one in the diagnostic
@@ -804,6 +821,17 @@ struct ParseDiagnostic
     // A later declarator of an unknown type is never declared by clang. Its failed initializer discards the list
     // from its first comma, before the diagnostic's token. Zero keeps the ordinary [token, resume_end) range.
     uint32_t resume_begin;
+    // A suppress argument's diagnostic can precede the missing delimiter repaired at this token. Zero uses token.
+    uint32_t resume_at;
+    // A missing C23 attribute-list end needs one or two brackets. Zero keeps the ordinary single-token insertion.
+    uint8_t resume_closers;
+    // A C23 list that consumes the rest of a block still needs a statement, or a declaration's semicolon, at its
+    // original '}'. This is that ParseMessage, or zero. The private view supplies ';' and retains the error separately.
+    uint8_t resume_follow;
+    // The retained attribute reader republishes this diagnostic (a missing string or invalid escape), or a malformed
+    // GNU suppress leaves a declarator error before an unread C23 list. Argument names the owning suppress token;
+    // the driver's resumed stream omits the scaffold only after the reader reports its corresponding error.
+    bool resume_attribute;
     // A case's or default's missing `:` before a `;`, which clang's recovery reads as the label's empty statement
     // (check_prefix_resume puts a `:` before the `;` and parses the view again).
     bool resume_colon;
@@ -1244,11 +1272,15 @@ struct ParseScalar
     uint32_t error_follow_open;
     uint8_t error_message;
     uint8_t error_place;
-    // Whether the error is a missing `;` that clang's recovery reads past (ParseDiagnostic.resumed).
+    // Whether the error has a proven diagnostic-only continuation (ParseDiagnostic.resumed).
     bool error_resumed;
     bool error_resume_delete;
     uint32_t error_resume_end;
     uint32_t error_resume_begin;
+    uint32_t error_resume_at;
+    uint8_t error_resume_closers;
+    uint8_t error_resume_follow;
+    bool error_resume_attribute;
     // Whether the error is a case's or default's missing `:` before a `;` (ParseDiagnostic.resume_colon).
     bool error_resume_colon;
     // Whether the error is an expression statement's missing `;` after its first name (ParseDiagnostic.probe).
@@ -2697,6 +2729,7 @@ typedef enum ParseRecoveredType
 {
     PARSE_RECOVERED_TYPE_NONE,
     PARSE_RECOVERED_TYPE_UNKNOWN,
+    // A missing type after attributes: implicit int before C23, an invalid declaration's placeholder in C23.
     PARSE_RECOVERED_TYPE_IMPLICIT_INT,
 } ParseRecoveredType;
 

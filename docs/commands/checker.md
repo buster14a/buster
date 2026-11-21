@@ -178,15 +178,24 @@ unused-warning fixtures also check exact scope-completion tokens.
   `.cases` file records case number, expected exit status and whether the first
   error must be the string-literal error. `--label-attributes-only` runs these
   cases plus the existing label and unknown-attribute suites, including the
-  label execution controls. Attributed implicit-int declarations (#2332)
-  compare complete GNU99/GNU17 diagnostics on both readers and deferred checking
-  with one, two and three lanes; C23's unsupported cases retain a frozen baseline
-  stream instead of claiming Clang parity. Typed controls include GNU89/C23 and
+  label execution controls. Attributed declarations without a type (#2332)
+  compare complete GNU99/GNU17/C23 diagnostics on both readers and deferred checking
+  with one, two and three lanes. C23 invalid declarations retain their initializer
+  checks and the earlier binding in the same scope. The runtime
+  `attribute_declarations.cases` records case number, expected status and check
+  bits (1: Clang comparison, 2: parser boundary). Typed controls include GNU89/C23 and
   require an ELF object that links and runs. Invalid inputs preserve existing
   output or create none. Prefix/reparse contract checks also retain the complete
   meaning metadata and a separate mutable table for each reparse (#2748).
   `--attribute-recovery-only` runs the balanced string-list, mixed-label,
-  implicit-int-declaration and attribute-led-call fixtures together. The string
+  missing-type-declaration and attribute-led-call fixtures together. The runtime
+  `suppress_recovery.cases` adds mixed GNU/C23 lists, macro delimiter locations
+  and unmatched attribute delimiters. Each row names a source, its decimal case
+  count, and hexadecimal masks for accepted and executable cases. These cases
+  compare complete ordered diagnostics and status in GNU17/C23, both readers,
+  syntax/object modes, one/three deferred lanes, warning policies and a one-error
+  limit; rejected output is preserved and accepted statement effects execute.
+  The string
   lists include malformed string subscripts through parentheses and macros,
   repeated and split lists, valid adjacent-string controls and an assumption
   with a subscript. A malformed C23 suppress separator discards the remaining
@@ -196,7 +205,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   output, and accepted controls must produce an ELF object. Its `attribute-recovery-integration.c`
   combines their recovery paths in two functions, preserving the complete
   diagnostic order and later independent errors. The declaration portion runs
-  in C99–C17, the call portion before C23, and the label portion in every
+  in C99–C23, the call portion before C23, and the label portion in every
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
   `--malformed-calls-only` runs the ordinary balanced type-first call recovery

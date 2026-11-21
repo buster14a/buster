@@ -10233,6 +10233,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && attribute_recovery_only)
     {
         check_test_driver_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_suppress_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_label_order(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_attribute_calls(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_attribute_declarations(&test, clang, executable != NULL ? executable : "./build/compiler", directory);

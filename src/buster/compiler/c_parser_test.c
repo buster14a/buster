@@ -2530,6 +2530,8 @@ static void parse_test_handoff_stream(PPTokens* output, uint32_t count, uint64_t
         uint8_t kind = C_TOKEN_RAW_IDENTIFIER;
         uint32_t value = 0;
         uint8_t flags = (uint8_t)((r >> 8) % 4 == 0 ? BUSTER_PP_START_OF_LINE : 0) | (uint8_t)((r >> 10) % 2 == 0 ? BUSTER_PP_SPACE : 0);
+        // PP-only name flags must be cleared at the handoff, where their bits become private recovery markers.
+        flags |= (uint8_t)((r >> 11) % 2 == 0 ? BUSTER_PP_NAME_SPACE : 0) | (uint8_t)((r >> 12) % 2 == 0 ? BUSTER_PP_NAME_LINE : 0);
         uint32_t length = 1;
         if (pick < 8)
         {
@@ -2574,6 +2576,7 @@ static void parse_test_handoff_stream(PPTokens* output, uint32_t count, uint64_t
             output->values[i + j] = output->kinds[i + j] == C_TOKEN_RAW_IDENTIFIER ? 1 + (uint32_t)((t >> 8) % (BUSTER_PP_KEYWORD_TABLE + 8)) : 0;
             // A pragma's tokens never start a line; a '#' without PRAGMA_END ends where a token does.
             output->flags[i + j] = !pragma && last ? BUSTER_PP_START_OF_LINE : (uint8_t)((t >> 20) % 2 == 0 ? BUSTER_PP_SPACE : 0);
+            output->flags[i + j] |= (uint8_t)((t >> 21) % 2 == 0 ? BUSTER_PP_NAME_SPACE : 0) | (uint8_t)((t >> 22) % 2 == 0 ? BUSTER_PP_NAME_LINE : 0);
             j += 1;
         }
         i += j;
@@ -2631,7 +2634,7 @@ static void parse_test_handoff_oracle(const PPTokens* output, CLanguage language
             tokens->kinds[w] = kind == C_TOKEN_COLONCOLON ? PARSE_KIND_COLON : parse_kind;
             tokens->names[w] = kind == C_TOKEN_RAW_IDENTIFIER || is_keyword ? output->values[i] : 0;
             tokens->sources[w] = i;
-            tokens->flags[w] = output->flags[i];
+            tokens->flags[w] = output->flags[i] & BUSTER_PARSE_PP_FLAGS;
             w += 1;
             if (kind == C_TOKEN_COLONCOLON)
             {

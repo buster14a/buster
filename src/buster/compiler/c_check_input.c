@@ -4306,7 +4306,13 @@ static bool check_input_free_standing(const Parser* parser, uint32_t first, uint
         const uint8_t kind = parser->tokens.kinds[t];
         const uint8_t role = parser->tree.roles[t];
         uint32_t next = t + 1;
-        if (check_input_attribute_starts(parser, t, end))
+        if (parser->recovered_types != NULL && parser->recovered_types[t] == PARSE_RECOVERED_TYPE_UNKNOWN)
+        {
+            // Recovery may have removed an unknown type's unread declarator tail. It is still a failed declaration,
+            // whose attribute arguments were read; do not apply the GNU free-standing attribute shortcut to it.
+            reading = false;
+        }
+        else if (check_input_attribute_starts(parser, t, end))
         {
             next = check_input_skip_attributes(parser, t, end);
         }
@@ -7276,6 +7282,13 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
     }
     CheckInputAttributes parsed = { 0 };
     bool valid = check_input_attributes(reader, cursor, end, &parsed);
+    // A rejected mixed prefix's private tree leaves an operand, or a marked semicolon after deleting the failed
+    // declarator (#2332). Read its argument expressions, but leave an aligned value's semantic error for a subject
+    // that this declaration never gets.
+    const bool rejected_declaration = !reader->statement_attributes && reader->function_body < reader->parser->tokens.count &&
+                                      *cursor < end && (reader->parser->tree.roles[*cursor] == PARSE_ROLE_OPERAND ||
+                                                       (reader->parser->tokens.kinds[*cursor] == PARSE_KIND_SEMI &&
+                                                        (reader->parser->tokens.flags[*cursor] & BUSTER_PARSE_DROPPED_DECLARATOR) != 0));
     // (Whether an attribute was dropped for an undeclared name in its arguments, #2251.)
     bool names_dropped = false;
     for (uint32_t i = 0; valid && i < parsed.count; i += 1)
@@ -7334,7 +7347,8 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
         const bool deferring = attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
                                attribute->kind == CHECK_ATTRIBUTE_ASSUME_ALIGNED || attribute->kind == CHECK_ATTRIBUTE_ALLOC_SIZE ||
                                attribute->kind == CHECK_ATTRIBUTE_ALLOC_ALIGN || attribute->kind == CHECK_ATTRIBUTE_FORMAT ||
-                               attribute->kind == CHECK_ATTRIBUTE_ALIGNAS;
+                               attribute->kind == CHECK_ATTRIBUTE_ALIGNAS ||
+                               ((reader->statement_attributes || rejected_declaration) && attribute->kind == CHECK_ATTRIBUTE_ALIGNED);
         const bool tag_type = reader->tag_attributes && (attribute->kind == CHECK_ATTRIBUTE_REGPARM || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE);
         attribute->ignored |= tag_type;
         if (attribute->deferred != NULL)
@@ -11684,7 +11698,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         const uint8_t* const recovered_types = parser->recovered_types;
         for (uint32_t token = first; !invalid_specifiers && token < i && token < count; token += 1)
         {
-            invalid_specifiers = recovered_types[token] == PARSE_RECOVERED_TYPE_UNKNOWN;
+            invalid_specifiers = recovered_types[token] == PARSE_RECOVERED_TYPE_UNKNOWN ||
+                                 (parser->language.standard >= 2023 && recovered_types[token] == PARSE_RECOVERED_TYPE_IMPLICIT_INT);
         }
     }
     reader->specifier_free_standing = false;
@@ -11727,7 +11742,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         valid = check_input_attribute_subjects(reader, common_attributes, 0, 0, first, BUSTER_CHECK_NONE) &&
                 check_input_attribute_ignored_lists(reader, first, i, false, 0, i);
     }
-    if (declares_nothing && !attribute_only)
+    if (declares_nothing && !attribute_only && !invalid_specifiers)
     {
         const uint32_t inline_token = is_inline ? check_input_inline_token(parser, first, i) : BUSTER_CHECK_NONE;
         const uint32_t noreturn_token = check_input_noreturn_keyword(common_attributes);
@@ -11807,29 +11822,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     bool discarded = false;
     if (valid && common_attributes != NULL && common_attributes->suppress_tail)
     {
-        uint32_t end = i;
-        bool balanced = true;
-        while (balanced && end < count && parser->tokens.kinds[end] != PARSE_KIND_SEMI)
-        {
-            const uint8_t kind = parser->tokens.kinds[end];
-            if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE ||
-                (kind == PARSE_KIND_L_BRACE && parser->tree.roles[end] == PARSE_ROLE_OPEN_INITIALIZER))
-            {
-                const uint32_t close = parser->tree.parents[end];
-                balanced = close > end && close < count;
-                end = balanced ? close + 1 : end;
-            }
-            else
-            {
-                balanced = kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_R_PAREN && kind != PARSE_KIND_R_SQUARE;
-                end += balanced;
-            }
-        }
-        discarded = balanced && end < count;
-        if (discarded)
-        {
-            memset(reader->ignored + i, 1, end + 1 - i);
-        }
+        discarded = check_input_attribute_discard_tail(reader, i);
     }
     bool more = valid && !declares_nothing && !discarded;
     while (more && i < count)
@@ -11899,26 +11892,38 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             type = check_input_type_result(reader, type_aligned(reader->types, type, attributes->alignment_log2 - 1));
         }
         valid &= type != 0 && name != BUSTER_CHECK_NONE && i < count;
+        const bool missing_type = parser->recovered_types != NULL && parser->recovered_types[declaration_group] == PARSE_RECOVERED_TYPE_IMPLICIT_INT;
         // An initialized invalid object (#1447): clang checks its initializer no further (but for its undeclared names, which
         // its parser reports), so the reader skips it to the declarator's end, the object invalid. A function's, which is
         // clang's "illegal initializer", is reported and skipped too. A K&R definition's goes on, its
         // body checked as clang checks it.
-        const bool function_initialized = __builtin_expect(invalid, 0) && valid && !reader->declarator_identifier_list && i < count &&
+        const bool function_initialized = __builtin_expect(invalid || missing_type, 0) && valid && !reader->declarator_identifier_list && i < count &&
                                           parser->tokens.kinds[i] == PARSE_KIND_EQUAL && type != 0 && name < count &&
                                           type_kind(reader->types, type_strip_aligned(reader->types, type)) == BUSTER_TYPE_KIND_FUNCTION;
+        invalid |= function_initialized;
+        // Missing types still build the initializer expression in C23, and in a function declaration's illegal
+        // initializer in earlier modes. Binding removes only the conversion to the invalid placeholder type.
+        const bool retained_initializer = missing_type && !reader->declarator_invalid &&
+                                          (parser->language.standard >= 2023 || function_initialized);
         if (__builtin_expect(function_initialized, 0))
         {
             const uint32_t before = reader->output->report_count;
             check_input_report(reader, name, CHECK_INPUT_FUNCTION_INITIALIZER);
             if (reader->output->report_count == before + 1)
             {
-                // (After the declarator's own error, as clang finds it at the `=`.)
-                reader->output->reports[before].sort = i;
+                // A missing type still checks the expression before rejecting the function's initializer.
+                // The other invalid function declarators report at '=', before their skipped initializer.
+                uint32_t right = retained_initializer ? reader->first_child[i] : BUSTER_CHECK_NONE;
+                while (right != BUSTER_CHECK_NONE && right < i)
+                {
+                    right = reader->next_child[right];
+                }
+                reader->output->reports[before].sort = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i;
             }
             valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
         }
         const bool skipped_initializer = __builtin_expect(invalid, 0) && valid && !reader->declarator_identifier_list && i < count &&
-                                         parser->tokens.kinds[i] == PARSE_KIND_EQUAL && type != 0;
+                                         parser->tokens.kinds[i] == PARSE_KIND_EQUAL && type != 0 && !retained_initializer;
         if (__builtin_expect(skipped_initializer, 0))
         {
             uint32_t right = reader->first_child[i];
@@ -11933,7 +11938,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             }
             i = right != BUSTER_CHECK_NONE ? end : i;
         }
-        if (__builtin_expect(invalid, 0) && (!valid || check_input_has_initializer(parser, i)))
+        if (__builtin_expect(invalid, 0) && (!valid || (!retained_initializer && check_input_has_initializer(parser, i))))
         {
             check_input_recover_undo(reader, recovered_mark);
             valid = false;
@@ -12504,7 +12509,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                                                     check_input_attribute_gnu_inline(attributes) || check_input_attribute_gnu_inline(previous_attributes));
                 // A loader_uninitialized variable's declaration defines it, without an initializer (#147).
                 // A global register variable (#1846) defines no object, its initializer ignored as clang's is.
-                const bool defines = (((initialized || (function && kind == PARSE_KIND_L_BRACE)) && !gnu_inline_definition) ||
+                const bool defines = ((((initialized && !function) || (function && kind == PARSE_KIND_L_BRACE)) && !gnu_inline_definition) ||
                                       (!is_typedef && !function && !file && is_static) || loader != NULL) &&
                                      !global_register;
                 check_input_set_bit(reader->declaration_bits, name, BUSTER_CHECK_BITS_DEFINED, defines);
@@ -12630,7 +12635,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 if (initialized)
                 {
-                    valid &= !is_typedef && !function;
+                    valid &= !is_typedef && (!function || retained_initializer);
                     reader->initializers[i] = i + 1 < count && (parser->tokens.kinds[i + 1] == PARSE_KIND_L_BRACE || check_init_aggregate(reader->types, type)) ? 2 : 1;
                     reader->initializer_declarations[i] = name;
                     check_input_visit(reader, i, BUSTER_CHECK_RESOLVE_DECLARATION);
@@ -12992,6 +12997,21 @@ static void check_input_implicit_late_attributes(CheckInputReader* reader, uint3
     }
 }
 
+// An invalid declaration still checks its initializer expression, but never converts it to the recovered type.
+// Remove both the initializer action and its metadata; leaving either would make a later diagnostic view revive it.
+static void check_input_invalid_initializer(CheckInputReader* reader, uint32_t token, uint32_t point)
+{
+    if (point < reader->parser->tokens.count && reader->initializer_declarations[point] == token)
+    {
+        reader->initializers[point] = 0;
+        reader->initializer_declarations[point] = BUSTER_CHECK_NONE;
+        reader->query_types[point] = 0;
+        reader->ignored[point] = true;
+        check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, token, BUSTER_CHECK_NONE);
+        check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, token, BUSTER_CHECK_NONE);
+    }
+}
+
 static bool check_input_library_enabled(const BuiltinIntrinsicInfo* info, const PPOptions* options);
 
 // The reader keeps a composite type after binding. The warning compares written prototypes and still needs the
@@ -13232,15 +13252,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 check_input_invalid_declare(reader, token);
                 // Sema still builds the initializer's expression, but never converts it to an invalid declaration's
                 // type. Remove the initializer action and its output metadata together, keeping its operands' checks.
-                if (point < reader->parser->tokens.count && reader->initializer_declarations[point] == token)
-                {
-                    reader->initializers[point] = 0;
-                    reader->initializer_declarations[point] = BUSTER_CHECK_NONE;
-                    reader->query_types[point] = 0;
-                    reader->ignored[point] = true;
-                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, token, BUSTER_CHECK_NONE);
-                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, token, BUSTER_CHECK_NONE);
-                }
+                check_input_invalid_initializer(reader, token, point);
             }
             if (dropped && kind == C_BINDING_FUNCTION)
             {
@@ -13582,9 +13594,20 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     if (__builtin_expect(reader->output->invalid_declarations != NULL && reader->output->invalid_declarations[token] != 0, 0))
     {
         const uint32_t depth = reader->scope_count;
-        if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, (CBindingKind)reader->declaration_kinds[token], token, point, depth) == 0)
+        const Parser* parser = reader->parser;
+        const uint32_t specifiers = parser->recovered_types != NULL ? reader->declaration_specifiers[token] : 0;
+        const bool implicit = parser->recovered_types != NULL && parser->recovered_types[specifiers] == PARSE_RECOVERED_TYPE_IMPLICIT_INT;
+        const bool missing_type = parser->language.standard >= 2023 && implicit;
+        // Unlike pre-C23 implicit int, the missing type invalidates this declaration before redeclaration checks.
+        // A name already in this scope keeps its earlier binding; a new name is bound invalid and its uses stay quiet.
+        const bool previous = missing_type && old != 0 && reader->bindings.depth[old - 1] == depth;
+        if (!previous && c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, (CBindingKind)reader->declaration_kinds[token], token, point, depth) == 0)
         {
             reader->output->resource = true;
+        }
+        if (missing_type || (implicit && reader->declaration_kinds[token] == C_BINDING_FUNCTION))
+        {
+            check_input_invalid_initializer(reader, token, point);
         }
         // Its attributes are its own entity's still (#2362): a multiversioned function's later declaration of its version
         // redeclares it, its attributes checked against these.
