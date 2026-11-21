@@ -2087,6 +2087,12 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
                                check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier);
             if (taken)
             {
+                // The skipped actions have no child value chains. A surrounding statement expression can still
+                // visit their terminator, including one under a label. Publish the same empty heads as the walk.
+                for (uint32_t i = first; i <= end; i += 1)
+                {
+                    reader->first_value[tokens[i]] = BUSTER_CHECK_NONE;
+                }
                 cursor = end + 1;
             }
         }

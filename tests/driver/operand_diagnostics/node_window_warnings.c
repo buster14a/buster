@@ -114,3 +114,10 @@ int braced_after_write(void)
     int value = { ({ value = 2; value; }) };
     return value;
 }
+
+int labeled_statement_results(int parameter)
+{
+#define BUSTER_LABELED_RESULT(condition) ({ __label__ done; int x = 0; if (condition) goto done; x = 1; done: x; })
+    return BUSTER_LABELED_RESULT(parameter) + BUSTER_LABELED_RESULT(parameter > 1);
+#undef BUSTER_LABELED_RESULT
+}
