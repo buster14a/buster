@@ -9545,36 +9545,28 @@ static bool check_driver_code_temporary(const Link* link, uint32_t s)
            link->names.bytes[name][1] == 'L';
 }
 
-// The object of a unit's emitted code (`code`, its static data published and its sections placed: `sections`, one per
-// atom, or null), as -c writes it: its link checked, its temporaries (the jump tables' symbols and their labels', the
-// unit's own) left out, as clang's .L labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error
-// is OBJECT_ERROR_FULL where the link isn't valid or memory ran out before the build. check_driver_object writes it;
-// #1057's parity tests build their preparation's so, to compare it with -c's file byte for byte.
-static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch)
+// The symbols -c's object leaves out of a unit's emitted code (`code`), indexed by SymbolId, on `scratch`, or null for a
+// unit without them: its temporaries, the jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base),
+// which are the lowering's, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
+// relocations name their sections' symbols instead (ObjectOptions.temporary_symbols). So are the patchable function
+// entries' labels (#1447, CheckProgramCode.patchable_symbol_base), as clang's .Ltmp ones. And every local `.L` label in
+// code (#1845): the labels of asm templates assembled by their own statements and of naked functions and the
+// address-taken labels' `.Lbuster_label_N` (clang's `.Ltmp`), all places in a function's code, which an assembler never
+// keeps. False where the scratch arena can't hold them.
+static bool check_driver_temporaries(const CheckProgramCode* code, Arena* scratch, uint8_t** temporaries)
 {
-    ObjectUnits units = { 0 };
-    ObjectSymbols symbols = { 0 };
-    bool valid = link_check(&code->link) == LINK_ERROR_NONE && object_prepare(&units, &code->link, 1, scratch) && object_map_symbols(&symbols, &code->link, scratch);
-    // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
-    // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
-    // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols). So are the patchable function
-    // entries' labels (#1447, CheckProgramCode.patchable_symbol_base), as clang's .Ltmp ones.
-    // And every local `.L` label in code (#1845): the labels of asm templates assembled by their own statements and of
-    // naked functions and the address-taken labels' `.Lbuster_label_N` (clang's `.Ltmp`), all places in a function's
-    // code, which an assembler never keeps.
     const uint32_t switch_symbols = code->lowered.table_count + code->lowered.case_symbol_count;
     const Link* link = &code->link;
     bool coded = false;
-    for (uint32_t s = 1; valid && !coded && s < link->symbols.count; s += 1)
+    for (uint32_t s = 1; !coded && s < link->symbols.count; s += 1)
     {
         coded = check_driver_code_temporary(link, s) || check_driver_placeholder(link, s);
     }
-    const bool temporaries = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0 || coded;
-    uint8_t* temporary = valid && temporaries ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
-    valid = valid && (!temporaries || temporary != 0);
+    const bool temporaries_kept = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0 || coded;
+    uint8_t* temporary = temporaries_kept ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, link->symbols.count) : 0;
     if (temporary != 0)
     {
-        memset(temporary, 0, code->link.symbols.count);
+        memset(temporary, 0, link->symbols.count);
         memset(temporary + code->lowered.case_symbol_base, 1, switch_symbols);
         memset(temporary + code->patchable_symbol_base, 1, code->patchable_count);
         for (uint32_t s = 0; s < code->unit_temporary_count; s += 1)
@@ -9586,6 +9578,22 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
             temporary[s] |= check_driver_code_temporary(link, s) || check_driver_placeholder(link, s);
         }
     }
+    *temporaries = temporary;
+    return !temporaries_kept || temporary != 0;
+}
+
+// The object of a unit's emitted code (`code`, its static data published and its sections placed: `sections`, one per
+// atom, or null), as -c writes it: its link checked, its temporaries (check_driver_temporaries) left out, as clang's .L
+// labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error is OBJECT_ERROR_FULL where the link
+// isn't valid or memory ran out before the build. check_driver_object writes it; #1057's parity tests build their
+// preparation's so, to compare it with -c's file byte for byte.
+static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch)
+{
+    ObjectUnits units = { 0 };
+    ObjectSymbols symbols = { 0 };
+    uint8_t* temporary = 0;
+    const bool valid = link_check(&code->link) == LINK_ERROR_NONE && object_prepare(&units, &code->link, 1, scratch) && object_map_symbols(&symbols, &code->link, scratch) &&
+                       check_driver_temporaries(code, scratch, &temporary);
     Object result = { .error = OBJECT_ERROR_FULL };
     if (valid)
     {
@@ -9601,6 +9609,81 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
         result = object_build(&code->link, &units, &symbols, 0, options, source, scratch);
     }
     return result;
+}
+
+// The first named symbol of `atom` at its start, or 0: what a diagnostic about the atom names.
+static SymbolId check_driver_atom_symbol(const Link* link, AtomId atom)
+{
+    SymbolId result = 0;
+    for (SymbolId s = 1; atom != 0 && result == 0 && s < link->symbols.count; s += 1)
+    {
+        result = link->symbols.atom[s] == atom && link->symbols.value[s] == 0 && link->symbols.name[s] != 0 ? s : 0;
+    }
+    return result;
+}
+
+// -S's text of a unit's emitted code (#1362): the assembly sink's (assembly_output.c) over what -c's object is made of
+// (check_driver_object_build: the link, checked, its `sections` and its temporaries), pushed on `text`, named after
+// `source_path` and written to `output_path` ("-" for standard output), as -c writes its object. A unit with what the
+// sink doesn't print yet is an error that names it, and writes nothing.
+static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgram* program, ObjectAtomSection* sections, const char* source_path, const char* output_path,
+                                       Arena* text, Arena* scratch, FILE* errors)
+{
+    const CheckProgramAsms* asms = &code->lowered.asms;
+    const bool inline_assembly = asms->plan_count != 0 || asms->naked != 0 || asms->file_assembled || code->asm_atom_count != 0 || code->unit_atom_count != 0;
+    const bool multiversioned = program->cpu_group_count != 0 || program->target_group_count != 0;
+    const char* refusal = inline_assembly ? "inline assembly" : code->patchable_count != 0 ? "patchable function entries" :
+                          multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
+    uint8_t* temporary = 0;
+    const bool linked = refusal == 0 && link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
+    AssemblyResult printed = { .error = ASSEMBLY_FULL };
+    if (linked)
+    {
+        const AssemblyView view = {
+            .link = &code->link,
+            .code = code->assembly_code,
+            .code_count = code->assembly_code_count,
+            .sections = sections,
+            .section_count = sections != 0 ? code->link.atoms.count : 0,
+            .temporary = temporary,
+            .temporary_count = temporary != 0 ? code->link.symbols.count : 0,
+            .source_name = { .pointer = (char*)source_path, .length = strlen(source_path) },
+            .unit = 0,
+        };
+        printed = assembly_print(&view, text, scratch);
+    }
+    bool valid = printed.error == ASSEMBLY_OK;
+    if (refusal != 0)
+    {
+        fprintf(errors, "%s: error: -S doesn't print %s yet\n", source_path, refusal);
+    }
+    else if (printed.error == ASSEMBLY_UNSUPPORTED || printed.error == ASSEMBLY_INVALID)
+    {
+        // The sink's reason, with the function or object it stopped at.
+        const SymbolId symbol = printed.symbol != 0 ? printed.symbol : check_driver_atom_symbol(&code->link, printed.atom);
+        const NameId name = symbol != 0 ? code->link.symbols.name[symbol] : 0;
+        const bool invalid = printed.error == ASSEMBLY_INVALID;
+        fprintf(errors, "%s: %s: -S %s %s%s%s%.*s%s\n", source_path, invalid ? "internal compiler error" : "error", invalid ? "found" : "doesn't print", printed.reason,
+                invalid ? "" : " yet", name != 0 ? " (in '" : "", name != 0 ? (int)code->link.names.length[name] : 0,
+                name != 0 ? (const char*)code->link.names.bytes[name] : "", name != 0 ? "')" : "");
+    }
+    else if (!valid)
+    {
+        fprintf(errors, "fatal error: can't print the unit's assembly: %s\n", linked ? "no memory" : "its link isn't valid");
+    }
+    if (valid && strcmp(output_path, "-") == 0)
+    {
+        valid = fwrite(printed.bytes, 1, printed.length, stdout) == printed.length && fflush(stdout) == 0;
+    }
+    else if (valid)
+    {
+        valid = object_write_file(output_path, printed.bytes, printed.length) == OBJECT_ERROR_NONE;
+    }
+    if (!valid && printed.error == ASSEMBLY_OK)
+    {
+        fprintf(errors, "error: could not write assembly file %s\n", output_path);
+    }
+    return valid;
 }
 
 // One census's verdict for --selection-census (check_driver_selection_census): "same-references" where every body's
@@ -10330,6 +10413,12 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
             fprintf(errors, "fatal error: can't keep the unit's link: no memory\n");
             *fatal = true;
         }
+    }
+    else if (valid && lanes != NULL && lanes->assembly)
+    {
+        // -S (#1362): the unit's assembly where -c writes its object, its text on the emission's output arena.
+        valid = check_driver_assembly_text(&code, program, sections, source_path, output_path, &state->output, scratch, errors);
+        check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
     }
     else if (valid)
     {
@@ -11248,7 +11337,9 @@ static uint32_t check_driver_address_lanes(uint32_t cpus)
     return result;
 }
 
-static const char* check_driver_object_name(Arena* arena, const char* source)
+// The output -c (".o") or -S (".s") names for a source without -o: its base name with `extension` for its suffix, in the
+// current directory, as clang names it.
+static const char* check_driver_object_name(Arena* arena, const char* source, const char* extension)
 {
     const char* slash = strrchr(source, '/');
     const char* name = slash != 0 ? slash + 1 : source;
@@ -11258,7 +11349,7 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
     if (result != 0)
     {
         memcpy(result, name, length);
-        memcpy(result + length, ".o", 3);
+        memcpy(result + length, extension, 3);
     }
     return result;
 }
@@ -11393,6 +11484,8 @@ struct CheckDriverCommand
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
+    // -S (#1362): emit_object's compile, which writes each unit's assembly (assembly_output.c) where -c writes its object.
+    bool assembly;
     RuntimeKind runtime_kind;
     // -g's source rows, with -c or a link, and the functions' unwind tables.
     bool source_rows;
@@ -13600,7 +13693,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                         if (selection && result == 0)
                         {
-                            const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
+                            const char* object_path = output != 0 ? output : check_driver_object_name(arena, path, command->assembly ? ".s" : ".o");
                             if (served)
                             {
                                 windowed = object_path == 0;
@@ -14110,6 +14203,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
+    bool emit_assembly = false;
     RuntimeKind runtime_kind = RUNTIME_KIND_DYNAMIC;
     // The link kind's options (#1503), which decide runtime_kind after the loop as clang's driver decides it (its
     // getStaticPIE, getStatic and getPIE): -static-pie over -static, either over -pie and -no-pie whatever their order,
@@ -14614,6 +14708,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             emit_object = true;
         }
+        else if (match.exact == C_OPTION_S)
+        {
+            emit_assembly = true;
+        }
         else if (match.exact == C_OPTION_FSYNTAX_ONLY)
         {
             syntax_only = true;
@@ -14648,8 +14746,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             }
         }
     }
-    // Syntax-only takes precedence over -c, whichever came first.
-    emit_object = emit_object && !syntax_only;
+    // Syntax-only takes precedence over -S, and -S over -c, whichever came first, as clang's phases do: the earliest stops.
+    emit_assembly = emit_assembly && !syntax_only;
+    emit_object = (emit_object || emit_assembly) && !syntax_only;
+    lanes->assembly = emit_assembly;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     // Non-linking actions consume the transport but do not invoke a linker, as -c and -E do in a system driver.
@@ -14827,6 +14927,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .units_memory = units_memory,
         .emit_object = emit_object,
         .link = link,
+        .assembly = emit_assembly,
         .runtime_kind = runtime_kind,
         .source_rows = source_rows,
         .unwind_tables = unwind_tables,
@@ -14891,7 +14992,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c | -S] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
@@ -14910,6 +15011,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             arena_report_failure(stderr, "named-library arguments", (uint64_t)(count + 1) * sizeof(String8));
         }
+    }
+    else if (emit_assembly && (source_rows || mixed_inputs))
+    {
+        // What -S doesn't print yet (#1362's later stages), before any source is read.
+        fprintf(stderr, "error: -S %s\n", source_rows ? "doesn't print debug information yet (-g)" : "takes C sources alone, without assembly or linker inputs");
     }
     else if (invalid_tier1)
     {
