@@ -10861,7 +10861,7 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
                          role == PARSE_ROLE_SPECIFIER && check_input_typedef_declared(reader, declared) && reader->declaration_starts != NULL;
     if (delayed)
     {
-        const uint32_t first = reader->declaration_starts[t];
+        const uint32_t first = check_input_declaration_start_at(reader->declaration_starts, t);
         if (pass->delayed_first != first)
         {
             pass->delayed_first = first;
