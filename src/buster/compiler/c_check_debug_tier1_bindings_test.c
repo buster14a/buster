@@ -73,6 +73,46 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
     }
 }
 
+// A cursor can move across many repeated boundaries in either direction. The pending list keeps the first
+// boundary for each local and keeps an already pending local at its original position.
+static void check_debug_tier1_region_changes(CheckDebugTestTally* tally)
+{
+    const uint8_t locals[] = {
+        5, 5, 1, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 3,
+        4, 6, 2, 2, 6, 2, 6, 2, 6, 2, 6, 2, 6, 2, 3, 7, 8, 7, 9,
+    };
+    uint32_t last[10] = { 0 };
+    uint64_t events[BUSTER_ARRAY_LENGTH(locals)];
+    uint32_t previous[BUSTER_ARRAY_LENGTH(locals)];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(locals); i += 1)
+    {
+        events[i] = ((uint64_t)(i + 1) << 32) | locals[i];
+        previous[i] = last[locals[i]];
+        last[locals[i]] = i + 1;
+    }
+    const CheckTier1DebugValues proof = { .region_events = events, .region_previous = previous };
+    const uint32_t expected[] = { 4, 5, 1, 2, 3, 6, 7, 8, 9 };
+    for (uint32_t direction = 0; direction < 2; direction += 1)
+    {
+        uint8_t queued[10] = { 0 };
+        uint32_t changed[10] = { 0 };
+        CheckTier1DebugValueLive live = { .local_queued = queued, .changed_locals = changed };
+        check_tier1_debug_local_changed(&live, 4);
+        const uint32_t end = BUSTER_ARRAY_LENGTH(locals);
+        check_tier1_debug_region_changes(&proof, &live, direction ? end : 1, direction ? 1 : end);
+        check_tier1_debug_region_changes(&proof, &live, 16, 16);
+        check_debug_test_expect(tally, live.local_count == BUSTER_ARRAY_LENGTH(expected) && memcmp(changed, expected, sizeof(expected)) == 0,
+                                "crossing two vector boundaries queues each local in stable order", direction ? "backward cursor" : "forward cursor");
+    }
+    uint8_t queued[10] = { 0 };
+    uint32_t changed[10] = { 0 };
+    CheckTier1DebugValueLive live = { .local_queued = queued, .changed_locals = changed };
+    const uint32_t middle[] = { 4, 6, 2, 3, 7, 8 };
+    check_tier1_debug_region_changes(&proof, &live, 16, 33);
+    check_debug_test_expect(tally, live.local_count == BUSTER_ARRAY_LENGTH(middle) && memcmp(changed, middle, sizeof(middle)) == 0,
+                            "a preceding boundary outside this interval still queues its local", "unaligned start and one trailing event");
+}
+
 // The static CFG meet alone can hide a stale-iteration bug by discarding a first-trip-absent row. Walk the concrete
 // backedge twice too: the same static phi/definition IDs have new dynamic values, while their old private spills
 // still contain the preceding iteration's bytes. All observed source PCs stay inside the same witnessed region.
@@ -367,6 +407,7 @@ static void check_debug_tier1_values_bindings(CheckDebugTestTally* tally)
     emitted.debug_definitions = NULL;
     check_debug_tier1_values_binding_case(tally, &function, &ir, &emitted, NULL, sequence_entries, sequence_safe, 8, absent,
                                          "without a checked later RHS, old source origins cannot justify stale assignment ranges");
+    check_debug_tier1_region_changes(tally);
     check_debug_tier1_values_fresh(tally);
     check_debug_tier1_values_float_call(tally);
 }

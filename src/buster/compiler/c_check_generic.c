@@ -82,28 +82,11 @@ static bool check_generic_initialize(CheckInputReader* reader, CheckGenericSet* 
     return valid;
 }
 
-static uint32_t check_generic_masks(const TypeId* keys, TypeId key, bool scalar)
+static uint32_t check_generic_masks(const TypeId* keys, TypeId key)
 {
-    (void)scalar;
-
-    uint32_t matches = 0;
-    uint32_t empty = 0;
-    if (BUSTER_SCALAR_PATH(scalar))
-    {
-        // Keep --scalar an independent executable oracle; Clang otherwise folds both branches into the same masks.
-        #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
-        for (uint32_t lane = 0; lane < BUSTER_CHECK_GENERIC_GROUP; lane += 1)
-        {
-            matches |= (uint32_t)(keys[lane] == key) << lane;
-            empty |= (uint32_t)(keys[lane] == 0) << lane;
-        }
-    }
-    else
-    {
-        const __m512i block = _mm512_loadu_si512(keys);
-        matches = _mm512_cmpeq_epi32_mask(block, _mm512_set1_epi32((int)key));
-        empty = _mm512_cmpeq_epi32_mask(block, _mm512_setzero_si512());
-    }
+    const __m512i block = _mm512_loadu_si512(keys);
+    const uint32_t matches = _mm512_cmpeq_epi32_mask(block, _mm512_set1_epi32((int)key));
+    const uint32_t empty = _mm512_cmpeq_epi32_mask(block, _mm512_setzero_si512());
     return matches | (empty << BUSTER_CHECK_GENERIC_GROUP);
 }
 
@@ -154,7 +137,7 @@ static bool check_generic_association(CheckInputReader* reader, CheckGenericSet*
     *matches = false;
     while (valid && !inserted)
     {
-        const uint32_t masks = check_generic_masks(set->keys + group, key, BUSTER_SCALAR_PATH(reader->parser->options.scalar));
+        const uint32_t masks = check_generic_masks(set->keys + group, key);
         uint32_t candidates = masks & UINT16_MAX;
         const uint32_t empty = masks >> BUSTER_CHECK_GENERIC_GROUP;
         while (valid && candidates != 0)

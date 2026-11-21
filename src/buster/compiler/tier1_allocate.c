@@ -80,7 +80,8 @@ struct Tier1AllocationInput
     // every successor of a dispatch loop's join does from the first, which no value's last register says. With
     // BUSTER_TIER1_ALLOCATE_HINT_EXIT, the named interval ends at or before this one starts, and its register at its end
     // is the one (#2553): a block's entry takes its values' places at the exit of a block that dominates it, and a phi
-    // its operand's at a predecessor's.
+    // its operand's at a predecessor's. An interval hinted to its own value that names another value's recipe takes only
+    // a register there: a recipe without one was recomputed, and the interval follows its own value instead (#2834).
     const uint32_t* hint_intervals;
     // Optional, with hint_intervals: per interval, an interval of its class starting before it, whose register at its
     // start the interval takes at its own start before its other hints, where that interval's value still holds it last
@@ -303,7 +304,14 @@ static uint8_t tier1_allocation_valued_hint(const Tier1AllocationInput* columns,
     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
     // after its body takes the register the body gave its phi, not its operand's.
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
-    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED;
+    // An interval hinted to its own value that names another value's recipe (tier1_cfg_body_hints, #2834) takes the
+    // recipe's register only: a recipe without one there was recomputed, not stored, and its place says nothing of this
+    // value's slot. A phi of sqlite3RunParser's loop, named to the constant that enters it, rested in its slot through
+    // the loop and its back edge stored it there on every token.
+    const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+    const bool borrowed = named != UINT32_MAX && value == columns->values[interval] && columns->values[earlier] != value;
+    const bool recomputed = borrowed && opening >= 32 && tier1_allocation_spill_kind(columns, earlier) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED && !recomputed;
     return named_place ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
 }
 

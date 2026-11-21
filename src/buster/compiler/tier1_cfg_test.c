@@ -2402,6 +2402,139 @@ static void tier1_cfg_test_body_hints(Tier1CfgTestTally* tally, Arena* output, A
     arena_pop_to(output, saved);
 }
 
+// #2834's fixture, tests/driver/tier1_patterns.c's patterns_gsub in small: 0 -> 5, 1 -> 3, 2 -> 3, 7 -> 3, 3 -> 5,
+// 3 -> 4, 5 -> 6, 6 -> 1, 6 -> 8, 8 -> 2, 8 -> 7. The header 5 takes n = phi(s, j) and l = phi(t, k) from the entry 0,
+// which defines s and t, and from the latch 3, where j = phi(n, n, m) and k = phi(l, l, e) join the paths 1 for a
+// character, 2 for a failed match and 7 for a match. 6 defines e, which 8 tests against l; 7 defines m = n + 1 and reads
+// e; 1 defines a character; 8 defines y, which 2 reads. n's and l's ranges in 1 and in 2 are laid out before their
+// header, without an anchor or a sibling: the chain of their phis' hints at 5 leads to j's and k's at 3, laid out after
+// them, whose chosen predecessor is 2, so that it names no other value's range before them (tier1_cfg_body_hints' first
+// loop). Their first ranges, in 1, took the lowest free registers, crossed against s's and t's, and the edge into the
+// loop swapped the two through the scratch register. Each now takes its operand's register at the entry's exit, and
+// neither moves on any edge. Their ranges in 2 keep their values' own places from 1 rather than name the entry's
+// (sqlite3VdbeExec's handlers).
+static void tier1_cfg_test_latch_chain(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 9;
+    const uint32_t instructions[] = { 2, 1, 1, 1, 1, 1, 1, 1, 2 };
+    for (uint32_t b = 0; b < builder.block_count; b += 1)
+    {
+        builder.instructions[b] = instructions[b];
+    }
+    builder.registers[0] = 0x000f;
+    builder.scratch[0] = 11;
+    const uint32_t edges[][2] = {
+        { 0, 5 },
+        { 1, 3 },
+        { 2, 3 },
+        { 7, 3 },
+        { 3, 5 },
+        { 3, 4 },
+        { 5, 6 },
+        { 6, 1 },
+        { 6, 8 },
+        { 8, 2 },
+        { 8, 7 },
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(edges); k += 1)
+    {
+        tier1_cfg_test_edge(&builder, edges[k][0], edges[k][1]);
+    }
+    const uint32_t s = tier1_cfg_test_value(&builder, 0, 0, 0, 0x000f);
+    const uint32_t t = tier1_cfg_test_value(&builder, 0, 1, 0, 0x000f);
+    const uint32_t x = tier1_cfg_test_value(&builder, 1, 0, 0, 0x000f);
+    const uint32_t e = tier1_cfg_test_value(&builder, 6, 0, 0, 0x000f);
+    const uint32_t m = tier1_cfg_test_value(&builder, 7, 0, 0, 0x000f);
+    tier1_cfg_test_definition_use(&builder, s);
+    tier1_cfg_test_definition_use(&builder, t);
+    tier1_cfg_test_definition_use(&builder, x);
+    tier1_cfg_test_definition_use(&builder, e);
+    tier1_cfg_test_definition_use(&builder, m);
+    // Block 3's predecessors are 1, 2 and 7, block 5's 0 and 3, in the edges' order; n and l follow j and k.
+    const uint32_t n = builder.value_count + 2;
+    const uint32_t l = builder.value_count + 3;
+    const uint32_t join_n[] = {
+        n,
+        n,
+        m,
+    };
+    const uint32_t j = tier1_cfg_test_phi(&builder, 3, 0, join_n);
+    const uint32_t join_l[] = {
+        l,
+        l,
+        e,
+    };
+    const uint32_t k = tier1_cfg_test_phi(&builder, 3, 0, join_l);
+    const uint32_t header_n[] = {
+        s,
+        j,
+    };
+    const uint32_t header_l[] = {
+        t,
+        k,
+    };
+    const bool numbered = tier1_cfg_test_phi(&builder, 5, 0, header_n) == n && tier1_cfg_test_phi(&builder, 5, 0, header_l) == l;
+    tier1_cfg_test_expect(tally, numbered, "a latch between a loop's body and its header: phis numbered");
+    // y after the phis: its range in 2 starts with theirs and, unhinted, takes what they leave.
+    const uint32_t y = tier1_cfg_test_value(&builder, 8, 1, 0, 0x000f);
+    tier1_cfg_test_definition_use(&builder, y);
+    tier1_cfg_test_use(&builder, n, 5, 0, true);
+    tier1_cfg_test_use(&builder, l, 8, 0, true);
+    tier1_cfg_test_use(&builder, e, 8, 0, true);
+    tier1_cfg_test_use(&builder, e, 7, 0, true);
+    tier1_cfg_test_use(&builder, n, 7, 0, true);
+    tier1_cfg_test_use(&builder, y, 2, 0, true);
+    tier1_cfg_test_use(&builder, j, 4, 0, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input;
+    const bool built = numbered && tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "a latch between a loop's body and its header: built");
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "a latch between a loop's body and its header: allocated");
+        // The edges n and l take into the loop and around its paths that leave them as they are; 7 -> 3 moves m and
+        // 8 -> 2 y.
+        const uint32_t quiet_edges[][2] = {
+            { 0, 5 },
+            { 6, 1 },
+            { 1, 3 },
+            { 2, 3 },
+            { 3, 5 },
+        };
+        uint32_t moved = 0;
+        for (uint32_t edge = 0; allocated && edge < BUSTER_ARRAY_LENGTH(quiet_edges); edge += 1)
+        {
+            moved += tier1_cfg_test_edge_moves(&input, &result, quiet_edges[edge][0], quiet_edges[edge][1]);
+        }
+        tier1_cfg_test_expect(tally, allocated && moved == 0, "a loop's body before its latch takes its entry's registers: n and l move on no edge");
+        // n's and l's ranges in 2, their second in layout, name no other value's range.
+        uint32_t later_ranges = 0;
+        bool kept = allocated;
+        for (uint32_t i = 0; allocated && i < result.intervals.count; i += 1)
+        {
+            const uint32_t value = result.intervals.values[i];
+            const uint32_t named = result.intervals.hint_intervals[i];
+            const bool later = (value == n || value == l) && result.intervals.starts[i] >= input.block_starts[2] && result.intervals.starts[i] < input.block_starts[3];
+            kept = kept && (!later || named == UINT32_MAX || result.intervals.values[named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT] == value);
+            later_ranges += later;
+        }
+        tier1_cfg_test_expect(tally, kept && later_ranges == 2, "a loop's body's later ranges keep their values' own places, not the entry's");
+        arena_pop_to(output, mark);
+    }
+    if (built)
+    {
+        tier1_cfg_test_case(tally, &input, output, scratch, "a latch between a loop's body and its header", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
 // The registers a call reads its arguments in (#2646, Tier1CfgInput.use_registers). Block 0 defines p (a recipe), w and,
 // with `held`, q, then a, b and v; a call at its instruction 3 reads a in r4, b in r0, which p holds until its use at
 // instruction 5, and w in r4, though w lives on into block 1; block 1, whose phi of p keeps it from continuing block 0's
@@ -2950,6 +3083,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_undefined(&tally, &output, &scratch);
             tier1_cfg_test_dominance(&tally, &output, &scratch);
             tier1_cfg_test_body_hints(&tally, &output, &scratch);
+            tier1_cfg_test_latch_chain(&tally, &output, &scratch);
             tier1_cfg_test_local_phis(&tally, &output, &scratch);
             tier1_cfg_test_dispatch_entry(&tally, &output, &scratch);
             tier1_cfg_test_use_registers(&tally, &output, &scratch, false);

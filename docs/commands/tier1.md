@@ -365,11 +365,21 @@ In #2745's objects that a 64-byte vector's value initializes whole (a struct's,
 a union's, a compound literal's, and a union's other member read back), no
 store of a zero immediate may be left; a volatile object and a union whose
 designator moves to another member after the vector's keep their eight. In
+#2922's selects of floating `==` and `!=` (one of each, a loop's sum of them
+and a running last match), a `cmov` of the parity flag and no `setcc` must be
+left, and in a conditional scale by `==` (`c = p[i] == t ? c * 3 : c + 1`),
+whose accumulator recurs through the select's values by an operation, the truth
+value's `setcc`s and no parity `cmov`. In #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be
+stored back into the memory the instruction before loaded it from:
 #2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
-into the memory the instruction before loaded it from. #2870's
+into the memory the instruction before loaded it from. In #2843's conditional
+sums, `s += p[i] > 0 ? p[i] : 1` over an `int`, an `unsigned` and an
+`unsigned short` array, whose select reads the load's register for its
+extension, each must have a cmov and no register moved into another. #2870's
 `patterns_sector`, SQLite's `pagerWriteLargeSector` cut down, leaves out a
 store into a slot two blocks after its reload, which the code's certificate
 must prove from the run's entries:
+
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"
@@ -435,7 +445,14 @@ GOT and thread-pointer references resolved by the test, the comparisons'
 addends covering their immediates. Its repeated-access fixture (#2601) has the
 lowering's three symbol addresses and index extensions for three indexed
 accesses of one table in one block: every access reads the first of each, by
-both paths, and the code has one `lea` and runs natively. `tests/driver/tier1_symbols.c` is the
+both paths, and the code has one `lea` and runs natively; with the index's
+sign extensions, which the parameter's signed storage holds, every access
+reads the parameter itself (#2843). `tier1_extension_test.c` loads a byte, a
+word or a doubleword with two uses, a comparison and an extension to I64
+that a select reads, in one block and across a branch, by both paths: the
+select reads the load wherever its storage holds the extension, a word's
+sign extension stays its own, and a load the extension alone reads is its
+`movsx`'s operand; each runs natively against its oracle. `tests/driver/tier1_symbols.c` is the
 standalone native regression, run by `tools/ci/correctness.tests`: every
 width's loads, stores, comparisons with an immediate after the displacement
 field and branches on them, the operations that take a memory operand,

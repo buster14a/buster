@@ -746,8 +746,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; with
 // check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); with
 // check_corpus_deferred_late_first, its first lane starts once every other lane has taken (CheckDeferred.late_first);
-// with check_corpus_deferred_scalar_merge, its merge finds the columns' entries by its scalar twin
-// (CheckDeferred.scalar_merge); with check_corpus_deferred_base_page_tokens, a unit of that many tokens or more is large
+// with check_corpus_deferred_base_page_tokens, a unit of that many tokens or more is large
 // (CheckDeferred.base_page_tokens);
 // and with check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests
 // may also supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team. With
@@ -764,7 +763,6 @@ static bool check_corpus_deferred_fail_expressions;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_late_first;
-static bool check_corpus_deferred_scalar_merge;
 static uint32_t check_corpus_deferred_base_page_tokens;
 static bool check_corpus_deferred_timing;
 static const uint32_t* check_corpus_deferred_cpus;
@@ -923,7 +921,6 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                         .fail_after_expressions = check_corpus_deferred_fail_expressions,
                         .hold_lanes = check_corpus_deferred_hold_lanes,
                         .late_first = check_corpus_deferred_late_first,
-                        .scalar_merge = check_corpus_deferred_scalar_merge,
                         .base_page_tokens = check_corpus_deferred_base_page_tokens,
                         .timing = check_corpus_deferred_timing,
                         .cpus = check_corpus_deferred_cpus,

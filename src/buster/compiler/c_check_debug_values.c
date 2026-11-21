@@ -95,6 +95,14 @@ static const uint8_t check_debug_value_abbreviations[] = {
     0,
 };
 
+// The half-open interval of machine spans that may belong to an inline instance or its descendants.
+typedef struct CheckDebugInlineSpans CheckDebugInlineSpans;
+struct CheckDebugInlineSpans
+{
+    uint32_t first;
+    uint32_t end;
+};
+
 typedef struct CheckDebugValues CheckDebugValues;
 struct CheckDebugValues
 {
@@ -158,6 +166,7 @@ struct CheckDebugValues
     uint32_t* address_indices;
     uint32_t* inline_open;
     uint64_t* inline_order;
+    CheckDebugInlineSpans* inline_spans;
 };
 
 static String8 check_debug_name(const CheckDebugValues* values, uint32_t identifier)
@@ -851,17 +860,48 @@ static uint32_t check_debug_inline_end(const CheckDebugBody* source, uint32_t k)
     return end;
 }
 
+// A span names its innermost instance. Extend the first and last span of each parent in reverse instance
+// order: children follow their parent. A function span or another instance can still break the range inside
+// these bounds; the list writer checks each span there. An instance can have code only in its children.
+static void check_debug_inline_span_bounds(const CheckDebugBody* source, CheckDebugInlineSpans* bounds)
+{
+    for (uint32_t i = 0; i < source->inline_count; i += 1)
+    {
+        bounds[i] = (CheckDebugInlineSpans){ .first = source->span_count };
+    }
+    for (uint32_t s = 0; s < source->span_count; s += 1)
+    {
+        const uint32_t id = source->spans[s].inline_instance;
+        if (id != 0 && id <= source->inline_count)
+        {
+            CheckDebugInlineSpans* instance = &bounds[id - 1];
+            instance->first = s < instance->first ? s : instance->first;
+            instance->end = s + 1;
+        }
+    }
+    for (uint32_t i = source->inline_count; i != 0; i -= 1)
+    {
+        const uint32_t parent = source->inlines[i - 1].parent;
+        if (parent < i - 1)
+        {
+            const CheckDebugInlineSpans child = bounds[i - 1];
+            bounds[parent].first = child.first < bounds[parent].first ? child.first : bounds[parent].first;
+            bounds[parent].end = child.end > bounds[parent].end ? child.end : bounds[parent].end;
+        }
+    }
+}
+
 // The range list of instance subtree [first, end) in body `source`, whose .debug_addr entry is `address`: its spans
 // (CheckDebugValueSpan.inline_instance) with adjacent ones coalesced. A subtree without a pair writes no bytes.
-static uint32_t check_debug_inline_ranges(const CheckDebugBody* source, DebugWriter* out, uint32_t address, uint32_t first, uint32_t end)
+static uint32_t check_debug_inline_ranges(const CheckDebugBody* source, DebugWriter* out, uint32_t address, uint32_t first, uint32_t end, CheckDebugInlineSpans spans)
 {
     uint32_t pairs = 0;
     uint32_t begin = 0;
     uint32_t stop = 0;
-    for (uint32_t s = 0; s <= source->span_count; s += 1)
+    for (uint32_t s = spans.first; s <= spans.end; s += 1)
     {
-        const CheckDebugValueSpan span = s < source->span_count ? source->spans[s] : (CheckDebugValueSpan){ 0 };
-        const bool keep = s < source->span_count && span.inline_instance > first && span.inline_instance <= end;
+        const CheckDebugValueSpan span = s < spans.end ? source->spans[s] : (CheckDebugValueSpan){ 0 };
+        const bool keep = s < spans.end && span.inline_instance > first && span.inline_instance <= end;
         if (begin < stop && (!keep || span.begin != stop))
         {
             if (pairs == 0)
@@ -974,7 +1014,8 @@ static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, ui
         const uint32_t subtree = check_debug_inline_end(source, j);
         // A list without spans writes nothing. Save its start so the DIE can refer to the list after writing it.
         const uint64_t range_offset = values->ranges.size;
-        const bool spanned = placed && instance.described && check_debug_inline_ranges(source, &values->ranges, values->address_indices[body], j, subtree) != 0;
+        const CheckDebugInlineSpans spans = values->inline_spans != NULL && source->inline_count > 1 ? values->inline_spans[j] : (CheckDebugInlineSpans){ .end = source->span_count };
+        const bool spanned = placed && instance.described && check_debug_inline_ranges(source, &values->ranges, values->address_indices[body], j, subtree, spans) != 0;
         if (spanned)
         {
             debug_uleb(&values->info, CHECK_DEBUG_INLINED);
@@ -1266,6 +1307,10 @@ static void check_debug_values_write(CheckDebugValues* values)
                     values->inline_order[ordered++] = (uint64_t)source->inlines[k].call_token << 32 | k;
                 }
             }
+            if (ordered != 0 && source->inline_count > 1 && values->inline_spans != NULL)
+            {
+                check_debug_inline_span_bounds(source, values->inline_spans);
+            }
             qsort(values->inline_order, ordered, sizeof(uint64_t), check_debug_inline_compare);
             uint32_t next_inline = 0;
             while (next_inline < ordered && (uint32_t)(values->inline_order[next_inline] >> 32) <= body.opening)
@@ -1410,6 +1455,9 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
                  values.parameter_dies != NULL && values.inline_open != NULL && values.inline_order != NULL;
     if (valid)
     {
+        // A lone instance visits the spans only once. Without room for the optional index, the same writer
+        // starts at the first span of the function and ends at the last.
+        values.inline_spans = most_inlines > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugInlineSpans, most_inlines) : NULL;
         memset(values.type_offsets, 0, room * sizeof(uint32_t));
         memset(values.enum_definitions, 0, (uint64_t)table->types.count * sizeof(uint32_t));
         // (The roots' scan takes the local ids and the scopes for its starts and its worklist, before either is used.)
