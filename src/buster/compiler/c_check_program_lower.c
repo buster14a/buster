@@ -7025,7 +7025,13 @@ static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
     CheckLowerAbi* abi = writer->abi;
     // The statement's node, or its conversion (to void) or cast of the call.
     const uint32_t root = writer->statement;
-    const bool alone = node == root || (root < graph->count && (graph->ops[root] == CHECK_OP_CONVERT || graph->ops[root] == CHECK_OP_CAST) && graph->operand0[root] == node);
+    const CheckInput* input = writer->program->input;
+    // A retained root is itself the operand of the statement's implicit void cast. If that root
+    // is an explicit cast, its child call is two conversions away from the original statement.
+    const bool retained = root < graph->count && input->discard_roots != NULL &&
+                          (input->discard_roots[root / 64] & (UINT64_C(1) << (root % 64))) != 0;
+    const bool alone = node == root || (!retained && root < graph->count && (graph->ops[root] == CHECK_OP_CONVERT || graph->ops[root] == CHECK_OP_CAST) &&
+                                       graph->operand0[root] == node);
     if (!alone && !writer->track)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);

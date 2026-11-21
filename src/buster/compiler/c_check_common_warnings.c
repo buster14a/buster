@@ -4658,8 +4658,10 @@ static inline __attribute__((always_inline)) void check_common_root_frames(Check
     const uint8_t* evaluated = emission->evaluated;
     uint8_t* emitted = emission->emitted;
     const uint32_t expr = check_common_discarded(parser, graph, node);
-    const CheckOp expr_op = expr != node && expr < graph->count && parents[node] == BUSTER_CHECK_NONE &&
-                            stream->diagnostics[node] == CHECK_DIAG_NONE ? graph->ops[expr] : CHECK_OP_COUNT;
+    const bool clean_root = expr < graph->count && parents[node] == BUSTER_CHECK_NONE && stream->diagnostics[node] == CHECK_DIAG_NONE;
+    const bool statement = expr != node || (emission->input->discard_roots != NULL &&
+                                           (emission->input->discard_roots[node / 64] & (UINT64_C(1) << (node % 64))) != 0);
+    const CheckOp expr_op = clean_root && statement ? graph->ops[expr] : CHECK_OP_COUNT;
     if (expr_op != CHECK_OP_COUNT && check_common_ignored_op(expr_op))
     {
         check_common_ignored_statement(emission, expr);

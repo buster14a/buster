@@ -919,6 +919,10 @@ struct CheckInputWindowSummary
 struct CheckInput
 {
     CheckGraph graph;
+    // Bits of discard expressions whose statement can recover its semicolon from the expression end.
+    uint64_t* discard_roots;
+    // The first executable root of each statement plus one, published by the expression reader.
+    uint32_t* statement_heads;
     CheckEnvironment environment;
     CheckInputDiagnosticPragmas* diagnostic_pragmas;
     CheckInputNonnullPragmas* nonnull_pragmas;
@@ -15835,6 +15839,10 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             if (discard != BUSTER_CHECK_NONE)
             {
                 graph->types[discard] = BUSTER_TYPE_VOID;
+                if (value == first && reader->output->statement_heads != NULL)
+                {
+                    reader->output->statement_heads[token] = discard + 1;
+                }
                 if (reader->region_roots != NULL)
                 {
                     if (last_discard == BUSTER_CHECK_NONE)
@@ -17306,6 +17314,20 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
     input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
+    if (pp->options.statement_controls && valid && fresh_output && complete_translation_unit && deferred == NULL && deferred_tokens == NULL && attested == NULL && count >= 8192)
+    {
+        const uint64_t words = (graph_capacity + 63) / 64;
+        input->discard_roots = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
+        input->statement_heads = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1);
+        if (input->statement_heads != NULL && !output_zero)
+        {
+            memset(input->statement_heads, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
+        if (input->discard_roots != NULL && !output_zero)
+        {
+            memset(input->discard_roots, 0, words * sizeof(uint64_t));
+        }
+    }
     reader.const_values.declarations = (CheckObjectDeclarations)
     {
         .objects = input->objects,

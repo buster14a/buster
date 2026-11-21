@@ -6341,6 +6341,50 @@ static bool node_window_test_debug_driver(const char* directory)
     return same;
 }
 
+// On a unit large enough to use retained statement roots the implicit cast still belongs to
+// the typed dump, and an explicit cast around eh_return still affects the native unwind path.
+static bool node_window_test_statement_driver(const char* directory)
+{
+    char source[PATH_MAX];
+    char objects[2][PATH_MAX];
+    snprintf(source, sizeof(source), "%s/discard.c", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s/discard.o", directory);
+    snprintf(objects[1], sizeof(objects[1]), "%s/discard-scalar.o", directory);
+    FILE* file = fopen(source, "w");
+    if (file == NULL)
+    {
+        return false;
+    }
+    for (uint32_t i = 0; i < 2052; i += 1)
+    {
+        fprintf(file, "typedef int Pad%u;\n", i);
+    }
+    fputs("int x; void update(void){ x++; }\n"
+          "void unwind(long offset, void *target){ (void)__builtin_eh_return(offset,target); }\n", file);
+    bool same = fclose(file) == 0;
+    char* dumps[2] = { NULL, NULL };
+    for (uint32_t mode = 0; same && mode < 2; mode += 1)
+    {
+        char* args[] = { "/proc/self/exe", "-nostdinc", "-c", "-o", objects[mode], source, mode == 0 ? NULL : "--scalar", NULL };
+        char* diagnostics = NULL;
+        same = check_test_driver_spawn(args, &diagnostics) == 0;
+        free(diagnostics);
+    }
+    same = same && check_test_driver_files_equal(objects[0], objects[1]);
+    for (uint32_t mode = 0; same && mode < 2; mode += 1)
+    {
+        char* args[] = { "/proc/self/exe", "-nostdinc", "-c", "--dump-typed", "-o", objects[mode], source, mode == 0 ? NULL : "--scalar", NULL };
+        same = check_test_driver_spawn_stream(args, &dumps[mode], true) == 0 && dumps[mode] != NULL;
+    }
+    same = same && dumps[0][0] != '\0' && strcmp(dumps[0], dumps[1]) == 0;
+    free(dumps[1]);
+    free(dumps[0]);
+    unlink(objects[1]);
+    unlink(objects[0]);
+    unlink(source);
+    return same;
+}
+
 // An explicit cast to void still has two native entries, even when the backend emits no code for either.
 static void node_window_test_void(CheckTest* test)
 {
@@ -6411,6 +6455,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     node_window_test_constants(test, true);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
+    check_test_expect(test, ready && node_window_test_statement_driver(directory), "retained statements preserve typed dumps and exception-return native objects");
     check_test_expect(test, ready && node_window_test_debug_driver(directory), "node-window takes integer returns under -g and preserves the debug object");
 
     check_test_expect(test, ready, "node-census fixtures' directory is made");
