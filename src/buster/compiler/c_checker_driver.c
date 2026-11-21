@@ -2388,8 +2388,16 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
                         (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                 // Clang's warn_argument_invalid_range is an error by default, so its printer never adds `-Werror,`: the
                 // option alone, whether it is a warning, an error or a fatal error (#1079).
+                const PPDiagnosticRecord* previous = pp->diagnostic_last;
                 pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase,
                                    "argument value %s is outside the valid range [%u, %u] [-Wargument-outside-range]", text, event->low, event->high);
+                // A body's is queued as the call is built, after its arguments' constants' commas (#2252, pp_diagnostic_queued).
+                const uint32_t end = phase == PP_DIAGNOSTIC_DEFERRED && effect->node < input->graph.count && input->graph.source_positions != NULL ?
+                                     input->graph.source_positions[effect->node] : BUSTER_CHECK_NONE;
+                if (pp->diagnostic_last != previous && end <= parser->tokens.count)
+                {
+                    pp_diagnostic_queued(pp, previous, end);
+                }
             }
         }
     }

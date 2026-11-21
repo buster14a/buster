@@ -78,6 +78,18 @@ static __attribute__((unused)) void pp_diagnostic_source_order(Preprocessor* pp,
     }
 }
 
+// Order the new records among a position's source-ordered ones (pp_diagnostic_source_merge) by where clang queues them,
+// `end`, the exclusive end of the expression whose building or completion queues them, rather than by their tokens
+// (#2252): a function body's array index, unused result, unsequenced or conversion warning at its full expression's end,
+// a division's or a shift's at its operator's, after a constant's comma their expression holds.
+static __attribute__((unused)) void pp_diagnostic_queued(Preprocessor* pp, const PPDiagnosticRecord* previous, uint32_t end)
+{
+    for (PPDiagnosticRecord* record = previous != NULL ? previous->next : pp->diagnostic_first; record != NULL; record = record->next)
+    {
+        record->token = end;
+    }
+}
+
 BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp);
 
 // The diagnostic location and its publication boundary can differ. A runtime warning, for example, completes

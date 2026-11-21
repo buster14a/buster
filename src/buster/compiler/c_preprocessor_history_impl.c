@@ -912,9 +912,9 @@ static PPDiagnosticRecord* pp_diagnostic_order(PPDiagnosticRecord* first)
 }
 
 // The sorted records with each source-ordered one (pp_diagnostic_source_order) moved among the others at its position,
-// which keep their sorted order: before the first whose token follows its own, else after them all (#2252). The sort put
-// the source-ordered ones in token order (their suborders); a record of no token (zero) follows none. One pass over the
-// records, which only a unit with such a record takes.
+// which keep their sorted order: before the first whose token, or where clang queues it (pp_diagnostic_queued), follows
+// its own, else after them all (#2252). The sort put the source-ordered ones in token order (their suborders); a record
+// of no token (zero) follows none. One pass over the records, which only a unit with such a record takes.
 static PPDiagnosticRecord* pp_diagnostic_source_merge(PPDiagnosticRecord* first)
 {
     PPDiagnosticRecord* result = NULL;

@@ -336,6 +336,101 @@ static const char check_driver_vla_static_commas_source[] =
     "    a[4] = 0;\n"
     "}\n";
 
+// A constant's comma inside a body's full expression, which clang queues as it reads it, before what the full expression
+// queues as it completes (#2252, pp_diagnostic_queued): array indexes before and after it, an unused result, unsequenced
+// modifications, a constant conversion and a call's argument, each after a queued array index of an earlier statement.
+static const char check_driver_vla_body_completions_source[] =
+    "void g(int);\n"
+    "int f(int i)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    char c;\n"
+    "    a[3] = 0;\n"
+    "    a[4] = (int)sizeof(struct { int m[(1, 2)]; });\n"
+    "    int x = a[5] + (int)sizeof(enum { E = (3, 4) }) + a[6];\n"
+    "    1 + (int)sizeof(struct { int m[(5, 6)]; });\n"
+    "    i++ + i++ + (int)sizeof(struct { int m[(7, 8)]; });\n"
+    "    c = 300 + (int)sizeof(struct { int m[(9, 1)]; });\n"
+    "    g(a[7] + (int)sizeof(struct { int m[(2, 3)]; }));\n"
+    "    return x + c;\n"
+    "}\n";
+
+// The same in statement expressions (a call's argument's, one whose own statement's warnings come first), before a null
+// dereference's reader, in a division's and a shift's right operands, and in a for statement's clauses, whose third
+// completes before its body (#2252).
+static const char check_driver_vla_body_nested_source[] =
+    "void g(int, int);\n"
+    "void f(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    a[3] = 0;\n"
+    "    a[4] = ({ enum { E = (1, 2) }; 0; });\n"
+    "    g(a[5], ({ static int s[(3, 4)]; s[0]; }));\n"
+    "    a[6] = ({ a[7]; enum { F = (5, 6) }; 0; });\n"
+    "    int x = *(int *)0 + (int)sizeof(struct { int m[(7, 8)]; });\n"
+    "    x = x / (sizeof(struct { int m[(9, 2)]; }) - 8);\n"
+    "    x = 1 << (sizeof(struct { int m[(1, 2)]; }) * 8);\n"
+    "    for (a[8] = 0; (int)sizeof(struct { int m[(3, 1)]; }) > a[9]; a[10]++)\n"
+    "    {\n"
+    "        enum { G = (4, 5) };\n"
+    "    }\n"
+    "    (void)x;\n"
+    "}\n";
+
+// What building an operator queues comes before a constant's comma later in its full expression (#2252): a division's, a
+// shift's, an atomic member's and a comma's left operand's.
+static const char check_driver_vla_body_operators_source[] =
+    "_Atomic struct A { int m; } s;\n"
+    "int y;\n"
+    "int f(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    a[3] = 0;\n"
+    "    int x = 1 / 0 + (int)sizeof(struct { int m[(1, 2)]; });\n"
+    "    x += (1 << 40) + (int)sizeof(struct { int m[(3, 4)]; });\n"
+    "    x += s.m + (int)sizeof(struct { int m[(5, 6)]; });\n"
+    "    x += (y, 1) + (int)sizeof(struct { int m[(7, 8)]; });\n"
+    "    return x;\n"
+    "}\n";
+
+// A comparison's warnings, which clang analyzes as its full expression completes, after a constant's comma it holds
+// (#2252): a constant out of the operand's range, and a sign mismatch under -Wsign-compare.
+static const char check_driver_vla_body_comparison_queue_source[] =
+    "int i;\n"
+    "unsigned u;\n"
+    "unsigned char c;\n"
+    "int f(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    a[3] = 0;\n"
+    "    int x = (i < u) + (int)sizeof(struct { int m[(1, 2)]; });\n"
+    "    x += (c < 300) + (int)sizeof(struct { int m[(3, 4)]; });\n"
+    "    return x;\n"
+    "}\n";
+
+// An x86 builtin's argument's range error, which clang queues as it builds the call, after a constant's comma in the
+// argument (#2252).
+static const char check_driver_vla_body_builtin_source[] =
+    "typedef int v4si __attribute__((vector_size(16)));\n"
+    "v4si f(v4si x)\n"
+    "{\n"
+    "    x = __builtin_ia32_pshufd(x, 300);\n"
+    "    x = __builtin_ia32_pshufd(x, (int)sizeof(struct { int m[(1, 2)]; }) + 300);\n"
+    "    return x;\n"
+    "}\n";
+
+// A body's member bounds' and bit-fields' widths' comparisons as commas' left operands, at once, before each declarator's
+// fold warning and among the body's queued diagnostics (#2252).
+static const char check_driver_vla_body_member_comparisons_source[] =
+    "void f(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    a[5] = 0;\n"
+    "    struct S { int m[(1 < 2, 2)]; int w : (3 != 3, 4); };\n"
+    "    a[6] = 1;\n"
+    "    union U { char n[(5 == 5, 1)]; int v : (6 >= 7, 2); };\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
     {
@@ -433,6 +528,70 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .source = check_driver_vla_static_commas_source,
         .warnings = 4,
         .errors = 1,
+        .notes = 2,
+    },
+    // A file-scope sizeof's comma in a later declarator's initializer, or before a later declarator, whose initializer's
+    // error is at its own `,` or `;` (#2252, check_driver_initializer_last).
+    {
+        .name = "a second declarator's sizeof's variable bound's comma before its error",
+        .source = "int b = 1, c = sizeof(int[(6, 2)]);\n",
+        .warnings = 1,
+        .errors = 1,
+    },
+    {
+        .name = "a middle declarator's sizeof's variable bound's comma before its error",
+        .source = "int b = 1, c = sizeof(int[(6, 2)]), d = 2;\n",
+        .warnings = 1,
+        .errors = 1,
+    },
+    {
+        .name = "a first declarator's sizeof's variable bound's comma before its error",
+        .source = "int b = sizeof(int[(6, 2)]), c = 1;\n",
+        .warnings = 1,
+        .errors = 1,
+    },
+    {
+        .name = "a body's constants' commas before what their full expressions queue as they complete",
+        .source = check_driver_vla_body_completions_source,
+        .warnings = 20,
+        .notes = 5,
+    },
+    {
+        .name = "a body's constants' commas in statement expressions, operators' operands and a for statement's clauses",
+        .source = check_driver_vla_body_nested_source,
+        .warnings = 25,
+        .notes = 9,
+    },
+    {
+        .name = "what building a body's operators queues before a later constant's comma",
+        .source = check_driver_vla_body_operators_source,
+        .warnings = 12,
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a body's comparisons' constant warnings after a constant's comma they hold",
+        .source = check_driver_vla_body_comparison_queue_source,
+        .warnings = 6,
+        .notes = 1,
+    },
+    {
+        .name = "a body's comparisons' sign warnings after a constant's comma they hold",
+        .source = check_driver_vla_body_comparison_queue_source,
+        .options = { "-Wsign-compare" },
+        .warnings = 7,
+        .notes = 1,
+    },
+    {
+        .name = "an x86 builtin's range error after a constant's comma in its argument",
+        .source = check_driver_vla_body_builtin_source,
+        .warnings = 2,
+        .errors = 2,
+    },
+    {
+        .name = "a body's members' and bit-fields' comparisons as commas' left operands at once",
+        .source = check_driver_vla_body_member_comparisons_source,
+        .warnings = 8,
         .notes = 2,
     },
     {

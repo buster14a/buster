@@ -1506,7 +1506,8 @@ struct PPDiagnosticRecord
     // Zero retains ordinary discovery order. Notes belong to the same record and follow its primary.
     uint64_t suborder;
     // The output token it is at plus one, or zero for a diagnostic at a place of its own (pp_diagnose_output_location's):
-    // what orders a source-ordered record among the others at its position (pp_diagnostic_source_merge).
+    // what orders a source-ordered record among the others at its position (pp_diagnostic_source_merge). A queued runtime
+    // warning's is where clang queues it instead (pp_diagnostic_queued, #2252).
     uint32_t token;
     uint32_t location;
     uint32_t origin;
