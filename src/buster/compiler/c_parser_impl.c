@@ -8572,6 +8572,7 @@ static void parse_classify_mask_avx512(ParseKernels* kernels, const uint8_t* kin
 // the twin's stack), and the depth of their groups is a prefix sum of their deltas, added to each token's depth.
 static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32_t* secondary)
 {
+    kernels->depth_work = NULL;
     uint32_t open = 0;
     for (uint32_t block = 0; block < count; block += 64)
     {
@@ -8635,6 +8636,7 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
     const __m512i closer_low = _mm512_loadu_si512(closers);
     const __m512i closer_high = _mm512_loadu_si512(closers + 64);
     uint32_t inner = 0;
+    __m512i depth_bits = _mm512_setzero_si512();
     for (uint32_t block = 0; block < count; block += 64)
     {
         const __m512i role = _mm512_loadu_si512(kernels->roles + block);
@@ -8643,19 +8645,37 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
         // The secondary depth before each token, less one at a closer.
         const __m512i before = _mm512_sub_epi8(_mm512_sub_epi8(after, delta), _mm512_permutex2var_epi8(closer_low, role, closer_high));
         const __m512i base = _mm512_set1_epi32((int)inner);
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        __m512i block_bits = _mm512_setzero_si512();
         for (uint32_t q = 0; q < 4; q += 1)
         {
             const __m128i quarter = q == 0 ? _mm512_extracti32x4_epi32(before, 0) : q == 1 ? _mm512_extracti32x4_epi32(before, 1) :
                                     q == 2 ? _mm512_extracti32x4_epi32(before, 2) : _mm512_extracti32x4_epi32(before, 3);
             const uint32_t* depths = kernels->depths + block + 16 * q;
-            _mm512_storeu_si512(kernels->node_depths + block + 16 * q, _mm512_add_epi32(_mm512_loadu_si512(depths), _mm512_add_epi32(base, _mm512_cvtepi8_epi32(quarter))));
+            const __m512i depth = _mm512_add_epi32(_mm512_loadu_si512(depths), _mm512_add_epi32(base, _mm512_cvtepi8_epi32(quarter)));
+            _mm512_storeu_si512(kernels->node_depths + block + 16 * q, depth);
+            block_bits = _mm512_or_si512(block_bits, depth);
+        }
+        if (live == 64)
+        {
+            depth_bits = _mm512_or_si512(depth_bits, block_bits);
+        }
+        else
+        {
+            for (uint32_t q = 0; q < live; q += 16)
+            {
+                const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT16_MAX, live - q);
+                depth_bits = _mm512_or_si512(depth_bits, _mm512_maskz_loadu_epi32(lanes, kernels->node_depths + block + q));
+            }
         }
         // The last live lane from the register: a byte reloaded from a store of `after` met that store before its data
         // was ready, in some builds once a block (about 0.1 cycles a token on sqlite3.c, 0.15 on the libc corpus).
-        const uint32_t live = count - block < 64 ? count - block : 64;
         const __m512i last = _mm512_permutexvar_epi8(_mm512_set1_epi8((char)(live - 1)), after);
         inner += (uint32_t)(int32_t)(int8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(last));
     }
+    // K4 only needs to know whether any depth exceeds its eleven-bit key. The OR retains every high bit.
+    _Static_assert((BUSTER_PARSE_MAX_VECTOR_DEPTH & (BUSTER_PARSE_MAX_VECTOR_DEPTH + 1u)) == 0, "K4's depth bound consists of consecutive low bits");
+    kernels->deep_node_depths = _mm512_test_epi32_mask(depth_bits, _mm512_set1_epi32(~BUSTER_PARSE_MAX_VECTOR_DEPTH)) != 0;
 }
 
 // The roles that depend on whether a `:` before them ends a case label or a label (a statement starts) or a ternary's
@@ -10007,27 +10027,26 @@ static bool parse_check_block_avx512(ParseKernels* kernels, const uint32_t* name
 {
     const ParseCheckVectorTables* v = &parse_check_vector;
     const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
-    // The levels: the node depths less the block's least, plus one.
-    __m512i depths[4];
-    __m512i lowest = _mm512_set1_epi32(-1);
-    __m512i highest = _mm512_setzero_si512();
-    for (uint32_t q = 0; q < 4; q += 1)
+    // A narrow K4 key is (node depth - base) * 32 + precedence. Its high three bits already give K6 the
+    // relative depth. Wider blocks and units the scalar K4 handled use the full depth column.
+    const ParseBlockWork* work = kernels->depth_work != NULL ? &kernels->depth_work[block >> 6] : NULL;
+    uint32_t lo = work != NULL ? work->base : BUSTER_PARSE_NONE;
+    __m512i relative;
+    bool result = true;
+    if (lo != BUSTER_PARSE_NONE)
     {
-        const __mmask16 quarter = (__mmask16)(live_mask >> (16 * q));
-        depths[q] = _mm512_maskz_loadu_epi32(quarter, kernels->node_depths + block + 16 * q);
-        lowest = _mm512_mask_min_epu32(lowest, quarter, lowest, depths[q]);
-        highest = _mm512_mask_max_epu32(highest, quarter, highest, depths[q]);
+        const __m512i keys = _mm512_load_si512(work->keys);
+        relative = _mm512_and_si512(_mm512_srli_epi16(keys, 5), _mm512_set1_epi8(7));
     }
-    const uint32_t lo = _mm512_reduce_min_epu32(lowest);
-    const uint32_t hi = _mm512_reduce_max_epu32(highest);
-    bool result = hi - lo <= 63;
+    else
+    {
+        uint32_t hi;
+        relative = parse_relative_depths8(kernels->node_depths, block, live_mask, &lo, &hi);
+        result = hi - lo <= 63;
+    }
     if (result)
     {
-        const __m512i base = _mm512_set1_epi32((int)lo - 1);
-        __m512i level = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[0], base)));
-        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[1], base)), 1);
-        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[2], base)), 2);
-        level = _mm512_inserti32x4(level, _mm512_cvtepi32_epi8(_mm512_sub_epi32(depths[3], base)), 3);
+        __m512i level = _mm512_add_epi8(relative, _mm512_set1_epi8(1));
         // Lanes past the block's end at the last lane's level.
         level = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)(kernels->node_depths[block + live - 1] - lo + 1)), live_mask, level);
         const uint32_t previous_depth = carry->previous_depth;
@@ -10463,7 +10482,7 @@ static bool parse_vector_postorder_reserve(ParseVectorBuffers* buffers, Arena* a
 }
 
 // The deepest node depth, which decides whether K4's 16-bit keys can hold it.
-static uint32_t parse_deepest(const ParseKernels* kernels, uint32_t count)
+static __attribute__((unused)) uint32_t parse_deepest(const ParseKernels* kernels, uint32_t count)
 {
     __m512i deepest = _mm512_setzero_si512();
     for (uint32_t block = 0; block < count; block += 16)
@@ -10478,13 +10497,15 @@ static uint32_t parse_deepest(const ParseKernels* kernels, uint32_t count)
 // 16-bit keys, which the twin takes.
 static void parse_parents_vector(ParseKernels* kernels, uint32_t count, ParseVectorBuffers* buffers)
 {
-    if (parse_deepest(kernels, count) <= BUSTER_PARSE_MAX_VECTOR_DEPTH)
+    if (!kernels->deep_node_depths)
     {
+        kernels->depth_work = buffers->works;
         parse_top_parents8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, buffers->works, kernels->parents, &buffers->slots,
                                   &buffers->wide_blocks);
     }
     else
     {
+        kernels->depth_work = NULL;
         parse_parents_scalar(kernels, count);
     }
 }
