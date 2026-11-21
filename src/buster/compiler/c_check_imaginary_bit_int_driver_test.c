@@ -83,17 +83,16 @@ static void check_test_driver_imaginary_bit_int_program(CheckTest* test, const c
     for (uint32_t route = 0; referenced && route < 8; route += 1)
     {
         const bool direct = (route & 1) != 0;
-        const bool scalar = (route & 2) != 0;
+        const bool deferred = (route & 2) != 0;
         const bool tier1 = (route & 4) != 0;
         char* arguments[24] = { (char*)buster, "-std=c23", "-w" };
         uint32_t count = 3;
-        if (scalar)
+        if (deferred)
         {
-            arguments[count++] = "--scalar";
             arguments[count++] = "--deferred-bodies";
         }
         arguments[count++] = "--lanes";
-        arguments[count++] = scalar ? "3" : "1";
+        arguments[count++] = deferred ? "3" : "1";
         if (tier1)
         {
             arguments[count++] = "--tier1";
@@ -124,7 +123,7 @@ static void check_test_driver_imaginary_bit_int_program(CheckTest* test, const c
         }
         char description[256];
         snprintf(description, sizeof(description), "imaginary bit-precise program, Tier %u, %s reader, %s: builds and links", tier1 ? 1 : 0,
-                 scalar ? "scalar/deferred" : "vector", direct ? "direct" : "object");
+                 deferred ? "deferred, 3 lanes" : "1 lane", direct ? "direct" : "object");
         check_test_expect(test, status == 0, description);
         if (status != 0 && diagnostic != NULL)
         {
@@ -139,7 +138,7 @@ static void check_test_driver_imaginary_bit_int_program(CheckTest* test, const c
             const int ran = check_test_driver_spawn_stream(run, &actual, true);
             const bool same = ran == 0 && actual != NULL && strcmp(actual, expected) == 0;
             snprintf(description, sizeof(description), "imaginary bit-precise program, Tier %u, %s reader, %s: prints Clang's values", tier1 ? 1 : 0,
-                     scalar ? "scalar/deferred" : "vector", direct ? "direct" : "object");
+                     deferred ? "deferred, 3 lanes" : "1 lane", direct ? "direct" : "object");
             check_test_expect(test, same, description);
             if (!same)
             {
