@@ -7453,16 +7453,26 @@ but the tests', which refuse more there):
 Nothing a corpus took is lost, and nothing more is taken: the holes were in
 what the corpora do not have.
 
-**Its cost was not read.** The 9700X job that reads it (`9700x/job-xh.sh` in
-the record: the build before and the code here in one job, seven readings,
-the tests' loop's ticks a record swept, the names' pass's, the front's
-inputs made again and the kernel in place) was queued behind the third fault
-round and cancelled when the work was handed off. What the code adds where
-the corpora run: the tests' loop's step has one mask more (six tests of
-bytes it has, a block of 64 records); a `return` asks a search of the
-cleanups only in a unit that has one (none of the four corpora); and a
-declaration's line is taken by the same load and one range test, where the
-test was one for zero. The corpora make no line again (0, 0, 0 and 0).
+The completed 9700X measurement on the original change put the tests' loop
+above H4's target on both gated inputs. Packing the operator classes, counting
+the block's masks together, and using one converted-pointer bit brought the
+loop under the target. The front now checks all three operand distances
+against the same bound before reading a record. The measurements below are
+medians of seven paired Release readings. Each number is the difference from
+the compiler before the holes were fixed, in ticks per record.
+
+| Shadow work | SQLite | Lua | musl |
+| --- | ---: | ---: | ---: |
+| Tests' loop and result asks, per record swept | −0.10403 | +0.12243 | +0.42228 |
+| Front inputs made again, per input record | −2.63026 | −2.13058 | −0.57860 |
+| Kernel in place, per record made | +0.02146 | +0.04716 | +0.05437 |
+
+H4 allows +0.15 on SQLite and Lua. The musl tests' loop measurement is
+informational. O3 allows +0.20 on all three inputs for both the repeated
+front and the kernel. These are measurements of the compiler's shadow
+command. The record includes each paired reading and both native loop
+disassemblies. [Original readings](https://github.com/buster14a/buster-performance/tree/fac20eb7f9d56f2faf208ae114c1f278bc2af61d/docs/measurements/tests-holes-2850-2026-11-21/9700x/observed)
+and [follow-up readings and checks](https://github.com/buster14a/buster-performance/tree/3fcddc9068499483cfb86adbbb53d73dcc19dc90/docs/measurements/window-cost-2850-2026-11-21/5c0cf0020).
 
 **Against its gates** (H1 to H6 the tests' specification's, O1 to O5 the
 objects')
@@ -7486,7 +7496,8 @@ objects')
   table above). No corpus has a rename pragma, and T's refusals for a callee
   are the code before's (133, 50, 124 and 890): no unit of theirs loses a
   call to the overloads' answer.
-- **H4 and O3, work: not read** (above).
+- **H4 and O3, work.** The follow-up meets both targets in the seven paired
+  readings above.
 - **H5 and O4, faults: met for the first two rounds; the third was cut
   short.** Each term of the two parts changed alone, a build and the node
   machine's tests a fault. The first round's 104 faults, from the list's two
